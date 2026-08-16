@@ -5,6 +5,11 @@ pub struct QwenMessage<'a> {
     pub content: &'a str,
 }
 
+pub struct HunyuanMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
 const PLAIN_TEXT: EncodeOptions = EncodeOptions {
     add_special: false,
     parse_special: false,
@@ -17,6 +22,41 @@ pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
     }
     tokens.extend(tokenizer.encode(text, PLAIN_TEXT));
     tokens
+}
+
+pub fn build_hunyuan_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
+    let hy_user = required_control(tokenizer, "hy_user", "<｜hy_User｜>")?;
+    let hy_assistant = required_control(tokenizer, "hy_assistant", "<｜hy_Assistant｜>")?;
+    let hy_placeholder_2 = required_control(tokenizer, "hy_placeholder_2", "<｜hy_place▁holder▁no▁2｜>")?;
+    let hy_placeholder_3 = required_control(tokenizer, "hy_placeholder_3", "<｜hy_place▁holder▁no▁3｜>")?;
+    let hy_placeholder_8 = required_control(tokenizer, "hy_placeholder_8", "<｜hy_place▁holder▁no▁8｜>")?;
+
+    let mut output = Vec::new();
+    for (i, message) in messages.iter().enumerate() {
+        if i == 0 && message.role == "system" {
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_placeholder_3);
+        }
+        if message.role == "user" {
+            output.push(hy_user);
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_assistant);
+        } else if message.role == "assistant" {
+            output.push(hy_assistant);
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_placeholder_2);
+        }
+    }
+    if add_generation_prompt {
+        output.push(hy_assistant);
+    } else {
+        output.push(hy_placeholder_8);
+    }
+    Ok(output)
 }
 
 fn required_control(tokenizer: &BPETokenizer, name: &str, literal: &str) -> Result<u32, String> {

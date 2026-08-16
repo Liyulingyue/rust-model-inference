@@ -2666,7 +2666,14 @@ fn run_shared_inference(
     let model = Qwen3Model::from_source(source, std::sync::Arc::clone(&tokenizer), pool)?;
     let arch = model.config().architecture.clone();
     let input_tokens = if arch == "hunyuan-dense" {
-        build_simple_prompt(&tokenizer, prompt)
+        build_hunyuan_chat_prompt(
+            &tokenizer,
+            &[HunyuanMessage {
+                role: "user",
+                content: prompt,
+            }],
+            true,
+        )?
     } else {
         build_qwen_chat_prompt(
             &tokenizer,
@@ -2841,7 +2848,14 @@ fn run_inference(
             },
         )
     } else if arch == "hunyuan-dense" {
-        build_simple_prompt(&tokenizer, prompt)
+        build_hunyuan_chat_prompt(
+            &tokenizer,
+            &[HunyuanMessage {
+                role: "user",
+                content: prompt,
+            }],
+            true,
+        )?
     } else {
         build_qwen_chat_prompt(
             &tokenizer,

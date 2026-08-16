@@ -76,6 +76,15 @@ const QWEN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<|endoftext|>", "endoftext"),
 ];
 
+const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
+    ("<｜hy_begin▁of▁sentence｜>", "hy_begin"),
+    ("<｜hy_User｜>", "hy_user"),
+    ("<｜hy_Assistant｜>", "hy_assistant"),
+    ("<｜hy_place▁holder▁no▁2｜>", "hy_placeholder_2"),
+    ("<｜hy_place▁holder▁no▁3｜>", "hy_placeholder_3"),
+    ("<｜hy_place▁holder▁no▁8｜>", "hy_placeholder_8"),
+];
+
 fn string_array(value: Option<MetaValue>, key: &str) -> Result<Vec<String>, String> {
     let Some(MetaValue::Array(MetaValueType::String, values)) = value else {
         return Err(format!("Missing or invalid {key}: expected string array"));
@@ -267,15 +276,18 @@ impl BPETokenizer {
             .collect();
         special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
 
-        let semantic_tokens = QWEN_SEMANTIC_TOKENS
-            .iter()
-            .filter_map(|(literal, name)| {
-                special_tokens
-                    .iter()
-                    .find(|token| token.text == *literal)
-                    .map(|token| ((*name).to_string(), token.id))
-            })
-            .collect();
+        let semantic_tokens = match pre {
+            PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
+            _ => QWEN_SEMANTIC_TOKENS,
+        }
+        .iter()
+        .filter_map(|(literal, name)| {
+            special_tokens
+                .iter()
+                .find(|token| token.text == *literal)
+                .map(|token| ((*name).to_string(), token.id))
+        })
+        .collect();
 
         let byte_fallback = match get_meta("tokenizer.ggml.byte_fallback") {
             Some(MetaValue::Bool(value)) => value,
