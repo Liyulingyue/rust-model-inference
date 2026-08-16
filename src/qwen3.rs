@@ -38,7 +38,7 @@ impl Qwen3Config {
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
             .ok_or_else(|| "Missing metadata: general.architecture".to_string())?;
-        if !matches!(architecture, "qwen2" | "qwen3" | "qwen3vl" | "llama") {
+        if !matches!(architecture, "qwen2" | "qwen3" | "qwen3vl" | "llama" | "hunyuan-dense") {
             return Err(format!("Unsupported architecture: {architecture}"));
         }
 
@@ -85,7 +85,7 @@ impl Qwen3Config {
             ));
         }
 
-        let has_qk_norm = matches!(architecture, "qwen3" | "qwen3vl");
+        let has_qk_norm = matches!(architecture, "qwen3" | "qwen3vl" | "hunyuan-dense");
         let rope = if architecture == "qwen3vl" {
             let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
             if sections != [24, 20, 20, 0] {

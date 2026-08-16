@@ -36,7 +36,8 @@ pub use model::{
 };
 pub use ops::*;
 pub use prompt::{
-    append_qwen_assistant_prefix, append_qwen_message_tokens, build_qwen_chat_prompt, QwenMessage,
+    append_qwen_assistant_prefix, append_qwen_message_tokens, build_qwen_chat_prompt,
+    build_simple_prompt, QwenMessage,
 };
 pub use quant::dequant_weight_q4k;
 pub use qwen3::*;

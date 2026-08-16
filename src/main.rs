@@ -2664,14 +2664,19 @@ fn run_shared_inference(
         available_threads,
     )));
     let model = Qwen3Model::from_source(source, std::sync::Arc::clone(&tokenizer), pool)?;
-    let input_tokens = build_qwen_chat_prompt(
-        &tokenizer,
-        &[QwenMessage {
-            role: "user",
-            content: prompt,
-        }],
-        thinking,
-    )?;
+    let arch = model.config().architecture.clone();
+    let input_tokens = if arch == "hunyuan-dense" {
+        build_simple_prompt(&tokenizer, prompt)
+    } else {
+        build_qwen_chat_prompt(
+            &tokenizer,
+            &[QwenMessage {
+                role: "user",
+                content: prompt,
+            }],
+            thinking,
+        )?
+    };
     let positions = qwen_text_positions(input_tokens.len());
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
@@ -2736,7 +2741,7 @@ fn run_inference(
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    let is_qwen3 = arch == "qwen3";
+    let is_qwen3 = arch == "qwen3" || arch == "hunyuan-dense";
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -2835,6 +2840,8 @@ fn run_inference(
                 parse_special: true,
             },
         )
+    } else if arch == "hunyuan-dense" {
+        build_simple_prompt(&tokenizer, prompt)
     } else {
         build_qwen_chat_prompt(
             &tokenizer,

@@ -604,10 +604,14 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
-    let prefix = match arch {
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" => arch,
-        _ => return Err(format!("Unsupported architecture: {arch}")),
+    let prefix: &str = if arch == "hunyuan-dense" {
+        "hunyuan-dense"
+    } else {
+        &arch
     };
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense") {
+        return Err(format!("Unsupported architecture: {arch}"));
+    }
     let get_u64 = |key: &str| -> Result<u64, String> {
         source
             .metadata(key)

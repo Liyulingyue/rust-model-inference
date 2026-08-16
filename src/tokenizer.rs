@@ -24,6 +24,7 @@ impl Default for EncodeOptions {
 enum PreTokenizer {
     Qwen2,
     Qwen35,
+    HunyuanDense,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,9 +171,10 @@ impl BPETokenizer {
         let pre = match get_meta("tokenizer.ggml.pre") {
             Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
             Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
+            Some(MetaValue::String(value)) if value == "hunyuan-dense" => PreTokenizer::HunyuanDense,
             Some(MetaValue::String(value)) => {
                 return Err(format!(
-                    "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35"
+                    "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2, qwen35, or hunyuan-dense"
                 ));
             }
             _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),

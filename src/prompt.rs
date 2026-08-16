@@ -10,6 +10,15 @@ const PLAIN_TEXT: EncodeOptions = EncodeOptions {
     parse_special: false,
 };
 
+pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
+    let mut tokens = Vec::new();
+    if let Some(bos_id) = tokenizer.bos_id() {
+        tokens.push(bos_id);
+    }
+    tokens.extend(tokenizer.encode(text, PLAIN_TEXT));
+    tokens
+}
+
 fn required_control(tokenizer: &BPETokenizer, name: &str, literal: &str) -> Result<u32, String> {
     tokenizer
         .special_token_id(name)
