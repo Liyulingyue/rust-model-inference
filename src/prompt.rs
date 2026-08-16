@@ -124,6 +124,7 @@ mod tests {
                 role: "user",
                 content: "Hi",
             }],
+            false,
         )
         .unwrap_err();
         assert!(error.contains("<|im_end|>"), "{error}");

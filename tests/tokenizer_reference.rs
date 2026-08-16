@@ -96,6 +96,7 @@ fn qwen_chat_prompt_matches_reference_ids() {
                 role: "user",
                 content: "Hello",
             }],
+            false,
         )
         .unwrap(),
         vec![
@@ -128,6 +129,7 @@ fn qwen_system_user_assistant_prompt_matches_reference_ids() {
                     content: "Acknowledged.",
                 },
             ],
+            false,
         )
         .unwrap(),
         vec![
