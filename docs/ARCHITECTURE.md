@@ -256,6 +256,12 @@ fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
 4. **多模态扩展：** 实现 `VisionEncoder` trait + `.ggufrs` 统一打包格式
 5. **混合量化支持：** 扩展 `QuantizedLayer` 枚举支持 Q4_K/Q3_K/Q5_K/Q6_K
 
+### 性能差距分析（88% of llama.cpp at 8 threads）
+- **Pool barrier overhead (~5-10%)**：7 `pool.compute()` calls per layer × 28 layers = ~196 barriers/token
+- **logits matmul (23.5%)**：memory-bound at ~22 GB/s, near DDR bandwidth limit
+- **FFN (42.1%)**：two 1024→3072 matmuls + SiLU, compute-bound
+- **可能的改进方向**：merge pool.compute calls、quantized KV cache、NUMA-aware scheduling
+
 ---
 
 ## 10. GGUF 文件格式参考

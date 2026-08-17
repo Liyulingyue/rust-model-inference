@@ -71,7 +71,7 @@ for h in 0..n_head_kv {
 ## Remaining Known Issues
 
 - [ ] UTF-8 multi-byte characters split across token boundaries may produce replacement characters (U+FFFD)
-- [ ] No chat template support — `<|im_start|>` encodes to multiple tokens, not a single special token
-- [ ] Per-layer numerical alignment with llama.cpp not yet verified (model produces correct output but intermediate values not compared)
-- [ ] `get_f32_tensor` called every forward pass — should cache norm weights
-- [ ] Matmul allocates per-row — should use pre-allocated buffers consistently
+- [x] Chat template support — `build_qwen_chat_prompt` / `build_hunyuan_chat_prompt` 已实现
+- [x] Per-layer numerical alignment — `parity_trace` 模块已实现 (`cargo build --features parity-trace`)
+- [ ] `get_f32_tensor` 每次 forward 调用应缓存 norm weights
+- [ ] Matmul per-row 分配应使用预分配 buffer

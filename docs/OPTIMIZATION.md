@@ -2,14 +2,14 @@
 
 ## 历史性能基线（2025-07-31，llama-bench 校正）
 
+> ⚠️ 以下数据已过时，最新数据见 "Rust 与 llama.cpp 固定机器对比（2026-08-10）" 章节
+
 | 模型 | 线程 | Rust | llama.cpp | 差距 |
 |------|------|------|-----------|------|
 | Qwen3-0.6B Q8_0 | T1 | ~16 tok/s | ~21 tok/s | 1.3x |
 | Qwen3-0.6B Q8_0 | T4 | ~38 tok/s | ~44 tok/s | 1.16x |
 | MiniCPM5-1B Q8_0 | T1 | 9.5 tok/s | ~32 tok/s | 3.4x |
 | MiniCPM5-1B Q8_0 | T4 | 27.9 tok/s | ~32 tok/s | 1.15x |
-
-> 注：之前 llama.cpp T1=44 tok/s 的数据有误（可能是多线程测量）。使用 `llama-bench -t 1` 校正后为 ~21 tok/s。
 
 测试条件：40 decode tokens，纯 decode（无 prompt），`--bench` 模式。
 
@@ -33,13 +33,13 @@
 - **原因**：`swap()` 比 `load()` 重（带 lock 前缀），`get().map().unwrap_or()` 分支多
 - **结论**：atomic load 编译成单条 mov，已是 zero-overhead，无需缓存
 
-### 2. 合并 FFN compute 调用
+### 2. 合并 FFN compute 调用 ⚠️ 已废弃
 - **做法**：把 FFN gate/up/down 3 个 matmul 合并到 1 个 `compute()`
 - **结果**：输出乱码 + 变慢（9.6→6.6 tok/s）
 - **原因**：silu activation 需要在 gate/up matmul 完成后才能执行，合并改变了数据流
 - **结论**：需更仔细的依赖分析
 
-### 3. Persistent Workers 架构（2025-07-31）
+### 3. Persistent Workers 架构 ⚠️ 已废弃（2025-07-31）
 - **做法**：重写 `ComputePool`，让 worker 线程永不退出，在 `worker_loop` 中遍历所有 ops。用 `work_ready` flag + exit_barrier + reenter_barrier 三阶段同步。
 - **结果**：Qwen3 T4 从 31.1 → 23.3 tok/s（**更慢**），输出正确
 - **原因**：每步推理多了 `work_ready` spin-wait + 额外 barrier 开销。Fork-join 的 barrier 已经是 minimal overhead 了。
@@ -79,18 +79,19 @@ llama.cpp FFN 约 50 GB/s，差距 4-5x。
 
 ### 🔴 高优先级
 
-#### 1. Persistent Workers 架构
+#### 1. Persistent Workers 架构 ⚠️ 已废弃
 **目标**：消除每层 5 次 fork-join 的调度开销
 
-llama.cpp 的 workers 是 persistent 的：线程进入 `worker_loop` 后，遍历 **所有 compute 操作**（barrier 模型），无需每次都 spawn/join。
+ llama.cpp 的 workers 是 persistent 的：线程进入 `worker_loop` 后，遍历 **所有 compute 操作**（barrier 模型），无需每次都 spawn/join。
 
-实现方式：
-- Worker 线程在 `worker_loop` 中维护一个 "当前 op" 指针
-- 每个 compute 操作携带：op 类型、权重指针、数据指针、操作函数
-- 主线程遍历 ops 并分发给 workers（类似 `tokio` 的 task）
-- Worker 遍历所有 op，做完才进入下一轮
+ 实现方式：
+ - Worker 线程在 `worker_loop` 中维护一个 "当前 op" 指针
+ - 每个 compute 操作携带：op 类型、权重指针、数据指针、操作函数
+ - 主线程遍历 ops 并分发给 workers（类似 `tokio` 的 task）
+ - Worker 遍历所有 op，做完才进入下一轮
 
-这是 llama.cpp 50 GB/s 的关键来源。
+ **状态**：2025-07-31 实验结果 Qwen3 T4 31.1 → 23.3 tok/s（**更慢**），已废弃。
+ 需完全重新设计（work-stealing queue）才能收益。
 
 #### 2. Matmul Kernel 优化（✅ 已实施，2025-07-31）
 **改动**：

@@ -1,56 +1,56 @@
 # GGUFRS v1
 
-GGUFRS is a RustModelInference package for model management and device-independent loading. It bundles exactly one LLM GGUF and optionally one mmproj GGUF while preserving component metadata and original tensor bytes. It is not readable by llama.cpp and does not replace ordinary GGUF interchange.
+GGUFRS 是 RustModelInference 的模型管理和设备无关加载方案。它打包一个 LLM GGUF 和可选的一个 mmproj GGUF，保留组件元数据和原始 tensor 字节。它不可被 llama.cpp 读取，也不替代普通的 GGUF 交换格式。
 
-All integers are little-endian. Offsets and byte lengths are `u64`; counts and stable IDs are `u32`. Strings are `u64 byte_length` followed by UTF-8 bytes. GGUF metadata and GGML tensor type numeric codes are reused.
+所有整数均为小端序。偏移量和字节长度为 `u64`；计数和稳定 ID 为 `u32`。字符串为 `u64 字节长度` + UTF-8 字节。GGUF 元数据和 GGML tensor 类型数值码被复用。
 
-## Physical order
+## 物理布局
 
 ```text
-128-byte superblock
-component table
-component-scoped metadata table
-segment table
-tensor table
-zero alignment padding
-64 KiB-aligned tensor segments
+128 字节超级块
+组件表
+组件级元数据表
+段表
+tensor 表
+零对齐填充
+64 KiB 对齐的 tensor 段
 ```
 
-No component or directory is appended after tensor data. The last segment ends at the declared file size.
+tensor 数据之后不追加任何组件或目录。最后一个段在声明的文件大小处结束。
 
-## Superblock
+## 超级块（Superblock）
 
-| Offset | Size | Field |
+| 偏移 | 大小 | 字段 |
 |---:|---:|---|
 | 0 | 8 | magic `b"GGUFRS\0\0"` |
-| 8 | 4 | version, `1` |
-| 12 | 4 | flags, `0` in v1 |
-| 16 | 8 | declared file size |
-| 24 | 4 | component count |
-| 28 | 4 | metadata count |
-| 32 | 4 | segment count |
-| 36 | 4 | tensor count |
-| 40 | 8 | component table offset |
-| 48 | 8 | component table length |
-| 56 | 8 | metadata table offset |
-| 64 | 8 | metadata table length |
-| 72 | 8 | segment table offset |
-| 80 | 8 | segment table length |
-| 88 | 8 | tensor table offset |
-| 96 | 8 | tensor table length |
-| 104 | 8 | tensor-data offset |
-| 112 | 16 | reserved zero bytes |
+| 8 | 4 | version，`1` |
+| 12 | 4 | flags，v1 中为 `0` |
+| 16 | 8 | 声明的文件大小 |
+| 24 | 4 | 组件数量 |
+| 28 | 4 | 元数据数量 |
+| 32 | 4 | 段数量 |
+| 36 | 4 | tensor 数量 |
+| 40 | 8 | 组件表偏移 |
+| 48 | 8 | 组件表长度 |
+| 56 | 8 | 元数据表偏移 |
+| 64 | 8 | 元数据表长度 |
+| 72 | 8 | 段表偏移 |
+| 80 | 8 | 段表长度 |
+| 88 | 8 | tensor 表偏移 |
+| 96 | 8 | tensor 表长度 |
+| 104 | 8 | tensor 数据偏移 |
+| 112 | 16 | 保留的零字节 |
 
-Readers reject unsupported versions, nonzero flags/reserved bytes, unordered or noncontiguous tables, nonzero table padding, invalid ranges, appended data, and a declared size different from the actual file size.
+读取方会拒绝：不支持的版本、非零 flags/保留字节、无序或不连续的表、非零表填充、无效范围、追加的数据、以及声明大小与实际文件大小不符的情况。
 
-## Component table
+## 组件表（Component Table）
 
-Each entry is:
+每个条目为：
 
 ```text
 u32 component_id
 u32 role                 # 1 = LLM, 2 = MMPROJ
-string name              # canonical "llm" or "mmproj"
+string name              # 规范名为 "llm" 或 "mmproj"
 u32 metadata_start
 u32 metadata_count
 u32 tensor_start
@@ -59,11 +59,11 @@ u32 segment_start
 u32 segment_count
 ```
 
-V1 requires exactly one LLM and at most one mmproj. Components are ordered by role then UTF-8 name bytes; IDs are their table indices.
+V1 要求恰好一个 LLM 和最多一个 mmproj。组件按 role 和 UTF-8 名字字节排序；ID 即其表索引。
 
-## Scoped metadata table
+## 组件级元数据表（Scoped Metadata Table）
 
-Each entry is:
+每个条目为：
 
 ```text
 u32 component_id
@@ -72,17 +72,17 @@ i32 GGUF value_type
 typed GGUF value
 ```
 
-Array encoding is `i32 element_type`, `u64 count`, then homogeneous values. Metadata is sorted by component and key bytes. Duplicate keys inside one component are invalid; identical keys in different components remain independent.
+数组编码为 `i32 element_type`、`u64 count`，然后是同构值。元数据按组件和 key 字节排序。一个组件内重复的 key 无效；不同组件中相同的 key 保持独立。
 
-## Segment table
+## 段表（Segment Table）
 
-Each 72-byte entry is:
+每个 72 字节条目为：
 
 ```text
 u32 segment_id
 u32 component_id
 u32 kind                 # 1 = shared, 2 = layer, 3 = component
-i32 layer                # layer index, or -1
+i32 layer                # layer 索引，或 -1
 u64 absolute_offset
 u64 stored_length
 u32 tensor_start
@@ -90,11 +90,11 @@ u32 tensor_count
 u8 sha256[32]
 ```
 
-The LLM has one shared segment and one segment for every layer. The mmproj has one component segment. Segment starts and stored lengths are multiples of 64 KiB and segments are contiguous. SHA-256 covers the complete stored segment, including inter-tensor and trailing zero padding. A segment can therefore be verified, mapped, and released independently.
+LLM 有一个共享段和每个 layer 一个段。mmproj 有一个组件段。段起始和存储长度是 64 KiB 的倍数且段是连续的。SHA-256 覆盖完整存储段，包括 tensor 间和尾部零填充。因此段可以独立验证、映射和释放。
 
-## Tensor table and bytes
+## Tensor 表与字节（Tensor Table and Bytes）
 
-Each entry is:
+每个条目为：
 
 ```text
 u32 component_id
@@ -107,11 +107,11 @@ u64 offset_within_segment
 u64 exact_byte_length
 ```
 
-Tensors are sorted by name bytes inside each segment. Offsets use `max(32, general.alignment)` for that component. Shapes, quantization block sizes, ranges, and overlaps are validated before mapping.
+Tensor 在每个段内按名字字节排序。偏移量使用该组件的 `max(32, general.alignment)`。映射前验证 shape、量化块大小、范围和重叠。
 
-The exporter copies `GGUFLoader::tensor_slice(name)` directly. It never dequantizes, requantizes, repacks, or converts tensor data through floating point. Identical source bytes and options therefore produce byte-identical packages; source paths, timestamps, host devices, and temporary names are not serialized.
+导出器直接复制 `GGUFLoader::tensor_slice(name)`。它从不反量化、再量化、重打包或通过浮点转换 tensor 数据。因此相同的源字节和选项产生字节完全相同的包；源路径、时间戳、主机设备和临时名称不被序列化。
 
-## Export and publication
+## 导出与发布
 
 ```bash
 cargo run --release --bin ggufrs -- \
@@ -121,12 +121,12 @@ cargo run --release --bin ggufrs -- \
   --output model.ggufrs
 ```
 
-`--mmproj` is optional. The default never replaces an output. `--overwrite` requests atomic replacement. Export writes a unique file in the output directory, retains and syncs its `create_new` handle, verifies every segment through a clone of that handle and the production reader, then publishes it. Unsupported atomic publication returns an error and never deletes the destination first.
+`--mmproj` 是可选的。默认不会覆盖已有输出。`--overwrite` 请求原子替换。导出在输出目录写入唯一文件，保留并同步其 `create_new` 句柄，通过该句柄的克隆和生产者读者验证每个段，然后发布。不支持的原子发布返回错误，且从不先删除目标。
 
-## Runtime and load planning
+## 运行时与加载规划
 
-`TensorSource` is the common read-only interface for GGUF and a loaded GGUFRS component. Runtime format selection uses file magic, not the extension. An explicit `--mmproj` overrides the bundled component.
+`TensorSource` 是 GGUF 和已加载 GGUFRS 组件的通用只读接口。运行时格式选择使用文件 magic 而非扩展名。显式 `--mmproj` 覆盖打包的组件。
 
-`LayerSplit` keeps each layer segment whole and assigns contiguous layer ranges to caller-provided logical devices. Shared and mmproj tensors stay on the declared primary device. `TensorSplit` may divide a tensor only between complete rows; quantized rows must contain complete quantization blocks. Capacity counts tensor payload, not table or padding bytes.
+`LayerSplit` 保持每个 layer 段完整，并将连续 layer 范围分配给调用方提供的逻辑设备。共享和 mmproj tensor 保留在声明的主设备上。`TensorSplit` 只在完整行之间划分 tensor；量化行必须包含完整的量化块。容量只计算 tensor 载荷，不计算表或填充字节。
 
-V1 executes a plan only against logical CPU devices to verify deterministic placement and mapping lifetimes. Metal, CUDA, NPU, transfers, and execution scheduling are future backends; they do not change this file format.
+V1 只针对逻辑 CPU 设备执行计划，以验证确定性放置和映射生命周期。Metal、CUDA、NPU、传输和执行调度是未来后端；它们不改变此文件格式。
