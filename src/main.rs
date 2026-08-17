@@ -2063,6 +2063,13 @@ fn run_dump_logits(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
+    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
+    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+        panic!(
+            "token_embd.weight has unsupported type {:?}; only F16 and Q8_0 are supported",
+            embd_info.ggml_type
+        );
+    }
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
 
@@ -2778,6 +2785,13 @@ fn run_inference(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
+    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
+    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+        panic!(
+            "token_embd.weight has unsupported type {:?}; only F16 and Q8_0 are supported",
+            embd_info.ggml_type
+        );
+    }
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
 
