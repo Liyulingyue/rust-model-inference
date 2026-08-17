@@ -1984,6 +1984,15 @@ pub fn matmul_q8_0_batch(tasks: &mut [MatmulTask<'_>]) {
     });
 }
 
+pub fn embedding_lookup(weight: &[u8], token_id: u32, n_embd: usize, embd_type: crate::model::GGMLType, out: &mut [f32]) {
+    match embd_type {
+        crate::model::GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
+        crate::model::GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
+        crate::model::GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
+        _ => panic!("unsupported embedding type {:?}", embd_type),
+    }
+}
+
 pub fn embedding_lookup_q8_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
     let blocks_per_row = n_embd / 32;
     let row_off = token_id as usize * blocks_per_row * 34;
@@ -1992,6 +2001,53 @@ pub fn embedding_lookup_q8_0(weight: &[u8], token_id: u32, n_embd: usize, out: &
         let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
         for j in 0..32usize {
             out[b * 32 + j] = d * (weight[off + 2 + j] as i8 as f32);
+        }
+    }
+}
+
+pub fn embedding_lookup_q4_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let blocks_per_row = n_embd / 32;
+    let row_off = token_id as usize * blocks_per_row * 18;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * 18;
+        let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        for j in 0..16usize {
+            let q = weight[off + 2 + j];
+            let q0 = ((q & 0x0F) as i8 as f32 - 8.0) * d;
+            let q1 = (((q >> 4) & 0x0F) as i8 as f32 - 8.0) * d;
+            out[b * 32 + j * 2] = q0;
+            out[b * 32 + j * 2 + 1] = q1;
+        }
+    }
+}
+
+pub fn embedding_lookup_q6_k(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let blocks_per_row = n_embd / 256;
+    let row_off = token_id as usize * blocks_per_row * 210;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * 210;
+        let d = f16_to_f32(u16::from_le_bytes([weight[off + 208], weight[off + 209]]));
+        let base_y = b * 256;
+        for sub in 0..2 {
+            let ql_off = off + sub * 64;
+            let qh_off = off + 128 + sub * 32;
+            let sc_off = off + 192 + sub * 8;
+            for l in 0..32 {
+                let is = l / 16;
+                let ql_0 = weight[ql_off + l] as i8;
+                let ql_1 = weight[ql_off + 32 + l] as i8;
+                let qh_l = weight[qh_off + l] as i8;
+                let q1 = ((((ql_0 & 0xF) as i32) | ((((qh_l >> 0) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                let q2 = ((((ql_1 & 0xF) as i32) | ((((qh_l >> 2) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                let q3 = ((((ql_0 >> 4) as i32) | ((((qh_l >> 4) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                let q4 = ((((ql_1 >> 4) as i32) | ((((qh_l >> 6) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                let sc0 = weight[sc_off + is + 0] as i8;
+                let sc1 = weight[sc_off + is + 2] as i8;
+                out[base_y + sub * 128 + l] = d * sc0 as f32 * q1;
+                out[base_y + sub * 128 + 32 + l] = d * sc0 as f32 * q2;
+                out[base_y + sub * 128 + 64 + l] = d * sc1 as f32 * q3;
+                out[base_y + sub * 128 + 96 + l] = d * sc1 as f32 * q4;
+            }
         }
     }
 }

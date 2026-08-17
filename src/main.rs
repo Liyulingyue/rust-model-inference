@@ -1776,12 +1776,6 @@ fn run_embedding(
         &hidden,
     ));
 
-    eprintln!(
-        "DEBUG: initial embedding[0:8] = {:?}, n_embd={}, token_id={}",
-        &hidden[..8],
-        n_embd,
-        prompt_tokens[0]
-    );
     let t_embed = Instant::now();
     for layer in 0..n_layer {
         let lw = &layers[layer];
@@ -2064,14 +2058,15 @@ fn run_dump_logits(
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
         panic!(
-            "token_embd.weight has unsupported type {:?}; only F16 and Q8_0 are supported",
+            "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
             embd_info.ggml_type
         );
     }
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
+    let embd_type = embd_info.ggml_type;
 
     let layers: Vec<LayerWeights> = (0..n_layer)
         .map(|l| LayerWeights {
@@ -2192,7 +2187,12 @@ fn run_dump_logits(
 
         let pos = step;
 
-        embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x);
+        match embd_type {
+            GGMLType::Q8_0 => embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x),
+            GGMLType::Q4_0 => embedding_lookup_q4_0(embd_weight, token_id, n_embd, &mut scratch.x),
+            GGMLType::Q6K => embedding_lookup_q6_k(embd_weight, token_id, n_embd, &mut scratch.x),
+            _ => panic!("unsupported embedding type {:?}", embd_type),
+        }
         #[cfg(feature = "parity-trace")]
         parity_trace::report(parity_trace::checkpoint(
             "model.input_embed",
@@ -2786,14 +2786,15 @@ fn run_inference(
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
         panic!(
-            "token_embd.weight has unsupported type {:?}; only F16 and Q8_0 are supported",
+            "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
             embd_info.ggml_type
         );
     }
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
+    let embd_type = embd_info.ggml_type;
 
     let layers: Vec<LayerWeights> = (0..n_layer)
         .map(|l| LayerWeights {
@@ -2940,7 +2941,12 @@ fn run_inference(
 
         let pos = step;
 
-        embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x);
+        match embd_type {
+            GGMLType::Q8_0 => embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x),
+            GGMLType::Q4_0 => embedding_lookup_q4_0(embd_weight, token_id, n_embd, &mut scratch.x),
+            GGMLType::Q6K => embedding_lookup_q6_k(embd_weight, token_id, n_embd, &mut scratch.x),
+            _ => panic!("unsupported embedding type {:?}", embd_type),
+        }
         #[cfg(feature = "parity-trace")]
         parity_trace::report(parity_trace::checkpoint(
             "model.input_embed",

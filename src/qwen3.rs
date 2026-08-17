@@ -279,6 +279,7 @@ pub struct Qwen3Model {
     output_norm: Vec<f32>,
     token_embedding: &'static [u8],
     output: &'static [u8],
+    embedding_type: GGMLType,
 }
 
 struct Qwen3LayerWeights {
@@ -327,9 +328,13 @@ impl Qwen3Model {
             usize_to_u64(config.n_embd, "embedding width")?,
             usize_to_u64(config.vocab, "vocabulary size")?,
         ];
-        let token_embedding = static_q8_tensor(&source, "token_embd.weight", &embedding_dims)?;
+        let embedding_type = source
+            .tensor_info("token_embd.weight")
+            .map(|info| info.ggml_type)
+            .unwrap_or(GGMLType::Q8_0);
+        let token_embedding = static_tensor(&source, "token_embd.weight", &embedding_dims, embedding_type)?;
         let output = if source.tensor_info("output.weight").is_some() {
-            static_q8_tensor(&source, "output.weight", &embedding_dims)?
+            static_tensor(&source, "output.weight", &embedding_dims, GGMLType::Q8_0)?
         } else {
             token_embedding
         };
@@ -406,6 +411,7 @@ impl Qwen3Model {
             output_norm,
             token_embedding,
             output,
+            embedding_type,
         })
     }
 
@@ -687,23 +693,53 @@ impl<'model> Qwen3Session<'model> {
                         .x
                         .copy_from_slice(&embeddings[start..start + config.n_embd]);
                 } else {
-                    embedding_lookup_q8_0(
-                        model.token_embedding,
-                        input.token_ids[step],
-                        config.n_embd,
-                        &mut self.scratch.x,
-                    );
+                    match model.embedding_type {
+                        GGMLType::Q8_0 => embedding_lookup_q8_0(
+                            model.token_embedding,
+                            input.token_ids[step],
+                            config.n_embd,
+                            &mut self.scratch.x,
+                        ),
+                        GGMLType::Q4_0 => embedding_lookup_q4_0(
+                            model.token_embedding,
+                            input.token_ids[step],
+                            config.n_embd,
+                            &mut self.scratch.x,
+                        ),
+                        GGMLType::Q6K => embedding_lookup_q6_k(
+                            model.token_embedding,
+                            input.token_ids[step],
+                            config.n_embd,
+                            &mut self.scratch.x,
+                        ),
+                        _ => return Err("Unsupported embedding type".to_string()),
+                    }
                 }
             } else {
                 let token_id = *generated_tokens
                     .last()
                     .ok_or_else(|| "Missing generated token for decoder step".to_string())?;
-                embedding_lookup_q8_0(
-                    model.token_embedding,
-                    token_id,
-                    config.n_embd,
-                    &mut self.scratch.x,
-                );
+                match model.embedding_type {
+                    GGMLType::Q8_0 => embedding_lookup_q8_0(
+                        model.token_embedding,
+                        token_id,
+                        config.n_embd,
+                        &mut self.scratch.x,
+                    ),
+                    GGMLType::Q4_0 => embedding_lookup_q4_0(
+                        model.token_embedding,
+                        token_id,
+                        config.n_embd,
+                        &mut self.scratch.x,
+                    ),
+                    GGMLType::Q6K => embedding_lookup_q6_k(
+                        model.token_embedding,
+                        token_id,
+                        config.n_embd,
+                        &mut self.scratch.x,
+                    ),
+                    _ => return Err("Unsupported embedding type".to_string()),
+                };
             }
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
@@ -1223,6 +1259,7 @@ pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usi
         output_norm: vec![1.0; n_embd],
         token_embedding,
         output: token_embedding,
+        embedding_type: GGMLType::Q8_0,
     }
 }
 
@@ -1333,6 +1370,18 @@ fn static_q8_tensor(
     dims: &[u64],
 ) -> Result<&'static [u8], String> {
     let bytes = checked_tensor(source.as_ref(), name, dims, GGMLType::Q8_0)?;
+    // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
+    // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
+    Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
+}
+
+fn static_tensor(
+    source: &Arc<dyn TensorSource>,
+    name: &str,
+    dims: &[u64],
+    ggml_type: GGMLType,
+) -> Result<&'static [u8], String> {
+    let bytes = checked_tensor(source.as_ref(), name, dims, ggml_type)?;
     // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
     // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
