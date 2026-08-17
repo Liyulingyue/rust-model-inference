@@ -693,53 +693,25 @@ impl<'model> Qwen3Session<'model> {
                         .x
                         .copy_from_slice(&embeddings[start..start + config.n_embd]);
                 } else {
-                    match model.embedding_type {
-                        GGMLType::Q8_0 => embedding_lookup_q8_0(
-                            model.token_embedding,
-                            input.token_ids[step],
-                            config.n_embd,
-                            &mut self.scratch.x,
-                        ),
-                        GGMLType::Q4_0 => embedding_lookup_q4_0(
-                            model.token_embedding,
-                            input.token_ids[step],
-                            config.n_embd,
-                            &mut self.scratch.x,
-                        ),
-                        GGMLType::Q6K => embedding_lookup_q6_k(
-                            model.token_embedding,
-                            input.token_ids[step],
-                            config.n_embd,
-                            &mut self.scratch.x,
-                        ),
-                        _ => return Err("Unsupported embedding type".to_string()),
-                    }
+                    embedding_lookup(
+                        model.token_embedding,
+                        input.token_ids[step],
+                        config.n_embd,
+                        model.embedding_type,
+                        &mut self.scratch.x,
+                    );
                 }
             } else {
                 let token_id = *generated_tokens
                     .last()
                     .ok_or_else(|| "Missing generated token for decoder step".to_string())?;
-                match model.embedding_type {
-                    GGMLType::Q8_0 => embedding_lookup_q8_0(
-                        model.token_embedding,
-                        token_id,
-                        config.n_embd,
-                        &mut self.scratch.x,
-                    ),
-                    GGMLType::Q4_0 => embedding_lookup_q4_0(
-                        model.token_embedding,
-                        token_id,
-                        config.n_embd,
-                        &mut self.scratch.x,
-                    ),
-                    GGMLType::Q6K => embedding_lookup_q6_k(
-                        model.token_embedding,
-                        token_id,
-                        config.n_embd,
-                        &mut self.scratch.x,
-                    ),
-                    _ => return Err("Unsupported embedding type".to_string()),
-                };
+                embedding_lookup(
+                    model.token_embedding,
+                    token_id,
+                    config.n_embd,
+                    model.embedding_type,
+                    &mut self.scratch.x,
+                );
             }
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(

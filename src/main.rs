@@ -2187,12 +2187,7 @@ fn run_dump_logits(
 
         let pos = step;
 
-        match embd_type {
-            GGMLType::Q8_0 => embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x),
-            GGMLType::Q4_0 => embedding_lookup_q4_0(embd_weight, token_id, n_embd, &mut scratch.x),
-            GGMLType::Q6K => embedding_lookup_q6_k(embd_weight, token_id, n_embd, &mut scratch.x),
-            _ => panic!("unsupported embedding type {:?}", embd_type),
-        }
+        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
         #[cfg(feature = "parity-trace")]
         parity_trace::report(parity_trace::checkpoint(
             "model.input_embed",
@@ -2941,12 +2936,7 @@ fn run_inference(
 
         let pos = step;
 
-        match embd_type {
-            GGMLType::Q8_0 => embedding_lookup_q8_0(embd_weight, token_id, n_embd, &mut scratch.x),
-            GGMLType::Q4_0 => embedding_lookup_q4_0(embd_weight, token_id, n_embd, &mut scratch.x),
-            GGMLType::Q6K => embedding_lookup_q6_k(embd_weight, token_id, n_embd, &mut scratch.x),
-            _ => panic!("unsupported embedding type {:?}", embd_type),
-        }
+        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
         #[cfg(feature = "parity-trace")]
         parity_trace::report(parity_trace::checkpoint(
             "model.input_embed",
