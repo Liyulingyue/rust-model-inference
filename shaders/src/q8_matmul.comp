@@ -3,7 +3,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-layout(local_size_x = 1) in;
+layout(local_size_x = 256) in;
 
 layout(binding = 0) readonly buffer WeightBuffer {
     uint8_t weight[];
@@ -35,10 +35,11 @@ void main() {
         return;
     }
 
-    float sum = 0.0;
+    float sum = 0.0f;
+    uint row_off = out_idx * pc.row_stride;
 
     for (uint block = 0; block < pc.blocks_per_row; block++) {
-        uint weight_off = out_idx * pc.row_stride + block * 34;
+        uint weight_off = row_off + block * 34;
         uint input_off = block * 32;
 
         uint scale_bits = uint(weight[weight_off]) | (uint(weight[weight_off + 1]) << 8);
