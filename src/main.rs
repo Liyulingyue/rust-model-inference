@@ -3459,6 +3459,12 @@ fn run_inference(
             per_second(decode_evals, decode_time),
         );
     }
+    eprintln!(
+        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        per_second(prefill_evals, prefill_time),
+        per_second(decode_evals, decode_time),
+        tok_s
+    );
     if profile {
         eprintln!(
             "PROFILE: norm={:.1}% quant={:.1}% qkv+attn={:.1}% wo={:.1}% ffn={:.1}% logits={:.1}%",
@@ -3475,12 +3481,7 @@ fn run_inference(
         );
     }
     println!();
-    println!(
-        "[end-to-end: {} output tokens in {}ms | {:.1} tok/s]",
-        generated_tokens.len(),
-        infer_ms,
-        tok_s
-    );
+    println!("[{} output tokens in {}ms]", generated_tokens.len(), infer_ms);
     Ok(())
 }
 
