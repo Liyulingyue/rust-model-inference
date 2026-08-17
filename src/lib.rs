@@ -18,6 +18,8 @@ pub mod thread_pool;
 pub mod tokenizer;
 pub mod traits;
 pub mod vision;
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
 
 pub use asr::*;
 pub use clip_config::{ClipVisionConfig, Qwen35Config};

@@ -1,6 +1,12 @@
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "vulkan")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "vulkan")]
+use crate::vulkan::VulkanContext;
+
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 use std::arch::asm;
 
@@ -10,6 +16,33 @@ static HAS_AVX2_FMA: AtomicBool = AtomicBool::new(false);
 static HAS_F16C: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "vulkan")]
+static VULKAN_CONTEXT: OnceLock<Result<VulkanContext, String>> = OnceLock::new();
+
+#[cfg(feature = "vulkan")]
+use std::sync::Mutex;
+
+#[cfg(feature = "vulkan")]
+fn get_vulkan_context() -> Option<&'static VulkanContext> {
+    if std::env::var("USE_GPU").is_err() && std::env::var("RUST_GPU").is_err() {
+        return None;
+    }
+    let result = VULKAN_CONTEXT.get_or_init(|| {
+        eprintln!("[GPU] Initializing Vulkan context...");
+        VulkanContext::new().map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(ctx) => {
+            eprintln!("[GPU] Vulkan context ready");
+            Some(ctx)
+        }
+        Err(e) => {
+            eprintln!("[GPU] Vulkan init failed: {}. Falling back to CPU.", e);
+            None
+        }
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 fn init_cpu_features() {
@@ -1478,6 +1511,16 @@ pub fn matmul_q8_0_quantized(
     n_in: usize,
     n_out: usize,
 ) {
+    #[cfg(feature = "vulkan")]
+    {
+        if let Some(ctx) = get_vulkan_context() {
+            unsafe {
+                ctx.matmul_q8_0(weight, input_q8, input_scales, output, n_in, n_out)
+                    .expect("GPU matmul failed");
+            }
+            return;
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1609,6 +1652,25 @@ pub fn matmul_q8_0_quantized_range(
     row_end: usize,
 ) {
     debug_assert_eq!(output.len(), row_end - row_start);
+    #[cfg(feature = "vulkan")]
+    if let Some(ctx) = get_vulkan_context() {
+        let n_out = row_end - row_start;
+        let blocks_per_row = n_in / 32;
+        let weight_row_stride = blocks_per_row * 34;
+        let weight_offset = row_start * weight_row_stride;
+        let expected_weight_size = (row_end - row_start) * weight_row_stride;
+        eprintln!("[GPU] range: n_in={}, n_out={}, row_start={}, row_end={}, blocks_per_row={}, weight_row_stride={}, weight_offset={}, weight.len={}, expected={}",
+                  n_in, n_out, row_start, row_end, blocks_per_row, weight_row_stride, weight_offset, weight.len(), expected_weight_size);
+        if weight_offset + expected_weight_size > weight.len() {
+            eprintln!("[GPU] ERROR: weight buffer too small! need {} bytes but only have {}", weight_offset + expected_weight_size, weight.len());
+        }
+        let adjusted_weight = &weight[weight_offset..weight_offset + expected_weight_size];
+        unsafe {
+            ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
+                .expect("GPU matmul failed");
+        }
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
         unsafe {

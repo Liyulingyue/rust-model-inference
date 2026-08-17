@@ -1,0 +1,16 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(binding = 0) readonly buffer BufferA {
+    uint data[];
+};
+
+layout(binding = 1) writeonly buffer OutputBuffer {
+    float out_data[];
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    out_data[idx] = float(data[idx]);
+}

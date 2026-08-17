@@ -65,6 +65,46 @@ cargo run --release --bin micro-bench
 cargo run --release --bin micro-bench -- --check
 ```
 
+### GPU 后端 (Vulkan)
+
+启用 GPU 加速推理（需要支持 Vulkan 的 GPU）：
+
+**1. 安装 glslangValidator（如需重新编译 shader）**
+```bash
+sudo apt install glslang-tools
+```
+
+**2. 编译 shader**
+```bash
+glslangValidator -V shaders/src/q8_matmul.comp -o shaders/bin/q8_matmul.spv
+```
+
+**3. 配置 Vulkan ICD**
+```bash
+# Intel GPU
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json
+
+# NVIDIA GPU
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+
+# AMD GPU
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/amd_icd.json
+```
+
+查看可用设备：
+```bash
+ls /usr/share/vulkan/icd.d/
+ls -la /dev/dri/  # 查看 GPU 设备
+```
+
+**4. 启用 GPU 推理**
+```bash
+export USE_GPU=1
+cargo run --release --features vulkan -- --model models/Qwen3-0.6B-Q8_0.gguf --prompt "法国的首都是"
+```
+
+**注意**：GPU 输出结果可能有乱码，当前为实验性支持。
+
 ### CLI 选项
 
 | 参数 | 默认值 | 描述 |
@@ -138,7 +178,12 @@ src/
 ├── qwen35.rs       # Qwen3.5/VL 模型实现
 ├── qwen3a.rs       # Qwen3-ASR 模型实现
 ├── parity_trace.rs # llama.cpp 逐层精度对比（parity-trace feature）
+├── vulkan.rs       # Vulkan GPU 后端（vulkan feature）
 └── main.rs         # CLI + 推理循环
+
+shaders/
+├── src/q8_matmul.comp   # GLSL 计算着色器（Q8_0 matmul）
+└── bin/q8_matmul.spv    # 预编译的 SPIR-V
 ```
 
 ## Qwen3-0.6B 参数
@@ -187,6 +232,8 @@ src/
 | `tokio` | 1 | 服务端模式异步运行时 |
 | `serde` | 1 | 序列化 |
 | `rand` | 0.8 | 采样工具 |
+| `ash` | 0.37 | Vulkan API 绑定（vulkan feature） |
+| `bytemuck` | 1.0 | 类型转换（vulkan feature） |
 
 ## 路线图
 
@@ -199,7 +246,7 @@ src/
 - [x] ASR（音频）
 - [ ] 连续 batching / 多序列
 - [ ] 更多量化格式（Q5_K, Q6_K）
-- [ ] CUDA / Metal GPU 后端
+- [x] Vulkan GPU 后端（实验性，Q8_0 matmul）
 
 ## 服务端模式
 

@@ -8,12 +8,16 @@ license = "MIT"
 [features]
 default = []
 parity-trace = []
+vulkan = []
 
 [dependencies]
 memmap2 = "0.9"
 half = "2.4"
 rayon = "1.10"
 image = "0.25"
+ash = "0.37"
+raw-window-handle = "0.6"
+bytemuck = "1.0"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
