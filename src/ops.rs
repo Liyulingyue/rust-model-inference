@@ -29,14 +29,10 @@ fn get_vulkan_context() -> Option<&'static VulkanContext> {
         return None;
     }
     let result = VULKAN_CONTEXT.get_or_init(|| {
-        eprintln!("[GPU] Initializing Vulkan context...");
         VulkanContext::new().map_err(|e| e.to_string())
     });
     match result {
-        Ok(ctx) => {
-            eprintln!("[GPU] Vulkan context ready");
-            Some(ctx)
-        }
+        Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("[GPU] Vulkan init failed: {}. Falling back to CPU.", e);
             None
@@ -1659,16 +1655,13 @@ pub fn matmul_q8_0_quantized_range(
         let weight_row_stride = blocks_per_row * 34;
         let weight_offset = row_start * weight_row_stride;
         let expected_weight_size = (row_end - row_start) * weight_row_stride;
-        eprintln!("[GPU] range: n_in={}, n_out={}, row_start={}, row_end={}, blocks_per_row={}, weight_row_stride={}, weight_offset={}, weight.len={}, expected={}",
-                  n_in, n_out, row_start, row_end, blocks_per_row, weight_row_stride, weight_offset, weight.len(), expected_weight_size);
-        if weight_offset + expected_weight_size > weight.len() {
-            eprintln!("[GPU] ERROR: weight buffer too small! need {} bytes but only have {}", weight_offset + expected_weight_size, weight.len());
-        }
         let adjusted_weight = &weight[weight_offset..weight_offset + expected_weight_size];
+        
         unsafe {
             ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
                 .expect("GPU matmul failed");
         }
+        
         return;
     }
     #[cfg(target_arch = "x86_64")]

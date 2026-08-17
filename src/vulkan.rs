@@ -84,10 +84,7 @@ impl VulkanContext {
         unsafe {
             entry
                 .create_instance(&create_info, None)
-                .map_err(|e| {
-                    eprintln!("[GPU] vkCreateInstance failed: {}", e);
-                    VulkanError::InitFailed(e.to_string())
-                })
+                .map_err(|e| VulkanError::InitFailed(e.to_string()))
         }
     }
 
@@ -97,22 +94,16 @@ impl VulkanContext {
         unsafe {
             let devices = match instance.enumerate_physical_devices() {
                 Ok(d) => d,
-                Err(e) => {
-                    eprintln!("[GPU] enumerate_physical_devices failed: {}", e);
-                    return Err(VulkanError::InitFailed(e.to_string()));
-                }
+                Err(e) => return Err(VulkanError::InitFailed(e.to_string())),
             };
 
             for device in devices {
                 let props = instance.get_physical_device_properties(device);
                 let name = CStr::from_ptr(props.device_name.as_ptr());
-                eprintln!("Found device: {:?}", name);
-
                 let queue_families = instance.get_physical_device_queue_family_properties(device);
 
                 for (i, family) in queue_families.iter().enumerate() {
                     if family.queue_flags.contains(vk::QueueFlags::COMPUTE) {
-                        eprintln!("  Using queue family {} for compute", i);
                         return Ok((device, i as u32));
                     }
                 }
@@ -286,7 +277,6 @@ impl VulkanContext {
         device: &ash::Device,
         pipeline_layout: vk::PipelineLayout,
     ) -> Result<vk::Pipeline, VulkanError> {
-        eprintln!("[GPU] Creating shader module, size={}", SHADER.len());
         let shader_module = unsafe {
             device
                 .create_shader_module(
@@ -301,7 +291,6 @@ impl VulkanContext {
                 )
                 .map_err(|e| VulkanError::ShaderCompileFailed(e.to_string()))?
         };
-        eprintln!("[GPU] Shader module created successfully");
 
         let stage = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -367,11 +356,8 @@ impl VulkanContext {
         let _lock = self.mutex.lock().unwrap();
         let blocks_per_row = n_in / 32;
         let weight_row_stride = blocks_per_row * 34;
-        eprintln!("[GPU] matmul: n_in={}, n_out={}, blocks_per_row={}, weight_row_stride={}, weight.len={}, input_q8.len={}, input_scales.len={}, output.len={}",
-                  n_in, n_out, blocks_per_row, weight_row_stride, weight.len(), input_q8.len(), input_scales.len(), output.len());
 
         let weight_buffer = self.create_buffer(weight, vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        eprintln!("[GPU] weight buffer created: size={}", weight_buffer.size);
         let input_buffer = self.create_buffer(input_q8, vk::BufferUsageFlags::STORAGE_BUFFER)?;
         let scale_buffer = self.create_buffer_f32(input_scales, vk::BufferUsageFlags::STORAGE_BUFFER)?;
         let output_buffer = self.create_buffer_f32_mut(output, vk::BufferUsageFlags::STORAGE_BUFFER)?;
@@ -421,16 +407,13 @@ impl VulkanContext {
 
         self.end_and_submit_command_buffer(command_buffer)?;
 
-        eprintln!("[GPU] Command completed, reading output...");
         self.read_buffer_f32(output_buffer, output)?;
-        eprintln!("[GPU] Output read complete");
 
         unsafe {
             self.destroy_buffer(weight_buffer);
             self.destroy_buffer(input_buffer);
             self.destroy_buffer(scale_buffer);
         }
-        eprintln!("[GPU] Buffers destroyed");
 
         Ok(())
     }
@@ -715,13 +698,9 @@ impl VulkanContext {
             .queue_submit(self.queue, &[submit_info], vk::Fence::null())
             .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
 
-        eprintln!("[GPU] Submitted command buffer, waiting for queue idle...");
-
         self.device
             .queue_wait_idle(self.queue)
             .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-
-        eprintln!("[GPU] Queue idle complete");
 
         self.device
             .free_command_buffers(self.command_pool, std::slice::from_ref(&command_buffer));

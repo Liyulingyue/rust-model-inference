@@ -1,5 +1,7 @@
 #version 450
+#extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = 1) in;
 
@@ -26,20 +28,6 @@ layout(push_constant) uniform PushConstants {
     uint row_stride;
 } pc;
 
-float f16_to_f32(uint bits) {
-    uint sign = (bits >> 15) & 0x1u;
-    int exp = int((bits >> 10) & 0x1Fu);
-    uint frac = bits & 0x3FFu;
-
-    if (exp == 0) {
-        return ldexp(float(frac) / 1024.0, -14);
-    } else if (exp == 31) {
-        return sign == 0 ? 1.0 / 0.0 : -1.0 / 0.0;
-    } else {
-        return ldexp(1.0 + float(frac) / 1024.0, int(exp) - 15);
-    }
-}
-
 void main() {
     uint out_idx = gl_GlobalInvocationID.x;
 
@@ -54,15 +42,15 @@ void main() {
         uint input_off = block * 32;
 
         uint scale_bits = uint(weight[weight_off]) | (uint(weight[weight_off + 1]) << 8);
-        float weight_scale = f16_to_f32(scale_bits);
+        float weight_scale = unpackFloat2x16(scale_bits).x;
 
         float in_scale = input_scales[block];
 
         int dot = 0;
         for (uint i = 0; i < 32; i++) {
-            int8_t w_val = int8_t(weight[weight_off + 2 + i]);
-            int8_t in_val = int8_t(input_q8[input_off + i]);
-            dot += int(w_val) * int(in_val);
+            int w_val = int(int8_t(weight[weight_off + 2 + i]));
+            int in_val = int(int8_t(input_q8[input_off + i]));
+            dot += w_val * in_val;
         }
 
         sum += weight_scale * in_scale * float(dot);
