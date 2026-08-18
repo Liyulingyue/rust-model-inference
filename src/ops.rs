@@ -1,6 +1,12 @@
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+static GPU_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn enable_gpu() {
+    GPU_ENABLED.store(true, Ordering::Relaxed);
+}
+
 #[cfg(feature = "vulkan")]
 use std::sync::OnceLock;
 
@@ -31,7 +37,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if std::env::var("USE_GPU").is_err() && std::env::var("RUST_GPU").is_err() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
     let result = VULKAN_CONTEXT.get_or_init(|| {
@@ -54,7 +60,7 @@ static WGPU_INIT_THREAD: std::sync::OnceLock<std::sync::Mutex<Option<WgpuContext
 
 #[cfg(feature = "wgpu")]
 fn get_wgpu_context() -> Option<&'static WgpuContext> {
-    if std::env::var("USE_GPU").is_err() && std::env::var("RUST_GPU").is_err() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
     

@@ -39,6 +39,7 @@ struct CliOptions {
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    gpu: bool,
 }
 
 fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -892,6 +893,7 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--bench" => options.bench = true,
             "--thinking" => options.thinking = true,
             "--profile" => options.profile = true,
+            "--gpu" => options.gpu = true,
             "--kv-cache" => {
                 if i + 1 < args.len() {
                     options.kv_format = match args[i + 1].as_str() {
@@ -1003,6 +1005,10 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+
+    if options.gpu {
+        crate::ops::enable_gpu();
+    }
 
     if options.model.as_os_str().is_empty() {
         run_self_test();
