@@ -7,6 +7,12 @@ use std::sync::OnceLock;
 #[cfg(feature = "vulkan")]
 use crate::vulkan::VulkanContext;
 
+#[cfg(feature = "wgpu")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "wgpu")]
+use crate::wgpu::WgpuContext;
+
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 use std::arch::asm;
 
@@ -38,6 +44,68 @@ fn get_vulkan_context() -> Option<&'static VulkanContext> {
             None
         }
     }
+}
+
+#[cfg(feature = "wgpu")]
+static WGPU_CONTEXT: OnceLock<Result<WgpuContext, String>> = OnceLock::new();
+
+#[cfg(feature = "wgpu")]
+static WGPU_INIT_THREAD: std::sync::OnceLock<std::sync::Mutex<Option<WgpuContext>>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "wgpu")]
+fn get_wgpu_context() -> Option<&'static WgpuContext> {
+    if std::env::var("USE_GPU").is_err() && std::env::var("RUST_GPU").is_err() {
+        return None;
+    }
+    
+    let cell = WGPU_INIT_THREAD.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().ok()?;
+    
+    if guard.is_none() {
+        eprintln!("[GPU] Creating wgpu context via blocking thread...");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                WgpuContext::new_blocking()
+            }));
+            match result {
+                Ok(Ok(ctx)) => {
+                    let _ = tx.send(Ok(ctx));
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Err(e.to_string()));
+                }
+                Err(e) => {
+                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+                    let _ = tx.send(Err(msg));
+                }
+            }
+        });
+        
+        eprintln!("[GPU] Waiting for wgpu init...");
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Ok(ctx)) => {
+                eprintln!("[GPU] Wgpu context created successfully!");
+                *guard = Some(ctx);
+            }
+            Ok(Err(e)) => {
+                eprintln!("[GPU] WGPU init failed: {}. Falling back to CPU.", e);
+            }
+            Err(e) => {
+                eprintln!("[GPU] WGPU init timeout: {:?}. Falling back to CPU.", e);
+            }
+        }
+    }
+    
+    guard.as_ref().map(|ctx| {
+        unsafe { std::mem::transmute(ctx) }
+    })
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1517,6 +1585,16 @@ pub fn matmul_q8_0_quantized(
             return;
         }
     }
+    #[cfg(feature = "wgpu")]
+    {
+        if let Some(ctx) = get_wgpu_context() {
+            unsafe {
+                ctx.matmul_q8_0(weight, input_q8, input_scales, output, n_in, n_out)
+                    .expect("WGPU matmul failed");
+            }
+            return;
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1995,6 +2073,22 @@ pub fn matmul_q8_0_quantized_range(
         unsafe {
             ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
                 .expect("GPU matmul failed");
+        }
+        
+        return;
+    }
+    #[cfg(feature = "wgpu")]
+    if let Some(ctx) = get_wgpu_context() {
+        let n_out = row_end - row_start;
+        let blocks_per_row = n_in / 32;
+        let weight_row_stride = blocks_per_row * 34;
+        let weight_offset = row_start * weight_row_stride;
+        let expected_weight_size = (row_end - row_start) * weight_row_stride;
+        let adjusted_weight = &weight[weight_offset..weight_offset + expected_weight_size];
+        
+        unsafe {
+            ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
+                .expect("WGPU matmul failed");
         }
         
         return;

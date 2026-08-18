@@ -20,6 +20,8 @@ pub mod traits;
 pub mod vision;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
+#[cfg(feature = "wgpu")]
+pub mod wgpu;
 
 pub use asr::*;
 pub use clip_config::{ClipVisionConfig, Qwen35Config};
