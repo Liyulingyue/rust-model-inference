@@ -5,6 +5,7 @@ pub mod load_plan;
 pub mod memory;
 pub mod model;
 pub mod ops;
+pub mod pig;
 #[cfg(feature = "parity-trace")]
 #[doc(hidden)]
 pub mod parity_trace;
@@ -46,6 +47,7 @@ pub use prompt::{
 pub use quant::dequant_weight_q4k;
 pub use qwen3::*;
 pub use qwen35::{build_qwen35_positions, Qwen35Model};
+pub use pig::{PigConfig, PigModel, PigVAE};
 pub use scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32};
 pub use tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
 pub use traits::{ExecContext, Layer, ModelConfig};

@@ -609,8 +609,24 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense") {
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense" | "pig") {
         return Err(format!("Unsupported architecture: {arch}"));
+    }
+
+    // Pig (Z-Image) uses default config since it doesn't have standard LLM metadata
+    if arch == "pig" {
+        return Ok(ModelConfig {
+            n_embd: 1024,
+            n_layer: 30,
+            n_head: 16,
+            n_head_kv: 16,
+            n_embd_head: 64,
+            n_ff: 4096,
+            n_ctx: 512,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-5,
+        });
     }
     let get_u64 = |key: &str| -> Result<u64, String> {
         source

@@ -1070,6 +1070,13 @@ fn main() {
                 options.kv_format,
                 options.embedding_output,
             );
+        } else if arch == "pig" {
+            run_or_exit(run_pig_image(
+                std::sync::Arc::clone(&source),
+                prompt,
+                max_tokens,
+                options.threads,
+            ));
         } else if arch == "qwen3vl" {
             run_or_exit(validate_qwen3vl_decoder_mode(
                 &arch,
@@ -1120,6 +1127,13 @@ fn main() {
                 options.kv_format,
             ));
         }
+    } else if arch == "pig" {
+        run_or_exit(run_pig_image(
+            std::sync::Arc::from(source),
+            prompt,
+            max_tokens,
+            options.threads,
+        ));
     } else {
         run_or_exit(validate_qwen3vl_decoder_mode(
             &arch,
@@ -2767,6 +2781,45 @@ fn run_shared_inference(
     Ok(())
 }
 
+fn run_pig_image(
+    source: std::sync::Arc<dyn TensorSource>,
+    prompt: &str,
+    _max_tokens: usize,
+    n_threads: usize,
+) -> Result<(), String> {
+    use std::time::Instant;
+    let started = Instant::now();
+
+    let pool = std::sync::Arc::new(thread_pool::ComputePool::new(n_threads.max(1)));
+    let model = pig::PigModel::from_source(source.clone(), pool)?;
+
+    println!("Model: pig (Z-Image) | layers={} | loaded in {}ms",
+        model.config().n_layer,
+        started.elapsed().as_millis());
+
+    println!("Generating image for prompt: {}", prompt);
+
+    let mut session = pig::PigSession::new(&model, 512)?;
+    match session.generate_image(prompt, 20) {
+        Ok(pixels) => {
+            println!("Generated {} bytes image in {}ms",
+                pixels.len(), started.elapsed().as_millis());
+
+            let img_size = 64;
+            let img = image::RgbaImage::from_raw(
+                img_size as u32, img_size as u32, pixels
+            ).ok_or("Failed to create image from pixels")?;
+            img.save("output.png").map_err(|e| format!("Failed to save PNG: {}", e))?;
+            println!("Image saved to output.png");
+        }
+        Err(e) => {
+            return Err(format!("Image generation failed: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
 fn run_inference(
     source: &dyn TensorSource,
     prompt: &str,
@@ -2787,6 +2840,11 @@ fn run_inference(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     let is_qwen3 = arch == "qwen3" || arch == "hunyuan-dense";
+
+    // Pig (Z-Image) is a diffusion model - doesn't need tokenizer
+    if arch == "pig" {
+        return Err("pig model requires image generation flow, not text inference".into());
+    }
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
