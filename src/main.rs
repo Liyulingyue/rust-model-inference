@@ -1203,13 +1203,13 @@ struct LayerWeights<'a> {
     ffn_norm: Vec<f32>,
     q_norm: Option<Vec<f32>>,
     k_norm: Option<Vec<f32>>,
-    wq: &'a [u8],
-    wk: &'a [u8],
-    wv: &'a [u8],
-    wo: &'a [u8],
-    w_gate: &'a [u8],
-    w_up: &'a [u8],
-    w_down: &'a [u8],
+    wq: ops::ProcessedWeight<'a>,
+    wk: ops::ProcessedWeight<'a>,
+    wv: ops::ProcessedWeight<'a>,
+    wo: ops::ProcessedWeight<'a>,
+    w_gate: ops::ProcessedWeight<'a>,
+    w_up: ops::ProcessedWeight<'a>,
+    w_down: ops::ProcessedWeight<'a>,
 }
 
 #[derive(Debug)]
@@ -2090,27 +2090,69 @@ fn run_dump_logits(
             } else {
                 None
             },
-            wq: source
-                .tensor_slice(&format!("blk.{}.attn_q.weight", l))
-                .unwrap(),
-            wk: source
-                .tensor_slice(&format!("blk.{}.attn_k.weight", l))
-                .unwrap(),
-            wv: source
-                .tensor_slice(&format!("blk.{}.attn_v.weight", l))
-                .unwrap(),
-            wo: source
-                .tensor_slice(&format!("blk.{}.attn_output.weight", l))
-                .unwrap(),
-            w_gate: source
-                .tensor_slice(&format!("blk.{}.ffn_gate.weight", l))
-                .unwrap(),
-            w_up: source
-                .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
-                .unwrap(),
-            w_down: source
-                .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
-                .unwrap(),
+            wq: {
+                let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_q,
+                )
+            },
+            wk: {
+                let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )
+            },
+            wv: {
+                let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )
+            },
+            wo: {
+                let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd_q,
+                    n_embd,
+                )
+            },
+            w_gate: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_ff,
+                )
+            },
+            w_up: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_ff,
+                )
+            },
+            w_down: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_ff,
+                    n_embd,
+                )
+            },
         })
         .collect();
 
@@ -2255,13 +2297,9 @@ fn run_dump_logits(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                matmul_q8_0_quantized_parallel_rows(lw.wq, q8, sc, q, n_embd, n_embd_q, ith, nth);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wk, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wv, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth,
-                );
+                lw.wq.matmul(q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk.matmul(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.matmul(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -2458,9 +2496,7 @@ fn run_dump_logits(
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wo, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth,
-                );
+                lw.wo.matmul(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
 
             let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
@@ -2485,12 +2521,8 @@ fn run_dump_logits(
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_gate, q8, sc, up_buf, n_embd, n_ff, ith, nth,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_up, q8, sc, gate_buf, n_embd, n_ff, ith, nth,
-                );
+                lw.w_gate.matmul(q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.matmul(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -2516,9 +2548,7 @@ fn run_dump_logits(
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_down, q8, sc, down_buf, n_ff, n_embd, ith, nth,
-                );
+                lw.w_down.matmul(q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
 
             let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
@@ -2813,27 +2843,69 @@ fn run_inference(
             } else {
                 None
             },
-            wq: source
-                .tensor_slice(&format!("blk.{}.attn_q.weight", l))
-                .unwrap(),
-            wk: source
-                .tensor_slice(&format!("blk.{}.attn_k.weight", l))
-                .unwrap(),
-            wv: source
-                .tensor_slice(&format!("blk.{}.attn_v.weight", l))
-                .unwrap(),
-            wo: source
-                .tensor_slice(&format!("blk.{}.attn_output.weight", l))
-                .unwrap(),
-            w_gate: source
-                .tensor_slice(&format!("blk.{}.ffn_gate.weight", l))
-                .unwrap(),
-            w_up: source
-                .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
-                .unwrap(),
-            w_down: source
-                .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
-                .unwrap(),
+            wq: {
+                let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_q,
+                )
+            },
+            wk: {
+                let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )
+            },
+            wv: {
+                let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )
+            },
+            wo: {
+                let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd_q,
+                    n_embd,
+                )
+            },
+            w_gate: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_ff,
+                )
+            },
+            w_up: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_embd,
+                    n_ff,
+                )
+            },
+            w_down: {
+                let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
+                ops::ProcessedWeight::from_bytes(
+                    source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                    info.ggml_type,
+                    n_ff,
+                    n_embd,
+                )
+            },
         })
         .collect();
 
@@ -3005,13 +3077,9 @@ fn run_inference(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                matmul_q8_0_quantized_parallel_rows(lw.wq, q8, sc, q, n_embd, n_embd_q, ith, nth);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wk, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wv, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth,
-                );
+                lw.wq.matmul(q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk.matmul(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.matmul(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -3233,9 +3301,7 @@ fn run_inference(
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.wo, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth,
-                );
+                lw.wo.matmul(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
@@ -3262,12 +3328,8 @@ fn run_inference(
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_gate, q8, sc, up_buf, n_embd, n_ff, ith, nth,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_up, q8, sc, gate_buf, n_embd, n_ff, ith, nth,
-                );
+                lw.w_gate.matmul(q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.matmul(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -3297,9 +3359,7 @@ fn run_inference(
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                matmul_q8_0_quantized_parallel_rows(
-                    lw.w_down, q8, sc, down_buf, n_ff, n_embd, ith, nth,
-                );
+                lw.w_down.matmul(q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 

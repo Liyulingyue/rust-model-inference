@@ -1567,6 +1567,341 @@ fn matmul_q8_0_quantized_scalar_range(
     }
 }
 
+pub enum ProcessedWeight<'a> {
+    F32(Vec<f32>),
+    Q8_0(&'a [u8]),
+    Q6_K(Q6_KWeight<'a>),
+    Q4_0(Q4_0Weight<'a>),
+    Q4_1(Q4_1Weight<'a>),
+}
+
+pub struct Q6_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+pub struct Q4_0Weight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+pub struct Q4_1Weight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+impl<'a> ProcessedWeight<'a> {
+    pub fn from_bytes(data: &'a [u8], ggml_type: crate::model::GGMLType, n_in: usize, n_out: usize) -> Self {
+        match ggml_type {
+            crate::model::GGMLType::F32 => {
+                let f32_data: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                ProcessedWeight::F32(f32_data)
+            }
+            crate::model::GGMLType::Q8_0 => ProcessedWeight::Q8_0(data),
+            crate::model::GGMLType::Q6K => ProcessedWeight::Q6_K(Q6_KWeight { data, n_in, n_out }),
+            crate::model::GGMLType::Q4_0 => ProcessedWeight::Q4_0(Q4_0Weight { data, n_in, n_out }),
+            crate::model::GGMLType::Q4_1 => ProcessedWeight::Q4_1(Q4_1Weight { data, n_in, n_out }),
+            _ => panic!("unsupported weight type {:?} - use Q8_0 model", ggml_type),
+        }
+    }
+
+    pub fn matmul(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        match self {
+            ProcessedWeight::F32(w) => {
+                matmul_f32_parallel_rows(w, input_scales, output, n_in, n_out, ith, nth);
+            }
+            ProcessedWeight::Q8_0(w) => {
+                matmul_q8_0_quantized_parallel_rows(w, input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
+            ProcessedWeight::Q6_K(w) => {
+                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
+            ProcessedWeight::Q4_0(w) => {
+                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
+            ProcessedWeight::Q4_1(w) => {
+                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
+        }
+    }
+}
+
+impl<'a> Q6_KWeight<'a> {
+    pub fn matmul(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if nth <= 1 || n_out == 0 {
+            matmul_q6_k_scalar_range(self.data, input_q8, input_scales, output, self.n_in, 0, n_out);
+            return;
+        }
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+        matmul_q6_k_scalar_range(
+            self.data,
+            input_q8,
+            input_scales,
+            &mut output[my_start..my_end],
+            self.n_in,
+            my_start,
+            my_end,
+        );
+    }
+}
+
+impl<'a> Q4_0Weight<'a> {
+    pub fn matmul(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if nth <= 1 || n_out == 0 {
+            matmul_q4_0_scalar_range(self.data, input_q8, input_scales, output, self.n_in, 0, n_out);
+            return;
+        }
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+        matmul_q4_0_scalar_range(
+            self.data,
+            input_q8,
+            input_scales,
+            &mut output[my_start..my_end],
+            self.n_in,
+            my_start,
+            my_end,
+        );
+    }
+}
+
+impl<'a> Q4_1Weight<'a> {
+    pub fn matmul(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if nth <= 1 || n_out == 0 {
+            matmul_q4_1_scalar_range(self.data, input_q8, input_scales, output, self.n_in, 0, n_out);
+            return;
+        }
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+        matmul_q4_1_scalar_range(
+            self.data,
+            input_q8,
+            input_scales,
+            &mut output[my_start..my_end],
+            self.n_in,
+            my_start,
+            my_end,
+        );
+    }
+}
+
+fn matmul_f32_parallel_rows(
+    weight: &[f32],
+    _input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    if nth <= 1 || n_out == 0 {
+        matmul_f32_scalar_range(weight, output, n_in, 0, n_out);
+        return;
+    }
+    let per_thread = (n_out + nth - 1) / nth;
+    let my_start = ith * per_thread;
+    let my_end = (my_start + per_thread).min(n_out);
+    if my_start >= my_end {
+        return;
+    }
+    matmul_f32_scalar_range(weight, &mut output[my_start..my_end], n_in, my_start, my_end);
+}
+
+fn matmul_f32_scalar_range(
+    weight: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    for (out_idx, row) in (row_start..row_end).enumerate() {
+        let mut sum = 0.0f32;
+        let row_off = row * n_in;
+        for col in 0..n_in {
+            sum += weight[row_off + col];
+        }
+        output[out_idx] = sum;
+    }
+}
+
+fn matmul_q6_k_scalar_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    let n_blocks = n_in / 256;
+    let row_stride = n_blocks * 210;
+    for (out_idx, row) in (row_start..row_end).enumerate() {
+        let row_off = row * row_stride;
+        let mut sum = 0.0f32;
+        for block in 0..n_blocks {
+            let off = row_off + block * 210;
+            let d = f16_to_f32(u16::from_le_bytes([weight[off + 208], weight[off + 209]]));
+            let mut sum_block = 0.0f32;
+            for sub in 0..2 {
+                let ql_off = off + sub * 64;
+                let qh_off = off + 128 + sub * 32;
+                let sc_off = off + 192 + sub * 8;
+                for l in 0..32 {
+                    let is = l / 16;
+                    let ql_0 = weight[ql_off + l] as i8;
+                    let ql_1 = weight[ql_off + 32 + l] as i8;
+                    let qh_l = weight[qh_off + l] as i8;
+                    let q1 = ((((ql_0 & 0xF) as i32) | ((((qh_l >> 0) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                    let q2 = ((((ql_1 & 0xF) as i32) | ((((qh_l >> 2) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                    let q3 = ((((ql_0 >> 4) as i32) | ((((qh_l >> 4) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                    let q4 = ((((ql_1 >> 4) as i32) | ((((qh_l >> 6) & 3) as i32) << 4)) as i8) as f32 - 32.0;
+                    let sc0 = weight[sc_off + is + 0] as i8;
+                    let sc1 = weight[sc_off + is + 2] as i8;
+                    let base_y = sub * 128 + l;
+                    let input_val_raw = u32::from_le_bytes([
+                        input_q8[base_y * 4],
+                        input_q8[base_y * 4 + 1],
+                        input_q8[base_y * 4 + 2],
+                        input_q8[base_y * 4 + 3],
+                    ]);
+                    let input_val = f32::from_bits(input_val_raw);
+                    let scale_idx = block * 8 + sub * 4 + is;
+                    let scale = if scale_idx < input_scales.len() { input_scales[scale_idx] } else { 1.0 };
+                    sum_block += scale * (sc0 as f32 * q1 * input_val + sc0 as f32 * q2 * input_val + sc1 as f32 * q3 * input_val + sc1 as f32 * q4 * input_val);
+                }
+            }
+            sum += d * sum_block;
+        }
+        output[out_idx] = sum;
+    }
+}
+
+fn matmul_q4_0_scalar_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    let n_blocks = n_in / 32;
+    let row_stride = n_blocks * 18;
+    for (out_idx, row) in (row_start..row_end).enumerate() {
+        let row_off = row * row_stride;
+        let mut sum = 0.0f32;
+        for block in 0..n_blocks {
+            let off = row_off + block * 18;
+            let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+            let qx = &weight[off + 2..off + 18];
+            let base_y = block * 32;
+            let scale = input_scales[block];
+            let mut dot = 0i32;
+            for l in 0..16 {
+                let x0 = (qx[l] & 0x0F) as i32 - 8;
+                let x1 = (qx[l] >> 4) as i32 - 8;
+                let y0 = input_q8[base_y + l] as i32;
+                let y1 = input_q8[base_y + 16 + l] as i32;
+                dot += x0 * y0 + x1 * y1;
+            }
+            sum += d * scale * dot as f32;
+        }
+        output[out_idx] = sum;
+    }
+}
+
+fn matmul_q4_1_scalar_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    let n_blocks = n_in / 32;
+    let row_stride = n_blocks * 20;
+    for (out_idx, row) in (row_start..row_end).enumerate() {
+        let row_off = row * row_stride;
+        let mut sum = 0.0f32;
+        for block in 0..n_blocks {
+            let off = row_off + block * 20;
+            let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+            let m = f16_to_f32(u16::from_le_bytes([weight[off + 2], weight[off + 3]]));
+            let qx = &weight[off + 4..off + 20];
+            let base_y = block * 32;
+            let scale = input_scales[block];
+            let mut dot = 0i32;
+            let mut y_sum = 0i32;
+            for l in 0..16 {
+                let x0 = (qx[l] & 0x0F) as i32;
+                let x1 = (qx[l] >> 4) as i32;
+                let y0 = input_q8[base_y + l] as i32;
+                let y1 = input_q8[base_y + 16 + l] as i32;
+                dot += x0 * y0 + x1 * y1;
+                y_sum += y0 + y1;
+            }
+            sum += d * scale * dot as f32 + m * scale * y_sum as f32;
+        }
+        output[out_idx] = sum;
+    }
+}
+
 pub fn matmul_q8_0_quantized_parallel_rows(
     weight: &[u8],
     input_q8: &[u8],
