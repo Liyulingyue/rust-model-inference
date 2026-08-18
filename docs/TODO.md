@@ -4,10 +4,10 @@
 
 - [ ] Prompt 处理速度优化（当前远低于 llama.cpp）
 - [ ] **Q6_K embedding_lookup 调试** - 当前实现数值正确但模型挂起
-- [ ] **统一 embedding_lookup 函数** - 当前 Qwen3Model 存储 embedding_type，每个模型有多处重复的 match 分支
-  - 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
-  - 从 Qwen3Model/Qwen35Model/Qwen3AudioModel 中移除 embedding_type 字段
-  - 避免在 qwen3.rs、qwen35.rs、qwen3a.rs 中重复 match 分支
+- [x] **统一 embedding_lookup 函数**
+  - [x] 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
+  - [x] qwen3.rs、main.rs 已使用统一函数
+  - [x] 保留 token embedding 的类型信息；模型各组件的量化类型应独立管理
 
 ## Medium Priority
 
