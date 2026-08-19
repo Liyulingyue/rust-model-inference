@@ -27,9 +27,12 @@ struct CliOptions {
     mmproj: Option<PathBuf>,
     audio: Option<PathBuf>,
     image: Option<PathBuf>,
+    vae: Option<PathBuf>,
+    text_encoder: Option<PathBuf>,
     prompt: Option<String>,
     language: Option<String>,
     max_tokens: Option<usize>,
+    steps: Option<usize>,
     temperature: Option<f32>,
     threads: usize,
     thinking: bool,
@@ -871,6 +874,12 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--steps" => {
+                if i + 1 < args.len() {
+                    options.steps = Some(args[i + 1].parse().unwrap_or(20));
+                    i += 1;
+                }
+            }
             "--temp" => {
                 if i + 1 < args.len() {
                     options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
@@ -912,6 +921,18 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--image" => {
                 if i + 1 < args.len() {
                     options.image = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--vae" => {
+                if i + 1 < args.len() {
+                    options.vae = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--text-encoder" => {
+                if i + 1 < args.len() {
+                    options.text_encoder = Some(args[i + 1].as_str().into());
                     i += 1;
                 }
             }
@@ -1071,10 +1092,22 @@ fn main() {
                 options.embedding_output,
             );
         } else if arch == "pig" {
+            let vae_source = if let Some(ref vae_path) = options.vae {
+                Some(std::sync::Arc::from(open_or_exit(vae_path, ComponentRole::Llm)) as std::sync::Arc<dyn TensorSource>)
+            } else {
+                None
+            };
+            let text_encoder_source = if let Some(ref te_path) = options.text_encoder {
+                Some(std::sync::Arc::from(open_or_exit(te_path, ComponentRole::Llm)) as std::sync::Arc<dyn TensorSource>)
+            } else {
+                None
+            };
             run_or_exit(run_pig_image(
                 std::sync::Arc::clone(&source),
+                vae_source,
+                text_encoder_source,
                 prompt,
-                max_tokens,
+                options.steps.unwrap_or(20),
                 options.threads,
             ));
         } else if arch == "qwen3vl" {
@@ -1130,8 +1163,10 @@ fn main() {
     } else if arch == "pig" {
         run_or_exit(run_pig_image(
             std::sync::Arc::from(source),
+            None,
+            None,
             prompt,
-            max_tokens,
+            options.steps.unwrap_or(20),
             options.threads,
         ));
     } else {
@@ -2790,8 +2825,10 @@ fn run_shared_inference(
 
 fn run_pig_image(
     source: std::sync::Arc<dyn TensorSource>,
+    vae_source: Option<std::sync::Arc<dyn TensorSource>>,
+    text_encoder_source: Option<std::sync::Arc<dyn TensorSource>>,
     prompt: &str,
-    _max_tokens: usize,
+    steps: usize,
     n_threads: usize,
 ) -> Result<(), String> {
     use std::time::Instant;
@@ -2807,7 +2844,7 @@ fn run_pig_image(
     println!("Generating image for prompt: {}", prompt);
 
     let mut session = pig::PigSession::new(&model, 512)?;
-    match session.generate_image(prompt, 20) {
+    match session.generate_image(prompt, steps) {
         Ok(pixels) => {
             println!("Generated {} bytes image in {}ms",
                 pixels.len(), started.elapsed().as_millis());

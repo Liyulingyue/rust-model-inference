@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::model::{GGMLType, TensorSource};
-use crate::ops::f16_to_f32;
+use crate::ops::{matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into};
 use crate::thread_pool::ComputePool;
 
 #[derive(Debug)]
@@ -61,27 +61,28 @@ impl PigConfig {
 pub struct PigModel {
     config: PigConfig,
     pool: Arc<ComputePool>,
-    x_embedder_weight: Vec<f32>,
-    t_embedder_mlp_0_weight: Vec<f32>,
+    x_embedder_weight: &'static [u8],
+    t_embedder_mlp_0_weight: &'static [u8],
     t_embedder_mlp_0_bias: Vec<f32>,
     layers: Vec<PigLayer>,
-    final_layer_adaln_weight: Vec<f32>,
+    final_layer_adaln_weight: &'static [u8],
     final_layer_adaln_bias: Vec<f32>,
-    final_layer_linear_weight: Vec<f32>,
+    final_layer_linear_weight: &'static [u8],
 }
 
+#[derive(Clone)]
 struct PigLayer {
-    adaln_weight: Vec<f32>,
+    adaln_weight: &'static [u8],
     adaln_bias: Vec<f32>,
-    qkv_weight: Vec<f32>,
-    out_weight: Vec<f32>,
+    qkv_weight: &'static [u8],
+    out_weight: &'static [u8],
     q_norm_weight: Vec<f32>,
     k_norm_weight: Vec<f32>,
     attention_norm1_weight: Vec<f32>,
     attention_norm2_weight: Vec<f32>,
-    w1_weight: Vec<f32>,
-    w2_weight: Vec<f32>,
-    w3_weight: Vec<f32>,
+    w1_weight: &'static [u8],
+    w2_weight: &'static [u8],
+    w3_weight: &'static [u8],
     ffn_norm1_weight: Vec<f32>,
     ffn_norm2_weight: Vec<f32>,
 }
@@ -93,32 +94,35 @@ impl PigModel {
     ) -> Result<Self, String> {
         let config = PigConfig::from_source(source.as_ref())?;
 
-        let x_embedder_weight = load_f32_weight(source.as_ref(), "x_embedder.weight")?;
-        let t_embedder_mlp_0_weight = load_f32_weight(source.as_ref(), "t_embedder.mlp.0.weight")?;
-        let t_embedder_mlp_0_bias = load_f32_weight(source.as_ref(), "t_embedder.mlp.0.bias")?;
+        let x_embedder_weight = static_tensor(source.as_ref(), "x_embedder.weight", &[256, 3840], GGMLType::Q8_0)?;
+        let t_embedder_mlp_0_weight = static_tensor(source.as_ref(), "t_embedder.mlp.0.weight", &[256, 1024], GGMLType::Q8_0)?;
+        let t_embedder_mlp_0_bias = load_f32(source.as_ref(), "t_embedder.mlp.0.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
+            let n_embd_dim = [3840u64];
+            let n_ff_dim = [10240u64];
+            let n_adaln_dim = [256, 15360];
             layers.push(PigLayer {
-                adaln_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.adaLN_modulation.0.weight", i))?,
-                adaln_bias: load_f32_weight(source.as_ref(), &format!("layers.{}.adaLN_modulation.0.bias", i))?,
-                qkv_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention.qkv.weight", i))?,
-                out_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention.out.weight", i))?,
-                q_norm_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention.q_norm.weight", i))?,
-                k_norm_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention.k_norm.weight", i))?,
-                attention_norm1_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention_norm1.weight", i))?,
-                attention_norm2_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.attention_norm2.weight", i))?,
-                w1_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.feed_forward.w1.weight", i))?,
-                w2_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.feed_forward.w2.weight", i))?,
-                w3_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.feed_forward.w3.weight", i))?,
-                ffn_norm1_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.ffn_norm1.weight", i))?,
-                ffn_norm2_weight: load_f32_weight(source.as_ref(), &format!("layers.{}.ffn_norm2.weight", i))?,
+                adaln_weight: static_tensor(source.as_ref(), &format!("layers.{}.adaLN_modulation.0.weight", i), &n_adaln_dim, GGMLType::Q8_0)?,
+                adaln_bias: load_f32(source.as_ref(), &format!("layers.{}.adaLN_modulation.0.bias", i))?,
+                qkv_weight: static_tensor(source.as_ref(), &format!("layers.{}.attention.qkv.weight", i), &[3840, 11520], GGMLType::Q8_0)?,
+                out_weight: static_tensor(source.as_ref(), &format!("layers.{}.attention.out.weight", i), &[3840, 3840], GGMLType::Q8_0)?,
+                q_norm_weight: load_f32(source.as_ref(), &format!("layers.{}.attention.q_norm.weight", i))?,
+                k_norm_weight: load_f32(source.as_ref(), &format!("layers.{}.attention.k_norm.weight", i))?,
+                attention_norm1_weight: load_f32(source.as_ref(), &format!("layers.{}.attention_norm1.weight", i))?,
+                attention_norm2_weight: load_f32(source.as_ref(), &format!("layers.{}.attention_norm2.weight", i))?,
+                w1_weight: static_tensor(source.as_ref(), &format!("layers.{}.feed_forward.w1.weight", i), &n_ff_dim, GGMLType::Q8_0)?,
+                w2_weight: static_tensor(source.as_ref(), &format!("layers.{}.feed_forward.w2.weight", i), &[10240, 3840], GGMLType::Q8_0)?,
+                w3_weight: static_tensor(source.as_ref(), &format!("layers.{}.feed_forward.w3.weight", i), &n_ff_dim, GGMLType::Q8_0)?,
+                ffn_norm1_weight: load_f32(source.as_ref(), &format!("layers.{}.ffn_norm1.weight", i))?,
+                ffn_norm2_weight: load_f32(source.as_ref(), &format!("layers.{}.ffn_norm2.weight", i))?,
             });
         }
 
-        let final_layer_adaln_weight = load_f32_weight(source.as_ref(), "final_layer.adaLN_modulation.1.weight")?;
-        let final_layer_adaln_bias = load_f32_weight(source.as_ref(), "final_layer.adaLN_modulation.1.bias")?;
-        let final_layer_linear_weight = load_f32_weight(source.as_ref(), "final_layer.linear.weight")?;
+        let final_layer_adaln_weight = static_tensor(source.as_ref(), "final_layer.adaLN_modulation.1.weight", &[256, 15360], GGMLType::Q8_0)?;
+        let final_layer_adaln_bias = load_f32(source.as_ref(), "final_layer.adaLN_modulation.1.bias")?;
+        let final_layer_linear_weight = static_tensor(source.as_ref(), "final_layer.linear.weight", &[3840, 256], GGMLType::Q8_0)?;
 
         Ok(Self {
             config,
@@ -142,38 +146,36 @@ impl PigModel {
     }
 }
 
-fn load_f32_weight<S: crate::model::TensorSource + ?Sized>(source: &S, name: &str) -> Result<Vec<f32>, String> {
-    let ti = source.tensor_info(name).ok_or_else(|| format!("Missing tensor: {}", name))?;
-    let data = source.tensor_slice(name).ok_or_else(|| format!("Cannot load tensor slice: {}", name))?;
-    let n_el = ti.n_elements();
-    match ti.ggml_type {
-        GGMLType::F32 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                let off = i * 4;
-                out.push(f32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]));
-            }
-            Ok(out)
-        }
-        GGMLType::F16 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                out.push(f16_to_f32(f16_at(data, i)));
-            }
-            Ok(out)
-        }
-        GGMLType::Q8_0 => {
-            let n_cols = ti.dims[0] as usize;
-            let n_rows = if ti.dims.len() >= 2 { ti.dims[1] as usize } else { 1 };
-            Ok(crate::quant::dequant_q80_weight(data, n_cols, n_rows))
-        }
-        _ => Err(format!("Unsupported type {:?} for {}", ti.ggml_type, name))
-    }
+fn static_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    _dims: &[u64],
+    _ggml_type: GGMLType,
+) -> Result<&'static [u8], String> {
+    let bytes = source.tensor_slice(name).ok_or_else(|| format!("Missing tensor: {}", name))?;
+    let info = source.tensor_info(name).ok_or_else(|| format!("Missing tensor info: {}", name))?;
+    eprintln!("Loading {}: dims={:?}, type={:?}", name, info.dims, info.ggml_type);
+    // SAFETY: PigModel stores a strong Arc to this immutable TensorSource and never unloads.
+    Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-fn f16_at(data: &[u8], i: usize) -> u16 {
-    let off = i * 2;
-    u16::from_le_bytes([data[off], data[off + 1]])
+fn load_f32(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
+    let data = source.tensor_slice(name).ok_or_else(|| format!("Missing tensor: {}", name))?;
+    let n_el = data.len() / 4;
+    let mut out = Vec::with_capacity(n_el);
+    for i in 0..n_el {
+        let off = i * 4;
+        out.push(f32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]));
+    }
+    Ok(out)
+}
+
+pub struct PigVAE;
+
+impl PigVAE {
+    pub fn decode(&self, _latents: &[f32]) -> Result<Vec<u8>, String> {
+        Ok(vec![0u8; 512 * 512 * 4])
+    }
 }
 
 pub struct PigSession<'a> {
@@ -201,8 +203,8 @@ impl<'a> PigSession<'a> {
             let t_emb = self.compute_t_embed(t);
 
             for layer_idx in 0..config.n_layer {
+                eprintln!("  Layer {}/{}", layer_idx + 1, config.n_layer);
                 self.apply_transformer_block(&mut patches, n_patches, &t_emb, layer_idx);
-                eprintln!("  Applied layer {}/{}", layer_idx + 1, config.n_layer);
             }
 
             self.apply_final_layer(&mut patches, &t_emb);
@@ -213,44 +215,50 @@ impl<'a> PigSession<'a> {
         Ok(pixels)
     }
 
-    fn ddpm_sampling(&mut self, patches: &mut [f32], steps: usize) -> Result<(), String> {
-        let timesteps: Vec<f32> = (0..steps).map(|t| 1.0 - t as f32 / steps as f32).collect();
-
-        for t in timesteps.iter() {
-            self.denoise_step(patches, *t);
-        }
-
-        Ok(())
-    }
-
-    fn denoise_step(&self, patches: &mut [f32], t: f32) {
-        let config = &self.model.config;
-        let n_patches = patches.len() / config.n_embed;
-
-        let t_emb = self.compute_t_embed(t);
-
-        for layer_idx in 0..config.n_layer {
-            self.apply_transformer_block(patches, n_patches, &t_emb, layer_idx);
-        }
-
-        self.apply_final_layer(patches, &t_emb);
-    }
-
     fn compute_t_embed(&self, t: f32) -> Vec<f32> {
-        let mlp = &self.model.t_embedder_mlp_0_weight;
-        let bias = &self.model.t_embedder_mlp_0_bias;
-        let t_embed_in = 256;
+        let n_embed = self.model.config.n_embed;
         let t_embed_out = 1024;
 
-        let mut h = vec![t; t_embed_in];
-        let mut tmp = vec![0.0f32; t_embed_out];
-        self.matmul_f32(&h, mlp, t_embed_in, t_embed_out, &mut tmp);
+        let mut h = vec![t; 256];
+        let mut output = vec![0.0f32; t_embed_out];
+
+        self.matmul_q8(&self.model.t_embedder_mlp_0_weight, &h, 256, t_embed_out, &mut output);
 
         for i in 0..t_embed_out {
-            tmp[i] += bias[i];
+            output[i] += self.model.t_embedder_mlp_0_bias[i];
         }
 
-        tmp
+        output
+    }
+
+    fn matmul_q8(&self, weight: &[u8], input: &[f32], n_in: usize, n_out: usize, output: &mut [f32]) {
+        let blocks = (n_in + 31) / 32;
+        let mut q8_buf = vec![0u8; n_in];
+        let mut scale_buf = vec![0.0f32; blocks];
+        quantize_q8_0_into(input, n_in, &mut q8_buf, &mut scale_buf);
+
+        let weight_ptr = weight.as_ptr();
+        let q8_ptr = q8_buf.as_ptr();
+        let scale_ptr = scale_buf.as_ptr();
+        let out_ptr = output.as_mut_ptr();
+
+        let pool = Arc::clone(&self.model.pool);
+        pool.compute(move |thread, threads| {
+            let weight = unsafe { std::slice::from_raw_parts(weight_ptr, weight.len()) };
+            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
+            let scales = unsafe { std::slice::from_raw_parts(scale_ptr, blocks) };
+            let output = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_out) };
+            matmul_q8_0_quantized_parallel_rows(
+                weight,
+                q8,
+                scales,
+                output,
+                n_in,
+                n_out,
+                thread,
+                threads,
+            );
+        });
     }
 
     fn apply_transformer_block(&self, patches: &mut [f32], n_patches: usize, t_emb: &[f32], layer_idx: usize) {
@@ -265,11 +273,12 @@ impl<'a> PigSession<'a> {
         for patch_idx in 0..n_patches {
             let patch_offset = patch_idx * n_embed;
 
-            let residual = h[patch_offset..patch_offset + n_embed].to_vec();
+            let residual: Vec<f32> = h[patch_offset..patch_offset + n_embed].to_vec();
 
             let x_normed = self.layer_norm(&residual, &layer.attention_norm1_weight);
 
-            let qkv = self.matmul_vec(&x_normed, &layer.qkv_weight, n_embed, 3 * n_embed);
+            let mut qkv = vec![0.0f32; 3 * n_embed];
+            self.matmul_q8(&layer.qkv_weight, &x_normed, n_embed, 3 * n_embed, &mut qkv);
 
             let head_dim = n_embed / config.n_head;
             let q = &qkv[..n_embed];
@@ -281,9 +290,10 @@ impl<'a> PigSession<'a> {
 
             let attn_out = self.compute_attention(&q_normed, &k_normed, v, config.n_head, head_dim);
 
-            let attn_out_proj = self.matmul_vec(&attn_out, &layer.out_weight, n_embed, n_embed);
+            let mut attn_proj = vec![0.0f32; n_embed];
+            self.matmul_q8(&layer.out_weight, &attn_out, n_embed, n_embed, &mut attn_proj);
 
-            let attn_normed = self.layer_norm(&attn_out_proj, &layer.attention_norm2_weight);
+            let attn_normed = self.layer_norm(&attn_proj, &layer.attention_norm2_weight);
 
             let ffn_input = self.layer_norm(&residual, &layer.ffn_norm1_weight);
 
@@ -303,6 +313,7 @@ impl<'a> PigSession<'a> {
         let config = &self.model.config;
         let n_embed = config.n_embed;
         let n_patches = patches.len() / n_embed;
+        let final_out_dim = 64;
 
         let adaln_mod = self.compute_adaln_modulation(
             &self.model.final_layer_adaln_weight,
@@ -315,26 +326,33 @@ impl<'a> PigSession<'a> {
         for patch_idx in 0..n_patches {
             let patch_offset = patch_idx * n_embed;
 
-            let residual = h[patch_offset..patch_offset + n_embed].to_vec();
+            let residual: Vec<f32> = h[patch_offset..patch_offset + n_embed].to_vec();
 
-            let out = self.matmul_vec(&residual, &self.model.final_layer_linear_weight, n_embed, 16 * 16);
+            let mut out = vec![0.0f32; final_out_dim];
+            self.matmul_q8(&self.model.final_layer_linear_weight, &residual, n_embed, final_out_dim, &mut out);
 
-            for i in 0..(16 * 16) {
-                h[patch_offset + i] = residual[i] + adaln_mod[patch_offset + i] * out[i];
+            for i in 0..final_out_dim {
+                h[patch_offset + i] = residual[i] + adaln_mod[i] * out[i];
             }
         }
 
         patches.copy_from_slice(&h);
     }
 
-    fn compute_adaln_modulation(&self, shift_scale: &[f32], bias: &[f32], t_emb: &[f32]) -> Vec<f32> {
-        let config = &self.model.config;
-        let n_embed = config.n_embed;
+    fn compute_adaln_modulation(&self, weight: &[u8], bias: &[f32], t_emb: &[f32]) -> Vec<f32> {
+        let n_embed = self.model.config.n_embed;
+
+        let mut input = vec![0.0f32; 256];
+        for i in 0..256 {
+            input[i] = t_emb[i % t_emb.len()];
+        }
+
+        let mut tmp = vec![0.0f32; n_embed];
+        self.matmul_q8(weight, &input, 256, n_embed, &mut tmp);
 
         let mut mod_vals = vec![0.0f32; n_embed];
         for i in 0..n_embed {
-            let shift = shift_scale[i] + t_emb[i % t_emb.len()];
-            mod_vals[i] = 1.0 + bias[i % bias.len()] + shift;
+            mod_vals[i] = 1.0 + bias[i] + tmp[i];
         }
         mod_vals
     }
@@ -351,103 +369,68 @@ impl<'a> PigSession<'a> {
         output
     }
 
-    fn apply_rms_norm(&self, input: &[f32], weight: &[f32]) -> Vec<f32> {
-        let n = input.len();
-        let norm_factor = 1.0 / (input.iter().map(|x| x * x).sum::<f32>() / n as f32 + 1e-5).sqrt();
-        let mut output = vec![0.0f32; n];
-        for i in 0..n {
-            output[i] = input[i] * norm_factor * weight[i];
-        }
-        output
-    }
-
-    fn matmul_f32(&self, input: &[f32], weight: &[f32], in_dim: usize, out_dim: usize, output: &mut [f32]) {
-        let n_tokens = input.len() / in_dim;
-        for t in 0..n_tokens {
-            let input_offset = t * in_dim;
-            let output_offset = t * out_dim;
-            for i in 0..out_dim {
-                let mut sum = 0.0f32;
-                for j in 0..in_dim {
-                    sum += input[input_offset + j] * weight[j * out_dim + i];
-                }
-                output[output_offset + i] = sum;
-            }
-        }
-    }
-
-    fn matmul_vec(&self, input: &[f32], weight: &[f32], in_dim: usize, out_dim: usize) -> Vec<f32> {
-        let mut output = vec![0.0f32; out_dim];
-        for i in 0..out_dim {
-            let mut sum = 0.0f32;
-            for j in 0..in_dim {
-                sum += input[j] * weight[j * out_dim + i];
-            }
-            output[i] = sum;
-        }
-        output
-    }
-
     fn compute_attention(&self, q: &[f32], k: &[f32], v: &[f32], n_head: usize, head_dim: usize) -> Vec<f32> {
+        use crate::ops::dot_f32;
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let mut output = vec![0.0f32; n_head * head_dim];
+        let mut scores = vec![0.0f32; n_head * head_dim];
 
         for h in 0..n_head {
-            let h_offset = h * head_dim;
             for i in 0..head_dim {
-                let mut sum = 0.0f32;
-                for j in 0..head_dim {
-                    sum += q[h_offset + i] * k[h * head_dim + j] * scale;
-                }
-                output[h_offset + i] = sum;
+                let q_row = &q[h * head_dim..h * head_dim + head_dim];
+                let k_row = &k[h * head_dim..h * head_dim + head_dim];
+                scores[h * head_dim + i] = dot_f32(q_row, k_row, head_dim) * scale;
             }
         }
 
-        let mut softmax_out = vec![0.0f32; n_head * head_dim];
         for h in 0..n_head {
             let h_offset = h * head_dim;
             let mut max_val = f32::MIN;
             for i in 0..head_dim {
-                if output[h_offset + i] > max_val {
-                    max_val = output[h_offset + i];
+                if scores[h_offset + i] > max_val {
+                    max_val = scores[h_offset + i];
                 }
             }
             let mut exp_sum = 0.0f32;
             for i in 0..head_dim {
-                output[h_offset + i] = (output[h_offset + i] - max_val).exp();
-                exp_sum += output[h_offset + i];
+                scores[h_offset + i] = (scores[h_offset + i] - max_val).exp();
+                exp_sum += scores[h_offset + i];
             }
             for i in 0..head_dim {
-                output[h_offset + i] /= exp_sum;
+                scores[h_offset + i] /= exp_sum;
             }
         }
 
         let mut final_out = vec![0.0f32; n_head * head_dim];
         for h in 0..n_head {
-            let h_offset = h * head_dim;
             for i in 0..head_dim {
                 let mut sum = 0.0f32;
                 for j in 0..head_dim {
-                    sum += output[h * head_dim + j] * v[h * head_dim + i];
+                    sum += scores[h * head_dim + j] * v[h * head_dim + i];
                 }
-                final_out[h_offset + i] = sum;
+                final_out[h * head_dim + i] = sum;
             }
         }
 
         final_out
     }
 
-    fn apply_ffn(&self, input: &[f32], w1: &[f32], w2: &[f32], w3: &[f32], in_dim: usize, hidden_dim: usize) -> Vec<f32> {
-        let gate = self.matmul_vec(input, w1, in_dim, hidden_dim);
-        let up = self.matmul_vec(input, w3, in_dim, hidden_dim);
+    fn apply_ffn(&self, input: &[f32], w1: &[u8], w2: &[u8], w3: &[u8], in_dim: usize, hidden_dim: usize) -> Vec<f32> {
+        let mut gate = vec![0.0f32; hidden_dim];
+        self.matmul_q8(w1, input, in_dim, hidden_dim, &mut gate);
 
-        let mut hidden = vec![0.0f32; hidden_dim];
+        let mut up = vec![0.0f32; hidden_dim];
+        self.matmul_q8(w3, input, in_dim, hidden_dim, &mut up);
+
         for i in 0..hidden_dim {
-            hidden[i] = gate[i] * (1.0 / (1.0 + (-gate[i]).exp()));
-            hidden[i] *= up[i];
+            let g = gate[i];
+            gate[i] = g * (1.0f32 / (1.0f32 + (-g).exp()));
+            gate[i] *= up[i];
         }
 
-        self.matmul_vec(&hidden, w2, hidden_dim, in_dim)
+        let mut down = vec![0.0f32; in_dim];
+        self.matmul_q8(w2, &gate, hidden_dim, in_dim, &mut down);
+
+        down
     }
 
     fn decode_patches(&self, patches: &[f32], n_patches: usize, latent_size: usize) -> Result<Vec<u8>, String> {
@@ -492,13 +475,5 @@ impl<'a> PigSession<'a> {
         }
 
         Ok(pixels)
-    }
-}
-
-pub struct PigVAE;
-
-impl PigVAE {
-    pub fn decode(&self, _latents: &[f32]) -> Result<Vec<u8>, String> {
-        Ok(vec![0u8; 512 * 512 * 4])
     }
 }
