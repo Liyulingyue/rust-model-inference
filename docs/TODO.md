@@ -4,6 +4,7 @@
 
 - [ ] Prompt 处理速度优化（当前远低于 llama.cpp）
 - [ ] **Q6_K embedding_lookup 调试** - 当前实现数值正确但模型挂起
+- [ ] **WGPU Buffer Pool 优化** - 当前每次 matmul 调用都重新创建 buffer/bind_group/encoder，导致巨大开销。每个 token 生成需要几十次 matmul，应该预创建 buffer pool 复用
 - [x] **统一 embedding_lookup 函数**
   - [x] 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
   - [x] qwen3.rs、main.rs 已使用统一函数
