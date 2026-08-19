@@ -1,0 +1,587 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum KvFormat {
+    #[default]
+    F16,
+    F32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EmbeddingOutput {
+    #[default]
+    Summary,
+    Raw,
+}
+
+#[derive(Debug, Default)]
+pub struct CliOptions {
+    pub model: PathBuf,
+    pub mmproj: Option<PathBuf>,
+    pub audio: Option<PathBuf>,
+    pub image: Option<PathBuf>,
+    pub vae: Option<PathBuf>,
+    pub text_encoder: Option<PathBuf>,
+    pub prompt: Option<String>,
+    pub language: Option<String>,
+    pub max_tokens: Option<usize>,
+    pub steps: Option<usize>,
+    pub resolution: Option<usize>,
+    pub temperature: Option<f32>,
+    pub threads: usize,
+    pub thinking: bool,
+    pub embedding: bool,
+    pub embedding_output: EmbeddingOutput,
+    pub dump_logits: bool,
+    pub bench: bool,
+    pub profile: bool,
+    pub kv_format: KvFormat,
+    pub gpu: bool,
+}
+
+pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
+    match value {
+        Some("summary") => Ok(EmbeddingOutput::Summary),
+        Some("raw") => Ok(EmbeddingOutput::Raw),
+        Some(value) => Err(format!(
+            "Invalid --embedding-output {value:?}; expected summary or raw"
+        )),
+        None => Err("Missing value for --embedding-output".into()),
+    }
+}
+
+pub fn validate_qwen3vl_decoder_mode(
+    arch: &str,
+    dump_logits: bool,
+    bench: bool,
+    profile: bool,
+    kv_format: KvFormat,
+    interactive: bool,
+) -> Result<(), String> {
+    if arch != "qwen3vl" {
+        return Ok(());
+    }
+    let unsupported = if dump_logits {
+        Some("--dump-logits")
+    } else if bench {
+        Some("--bench")
+    } else if profile {
+        Some("--profile")
+    } else if kv_format == KvFormat::F32 {
+        Some("--kv-cache f32")
+    } else if interactive {
+        Some("interactive mode")
+    } else {
+        None
+    };
+    match unsupported {
+        Some(option) => Err(format!(
+            "{option} is not supported for qwen3vl; use default F16 generation"
+        )),
+        None => Ok(()),
+    }
+}
+
+pub const DEFAULT_THREAD_CAP: usize = 8;
+
+pub fn resolve_thread_count(requested: usize, available: usize) -> usize {
+    if requested > 0 {
+        requested
+    } else {
+        available.clamp(1, DEFAULT_THREAD_CAP)
+    }
+}
+
+pub fn inference_step_budget(prompt_tokens: usize, max_tokens: usize, bench: bool) -> usize {
+    prompt_tokens
+        + if bench {
+            max_tokens
+        } else {
+            max_tokens.saturating_sub(1)
+        }
+}
+
+pub fn per_second(count: usize, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds > 0.0 {
+        count as f64 / seconds
+    } else {
+        0.0
+    }
+}
+
+pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
+    let mut options = CliOptions::default();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--model" => {
+                if i + 1 < args.len() {
+                    options.model = args[i + 1].as_str().into();
+                    i += 1;
+                }
+            }
+            "--prompt" => {
+                if i + 1 < args.len() {
+                    options.prompt = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--max-tokens" | "--n-gen" => {
+                if i + 1 < args.len() {
+                    options.max_tokens = Some(args[i + 1].parse().unwrap_or(128));
+                    i += 1;
+                }
+            }
+            "--steps" => {
+                if i + 1 < args.len() {
+                    options.steps = Some(args[i + 1].parse().unwrap_or(20));
+                    i += 1;
+                }
+            }
+            "--resolution" | "--size" => {
+                if i + 1 < args.len() {
+                    options.resolution = Some(args[i + 1].parse().unwrap_or(512));
+                    i += 1;
+                }
+            }
+            "--temp" => {
+                if i + 1 < args.len() {
+                    options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
+                    i += 1;
+                }
+            }
+            "--threads" => {
+                if i + 1 < args.len() {
+                    options.threads = args[i + 1].parse().unwrap_or(0);
+                    i += 1;
+                }
+            }
+            "--dump-logits" => options.dump_logits = true,
+            "--embedding" => options.embedding = true,
+            "--embedding-output" => {
+                options.embedding_output =
+                    parse_embedding_output(args.get(i + 1).map(String::as_str))?;
+                i += 1;
+            }
+            "--bench" => options.bench = true,
+            "--thinking" => options.thinking = true,
+            "--profile" => options.profile = true,
+            "--gpu" => options.gpu = true,
+            "--kv-cache" => {
+                if i + 1 < args.len() {
+                    options.kv_format = match args[i + 1].as_str() {
+                        "f32" => KvFormat::F32,
+                        _ => KvFormat::F16,
+                    };
+                    i += 1;
+                }
+            }
+            "--mmproj" => {
+                if i + 1 < args.len() {
+                    options.mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--image" => {
+                if i + 1 < args.len() {
+                    options.image = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--vae" => {
+                if i + 1 < args.len() {
+                    options.vae = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--text-encoder" => {
+                if i + 1 < args.len() {
+                    options.text_encoder = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --audio")?;
+                options.audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--language" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --language")?;
+                options.language = Some(value.clone());
+                i += 1;
+            }
+            _ => {
+                if options.audio.is_none() && !args[i].starts_with("--") && !args[i].is_empty() {
+                    options.audio = Some(args[i].as_str().into());
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+
+pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.audio.is_none() {
+        return if options.language.is_some() {
+            Err("--language requires --audio".into())
+        } else {
+            Ok(())
+        };
+    }
+    let conflict = if options.image.is_some() {
+        Some("--image")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.dump_logits {
+        Some("--dump-logits")
+    } else if options.bench {
+        Some("--bench")
+    } else if options.profile {
+        Some("--profile")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("--audio cannot be used with {conflict}"));
+    }
+    if options.temperature.is_some_and(|temperature| temperature != 0.0) {
+        return Err("--audio requires greedy decoding; --temp must be 0".into());
+    }
+    if options.max_tokens == Some(0) {
+        return Err("--audio requires --max-tokens greater than 0".into());
+    }
+    Ok(())
+}
+
+pub fn resolve_cli_generation_options(options: &CliOptions) -> (usize, f32) {
+    (
+        options
+            .max_tokens
+            .unwrap_or(if options.audio.is_some() { 256 } else { 128 }),
+        options
+            .temperature
+            .unwrap_or(if options.audio.is_some() { 0.0 } else { 0.6 }),
+    )
+}
+
+pub fn transcription_options(options: &CliOptions) -> crate::asr::TranscriptionOptions {
+    let language = options
+        .language
+        .as_ref()
+        .filter(|language| !language.eq_ignore_ascii_case("auto"))
+        .cloned();
+    crate::asr::TranscriptionOptions {
+        language,
+        prompt: options.prompt.clone(),
+        max_new_tokens: resolve_cli_generation_options(options).0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asr::{normalize_language, TranscriptionOptions};
+    use crate::model::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use crate::tokenizer::BPETokenizer;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    struct TestTensorSource {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+    }
+
+    impl TensorSource for TestTensorSource {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(&self.bytes)
+        }
+    }
+
+    #[test]
+    fn embedding_output_accepts_only_summary_or_raw() {
+        assert_eq!(
+            parse_embedding_output(Some("summary")).unwrap(),
+            EmbeddingOutput::Summary,
+        );
+        assert_eq!(
+            parse_embedding_output(Some("raw")).unwrap(),
+            EmbeddingOutput::Raw,
+        );
+        assert!(parse_embedding_output(Some("json")).is_err());
+        assert!(parse_embedding_output(None).is_err());
+    }
+
+    #[test]
+    fn default_threads_are_capped_but_explicit_value_wins() {
+        assert_eq!(resolve_thread_count(0, 16), 8);
+        assert_eq!(resolve_thread_count(0, 4), 4);
+        assert_eq!(resolve_thread_count(0, 0), 1);
+        assert_eq!(resolve_thread_count(12, 16), 12);
+    }
+
+    #[test]
+    fn normal_generation_does_not_run_the_final_unused_forward() {
+        assert_eq!(inference_step_budget(5, 32, false), 36);
+        assert_eq!(inference_step_budget(5, 0, false), 5);
+    }
+
+    #[test]
+    fn bench_budget_has_exact_decode_eval_count() {
+        assert_eq!(inference_step_budget(5, 32, true), 37);
+        assert_eq!(per_second(32, Duration::from_millis(250)), 128.0);
+    }
+
+    #[test]
+    fn qwen3vl_rejects_legacy_decoder_modes() {
+        for (result, expected_mode) in [
+            (
+                validate_qwen3vl_decoder_mode("qwen3vl", true, false, false, KvFormat::F16, false),
+                "--dump-logits",
+            ),
+            (
+                validate_qwen3vl_decoder_mode("qwen3vl", false, true, false, KvFormat::F16, false),
+                "--bench",
+            ),
+            (
+                validate_qwen3vl_decoder_mode("qwen3vl", false, false, true, KvFormat::F16, false),
+                "--profile",
+            ),
+            (
+                validate_qwen3vl_decoder_mode("qwen3vl", false, false, false, KvFormat::F32, false),
+                "--kv-cache f32",
+            ),
+            (
+                validate_qwen3vl_decoder_mode("qwen3vl", false, false, false, KvFormat::F16, true),
+                "interactive mode",
+            ),
+        ] {
+            assert!(result.unwrap_err().contains(expected_mode));
+        }
+
+        assert!(validate_qwen3vl_decoder_mode(
+            "qwen3vl",
+            false,
+            false,
+            false,
+            KvFormat::F16,
+            false
+        )
+        .is_ok());
+        assert!(
+            validate_qwen3vl_decoder_mode(
+                "qwen3",
+                true,
+                true,
+                true,
+                KvFormat::F32,
+                true
+            )
+            .is_ok()
+        );
+    }
+
+    fn asr_cli_options() -> CliOptions {
+        CliOptions {
+            model: "missing.gguf".into(),
+            audio: Some("missing.wav".into()),
+            ..CliOptions::default()
+        }
+    }
+
+    #[test]
+    fn asr_cli_rejects_conflicting_modes_before_model_load() {
+        let mut options = asr_cli_options();
+        options.image = Some("missing.png".into());
+        assert!(validate_cli_options(&options).unwrap_err().contains("--image"));
+
+        let mut options = asr_cli_options();
+        options.embedding = true;
+        assert!(validate_cli_options(&options).unwrap_err().contains("--embedding"));
+
+        let mut options = asr_cli_options();
+        options.dump_logits = true;
+        assert!(validate_cli_options(&options).unwrap_err().contains("--dump-logits"));
+
+        let mut options = asr_cli_options();
+        options.bench = true;
+        assert!(validate_cli_options(&options).unwrap_err().contains("--bench"));
+
+        let mut options = asr_cli_options();
+        options.profile = true;
+        assert!(validate_cli_options(&options).unwrap_err().contains("--profile"));
+
+        let mut options = asr_cli_options();
+        options.temperature = Some(0.1);
+        assert!(validate_cli_options(&options).unwrap_err().contains("--temp"));
+
+        let mut options = asr_cli_options();
+        options.max_tokens = Some(0);
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("--max-tokens"));
+
+        let mut options = asr_cli_options();
+        options.audio = None;
+        options.language = Some("English".into());
+        assert!(validate_cli_options(&options).unwrap_err().contains("--language"));
+
+        let mut options = asr_cli_options();
+        options.prompt = Some("domain context".into());
+        assert!(validate_cli_options(&options).is_ok());
+
+        let args = ["rmi".to_string(), "--audio".to_string()];
+        assert!(parse_cli_options(&args).unwrap_err().contains("--audio"));
+    }
+
+    #[test]
+    fn asr_cli_rejects_empty_and_flag_shaped_values() {
+        for args in [
+            vec!["rmi", "--audio", ""],
+            vec!["rmi", "--audio", "--image", "missing.png"],
+            vec!["rmi", "--audio", "--language", "English"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_cli_options(&args).unwrap_err().contains("--audio"));
+        }
+
+        let args: Vec<String> = ["rmi", "--audio", "missing.wav", "--language", "--prompt"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(parse_cli_options(&args)
+            .unwrap_err()
+            .contains("--language"));
+
+        let args: Vec<String> = ["rmi", "-recording.wav", "--language", "English"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let options = parse_cli_options(&args).unwrap();
+        assert_eq!(options.audio.as_deref(), Some(Path::new("-recording.wav")));
+        assert_eq!(options.language.as_deref(), Some("English"));
+
+        let args: Vec<String> = ["rmi", "missing.wav", "--language", ""]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let options = parse_cli_options(&args).unwrap();
+        assert!(validate_cli_options(&options).is_ok());
+        assert!(normalize_language(
+            transcription_options(&options).language.as_deref()
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn asr_cli_defaults_are_greedy_and_256_tokens() {
+        let mut options = asr_cli_options();
+        options.language = Some("auto".into());
+        options.prompt = Some("domain context".into());
+
+        let (max_tokens, temperature) = resolve_cli_generation_options(&options);
+        assert_eq!(max_tokens, 256);
+        assert_eq!(temperature, 0.0);
+        let transcription = transcription_options(&options);
+        assert_eq!(transcription.language, None);
+        assert_eq!(transcription.prompt.as_deref(), Some("domain context"));
+        assert_eq!(transcription.max_new_tokens, 256);
+        assert!(normalize_language(Some("auto")).is_err());
+
+        let args = [
+            "rmi".to_string(),
+            "--audio".to_string(),
+            "missing.wav".to_string(),
+            "--n-gen".to_string(),
+            "7".to_string(),
+        ];
+        assert_eq!(parse_cli_options(&args).unwrap().max_tokens, Some(7));
+
+        let args = [
+            "rmi".to_string(),
+            "--unknown".to_string(),
+            "--prompt".to_string(),
+            "hello".to_string(),
+        ];
+        let text = parse_cli_options(&args).unwrap();
+        assert_eq!(text.prompt.as_deref(), Some("hello"));
+        assert_eq!(resolve_cli_generation_options(&text), (128, 0.6));
+    }
+
+    #[test]
+    fn legacy_cli_parser_and_dispatch_semantics_are_preserved() {
+        type Check = fn(&CliOptions) -> bool;
+        let parse = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+            parse_cli_options(&args).unwrap()
+        };
+        let cases: &[(&[&str], &str, Check)] = &[
+            (&["rmi", "--embedding", "--prompt", "x"], "embedding", |o| o.embedding && o.prompt.as_deref() == Some("x")),
+            (&["rmi", "--image", "image.png"], "image", |o| o.image.as_deref() == Some(Path::new("image.png"))),
+            (&["rmi", "--mmproj", "projector.gguf"], "mmproj", |o| o.mmproj.as_deref() == Some(Path::new("projector.gguf"))),
+            (&["rmi", "--model", "model.gguf"], "interactive", |o| o.prompt.is_none() && o.image.is_none() && o.mmproj.is_none()),
+            (&["rmi", "positional", "--prompt", "x"], "unknown/positional", |o| o.prompt.as_deref() == Some("x")),
+            (&["rmi"], "text defaults", |o| resolve_cli_generation_options(o) == (128, 0.6)),
+            (&["rmi", "--max-tokens", "bad"], "malformed max", |o| o.max_tokens == Some(128)),
+            (&["rmi", "--n-gen", "bad"], "malformed n-gen", |o| o.max_tokens == Some(128)),
+            (&["rmi", "--temp", "bad"], "malformed temp", |o| o.temperature == Some(0.6)),
+            (&["rmi", "--threads", "bad"], "malformed threads", |o| o.threads == 0),
+            (&["rmi", "--kv-cache", "f32"], "F32 KV", |o| o.kv_format == KvFormat::F32),
+            (&["rmi", "--kv-cache", "bad"], "fallback F16 KV", |o| o.kv_format == KvFormat::F16),
+            (&["rmi", "--model", "", "--prompt", "", "--max-tokens", "", "--temp", "", "--threads", "", "--kv-cache", "", "--mmproj", "", "--image", ""], "empty legacy values", |o| o.model.as_os_str().is_empty() && o.prompt.as_deref() == Some("") && o.max_tokens == Some(128) && o.temperature == Some(0.6) && o.threads == 0 && o.kv_format == KvFormat::F16 && o.mmproj.as_deref() == Some(Path::new("")) && o.image.as_deref() == Some(Path::new(""))),
+        ];
+        for (args, name, check) in cases {
+            assert!(check(&parse(args)), "{name}");
+        }
+
+        let absent: &[(&str, Check)] = &[
+            ("--model", |o| o.model.as_os_str().is_empty()),
+            ("--prompt", |o| o.prompt.is_none()),
+            ("--max-tokens", |o| o.max_tokens.is_none()),
+            ("--n-gen", |o| o.max_tokens.is_none()),
+            ("--temp", |o| o.temperature.is_none()),
+            ("--threads", |o| o.threads == 0),
+            ("--kv-cache", |o| o.kv_format == KvFormat::F16),
+            ("--mmproj", |o| o.mmproj.is_none()),
+            ("--image", |o| o.image.is_none()),
+        ];
+        for (flag, check) in absent {
+            assert!(check(&parse(&["rmi", flag])), "absent {flag}");
+        }
+        assert!(parse_cli_options(&["rmi".into(), "--embedding-output".into()]).is_err());
+
+        for (value, expected) in [
+            ("0", 0.0),
+            ("-1", -1.0),
+            ("NaN", f32::NAN),
+            ("inf", f32::INFINITY),
+            ("-inf", f32::NEG_INFINITY),
+        ] {
+            let options = parse(&["rmi", "--temp", value]);
+            let actual = options.temperature.unwrap();
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual, expected);
+            }
+            assert!(validate_cli_options(&options).is_ok());
+        }
+    }
+}
