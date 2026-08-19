@@ -1872,14 +1872,21 @@ fn matmul_q6_k_scalar_range(
     row_start: usize,
     row_end: usize,
 ) {
+    // input_q8 is actually f32 array of length n_in (NOT quantized!)
+    // We accept f32 input to avoid needing Q8_K quantization
+    // This is a workaround - slower but correct
     let n_blocks = n_in / 256;
     let row_stride = n_blocks * 210;
+    let input_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(input_q8.as_ptr() as *const f32, n_in)
+    };
     for (out_idx, row) in (row_start..row_end).enumerate() {
         let row_off = row * row_stride;
         let mut sum = 0.0f32;
         for block in 0..n_blocks {
             let off = row_off + block * 210;
             let d = f16_to_f32(u16::from_le_bytes([weight[off + 208], weight[off + 209]]));
+            let base_x = block * 256;
             let mut sum_block = 0.0f32;
             for sub in 0..2 {
                 let ql_off = off + sub * 64;
@@ -1896,17 +1903,13 @@ fn matmul_q6_k_scalar_range(
                     let q4 = ((((ql_1 >> 4) as i32) | ((((qh_l >> 6) & 3) as i32) << 4)) as i8) as f32 - 32.0;
                     let sc0 = weight[sc_off + is + 0] as i8;
                     let sc1 = weight[sc_off + is + 2] as i8;
+                    let sc2 = weight[sc_off + is + 4] as i8;
+                    let sc3 = weight[sc_off + is + 6] as i8;
                     let base_y = sub * 128 + l;
-                    let input_val_raw = u32::from_le_bytes([
-                        input_q8[base_y * 4],
-                        input_q8[base_y * 4 + 1],
-                        input_q8[base_y * 4 + 2],
-                        input_q8[base_y * 4 + 3],
-                    ]);
-                    let input_val = f32::from_bits(input_val_raw);
-                    let scale_idx = block * 8 + sub * 4 + is;
-                    let scale = if scale_idx < input_scales.len() { input_scales[scale_idx] } else { 1.0 };
-                    sum_block += scale * (sc0 as f32 * q1 * input_val + sc0 as f32 * q2 * input_val + sc1 as f32 * q3 * input_val + sc1 as f32 * q4 * input_val);
+                    sum_block += sc0 as f32 * q1 * input_f32[base_x + base_y]
+                              + sc1 as f32 * q2 * input_f32[base_x + base_y + 32]
+                              + sc2 as f32 * q3 * input_f32[base_x + base_y + 64]
+                              + sc3 as f32 * q4 * input_f32[base_x + base_y + 96];
                 }
             }
             sum += d * sum_block;
@@ -1939,8 +1942,9 @@ fn matmul_q4_0_scalar_range(
             for l in 0..16 {
                 let x0 = (qx[l] & 0x0F) as i32 - 8;
                 let x1 = (qx[l] >> 4) as i32 - 8;
-                let y0 = input_q8[base_y + l] as i32;
-                let y1 = input_q8[base_y + 16 + l] as i32;
+                // FIX: cast u8 -> i8 -> i32 to sign-extend negative values
+                let y0 = input_q8[base_y + l] as i8 as i32;
+                let y1 = input_q8[base_y + 16 + l] as i8 as i32;
                 dot += x0 * y0 + x1 * y1;
             }
             sum += d * scale * dot as f32;
@@ -1975,8 +1979,9 @@ fn matmul_q4_1_scalar_range(
             for l in 0..16 {
                 let x0 = (qx[l] & 0x0F) as i32;
                 let x1 = (qx[l] >> 4) as i32;
-                let y0 = input_q8[base_y + l] as i32;
-                let y1 = input_q8[base_y + 16 + l] as i32;
+                // FIX: cast u8 -> i8 -> i32 to sign-extend negative values
+                let y0 = input_q8[base_y + l] as i8 as i32;
+                let y1 = input_q8[base_y + 16 + l] as i8 as i32;
                 dot += x0 * y0 + x1 * y1;
                 y_sum += y0 + y1;
             }
@@ -2505,8 +2510,8 @@ pub fn embedding_lookup_q4_0(weight: &[u8], token_id: u32, n_embd: usize, out: &
             let q = weight[off + 2 + j];
             let q0 = ((q & 0x0F) as i8 as f32 - 8.0) * d;
             let q1 = (((q >> 4) & 0x0F) as i8 as f32 - 8.0) * d;
-            out[b * 32 + j * 2] = q0;
-            out[b * 32 + j * 2 + 1] = q1;
+            out[b * 32 + j] = q0;
+            out[b * 32 + j + 16] = q1;
         }
     }
 }
@@ -2517,26 +2522,28 @@ pub fn embedding_lookup_q6_k(weight: &[u8], token_id: u32, n_embd: usize, out: &
     for b in 0..blocks_per_row {
         let off = row_off + b * 210;
         let d = f16_to_f32(u16::from_le_bytes([weight[off + 208], weight[off + 209]]));
+        let scales_off = off + 192;
         let base_y = b * 256;
-        for sub in 0..2 {
-            let ql_off = off + sub * 64;
-            let qh_off = off + 128 + sub * 32;
-            let sc_off = off + 192 + sub * 8;
-            for l in 0..32 {
-                let is = l / 16;
-                let ql_0 = weight[ql_off + l] as i8;
-                let ql_1 = weight[ql_off + 32 + l] as i8;
-                let qh_l = weight[qh_off + l] as i8;
-                let q1 = ((((ql_0 & 0xF) as i32) | ((((qh_l >> 0) & 3) as i32) << 4)) as i8) as f32 - 32.0;
-                let q2 = ((((ql_1 & 0xF) as i32) | ((((qh_l >> 2) & 3) as i32) << 4)) as i8) as f32 - 32.0;
-                let q3 = ((((ql_0 >> 4) as i32) | ((((qh_l >> 4) & 3) as i32) << 4)) as i8) as f32 - 32.0;
-                let q4 = ((((ql_1 >> 4) as i32) | ((((qh_l >> 6) & 3) as i32) << 4)) as i8) as f32 - 32.0;
-                let sc0 = weight[sc_off + is + 0] as i8;
-                let sc1 = weight[sc_off + is + 2] as i8;
-                out[base_y + sub * 128 + l] = d * sc0 as f32 * q1;
-                out[base_y + sub * 128 + 32 + l] = d * sc0 as f32 * q2;
-                out[base_y + sub * 128 + 64 + l] = d * sc1 as f32 * q3;
-                out[base_y + sub * 128 + 96 + l] = d * sc1 as f32 * q4;
+        // 16 scales per block, each scale handles 16 consecutive L values
+        for j in 0..16 {
+            let sw = j % 8;
+            let sub = j / 8;
+            let mut scale = weight[scales_off + j] as i8;
+            // ql/qh byte index within sub_block
+            let ql_byte_start = (sw / 2) * 16;
+            let ql_shift = ((sw % 2) * 4) as u32;
+            let qh_byte_start = (sw / 4) * 16;
+            let qh_shift = ((sw % 4) * 2) as u32;
+            let ql_off = off + sub * 64 + ql_byte_start;
+            let qh_off = off + 128 + sub * 32 + qh_byte_start;
+            let scale_f = scale as f32;
+            for k in 0..16 {
+                let ql_byte = weight[ql_off + k] as i32;
+                let qh_byte = weight[qh_off + k] as i32;
+                let low = (ql_byte >> ql_shift) & 0x0F;
+                let high = (qh_byte >> qh_shift) & 0x03;
+                let l_value = (low | (high << 4)) - 32;
+                out[base_y + sub * 128 + sw * 16 + k] = d * scale_f * l_value as f32;
             }
         }
     }

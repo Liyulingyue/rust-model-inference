@@ -1356,6 +1356,7 @@ fn parse_index(superblock: &Superblock, tables: &IndexTables) -> Result<PackageI
         let type_raw = reader
             .read_i32()
             .map_err(|message| invalid(format!("{tensor_context}: {message}")))?;
+        eprintln!("[DEBUG GGUF] tensor={} type_raw={}", name, type_raw);
         let ggml_type = GGMLType::from_i32(type_raw)
             .ok_or_else(|| invalid(format!("{tensor_context}: unknown GGML type {type_raw}")))?;
         let rank = reader

@@ -2248,6 +2248,7 @@ fn run_dump_logits(
         };
 
         let pos = step;
+        println!("[STEP] step={} token_id={} input_tokens.len()={}", step, token_id, input_tokens.len());
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
         #[cfg(feature = "parity-trace")]
@@ -2602,29 +2603,35 @@ fn run_dump_logits(
                 &[1, n_embd],
                 normed,
             ));
-            quantize_q8_0_into(
-                normed,
+            // For Q6_K weights, use normed directly as f32 input (workaround)
+            // For Q8_0 weights, quantize to Q8_0 first
+            let use_f32_input = embd_type == crate::model::GGMLType::Q6K;
+            if !use_f32_input {
+                quantize_q8_0_into(
+                    normed,
+                    n_embd,
+                    &mut q8_buf[..n_embd],
+                    &mut scale_buf[..n_embd / 32],
+                );
+            }
+            let output_pw = ops::ProcessedWeight::from_bytes(
+                output_weight,
+                embd_type,
                 n_embd,
-                &mut q8_buf[..n_embd],
-                &mut scale_buf[..n_embd / 32],
+                vocab,
             );
-
-            let q8 = q8_buf[..n_embd].as_ptr();
+            let q8_ptr = if use_f32_input {
+                normed.as_ptr() as *const u8
+            } else {
+                q8_buf.as_ptr()
+            };
+            let q8_len = if use_f32_input { n_embd * 4 } else { n_embd };
             let sc = scale_buf[..n_embd / 32].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
+                let q8 = raw_parts!(q8_ptr, q8_len);
+                let sc_ptr = raw_parts!(sc, if use_f32_input { 0 } else { n_embd / 32 });
                 let logits = slice_from_mut!(logits_ptr, vocab);
-                matmul_q8_0_quantized_parallel_rows(
-                    output_weight,
-                    q8,
-                    sc,
-                    logits,
-                    n_embd,
-                    vocab,
-                    ith,
-                    nth,
-                );
+                output_pw.matmul(q8, sc_ptr, logits, n_embd, vocab, ith, nth);
             });
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
