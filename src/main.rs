@@ -33,6 +33,7 @@ struct CliOptions {
     language: Option<String>,
     max_tokens: Option<usize>,
     steps: Option<usize>,
+    resolution: Option<usize>,
     temperature: Option<f32>,
     threads: usize,
     thinking: bool,
@@ -880,6 +881,12 @@ fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--resolution" | "--size" => {
+                if i + 1 < args.len() {
+                    options.resolution = Some(args[i + 1].parse().unwrap_or(512));
+                    i += 1;
+                }
+            }
             "--temp" => {
                 if i + 1 < args.len() {
                     options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
@@ -1108,6 +1115,7 @@ fn main() {
                 text_encoder_source,
                 prompt,
                 options.steps.unwrap_or(20),
+                options.resolution.unwrap_or(512),
                 options.threads,
             ));
         } else if arch == "qwen3vl" {
@@ -1167,6 +1175,7 @@ fn main() {
             None,
             prompt,
             options.steps.unwrap_or(20),
+            options.resolution.unwrap_or(512),
             options.threads,
         ));
     } else {
@@ -2829,6 +2838,7 @@ fn run_pig_image(
     text_encoder_source: Option<std::sync::Arc<dyn TensorSource>>,
     prompt: &str,
     steps: usize,
+    resolution: usize,
     n_threads: usize,
 ) -> Result<(), String> {
     use std::time::Instant;
@@ -2841,17 +2851,68 @@ fn run_pig_image(
         model.config().n_layer,
         started.elapsed().as_millis());
 
+    let vae = if let Some(vs) = vae_source {
+        match pig::PigVAE::from_source(vs.as_ref()) {
+            Ok(v) => {
+                println!("VAE loaded successfully");
+                Some(v)
+            }
+            Err(e) => {
+                println!("Failed to load VAE: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     println!("Generating image for prompt: {}", prompt);
 
-    let mut session = pig::PigSession::new(&model, 512)?;
-    match session.generate_image(prompt, steps) {
+    let mut session = pig::PigSession::new(&model, resolution)?;
+    if let Some(ref v) = vae {
+        session.set_vae(v);
+    }
+
+    let text_context = if let Some(ref te_source) = text_encoder_source {
+        let te_pool = std::sync::Arc::new(thread_pool::ComputePool::new(n_threads.max(1)));
+        let tokenizer = crate::tokenizer::BPETokenizer::from_gguf_metadata(|k| te_source.metadata(k).cloned())
+            .map_err(|e| format!("Failed to load text encoder tokenizer: {}", e))?;
+        let text_model = qwen3::Qwen3Model::from_source(
+            std::sync::Arc::clone(te_source),
+            std::sync::Arc::new(tokenizer),
+            te_pool,
+        ).map_err(|e| format!("Failed to load text encoder model: {}", e))?;
+
+        let full_prompt = format!("<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n", prompt);
+        let token_ids = text_model.tokenizer().encode(&full_prompt, Default::default());
+        let n_tokens = token_ids.len();
+        let positions: Vec<[usize; 4]> = (0..n_tokens)
+            .map(|i| [i, 0, 0, 0])
+            .collect();
+
+        println!("Encoding text: {} tokens", n_tokens);
+        let text_embeddings = text_model.text_encode(
+            &token_ids.iter().map(|&t| t as u32).collect::<Vec<u32>>(),
+            &positions,
+        ).map_err(|e| format!("Text encoding failed: {}", e))?;
+        println!("Text encoding done: {} dimensions", text_embeddings.len());
+
+        text_embeddings
+    } else {
+        println!("WARNING: No text encoder provided; using zero context");
+        let cap_dim = 2560;
+        let context_len = 256;
+        vec![0.0f32; cap_dim * context_len]
+    };
+
+    match session.generate_image(&text_context, steps) {
         Ok(pixels) => {
             println!("Generated {} bytes image in {}ms",
                 pixels.len(), started.elapsed().as_millis());
 
-            let img_size = 64;
+            let img_side = (pixels.len() / 4) as u32;
             let img = image::RgbaImage::from_raw(
-                img_size as u32, img_size as u32, pixels
+                img_side, img_side, pixels
             ).ok_or("Failed to create image from pixels")?;
             img.save("output.png").map_err(|e| format!("Failed to save PNG: {}", e))?;
             println!("Image saved to output.png");
