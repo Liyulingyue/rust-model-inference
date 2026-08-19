@@ -15,7 +15,6 @@ pub mod pig;
 #[doc(hidden)]
 pub mod parity_trace;
 pub mod prompt;
-pub mod quant;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen3a;
@@ -49,7 +48,12 @@ pub use prompt::{
     append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
     build_qwen_chat_prompt, build_simple_prompt, HunyuanMessage, QwenMessage,
 };
-pub use quant::dequant_weight_q4k;
+pub use ops::quant::{dequant_weight_q4k, BlockQ8K, QK_K, dequantize_q4_k_weight};
+
+#[deprecated(note = "use crate::ops::quant instead")]
+pub mod quant {
+    pub use crate::ops::quant::*;
+}
 pub use qwen3::*;
 pub use qwen35::{build_qwen35_positions, Qwen35Model};
 pub use pig::{PigConfig, PigModel, PigVAE};

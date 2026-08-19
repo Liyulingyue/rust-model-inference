@@ -1,5 +1,7 @@
 use crate::model::TensorInfo;
 
+pub mod q8_0;
+
 pub const QK_K: usize = 256;
 pub const K_SCALE_SIZE: usize = 12;
 pub const BLOCK_Q4K_SIZE: usize = 144;
