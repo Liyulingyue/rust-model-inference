@@ -4,7 +4,15 @@
 
 - [ ] Prompt 处理速度优化（当前远低于 llama.cpp）
 - [ ] **Q6_K embedding_lookup 调试** - 当前实现数值正确但模型挂起
-- [ ] **WGPU Buffer Pool 优化** - 当前每次 matmul 调用都重新创建 buffer/bind_group/encoder，导致巨大开销。每个 token 生成需要几十次 matmul，应该预创建 buffer pool 复用
+- [ ] **WGPU Buffer Pool 优化** - 当前每次 matmul 调用都重新创建 buffer/bind_group/encoder，导致巨大开销。每个 token 生成需要几十次 matmul。
+
+  **尝试记录（2026-08-19）：**
+  - 初步尝试失败，回滚代码
+  - 问题1：wgpu buffer 有 mapped/unmapped 状态，不能直接重新写入
+  - 问题2：WgpuContext 被多线程同时访问，没有同步机制
+  - 问题3：Buffer 大小在调用间会变化（n_out 不同），需要 resize 逻辑
+  - 结论：需要深入理解 wgpu 内存模型和线程安全机制后再实现
+  - 可能的正确方向：使用 Mutex 保护 WgpuContext，或者每个线程独立的 buffer pool
 - [x] **统一 embedding_lookup 函数**
   - [x] 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
   - [x] qwen3.rs、main.rs 已使用统一函数
