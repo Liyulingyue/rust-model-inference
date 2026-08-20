@@ -211,7 +211,7 @@ impl Qwen3TtsTalker {
             .map(|info| info.ggml_type)
             .unwrap_or(GGMLType::Q8_0);
         let token_embedding = static_tensor(
-            &source,
+            source.as_ref(),
             "token_embd.weight",
             &embedding_dims,
             embedding_type,
@@ -222,7 +222,7 @@ impl Qwen3TtsTalker {
             usize_to_u64(config.audio_codebook_size, "audio codebook")?,
         ];
         let audio_output_head = static_q8_tensor(
-            &source,
+            source.as_ref(),
             "output.weight",
             &audio_head_dims,
         )?;
@@ -262,43 +262,43 @@ impl Qwen3TtsTalker {
                     &head_dim,
                 )?,
                 wq: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("attn_q.weight"),
                     config.n_embd,
                     n_embd_q,
                 )?,
                 wk: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("attn_k.weight"),
                     config.n_embd,
                     n_embd_k,
                 )?,
                 wv: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("attn_v.weight"),
                     config.n_embd,
                     n_embd_v,
                 )?,
                 wo: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("attn_output.weight"),
                     n_attn,
                     config.n_embd,
                 )?,
                 w_gate: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_gate.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_up: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_up.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_down: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_down.weight"),
                     config.n_ff,
                     config.n_embd,

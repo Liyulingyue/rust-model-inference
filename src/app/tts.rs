@@ -4,7 +4,9 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
-use crate::models::tts::codec::{write_wav_f32, DacDecoder, RvqDecoder, WAVEFORM_SAMPLE_RATE};
+use crate::models::tts::codec::{
+    write_wav_f32, CodePredictor, DacDecoder, RvqDecoder, WaveformTransformer, WAVEFORM_SAMPLE_RATE,
+};
 use crate::models::tts::{Qwen3TtsTalker, TTS_DEFAULT_TEMP, AUDIO_CODEBOOK_SIZE};
 use std::sync::Arc;
 use std::time::Instant;
@@ -84,7 +86,9 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     let mmproj_source: Arc<dyn TensorSource> = Arc::from(
         open_or_exit(mmproj_path, ComponentRole::Mmproj),
     );
+    let predictor = CodePredictor::from_source(mmproj_source.as_ref())?;
     let rvq = RvqDecoder::from_source(mmproj_source.as_ref())?;
+    let tfm = WaveformTransformer::from_source(mmproj_source.as_ref())?;
     let dac = DacDecoder::from_source(mmproj_source.as_ref())?;
     eprintln!(
         "RVQ: {} first + {} rest codebooks, {} dim each",
@@ -93,22 +97,38 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         crate::models::tts::codec::RVQ_CODE_DIM,
     );
 
-    // Stage 1 only emits one token per frame; we currently lack a code predictor
-    // and waveform transformer, so map each Talker audio token to a single
-    // first-codebook index by taking `token_id % RVQ_CODEBOOK_SIZE` and
-    // padding the remaining 15 residual levels with zeros.
-    let codes: Vec<u32> = expand_talker_codes_to_rvq(&generation.audio_token_ids);
+    // Predict 15 residual RVQ indices per Talker audio token.
+    let residual_codes = predictor.predict(&generation.audio_token_ids)?;
+    let n_tokens = generation.audio_token_ids.len();
+    // The Talker emits one audio-codebook id per frame; the first-level
+    // codebook index is `id % RVQ_CODEBOOK_SIZE` (the model was trained with
+    // first-code indices in [0, 2047] regardless of the 3072-dim id).
+    let codes: Vec<u32> = (0..n_tokens)
+        .flat_map(|t| {
+            let first = generation.audio_token_ids[t]
+                % crate::models::tts::codec::RVQ_CODEBOOK_SIZE as u32;
+            std::iter::once(first).chain(
+                residual_codes
+                    [t * (crate::models::tts::codec::RVQ_LEVELS - 1)
+                        ..(t + 1) * (crate::models::tts::codec::RVQ_LEVELS - 1)]
+                    .iter()
+                    .copied(),
+            )
+        })
+        .collect();
     let continuous = rvq.decode(&codes)?;
     let timesteps = continuous.len() / crate::models::tts::codec::RVQ_CODE_DIM;
-    eprintln!("RVQ decoded {} timesteps × {} dim", timesteps, crate::models::tts::codec::RVQ_CODE_DIM);
+    eprintln!(
+        "RVQ decoded {} timesteps × {} dim",
+        timesteps,
+        crate::models::tts::codec::RVQ_CODE_DIM
+    );
 
-    // Stage 2 placeholder: feed the RVQ-decoded [256, timesteps] directly into
-    // the DAC entry conv. The waveform TFM is not yet wired in — for now we
-    // tile the 256-dim code vectors to 1024 channels (4× repeat) so the DAC
-    // entry conv has something to consume.
-    let tiled = tile_to_dac_input(&continuous, timesteps, 1024);
-
-    let waveform = dac.decode(&tiled, 1024, timesteps)?;
+    // Pad 256-dim RVQ embedding to 1024-dim by 4× repetition (channel tile),
+    // run the waveform transformer, and feed its output to the DAC entry conv.
+    let padded = tile_channels(&continuous, timesteps, 1024);
+    let lifted = tfm.forward(&padded, timesteps)?;
+    let waveform = dac.decode(&lifted, 1024, timesteps)?;
     eprintln!(
         "DAC decoded {} samples ({} Hz target)",
         waveform.len(),
@@ -133,22 +153,7 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     Ok(())
 }
 
-fn expand_talker_codes_to_rvq(talker_codes: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(talker_codes.len() * crate::models::tts::codec::RVQ_LEVELS);
-    for &token in talker_codes {
-        // First-level code: take the audio-codebook id modulo codebook vocab.
-        let first = (token % crate::models::tts::codec::RVQ_CODEBOOK_SIZE as u32);
-        out.push(first);
-        // Remaining 15 residual levels default to zero (placeholder until the
-        // code predictor is implemented).
-        for _ in 1..crate::models::tts::codec::RVQ_LEVELS {
-            out.push(0);
-        }
-    }
-    out
-}
-
-fn tile_to_dac_input(continuous: &[f32], timesteps: usize, target_channels: usize) -> Vec<f32> {
+fn tile_channels(continuous: &[f32], timesteps: usize, target_channels: usize) -> Vec<f32> {
     let src_dim = crate::models::tts::codec::RVQ_CODE_DIM;
     let mut out = vec![0.0f32; target_channels * timesteps];
     for t in 0..timesteps {

@@ -279,9 +279,9 @@ impl Qwen3Model {
             .tensor_info("token_embd.weight")
             .map(|info| info.ggml_type)
             .unwrap_or(GGMLType::Q8_0);
-        let token_embedding = static_tensor(&source, "token_embd.weight", &embedding_dims, embedding_type)?;
+        let token_embedding = static_tensor(source.as_ref(), "token_embd.weight", &embedding_dims, embedding_type)?;
         let output = if source.tensor_info("output.weight").is_some() {
-            static_tensor(&source, "output.weight", &embedding_dims, GGMLType::Q8_0)?
+            static_tensor(source.as_ref(), "output.weight", &embedding_dims, GGMLType::Q8_0)?
         } else {
             token_embedding
         };
@@ -324,24 +324,24 @@ impl Qwen3Model {
                 } else {
                     None
                 },
-                wq: static_q8_matrix(&source, &name("attn_q.weight"), config.n_embd, n_embd_q)?,
-                wk: static_q8_matrix(&source, &name("attn_k.weight"), config.n_embd, n_embd_k)?,
-                wv: static_q8_matrix(&source, &name("attn_v.weight"), config.n_embd, n_embd_v)?,
-                wo: static_q8_matrix(&source, &name("attn_output.weight"), n_attn, config.n_embd)?,
+                wq: static_q8_matrix(source.as_ref(), &name("attn_q.weight"), config.n_embd, n_embd_q)?,
+                wk: static_q8_matrix(source.as_ref(), &name("attn_k.weight"), config.n_embd, n_embd_k)?,
+                wv: static_q8_matrix(source.as_ref(), &name("attn_v.weight"), config.n_embd, n_embd_v)?,
+                wo: static_q8_matrix(source.as_ref(), &name("attn_output.weight"), n_attn, config.n_embd)?,
                 w_gate: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_gate.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_up: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_up.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_down: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_down.weight"),
                     config.n_ff,
                     config.n_embd,
@@ -1272,7 +1272,7 @@ pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, Stri
 }
 
 pub(crate) fn static_q8_matrix(
-    source: &Arc<dyn TensorSource>,
+    source: &dyn TensorSource,
     name: &str,
     columns: usize,
     rows: usize,
@@ -1288,23 +1288,23 @@ pub(crate) fn static_q8_matrix(
 }
 
 pub(crate) fn static_q8_tensor(
-    source: &Arc<dyn TensorSource>,
+    source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, GGMLType::Q8_0)?;
+    let bytes = checked_tensor(source, name, dims, GGMLType::Q8_0)?;
     // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
     // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
 pub(crate) fn static_tensor(
-    source: &Arc<dyn TensorSource>,
+    source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, ggml_type)?;
+    let bytes = checked_tensor(source, name, dims, ggml_type)?;
     // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
     // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
