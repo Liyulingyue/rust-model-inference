@@ -6,8 +6,7 @@ pub use app::get_f32_tensor;
 pub mod asr;
 pub mod clip_config;
 pub mod core;
-pub mod ggufrs;
-pub mod load_plan;
+pub mod format;
 pub mod ops;
 pub mod pig;
 #[cfg(feature = "parity-trace")]
@@ -25,11 +24,11 @@ pub mod wgpu;
 
 pub use asr::*;
 pub use clip_config::{ClipVisionConfig, Qwen35Config};
-pub use ggufrs::{
+pub use format::ggufrs::{
     export_ggufrs, open_model_source, ComponentInfo, ComponentRole, ExportOptions, GgufrsError,
     GgufrsFile, LoadedComponent, SegmentKind, GGUFRS_SEGMENT_ALIGNMENT, GGUFRS_VERSION,
 };
-pub use load_plan::{
+pub use format::load_plan::{
     build_load_plan, load_logical_cpu, LoadPlan, LogicalCpuDeviceLoad, LogicalCpuLoad,
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
@@ -79,6 +78,18 @@ pub mod traits {
 #[deprecated(note = "use crate::core::tokenizer instead")]
 pub mod tokenizer {
     pub use crate::core::tokenizer::*;
+}
+
+/// Backward-compatibility facade for `src/ggufrs.rs` (Phase 5B).
+#[deprecated(note = "use crate::format::ggufrs instead")]
+pub mod ggufrs {
+    pub use crate::format::ggufrs::*;
+}
+
+/// Backward-compatibility facade for `src/load_plan.rs` (Phase 5B).
+#[deprecated(note = "use crate::format::load_plan instead")]
+pub mod load_plan {
+    pub use crate::format::load_plan::*;
 }
 pub use ops::*;
 pub use prompt::{

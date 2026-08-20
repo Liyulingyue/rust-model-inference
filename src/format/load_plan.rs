@@ -1,4 +1,4 @@
-use crate::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
+use crate::format::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
