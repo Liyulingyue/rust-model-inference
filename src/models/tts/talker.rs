@@ -84,11 +84,21 @@ impl Qwen3TtsTalkerConfig {
             .map(Vec::len)
             .unwrap_or(0);
 
-        let eos_token_id = source
+        // The talker emits tokens over the full vocab (text + audio), so the EOS
+        // id from the tokenizer metadata is a full-vocab id. Convert it to
+        // the narrow audio-codebook range by subtracting the audio offset
+        // (= full vocab size - audio codebook size).
+        let raw_eos = source
             .metadata("tokenizer.ggml.eos_token_id")
             .and_then(MetaValue::to_u64)
             .map(|v| v as u32)
             .unwrap_or(TTS_EOS_TOKEN_ID);
+        let vocab_size = source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(MetaValue::to_arr)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let eos_token_id = raw_eos.saturating_sub((vocab_size - AUDIO_CODEBOOK_SIZE) as u32);
 
         Ok(Self {
             architecture: "qwen3tts".into(),
@@ -362,11 +372,18 @@ impl Qwen3TtsTalker {
         let mut session = TtsSession::new(self)?;
         session.synthesize(&token_ids, positions_ref, max_new_tokens, temperature)
     }
+
+    /// Allocate a fresh empty `TtsSession` for the talker, ready to be
+    /// driven step-by-step from outside (e.g. by the codec pipeline that
+    /// interleaves talker forwards with code-predictor passes).
+    pub fn new_session(&self) -> Result<TtsSession<'_>, String> {
+        TtsSession::new(self)
+    }
 }
 
 pub(crate) struct TtsSession<'model> {
-    model: &'model Qwen3TtsTalker,
-    kv_cache: KvCache,
+    pub(crate) model: &'model Qwen3TtsTalker,
+    pub(crate) kv_cache: KvCache,
     scratch: ExecutionScratchpad,
     capacity: usize,
     next_step: usize,
@@ -482,7 +499,55 @@ impl<'model> TtsSession<'model> {
 
     /// Single-token forward pass: writes one token into the KV cache and
     /// updates `scratch.x` with the resulting hidden state.
-    fn forward_step(&mut self, token_id: u32, position: [usize; 4]) -> Result<(), String> {
+    pub(crate) fn forward_step(&mut self, token_id: u32, position: [usize; 4]) -> Result<(), String> {
+        self.forward_step_inner(Some(token_id), None, position)
+    }
+}
+
+impl TtsSession<'_> {
+    /// Like [`TtsSession::forward_step`] but uses a precomputed 2048-dim
+    /// embedding instead of looking up `token_embedding`. Used by the codec
+    /// pipeline to feed `out_embd` from the previous frame's code predictor
+    /// back into the talker as the next frame's input.
+    pub(crate) fn forward_step_with_embedding(
+        &mut self,
+        embedding: &[f32],
+        position: [usize; 4],
+    ) -> Result<(), String> {
+        self.forward_step_inner(None, Some(embedding), position)
+    }
+
+    /// Borrow the talker's current hidden state (length = `n_embd`, set by
+    /// the most recent forward step). Used by the code predictor as `h_state`.
+    pub(crate) fn hidden_state(&self) -> &[f32] {
+        &self.scratch.x
+    }
+
+    /// Run the output norm + LM head on `scratch.x` and return the audio-
+    /// codebook logits. Same as the internal `compute_logits` but exposed.
+    pub(crate) fn compute_audio_logits(&mut self) -> Result<Vec<f32>, String> {
+        self.compute_logits()
+    }
+
+    /// Sample a single token id from the supplied logits (greedy if
+    /// temperature <= 0, else temperature-scaled categorical).
+    pub(crate) fn sample_from_logits(
+        &self,
+        logits: &[f32],
+        temperature: f32,
+    ) -> Result<u32, String> {
+        let temp = if temperature <= 0.0 { 0.0 } else { temperature };
+        sample_token(logits, temp)
+    }
+}
+
+impl TtsSession<'_> {
+    fn forward_step_inner(
+        &mut self,
+        token_id: Option<u32>,
+        precomputed_embedding: Option<&[f32]>,
+        position: [usize; 4],
+    ) -> Result<(), String> {
         let model = self.model;
         let config = &model.config;
         let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
@@ -498,14 +563,32 @@ impl<'model> TtsSession<'model> {
             .checked_add(1)
             .ok_or_else(|| "TTS session step overflow".to_string())?;
 
-        // Embed single token into scratch.x.
-        embedding_lookup(
-            model.token_embedding,
-            token_id,
-            config.n_embd,
-            model.embedding_type,
-            &mut self.scratch.x,
-        );
+        // Embed the input into scratch.x — either from token_embedding
+        // lookup or from a precomputed 2048-dim vector.
+        match (token_id, precomputed_embedding) {
+            (Some(tid), _) => {
+                embedding_lookup(
+                    model.token_embedding,
+                    tid,
+                    config.n_embd,
+                    model.embedding_type,
+                    &mut self.scratch.x,
+                );
+            }
+            (None, Some(emb)) => {
+                if emb.len() != config.n_embd {
+                    return Err(format!(
+                        "forward_step_with_embedding: embedding length {} != {}",
+                        emb.len(),
+                        config.n_embd
+                    ));
+                }
+                self.scratch.x.copy_from_slice(emb);
+            }
+            (None, None) => {
+                return Err("forward_step_inner: no token_id or embedding".into());
+            }
+        }
 
         let (k_cache_ptr, v_cache_ptr) = match &mut self.kv_cache {
             KvCache::F16(cache) => (cache.k.as_mut_ptr(), cache.v.as_mut_ptr()),
