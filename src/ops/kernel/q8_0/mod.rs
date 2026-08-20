@@ -7,8 +7,11 @@
 
 use super::Kernel;
 pub mod avx2;
+pub mod batch;
 pub mod dispatch;
+pub mod legacy;
 pub mod neon;
+pub mod parallel;
 pub mod scalar;
 
 /// Q8_0 matmul kernel: `output = weight × input`, both as Q8_0 blocks.
@@ -39,7 +42,7 @@ impl<'a> Kernel for Q8Kernel<'a> {
     ) {
         // Delegate to the production matmul which handles AVX2/NEON/GPU
         // dispatch. This is the kernel the Qwen3 hot path actually wants.
-        crate::ops::matmul_q8_0_quantized_parallel_rows(
+        parallel::matmul_q8_0_quantized_parallel_rows(
             self.weight,
             input_q8,
             input_scales,
