@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::ops::Range;
 
 use unicode_categories::UnicodeCategories;
 
-use crate::model::{MetaValue, MetaValueType};
+use crate::core::tensor::{MetaValue, MetaValueType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeOptions {
@@ -758,7 +758,7 @@ fn build_byte_encoder() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MetaValue, MetaValueType};
+use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {
@@ -1108,7 +1108,7 @@ mod tests {
 
     fn tokenizer_from_env(name: &str) -> BPETokenizer {
         let path = std::env::var(name).unwrap();
-        let loader = crate::model::GGUFLoader::from_file(&path).unwrap();
+        let loader = crate::core::loader::GGUFLoader::from_file(&path).unwrap();
         BPETokenizer::from_gguf_metadata(|key| loader.metadata(key).cloned()).unwrap()
     }
 

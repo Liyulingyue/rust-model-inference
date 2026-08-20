@@ -1,8 +1,8 @@
-use crate::model::{GGMLType, TensorSource};
+﻿use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{dot_f32, f16_to_f32, matmul_q8_0_quantized, quantize_q8_0_into, rms_norm, rms_norm_inplace, silu_mul_inplace};
-use crate::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::app::cli::EmbeddingOutput;
-use crate::thread_pool::ComputePool;
+use crate::core::thread_pool::ComputePool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -241,7 +241,7 @@ struct EmbeddingConfig {
 
 fn embedding_config(
     arch: &str,
-    get_meta: impl Fn(&str) -> Option<crate::model::MetaValue>,
+    get_meta: impl Fn(&str) -> Option<crate::core::tensor::MetaValue>,
 ) -> Result<EmbeddingConfig, String> {
     let pooling_key = format!("{arch}.pooling_type");
     let pooling = match get_meta(&pooling_key).and_then(|value| value.to_u64()) {
@@ -258,7 +258,7 @@ fn embedding_config(
     let causal_key = format!("{arch}.attention.causal");
     let causal_attn = match get_meta(&causal_key) {
         None => true,
-        Some(crate::model::MetaValue::Bool(value)) => value,
+        Some(crate::core::tensor::MetaValue::Bool(value)) => value,
         Some(value) => {
             return Err(format!(
                 "Invalid metadata {causal_key}: expected bool, got {value:?}"
@@ -408,7 +408,7 @@ pub fn run_embedding(
     output: EmbeddingOutput,
 ) {
     let t0 = Instant::now();
-    let config = crate::model::model_config_from_source(source).expect("Failed to parse model config");
+    let config = crate::core::loader::model_config_from_source(source).expect("Failed to parse model config");
 
     let arch = source
         .metadata("general.architecture")
@@ -740,8 +740,8 @@ pub fn run_embedding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ggufrs::{open_model_source, ComponentRole};
-    use crate::model::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use crate::format::ggufrs::{open_model_source, ComponentRole};
+    use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use std::collections::HashMap;
     use std::path::Path;
 

@@ -14,6 +14,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
+use rust_model_inference::core::thread_pool::ComputePool;
+use rust_model_inference::models::qwen35;
 use rust_model_inference::*;
 
 struct Qwen3State {
@@ -24,14 +26,14 @@ struct Qwen3State {
     output_weight: &'static [u8],
     config: Qwen3Config,
     tokenizer: Arc<BPETokenizer>,
-    pool: Arc<thread_pool::ComputePool>,
+    pool: Arc<ComputePool>,
 }
 
 struct Qwen35State {
     source: Arc<dyn TensorSource>,
     model: Arc<Qwen35Model>,
     tokenizer: Arc<BPETokenizer>,
-    pool: Arc<thread_pool::ComputePool>,
+    pool: Arc<ComputePool>,
 }
 
 struct Qwen3Config {
@@ -987,7 +989,7 @@ async fn main() {
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    let pool = Arc::new(thread_pool::ComputePool::new(n_threads));
+    let pool = Arc::new(ComputePool::new(n_threads));
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .unwrap_or_else(|e| {

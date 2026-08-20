@@ -1,12 +1,15 @@
-use crate::model::{
-    model_config_from_source, GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
+﻿use crate::core::loader::{
+    check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs,
+};
+use crate::core::tensor::{
+    GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
 };
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
-use crate::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::BPETokenizer;
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,93 +36,46 @@ pub struct Qwen3Config {
 }
 
 impl Qwen3Config {
-    fn from_source(source: &dyn TensorSource, tokenizer_vocab: usize) -> Result<Self, String> {
-        let architecture = source
-            .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val)
-            .ok_or_else(|| "Missing metadata: general.architecture".to_string())?;
-        if !matches!(architecture, "qwen2" | "qwen3" | "qwen3vl" | "llama" | "hunyuan-dense") {
-            return Err(format!("Unsupported architecture: {architecture}"));
-        }
-
+    /// Build a `Qwen3Config` from a GGUF tensor source.
+    ///
+    /// Phase 4c: architecture dispatch (which architectures are accepted, which
+    /// rope flavor they use, which dimensional configurations are allowed)
+    /// lives in [`crate::core::loader::qwen3_arch_knobs`]. This function now
+    /// only composes the per-arch knobs with the dimensional configuration
+    /// produced by [`model_config_from_source`].
+    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let config = model_config_from_source(source)?;
-        if config.vocab_size != tokenizer_vocab {
-            return Err(format!(
-                "{architecture}.vocab_size {} does not match tokenizer vocab {tokenizer_vocab}",
-                config.vocab_size
-            ));
-        }
-        if config.n_head_kv == 0 || config.n_head % config.n_head_kv != 0 {
-            return Err(format!(
-                "Invalid {architecture} grouped-query heads: head_count={}, head_count_kv={}",
-                config.n_head, config.n_head_kv
-            ));
-        }
-        if config.n_embd == 0
-            || config.n_layer == 0
-            || config.n_ff == 0
-            || config.vocab_size == 0
-            || config.n_ctx == 0
-        {
-            return Err(format!("Invalid zero-sized {architecture} configuration"));
-        }
-        if !config.norm_eps.is_finite()
-            || config.norm_eps <= 0.0
-            || !config.rope_freq_base.is_finite()
-            || config.rope_freq_base <= 0.0
-        {
-            return Err(format!(
-                "Invalid {architecture} normalization or RoPE metadata"
-            ));
-        }
+        let knobs = qwen3_arch_knobs(source)?;
 
-        let n_embd_head_k =
-            optional_usize(source, &format!("{architecture}.attention.key_length"))?
-                .unwrap_or(config.n_embd_head);
+        // Per-arch head dimensions (Qwen3 / Qwen3-VL expose these explicitly;
+        // other architectures fall back to n_embd / n_head).
+        let n_embd_head_k = optional_usize(source, &format!("{}.attention.key_length", knobs.arch))?
+            .unwrap_or(config.n_embd_head);
         let n_embd_head_v =
-            optional_usize(source, &format!("{architecture}.attention.value_length"))?
+            optional_usize(source, &format!("{}.attention.value_length", knobs.arch))?
                 .unwrap_or(config.n_embd_head);
         if n_embd_head_k == 0 || n_embd_head_v == 0 {
             return Err(format!(
-                "Invalid {architecture} attention head lengths: key={n_embd_head_k}, value={n_embd_head_v}"
+                "Invalid {} attention head lengths: key={n_embd_head_k}, value={n_embd_head_v}",
+                knobs.arch
             ));
         }
 
-        let has_qk_norm = matches!(architecture, "qwen3" | "qwen3vl" | "hunyuan-dense");
-        let rope = if architecture == "qwen3vl" {
-            let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
-            if sections != [24, 20, 20, 0] {
-                return Err(format!(
-                    "Unsupported qwen3vl.rope.dimension_sections: {sections:?}"
-                ));
-            }
-            Qwen3Rope::Interleaved {
-                sections,
-                n_dims: n_embd_head_k,
-            }
-        } else {
-            Qwen3Rope::Neox
-        };
-
-        if architecture == "qwen3vl"
-            && (
-                config.n_embd,
-                config.n_layer,
-                config.n_head,
-                config.n_head_kv,
-                n_embd_head_k,
-                n_embd_head_v,
-                config.n_ff,
-                config.n_ctx,
-                config.norm_eps,
-                config.rope_freq_base,
-            ) != (1024, 28, 16, 8, 128, 128, 3072, 65_536, 1e-6, 1_000_000.0)
-        {
-            return Err("Unsupported qwen3vl main-model configuration".into());
+        // Optional dimensional whitelist (e.g. Qwen3-VL).
+        if let Some(allowed) = knobs.allowed_dimensions {
+            check_qwen3_allowed_dimensions(allowed, &config, n_embd_head_k, n_embd_head_v)?;
         }
 
+        let rope = match knobs.rope_sections {
+            Some(sections) => Qwen3Rope::Interleaved {
+                sections,
+                n_dims: n_embd_head_k,
+            },
+            None => Qwen3Rope::Neox,
+        };
+
         Ok(Self {
-            architecture: architecture.into(),
+            architecture: knobs.arch,
             n_embd: config.n_embd,
             n_layer: config.n_layer,
             n_head: config.n_head,
@@ -131,7 +87,7 @@ impl Qwen3Config {
             n_ctx: config.n_ctx,
             eps: config.norm_eps,
             freq_base: config.rope_freq_base,
-            has_qk_norm,
+            has_qk_norm: knobs.has_qk_norm,
             rope,
         })
     }
@@ -147,23 +103,6 @@ fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>,
     usize::try_from(value)
         .map(Some)
         .map_err(|_| format!("{key} does not fit usize"))
-}
-
-fn read_i32_array(source: &dyn TensorSource, key: &str) -> Result<[i32; 4], String> {
-    let values = match source.metadata(key) {
-        Some(MetaValue::Array(MetaValueType::Int32, values)) => values,
-        _ => return Err(format!("Missing or invalid metadata: {key}")),
-    };
-    let values: Vec<i32> = values
-        .iter()
-        .map(|value| match value {
-            MetaValue::Int32(value) => Ok(*value),
-            _ => Err(format!("Invalid Int32 array value in {key}")),
-        })
-        .collect::<Result<_, _>>()?;
-    values
-        .try_into()
-        .map_err(|values: Vec<i32>| format!("{key} has {} values; expected 4", values.len()))
 }
 
 fn checked_session_capacity(
@@ -271,29 +210,29 @@ pub struct Qwen3Generation {
 }
 
 pub struct Qwen3Model {
-    source: Arc<dyn TensorSource>,
-    tokenizer: Arc<BPETokenizer>,
-    pool: Arc<ComputePool>,
-    config: Qwen3Config,
-    layers: Vec<Qwen3LayerWeights>,
-    output_norm: Vec<f32>,
-    token_embedding: &'static [u8],
-    output: &'static [u8],
-    embedding_type: GGMLType,
+    pub(crate) source: Arc<dyn TensorSource>,
+    pub(crate) tokenizer: Arc<BPETokenizer>,
+    pub(crate) pool: Arc<ComputePool>,
+    pub(crate) config: Qwen3Config,
+    pub(crate) layers: Vec<Qwen3LayerWeights>,
+    pub(crate) output_norm: Vec<f32>,
+    pub(crate) token_embedding: &'static [u8],
+    pub(crate) output: &'static [u8],
+    pub(crate) embedding_type: GGMLType,
 }
 
-struct Qwen3LayerWeights {
-    attn_norm: Vec<f32>,
-    ffn_norm: Vec<f32>,
-    q_norm: Option<Vec<f32>>,
-    k_norm: Option<Vec<f32>>,
-    wq: &'static [u8],
-    wk: &'static [u8],
-    wv: &'static [u8],
-    wo: &'static [u8],
-    w_gate: &'static [u8],
-    w_up: &'static [u8],
-    w_down: &'static [u8],
+pub(crate) struct Qwen3LayerWeights {
+    pub(crate) attn_norm: Vec<f32>,
+    pub(crate) ffn_norm: Vec<f32>,
+    pub(crate) q_norm: Option<Vec<f32>>,
+    pub(crate) k_norm: Option<Vec<f32>>,
+    pub(crate) wq: &'static [u8],
+    pub(crate) wk: &'static [u8],
+    pub(crate) wv: &'static [u8],
+    pub(crate) wo: &'static [u8],
+    pub(crate) w_gate: &'static [u8],
+    pub(crate) w_up: &'static [u8],
+    pub(crate) w_down: &'static [u8],
 }
 
 pub struct Qwen3Session<'model> {
@@ -309,7 +248,15 @@ impl Qwen3Model {
         tokenizer: Arc<BPETokenizer>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        let config = Qwen3Config::from_source(source.as_ref(), tokenizer.vocab_size())?;
+        let config = Qwen3Config::from_source(source.as_ref())?;
+        if config.vocab != tokenizer.vocab_size() {
+            return Err(format!(
+                "{} vocabulary size {} does not match tokenizer vocab {}",
+                config.architecture,
+                config.vocab,
+                tokenizer.vocab_size()
+            ));
+        }
         let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
         let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
         let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
@@ -454,281 +401,7 @@ impl Qwen3Model {
     }
 
     pub fn text_encode(&self, token_ids: &[u32], positions: &[[usize; 4]]) -> Result<Vec<f32>, String> {
-        validate_token_ids(token_ids, self.config.vocab)?;
-        let n_tokens = token_ids.len();
-        if positions.len() != n_tokens {
-            return Err(format!(
-                "positions length {} != token_ids length {}",
-                positions.len(),
-                n_tokens
-            ));
-        }
-
-        let cfg = &self.config;
-        let n_embd_q = checked_product("query width", cfg.n_head, cfg.n_embd_head_k)?;
-        let n_embd_k = checked_product("key width", cfg.n_head_kv, cfg.n_embd_head_k)?;
-        let n_embd_v = checked_product("value width", cfg.n_head_kv, cfg.n_embd_head_v)?;
-        let n_attn = checked_product("attn width", cfg.n_head, cfg.n_embd_head_v)?;
-        let group_size = cfg.n_head / cfg.n_head_kv;
-        let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
-
-        let embeddings = self.embed_tokens(token_ids)?;
-
-        let mut hidden = embeddings;
-
-        for layer_idx in 0..cfg.n_layer {
-            let layer = &self.layers[layer_idx];
-
-            let mut normed = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let off = tok * cfg.n_embd;
-                rms_norm(
-                    &hidden[off..off + cfg.n_embd],
-                    &layer.attn_norm,
-                    &mut normed[off..off + cfg.n_embd],
-                    cfg.eps,
-                );
-            }
-
-            let mut q_all = vec![0.0; n_tokens * n_embd_q];
-            let mut k_all = vec![0.0; n_tokens * n_embd_k];
-            let mut v_all = vec![0.0; n_tokens * n_embd_v];
-            for tok in 0..n_tokens {
-                let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                let q_off = tok * n_embd_q;
-                let k_off = tok * n_embd_k;
-                let v_off = tok * n_embd_v;
-
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.wq,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut q_all[q_off..q_off + n_embd_q],
-                    cfg.n_embd,
-                    n_embd_q,
-                    0,
-                    1,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.wk,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut k_all[k_off..k_off + n_embd_k],
-                    cfg.n_embd,
-                    n_embd_k,
-                    0,
-                    1,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.wv,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut v_all[v_off..v_off + n_embd_v],
-                    cfg.n_embd,
-                    n_embd_v,
-                    0,
-                    1,
-                );
-            }
-
-            if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
-                for head in 0..cfg.n_head {
-                    let off = head * cfg.n_embd_head_k;
-                    rms_norm_inplace(&mut q_all[off..off + cfg.n_embd_head_k], q_norm, cfg.eps);
-                }
-                for head in 0..cfg.n_head_kv {
-                    let off = head * cfg.n_embd_head_k;
-                    rms_norm_inplace(&mut k_all[off..off + cfg.n_embd_head_k], k_norm, cfg.eps);
-                }
-            }
-
-            for tok in 0..n_tokens {
-                let pos = positions[tok];
-                for head in 0..cfg.n_head {
-                    let off = head * cfg.n_embd_head_k;
-                    let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
-                    match cfg.rope {
-                        Qwen3Rope::Neox => {
-                            rope_neox(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
-                        }
-                        Qwen3Rope::Interleaved { sections, n_dims } => {
-                            rope_mrope_interleaved(
-                                q_slice,
-                                pos,
-                                sections,
-                                cfg.n_embd_head_k,
-                                cfg.freq_base,
-                                n_dims,
-                            );
-                        }
-                    }
-                }
-                for head in 0..cfg.n_head_kv {
-                    let off = head * cfg.n_embd_head_k;
-                    let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
-                    match cfg.rope {
-                        Qwen3Rope::Neox => {
-                            rope_neox(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
-                        }
-                        Qwen3Rope::Interleaved { sections, n_dims } => {
-                            rope_mrope_interleaved(
-                                k_slice,
-                                pos,
-                                sections,
-                                cfg.n_embd_head_k,
-                                cfg.freq_base,
-                                n_dims,
-                            );
-                        }
-                    }
-                }
-            }
-
-            let mut attn_out = vec![0.0; n_tokens * n_attn];
-            for head in 0..cfg.n_head {
-                let kv_head = head / group_size;
-                let q_off = head * cfg.n_embd_head_k;
-                let k_off = kv_head * cfg.n_embd_head_k;
-                let v_off = kv_head * cfg.n_embd_head_v;
-                let attn_off = head * cfg.n_embd_head_v;
-
-                for i in 0..n_tokens {
-                    let mut max_val = f32::NEG_INFINITY;
-                    let mut scores = vec![0.0; n_tokens];
-                    for j in 0..=i {
-                        let q_row = &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
-                        let k_row = &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
-                        scores[j] = dot_f32(q_row, k_row, cfg.n_embd_head_k) * kq_scale;
-                        if scores[j] > max_val {
-                            max_val = scores[j];
-                        }
-                    }
-                    let mut exp_sum = 0.0f32;
-                    for j in 0..=i {
-                        scores[j] = (scores[j] - max_val).exp();
-                        exp_sum += scores[j];
-                    }
-                    for j in 0..=i {
-                        scores[j] /= exp_sum;
-                    }
-                    for dim in 0..cfg.n_embd_head_v {
-                        let mut sum = 0.0f32;
-                        for j in 0..=i {
-                            let v_row = &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
-                            sum += scores[j] * v_row[dim];
-                        }
-                        attn_out[i * n_attn + attn_off + dim] = sum;
-                    }
-                }
-            }
-
-            let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-                let blocks = (n_attn + 31) / 32;
-                let mut q8_buf = vec![0u8; n_attn];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.wo,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    n_attn,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
-
-            for tok in 0..n_tokens {
-                let off = tok * cfg.n_embd;
-                for j in 0..cfg.n_embd {
-                    hidden[off + j] += attn_proj_out[off + j];
-                }
-            }
-
-            let mut ffn_normed = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let off = tok * cfg.n_embd;
-                rms_norm(&hidden[off..off + cfg.n_embd], &layer.ffn_norm, &mut ffn_normed[off..off + cfg.n_embd], cfg.eps);
-            }
-
-            let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
-            let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-            for tok in 0..n_tokens {
-                let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.w_gate,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.w_up,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-            }
-
-            for tok in 0..n_tokens {
-                let off = tok * cfg.n_ff;
-                for i in 0..cfg.n_ff {
-                    gate_buf[off + i] = silu(gate_buf[off + i]) * up_buf[off + i];
-                }
-            }
-
-            let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let blocks = (cfg.n_ff + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_ff];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(&gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff], cfg.n_ff, &mut q8_buf, &mut scale_buf);
-                matmul_q8_0_quantized_parallel_rows(
-                    layer.w_down,
-                    &q8_buf,
-                    &scale_buf,
-                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    cfg.n_ff,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
-
-            for tok in 0..n_tokens {
-                let off = tok * cfg.n_embd;
-                for i in 0..cfg.n_embd {
-                    hidden[off + i] += down_buf[off + i];
-                }
-            }
-        }
-
-        let mut output = vec![0.0; n_tokens * cfg.n_embd];
-        for tok in 0..n_tokens {
-            let off = tok * cfg.n_embd;
-            rms_norm(&hidden[off..off + cfg.n_embd], &self.output_norm, &mut output[off..off + cfg.n_embd], cfg.eps);
-        }
-
-        Ok(output)
+        crate::models::qwen3_text_encode::text_encode(self, token_ids, positions)
     }
 
     pub fn generate(
@@ -1555,7 +1228,7 @@ fn validate_generation(
     Ok(())
 }
 
-fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), String> {
+pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), String> {
     for &token_id in token_ids {
         let token =
             usize::try_from(token_id).map_err(|_| format!("Invalid token ID {token_id}"))?;
@@ -1683,7 +1356,7 @@ fn checked_tensor<'a>(
     Ok(bytes)
 }
 
-fn checked_product(name: &str, left: usize, right: usize) -> Result<usize, String> {
+pub(crate) fn checked_product(name: &str, left: usize, right: usize) -> Result<usize, String> {
     left.checked_mul(right)
         .ok_or_else(|| format!("{name} overflows usize"))
 }
@@ -1703,7 +1376,7 @@ fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use crate::core::tensor::{MetaValue, MetaValueType, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -1776,7 +1449,7 @@ mod tests {
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
-        let config = Qwen3Config::from_source(&qwen3vl_metadata_source(), 151_936).unwrap();
+        let config = Qwen3Config::from_source(&qwen3vl_metadata_source()).unwrap();
         assert!(config.has_qk_norm);
         assert_eq!(
             config.rope,

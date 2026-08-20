@@ -1,4 +1,4 @@
-use crate::memory::KVCacheView;
+use crate::core::memory::KVCacheView;
 
 #[derive(Debug, Clone)]
 pub struct ModelConfig {

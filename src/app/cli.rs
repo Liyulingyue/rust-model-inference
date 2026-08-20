@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -273,13 +273,13 @@ pub fn resolve_cli_generation_options(options: &CliOptions) -> (usize, f32) {
     )
 }
 
-pub fn transcription_options(options: &CliOptions) -> crate::asr::TranscriptionOptions {
+pub fn transcription_options(options: &CliOptions) -> crate::models::asr::TranscriptionOptions {
     let language = options
         .language
         .as_ref()
         .filter(|language| !language.eq_ignore_ascii_case("auto"))
         .cloned();
-    crate::asr::TranscriptionOptions {
+    crate::models::asr::TranscriptionOptions {
         language,
         prompt: options.prompt.clone(),
         max_new_tokens: resolve_cli_generation_options(options).0,
@@ -289,9 +289,9 @@ pub fn transcription_options(options: &CliOptions) -> crate::asr::TranscriptionO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asr::{normalize_language, TranscriptionOptions};
-    use crate::model::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
-    use crate::tokenizer::BPETokenizer;
+    use crate::models::asr::{normalize_language, TranscriptionOptions};
+    use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use crate::core::tokenizer::BPETokenizer;
     use std::collections::HashMap;
     use std::path::Path;
 

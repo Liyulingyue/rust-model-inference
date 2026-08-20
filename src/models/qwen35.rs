@@ -1,13 +1,13 @@
-use rayon::prelude::*;
+﻿use rayon::prelude::*;
 
-use crate::clip_config::Qwen35Config;
-use crate::model::{GGMLType, TensorSource};
+use crate::models::clip_config::Qwen35Config;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
-use crate::quant::{self, BlockQ8K, QK_K};
-use crate::thread_pool::ComputePool;
-use crate::vision::VisionGrid;
+use crate::ops::quant::{self, BlockQ8K, QK_K};
+use crate::core::thread_pool::ComputePool;
+use crate::models::vision::VisionGrid;
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],
@@ -763,7 +763,7 @@ impl Qwen35Model {
     pub fn forward(
         &self,
         n_tokens: usize,
-        kv_cache: &mut crate::scratchpad::KvCache,
+        kv_cache: &mut crate::core::scratchpad::KvCache,
         scratch: &mut Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
@@ -915,7 +915,7 @@ impl Qwen35Model {
 
     fn forward_dense_attn_layer(
         &self, il: usize, input: &[f32], n_tokens: usize,
-        kv_cache: &mut crate::scratchpad::KvCache, scratch: &mut Qwen35Scratchpad,
+        kv_cache: &mut crate::core::scratchpad::KvCache, scratch: &mut Qwen35Scratchpad,
         pool: &ComputePool, mrope_positions: &[[usize; 4]],
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
@@ -1038,7 +1038,7 @@ impl Qwen35Model {
         let scale = 1.0 / (n_embd_head as f32).sqrt();
 
         let (k_cache, v_cache) = match kv_cache {
-            crate::scratchpad::KvCache::F32(c) => (&c.k, &c.v),
+            crate::core::scratchpad::KvCache::F32(c) => (&c.k, &c.v),
             _ => return vec![0.0; n_tokens * n_embd],
         };
         let k_len = k_cache.len() / cfg.n_layer;
@@ -1372,8 +1372,8 @@ impl Qwen35Model {
     }
 }
 
-fn kv_cache_pos(cache: &crate::scratchpad::KvCache, il: usize, k_dim: usize, n_layer: usize) -> usize {
-    if let crate::scratchpad::KvCache::F32(c) = cache {
+fn kv_cache_pos(cache: &crate::core::scratchpad::KvCache, il: usize, k_dim: usize, n_layer: usize) -> usize {
+    if let crate::core::scratchpad::KvCache::F32(c) = cache {
         let k_len = c.k.len() / n_layer;
         let mut pos = 0;
         for p in 0..k_len / k_dim {
@@ -1384,8 +1384,8 @@ fn kv_cache_pos(cache: &crate::scratchpad::KvCache, il: usize, k_dim: usize, n_l
     } else { 0 }
 }
 
-fn kv_cache_store(cache: &mut crate::scratchpad::KvCache, il: usize, n_layer: usize, k_data: &[f32], v_data: &[f32], k_dim: usize, v_dim: usize, pos: usize) {
-    if let crate::scratchpad::KvCache::F32(c) = cache {
+fn kv_cache_store(cache: &mut crate::core::scratchpad::KvCache, il: usize, n_layer: usize, k_data: &[f32], v_data: &[f32], k_dim: usize, v_dim: usize, pos: usize) {
+    if let crate::core::scratchpad::KvCache::F32(c) = cache {
         let k_len = c.k.len() / n_layer;
         let v_len = c.v.len() / n_layer;
         let n_tokens = k_data.len() / k_dim;
@@ -1742,7 +1742,7 @@ mod tests {
     fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
         let model = tiny_dense_model([1.0, 1.0, 0.0, 0.5], [1.0, 0.0, 0.0, 1.0]);
         let mut scratch = Qwen35Scratchpad::new(&model.config, 2);
-        let mut kv_cache = crate::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
+        let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
         let pool = ComputePool::new(1);
 
         model.forward_dense_attn_layer(
@@ -1769,7 +1769,7 @@ mod tests {
         let model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
         let n_tokens = 18;
         let mut scratch = Qwen35Scratchpad::new(&model.config, n_tokens);
-        let mut kv_cache = crate::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
+        let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
         let pool = ComputePool::new(1);
         let input: Vec<f32> = std::iter::repeat_n([1.0, 0.0], n_tokens).flatten().collect();
 

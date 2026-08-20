@@ -1,0 +1,629 @@
+﻿
+
+    use super::*;
+    use crate::ops::{
+        dot_f32, dot_f16_f16_bytes, f16_to_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+        rope_neox, rope_mrope,
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn ssm_matvec_qwen35_state_by_k_matches_llama_bits() {
+        const ROW_BITS: [u32; 128] = [
+            0x343dd31d, 0x35247646, 0x355ddbf1, 0x347ba9ca, 0xb331a47b, 0x35518fa0, 0xb3000a16,
+            0xb2c9392d, 0xb46c7875, 0x32260c85, 0x3210e6c4, 0x3570cae0, 0x35ba3a7a, 0x32954284,
+            0x33fad6a2, 0xb615773a, 0xb380a3a9, 0x347a533a, 0x33cad215, 0x3343c9ed, 0xb309f1d9,
+            0xb5adcd3b, 0x33eb313b, 0x32fa6046, 0x353c4a6b, 0x33211098, 0x329bd8ba, 0x337e2ca9,
+            0xb5325f4d, 0xb5f37d3a, 0x322f7c4b, 0x35a70d90, 0xb386bb9c, 0x3427645c, 0xb3ba3dbc,
+            0xb56bc37c, 0x3401b468, 0xb293977b, 0x33522d68, 0xb2b69671, 0xb59235b6, 0xb40d4f55,
+            0xb52af7e9, 0x361881ea, 0x332b5de4, 0xb6d012d6, 0xb67968ae, 0xb2b9d2fc, 0xb5b3d3c0,
+            0xb355744d, 0xb25d0d87, 0x35afc80f, 0xb5c3bca6, 0x32d8659b, 0xb5013b27, 0x3257a66c,
+            0x33c714ea, 0xacb4ba4c, 0x357f5dcc, 0xb5c67c05, 0x32ac0503, 0x31618e38, 0x3558949b,
+            0xb2d1614f, 0xb3a47828, 0x35062e30, 0x3312bcfd, 0x3373072a, 0x32f15e48, 0x359afcda,
+            0x322c1c69, 0xb5fed574, 0xb2971111, 0x3374d88f, 0x3409ea44, 0xb32e0c2e, 0xb6630338,
+            0x328e9746, 0x35f69b4f, 0x34ddf079, 0x35e9bc66, 0x3413994f, 0x33212afd, 0x3699623d,
+            0x3207c216, 0xb3d96568, 0xb2465f62, 0xb39fb8c5, 0x33896754, 0x3651aceb, 0x32b0a443,
+            0xb39bd9f5, 0xb2fe18a4, 0xb28029eb, 0xb3c57440, 0x345d62dc, 0xb2fa3cb1, 0x34ddc3ab,
+            0xb6218127, 0xb5f1fb9b, 0xb6015a8f, 0x351c31fd, 0xb4634deb, 0xb1bb91ef, 0x33c00f10,
+            0x3387e788, 0x33e69ff7, 0x32aff1f2, 0xb258a1e3, 0xb5997910, 0xb0ad833f, 0xb59118f0,
+            0x35af228e, 0x34487ed7, 0xb0a7f3d4, 0x356189d7, 0xb2d15576, 0x33047350, 0xb456a248,
+            0x313f972d, 0xb6eb84a2, 0xb31a2cc7, 0x3301a0b5, 0x334ceec8, 0x362a9aec, 0x3252560e,
+            0x356127db, 0xb29ec1b7,
+        ];
+        const K_BITS: [u32; 128] = [
+            0xbe5bc7ee, 0xbc72693b, 0x3cb64e01, 0x3c8a3926, 0x3dbcf543, 0xbd1307f9, 0x3e105106,
+            0x3d00dda0, 0x3e04c4fc, 0xbd07398f, 0xbbc8e6f3, 0xbd543e95, 0x3db81179, 0xbc8b8c61,
+            0xbd78ace0, 0xbd4ad402, 0x3cf5ebd7, 0x3d02337c, 0xbda6371a, 0xbcd93669, 0x3df39308,
+            0xbcd3e4b6, 0xbe1a9c1f, 0xbcd12e44, 0xbc08f288, 0xbd80de8d, 0xbda2b205, 0xbd5239e1,
+            0xbc637ab3, 0xbd81f478, 0xbd0f87e2, 0x3ae46dca, 0x3d99ae2b, 0xbd92dc0a, 0x3d4264bb,
+            0xbc994982, 0xbdce788b, 0x3d745a54, 0xbd39b5a4, 0x3d0b3d07, 0xbd919342, 0x3dad50fc,
+            0x3df3d1a3, 0xbd8db3e4, 0xbd58a8ca, 0xbeb782f3, 0x3daf3868, 0x3ca5846e, 0xbdb2638b,
+            0x3dccf713, 0x3d986a22, 0x3d284a25, 0xbc495e1a, 0xbd390fd2, 0x3dafcd38, 0xbc99c4be,
+            0x3cfcbf67, 0x39a59b94, 0xbc956928, 0x3d78278d, 0x3e0b0392, 0xbca6a426, 0x3de48e9b,
+            0x3cdb0c71, 0x3dfa6142, 0x3de05676, 0xbda183c3, 0x3c161c62, 0xbcc140d5, 0x3d5e0139,
+            0xbc78f2dc, 0xbd152690, 0x3d439f32, 0xbd23e5c2, 0xbdc065ca, 0x3d107d70, 0x3c984c25,
+            0xbccd0741, 0xbd7b6cd1, 0x3aa305ca, 0x3d261914, 0xbdea6a09, 0xbcf0d63a, 0xbdc3fe4e,
+            0xbcde1ac6, 0x3d3d7843, 0x3c47185d, 0x3e0117b8, 0xbdc85e9e, 0x3ca011a7, 0xbc625d4c,
+            0xbb3e7541, 0xbdfcfb7d, 0xbd285f17, 0x3dad8de7, 0xbe808674, 0x3d9bc937, 0xbdcb8055,
+            0xbd36264a, 0x3dd9a50b, 0x3dc1e5cc, 0xbc8ffaa5, 0x3e50a873, 0x3d338048, 0xbdcdcdbd,
+            0xbdcb5998, 0xbdd6a87f, 0xbccf4036, 0x3ca03e4e, 0xbc7046b1, 0x3b064c5e, 0x3d0abb81,
+            0xbd39915b, 0xbe2531e1, 0xbaef4e49, 0xbd68f73f, 0x3d8a5161, 0xbdaba148, 0x3bb1ce34,
+            0x3cf30beb, 0x3ed6228d, 0x3d384424, 0xbc807c2a, 0xbd19b95c, 0xbd41865e, 0xbc583265,
+            0x3d8e5c27, 0x3da4d68f,
+        ];
+        const EXPECTED_BITS: u32 = 0xb60098fc;
+        let row = ROW_BITS.map(f32::from_bits);
+        let k = K_BITS.map(f32::from_bits);
+        let mut out = [0.0f32; 1];
+
+        ssm_matvec(&row, &k, 128, 1, &mut out);
+
+        assert_eq!(out[0].to_bits(), EXPECTED_BITS);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn ssm_matvec_scaled_qwen35_matches_llama_bits() {
+        const STATE_ROW_BITS: [u32; 128] = [
+            0x373c2b56, 0x3823071e, 0x385beca7, 0x377977f7, 0xb63017e6, 0x384fbbca, 0xb5fdd87d,
+            0xb5c777f4, 0xb76a688c, 0x352499d2, 0x350fa347, 0x386eb152, 0x38b89abb, 0x3593f54d,
+            0x36f8a6a7, 0xb914298d, 0xb67f08f4, 0x37782463, 0x36c90d4b, 0x364214d6, 0xb608bde5,
+            0xb8ac493a, 0x36e9242d, 0x35f83152, 0x383aa611, 0x361fa906, 0x359a7cce, 0x367bf53a,
+            0xb830d117, 0xb8f15da7, 0x352df487, 0x38a598a0, 0xb6858ed4, 0x3725eeaa, 0xb6b89df5,
+            0xb869b526, 0x370092d8, 0xb5924dfd, 0x36505831, 0xb5b4fed3, 0xb890ef4e, 0xb70c13dd,
+            0xb8297a3b, 0x39172d72, 0x3629df52, 0xb9ce4252, 0xb9773be3, 0xb5b83424, 0xb8b2424a,
+            0xb65397c5, 0xb55b2009, 0x38ae3fa2, 0xb8c207ac, 0x35d68282, 0xb8001aa7, 0x3555c4fe,
+            0x36c55879, 0xafb326d4, 0x387d23b5, 0xb8c4c0e9, 0x35aa84fd, 0x345f96ae, 0x3856b11a,
+            0xb5cf8de0, 0xb6a308fc, 0x380502a3, 0x36117567, 0x3670e89c, 0x35ef4371, 0x3899a2da,
+            0x352a9c2e, 0xb8fc9c8c, 0xb595bfd1, 0x3672b5f4, 0x3708b660, 0xb62c87a0, 0xb961086d,
+            0x358d58f2, 0x38f474c6, 0x37dc0100, 0x38e7b298, 0x37124fcd, 0x361fc330, 0x39980bd1,
+            0x35069303, 0xb6d78015, 0xb544a487, 0xb69e5433, 0x36883494, 0x394fd8d4, 0x35af19ea,
+            0xb69a7e07, 0xb5fbe162, 0xb57e1799, 0xb6c3bb71, 0x375b749f, 0xb5f80e0c, 0x37dbd497,
+            0xb920189a, 0xb8efdf64, 0xb90039c8, 0x381ad54a, 0xb7615278, 0xb4b9ef30, 0x36be624d,
+            0x3686b822, 0x36e49d1b, 0x35ae6927, 0xb556be44, 0xb8982271, 0xb3abffe3, 0xb88fd504,
+            0x38ad9b94, 0x3746bf3e, 0xb3a67ce2, 0x385f9255, 0xb5cf8221, 0x36034ba0, 0xb754c31f,
+            0x343deb76, 0xb9e976d9, 0xb618d497, 0x36007f52, 0x364b2547, 0x39291e0e, 0x3550807c,
+            0x385f3135, 0xb59d5f4c,
+        ];
+        const Q_BITS: [u32; 128] = [
+            0x3c05bcb8, 0x3bac0000, 0x3b60906f, 0xbf27d235, 0x3d49d6dc, 0xbc6a0077, 0x3ddfb552,
+            0x3d264bbc, 0xbe06e9d2, 0x3e031a4c, 0xbdedf0cd, 0xbb94b02d, 0xbbeb8fdb, 0x3c8b46a4,
+            0x3cfe7bbe, 0x3c1c64ae, 0x3d76eaac, 0x3a18f07d, 0xbd7606d0, 0x3d8fca57, 0xbe1dcee5,
+            0xbb2d1b7f, 0x3d0d4ba1, 0x3d588e5d, 0xbb049d1f, 0x3dcb852c, 0xbabac748, 0x3d04fb24,
+            0x399f4aa6, 0x3b0ee976, 0xbd90f3d1, 0xb92237ac, 0xbdd39f8b, 0x3d6361ce, 0x3b8da58c,
+            0x3b949b3f, 0xbd7096cc, 0xbdbd0ffc, 0xbbcfe9d2, 0x3d0701e2, 0xbba9249b, 0xbe57571a,
+            0xba1e01f6, 0x3c19d00d, 0x3dc87814, 0x3a83f369, 0xba7a1f83, 0x3d6591c5, 0x3b92ba79,
+            0x3cef2594, 0x3de8277f, 0x3ae99153, 0x3a99c355, 0xbdc37d6e, 0xba5efd0e, 0x3dbf5aff,
+            0xbb384a95, 0x3e151a1b, 0x3aeb3a5a, 0x398cbc89, 0x3e172d40, 0x3d89005e, 0xb9a93ea7,
+            0xbab4aad2, 0x3e0da1de, 0xba5494a0, 0xbd88b357, 0xbc7921cb, 0xbd21ec9a, 0x3bc031c5,
+            0x3d75b8a7, 0xb976802e, 0x3ca0c40e, 0xbe4b1fec, 0xbc6f5a09, 0xbd39e37d, 0x3b94beab,
+            0x3e1d7004, 0xbb41d966, 0x3aa8b126, 0xbbc17d0d, 0xbdef0548, 0xbd6377b4, 0x3a2c085b,
+            0x3d896296, 0xbb860fec, 0xbc8bfd4c, 0xbba16379, 0x3c832238, 0x3a02c934, 0x3cae87ed,
+            0xbc6b660e, 0xba18a2e6, 0xbde0a121, 0x3d451bb1, 0x3bed995e, 0xbd597c6f, 0x3c22383d,
+            0xbadb7e90, 0xb9a07583, 0xbb66db29, 0xba1b8d82, 0x3d8e9c48, 0xbd811b24, 0xbdc2099b,
+            0x3e150dc4, 0x3dbcc0c0, 0xbe1b9e1c, 0x3e30f405, 0x3a569067, 0x3d8f6212, 0xba85b0e3,
+            0xba628be5, 0xbaa1a4c7, 0x3a8333cf, 0xb6d6c5c4, 0xbe318ab8, 0x3cd39ff2, 0x3adfd249,
+            0x3def2514, 0x3c300785, 0xbced9eed, 0x3ca33f05, 0xbb35862b, 0xbb7d54e2, 0x3c193845,
+            0xbac146f5, 0xbcd8eb85,
+        ];
+        const EXPECTED_BITS: u32 = 0xb5b15158;
+        let state_row = STATE_ROW_BITS.map(f32::from_bits);
+        let q = Q_BITS.map(f32::from_bits);
+        let mut out = [0.0f32; 1];
+
+        ssm_matvec_scaled(&state_row, &q, 128, 1, &mut out, f32::from_bits(0x3db504f3));
+
+        assert_eq!(out[0].to_bits(), EXPECTED_BITS);
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        let tolerance = 1e-4 + 1e-4 * expected.abs();
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn rms_norm_accumulates_f32_squares_in_f64() {
+        let input = [
+            f32::from_bits(0x3f80_0000),
+            f32::from_bits(0x3980_0000),
+            f32::from_bits(0x3980_0000),
+        ];
+        let weight = [1.0f32; 3];
+        let mut output = [0.0f32; 3];
+
+        rms_norm(&input, &weight, &mut output, 0.0);
+
+        assert_eq!(
+            output.map(f32::to_bits),
+            [0x3fdd_b3d6, 0x39dd_b3d6, 0x39dd_b3d6],
+        );
+    }
+
+    #[test]
+    fn rms_norm_inplace_matches_ggml_sequential_f64_accumulation() {
+        let mut values = [
+            f32::from_bits(0x3e57_d77b),
+            f32::from_bits(0xbd82_8687),
+            f32::from_bits(0xbe10_2e16),
+            f32::from_bits(0x3d2f_9fea),
+            f32::from_bits(0x3df4_8d0b),
+            f32::from_bits(0x3ded_164c),
+            f32::from_bits(0x3bcc_65ad),
+            f32::from_bits(0xbe18_b60f),
+        ];
+        let weight = [
+            f32::from_bits(0x4091_0000),
+            f32::from_bits(0x3f9f_0000),
+            f32::from_bits(0xbf3c_0000),
+            f32::from_bits(0x3fda_0000),
+            f32::from_bits(0x4026_0000),
+            f32::from_bits(0x3fc7_0000),
+            f32::from_bits(0x3f8c_0000),
+            f32::from_bits(0x3fbb_0000),
+        ];
+
+        rms_norm_inplace(&mut values, &weight, f32::from_bits(0x3586_37bd));
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [
+                0x40f9_71a9,
+                0xbf25_68fe,
+                0x3f58_0a09,
+                0x3f18_930b,
+                0x4021_c6f1,
+                0x3fbc_04bd,
+                0x3d64_1282,
+                0xbfe3_9aea,
+            ],
+        );
+    }
+
+    #[test]
+    fn rope_neox_matches_pinned_ggml_recurrence_and_fused_rotation() {
+        let mut values = [0.0f32; 128];
+        values[0] = f32::from_bits(0x402a_4f21);
+        values[1] = f32::from_bits(0x3fad_b711);
+        values[64] = f32::from_bits(0xbe0e_7273);
+        values[65] = f32::from_bits(0x3ef5_b8f9);
+
+        rope_neox(&mut values, 1, 128, 1_000_000.0);
+
+        assert_eq!(
+            [values[0], values[1], values[64], values[65]].map(f32::to_bits),
+            [0x3fc7_0519, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
+        );
+    }
+
+    #[test]
+    fn rope_mrope_matches_pinned_ggml_frequency_and_fused_rotation() {
+        let mut values = [0.0f32; 64];
+        values[0] = f32::from_bits(0x3eae_1c0f);
+        values[1] = f32::from_bits(0x3e8d_d676);
+        values[5] = f32::from_bits(0xbff5_1f9f);
+        values[11] = f32::from_bits(0x3e8d_d676);
+        values[22] = f32::from_bits(0xbff5_1f9f);
+        values[32] = f32::from_bits(0xbfb7_1543);
+        values[33] = f32::from_bits(0xc016_5e3a);
+        values[37] = f32::from_bits(0x3f02_9876);
+        values[43] = f32::from_bits(0xc016_5e3a);
+        values[54] = f32::from_bits(0x3f02_9876);
+
+        rope_mrope(&mut values, [1, 2, 3, 0], [11, 11, 10, 0], 64, 10_000_000.0);
+
+        assert_eq!(
+            [
+                values[0], values[1], values[5], values[11], values[22], values[32], values[33],
+                values[37], values[43], values[54],
+            ]
+            .map(f32::to_bits),
+            [
+                0x3fb1_93b8,
+                0x3fc8_0d88,
+                0xbff9_9597,
+                0x3e97_4641,
+                0xbff5_2065,
+                0xbef9_2c2e,
+                0xbfe3_5435,
+                0x3eb5_6aa7,
+                0xc016_396b,
+                0x3f02_92aa,
+            ],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
+        let a = [
+            1035226804, 3189287613, 3181886457, 3193572547, 1042787479, 3172027867, 1034549374,
+            3188264325, 1056115932, 3201905443, 3188891406, 1051732974, 1049988604, 3191259790,
+            3197162127, 1039754039,
+        ]
+        .map(f32::from_bits);
+        let b = [
+            1075433967, 1074732927, 1057635659, 3215511252, 3198768119, 1079784837, 1023408184,
+            3203974092, 3215464821, 3191576483, 1049344900, 1021989171, 3207345090, 3229966761,
+            3189361871, 1036416888,
+        ]
+        .map(f32::from_bits);
+
+        assert_eq!(
+            unsafe { dot_f32_neon(&a, &b, a.len()) }.to_bits(),
+            0x3d07_1678
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
+        let q_bits: Vec<u16> = (0..128)
+            .map(|index| {
+                ((if index % 3 == 0 { 0x8000 } else { 0 })
+                    | ((14 + index % 3) << 10)
+                    | ((index * 73 + 19) & 0x03ff)) as u16
+            })
+            .collect();
+        let q: Vec<f32> = q_bits.iter().map(|&bits| f16_to_f32(bits)).collect();
+        let k: Vec<u16> = (0..128)
+            .map(|index| {
+                ((if matches!(index % 5, 1 | 2) {
+                    0x8000
+                } else {
+                    0
+                }) | ((13 + index % 4) << 10)
+                    | ((index * 151 + 7) & 0x03ff)) as u16
+            })
+            .collect();
+
+        let q: Vec<u16> = q.iter().map(|&value| f32_to_f16(value)).collect();
+        assert_eq!(dot_f16(&q, &k, q.len()).to_bits(), 0x41d5_9c00);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_q8_matmul_matches_repacked_fused_block_accumulation() {
+        let mut weights = Vec::with_capacity(68);
+        for _ in 0..2 {
+            weights.extend_from_slice(&0x1800u16.to_le_bytes());
+            weights.push(127u8);
+            weights.extend_from_slice(&[0; 31]);
+        }
+        let mut input_q8 = vec![0u8; 64];
+        input_q8[0] = -127i8 as u8;
+        input_q8[32] = 127;
+        let input_scales = [f16_to_f32(0x1800), f16_to_f32(0x1a7d)];
+        let mut output = [0.0f32];
+
+        unsafe {
+            super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &input_q8, &input_scales, &mut output, 64, 0, 1);
+        }
+
+        assert_eq!(output[0].to_bits(), 0x3d1c_c57d);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_attention_value_matches_ggml_256_padded_reduction() {
+        let values = [
+            3206143318, 1061541424, 1061305652, 3210998438, 3195547419, 3163016063, 3212048900,
+            3189385624, 1062212878, 3209077215, 1044797186, 3208768978, 1042361759, 1061840183,
+            3206023529, 3212559954, 3210034948,
+        ]
+        .map(f32::from_bits);
+        let weights = [
+            1034085704, 3212250841, 3209990221, 3151333903, 1062699944, 3190005432, 3192954545,
+            1049496568, 3209702283, 1042509379, 3207046873, 1046413531, 1063954866, 3211019113,
+            1038190425, 1046076976, 3207827037,
+        ]
+        .map(f32::from_bits);
+        let mut padded_values = [0.0f32; 256];
+        let mut padded_weights = [0.0f32; 256];
+        padded_values[..values.len()].copy_from_slice(&values);
+        padded_weights[..weights.len()].copy_from_slice(&weights);
+
+        let actual = attention_value_f32(&padded_values, &padded_weights, values.len(), 256);
+
+        assert_eq!(actual.to_bits(), 0xc032_d8db);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
+        let mut values = [-1.0, 0.0, 1.0, f32::NEG_INFINITY];
+
+        softmax(&mut values);
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_silu_matches_qwen35_recurrent_four_lane_fixture() {
+        let mut values = [0xbb80_90bc, 0x3c17_08bd, 0x3c89_776f, 0x3ba9_f008].map(f32::from_bits);
+
+        silu_inplace(&mut values);
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0xbb00_502c, 0x3b97_baf3, 0x3c0a_9eb1, 0x3b2a_60d7],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_silu_mul_matches_pinned_ggml_four_lane_fixture() {
+        let gate = [0xbf46_e0d2, 0xbf47_ebea, 0xbeee_8b6b, 0xbe1b_692b].map(f32::from_bits);
+        let mut up = [0xbdbd_ab3d, 0xbdf0_16eb, 0x3e08_064c, 0xbf87_c095].map(f32::from_bits);
+
+        silu_mul_inplace(&gate, &mut up);
+
+        assert_eq!(
+            up.map(f32::to_bits),
+            [0x3cb9_a7c4, 0x3ceb_9536, 0xbcc3_7dcb, 0x3d98_56f8],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn ssm_outer_product_update_qwen35_matches_llama_bits() {
+        const DIM: usize = 8;
+        let mut state = [0.0f32; DIM * DIM];
+        state[..DIM].copy_from_slice(
+            &[
+                0x3494_80df,
+                0x3580_a966,
+                0x35ad_9089,
+                0x34c4_e183,
+                0xb38a_f91b,
+                0x35a3_f18c,
+                0xb348_55d4,
+                0xb31d_6bba,
+            ]
+            .map(f32::from_bits),
+        );
+        let k = [
+            0xbe5b_c7ee,
+            0xbc72_693b,
+            0x3cb6_4e01,
+            0x3c8a_3926,
+            0x3dbc_f543,
+            0xbd13_07f9,
+            0x3e10_5106,
+            0x3d00_dda0,
+        ]
+        .map(f32::from_bits);
+        let mut d_vec = [0.0f32; DIM];
+        d_vec[0] = f32::from_bits(0xbc50_0f83);
+
+        ssm_outer_product_update(&mut state, &k, &d_vec, DIM);
+
+        assert_eq!(
+            state[..DIM]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [
+                0x3b32_a467,
+                0x3946_0583,
+                0xb993_7cdc,
+                0xb960_4b2d,
+                0xba99_94e5,
+                0x39ef_a2b8,
+                0xbaea_96b8,
+                0xb9d1_7cad,
+            ],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_f32_ops_match_scalar_with_tail() {
+        let a: Vec<f32> = (0..19).map(|i| i as f32 * 0.125 - 1.0).collect();
+        let b: Vec<f32> = (0..19).map(|i| 0.75 - i as f32 * 0.0625).collect();
+        let expected_dot: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+        assert_close(unsafe { dot_f32_neon(&a, &b, a.len()) }, expected_dot);
+
+        let mut scaled = a.clone();
+        unsafe { vec_scale_f32_neon(&mut scaled, -0.25) };
+        for (actual, source) in scaled.iter().zip(&a) {
+            assert_close(*actual, source * -0.25);
+        }
+
+        let mut mad = a.clone();
+        unsafe { vec_mad_f32_neon(&mut mad, &b, 0.5) };
+        for i in 0..mad.len() {
+            assert_close(mad[i], a[i] + 0.5 * b[i]);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_f16_ops_match_scalar_with_tail() {
+        let src: Vec<f32> = (0..13).map(|i| i as f32 * 0.2 - 1.1).collect();
+        let mut bits = vec![0u16; src.len()];
+        unsafe { f32_slice_to_f16_neon(&src, &mut bits) };
+        let expected: Vec<u16> = src.iter().map(|&v| f32_to_f16(v)).collect();
+        assert_eq!(bits, expected);
+
+        let expected_dot: f32 = src.iter().zip(&bits).map(|(x, h)| x * f16_to_f32(*h)).sum();
+        assert_close(
+            unsafe { dot_f16_f32_neon(&src, &bits, src.len()) },
+            expected_dot,
+        );
+    }
+
+    #[test]
+    fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
+        fn pinned_inputs(n: usize) -> (Vec<u16>, Vec<u8>) {
+            let x = (0..n)
+                .map(|index| {
+                    ((if index % 3 == 0 { 0x8000 } else { 0 })
+                        | ((14 + index % 3) << 10)
+                        | ((index * 73 + 19) & 0x03ff)) as u16
+                })
+                .collect();
+            let mut y = Vec::with_capacity(n * 2);
+            for index in 0..n {
+                let bits = ((if matches!(index % 5, 1 | 2) {
+                    0x8000
+                } else {
+                    0
+                }) | ((13 + index % 4) << 10)
+                    | ((index * 151 + 7) & 0x03ff)) as u16;
+                y.extend_from_slice(&bits.to_le_bytes());
+            }
+            (x, y)
+        }
+
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        let native_fp16 = std::arch::is_aarch64_feature_detected!("fp16");
+        #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+        let native_fp16 = false;
+        let expected = if native_fp16 {
+            [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)]
+        } else {
+            [(32, 0xc086_612e), (37, 0x4035_d999), (64, 0x4122_a161)]
+        };
+        for (n, expected) in expected {
+            let (x, y) = pinned_inputs(n);
+            assert_eq!(dot_f16_f16_bytes(&x, &y, n).to_bits(), expected, "n={n}");
+        }
+
+        if !native_fp16 {
+            return;
+        }
+        let mut x = vec![0; 64];
+        let mut y = vec![0; 128];
+        x[0] = 0x3c00;
+        y[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        x[32] = 0x0475;
+        y[64..66].copy_from_slice(&0x472eu16.to_le_bytes());
+        assert_eq!(dot_f16_f16_bytes(&x, &y, 64).to_bits(), 0x3f80_2000);
+    }
+
+    fn valid_q8_weights(n_in: usize, n_out: usize) -> Vec<u8> {
+        let blocks = n_in / 32;
+        let mut data = Vec::with_capacity(n_out * blocks * 34);
+        for row in 0..n_out {
+            for block in 0..blocks {
+                let scale = half::f16::from_f32(0.01 + (row + block) as f32 * 0.0001).to_bits();
+                data.extend_from_slice(&scale.to_le_bytes());
+                for lane in 0..32 {
+                    data.push(
+                        (((row * 17 + block * 13 + lane * 7) % 255) as i16 - 127) as i8 as u8,
+                    );
+                }
+            }
+        }
+        data
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_q8_quantization_matches_scalar() {
+        let input: Vec<f32> = (0..64)
+            .map(|i| ((i as i32 % 17) - 8) as f32 * 0.125)
+            .collect();
+        let mut scalar_q = vec![0u8; 64];
+        let mut scalar_s = vec![0.0f32; 2];
+        let mut neon_q = vec![0u8; 64];
+        let mut neon_s = vec![0.0f32; 2];
+        quantize_q8_0_into_scalar_range(&input, &mut scalar_q, &mut scalar_s, 0, 2);
+        unsafe { quantize_q8_0_into_neon_range(&input, &mut neon_q, &mut neon_s, 0, 2) };
+        assert_eq!(neon_q, scalar_q);
+        assert_eq!(neon_s, scalar_s);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_q8_quantization_uses_ties_to_even() {
+        let mut input = [0.0f32; 32];
+        input[0] = 127.0;
+        input[1] = 34.5;
+        let mut q8 = [0u8; 32];
+        let mut scales = [0.0f32; 1];
+
+        unsafe { quantize_q8_0_into_neon_range(&input, &mut q8, &mut scales, 0, 1) };
+
+        assert_eq!(q8[1] as i8, 34);
+    }
+
+    #[test]
+    fn q8_quantization_stores_f16_scale_without_requantizing_values() {
+        let mut input = [0.0f32; 32];
+        input[0] = 1.0;
+        input[1] = f32::from_bits(0x3d11_213e);
+        let mut q8 = [0u8; 32];
+        let mut scales = [0.0f32; 1];
+
+        quantize_q8_0_into(&input, input.len(), &mut q8, &mut scales);
+
+        assert_eq!(q8[0] as i8, 127);
+        assert_eq!(q8[1] as i8, 4);
+        assert_eq!(scales[0].to_bits(), 0x3c01_0000);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_q8_matmul_matches_scalar_for_partial_row_range() {
+        let n_in = 64;
+        let weights = valid_q8_weights(n_in, 7);
+        let input: Vec<f32> = (0..n_in).map(|i| (i as f32 * 0.03).sin()).collect();
+        let mut q8 = vec![0u8; n_in];
+        let mut scales = vec![0.0f32; n_in / 32];
+        quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
+        let mut scalar = vec![0.0f32; 5];
+        let mut neon = vec![0.0f32; 5];
+        super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
+        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
+        for i in 0..5 {
+            assert_close(neon[i], scalar[i]);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_q8_nrc1_matches_llama_lane_reduction() {
+        let n_in = 64;
+        let weights = valid_q8_weights(n_in, 3);
+        let input: Vec<f32> = (0..n_in).map(|i| (i as f32 * 0.07).cos()).collect();
+        let mut q8 = vec![0u8; n_in];
+        let mut scales = vec![0.0f32; n_in / 32];
+        quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
+        let mut actual = vec![0.0; 3];
+        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(&weights, &q8, &scales, &mut actual, n_in, 0, 3) };
+
+        let stride = n_in / 32 * 34;
+        for row in 0..3 {
+            let mut lanes = [[0.0f32; 4]; 2];
+            for block in 0..2 {
+                let offset = row * stride + block * 34;
+                let scale = f16_to_f32(u16::from_le_bytes([weights[offset], weights[offset + 1]]))
+                    * scales[block];
+                for lane in 0..4 {
+                    let dot = (0..4)
+                        .map(|index| {
+                            let index = lane * 4 + index;
+                            (weights[offset + 2 + index] as i8 as i32)
+                                * (q8[block * 32 + index] as i8 as i32)
+                                + (weights[offset + 18 + index] as i8 as i32)
+                                    * (q8[block * 32 + 16 + index] as i8 as i32)
+                        })
+                        .sum::<i32>();
+                    lanes[block][lane] = (dot as f32).mul_add(scale, lanes[block][lane]);
+                }
+            }
+            let reduce = |lanes: [f32; 4]| (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+            assert_eq!(
+                actual[row].to_bits(),
+                (reduce(lanes[0]) + reduce(lanes[1])).to_bits()
+            );
+        }
+    }

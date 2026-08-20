@@ -1,5 +1,5 @@
-use crate::memory::{BlockAllocator, MemoryArena};
-use crate::traits::ModelConfig;
+﻿use crate::core::memory::{BlockAllocator, MemoryArena};
+use crate::core::traits::ModelConfig;
 
 pub fn run_self_test() {
     println!("=== RustModelInference MVP Self-Test ===\n");

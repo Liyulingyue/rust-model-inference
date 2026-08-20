@@ -1,15 +1,16 @@
-use crate::app::cli::{resolve_thread_count, per_second, inference_step_budget, KvFormat};
+﻿use crate::app::cli::{resolve_thread_count, per_second, inference_step_budget, KvFormat};
 use crate::app::{LayerWeights, get_f32_tensor, slice_from_mut, slice_from_ref, raw_parts};
-use crate::ggufrs::{open_model_source, ComponentRole};
-use crate::model::{model_config_from_source, GGMLType, TensorSource};
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::core::loader::model_config_from_source;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_inplace, softmax, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
-use crate::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
+use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
+use crate::models::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::models::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use crate::ops::embedding_lookup;
 use std::io::{self, Write};
 use std::path::Path;
@@ -104,66 +105,66 @@ pub fn run_inference(
             },
             wq: {
                 let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_q,
-                )
+                ).into_kernel()
             },
             wk: {
                 let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                )
+                ).into_kernel()
             },
             wv: {
                 let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                )
+                ).into_kernel()
             },
             wo: {
                 let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd_q,
                     n_embd,
-                )
+                ).into_kernel()
             },
             w_gate: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                )
+                ).into_kernel()
             },
             w_up: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                )
+                ).into_kernel()
             },
             w_down: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
                     info.ggml_type,
                     n_ff,
                     n_embd,
-                )
+                ).into_kernel()
             },
         })
         .collect();
@@ -311,9 +312,9 @@ pub fn run_inference(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.matmul(q8, sc, q, n_embd, n_embd_q, ith, nth);
-                lw.wk.matmul(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.matmul(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq.forward_prequantized(q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk.forward_prequantized(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.forward_prequantized(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -496,7 +497,7 @@ pub fn run_inference(
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.matmul(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo.forward_prequantized(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
@@ -523,8 +524,8 @@ pub fn run_inference(
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.matmul(q8, sc, up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.matmul(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate.forward_prequantized(q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.forward_prequantized(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -554,7 +555,7 @@ pub fn run_inference(
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.matmul(q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down.forward_prequantized(q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
@@ -1110,7 +1111,7 @@ pub fn run_multimodal(
     let mut prompt_ids = Vec::new();
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
-    let image_grids: Vec<crate::vision::VisionGrid> = image_grid.iter().copied().collect();
+    let image_grids: Vec<crate::models::vision::VisionGrid> = image_grid.iter().copied().collect();
     let (prompt_positions, mut next_text_position) =
         build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
@@ -1146,13 +1147,13 @@ pub fn run_multimodal(
     );
 
     let max_seq = llm.config.n_ctx;
-    let mut kv_cache = crate::scratchpad::KvCache::new_f32(
+    let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(
         llm.config.n_layer,
         max_seq,
         llm.config.n_embd_head() * llm.config.n_head_kv,
     );
     let mut llm_scratch =
-        crate::qwen35::Qwen35Scratchpad::new(&llm.config, prompt_tokens.len().max(max_tokens));
+        crate::models::qwen35::Qwen35Scratchpad::new(&llm.config, prompt_tokens.len().max(max_tokens));
 
     let prompt_embd = inject_vision_embeddings(
         &llm,

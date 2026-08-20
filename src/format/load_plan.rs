@@ -1,4 +1,4 @@
-use crate::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
+﻿use crate::format::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -688,23 +688,23 @@ pub fn load_logical_cpu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ggufrs::{GgufrsFile, SegmentKind};
-    use crate::model::{GGMLType, TensorInfo};
+    use crate::format::ggufrs::{GgufrsFile, SegmentKind};
+    use crate::core::tensor::{GGMLType, TensorInfo};
 
     struct ExportedFixture {
         package: GgufrsFile,
         #[allow(dead_code)]
-        inputs: crate::ggufrs::test_support::TestInputs,
+        inputs: crate::format::ggufrs::test_support::TestInputs,
     }
 
     fn exported_test_package() -> ExportedFixture {
-        let inputs = crate::ggufrs::test_support::test_gguf_pair();
+        let inputs = crate::format::ggufrs::test_support::test_gguf_pair();
         let output = inputs.dir.join("load-plan.ggufrs");
-        crate::ggufrs::export_ggufrs(
+        crate::format::ggufrs::export_ggufrs(
             &output,
             &inputs.llm,
             Some(&inputs.mmproj),
-            crate::ggufrs::ExportOptions::default(),
+            crate::format::ggufrs::ExportOptions::default(),
         )
         .unwrap();
         let package = GgufrsFile::open(output).unwrap();
@@ -716,10 +716,10 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let mmproj = package
-            .component_id(crate::ggufrs::ComponentRole::Mmproj)
+            .component_id(crate::format::ggufrs::ComponentRole::Mmproj)
             .unwrap();
         let devices = vec![
             LogicalDevice {
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn tensor_split_uses_only_complete_quantized_rows() {
-        let fixture = crate::ggufrs::test_support::test_q8_row_package(4, 32);
+        let fixture = crate::format::ggufrs::test_support::test_q8_row_package(4, 32);
         let devices = vec![
             LogicalDevice {
                 id: "cpu0".into(),
@@ -835,7 +835,7 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let devices = vec![
             LogicalDevice {
@@ -871,7 +871,7 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let too_small = vec![LogicalDevice {
             id: "cpu0".into(),
@@ -888,7 +888,7 @@ mod tests {
             Err(GgufrsError::CapacityExceeded { .. })
         ));
 
-        let fixture = crate::ggufrs::test_support::test_q8_row_package(2, 64);
+        let fixture = crate::format::ggufrs::test_support::test_q8_row_package(2, 64);
         let devices = vec![
             LogicalDevice {
                 id: "cpu0".into(),
@@ -916,7 +916,7 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let duplicate = vec![
             LogicalDevice {
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_missing_overlapping_or_misaligned_rows() {
-        let fixture = crate::ggufrs::test_support::test_q8_row_package(4, 32);
+        let fixture = crate::format::ggufrs::test_support::test_q8_row_package(4, 32);
         let devices = vec![
             LogicalDevice {
                 id: "cpu0".into(),
@@ -1019,10 +1019,10 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let mmproj = package
-            .component_id(crate::ggufrs::ComponentRole::Mmproj)
+            .component_id(crate::format::ggufrs::ComponentRole::Mmproj)
             .unwrap();
         let devices = vec![
             LogicalDevice {
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn layer_split_validation_requires_whole_single_device_layers() {
-        let fixture = crate::ggufrs::test_support::test_q8_row_package(4, 32);
+        let fixture = crate::format::ggufrs::test_support::test_q8_row_package(4, 32);
         let devices = vec![
             LogicalDevice {
                 id: "cpu0".into(),
@@ -1101,7 +1101,7 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let devices = vec![
             LogicalDevice {
@@ -1131,7 +1131,7 @@ mod tests {
 
     #[test]
     fn logical_cpu_shares_split_segment_mapping_until_each_device_releases() {
-        let fixture = crate::ggufrs::test_support::test_q8_row_package(4, 32);
+        let fixture = crate::format::ggufrs::test_support::test_q8_row_package(4, 32);
         let devices = vec![
             LogicalDevice {
                 id: "cpu0".into(),
@@ -1177,10 +1177,10 @@ mod tests {
         let fixture = exported_test_package();
         let package = &fixture.package;
         let llm = package
-            .component_id(crate::ggufrs::ComponentRole::Llm)
+            .component_id(crate::format::ggufrs::ComponentRole::Llm)
             .unwrap();
         let mmproj = package
-            .component_id(crate::ggufrs::ComponentRole::Mmproj)
+            .component_id(crate::format::ggufrs::ComponentRole::Mmproj)
             .unwrap();
         let devices = vec![LogicalDevice {
             id: "cpu0".into(),

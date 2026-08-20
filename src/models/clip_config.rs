@@ -1,4 +1,4 @@
-use crate::model::{MetaValue, TensorSource};
+﻿use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct ClipVisionConfig {
@@ -250,56 +250,54 @@ fn recurrent_layer_mask(
         .map(|layer| ((layer as u64 + 1) % interval) != 0)
         .collect())
 }
-
 impl Qwen35Config {
+    /// Build a `Qwen35Config` from a GGUF tensor source.
+    ///
+    /// Phase 4c: delegates the common Qwen3-family dimensional and rope
+    /// metadata to [`crate::core::loader::model_config_from_source`], then
+    /// layers on the Qwen35-specific extensions: SSM state shape,
+    /// `full_attention_interval`, layer recurrence mask, and the
+    /// mrope `dimension_sections` array.
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
+        // Common Qwen3-family base (n_embd / n_layer / n_head / n_head_kv /
+        // n_ff / n_ctx / vocab_size / rope_freq_base / norm_eps). The unified
+        // loader also validates that the head/embedding shape is sane.
+        let base = crate::core::loader::model_config_from_source(source)?;
+
         let get_u32 = |key: &str| -> Result<u32, String> {
-            source.metadata(key)
+            source
+                .metadata(key)
                 .and_then(|v| v.to_u64())
                 .map(|v| v as u32)
                 .ok_or_else(|| format!("Missing qwen35 metadata: {}", key))
         };
 
-        let get_f32 = |key: &str| -> Result<f32, String> {
-            source.metadata(key)
-                .and_then(|v| v.to_f64())
-                .map(|v| v as f32)
-                .ok_or_else(|| format!("Missing qwen35 metadata: {}", key))
-        };
+        let key_length = source
+            .metadata("qwen35.attention.key_length")
+            .and_then(|v| v.to_u64())
+            .unwrap_or(base.n_embd_head as u64) as usize;
+        let value_length = source
+            .metadata("qwen35.attention.value_length")
+            .and_then(|v| v.to_u64())
+            .unwrap_or(base.n_embd_head as u64) as usize;
 
-        let n_embd = get_u32("qwen35.embedding_length")? as usize;
-        let n_layer = get_u32("qwen35.block_count")? as usize;
-        let n_head = get_u32("qwen35.attention.head_count")? as usize;
-        let n_head_kv = get_u32("qwen35.attention.head_count_kv")? as usize;
-        let n_ff = get_u32("qwen35.feed_forward_length")? as usize;
-        let n_ctx = get_u32("qwen35.context_length")? as usize;
-
-        let key_length = source.metadata("qwen35.attention.key_length").and_then(|v| v.to_u64()).unwrap_or(n_embd as u64 / n_head as u64) as usize;
-        let value_length = source.metadata("qwen35.attention.value_length").and_then(|v| v.to_u64()).unwrap_or(n_embd as u64 / n_head as u64) as usize;
-
-        let vocab_size = match source.metadata("tokenizer.ggml.tokens") {
-            Some(MetaValue::Array(_, vals)) => vals.len(),
-            _ => 151936,
-        };
-
-        let rope_freq_base = source.metadata("qwen35.rope.freq_base")
-            .and_then(|v| v.to_f64())
-            .unwrap_or(1_000_000.0) as f32;
-        let norm_eps = get_f32("qwen35.attention.layer_norm_rms_epsilon")?;
-
-        let rope_dimension_count = source.metadata("qwen35.rope.dimension_count")
+        let rope_dimension_count = source
+            .metadata("qwen35.rope.dimension_count")
             .and_then(|v| v.to_u64())
             .unwrap_or(64) as usize;
 
         let rope_dimension_sections = match source.metadata("qwen35.rope.dimension_sections") {
             Some(MetaValue::Array(_, vals)) => {
-                let s: Vec<i32> = vals.iter()
+                let s: Vec<i32> = vals
+                    .iter()
                     .filter_map(|v| v.to_u64().map(|x| x as i32))
                     .collect();
-                [s.get(0).copied().unwrap_or(16),
-                 s.get(1).copied().unwrap_or(16),
-                 s.get(2).copied().unwrap_or(16),
-                 s.get(3).copied().unwrap_or(16)]
+                [
+                    s.first().copied().unwrap_or(16),
+                    s.get(1).copied().unwrap_or(16),
+                    s.get(2).copied().unwrap_or(16),
+                    s.get(3).copied().unwrap_or(16),
+                ]
             }
             _ => {
                 let sec = rope_dimension_count as i32 / 4;
@@ -315,7 +313,7 @@ impl Qwen35Config {
         let full_attention_interval_raw =
             full_attention_interval(source.metadata("qwen35.full_attention_interval"))?;
         let is_recurrent = recurrent_layer_mask(
-            n_layer,
+            base.n_layer,
             source.metadata("qwen35.attention.recurrent_layers"),
             full_attention_interval_raw,
         )?;
@@ -323,15 +321,15 @@ impl Qwen35Config {
             .map_err(|_| "qwen35.full_attention_interval does not fit usize")?;
 
         Ok(Self {
-            n_embd,
-            n_layer,
-            n_head,
-            n_head_kv,
-            n_ff,
-            n_ctx,
-            vocab_size,
-            rope_freq_base,
-            norm_eps,
+            n_embd: base.n_embd,
+            n_layer: base.n_layer,
+            n_head: base.n_head,
+            n_head_kv: base.n_head_kv,
+            n_ff: base.n_ff,
+            n_ctx: base.n_ctx,
+            vocab_size: base.vocab_size,
+            rope_freq_base: base.rope_freq_base,
+            norm_eps: base.norm_eps,
             rope_dimension_count,
             rope_dimension_sections,
             ssm_d_conv,
@@ -374,7 +372,7 @@ impl Qwen35Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MetaValueType;
+    use crate::core::tensor::MetaValueType;
 
     #[test]
     fn qwen35_recurrent_layers_metadata_is_authoritative() {

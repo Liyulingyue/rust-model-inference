@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use crate::model::TensorSource;
+﻿use std::sync::Arc;
+use crate::core::tensor::TensorSource;
 use crate::ops::{matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, dot_f32, rms_norm, rms_norm_inplace, silu, f16_to_f32};
-use crate::thread_pool::ComputePool;
+use crate::core::thread_pool::ComputePool;
 
 #[derive(Debug)]
 pub struct PigConfig {
@@ -22,7 +22,7 @@ pub struct PigConfig {
 }
 
 impl PigConfig {
-    pub fn from_source<S: crate::model::TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
+    pub fn from_source<S: crate::core::tensor::TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
         let n_layer = source.metadata("pig.block_count").and_then(|v| v.to_u64()).map(|v| v as usize).unwrap_or(30);
         let n_embed = source.metadata("pig.embedding_length").and_then(|v| v.to_u64()).map(|v| v as usize).unwrap_or(3840);
         let n_head = source.metadata("pig.attention.head_count").and_then(|v| v.to_u64()).map(|v| v as usize).unwrap_or(30);

@@ -1,11 +1,11 @@
-use crate::app::cli::{resolve_thread_count, transcription_options};
+﻿use crate::app::cli::{resolve_thread_count, transcription_options};
 use crate::app::open_or_exit;
-use crate::asr::{open_bundled_audio_source, AsrRuntime};
-use crate::ggufrs::ComponentRole;
-use crate::model::TensorSource;
-use crate::qwen3::Qwen3Model;
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::BPETokenizer;
+use crate::models::asr::{open_bundled_audio_source, AsrRuntime};
+use crate::format::ggufrs::ComponentRole;
+use crate::core::tensor::TensorSource;
+use crate::models::qwen3::Qwen3Model;
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
 use std::time::Instant;
 

@@ -133,12 +133,87 @@ src/
 - 将 main.rs 内嵌的 `cli_tests` 测试模块迁移到对应 app 子模块的 `#[cfg(test)]`。
 - 产出：`main.rs` 4304 → ~300 行；`app/` 各文件 <800 行。
 
-### Phase 2 — 拆 ops.rs + 合并 quant.rs（风险：低）
+### Phase 2 — ops.rs 类型抽象 + 物理拆解（风险：低→中）
 
-- 按 §2 的 `ops/` 子模块**纯物理搬移**，不改逻辑、不改签名。
-- `quant.rs`（Q4K/Q5K/Q6K）全部并入 `ops/quant.rs`，消除 `quant.rs` 与 `ops.rs` 的平级重复。
-- 保留 `pub use ops::*` 背后的函数签名兼容；更新 lib.rs / 引用路径。
-- 产出：`ops.rs` 3592 + `quant.rs` 1038 → 9 个均 <600 行的子模块。
+**核心理念：先定义接口类型，再迁移函数实现。** 即使某些函数暂时还没接入新类型，接口也要先预留，避免后期推翻重来。
+
+#### Phase 2.1 — 骨架：定义类型抽象（风险：零）
+
+在 `src/ops/mod.rs` 顶部新增一个 `pub mod kernel` 子模块，只放**类型定义 + trait + 接口声明**，不写实现细节。
+
+- 定义 `Kernel` trait（内核统一接口）：
+  ```rust
+  pub trait Kernel {
+      fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize);
+      fn forward_batched(&self, /* ... */) { /* 默认调用 forward 单 token 循环 */ }
+  }
+  ```
+- 定义 `QuantizedTensor<'a>` 枚举（**保留所有类型的入口**，即使某些类型暂未实现）：
+  ```rust
+  pub enum QuantizedTensor<'a> {
+      F32(&'a [f32]),
+      F16(&'a [u8]),   // 预留
+      Q8_0(&'a [u8]),
+      Q6_K(Q6_KWeight<'a>),
+      Q4_0(Q4_0Weight<'a>),
+      Q4_1(Q4_1Weight<'a>),
+  }
+  ```
+- 保留现有 `ProcessedWeight` 公共函数签名；`QuantizedTensor` 仅作为新接口的**占位类型**（暂时不替换）。
+- 验证：`cargo build + cargo test` 全绿，与基线一致。
+- 产出：新增 `src/ops/kernel.rs` (~80 行类型 + trait + 占位 enum)；`ops.rs` 行为零变化。
+
+#### Phase 2.2 — 迁移 F32 matmul 到 Kernel trait（风险：低）
+
+最小动作：只动 F32 路径。
+
+- `ops.rs` 提取 `matmul_f32_scalar_range` + `matmul_f32_parallel_rows` 到 `ops/kernel/f32.rs`。
+- 实现 `Kernel for F32Kernel<'_>`。
+- 在 `ops/mod.rs` 加 `pub use kernel::f32::F32Kernel`，原 `matmul_f32_scalar_range` 签名标记 `#[deprecated]` 或保留兼容 wrapper。
+- 加 `#[cfg(test)]` 单测：`F32Kernel::forward(&[1; 32], &mut [0], 32, 1)` → `[32]`。
+- 验证：190 passed, 2 failed (基线)。
+
+#### Phase 2.3 — 迁移 Q8_0 matmul 到 Kernel trait（风险：低）
+
+- 提取 Q8_0 内核到 `ops/kernel/q8_0.rs`。
+- `Q8Kernel<'_>` 实现 `Kernel`。
+- 加测试。
+
+#### Phase 2.4 — 预留 F16 matmul 接口（风险：低）
+
+- `ops/kernel/f16.rs` 定义 `F16Kernel` 结构 + `impl Kernel for F16Kernel` 的**接口骨架**。
+- 实现部分暂时调用现有 `matmul_f16_f32`（pig.rs 已在用），不重写。
+- 不改任何调用方。
+
+#### Phase 2.5 — 迁移 Q6_K / Q4_0 / Q4_1 到 Kernel trait（风险：中）
+
+- 提取 Q6_K → `ops/kernel/q6_k.rs`。
+- 提取 Q4_0 / Q4_1 → `ops/kernel/q4.rs`。
+- 复用现有 quant.rs 的 `BlockQ8K` 与 `vec_dot_q*k_q8k` 函数（**不动 quant.rs**，先物理搬移到 `ops/quant/`）。
+
+#### Phase 2.6 — quant.rs 物理搬移到 ops/quant/（风险：低）
+
+- `quant.rs` 全部代码并入 `ops/quant/` 子模块（block.rs、q4k.rs、q5k.rs、q6k.rs、q8k.rs、dequant.rs）。
+- lib.rs 删 `pub mod quant`，所有引用从 `crate::quant::*` 改为 `crate::ops::quant::*`。
+
+#### Phase 2.7 — 文件物理拆解 ops.rs（风险：中）
+
+只有当前面 6 个子阶段全部跑过、接口稳定后，才动 `ops.rs` 文件拆分。
+
+- 按 kernel/quant/norm/rope/activation/sampling/ssm/embedding 拆文件。
+- 每拆一个文件，确保 `cargo test` 全绿再继续。
+- 最终产出：`ops.rs` 3592 → 7-8 个 <700 行的子文件。
+
+#### Phase 2.x 验收
+
+每阶段后必须：
+- `cargo build --release` 零 error；
+- `cargo test --release` 与基线一致（190 passed, 2 failed, 8 ignored）；
+- 关键命令验证：
+  - `cargo run -- --model models/Qwen3-0.6B-Q8_0.gguf --prompt "Hello" --max-tokens 20`（Q8 文本）
+  - `cargo run -- --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --prompt "test" --embedding`（embedding）
+  - `cargo run -- --model models/Qwen3-ASR-0.6B-Q8_0.gguf --mmproj ... --audio models/zh.wav --language Chinese`（ASR）
+- cos 相似度与 llama.cpp 对比 ≥ 0.9999。
 
 ### Phase 3 — 拆 model.rs（风险：低）
 
@@ -169,7 +244,8 @@ src/
 
 | 项 | 说明 | 前置 |
 |----|------|------|
-| `ProcessedWeight` 泛化 | 加入 F16 variant，统一 matmul 调度入口 | 依赖 Phase 2 拆完 ops |
+| `Kernel` trait 全面落地 | 所有量化类型接入 `Kernel` 统一调度 | Phase 2.1-2.5 已铺垫 |
+| `ProcessedWeight` → `QuantizedTensor` 迁移 | 引入 F16 之后，替换旧 enum | Phase 2.3 / 2.4 后可启动 |
 | FFN / Gate-Up 融合 | 减少 pool.compute() 调用 | 独立性能任务 |
 | qwen3a / qwen35 主循环重构 | 对齐 CommonLayer 推理路径 | 依赖 Phase 4 |
 | backend/ 目录化 | vulkan / wgpu 归入 backend/ | 实时进行，见决策点 4 |

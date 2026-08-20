@@ -1,5 +1,5 @@
-use crate::clip_config::ClipVisionConfig;
-use crate::model::TensorSource;
+﻿use crate::models::clip_config::ClipVisionConfig;
+use crate::core::tensor::TensorSource;
 use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32};
 use rayon::prelude::*;
 
