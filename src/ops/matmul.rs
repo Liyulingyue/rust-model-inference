@@ -460,13 +460,11 @@ fn matmul_q8_0_quantized_scalar_range(
     }
 }
 
-pub enum ProcessedWeight<'a> {
-    F32(Vec<f32>),
-    Q8_0(&'a [u8]),
-    Q6_K(Q6_KWeight<'a>),
-    Q4_0(Q4_0Weight<'a>),
-    Q4_1(Q4_1Weight<'a>),
-}
+// Phase 2.7-final cleanup: `ProcessedWeight` enum has been retired.
+// Weight handling now flows entirely through the `Kernel` trait in
+// `ops::kernel::*`. Per-quant weight structs (Q4_0 / Q4_1 / Q6_K /
+// Q4_K / Q5_K) live below as plain data holders used by the Kernel
+// impls.
 
 pub struct Q6_KWeight<'a> {
     pub data: &'a [u8],
@@ -488,7 +486,7 @@ pub struct Q4_1Weight<'a> {
 
 /// Placeholder weight structs for Q4_K / Q5_K — reserved for the
 /// per-quant `Kernel` impls in `ops::kernel::q4_k` / `q5_k`. These types
-/// are not yet produced by `ProcessedWeight::from_bytes` because the
+/// are not yet produced by `QuantizedTensor::from_bytes` because the
 /// production Q4_K_M / Q5_K_M path goes through `QuantizedLinear::forward_dequant`.
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_KWeight<'a> {
@@ -502,77 +500,6 @@ pub struct Q5_KWeight<'a> {
     pub data: &'a [u8],
     pub n_in: usize,
     pub n_out: usize,
-}
-
-impl<'a> ProcessedWeight<'a> {
-    pub fn from_bytes(data: &'a [u8], ggml_type: crate::core::tensor::GGMLType, n_in: usize, n_out: usize) -> Self {
-        match ggml_type {
-            crate::core::tensor::GGMLType::F32 => {
-                let f32_data: Vec<f32> = data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                ProcessedWeight::F32(f32_data)
-            }
-            crate::core::tensor::GGMLType::Q8_0 => ProcessedWeight::Q8_0(data),
-            crate::core::tensor::GGMLType::Q6K => ProcessedWeight::Q6_K(Q6_KWeight { data, n_in, n_out }),
-            crate::core::tensor::GGMLType::Q4_0 => ProcessedWeight::Q4_0(Q4_0Weight { data, n_in, n_out }),
-            crate::core::tensor::GGMLType::Q4_1 => ProcessedWeight::Q4_1(Q4_1Weight { data, n_in, n_out }),
-            _ => panic!("unsupported weight type {:?} - use Q8_0 model", ggml_type),
-        }
-    }
-
-    /// Internal dispatch used during the Phase 2.7-final migration. After
-    /// all call sites are migrated to the `Kernel` trait this method will
-    /// be removed and the per-quant `Kernel` impls in `ops::kernel::*` will
-    /// be the sole dispatch path.
-    pub fn matmul(
-        &self,
-        input_q8: &[u8],
-        input_scales: &[f32],
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-        ith: usize,
-        nth: usize,
-    ) {
-        match self {
-            ProcessedWeight::F32(w) => {
-                matmul_f32_parallel_rows(w, input_scales, output, n_in, n_out, ith, nth);
-            }
-            ProcessedWeight::Q8_0(w) => {
-                matmul_q8_0_quantized_parallel_rows(w, input_q8, input_scales, output, n_in, n_out, ith, nth);
-            }
-            ProcessedWeight::Q6_K(w) => {
-                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
-            }
-            ProcessedWeight::Q4_0(w) => {
-                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
-            }
-            ProcessedWeight::Q4_1(w) => {
-                w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
-            }
-        }
-    }
-}
-
-/// Bridge impl: `ProcessedWeight` acts as a `Kernel` during the Phase 2.7-final
-/// migration. Production code holds `Box<dyn Kernel>`; `ProcessedWeight` is
-/// the boxed-impl detail for now. Once the per-quant `Kernel` types in
-/// `ops::kernel::*` are wired up directly, this impl goes away.
-impl<'a> crate::ops::kernel::Kernel for ProcessedWeight<'a> {
-    fn forward_prequantized(
-        &self,
-        input_q8: &[u8],
-        input_scales: &[f32],
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-        ith: usize,
-        nth: usize,
-    ) {
-        self.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
-    }
 }
 
 impl<'a> Q6_KWeight<'a> {

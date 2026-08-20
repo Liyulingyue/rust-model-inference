@@ -33,36 +33,18 @@ impl<'a> Kernel for Q8Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        let blocks_per_row = n_in / 32;
-        let row_stride = blocks_per_row * 34;
-        debug_assert_eq!(self.weight.len(), (n_out * blocks_per_row) * 34);
-
-        let per_thread = (n_out + nth - 1) / nth;
-        let my_start = ith * per_thread;
-        let my_end = (my_start + per_thread).min(n_out);
-        if my_start >= my_end {
-            return;
-        }
-
-        for out_idx in my_start..my_end {
-            let row_off = out_idx * row_stride;
-            let mut sum = 0.0f32;
-            for block in 0..blocks_per_row {
-                let off = row_off + block * 34;
-                let scale_bytes: [u8; 2] = [self.weight[off], self.weight[off + 1]];
-                let wd = crate::ops::f16_to_f32(u16::from_le_bytes(scale_bytes));
-                let qx = &self.weight[off + 2..off + 34];
-                let qy = &input_q8[block * 32..(block + 1) * 32];
-                let mut dot: i32 = 0;
-                for lane in 0..32 {
-                    dot += (qx[lane] as i8 as i32) * (qy[lane] as i8 as i32);
-                }
-                sum += wd * input_scales[block] * dot as f32;
-            }
-            // `output` is the full n_out slice; each thread writes to its
-            // own partition, so the absolute index is the right slot.
-            output[out_idx] = sum;
-        }
+        // Delegate to the production matmul which handles AVX2/NEON/GPU
+        // dispatch. This is the kernel the Qwen3 hot path actually wants.
+        crate::ops::matmul_q8_0_quantized_parallel_rows(
+            self.weight,
+            input_q8,
+            input_scales,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
     }
 }
 

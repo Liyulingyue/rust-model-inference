@@ -1,9 +1,9 @@
 //! F16 matmul kernel implementation.
 //!
-//! Phase 2.4: Reserved interface for F16 matmul. The `F16Kernel` exists
-//! to lock the contract for `ProcessedWeight::F16` (which currently is
-//! not part of `ProcessedWeight`'s variants). This is the future home
-//! of the F16 path once `QuantizedTensor` replaces `ProcessedWeight`.
+//! Phase 2.4 + 2.7-final: Reserved interface for F16 matmul. The
+//! `F16Kernel` exists to lock the contract for the F16 variant of
+//! `QuantizedTensor`. Production F16 weights are rare; this kernel is
+//! mostly a placeholder until the AVX2/NEON F16 path lands.
 
 use super::Kernel;
 
