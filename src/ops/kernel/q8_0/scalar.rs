@@ -87,7 +87,7 @@ pub fn q8_0_dot_row(
     if crate::ops::matmul::has_neon() {
         let mut output = [0.0];
         unsafe {
-            crate::ops::matmul::matmul_q8_0_vs_q8_0_neon(
+            super::neon::matmul_q8_0_vs_q8_0_neon(
                 weight,
                 input_q8,
                 input_scales,

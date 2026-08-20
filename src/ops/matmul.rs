@@ -10,128 +10,6 @@ use super::quant::q8_0::quantize_q8_0_into;
 use super::rope::{rope_mrope, rope_neox};
 use super::vec_mad_f16_f32;
 
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn dot_i8x32_neon(a: *const u8, b: *const u8) -> i32 {
-    use std::arch::aarch64::*;
-    let a0 = vld1q_s8(a as *const i8);
-    let b0 = vld1q_s8(b as *const i8);
-    let a1 = vld1q_s8(a.add(16) as *const i8);
-    let b1 = vld1q_s8(b.add(16) as *const i8);
-    let p0 = vaddq_s32(
-        vpaddlq_s16(vmull_s8(vget_low_s8(a0), vget_low_s8(b0))),
-        vpaddlq_s16(vmull_high_s8(a0, b0)),
-    );
-    let p1 = vaddq_s32(
-        vpaddlq_s16(vmull_s8(vget_low_s8(a1), vget_low_s8(b1))),
-        vpaddlq_s16(vmull_high_s8(a1, b1)),
-    );
-    vaddvq_s32(vaddq_s32(p0, p1))
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn dot_i8x32_lanes_neon(a: *const u8, b: *const u8) -> std::arch::aarch64::int32x4_t {
-    use std::arch::aarch64::*;
-    let a0 = vld1q_s8(a as *const i8);
-    let b0 = vld1q_s8(b as *const i8);
-    let a1 = vld1q_s8(a.add(16) as *const i8);
-    let b1 = vld1q_s8(b.add(16) as *const i8);
-    let dot16 = |a: int8x16_t, b: int8x16_t| {
-        vpaddq_s32(
-            vpaddlq_s16(vmull_s8(vget_low_s8(a), vget_low_s8(b))),
-            vpaddlq_s16(vmull_high_s8(a, b)),
-        )
-    };
-    vaddq_s32(dot16(a0, b0), dot16(a1, b1))
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn matmul_q8_0_vs_q8_0_neon(
-    weight: &[u8],
-    input_q8: &[u8],
-    input_scales: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    let blocks = n_in / 32;
-    let stride = blocks * 34;
-    for (out_idx, row) in (row_start..row_end).enumerate() {
-        let mut sum = 0.0f32;
-        for block in 0..blocks {
-            let off = row * stride + block * 34;
-            let wd = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
-            let dot = dot_i8x32_neon(
-                weight.as_ptr().add(off + 2),
-                input_q8.as_ptr().add(block * 32),
-            );
-            sum = (dot as f32).mul_add(wd * input_scales[block], sum);
-        }
-        output[out_idx] = sum;
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn matmul_q8_0_vs_q8_0_neon_nrc1(
-    weight: &[u8],
-    input_q8: &[u8],
-    input_scales: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    use std::arch::aarch64::*;
-    let blocks = n_in / 32;
-    let stride = blocks * 34;
-    for (out_idx, row) in (row_start..row_end).enumerate() {
-        let mut sum0 = vdupq_n_f32(0.0);
-        let mut sum1 = vdupq_n_f32(0.0);
-        let mut block = 0;
-        while block + 1 < blocks {
-            let off0 = row * stride + block * 34;
-            let off1 = off0 + 34;
-            let scale0 = f16_to_f32(u16::from_le_bytes([weight[off0], weight[off0 + 1]]))
-                * input_scales[block];
-            let scale1 = f16_to_f32(u16::from_le_bytes([weight[off1], weight[off1 + 1]]))
-                * input_scales[block + 1];
-            sum0 = vfmaq_n_f32(
-                sum0,
-                vcvtq_f32_s32(dot_i8x32_lanes_neon(
-                    weight.as_ptr().add(off0 + 2),
-                    input_q8.as_ptr().add(block * 32),
-                )),
-                scale0,
-            );
-            sum1 = vfmaq_n_f32(
-                sum1,
-                vcvtq_f32_s32(dot_i8x32_lanes_neon(
-                    weight.as_ptr().add(off1 + 2),
-                    input_q8.as_ptr().add((block + 1) * 32),
-                )),
-                scale1,
-            );
-            block += 2;
-        }
-        let mut sum = vaddvq_f32(sum0) + vaddvq_f32(sum1);
-        if block < blocks {
-            let off = row * stride + block * 34;
-            let scale = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]))
-                * input_scales[block];
-            sum += dot_i8x32_neon(
-                weight.as_ptr().add(off + 2),
-                input_q8.as_ptr().add(block * 32),
-            ) as f32
-                * scale;
-        }
-        output[out_idx] = sum;
-    }
-}
-
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 unsafe fn matmul_q8_0_vs_q8_0_avx2(
@@ -333,7 +211,7 @@ pub fn matmul_q8_0_via_q8(
     {
         if has_neon() {
             unsafe {
-                matmul_q8_0_vs_q8_0_neon(weight, q8_buf, scale_buf, output, n_in, 0, n_out);
+                super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(weight, q8_buf, scale_buf, output, n_in, 0, n_out);
             }
             return;
         }
@@ -395,7 +273,7 @@ pub fn matmul_q8_0_quantized(
     {
         if has_neon() {
             unsafe {
-                matmul_q8_0_vs_q8_0_neon(weight, input_q8, input_scales, output, n_in, 0, n_out);
+                super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(weight, input_q8, input_scales, output, n_in, 0, n_out);
             }
             return;
         }
@@ -616,7 +494,7 @@ pub fn matmul_q8_0_quantized_range(
     #[cfg(target_arch = "aarch64")]
     if has_neon() {
         unsafe {
-            matmul_q8_0_vs_q8_0_neon(
+            super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(
                 weight,
                 input_q8,
                 input_scales,
@@ -652,7 +530,7 @@ pub fn matmul_q8_0_quantized_range_nrc1(
     debug_assert_eq!(output.len(), row_end - row_start);
     if has_neon() {
         unsafe {
-            matmul_q8_0_vs_q8_0_neon_nrc1(
+            super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(
                 weight,
                 input_q8,
                 input_scales,
@@ -729,7 +607,7 @@ fn parallel_range(
         #[cfg(target_arch = "aarch64")]
         if has_neon() {
             unsafe {
-                matmul_q8_0_vs_q8_0_neon(
+                super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(
                     weight,
                     input_q8,
                     input_scales,
@@ -1182,7 +1060,7 @@ mod neon_tests {
         let mut output = [0.0f32];
 
         unsafe {
-            matmul_q8_0_vs_q8_0_neon(&weights, &input_q8, &input_scales, &mut output, 64, 0, 1);
+            super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &input_q8, &input_scales, &mut output, 64, 0, 1);
         }
 
         assert_eq!(output[0].to_bits(), 0x3d1c_c57d);
@@ -1465,7 +1343,7 @@ mod neon_tests {
         let mut scalar = vec![0.0f32; 5];
         let mut neon = vec![0.0f32; 5];
         super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
-        unsafe { matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
+        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
         for i in 0..5 {
             assert_close(neon[i], scalar[i]);
         }
@@ -1481,7 +1359,7 @@ mod neon_tests {
         let mut scales = vec![0.0f32; n_in / 32];
         quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
         let mut actual = vec![0.0; 3];
-        unsafe { matmul_q8_0_vs_q8_0_neon_nrc1(&weights, &q8, &scales, &mut actual, n_in, 0, 3) };
+        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(&weights, &q8, &scales, &mut actual, n_in, 0, 3) };
 
         let stride = n_in / 32 * 34;
         for row in 0..3 {
