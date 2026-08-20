@@ -11,7 +11,14 @@
 
 use super::Kernel;
 use crate::core::tensor::GGMLType;
-use crate::ops::matmul::{Q6_KWeight};
+
+/// Q6_K weight buffer: 256-element super-blocks, 210 bytes each.
+#[derive(Debug, Clone, Copy)]
+pub struct Q6_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q6_KKernel<'a> {

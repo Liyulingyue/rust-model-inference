@@ -6,7 +6,17 @@
 //! kernel can be dispatched inside a `pool.compute` closure.
 
 use super::Kernel;
-use crate::ops::matmul::Q4_0Weight;
+
+/// Q4_0 weight buffer: 32-element blocks, 18-byte layout
+/// (2-byte F16 scale + 16-byte nibbles).
+///
+/// Phase 2.7-final: moved from `ops::matmul` to live alongside `Q4_0Kernel`.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_0Weight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_0Kernel<'a> {

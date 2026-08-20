@@ -98,11 +98,11 @@ pub struct F16Weight<'a> {
 }
 
 /// Concrete weight types for each Kernel impl.
-pub use crate::ops::matmul::Q4_0Weight;
-pub use crate::ops::matmul::Q4_1Weight;
-pub use crate::ops::matmul::Q6_KWeight;
-pub use crate::ops::matmul::Q4_KWeight;
-pub use crate::ops::matmul::Q5_KWeight;
+pub use crate::ops::kernel::q4_0::Q4_0Weight;
+pub use crate::ops::kernel::q4_1::Q4_1Weight;
+pub use crate::ops::kernel::q6_k::Q6_KWeight;
+pub use crate::ops::kernel::q4_k::Q4_KWeight;
+pub use crate::ops::kernel::q5_k::Q5_KWeight;
 
 /// Unified enum of supported quantized weight formats. Produces a
 /// `Box<dyn Kernel>` via [`QuantizedTensor::into_kernel`].

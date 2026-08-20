@@ -4,7 +4,17 @@
 //! (2-byte F16 scale + 2-byte F16 min + 16-byte nibbles).
 
 use super::Kernel;
-use crate::ops::matmul::Q4_1Weight;
+
+/// Q4_1 weight buffer: 32-element blocks, 20-byte layout
+/// (2-byte F16 scale + 2-byte F16 min + 16-byte nibbles).
+///
+/// Phase 2.7-final: moved from `ops::matmul` to live alongside `Q4_1Kernel`.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_1Weight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_1Kernel<'a> {

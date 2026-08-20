@@ -6,7 +6,14 @@
 
 use super::Kernel;
 
-pub use crate::ops::matmul::Q5_KWeight;
+/// Q5_K weight buffer: 256-element super-blocks, 176 bytes each.
+/// Placeholder for future Q5_K_M production path.
+#[derive(Debug, Clone, Copy)]
+pub struct Q5_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 pub struct Q5_KKernel<'a> {
     pub weight: &'a [u8],

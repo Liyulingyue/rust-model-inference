@@ -11,7 +11,15 @@
 
 use super::Kernel;
 
-pub use crate::ops::matmul::Q4_KWeight;
+/// Q4_K weight buffer: 256-element super-blocks, 144 bytes each.
+/// Placeholder for future Q4_K_M production path; currently the
+/// production Q4_K_M / Q5_K_M path goes through `QuantizedLinear::forward_dequant`.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 pub struct Q4_KKernel<'a> {
     pub weight: &'a [u8],
