@@ -1,4 +1,6 @@
-﻿use crate::core::loader::model_config_from_source;
+﻿use crate::core::loader::{
+    check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs,
+};
 use crate::core::tensor::{
     GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
 };
@@ -34,93 +36,46 @@ pub struct Qwen3Config {
 }
 
 impl Qwen3Config {
-    fn from_source(source: &dyn TensorSource, tokenizer_vocab: usize) -> Result<Self, String> {
-        let architecture = source
-            .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val)
-            .ok_or_else(|| "Missing metadata: general.architecture".to_string())?;
-        if !matches!(architecture, "qwen2" | "qwen3" | "qwen3vl" | "llama" | "hunyuan-dense") {
-            return Err(format!("Unsupported architecture: {architecture}"));
-        }
-
+    /// Build a `Qwen3Config` from a GGUF tensor source.
+    ///
+    /// Phase 4c: architecture dispatch (which architectures are accepted, which
+    /// rope flavor they use, which dimensional configurations are allowed)
+    /// lives in [`crate::core::loader::qwen3_arch_knobs`]. This function now
+    /// only composes the per-arch knobs with the dimensional configuration
+    /// produced by [`model_config_from_source`].
+    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let config = model_config_from_source(source)?;
-        if config.vocab_size != tokenizer_vocab {
-            return Err(format!(
-                "{architecture}.vocab_size {} does not match tokenizer vocab {tokenizer_vocab}",
-                config.vocab_size
-            ));
-        }
-        if config.n_head_kv == 0 || config.n_head % config.n_head_kv != 0 {
-            return Err(format!(
-                "Invalid {architecture} grouped-query heads: head_count={}, head_count_kv={}",
-                config.n_head, config.n_head_kv
-            ));
-        }
-        if config.n_embd == 0
-            || config.n_layer == 0
-            || config.n_ff == 0
-            || config.vocab_size == 0
-            || config.n_ctx == 0
-        {
-            return Err(format!("Invalid zero-sized {architecture} configuration"));
-        }
-        if !config.norm_eps.is_finite()
-            || config.norm_eps <= 0.0
-            || !config.rope_freq_base.is_finite()
-            || config.rope_freq_base <= 0.0
-        {
-            return Err(format!(
-                "Invalid {architecture} normalization or RoPE metadata"
-            ));
-        }
+        let knobs = qwen3_arch_knobs(source)?;
 
-        let n_embd_head_k =
-            optional_usize(source, &format!("{architecture}.attention.key_length"))?
-                .unwrap_or(config.n_embd_head);
+        // Per-arch head dimensions (Qwen3 / Qwen3-VL expose these explicitly;
+        // other architectures fall back to n_embd / n_head).
+        let n_embd_head_k = optional_usize(source, &format!("{}.attention.key_length", knobs.arch))?
+            .unwrap_or(config.n_embd_head);
         let n_embd_head_v =
-            optional_usize(source, &format!("{architecture}.attention.value_length"))?
+            optional_usize(source, &format!("{}.attention.value_length", knobs.arch))?
                 .unwrap_or(config.n_embd_head);
         if n_embd_head_k == 0 || n_embd_head_v == 0 {
             return Err(format!(
-                "Invalid {architecture} attention head lengths: key={n_embd_head_k}, value={n_embd_head_v}"
+                "Invalid {} attention head lengths: key={n_embd_head_k}, value={n_embd_head_v}",
+                knobs.arch
             ));
         }
 
-        let has_qk_norm = matches!(architecture, "qwen3" | "qwen3vl" | "hunyuan-dense");
-        let rope = if architecture == "qwen3vl" {
-            let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
-            if sections != [24, 20, 20, 0] {
-                return Err(format!(
-                    "Unsupported qwen3vl.rope.dimension_sections: {sections:?}"
-                ));
-            }
-            Qwen3Rope::Interleaved {
-                sections,
-                n_dims: n_embd_head_k,
-            }
-        } else {
-            Qwen3Rope::Neox
-        };
-
-        if architecture == "qwen3vl"
-            && (
-                config.n_embd,
-                config.n_layer,
-                config.n_head,
-                config.n_head_kv,
-                n_embd_head_k,
-                n_embd_head_v,
-                config.n_ff,
-                config.n_ctx,
-                config.norm_eps,
-                config.rope_freq_base,
-            ) != (1024, 28, 16, 8, 128, 128, 3072, 65_536, 1e-6, 1_000_000.0)
-        {
-            return Err("Unsupported qwen3vl main-model configuration".into());
+        // Optional dimensional whitelist (e.g. Qwen3-VL).
+        if let Some(allowed) = knobs.allowed_dimensions {
+            check_qwen3_allowed_dimensions(allowed, &config, n_embd_head_k, n_embd_head_v)?;
         }
 
+        let rope = match knobs.rope_sections {
+            Some(sections) => Qwen3Rope::Interleaved {
+                sections,
+                n_dims: n_embd_head_k,
+            },
+            None => Qwen3Rope::Neox,
+        };
+
         Ok(Self {
-            architecture: architecture.into(),
+            architecture: knobs.arch,
             n_embd: config.n_embd,
             n_layer: config.n_layer,
             n_head: config.n_head,
@@ -132,7 +87,7 @@ impl Qwen3Config {
             n_ctx: config.n_ctx,
             eps: config.norm_eps,
             freq_base: config.rope_freq_base,
-            has_qk_norm,
+            has_qk_norm: knobs.has_qk_norm,
             rope,
         })
     }
@@ -148,23 +103,6 @@ fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>,
     usize::try_from(value)
         .map(Some)
         .map_err(|_| format!("{key} does not fit usize"))
-}
-
-fn read_i32_array(source: &dyn TensorSource, key: &str) -> Result<[i32; 4], String> {
-    let values = match source.metadata(key) {
-        Some(MetaValue::Array(MetaValueType::Int32, values)) => values,
-        _ => return Err(format!("Missing or invalid metadata: {key}")),
-    };
-    let values: Vec<i32> = values
-        .iter()
-        .map(|value| match value {
-            MetaValue::Int32(value) => Ok(*value),
-            _ => Err(format!("Invalid Int32 array value in {key}")),
-        })
-        .collect::<Result<_, _>>()?;
-    values
-        .try_into()
-        .map_err(|values: Vec<i32>| format!("{key} has {} values; expected 4", values.len()))
 }
 
 fn checked_session_capacity(
@@ -310,7 +248,15 @@ impl Qwen3Model {
         tokenizer: Arc<BPETokenizer>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        let config = Qwen3Config::from_source(source.as_ref(), tokenizer.vocab_size())?;
+        let config = Qwen3Config::from_source(source.as_ref())?;
+        if config.vocab != tokenizer.vocab_size() {
+            return Err(format!(
+                "{} vocabulary size {} does not match tokenizer vocab {}",
+                config.architecture,
+                config.vocab,
+                tokenizer.vocab_size()
+            ));
+        }
         let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
         let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
         let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
@@ -1503,7 +1449,7 @@ mod tests {
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
-        let config = Qwen3Config::from_source(&qwen3vl_metadata_source(), 151_936).unwrap();
+        let config = Qwen3Config::from_source(&qwen3vl_metadata_source()).unwrap();
         assert!(config.has_qk_norm);
         assert_eq!(
             config.rope,

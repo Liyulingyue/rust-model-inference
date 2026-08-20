@@ -419,6 +419,12 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             .and_then(MetaValue::to_f64)
             .ok_or_else(|| format!("Missing metadata: {key}"))
     };
+    let get_f64_opt = |key: &str, default: f64| -> Result<f64, String> {
+        Ok(source
+            .metadata(key)
+            .and_then(MetaValue::to_f64)
+            .unwrap_or(default))
+    };
     let n_embd = usize::try_from(get_u64(&format!("{prefix}.embedding_length"))?)
         .map_err(|_| format!("{prefix}.embedding_length does not fit usize"))?;
     let n_head = usize::try_from(get_u64(&format!("{prefix}.attention.head_count"))?)
@@ -449,7 +455,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .map(Vec::len)
                 .unwrap_or(0),
         },
-        rope_freq_base: get_f64(&format!("{prefix}.rope.freq_base"))? as f32,
+        rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
         norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon"))? as f32,
     })
 }
@@ -465,6 +471,175 @@ impl TensorSource for GGUFLoader {
 
     fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
         GGUFLoader::tensor_slice(self, name)
+    }
+}
+
+/// Architecture-specific knobs derived from `general.architecture` for the
+/// Qwen3 model family (Qwen2/Qwen3/Qwen3-VL/Qwen3.5/LLaMA/Hunyuan-Dense).
+///
+/// Phase 4c: extracted from `models::qwen3::Qwen3Config::from_source` so that
+/// architecture dispatch lives next to the GGUF metadata it interprets, rather
+/// than inside a model implementation that historically knew too much about
+/// other architectures.
+pub struct Qwen3ArchKnobs {
+    /// Canonical architecture name (`"qwen3"`, `"qwen3vl"`, ...).
+    pub arch: String,
+    /// Whether per-head Q/K RMSNorm is applied.
+    pub has_qk_norm: bool,
+    /// Multi-modal rope sections for Qwen3-VL. `None` means Neox rope.
+    /// Callers using the Interleaved variant must combine these sections
+    /// with the model's `n_embd_head_k` to build the final rope flavor.
+    pub rope_sections: Option<[i32; 4]>,
+    /// Optional whitelist of acceptable dimensional configurations per arch.
+    /// `None` means any configuration derived from `model_config_from_source`
+    /// is accepted (e.g. Qwen3 base).
+    pub allowed_dimensions: Option<Qwen3AllowedDimensions>,
+}
+
+/// Concrete dimensional constraints for an architecture whose variants are
+/// not yet enumerated individually. When present, configs that do not match
+/// are rejected — this surfaces the fact that we only support a fixed set of
+/// model sizes for that architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen3AllowedDimensions {
+    pub n_embd: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_embd_head_k: usize,
+    pub n_embd_head_v: usize,
+    pub n_ff: usize,
+    pub n_ctx: usize,
+    /// f32 stored as bits to avoid float-equality noise on cross-platform
+    /// builds.
+    pub norm_eps_bits: u32,
+    pub freq_base_bits: u32,
+}
+
+/// The single Qwen3-VL main-model configuration currently supported
+/// (1024-dim, 28-layer, 65 k context, 1e-6 / 1e6 RoPE base).
+const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 1024,
+    n_layer: 28,
+    n_head: 16,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 3072,
+    n_ctx: 65_536,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 1_000_000_f32.to_bits(),
+};
+
+/// Resolve the Qwen3-family knobs from `general.architecture`.
+///
+/// This is the **single** place where architecture dispatch happens. It is
+/// called by `models::qwen3::Qwen3Config::from_source` after
+/// `model_config_from_source` has produced the dimension set; together they
+/// replace the older `Qwen3Config::from_source` that hardcoded the arch list
+/// inside the model file.
+pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
+    source: &S,
+) -> Result<Qwen3ArchKnobs, String> {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .ok_or_else(|| "Missing metadata: general.architecture".to_string())?
+        .to_string();
+    if !matches!(
+        arch.as_str(),
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense"
+    ) {
+        return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
+    }
+
+    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense");
+
+    let rope_sections = if arch == "qwen3vl" {
+        let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
+        if sections != [24, 20, 20, 0] {
+            return Err(format!(
+                "Unsupported qwen3vl.rope.dimension_sections: {sections:?}"
+            ));
+        }
+        Some(sections)
+    } else {
+        None
+    };
+
+    let allowed_dimensions = if arch == "qwen3vl" {
+        Some(KNOWN_QWEN3VL_DIMENSIONS)
+    } else {
+        None
+    };
+
+    Ok(Qwen3ArchKnobs {
+        arch,
+        has_qk_norm,
+        rope_sections,
+        allowed_dimensions,
+    })
+}
+
+/// Read an `[i32; 4]` array from a GGUF metadata key.
+pub(crate) fn read_i32_array<S: TensorSource + ?Sized>(
+    source: &S,
+    key: &str,
+) -> Result<[i32; 4], String> {
+    let value = source
+        .metadata(key)
+        .ok_or_else(|| format!("Missing metadata: {key}"))?;
+    let MetaValue::Array(_, items) = value else {
+        return Err(format!("{key} is not an array"));
+    };
+    if items.len() != 4 {
+        return Err(format!("{key} expected 4 entries, got {}", items.len()));
+    }
+    let mut out = [0i32; 4];
+    for (i, item) in items.iter().enumerate() {
+        out[i] = item
+            .to_u64()
+            .ok_or_else(|| format!("{key}[{i}] is not an integer"))?
+            as i32;
+    }
+    Ok(out)
+}
+
+/// Check that the supplied dimensions match the allowed whitelist. Returns
+/// `Ok(())` if `allowed` is `None` or if the values all match.
+pub(crate) fn check_qwen3_allowed_dimensions(
+    allowed: Qwen3AllowedDimensions,
+    config: &crate::core::traits::ModelConfig,
+    n_embd_head_k: usize,
+    n_embd_head_v: usize,
+) -> Result<(), String> {
+    if config.n_embd == allowed.n_embd
+        && config.n_layer == allowed.n_layer
+        && config.n_head == allowed.n_head
+        && config.n_head_kv == allowed.n_head_kv
+        && n_embd_head_k == allowed.n_embd_head_k
+        && n_embd_head_v == allowed.n_embd_head_v
+        && config.n_ff == allowed.n_ff
+        && config.n_ctx == allowed.n_ctx
+        && config.norm_eps.to_bits() == allowed.norm_eps_bits
+        && config.rope_freq_base.to_bits() == allowed.freq_base_bits
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unsupported main-model configuration: expected {:?}, got n_embd={} n_layer={} n_head={} n_head_kv={} n_embd_head_k={} n_embd_head_v={} n_ff={} n_ctx={} norm_eps={} freq_base={}",
+            allowed,
+            config.n_embd,
+            config.n_layer,
+            config.n_head,
+            config.n_head_kv,
+            n_embd_head_k,
+            n_embd_head_v,
+            config.n_ff,
+            config.n_ctx,
+            config.norm_eps,
+            config.rope_freq_base
+        ))
     }
 }
 
