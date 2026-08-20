@@ -29,6 +29,7 @@ pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     if decoder.config().architecture != "qwen3vl" {
         return Err("--audio requires a qwen3vl decoder".into());
     }
+    let load_decoder_done = started.elapsed();
     let audio_source: Arc<dyn TensorSource> = match options.mmproj.as_deref() {
         Some(path) => Arc::from(
             open_or_exit(path, ComponentRole::Mmproj),
@@ -37,18 +38,26 @@ pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
             .ok_or("raw GGUF ASR requires --mmproj")?,
     };
     let runtime = AsrRuntime::new(decoder, audio_source).map_err(|error| error.to_string())?;
+    let load_runtime_done = started.elapsed();
     let audio = options.audio.as_ref().expect("validated audio option");
     let wav = std::fs::read(audio)
         .map_err(|error| format!("Failed to read {}: {error}", audio.display()))?;
     let result = runtime
         .transcribe_wav(&wav, &transcription_options(options))
         .map_err(|error| error.to_string())?;
+    let total = started.elapsed();
     eprintln!(
         "ASR: {} prompt tokens, {} audio tokens, {} output tokens in {:.3}s",
         result.prompt_tokens,
         result.audio_tokens,
         result.token_ids.len(),
-        started.elapsed().as_secs_f64(),
+        total.as_secs_f64(),
+    );
+    eprintln!(
+        "    load_decoder={:.3}s load_runtime={:.3}s transcribe={:.3}s",
+        load_decoder_done.as_secs_f64(),
+        (load_runtime_done - load_decoder_done).as_secs_f64(),
+        (total - load_runtime_done).as_secs_f64(),
     );
     println!("{}", result.text);
     Ok(())

@@ -185,9 +185,18 @@ impl AsrRuntime {
             ));
         }
 
+        let t0 = std::time::Instant::now();
         let samples = decode_pcm16_wav(wav).map_err(map_audio_error)?;
+        let t1 = std::time::Instant::now();
         let windows = log_mel_windows(&samples).map_err(map_audio_error)?;
+        let t2 = std::time::Instant::now();
+        eprintln!(
+            "    [asr-timing] audio: {} mel windows for {} samples",
+            windows.len(),
+            samples.len(),
+        );
         let audio = self.audio.encode(&windows).map_err(internal)?;
+        let t3 = std::time::Instant::now();
         let prompt = build_asr_prompt(
             self.decoder.tokenizer(),
             self.decoder.config().n_ctx,
@@ -201,6 +210,7 @@ impl AsrRuntime {
             self.decoder.config().n_ctx,
         )?;
         let embeddings = replace_audio_embeddings(&self.decoder, &prompt, &audio)?;
+        let t4 = std::time::Instant::now();
         let generation = self
             .decoder
             .generate_asr(
@@ -215,7 +225,16 @@ impl AsrRuntime {
                 },
             )
             .map_err(internal)?;
+        let t5 = std::time::Instant::now();
         let (text, language) = parse_model_output(&generation.text, forced_language)?;
+        eprintln!(
+            "    [asr-timing] decode_wav={:.3}s mel={:.3}s audio_encode={:.3}s prompt+embed={:.3}s llm_generate={:.3}s (prefill+decode)",
+            (t1 - t0).as_secs_f64(),
+            (t2 - t1).as_secs_f64(),
+            (t3 - t2).as_secs_f64(),
+            (t4 - t3).as_secs_f64(),
+            (t5 - t4).as_secs_f64(),
+        );
         Ok(Transcription {
             text,
             language,
