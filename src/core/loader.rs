@@ -388,7 +388,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense" | "pig") {
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig") {
         return Err(format!("Unsupported architecture: {arch}"));
     }
 
@@ -548,7 +548,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         .to_string();
     if !matches!(
         arch.as_str(),
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama" | "hunyuan-dense"
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
     }

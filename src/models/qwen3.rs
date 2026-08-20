@@ -43,7 +43,7 @@ impl Qwen3Config {
     /// lives in [`crate::core::loader::qwen3_arch_knobs`]. This function now
     /// only composes the per-arch knobs with the dimensional configuration
     /// produced by [`model_config_from_source`].
-    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+    pub(crate) fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let config = model_config_from_source(source)?;
         let knobs = qwen3_arch_knobs(source)?;
 
@@ -1239,7 +1239,7 @@ pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), 
     Ok(())
 }
 
-fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
+pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
     if temperature == 0.0 {
         return greedy_token(logits);
     }
@@ -1271,7 +1271,7 @@ fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
     u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
 }
 
-fn static_q8_matrix(
+pub(crate) fn static_q8_matrix(
     source: &Arc<dyn TensorSource>,
     name: &str,
     columns: usize,
@@ -1287,7 +1287,7 @@ fn static_q8_matrix(
     )
 }
 
-fn static_q8_tensor(
+pub(crate) fn static_q8_tensor(
     source: &Arc<dyn TensorSource>,
     name: &str,
     dims: &[u64],
@@ -1298,7 +1298,7 @@ fn static_q8_tensor(
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-fn static_tensor(
+pub(crate) fn static_tensor(
     source: &Arc<dyn TensorSource>,
     name: &str,
     dims: &[u64],
@@ -1310,7 +1310,7 @@ fn static_tensor(
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-fn load_f32_tensor(
+pub(crate) fn load_f32_tensor(
     source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
@@ -1324,7 +1324,7 @@ fn load_f32_tensor(
         .collect())
 }
 
-fn checked_tensor<'a>(
+pub(crate) fn checked_tensor<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
@@ -1361,7 +1361,7 @@ pub(crate) fn checked_product(name: &str, left: usize, right: usize) -> Result<u
         .ok_or_else(|| format!("{name} overflows usize"))
 }
 
-fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), String> {
+pub(crate) fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), String> {
     let bytes = checked_product(name, len, element_bytes)?;
     if bytes > isize::MAX as usize {
         return Err(format!("{name} allocation is too large"));
@@ -1369,7 +1369,7 @@ fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), 
     Ok(())
 }
 
-fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
+pub(crate) fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("{name} does not fit u64"))
 }
 

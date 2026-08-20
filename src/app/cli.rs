@@ -38,6 +38,8 @@ pub struct CliOptions {
     pub profile: bool,
     pub kv_format: KvFormat,
     pub gpu: bool,
+    pub tts: bool,
+    pub out: Option<PathBuf>,
 }
 
 pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -216,6 +218,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .filter(|value| !value.starts_with("--"))
                     .ok_or("Missing value for --language")?;
                 options.language = Some(value.clone());
+                i += 1;
+            }
+            "--tts" => options.tts = true,
+            "--out" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --out")?;
+                options.out = Some(value.as_str().into());
                 i += 1;
             }
             _ => {

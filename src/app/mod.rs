@@ -5,6 +5,7 @@ pub(crate) mod image;
 pub(crate) mod logits;
 pub(crate) mod selftest;
 pub(crate) mod text;
+pub(crate) mod tts;
 
 pub use audio::run_asr_cli;
 pub use cli::{parse_cli_options, validate_cli_options, resolve_cli_generation_options, transcription_options, resolve_thread_count, validate_qwen3vl_decoder_mode, CliOptions, EmbeddingOutput, KvFormat, DEFAULT_THREAD_CAP, per_second, inference_step_budget};
@@ -13,6 +14,7 @@ pub use image::run_pig_image;
 pub use logits::run_dump_logits;
 pub use selftest::run_self_test;
 pub use text::{run_inference, run_interactive, run_shared_inference, run_multimodal};
+pub use tts::run_tts_cli;
 
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::{GGMLType, TensorSource};
