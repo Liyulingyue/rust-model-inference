@@ -8,7 +8,6 @@ pub mod clip_config;
 pub mod core;
 pub mod ggufrs;
 pub mod load_plan;
-pub mod memory;
 pub mod ops;
 pub mod pig;
 #[cfg(feature = "parity-trace")]
@@ -18,10 +17,6 @@ pub mod prompt;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen3a;
-pub mod scratchpad;
-pub mod thread_pool;
-pub mod tokenizer;
-pub mod traits;
 pub mod vision;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
@@ -38,10 +33,14 @@ pub use load_plan::{
     build_load_plan, load_logical_cpu, LoadPlan, LogicalCpuDeviceLoad, LogicalCpuLoad,
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
-pub use memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
 pub use core::loader::{model_config_from_source, GGUFLoader};
+pub use core::memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
 pub use core::model::{ModelGraph, QuantizedLinear};
+pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32};
 pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
+pub use core::thread_pool::ComputePool;
+pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
+pub use core::traits::{ExecContext, Layer, ModelConfig};
 
 /// Backward-compatibility facade re-exporting everything that used to live
 /// in `src/model.rs`. New code should prefer `crate::core::{tensor,loader,model}`.
@@ -50,6 +49,36 @@ pub mod model {
     pub use crate::core::loader::*;
     pub use crate::core::model::*;
     pub use crate::core::tensor::*;
+}
+
+/// Backward-compatibility facade for `src/memory.rs` (Phase 5A).
+#[deprecated(note = "use crate::core::memory instead")]
+pub mod memory {
+    pub use crate::core::memory::*;
+}
+
+/// Backward-compatibility facade for `src/thread_pool.rs` (Phase 5A).
+#[deprecated(note = "use crate::core::thread_pool instead")]
+pub mod thread_pool {
+    pub use crate::core::thread_pool::*;
+}
+
+/// Backward-compatibility facade for `src/scratchpad.rs` (Phase 5A).
+#[deprecated(note = "use crate::core::scratchpad instead")]
+pub mod scratchpad {
+    pub use crate::core::scratchpad::*;
+}
+
+/// Backward-compatibility facade for `src/traits.rs` (Phase 5A).
+#[deprecated(note = "use crate::core::traits instead")]
+pub mod traits {
+    pub use crate::core::traits::*;
+}
+
+/// Backward-compatibility facade for `src/tokenizer.rs` (Phase 5A).
+#[deprecated(note = "use crate::core::tokenizer instead")]
+pub mod tokenizer {
+    pub use crate::core::tokenizer::*;
 }
 pub use ops::*;
 pub use prompt::{
@@ -65,7 +94,4 @@ pub mod quant {
 pub use qwen3::*;
 pub use qwen35::{build_qwen35_positions, Qwen35Model};
 pub use pig::{PigConfig, PigModel, PigVAE};
-pub use scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32};
-pub use tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
-pub use traits::{ExecContext, Layer, ModelConfig};
 pub use vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};

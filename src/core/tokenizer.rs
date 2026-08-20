@@ -758,7 +758,7 @@ fn build_byte_encoder() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MetaValue, MetaValueType};
+use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {
