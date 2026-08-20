@@ -10,6 +10,7 @@
 //!
 //! Stage 1 ships only the Talker; the codec decoder is added in Stage 2.
 
+pub mod codec;
 pub mod talker;
 
 pub use talker::{Qwen3TtsTalker, Qwen3TtsTalkerConfig, Qwen3TtsGeneration};
