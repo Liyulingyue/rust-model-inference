@@ -1,10 +1,8 @@
 ﻿use crate::format::ggufrs::{ComponentRole, GgufrsFile};
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::models::qwen3a::{
-    decode_pcm16_wav, log_mel_windows, validate_qwen3a_source, AsrAudioError, AudioEmbeddings,
-    Qwen3AudioModel,
-};
+use crate::models::qwen3a::audio_processor::{decode_pcm16_wav, log_mel_windows, AsrAudioError};
+use crate::models::qwen3a::model::{validate_qwen3a_source, AudioEmbeddings, Qwen3AudioModel};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use std::fs::File;
 use std::io::Read;
