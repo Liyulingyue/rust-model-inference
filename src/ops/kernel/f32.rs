@@ -25,16 +25,18 @@ impl Kernel for F32Kernel {
         _input_scales: &[f32],
         output: &mut [f32],
         n_out: usize,
-        _n_in: usize,
-        _ith: usize,
-        _nth: usize,
+        n_in: usize,
+        ith: usize,
+        nth: usize,
     ) {
-        // F32 in LayerWeights is not on the production path. Zeroing is
-        // a safe placeholder; if F32 weights ever land in LayerWeights
-        // this should be replaced with a true Q8→f32 dequant + f32 matmul.
-        for slot in output.iter_mut().take(n_out) {
-            *slot = 0.0;
-        }
+        matmul_f32_scalar_range(
+            &self.weight,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
     }
 
     /// F32 has a native f32-input path. The trait default impl quantizes
@@ -72,6 +74,37 @@ impl Kernel for F32Kernel {
                 n_out,
             );
         }
+    }
+}
+
+/// F32 scalar matmul kernel. Phase 2.7-final: moved from `ops::matmul`.
+///
+/// Stub: only sums each row of the weight matrix. Real f32×f32 dot
+/// product happens via `Kernel::forward` (which overrides this and uses
+/// the f32-input path). Kept for completeness so a `Box<dyn Kernel>`
+/// containing an F32 kernel still produces something deterministic rather
+/// than zeros in the LayerWeights hot path.
+pub fn matmul_f32_scalar_range(
+    weight: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    let per_thread = (n_out + nth - 1) / nth;
+    let my_start = ith * per_thread;
+    let my_end = (my_start + per_thread).min(n_out);
+    if my_start >= my_end {
+        return;
+    }
+    for out_idx in my_start..my_end {
+        let mut sum = 0.0f32;
+        let row_off = out_idx * n_in;
+        for col in 0..n_in {
+            sum += weight[row_off + col];
+        }
+        output[out_idx] = sum;
     }
 }
 
