@@ -1,4 +1,4 @@
-//! Kernel trait + reserved type abstractions for future matmul dispatch.
+﻿//! Kernel trait + reserved type abstractions for future matmul dispatch.
 //!
 //! Phase 2.1: This module defines the **type skeleton only** — no behavior
 //! changes. The `QuantizedTensor` enum and weight structs reserve the
@@ -27,7 +27,7 @@ pub mod q4_1;
 pub mod q6_k;
 pub mod q8_0;
 
-use crate::model::GGMLType;
+use crate::core::tensor::GGMLType;
 
 /// Core matmul kernel interface.
 ///

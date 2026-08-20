@@ -1,15 +1,16 @@
-use crate::app::cli::{resolve_thread_count, per_second, inference_step_budget, KvFormat};
+﻿use crate::app::cli::{resolve_thread_count, per_second, inference_step_budget, KvFormat};
 use crate::app::{LayerWeights, get_f32_tensor, slice_from_mut, slice_from_ref, raw_parts};
-use crate::ggufrs::{open_model_source, ComponentRole};
-use crate::model::{model_config_from_source, GGMLType, TensorSource};
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::core::loader::model_config_from_source;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_inplace, softmax, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
-use crate::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
+use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
+use crate::models::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::models::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use crate::ops::embedding_lookup;
 use std::io::{self, Write};
 use std::path::Path;
@@ -1110,7 +1111,7 @@ pub fn run_multimodal(
     let mut prompt_ids = Vec::new();
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
-    let image_grids: Vec<crate::vision::VisionGrid> = image_grid.iter().copied().collect();
+    let image_grids: Vec<crate::models::vision::VisionGrid> = image_grid.iter().copied().collect();
     let (prompt_positions, mut next_text_position) =
         build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
@@ -1146,13 +1147,13 @@ pub fn run_multimodal(
     );
 
     let max_seq = llm.config.n_ctx;
-    let mut kv_cache = crate::scratchpad::KvCache::new_f32(
+    let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(
         llm.config.n_layer,
         max_seq,
         llm.config.n_embd_head() * llm.config.n_head_kv,
     );
     let mut llm_scratch =
-        crate::qwen35::Qwen35Scratchpad::new(&llm.config, prompt_tokens.len().max(max_tokens));
+        crate::models::qwen35::Qwen35Scratchpad::new(&llm.config, prompt_tokens.len().max(max_tokens));
 
     let prompt_embd = inject_vision_embeddings(
         &llm,

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rust_model_inference::app;
-use rust_model_inference::ggufrs::ComponentRole;
+use rust_model_inference::format::ggufrs::ComponentRole;
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
 use rust_model_inference::MetaValue;

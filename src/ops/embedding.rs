@@ -1,10 +1,10 @@
-//! Embedding lookup functions for quantized token embedding tables.
+﻿//! Embedding lookup functions for quantized token embedding tables.
 
-pub fn embedding_lookup(weight: &[u8], token_id: u32, n_embd: usize, embd_type: crate::model::GGMLType, out: &mut [f32]) {
+pub fn embedding_lookup(weight: &[u8], token_id: u32, n_embd: usize, embd_type: crate::core::tensor::GGMLType, out: &mut [f32]) {
     match embd_type {
-        crate::model::GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
-        crate::model::GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
-        crate::model::GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
+        crate::core::tensor::GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
+        crate::core::tensor::GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
+        crate::core::tensor::GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
         _ => panic!("unsupported embedding type {:?}", embd_type),
     }
 }

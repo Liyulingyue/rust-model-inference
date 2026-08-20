@@ -1,6 +1,6 @@
-//! GGUF file loader: byte-level GGUF parser, mmap-backed [`GGUFLoader`], and
+﻿//! GGUF file loader: byte-level GGUF parser, mmap-backed [`GGUFLoader`], and
 //! free-function [`model_config_from_source`] that derives a
-//! [`crate::traits::ModelConfig`] from GGUF metadata.
+//! [`crate::core::traits::ModelConfig`] from GGUF metadata.
 //!
 //! Depends on [`crate::core::tensor`] for the value types it produces.
 
@@ -12,7 +12,7 @@ use crate::core::tensor::{
     GGMLType, GGUF_DEFAULT_ALIGNMENT, GGUF_MAGIC, MetaValue, MetaValueType, TensorInfo,
     TensorSource,
 };
-use crate::traits::ModelConfig;
+use crate::core::traits::ModelConfig;
 
 pub(crate) struct ByteReader<'a> {
     data: &'a [u8],

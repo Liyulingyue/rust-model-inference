@@ -1,4 +1,4 @@
-use crate::model::{MetaValue, TensorSource};
+﻿use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct ClipVisionConfig {
@@ -374,7 +374,7 @@ impl Qwen35Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MetaValueType;
+    use crate::core::tensor::MetaValueType;
 
     #[test]
     fn qwen35_recurrent_layers_metadata_is_authoritative() {

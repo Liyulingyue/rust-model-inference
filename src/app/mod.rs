@@ -1,4 +1,4 @@
-pub(crate) mod audio;
+﻿pub(crate) mod audio;
 pub(crate) mod cli;
 pub(crate) mod embedding;
 pub(crate) mod image;
@@ -14,8 +14,8 @@ pub use logits::run_dump_logits;
 pub use selftest::run_self_test;
 pub use text::{run_inference, run_interactive, run_shared_inference, run_multimodal};
 
-use crate::ggufrs::{open_model_source, ComponentRole};
-use crate::model::{GGMLType, TensorSource};
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops;
 use std::path::Path;
 

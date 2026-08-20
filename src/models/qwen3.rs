@@ -1,12 +1,13 @@
-use crate::model::{
-    model_config_from_source, GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
+﻿use crate::core::loader::model_config_from_source;
+use crate::core::tensor::{
+    GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
 };
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
-use crate::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::BPETokenizer;
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1703,7 +1704,7 @@ fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use crate::core::tensor::{MetaValue, MetaValueType, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
     #[derive(Default)]

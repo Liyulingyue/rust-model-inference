@@ -1,4 +1,4 @@
-use crate::core::loader::{ByteReader, GGUFLoader};
+﻿use crate::core::loader::{ByteReader, GGUFLoader};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use crate::models::qwen3a::validate_qwen3a_source;
 use memmap2::{Mmap, MmapOptions};
@@ -3351,10 +3351,10 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asr::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
-    use crate::qwen3::Qwen3Model;
-    use crate::thread_pool::ComputePool;
-    use crate::tokenizer::BPETokenizer;
+    use crate::models::asr::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
+    use crate::models::qwen3::Qwen3Model;
+    use crate::core::thread_pool::ComputePool;
+    use crate::core::tokenizer::BPETokenizer;
 
     #[test]
     fn qwen3vl_llm_uses_existing_shared_and_layer_segments() {

@@ -1,4 +1,4 @@
-use crate::model::TensorInfo;
+﻿use crate::core::tensor::TensorInfo;
 
 pub mod q8_0;
 

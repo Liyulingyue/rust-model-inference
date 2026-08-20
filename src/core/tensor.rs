@@ -1,4 +1,4 @@
-//! Tensor primitives: GGMLType enum, GGUF metadata value types, TensorInfo,
+﻿//! Tensor primitives: GGMLType enum, GGUF metadata value types, TensorInfo,
 //! and the [`TensorSource`] trait that abstracts byte-level access to tensor
 //! data regardless of physical storage (mmap, `.ggufrs`, in-memory, etc.).
 //!
@@ -241,7 +241,7 @@ pub trait TensorSource: Send + Sync {
     fn tensor_info(&self, name: &str) -> Option<&TensorInfo>;
     fn tensor_slice(&self, name: &str) -> Option<&[u8]>;
 
-    fn model_config(&self) -> Result<crate::traits::ModelConfig, String> {
+    fn model_config(&self) -> Result<crate::core::traits::ModelConfig, String> {
         crate::core::loader::model_config_from_source(self)
     }
 }

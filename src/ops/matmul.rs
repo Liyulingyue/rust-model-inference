@@ -1,4 +1,4 @@
-use super::dot_f32;
+﻿use super::dot_f32;
 use super::dot_f16_f16_bytes;
 use super::f16_to_f32;
 use super::hsum_ps;
@@ -487,19 +487,19 @@ pub struct Q4_1Weight<'a> {
 }
 
 impl<'a> ProcessedWeight<'a> {
-    pub fn from_bytes(data: &'a [u8], ggml_type: crate::model::GGMLType, n_in: usize, n_out: usize) -> Self {
+    pub fn from_bytes(data: &'a [u8], ggml_type: crate::core::tensor::GGMLType, n_in: usize, n_out: usize) -> Self {
         match ggml_type {
-            crate::model::GGMLType::F32 => {
+            crate::core::tensor::GGMLType::F32 => {
                 let f32_data: Vec<f32> = data
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
                 ProcessedWeight::F32(f32_data)
             }
-            crate::model::GGMLType::Q8_0 => ProcessedWeight::Q8_0(data),
-            crate::model::GGMLType::Q6K => ProcessedWeight::Q6_K(Q6_KWeight { data, n_in, n_out }),
-            crate::model::GGMLType::Q4_0 => ProcessedWeight::Q4_0(Q4_0Weight { data, n_in, n_out }),
-            crate::model::GGMLType::Q4_1 => ProcessedWeight::Q4_1(Q4_1Weight { data, n_in, n_out }),
+            crate::core::tensor::GGMLType::Q8_0 => ProcessedWeight::Q8_0(data),
+            crate::core::tensor::GGMLType::Q6K => ProcessedWeight::Q6_K(Q6_KWeight { data, n_in, n_out }),
+            crate::core::tensor::GGMLType::Q4_0 => ProcessedWeight::Q4_0(Q4_0Weight { data, n_in, n_out }),
+            crate::core::tensor::GGMLType::Q4_1 => ProcessedWeight::Q4_1(Q4_1Weight { data, n_in, n_out }),
             _ => panic!("unsupported weight type {:?} - use Q8_0 model", ggml_type),
         }
     }
@@ -856,7 +856,7 @@ pub fn matmul_q8_0_quantized_dynamic(
     output: &mut [f32],
     n_in: usize,
     n_out: usize,
-    pool: &crate::thread_pool::ComputePool,
+    pool: &crate::core::thread_pool::ComputePool,
 ) {
     if n_out == 0 {
         return;

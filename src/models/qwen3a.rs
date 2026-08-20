@@ -1,10 +1,10 @@
-use crate::model::{GGMLType, MetaValue, TensorSource};
+﻿use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 #[cfg(target_arch = "aarch64")]
 use crate::ops::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_range, quantize_q8_0_into,
 };
-use crate::thread_pool::ComputePool;
+use crate::core::thread_pool::ComputePool;
 use std::sync::Arc;
 
 const SAMPLE_RATE: usize = 16_000;
@@ -2157,7 +2157,7 @@ pub(crate) fn validate_qwen3a_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
     #[test]
@@ -2333,7 +2333,7 @@ mod tests {
         let down = q8_identity_linear(32);
         let mut input = vec![0.0; 32];
         input[0] = 2.0;
-        let pool = crate::thread_pool::ComputePool::new(1);
+        let pool = crate::core::thread_pool::ComputePool::new(1);
         let mut scratch = AudioScratch::new(1, 32, 32, 32).unwrap();
 
         audio_ffn(&input, 1, &up, &down, &pool, &mut scratch).unwrap();
@@ -2379,7 +2379,7 @@ mod tests {
         let input: Vec<f32> = (0..width)
             .map(|index| if index % 2 == 0 { -2.0 } else { 2.0 })
             .collect();
-        let pool = crate::thread_pool::ComputePool::new(1);
+        let pool = crate::core::thread_pool::ComputePool::new(1);
         let mut scratch = AudioScratch::new(1, width, width, width).unwrap();
 
         audio_projector(
@@ -2449,7 +2449,7 @@ mod tests {
                 projection: hidden,
                 epsilon: 1e-5,
             },
-            pool: Arc::new(crate::thread_pool::ComputePool::new(1)),
+            pool: Arc::new(crate::core::thread_pool::ComputePool::new(1)),
             conv: [
                 zero_conv(
                     1,
@@ -3222,7 +3222,7 @@ mod tests {
         let source: Arc<dyn TensorSource> = Arc::new(source);
         let model = Qwen3AudioModel {
             config: Qwen3AudioConfig::from_source(source.as_ref()).unwrap(),
-            pool: Arc::new(crate::thread_pool::ComputePool::new(1)),
+            pool: Arc::new(crate::core::thread_pool::ComputePool::new(1)),
             conv: [
                 load_conv2d(&source, "a.conv2d.1", 1, 480).unwrap(),
                 load_conv2d(&source, "a.conv2d.2", 480, 480).unwrap(),

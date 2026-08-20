@@ -1,10 +1,11 @@
-use crate::app::cli::KvFormat;
+﻿use crate::app::cli::KvFormat;
 use crate::app::{LayerWeights, get_f32_tensor, slice_from_mut, slice_from_ref, raw_parts};
-use crate::model::{model_config_from_source, GGMLType, TensorSource};
+use crate::core::loader::model_config_from_source;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax};
-use crate::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::BPETokenizer;
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use crate::ops::embedding_lookup;
 use std::sync::Arc;
 
@@ -161,7 +162,7 @@ pub fn run_dump_logits(
 
     let prompt_tokens = tokenizer.encode(
         prompt,
-        crate::tokenizer::EncodeOptions {
+        crate::core::tokenizer::EncodeOptions {
             add_special: true,
             parse_special: true,
         },

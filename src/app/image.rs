@@ -1,8 +1,8 @@
-use crate::model::TensorSource;
-use crate::pig;
-use crate::qwen3::Qwen3Model;
-use crate::thread_pool::ComputePool;
-use crate::tokenizer::BPETokenizer;
+﻿use crate::core::tensor::TensorSource;
+use crate::models::diffusion::pig;
+use crate::models::qwen3::Qwen3Model;
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
 use std::time::Instant;
 
