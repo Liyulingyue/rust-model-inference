@@ -56,3 +56,58 @@ pub fn matmul_q8_0_quantized_scalar_range(
         output[out_idx] = sum;
     }
 }
+
+pub fn q8_0_dot_row(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    n_in: usize,
+    row: usize,
+    _use_avx2: bool,
+) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    let blocks_per_row = n_in / 32;
+    #[cfg(target_arch = "x86_64")]
+    let row_stride = blocks_per_row * 34;
+    #[cfg(target_arch = "x86_64")]
+    if _use_avx2 {
+        return unsafe {
+            super::avx2::q8_0_dot_row_avx2(
+                weight,
+                input_q8,
+                input_scales,
+                n_in,
+                row,
+                blocks_per_row,
+                row_stride,
+            )
+        };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::matmul::has_neon() {
+        let mut output = [0.0];
+        unsafe {
+            crate::ops::matmul::matmul_q8_0_vs_q8_0_neon(
+                weight,
+                input_q8,
+                input_scales,
+                &mut output,
+                n_in,
+                row,
+                row + 1,
+            );
+        }
+        return output[0];
+    }
+    let mut output = [0.0];
+    matmul_q8_0_quantized_scalar_range(
+        weight,
+        input_q8,
+        input_scales,
+        &mut output,
+        n_in,
+        row,
+        row + 1,
+    );
+    output[0]
+}

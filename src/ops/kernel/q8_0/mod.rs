@@ -6,6 +6,7 @@
 //! `pool.compute` closure for thread-parallel matmul.
 
 use super::Kernel;
+pub mod avx2;
 pub mod scalar;
 
 /// Q8_0 matmul kernel: `output = weight × input`, both as Q8_0 blocks.
