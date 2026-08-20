@@ -5,10 +5,10 @@ pub use app::run_or_exit;
 pub use app::get_f32_tensor;
 pub mod asr;
 pub mod clip_config;
+pub mod core;
 pub mod ggufrs;
 pub mod load_plan;
 pub mod memory;
-pub mod model;
 pub mod ops;
 pub mod pig;
 #[cfg(feature = "parity-trace")]
@@ -39,10 +39,18 @@ pub use load_plan::{
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
 pub use memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
-pub use model::{
-    model_config_from_source, GGMLType, GGUFLoader, MetaValue, MetaValueType, ModelGraph,
-    QuantizedLinear, TensorInfo, TensorSource,
-};
+pub use core::loader::{model_config_from_source, GGUFLoader};
+pub use core::model::{ModelGraph, QuantizedLinear};
+pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
+
+/// Backward-compatibility facade re-exporting everything that used to live
+/// in `src/model.rs`. New code should prefer `crate::core::{tensor,loader,model}`.
+#[deprecated(note = "use crate::core::{tensor,loader,model} instead")]
+pub mod model {
+    pub use crate::core::loader::*;
+    pub use crate::core::model::*;
+    pub use crate::core::tensor::*;
+}
 pub use ops::*;
 pub use prompt::{
     append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,

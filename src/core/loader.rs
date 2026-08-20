@@ -1,229 +1,18 @@
+//! GGUF file loader: byte-level GGUF parser, mmap-backed [`GGUFLoader`], and
+//! free-function [`model_config_from_source`] that derives a
+//! [`crate::traits::ModelConfig`] from GGUF metadata.
+//!
+//! Depends on [`crate::core::tensor`] for the value types it produces.
+
 use std::fs::File;
 
 use memmap2::Mmap;
 
-use crate::quant::dequantize_q4_k_weight;
-use crate::traits::{ExecContext, Layer, ModelConfig};
-
-const GGUF_MAGIC: &[u8; 4] = b"GGUF";
-const GGUF_DEFAULT_ALIGNMENT: u64 = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(i32)]
-pub enum GGMLType {
-    F32 = 0,
-    F16 = 1,
-    Q4_0 = 2,
-    Q4_1 = 3,
-    Q5_0 = 6,
-    Q5_1 = 7,
-    Q8_0 = 8,
-    Q8_1 = 9,
-    Q2K = 10,
-    Q3K = 11,
-    Q4K = 12,
-    Q5K = 13,
-    Q6K = 14,
-    Q8K = 15,
-    I8 = 16,
-    I16 = 17,
-    I32 = 18,
-}
-
-impl GGMLType {
-    pub fn from_i32(v: i32) -> Option<Self> {
-        match v {
-            0 => Some(Self::F32),
-            1 => Some(Self::F16),
-            2 => Some(Self::Q4_0),
-            3 => Some(Self::Q4_1),
-            6 => Some(Self::Q5_0),
-            7 => Some(Self::Q5_1),
-            8 => Some(Self::Q8_0),
-            9 => Some(Self::Q8_1),
-            10 => Some(Self::Q2K),
-            11 => Some(Self::Q3K),
-            12 => Some(Self::Q4K),
-            13 => Some(Self::Q5K),
-            14 => Some(Self::Q6K),
-            15 => Some(Self::Q8K),
-            16 => Some(Self::I8),
-            17 => Some(Self::I16),
-            18 => Some(Self::I32),
-            _ => None,
-        }
-    }
-
-    pub fn type_traits(self) -> (usize, usize) {
-        match self {
-            Self::F32 => (1, 4),
-            Self::F16 => (1, 2),
-            Self::Q4_0 => (32, 18),
-            Self::Q4_1 => (32, 20),
-            Self::Q5_0 => (32, 22),
-            Self::Q5_1 => (32, 24),
-            Self::Q8_0 => (32, 34),
-            Self::Q8_1 => (32, 36),
-            Self::Q2K => (256, 84),
-            Self::Q3K => (256, 110),
-            Self::Q4K => (256, 144),
-            Self::Q5K => (256, 176),
-            Self::Q6K => (256, 210),
-            Self::Q8K => (256, 292),
-            Self::I8 => (1, 1),
-            Self::I16 => (1, 2),
-            Self::I32 => (1, 4),
-        }
-    }
-
-    pub fn nbytes(self, n_elements: usize) -> usize {
-        let (block_size, type_size) = self.type_traits();
-        let n_blocks = (n_elements + block_size - 1) / block_size;
-        n_blocks * type_size
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(i32)]
-pub enum MetaValueType {
-    Uint8 = 0,
-    Int8 = 1,
-    Uint16 = 2,
-    Int16 = 3,
-    Uint32 = 4,
-    Int32 = 5,
-    Float32 = 6,
-    Bool = 7,
-    String = 8,
-    Array = 9,
-    Uint64 = 10,
-    Int64 = 11,
-    Float64 = 12,
-}
-
-impl MetaValueType {
-    pub fn from_i32(v: i32) -> Option<Self> {
-        match v {
-            0 => Some(Self::Uint8),
-            1 => Some(Self::Int8),
-            2 => Some(Self::Uint16),
-            3 => Some(Self::Int16),
-            4 => Some(Self::Uint32),
-            5 => Some(Self::Int32),
-            6 => Some(Self::Float32),
-            7 => Some(Self::Bool),
-            8 => Some(Self::String),
-            9 => Some(Self::Array),
-            10 => Some(Self::Uint64),
-            11 => Some(Self::Int64),
-            12 => Some(Self::Float64),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MetaValue {
-    Uint8(u8),
-    Int8(i8),
-    Uint16(u16),
-    Int16(i16),
-    Uint32(u32),
-    Int32(i32),
-    Float32(f32),
-    Bool(bool),
-    String(String),
-    Uint64(u64),
-    Int64(i64),
-    Float64(f64),
-    Array(MetaValueType, Vec<MetaValue>),
-}
-
-impl MetaValue {
-    pub fn to_u64(&self) -> Option<u64> {
-        match self {
-            Self::Uint8(v) => Some(*v as u64),
-            Self::Int8(v) => Some(*v as u64),
-            Self::Uint16(v) => Some(*v as u64),
-            Self::Int16(v) => Some(*v as u64),
-            Self::Uint32(v) => Some(*v as u64),
-            Self::Int32(v) => Some(*v as u64),
-            Self::Uint64(v) => Some(*v),
-            Self::Int64(v) => Some(*v as u64),
-            Self::Float32(v) => Some(*v as u64),
-            Self::Float64(v) => Some(*v as u64),
-            _ => None,
-        }
-    }
-
-    pub fn to_f64(&self) -> Option<f64> {
-        match self {
-            Self::Float32(v) => Some(*v as f64),
-            Self::Float64(v) => Some(*v),
-            Self::Uint32(v) => Some(*v as f64),
-            Self::Int32(v) => Some(*v as f64),
-            Self::Uint64(v) => Some(*v as f64),
-            Self::Int64(v) => Some(*v as f64),
-            _ => None,
-        }
-    }
-
-    pub fn to_string_val(&self) -> Option<&str> {
-        match self {
-            Self::String(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn to_arr(&self) -> Option<&Vec<MetaValue>> {
-        match self {
-            Self::Array(_, v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TensorInfo {
-    pub name: String,
-    pub dims: Vec<u64>,
-    pub ggml_type: GGMLType,
-    pub offset: u64,
-}
-
-impl TensorInfo {
-    pub fn checked_n_elements(&self) -> Option<u64> {
-        let (first, rest) = self.dims.split_first()?;
-        rest.iter()
-            .try_fold(*first, |count, dimension| count.checked_mul(*dimension))
-    }
-
-    pub fn checked_nbytes(&self) -> Option<u64> {
-        let row_elements = *self.dims.first()?;
-        let rows = self.dims[1..]
-            .iter()
-            .try_fold(1u64, |count, dimension| count.checked_mul(*dimension))?;
-        let (block_elements, block_bytes) = self.ggml_type.type_traits();
-        let block_elements = block_elements as u64;
-        if row_elements % block_elements != 0 {
-            return None;
-        }
-        row_elements
-            .checked_div(block_elements)?
-            .checked_mul(block_bytes as u64)?
-            .checked_mul(rows)
-    }
-
-    pub fn n_elements(&self) -> usize {
-        usize::try_from(self.checked_n_elements().expect("validated tensor shape"))
-            .expect("validated tensor element count fits usize")
-    }
-
-    pub fn nbytes(&self) -> usize {
-        usize::try_from(self.checked_nbytes().expect("validated tensor byte size"))
-            .expect("validated tensor byte size fits usize")
-    }
-}
+use crate::core::tensor::{
+    GGMLType, GGUF_DEFAULT_ALIGNMENT, GGUF_MAGIC, MetaValue, MetaValueType, TensorInfo,
+    TensorSource,
+};
+use crate::traits::ModelConfig;
 
 pub(crate) struct ByteReader<'a> {
     data: &'a [u8],
@@ -587,16 +376,6 @@ impl GGUFLoader {
     }
 }
 
-pub trait TensorSource: Send + Sync {
-    fn metadata(&self, key: &str) -> Option<&MetaValue>;
-    fn tensor_info(&self, name: &str) -> Option<&TensorInfo>;
-    fn tensor_slice(&self, name: &str) -> Option<&[u8]>;
-
-    fn model_config(&self) -> Result<ModelConfig, String> {
-        model_config_from_source(self)
-    }
-}
-
 pub fn model_config_from_source<S: TensorSource + ?Sized>(
     source: &S,
 ) -> Result<ModelConfig, String> {
@@ -689,152 +468,10 @@ impl TensorSource for GGUFLoader {
     }
 }
 
-pub struct QuantizedLinear<'a> {
-    weight: &'a [u8],
-    #[allow(dead_code)]
-    bias: Option<&'a [u8]>,
-    in_features: usize,
-    out_features: usize,
-    layer_name: &'a str,
-}
-
-impl<'a> QuantizedLinear<'a> {
-    pub fn from_weight_slice(
-        weight: &'a [u8],
-        bias: Option<&'a [u8]>,
-        in_features: usize,
-        out_features: usize,
-        name: &'a str,
-    ) -> Self {
-        Self {
-            weight,
-            bias,
-            in_features,
-            out_features,
-            layer_name: name,
-        }
-    }
-
-    pub fn from_source<S: TensorSource + ?Sized>(
-        source: &'a S,
-        weight_name: &str,
-        bias_name: Option<&str>,
-        in_features: usize,
-        out_features: usize,
-        name: &'a str,
-    ) -> Option<Self> {
-        let weight = source.tensor_slice(weight_name)?;
-        let bias = bias_name.and_then(|n| source.tensor_slice(n));
-        Some(Self {
-            weight,
-            bias,
-            in_features,
-            out_features,
-            layer_name: name,
-        })
-    }
-
-    pub fn weight_ptr(&self) -> usize {
-        self.weight.as_ptr() as usize
-    }
-
-    pub fn weight_len(&self) -> usize {
-        self.weight.len()
-    }
-
-    pub fn forward_dequant(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]) {
-        let n_elements = self.out_features * self.in_features;
-        let dequant_len = n_elements.min(scratch.len());
-        dequantize_q4_k_weight(
-            self.weight,
-            self.out_features,
-            self.in_features,
-            &mut scratch[..dequant_len],
-        );
-
-        let dequant = &scratch[..dequant_len];
-
-        for i in 0..self.out_features {
-            let row_offset = i * self.in_features;
-            let mut sum = 0.0f32;
-            for j in 0..self.in_features {
-                sum += dequant[row_offset + j] * input[j];
-            }
-            output[i] = sum;
-        }
-    }
-}
-
-impl<'a> Layer for QuantizedLinear<'a> {
-    fn forward(&self, input: &[f32], output: &mut [f32], ctx: &mut ExecContext) {
-        self.forward_dequant(input, output, ctx.scratch);
-    }
-
-    fn input_dim(&self) -> usize {
-        self.in_features
-    }
-
-    fn output_dim(&self) -> usize {
-        self.out_features
-    }
-
-    fn name(&self) -> &str {
-        self.layer_name
-    }
-}
-
-pub struct ModelGraph<'a> {
-    pub config: ModelConfig,
-    pub layers: Vec<Box<dyn Layer + 'a>>,
-}
-
-impl<'a> ModelGraph<'a> {
-    pub fn new(config: ModelConfig) -> Self {
-        Self {
-            config,
-            layers: Vec::new(),
-        }
-    }
-
-    pub fn add_layer<L: Layer + 'a>(&mut self, layer: L) {
-        self.layers.push(Box::new(layer));
-    }
-
-    pub fn forward_all(
-        &self,
-        input: &[f32],
-        output: &mut [f32],
-        scratch: &mut [f32],
-        ctx: &mut ExecContext,
-    ) {
-        if self.layers.is_empty() {
-            return;
-        }
-
-        let dim = self.layers[0].output_dim().max(self.layers[0].input_dim());
-        let (buf_a, buf_b) = scratch.split_at_mut(dim);
-
-        buf_a[..input.len()].copy_from_slice(input);
-
-        for (i, layer) in self.layers.iter().enumerate() {
-            ctx.layer_idx = i as u32;
-            if i % 2 == 0 {
-                layer.forward(buf_a, buf_b, ctx);
-            } else {
-                layer.forward(buf_b, buf_a, ctx);
-            }
-        }
-
-        let last_idx = self.layers.len() - 1;
-        let src = if last_idx % 2 == 0 { buf_b } else { buf_a };
-        let out_len = output.len().min(src.len());
-        output[..out_len].copy_from_slice(&src[..out_len]);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tensor::{GGMLType, MetaValueType, TensorInfo, TensorSource};
 
     fn push_u8(buf: &mut Vec<u8>, v: u8) {
         buf.push(v);
@@ -1093,7 +730,7 @@ mod tests {
         let loader = parse_temp(&build_minimal_gguf()).unwrap();
         let source = DelegatingSource(&loader);
         assert_eq!(source.model_config().unwrap().n_embd, 1024);
-        assert!(QuantizedLinear::from_source(
+        assert!(crate::core::model::QuantizedLinear::from_source(
             &source,
             "blk.0.attn_q.weight",
             None,
@@ -1244,34 +881,6 @@ mod tests {
             }
             other => panic!("expected Array, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_ggml_type_nbytes() {
-        assert_eq!(GGMLType::F32.nbytes(256), 1024);
-        assert_eq!(GGMLType::F16.nbytes(256), 512);
-        assert_eq!(GGMLType::Q4K.nbytes(256), 144);
-        assert_eq!(GGMLType::Q4K.nbytes(512), 288);
-        assert_eq!(GGMLType::Q4_0.nbytes(32), 18);
-        assert_eq!(GGMLType::Q8_0.nbytes(32), 34);
-    }
-
-    #[test]
-    fn k_quant_block_sizes_match_ggml() {
-        assert_eq!(GGMLType::Q2K.nbytes(256), 84);
-        assert_eq!(GGMLType::Q3K.nbytes(256), 110);
-    }
-
-    #[test]
-    fn tensor_size_overflow_is_rejected() {
-        let info = TensorInfo {
-            name: "bad".into(),
-            dims: vec![u64::MAX, 2],
-            ggml_type: GGMLType::F32,
-            offset: 0,
-        };
-        assert_eq!(info.checked_n_elements(), None);
-        assert_eq!(info.checked_nbytes(), None);
     }
 
     #[test]
