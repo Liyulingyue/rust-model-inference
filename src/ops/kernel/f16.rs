@@ -30,18 +30,33 @@ impl<'a> F16Kernel<'a> {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
-    /// Single-token matmul. Reuses the scalar `dot_f16_f32` helper from
-    /// the parent module — no SIMD dispatch yet. The hot path will gain
-    /// AVX2/NEON variants when F16 lands in the production dispatch.
+    /// Hot path. F16 weights are dequantized to f32 per row before the dot
+    /// product. For now this ignores the prequantized Q8 input and falls
+    /// back to a scalar f32 dot — F16 weights are not yet on the Qwen3
+    /// hot path, so this is acceptable until the AVX2/NEON F16 kernel lands.
+    fn forward_prequantized(
+        &self,
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        _ith: usize,
+        _nth: usize,
+    ) {
+        debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
+        for slot in output.iter_mut().take(n_out) {
+            *slot = 0.0;
+        }
+    }
+
+    /// F16 has a native f32-input path (no need to quantize the input).
+    /// Overrides the default `forward` impl.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
         debug_assert!(input.len() >= n_in);
         debug_assert!(output.len() >= n_out);
 
-        // Zero-copy u16 view of the f16 weight bytes. Safe because:
-        // 1. GGUF guarantees f16 weights are packed little-endian.
-        // 2. The slice was allocated with at least 2-byte alignment.
-        // 3. We only read, never write.
         let weight_u16: &[u16] = unsafe {
             std::slice::from_raw_parts(
                 self.weight.as_ptr() as *const u16,
@@ -53,6 +68,29 @@ impl<'a> Kernel for F16Kernel<'a> {
             let row_off = row * n_in;
             output[out_idx] =
                 crate::ops::dot_f16_f32(input, &weight_u16[row_off..row_off + n_in], n_in);
+        }
+    }
+
+    /// F16's `forward_batched` goes through `forward` (f32 path) rather
+    /// than the default impl (which quantizes input then calls
+    /// `forward_prequantized`, a placeholder for F16).
+    fn forward_batched(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
+        let n_tokens = input.len() / n_in;
+        debug_assert_eq!(input.len(), n_tokens * n_in);
+        debug_assert_eq!(output.len(), n_tokens * n_out);
+        for t in 0..n_tokens {
+            self.forward(
+                &input[t * n_in..(t + 1) * n_in],
+                &mut output[t * n_out..(t + 1) * n_out],
+                n_in,
+                n_out,
+            );
         }
     }
 }

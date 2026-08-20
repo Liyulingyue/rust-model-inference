@@ -1,18 +1,10 @@
 //! Q4_1 block matmul kernel implementation.
 //!
-//! Phase 2.5: Fifth `Kernel` trait impl. Q4_1 uses 32-element blocks
-//! with 20-byte layout (2-byte F16 scale + 2-byte F16 min + 16-byte nibbles).
+//! Phase 2.5 + 2.7-final: Q4_1 uses 32-element blocks with 20-byte layout
+//! (2-byte F16 scale + 2-byte F16 min + 16-byte nibbles).
 
 use super::Kernel;
 
-/// Q4_1 block matmul kernel: `output = weight × input` (pre-quantized).
-///
-/// `weight` is laid out as Q4_1 blocks: 32 elements per block,
-/// 20 bytes per block (2-byte F16 scale + 2-byte F16 min + 16-byte 4-bit nibbles).
-/// Row-major `[n_out rows × n_in cols]` where n_in is a multiple of 32.
-///
-/// The hot path takes pre-quantized Q8 input (`input_q8: &[u8]` + scales).
-/// The trait's `forward` allocates a scratch Vec and quantizes internally.
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_1Kernel<'a> {
     pub weight: &'a [u8],
@@ -28,31 +20,28 @@ impl<'a> Q4_1Kernel<'a> {
 }
 
 impl<'a> Kernel for Q4_1Kernel<'a> {
-    /// General API: f32 input. Quantizes internally then dispatches to
-    /// `forward_prequantized`. Allocates scratch per call.
-    fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
-        let mut input_q8 = vec![0u8; n_in];
-        let mut input_scales = vec![0.0f32; n_in / 32];
-        crate::ops::quantize_q8_0_into(input, n_in, &mut input_q8, &mut input_scales);
-        self.forward_prequantized(&input_q8, &input_scales, output, n_in, n_out);
-    }
-}
-
-impl<'a> Q4_1Kernel<'a> {
-    /// Hot path: pre-quantized Q8 input. No allocation.
-    pub fn forward_prequantized(
+    fn forward_prequantized(
         &self,
         input_q8: &[u8],
         input_scales: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
+        ith: usize,
+        nth: usize,
     ) {
         let n_blocks = n_in / Self::BLOCK_ELEMENTS;
         let row_stride = n_blocks * Self::BLOCK_BYTES;
 
-        for (out_idx, row) in (0..n_out).enumerate() {
-            let row_off = row * row_stride;
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+
+        for out_idx in my_start..my_end {
+            let row_off = out_idx * row_stride;
             let mut sum = 0.0f32;
             for block in 0..n_blocks {
                 let off = row_off + block * Self::BLOCK_BYTES;
@@ -88,7 +77,6 @@ impl<'a> Q4_1Kernel<'a> {
 mod tests {
     use super::*;
 
-    /// Build a Q4_1 block where every nibble = `nibble` and min = `min`.
     fn q4_1_uniform_block(scale: f32, min: f32, nibble: u8) -> Vec<u8> {
         assert!(nibble < 16);
         let mut block = Vec::with_capacity(20);
@@ -103,29 +91,26 @@ mod tests {
 
     #[test]
     fn q4_1_kernel_min_contribution_only() {
-        // nibble=0, d=0, m=1 → sum = m * scale * y_sum = 1 * 1 * 32 = 32
         let weight = q4_1_uniform_block(0.0, 1.0, 0);
         let input_q8 = vec![1i8 as u8; 32];
         let input_scales = vec![1.0f32];
 
         let mut output = [0.0f32; 1];
         let kernel = Q4_1Kernel::new(&weight);
-        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
-        // m=1, scale=1, y_sum = 32 (each lane = 1)
         assert_eq!(output, [32.0]);
     }
 
     #[test]
     fn q4_1_kernel_dot_product_only() {
-        // nibble=1, d=1, m=0 → sum = d * scale * dot = 1 * 1 * 32 = 32
         let weight = q4_1_uniform_block(1.0, 0.0, 1);
         let input_q8 = vec![1i8 as u8; 32];
         let input_scales = vec![1.0f32];
 
         let mut output = [0.0f32; 1];
         let kernel = Q4_1Kernel::new(&weight);
-        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
         assert_eq!(output, [32.0]);
     }

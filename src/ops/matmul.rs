@@ -486,6 +486,24 @@ pub struct Q4_1Weight<'a> {
     pub n_out: usize,
 }
 
+/// Placeholder weight structs for Q4_K / Q5_K — reserved for the
+/// per-quant `Kernel` impls in `ops::kernel::q4_k` / `q5_k`. These types
+/// are not yet produced by `ProcessedWeight::from_bytes` because the
+/// production Q4_K_M / Q5_K_M path goes through `QuantizedLinear::forward_dequant`.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Q5_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 impl<'a> ProcessedWeight<'a> {
     pub fn from_bytes(data: &'a [u8], ggml_type: crate::core::tensor::GGMLType, n_in: usize, n_out: usize) -> Self {
         match ggml_type {
@@ -504,6 +522,10 @@ impl<'a> ProcessedWeight<'a> {
         }
     }
 
+    /// Internal dispatch used during the Phase 2.7-final migration. After
+    /// all call sites are migrated to the `Kernel` trait this method will
+    /// be removed and the per-quant `Kernel` impls in `ops::kernel::*` will
+    /// be the sole dispatch path.
     pub fn matmul(
         &self,
         input_q8: &[u8],
@@ -531,6 +553,25 @@ impl<'a> ProcessedWeight<'a> {
                 w.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }
         }
+    }
+}
+
+/// Bridge impl: `ProcessedWeight` acts as a `Kernel` during the Phase 2.7-final
+/// migration. Production code holds `Box<dyn Kernel>`; `ProcessedWeight` is
+/// the boxed-impl detail for now. Once the per-quant `Kernel` types in
+/// `ops::kernel::*` are wired up directly, this impl goes away.
+impl<'a> crate::ops::kernel::Kernel for ProcessedWeight<'a> {
+    fn forward_prequantized(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        self.matmul(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 }
 

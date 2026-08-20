@@ -1,9 +1,9 @@
 //! Q8_0 matmul kernel implementation.
 //!
-//! Phase 2.3: Second `Kernel` trait impl. The hot path in `app/text.rs` and
-//! `app/embedding.rs` uses pre-quantized Q8 input — exposed as the inherent
-//! method `forward_prequantized`. The trait's `forward` quantizes internally
-//! for general use.
+//! Phase 2.3 + 2.7-final: Q8_0 is the production hot-path kernel for Qwen3-0.6B.
+//! The `forward_prequantized` method accepts a Q8-prequantized input and an
+//! `ith`/`nth` row partition so callers can dispatch this inside a
+//! `pool.compute` closure for thread-parallel matmul.
 
 use super::Kernel;
 
@@ -23,39 +23,29 @@ impl<'a> Q8Kernel<'a> {
 }
 
 impl<'a> Kernel for Q8Kernel<'a> {
-    /// General API: f32 input. Quantizes internally then dispatches to
-    /// `forward_prequantized`. Allocates two scratch Vecs per call — for
-    /// hot paths, prefer `forward_prequantized` directly.
-    fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
-        let mut input_q8 = vec![0u8; n_in];
-        let mut input_scales = vec![0.0f32; n_in / 32];
-        crate::ops::quantize_q8_0_into(input, n_in, &mut input_q8, &mut input_scales);
-        self.forward_prequantized(&input_q8, &input_scales, output, n_in, n_out);
-    }
-}
-
-impl<'a> Q8Kernel<'a> {
-    /// Hot path: pre-quantized Q8_0 input. No allocation.
-    ///
-    /// Mirrors `matmul_q8_0_quantized` in `super::super` but as an inherent
-    /// method so it can be called without trait dispatch. The scalar fallback
-    /// path is used here to avoid the GPU/AVX dispatch chain; the production
-    /// path is the existing `ProcessedWeight::matmul` which we'll migrate
-    /// in a later phase.
-    pub fn forward_prequantized(
+    fn forward_prequantized(
         &self,
         input_q8: &[u8],
         input_scales: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
+        ith: usize,
+        nth: usize,
     ) {
         let blocks_per_row = n_in / 32;
         let row_stride = blocks_per_row * 34;
-        debug_assert_eq!(self.weight.len() / 34 * 32, n_in * n_out / 32 * 32);
+        debug_assert_eq!(self.weight.len(), (n_out * blocks_per_row) * 34);
 
-        for (out_idx, row) in (0..n_out).enumerate() {
-            let row_off = row * row_stride;
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+
+        for out_idx in my_start..my_end {
+            let row_off = out_idx * row_stride;
             let mut sum = 0.0f32;
             for block in 0..blocks_per_row {
                 let off = row_off + block * 34;
@@ -69,6 +59,8 @@ impl<'a> Q8Kernel<'a> {
                 }
                 sum += wd * input_scales[block] * dot as f32;
             }
+            // `output` is the full n_out slice; each thread writes to its
+            // own partition, so the absolute index is the right slot.
             output[out_idx] = sum;
         }
     }
@@ -92,25 +84,21 @@ mod tests {
 
     #[test]
     fn q8_kernel_uniform_weights_sum_to_dot_product() {
-        // weight row: scale=1.0, all 32 values = 1 → dequantized = [1; 32]
         let mut weight = Vec::new();
         weight.extend(q8_0_uniform_row(1, 1.0));
 
-        // input_q8 with scale=1.0, all values = 1 → dequantized = [1; 32]
         let input_q8 = vec![1u8; 32];
         let input_scales = vec![1.0f32];
 
         let mut output = [0.0f32; 1];
         let kernel = Q8Kernel::new(&weight);
-        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
-        // dot product of [1; 32] with [1; 32] = 32.0
         assert_eq!(output, [32.0]);
     }
 
     #[test]
     fn q8_kernel_multi_row() {
-        // 2 rows, each [1; 32] dequantized
         let mut weight = Vec::new();
         weight.extend(q8_0_uniform_row(1, 1.0));
         weight.extend(q8_0_uniform_row(1, 1.0));
@@ -120,14 +108,13 @@ mod tests {
 
         let mut output = [0.0f32; 2];
         let kernel = Q8Kernel::new(&weight);
-        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 2);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 2, 0, 1);
 
         assert_eq!(output, [32.0, 32.0]);
     }
 
     #[test]
     fn q8_kernel_scale_applied() {
-        // weight with scale=0.5: dequantized values are 0.5
         let mut weight = Vec::new();
         weight.extend(q8_0_uniform_row(1, 0.5));
 
@@ -136,26 +123,46 @@ mod tests {
 
         let mut output = [0.0f32; 1];
         let kernel = Q8Kernel::new(&weight);
-        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
-        // [0.5; 32] · [1; 32] = 16.0
         assert_eq!(output, [16.0]);
     }
 
     #[test]
     fn q8_kernel_forward_quantizes_internally() {
-        // weight row: scale=1.0, all 1
         let weight = q8_0_uniform_row(1, 1.0);
-        // f32 input: all 1.0 → after quantize (scale ≈ 1/127), each lane
-        // becomes ~127. dot product of dequantized values ≈ 32.0.
         let input = vec![1.0f32; 32];
         let mut output = [0.0f32; 1];
 
         let kernel = Q8Kernel::new(&weight);
         kernel.forward(&input, &mut output, 32, 1);
 
-        // Tolerance: quantize + dequantize round-trip isn't perfectly lossless.
-        // Actual error ~2^-9 = 0.001953, so 5e-3 gives comfortable margin.
         assert!((output[0] - 32.0).abs() < 5e-3, "got {}", output[0]);
+    }
+
+    #[test]
+    fn q8_kernel_thread_partition() {
+        // 4 rows; simulate 2 threads each writing to its own partition
+        // of the same full output slice.
+        let mut weight = Vec::new();
+        for _ in 0..4 {
+            weight.extend(q8_0_uniform_row(1, 1.0));
+        }
+
+        let input_q8 = vec![1u8; 32];
+        let input_scales = vec![1.0f32];
+        let kernel = Q8Kernel::new(&weight);
+
+        // Full 4-element output; threads 0 and 1 write to disjoint halves.
+        let mut out_a = [0.0f32; 4];
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut out_a, 32, 4, 0, 2);
+        // Reset and have thread 1 only (ith=1, nth=2) write its half.
+        let mut out_b = [0.0f32; 4];
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut out_b, 32, 4, 1, 2);
+
+        assert_eq!(out_a, [32.0, 32.0, 0.0, 0.0]);
+        // Thread 1 writes to indices 2..4.
+        assert_eq!(out_b[0..2], [0.0, 0.0]);
+        assert_eq!(out_b[2..4], [32.0, 32.0]);
     }
 }

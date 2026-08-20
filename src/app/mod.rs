@@ -24,13 +24,13 @@ pub struct LayerWeights<'a> {
     pub ffn_norm: Vec<f32>,
     pub q_norm: Option<Vec<f32>>,
     pub k_norm: Option<Vec<f32>>,
-    pub wq: ops::ProcessedWeight<'a>,
-    pub wk: ops::ProcessedWeight<'a>,
-    pub wv: ops::ProcessedWeight<'a>,
-    pub wo: ops::ProcessedWeight<'a>,
-    pub w_gate: ops::ProcessedWeight<'a>,
-    pub w_up: ops::ProcessedWeight<'a>,
-    pub w_down: ops::ProcessedWeight<'a>,
+    pub wq: Box<dyn ops::kernel::Kernel + 'a>,
+    pub wk: Box<dyn ops::kernel::Kernel + 'a>,
+    pub wv: Box<dyn ops::kernel::Kernel + 'a>,
+    pub wo: Box<dyn ops::kernel::Kernel + 'a>,
+    pub w_gate: Box<dyn ops::kernel::Kernel + 'a>,
+    pub w_up: Box<dyn ops::kernel::Kernel + 'a>,
+    pub w_down: Box<dyn ops::kernel::Kernel + 'a>,
 }
 
 pub fn get_f32_tensor<S: TensorSource + ?Sized>(

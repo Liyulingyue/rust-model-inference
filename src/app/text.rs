@@ -105,66 +105,66 @@ pub fn run_inference(
             },
             wq: {
                 let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_q,
-                )
+                ).into_kernel()
             },
             wk: {
                 let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                )
+                ).into_kernel()
             },
             wv: {
                 let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                )
+                ).into_kernel()
             },
             wo: {
                 let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd_q,
                     n_embd,
-                )
+                ).into_kernel()
             },
             w_gate: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                )
+                ).into_kernel()
             },
             w_up: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                )
+                ).into_kernel()
             },
             w_down: {
                 let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
-                crate::ops::ProcessedWeight::from_bytes(
+                crate::ops::kernel::QuantizedTensor::from_bytes(
                     source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
                     info.ggml_type,
                     n_ff,
                     n_embd,
-                )
+                ).into_kernel()
             },
         })
         .collect();
@@ -312,9 +312,9 @@ pub fn run_inference(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.matmul(q8, sc, q, n_embd, n_embd_q, ith, nth);
-                lw.wk.matmul(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.matmul(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq.forward_prequantized(q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk.forward_prequantized(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.forward_prequantized(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -497,7 +497,7 @@ pub fn run_inference(
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.matmul(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo.forward_prequantized(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
@@ -524,8 +524,8 @@ pub fn run_inference(
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.matmul(q8, sc, up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.matmul(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate.forward_prequantized(q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.forward_prequantized(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -555,7 +555,7 @@ pub fn run_inference(
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.matmul(q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down.forward_prequantized(q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
