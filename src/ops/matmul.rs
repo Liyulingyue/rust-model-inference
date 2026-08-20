@@ -338,7 +338,7 @@ pub fn matmul_q8_0_via_q8(
             return;
         }
     }
-    matmul_q8_0_quantized_scalar_range(weight, q8_buf, scale_buf, output, n_in, 0, n_out);
+    super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(weight, q8_buf, scale_buf, output, n_in, 0, n_out);
 }
 
 pub fn matmul_q8_0_via_q8_parallel(
@@ -352,34 +352,6 @@ pub fn matmul_q8_0_via_q8_parallel(
 ) {
     quantize_q8_0_into(input, n_in, q8_buf, scale_buf);
     matmul_q8_0_quantized_parallel(weight, q8_buf, scale_buf, output, n_in, n_out);
-}
-
-fn matmul_q8_0_fallback_range(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    let blocks_per_row = n_in / 32;
-    let row_stride = blocks_per_row * 34;
-    for (out_idx, j) in (row_start..row_end).enumerate() {
-        let row_off = j * row_stride;
-        let mut sum = 0.0f32;
-        for b in 0..blocks_per_row {
-            let off = row_off + b * 34;
-            let d = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
-            let qs = &weight[off + 2..off + 34];
-            let inp = &input[b * 32..];
-            let mut local = 0.0f32;
-            for k in 0..32 {
-                local += (qs[k] as i8 as f32) * inp[k];
-            }
-            sum += d * local;
-        }
-        output[out_idx] = sum;
-    }
 }
 
 pub fn matmul_q8_0_quantized(
@@ -428,36 +400,7 @@ pub fn matmul_q8_0_quantized(
             return;
         }
     }
-    matmul_q8_0_quantized_scalar_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
-}
-
-fn matmul_q8_0_quantized_scalar_range(
-    weight: &[u8],
-    input_q8: &[u8],
-    input_scales: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    let blocks_per_row = n_in / 32;
-    let row_stride = blocks_per_row * 34;
-    for (out_idx, row) in (row_start..row_end).enumerate() {
-        let row_off = row * row_stride;
-        let mut sum = 0.0f32;
-        for block in 0..blocks_per_row {
-            let off = row_off + block * 34;
-            let wd = f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
-            let qx = &weight[off + 2..off + 34];
-            let qy = &input_q8[block * 32..(block + 1) * 32];
-            let mut dot = 0i32;
-            for lane in 0..32 {
-                dot += (qx[lane] as i8 as i32) * (qy[lane] as i8 as i32);
-            }
-            sum += wd * input_scales[block] * dot as f32;
-        }
-        output[out_idx] = sum;
-    }
+    super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
 }
 
 // Phase 2.7-final cleanup: `ProcessedWeight` enum has been retired.
@@ -685,7 +628,7 @@ pub fn matmul_q8_0_quantized_range(
         }
         return;
     }
-    matmul_q8_0_quantized_scalar_range(
+    super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
         weight,
         input_q8,
         input_scales,
@@ -721,7 +664,7 @@ pub fn matmul_q8_0_quantized_range_nrc1(
         }
         return;
     }
-    matmul_q8_0_quantized_scalar_range(
+    super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
         weight,
         input_q8,
         input_scales,
@@ -775,7 +718,7 @@ pub fn q8_0_dot_row(
         return output[0];
     }
     let mut output = [0.0];
-    matmul_q8_0_quantized_scalar_range(
+    super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
         weight,
         input_q8,
         input_scales,
@@ -886,7 +829,7 @@ fn parallel_range(
             }
             return;
         }
-        matmul_q8_0_quantized_scalar_range(
+        super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
             weight,
             input_q8,
             input_scales,
@@ -940,7 +883,7 @@ pub fn matmul_q8_0(weight: &[u8], input: &[f32], output: &mut [f32], n_in: usize
             return;
         }
     }
-    matmul_q8_0_fallback_range(weight, input, output, n_in, 0, n_out);
+    super::kernel::q8_0::scalar::matmul_q8_0_fallback_range(weight, input, output, n_in, 0, n_out);
 }
 
 pub fn matmul_q8_0_parallel(
@@ -968,7 +911,7 @@ pub fn matmul_q8_0_parallel(
                 }
                 return;
             }
-            matmul_q8_0_fallback_range(weight, input, out_slice, n_in, rs, re);
+            super::kernel::q8_0::scalar::matmul_q8_0_fallback_range(weight, input, out_slice, n_in, rs, re);
         });
 }
 
@@ -1026,7 +969,7 @@ pub fn matmul_q8_0_batch(tasks: &mut [MatmulTask<'_>]) {
             }
             return;
         }
-        matmul_q8_0_fallback_range(weight, input, out_slice, info.n_in, rs, re);
+        super::kernel::q8_0::scalar::matmul_q8_0_fallback_range(weight, input, out_slice, info.n_in, rs, re);
     });
 }
 
@@ -1609,7 +1552,7 @@ mod neon_tests {
         quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
         let mut scalar = vec![0.0f32; 5];
         let mut neon = vec![0.0f32; 5];
-        matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
+        super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
         unsafe { matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
         for i in 0..5 {
             assert_close(neon[i], scalar[i]);
