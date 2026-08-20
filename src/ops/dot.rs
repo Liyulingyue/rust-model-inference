@@ -118,6 +118,12 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n * 2);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 16 {
+            return unsafe { dot_f16_f16_bytes_avx2(a, b, n) };
+        }
+    }
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
@@ -139,6 +145,54 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(weight));
     }
     sum as f32
+}
+
+/// AVX2 + F16C + FMA implementation of `dot_f16_f16_bytes`.
+///
+/// Both inputs are stored as `u16` (a) and packed 2-byte little-endian (b),
+/// but `b` is read into 128-bit lanes via `_mm_loadu_si128` (which never
+/// faults — it just reads raw bytes) and then converted to FP32 via
+/// `_mm256_cvtph_ps` (F16C). Each iteration processes 8 elements.
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i * 2) as *const __m128i));
+        acc = _mm256_fmadd_ps(va, vb, acc);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    // 4-element tail with `_mm_cvtph_ps` (SSE conversion of 4 F16).
+    if i + 4 <= n {
+        let va = _mm_cvtph_ps(_mm_loadl_epi64(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm_cvtph_ps(_mm_loadl_epi64(b.as_ptr().add(i * 2) as *const __m128i));
+        let v = _mm_fmadd_ps(va, vb, _mm_setzero_ps());
+        let tail = _mm_hsum_ps_4(v);
+        // extract the single F32 from the lowest lane of the 128-bit register
+        let t = std::mem::transmute::<__m128, [f32; 4]>(tail);
+        sum += t[0];
+        i += 4;
+    }
+    while i < n {
+        let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += f16_to_f32(a[i]) * f16_to_f32(weight);
+        i += 1;
+    }
+    sum
+}
+
+// Helper: horizontal sum of 4 lanes in a 128-bit __m128 (requires SSE3).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn _mm_hsum_ps_4(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+    let shuf = _mm_movehdup_ps(v);
+    let sums = _mm_add_ps(v, shuf);
+    let shuf2 = _mm_movehl_ps(sums, sums);
+    _mm_add_ps(sums, shuf2)
 }
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]

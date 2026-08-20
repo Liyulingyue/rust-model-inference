@@ -1,4 +1,4 @@
-//! Sampling utilities: argmax + top-K with softmax.
+//! Sampling utilities: argmax + top-K with softmax + top-K sampling draw.
 
 pub fn argmax(x: &[f32]) -> usize {
     let mut best_idx = 0;
@@ -58,4 +58,23 @@ pub fn sample_top_k(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
         }
     }
     top
+}
+
+/// Sample a token id using top-K + random draw (matches the reference codec
+/// decoder's on-device sampler).
+pub fn sample_top_k_draw<R: rand::Rng>(
+    logits: &[f32],
+    k: usize,
+    rng: &mut R,
+) -> usize {
+    let candidates = sample_top_k(logits, k);
+    let target: f32 = rng.gen();
+    let mut cumulative = 0.0f32;
+    for &(idx, p) in &candidates {
+        cumulative += p;
+        if cumulative >= target {
+            return idx;
+        }
+    }
+    candidates.last().map(|&(i, _)| i).unwrap_or(0)
 }

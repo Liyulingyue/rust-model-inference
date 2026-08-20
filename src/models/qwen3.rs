@@ -43,7 +43,7 @@ impl Qwen3Config {
     /// lives in [`crate::core::loader::qwen3_arch_knobs`]. This function now
     /// only composes the per-arch knobs with the dimensional configuration
     /// produced by [`model_config_from_source`].
-    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+    pub(crate) fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let config = model_config_from_source(source)?;
         let knobs = qwen3_arch_knobs(source)?;
 
@@ -279,9 +279,9 @@ impl Qwen3Model {
             .tensor_info("token_embd.weight")
             .map(|info| info.ggml_type)
             .unwrap_or(GGMLType::Q8_0);
-        let token_embedding = static_tensor(&source, "token_embd.weight", &embedding_dims, embedding_type)?;
+        let token_embedding = static_tensor(source.as_ref(), "token_embd.weight", &embedding_dims, embedding_type)?;
         let output = if source.tensor_info("output.weight").is_some() {
-            static_tensor(&source, "output.weight", &embedding_dims, GGMLType::Q8_0)?
+            static_tensor(source.as_ref(), "output.weight", &embedding_dims, GGMLType::Q8_0)?
         } else {
             token_embedding
         };
@@ -324,24 +324,24 @@ impl Qwen3Model {
                 } else {
                     None
                 },
-                wq: static_q8_matrix(&source, &name("attn_q.weight"), config.n_embd, n_embd_q)?,
-                wk: static_q8_matrix(&source, &name("attn_k.weight"), config.n_embd, n_embd_k)?,
-                wv: static_q8_matrix(&source, &name("attn_v.weight"), config.n_embd, n_embd_v)?,
-                wo: static_q8_matrix(&source, &name("attn_output.weight"), n_attn, config.n_embd)?,
+                wq: static_q8_matrix(source.as_ref(), &name("attn_q.weight"), config.n_embd, n_embd_q)?,
+                wk: static_q8_matrix(source.as_ref(), &name("attn_k.weight"), config.n_embd, n_embd_k)?,
+                wv: static_q8_matrix(source.as_ref(), &name("attn_v.weight"), config.n_embd, n_embd_v)?,
+                wo: static_q8_matrix(source.as_ref(), &name("attn_output.weight"), n_attn, config.n_embd)?,
                 w_gate: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_gate.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_up: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_up.weight"),
                     config.n_embd,
                     config.n_ff,
                 )?,
                 w_down: static_q8_matrix(
-                    &source,
+                    source.as_ref(),
                     &name("ffn_down.weight"),
                     config.n_ff,
                     config.n_embd,
@@ -1239,7 +1239,7 @@ pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), 
     Ok(())
 }
 
-fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
+pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
     if temperature == 0.0 {
         return greedy_token(logits);
     }
@@ -1271,8 +1271,8 @@ fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
     u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
 }
 
-fn static_q8_matrix(
-    source: &Arc<dyn TensorSource>,
+pub(crate) fn static_q8_matrix(
+    source: &dyn TensorSource,
     name: &str,
     columns: usize,
     rows: usize,
@@ -1287,30 +1287,30 @@ fn static_q8_matrix(
     )
 }
 
-fn static_q8_tensor(
-    source: &Arc<dyn TensorSource>,
+pub(crate) fn static_q8_tensor(
+    source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, GGMLType::Q8_0)?;
+    let bytes = checked_tensor(source, name, dims, GGMLType::Q8_0)?;
     // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
     // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-fn static_tensor(
-    source: &Arc<dyn TensorSource>,
+pub(crate) fn static_tensor(
+    source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<&'static [u8], String> {
-    let bytes = checked_tensor(source.as_ref(), name, dims, ggml_type)?;
+    let bytes = checked_tensor(source, name, dims, ggml_type)?;
     // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
     // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-fn load_f32_tensor(
+pub(crate) fn load_f32_tensor(
     source: &dyn TensorSource,
     name: &str,
     dims: &[u64],
@@ -1324,7 +1324,7 @@ fn load_f32_tensor(
         .collect())
 }
 
-fn checked_tensor<'a>(
+pub(crate) fn checked_tensor<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
@@ -1361,7 +1361,7 @@ pub(crate) fn checked_product(name: &str, left: usize, right: usize) -> Result<u
         .ok_or_else(|| format!("{name} overflows usize"))
 }
 
-fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), String> {
+pub(crate) fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), String> {
     let bytes = checked_product(name, len, element_bytes)?;
     if bytes > isize::MAX as usize {
         return Err(format!("{name} allocation is too large"));
@@ -1369,7 +1369,7 @@ fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), 
     Ok(())
 }
 
-fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
+pub(crate) fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("{name} does not fit u64"))
 }
 

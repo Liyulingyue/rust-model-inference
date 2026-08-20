@@ -41,3 +41,7 @@ strip = true
 [[bin]]
 name = "micro-bench"
 path = "src/bin/micro_bench.rs"
+
+[[bin]]
+name = "codec_test"
+path = "src/bin/codec_test.rs"

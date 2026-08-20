@@ -291,7 +291,9 @@ impl Qwen3AudioModel {
     }
 
     fn encode_window(&self, window: &MelWindow) -> Result<AudioEmbeddings, String> {
+        let tw0 = std::time::Instant::now();
         let mut hidden = self.encode_convolution(window)?;
+        let tw1 = std::time::Instant::now();
         if hidden.tokens == 0 || self.layers.len() != self.config.layers {
             return Err("Invalid audio Transformer configuration".into());
         }
@@ -315,6 +317,7 @@ impl Qwen3AudioModel {
         )?;
 
         for layer in &self.layers {
+            let tl0 = std::time::Instant::now();
             layer_norm_rows(
                 &hidden.values,
                 hidden.tokens,
@@ -383,7 +386,9 @@ impl Qwen3AudioModel {
             )?;
             scratch.normed = normed;
             add_residual(&mut hidden.values, &scratch.ffn_down)?;
+            let _ = tl0;
         }
+        let tw2 = std::time::Instant::now();
 
         audio_projector(
             &hidden.values,
@@ -395,6 +400,16 @@ impl Qwen3AudioModel {
             &self.pool,
             &mut scratch,
         )?;
+        let tw3 = std::time::Instant::now();
+        eprintln!(
+            "    [enc-window] tokens={} conv={:.3}s layers={:.3}s ({:.3}s/layer) projector={:.3}s",
+            hidden.tokens,
+            (tw1 - tw0).as_secs_f64(),
+            (tw2 - tw1).as_secs_f64(),
+            (tw2 - tw1).as_secs_f64() / self.layers.len() as f64,
+            (tw3 - tw2).as_secs_f64(),
+        );
+
         #[cfg(feature = "parity-trace")]
         {
             crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -448,6 +463,7 @@ impl Qwen3AudioModel {
         let mut projected = Vec::new();
 
         for chunk_index in 0..chunks {
+            let tcc0 = std::time::Instant::now();
             for mel in 0..MEL_BINS {
                 let source_start = checked_product("Mel chunk source", mel, window.frames)?
                     .checked_add(checked_product(
@@ -480,6 +496,7 @@ impl Qwen3AudioModel {
             let (height, width) =
                 conv2d_stride2_padding1(&stage_b, 480, height, width, &self.conv[2], &mut stage_a)?;
             apply_gelu(&mut stage_a)?;
+            let tcc1 = std::time::Instant::now();
             if (height, width) != (16, 13) {
                 return Err(format!(
                     "Invalid final convolution shape: [1,480,{height},{width}]"
@@ -497,14 +514,15 @@ impl Qwen3AudioModel {
             flatten_conv_output(&stage_a, 480, height, width, &mut flattened)?;
             self.conv_out
                 .project_f16(&flattened, width, &mut projected)?;
-            #[cfg(feature = "parity-trace")]
-            crate::parity_trace::report(crate::parity_trace::checkpoint(
-                "asr.after_conv_out",
-                None,
-                &[width, self.config.hidden],
-                &projected,
-            ));
+            let tcc2 = std::time::Instant::now();
             hidden.extend_from_slice(&projected);
+            if chunk_index == 0 {
+                eprintln!(
+                    "    [enc-conv] 3xconv2d={:.3}s project_f16={:.3}s",
+                    (tcc1 - tcc0).as_secs_f64(),
+                    (tcc2 - tcc1).as_secs_f64()
+                );
+            }
         }
         if hidden.len() != hidden_len || hidden.iter().any(|value| !value.is_finite()) {
             return Err("Invalid convolution hidden output".into());

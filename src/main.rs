@@ -28,6 +28,11 @@ fn main() {
         return;
     }
 
+    if options.tts {
+        app::run_or_exit(app::run_tts_cli(&options));
+        return;
+    }
+
     if options.audio.is_some() {
         app::run_or_exit(app::run_asr_cli(&options));
         return;
