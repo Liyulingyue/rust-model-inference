@@ -41,7 +41,7 @@ static VULKAN_CONTEXT: OnceLock<Result<VulkanContext, String>> = OnceLock::new()
 use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
-fn get_vulkan_context() -> Option<&'static VulkanContext> {
+pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
     if !GPU_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
@@ -64,7 +64,7 @@ static WGPU_CONTEXT: OnceLock<Result<WgpuContext, String>> = OnceLock::new();
 static WGPU_INIT_THREAD: std::sync::OnceLock<std::sync::Mutex<Option<WgpuContext>>> = std::sync::OnceLock::new();
 
 #[cfg(feature = "wgpu")]
-fn get_wgpu_context() -> Option<&'static WgpuContext> {
+pub fn get_wgpu_context() -> Option<&'static WgpuContext> {
     if !GPU_ENABLED.load(Ordering::Relaxed) {
         return None;
     }

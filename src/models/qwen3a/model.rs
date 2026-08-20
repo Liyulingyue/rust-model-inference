@@ -5,9 +5,10 @@
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 #[cfg(target_arch = "aarch64")]
-use crate::ops::matmul_q8_0_quantized_range_nrc1;
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
 use crate::ops::{
-    dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_range, quantize_q8_0_into,
+    dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel, quantize_q8_0_into,
 };
 use crate::core::thread_pool::ComputePool;
 use std::sync::Arc;
