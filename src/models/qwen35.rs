@@ -1,13 +1,13 @@
 use rayon::prelude::*;
 
-use crate::clip_config::Qwen35Config;
+use crate::models::clip_config::Qwen35Config;
 use crate::model::{GGMLType, TensorSource};
 use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::quant::{self, BlockQ8K, QK_K};
 use crate::thread_pool::ComputePool;
-use crate::vision::VisionGrid;
+use crate::models::vision::VisionGrid;
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],

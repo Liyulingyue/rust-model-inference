@@ -1,7 +1,7 @@
-use crate::ggufrs::{ComponentRole, GgufrsFile};
-use crate::model::{MetaValue, TensorSource};
-use crate::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::qwen3a::{
+use crate::format::ggufrs::{ComponentRole, GgufrsFile};
+use crate::core::tensor::{MetaValue, TensorSource};
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen3a::{
     decode_pcm16_wav, log_mel_windows, validate_qwen3a_source, AsrAudioError, AudioEmbeddings,
     Qwen3AudioModel,
 };

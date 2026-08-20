@@ -3,20 +3,14 @@ pub use app::LayerWeights;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
 pub use app::get_f32_tensor;
-pub mod asr;
-pub mod clip_config;
 pub mod core;
 pub mod format;
+pub mod models;
 pub mod ops;
-pub mod pig;
 #[cfg(feature = "parity-trace")]
 #[doc(hidden)]
 pub mod parity_trace;
 pub mod prompt;
-pub mod qwen3;
-pub mod qwen35;
-pub mod qwen3a;
-pub mod vision;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 #[cfg(feature = "wgpu")]
@@ -90,6 +84,48 @@ pub mod ggufrs {
 #[deprecated(note = "use crate::format::load_plan instead")]
 pub mod load_plan {
     pub use crate::format::load_plan::*;
+}
+
+/// Backward-compatibility facade for `src/asr.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::asr instead")]
+pub mod asr {
+    pub use crate::models::asr::*;
+}
+
+/// Backward-compatibility facade for `src/clip_config.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::clip_config instead")]
+pub mod clip_config {
+    pub use crate::models::clip_config::*;
+}
+
+/// Backward-compatibility facade for `src/qwen3.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::qwen3 instead")]
+pub mod qwen3 {
+    pub use crate::models::qwen3::*;
+}
+
+/// Backward-compatibility facade for `src/qwen35.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::qwen35 instead")]
+pub mod qwen35 {
+    pub use crate::models::qwen35::*;
+}
+
+/// Backward-compatibility facade for `src/qwen3a.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::qwen3a instead")]
+pub mod qwen3a {
+    pub use crate::models::qwen3a::*;
+}
+
+/// Backward-compatibility facade for `src/vision.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::vision instead")]
+pub mod vision {
+    pub use crate::models::vision::*;
+}
+
+/// Backward-compatibility facade for `src/pig.rs` (Phase 4 prep).
+#[deprecated(note = "use crate::models::diffusion::pig instead")]
+pub mod pig {
+    pub use crate::models::diffusion::pig::*;
 }
 pub use ops::*;
 pub use prompt::{
