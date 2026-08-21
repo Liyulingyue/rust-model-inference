@@ -29,7 +29,7 @@ pub use dac::DacDecoder;
 pub use predictor::CodePredictor;
 pub use rvq::RvqDecoder;
 pub use tfm::WaveformTransformer;
-pub use wav::{write_wav_f32, WavError};
+pub use wav::{encode_wav_pcm16, write_wav_f32, WavError};
 
 const CODE2WAV_WINDOW: usize = 72;
 const SAMPLES_PER_FRAME: usize = 1920;

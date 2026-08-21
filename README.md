@@ -12,7 +12,7 @@
 4. **Trait 架构** — 算子和内存通过 trait 解耦
 5. **无 C/C++ FFI** — 100% 纯 Rust，包括量化 kernel
 
-**支持的模型**：Qwen3-0.6B、Qwen3-Embedding、Qwen3-ASR、Qwen3.5-VL、MiniCPM5-1B、Hunyuan-MT2、Nanbeige
+**支持的模型**：Qwen3-0.6B、Qwen3-Embedding、Qwen3-ASR、Qwen3-TTS、Qwen3.5-VL、MiniCPM5-1B、Hunyuan-MT2、Nanbeige
 
 ## 快速开始
 
@@ -44,6 +44,18 @@ cargo run --release --bin rust-model-inference -- \
   --audio models/001_16k.wav \
   --language en
 ```
+
+### Qwen3-TTS Base 声音克隆
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --mmproj models/Qwen3-TTS/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --tts --prompt "你好，这是一个语音合成测试。" --language cn \
+  --ref-audio reference.wav --out output.wav
+```
+
+参考音频必须是 PCM16 WAV；Base 模型不支持 `--ref-text`。输出固定为单声道 24 kHz PCM16 WAV。语言支持 `cn/en/ge/it/po/sp/ja/ko/fr/ru`、对应英文全名，以及 `zh/de/pt/es` 别名。
 
 ### Apple Silicon (ARM64)
 
