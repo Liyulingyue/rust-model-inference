@@ -124,7 +124,14 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
 #[target_feature(enable = "avx2")]
 unsafe fn quantize_row_q8_k_avx2(x: &[f32]) -> Vec<BlockQ8K> {
     let nb = x.len() / QK_K;
-    let mut result = Vec::with_capacity(nb);
+    let mut result = vec![
+        BlockQ8K {
+            d: 0.0,
+            qs: [0; QK_K],
+            bsums: [0; QK_K / 16],
+        };
+        nb
+    ];
     quantize_row_q8_k_avx2_into(x, &mut result);
     result
 }
