@@ -533,11 +533,27 @@ pub fn run_dump_logits(
                             [h * n_cached..(h + 1) * n_cached]
                             .copy_from_slice(&scores[s_off..s_off + n_cached]);
                         for d in 0..n_embd_head_v {
+                            #[cfg(feature = "parity-trace")]
+                            let mut val = 0.0f64;
+                            #[cfg(not(feature = "parity-trace"))]
                             let mut val = 0.0f32;
                             for t in 0..n_cached {
-                                val += scores[s_off + t]
-                                    * v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                                #[cfg(feature = "parity-trace")]
+                                {
+                                    val += f64::from(
+                                        scores[s_off + t]
+                                            * v_cache
+                                                [kb + t * n_embd_gqa + kv_h * n_embd_head_v + d],
+                                    );
+                                }
+                                #[cfg(not(feature = "parity-trace"))]
+                                {
+                                    val += scores[s_off + t]
+                                        * v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                                }
                             }
+                            #[cfg(feature = "parity-trace")]
+                            let val = val as f32;
                             attn_out[h * n_embd_head_v + d] = val;
                         }
                     }

@@ -45,6 +45,46 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             self.weight,
             input_q8,
             input_scales,
+            None,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
+    }
+
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let input_sums: Vec<f32> = input_f32[..n_in]
+            .chunks_exact(32)
+            .zip(input_q8[..n_in].chunks_exact(32))
+            .map(|(values, quantized)| {
+                let amax = values
+                    .iter()
+                    .fold(0.0f32, |current, value| current.max(value.abs()));
+                let scale = if amax == 0.0 { 0.0 } else { amax / 127.0 };
+                let sum = quantized
+                    .iter()
+                    .map(|&value| i32::from(value as i8))
+                    .sum::<i32>();
+                crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * scale))
+            })
+            .collect();
+        matmul_q4_1_scalar_range(
+            self.weight,
+            input_q8,
+            input_scales,
+            Some(&input_sums),
             output,
             n_in,
             n_out,
@@ -61,6 +101,7 @@ pub fn matmul_q4_1_scalar_range(
     weight: &[u8],
     input_q8: &[u8],
     input_scales: &[f32],
+    input_sums: Option<&[f32]>,
     output: &mut [f32],
     n_in: usize,
     n_out: usize,
@@ -95,7 +136,8 @@ pub fn matmul_q4_1_scalar_range(
                 dot += x0 * y0 + x1 * y1;
                 y_sum += y0 + y1;
             }
-            sum += d * scale * dot as f32 + m * scale * y_sum as f32;
+            let input_sum = input_sums.map_or(scale * y_sum as f32, |sums| sums[block]);
+            sum += (d * scale) * dot as f32 + m * input_sum;
         }
         output[out_idx] = sum;
     }

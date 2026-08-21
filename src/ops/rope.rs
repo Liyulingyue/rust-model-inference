@@ -1,5 +1,23 @@
 //! RoPE (Rotary Position Embedding) operations.
 
+#[cfg(all(feature = "parity-trace", target_os = "macos"))]
+extern "C" {
+    fn __sincosf(value: f32, sin: *mut f32, cos: *mut f32);
+}
+
+#[inline]
+fn rope_sin_cos(theta: f32) -> (f32, f32) {
+    #[cfg(all(feature = "parity-trace", target_os = "macos"))]
+    {
+        let mut sin = 0.0f32;
+        let mut cos = 0.0f32;
+        unsafe { __sincosf(theta, &mut sin, &mut cos) };
+        return (cos, sin);
+    }
+    #[cfg(not(all(feature = "parity-trace", target_os = "macos")))]
+    (theta.cos(), theta.sin())
+}
+
 pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
@@ -8,12 +26,19 @@ pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
         let base = h * head_dim;
         let mut theta = pos as f32;
         for i in 0..half {
-            let cos_a = theta.cos();
-            let sin_a = theta.sin();
+            let (cos_a, sin_a) = rope_sin_cos(theta);
             let x0 = x[base + i];
             let x1 = x[base + i + half];
-            x[base + i] = x0.mul_add(cos_a, x1 * -sin_a);
-            x[base + i + half] = x0.mul_add(sin_a, x1 * cos_a);
+            #[cfg(feature = "parity-trace")]
+            {
+                x[base + i] = x0 * cos_a - x1 * sin_a;
+                x[base + i + half] = x0 * sin_a + x1 * cos_a;
+            }
+            #[cfg(not(feature = "parity-trace"))]
+            {
+                x[base + i] = x0.mul_add(cos_a, x1 * -sin_a);
+                x[base + i + half] = x0.mul_add(sin_a, x1 * cos_a);
+            }
             theta *= theta_scale;
         }
     }
