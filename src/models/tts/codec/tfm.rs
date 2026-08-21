@@ -12,7 +12,7 @@ use crate::models::qwen3::{
     usize_to_u64,
 };
 use crate::ops::{
-    dot_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, silu,
+    dot_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rope_neox, silu,
 };
 
 const TFM_N_LAYER: usize = 8;
@@ -21,6 +21,53 @@ const TFM_N_EMBD: usize = 512;
 const TFM_N_HEAD: usize = 16;
 const TFM_HEAD_DIM: usize = 64;
 const TFM_N_FF: usize = 1024;
+const TFM_WINDOW: usize = 72;
+const TFM_EPS: f32 = 1e-5;
+const TFM_ROPE_THETA: f32 = 10_000.0;
+
+#[derive(Debug, Clone)]
+pub struct WaveformTransformerState {
+    position: usize,
+    keys: Vec<Vec<f32>>,
+    values: Vec<Vec<f32>>,
+}
+
+impl WaveformTransformerState {
+    pub fn new() -> Self {
+        Self {
+            position: 0,
+            keys: vec![Vec::new(); TFM_N_LAYER],
+            values: vec![Vec::new(); TFM_N_LAYER],
+        }
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    fn advance(&mut self, frames: usize) -> Result<(), String> {
+        self.position = self
+            .position
+            .checked_add(frames)
+            .ok_or_else(|| "waveform transformer position overflow".to_string())?;
+        Ok(())
+    }
+}
+
+impl Default for WaveformTransformerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn visible_key_range(
+    query_position: usize,
+    _real_key_count: usize,
+    window: usize,
+) -> std::ops::Range<usize> {
+    let end = query_position.saturating_add(1);
+    end.saturating_sub(window)..end
+}
 
 pub(crate) struct TfmLayer {
     ln1: Vec<f32>,
@@ -75,11 +122,7 @@ impl WaveformTransformer {
             &[usize_to_u64(TFM_IN_DIM, "tfm out_proj bias")?],
         )?;
 
-        check_allocation(
-            "tfm layers",
-            TFM_N_LAYER,
-            std::mem::size_of::<TfmLayer>(),
-        )?;
+        check_allocation("tfm layers", TFM_N_LAYER, std::mem::size_of::<TfmLayer>())?;
         let mut layers = Vec::new();
         layers
             .try_reserve_exact(TFM_N_LAYER)
@@ -151,48 +194,75 @@ impl WaveformTransformer {
     /// Transform `[in_dim, length]` input to `[in_dim, length]` output via
     /// 8 DiT-style transformer layers. Returns the output buffer.
     pub fn forward(&self, input: &[f32], length: usize) -> Result<Vec<f32>, String> {
-        if input.len() != TFM_IN_DIM * length {
+        let mut state = WaveformTransformerState::new();
+        self.forward_window(input, length, &mut state)
+    }
+
+    pub fn forward_window(
+        &self,
+        input: &[f32],
+        frames: usize,
+        state: &mut WaveformTransformerState,
+    ) -> Result<Vec<f32>, String> {
+        if frames == 0 || frames > TFM_WINDOW {
+            return Err(format!(
+                "WaveformTransformer: window frames {frames} must be in 1..={TFM_WINDOW}"
+            ));
+        }
+        if input.len() != TFM_IN_DIM * frames {
             return Err(format!(
                 "WaveformTransformer: input length {} != expected {}",
                 input.len(),
-                TFM_IN_DIM * length,
+                TFM_IN_DIM * frames,
             ));
         }
-        // in_proj: 1024 -> 512 with bias.
         let mut hidden = matmul_q8_bias(
             self.in_proj_w,
             Some(&self.in_proj_b),
             input,
             TFM_IN_DIM,
             TFM_N_EMBD,
-            length,
+            frames,
         )?;
 
         let n_attn = checked_product("tfm attn", TFM_N_HEAD, TFM_HEAD_DIM)?;
-        for layer in &self.layers {
-            forward_tfm_layer(layer, &mut hidden, length, n_attn)?;
+        let mut next_state = state.clone();
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            let (keys, values) = forward_tfm_layer(
+                layer,
+                &mut hidden,
+                frames,
+                n_attn,
+                state.position,
+                &state.keys[layer_index],
+                &state.values[layer_index],
+            )?;
+            next_state.keys[layer_index] = keys;
+            next_state.values[layer_index] = values;
         }
 
-        // output_norm -> out_proj 512 -> 1024 with bias.
-        for t in 0..length {
+        for t in 0..frames {
             let off = t * TFM_N_EMBD;
             let mut normed = vec![0.0f32; TFM_N_EMBD];
             rms_norm(
                 &hidden[off..off + TFM_N_EMBD],
                 &self.output_norm,
                 &mut normed,
-                1e-6,
+                TFM_EPS,
             );
             hidden[off..off + TFM_N_EMBD].copy_from_slice(&normed);
         }
-        matmul_q8_bias(
+        let output = matmul_q8_bias(
             self.out_proj_w,
             Some(&self.out_proj_b),
             &hidden,
             TFM_N_EMBD,
             TFM_IN_DIM,
-            length,
-        )
+            frames,
+        )?;
+        next_state.advance(frames)?;
+        *state = next_state;
+        Ok(output)
     }
 }
 
@@ -201,20 +271,29 @@ fn forward_tfm_layer(
     hidden: &mut [f32],
     length: usize,
     n_attn: usize,
-) -> Result<(), String> {
+    position: usize,
+    old_keys: &[f32],
+    old_values: &[f32],
+) -> Result<(Vec<f32>, Vec<f32>), String> {
     let n_q = TFM_N_HEAD * TFM_HEAD_DIM;
+    if old_keys.len() != old_values.len() || old_keys.len() % n_q != 0 {
+        return Err("waveform transformer KV state shape mismatch".into());
+    }
+    let prior_frames = old_keys.len() / n_q;
+    if prior_frames > TFM_WINDOW - 1 || prior_frames > position {
+        return Err("waveform transformer KV state exceeds real history".into());
+    }
     let mut normed = vec![0.0f32; TFM_N_EMBD];
     let mut q_all = vec![0.0f32; length * n_q];
     let mut k_all = vec![0.0f32; length * n_q];
     let mut v_all = vec![0.0f32; length * n_q];
-    // ln1 -> qkv
     for t in 0..length {
         let off = t * TFM_N_EMBD;
         rms_norm(
             &hidden[off..off + TFM_N_EMBD],
             &layer.ln1,
             &mut normed,
-            1e-6,
+            TFM_EPS,
         );
         let blocks = (TFM_N_EMBD + 31) / 32;
         let mut q8_buf = vec![0u8; TFM_N_EMBD];
@@ -251,43 +330,72 @@ fn forward_tfm_layer(
             0,
             1,
         );
+        let rope_position = position
+            .checked_add(t)
+            .ok_or_else(|| "waveform transformer RoPE position overflow".to_string())?;
+        for head in 0..TFM_N_HEAD {
+            let head_start = q_off + head * TFM_HEAD_DIM;
+            rope_neox(
+                &mut q_all[head_start..head_start + TFM_HEAD_DIM],
+                rope_position,
+                TFM_HEAD_DIM,
+                TFM_ROPE_THETA,
+            );
+            rope_neox(
+                &mut k_all[head_start..head_start + TFM_HEAD_DIM],
+                rope_position,
+                TFM_HEAD_DIM,
+                TFM_ROPE_THETA,
+            );
+        }
     }
-    // Causal attention per head.
+
+    let mut keys = Vec::with_capacity(old_keys.len() + k_all.len());
+    keys.extend_from_slice(old_keys);
+    keys.extend_from_slice(&k_all);
+    let mut values = Vec::with_capacity(old_values.len() + v_all.len());
+    values.extend_from_slice(old_values);
+    values.extend_from_slice(&v_all);
+    let history_start = position - prior_frames;
     let kq_scale = 1.0 / (TFM_HEAD_DIM as f32).sqrt();
     let mut attn_out = vec![0.0f32; length * n_attn];
     for head in 0..TFM_N_HEAD {
         let q_off = head * TFM_HEAD_DIM;
         let attn_off = head * TFM_HEAD_DIM;
         for i in 0..length {
+            let query_position = position + i;
+            let visible = visible_key_range(query_position, position + i + 1, TFM_WINDOW);
+            let key_start = visible.start.max(history_start) - history_start;
+            let key_end = visible.end - history_start;
             let mut max_val = f32::NEG_INFINITY;
-            let mut scores = vec![0.0f32; length];
-            for j in 0..=i {
+            let mut scores = vec![0.0f32; key_end - key_start];
+            for (score, j) in scores.iter_mut().zip(key_start..key_end) {
                 let q_row = &q_all[i * n_q + q_off..i * n_q + q_off + TFM_HEAD_DIM];
-                let k_row = &k_all[j * n_q + q_off..j * n_q + q_off + TFM_HEAD_DIM];
-                scores[j] = dot_f32(q_row, k_row, TFM_HEAD_DIM) * kq_scale;
-                if scores[j] > max_val {
-                    max_val = scores[j];
-                }
+                let k_row = &keys[j * n_q + q_off..j * n_q + q_off + TFM_HEAD_DIM];
+                *score = dot_f32(q_row, k_row, TFM_HEAD_DIM) * kq_scale;
+                max_val = max_val.max(*score);
             }
             let mut exp_sum = 0.0f32;
-            for j in 0..=i {
-                scores[j] = (scores[j] - max_val).exp();
-                exp_sum += scores[j];
+            for score in &mut scores {
+                *score = (*score - max_val).exp();
+                exp_sum += *score;
             }
-            for j in 0..=i {
-                scores[j] /= exp_sum;
+            if !exp_sum.is_finite() || exp_sum <= 0.0 {
+                return Err("waveform transformer attention normalization failed".into());
+            }
+            for score in &mut scores {
+                *score /= exp_sum;
             }
             for dim in 0..TFM_HEAD_DIM {
                 let mut sum = 0.0f32;
-                for j in 0..=i {
-                    let v_row = &v_all[j * n_q + q_off..j * n_q + q_off + TFM_HEAD_DIM];
-                    sum += scores[j] * v_row[dim];
+                for (&score, j) in scores.iter().zip(key_start..key_end) {
+                    sum += score * values[j * n_q + q_off + dim];
                 }
                 attn_out[i * n_attn + attn_off + dim] = sum;
             }
         }
     }
-    // attn_out projection + ls1 + residual
+
     let mut attn_proj = vec![0.0f32; length * TFM_N_EMBD];
     for t in 0..length {
         let attn_row = &attn_out[t * n_attn..t * n_attn + n_attn];
@@ -305,20 +413,18 @@ fn forward_tfm_layer(
             0,
             1,
         );
-        // apply ls1 (per-channel scale) and residual
         let off = t * TFM_N_EMBD;
         for i in 0..TFM_N_EMBD {
             hidden[off + i] += layer.ls1[i] * attn_proj[off + i];
         }
     }
-    // ln2 -> ffn -> ls2 + residual
     for t in 0..length {
         let off = t * TFM_N_EMBD;
         rms_norm(
             &hidden[off..off + TFM_N_EMBD],
             &layer.ln2,
             &mut normed,
-            1e-6,
+            TFM_EPS,
         );
         let blocks = (TFM_N_EMBD + 31) / 32;
         let mut q8_buf = vec![0u8; TFM_N_EMBD];
@@ -337,16 +443,8 @@ fn forward_tfm_layer(
             1,
         );
         matmul_q8_0_quantized_parallel_rows(
-            layer.w_up,
-            &q8_buf,
-            &scale_buf,
-            &mut up,
-            TFM_N_EMBD,
-            TFM_N_FF,
-            0,
-            1,
+            layer.w_up, &q8_buf, &scale_buf, &mut up, TFM_N_EMBD, TFM_N_FF, 0, 1,
         );
-        // silu(gate) * up
         let mut silu_mul = vec![0.0f32; TFM_N_FF];
         for i in 0..TFM_N_FF {
             silu_mul[i] = silu(gate[i]) * up[i];
@@ -370,7 +468,8 @@ fn forward_tfm_layer(
             hidden[off + i] += layer.ls2[i] * down[i];
         }
     }
-    Ok(())
+    let keep_from = (prior_frames + length).saturating_sub(TFM_WINDOW - 1) * n_q;
+    Ok((keys[keep_from..].to_vec(), values[keep_from..].to_vec()))
 }
 
 fn matmul_q8_bias(
@@ -426,4 +525,25 @@ fn matmul_q8_bias(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sliding_window_visibility_is_causal_and_bounded() {
+        assert_eq!(visible_key_range(0, 0, 72), 0..1);
+        assert_eq!(visible_key_range(71, 72, 72), 0..72);
+        assert_eq!(visible_key_range(72, 73, 72), 1..73);
+        assert_eq!(visible_key_range(143, 144, 72), 72..144);
+    }
+
+    #[test]
+    fn transformer_state_advances_real_positions() {
+        let mut state = WaveformTransformerState::new();
+        state.advance(72).unwrap();
+        state.advance(5).unwrap();
+        assert_eq!(state.position(), 77);
+    }
 }

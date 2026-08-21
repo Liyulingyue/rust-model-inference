@@ -1,10 +1,10 @@
 //! Snake1d / Snake1d-style activations used by the Qwen3-TTS codec decoder.
 
-/// Snake1d activation: `y = x + (1 / beta) * sin(alpha * x).powi(2)`.
+/// Snake1d activation with GGUF-folded inverse beta:
+/// `y = x + beta * sin(alpha * x).powi(2)`.
 ///
 /// `alpha` and `beta` are per-channel learnable parameters with the same
-/// length as `channels`. `x` and `out` are stored as `[channels, length]`
-/// contiguous row-major slices — i.e. the inner dimension is `length`.
+/// length as `channels`. `x` is stored as `[length, channels]`.
 pub fn snake1d_inplace(
     x: &mut [f32],
     length: usize,
@@ -26,14 +26,32 @@ pub fn snake1d_inplace(
             channels * length,
         ));
     }
-    for c in 0..channels {
-        let a = alpha[c];
-        let b = beta[c];
-        let row = &mut x[c * length..(c + 1) * length];
-        for sample in row.iter_mut() {
+    for row in x.chunks_exact_mut(channels) {
+        for (c, sample) in row.iter_mut().enumerate() {
+            let a = alpha[c];
             let s = (a * *sample).sin();
-            *sample += s * s / b;
+            *sample += s * s * beta[c];
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snake_uses_t_first_channels_and_folded_inverse_beta() {
+        let mut values = [
+            std::f32::consts::FRAC_PI_2,
+            2.0,
+            3.0 * std::f32::consts::FRAC_PI_2,
+            4.0,
+        ];
+        snake1d_inplace(&mut values, 2, &[1.0, 0.0], &[2.0, 3.0]).unwrap();
+        assert!((values[0] - (std::f32::consts::FRAC_PI_2 + 2.0)).abs() < 1e-6);
+        assert_eq!(values[1], 2.0);
+        assert!((values[2] - (3.0 * std::f32::consts::FRAC_PI_2 + 2.0)).abs() < 1e-6);
+        assert_eq!(values[3], 4.0);
+    }
 }
