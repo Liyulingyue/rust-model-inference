@@ -175,6 +175,7 @@ fn run_per_frame_pipeline(
     let eos = cfg.eos_token_id;
     let mut audio_ids: Vec<u32> = Vec::with_capacity(max_new_tokens);
     let mut all_codes: Vec<u32> = Vec::with_capacity(max_new_tokens * 16);
+    let mut rng = rand::thread_rng();
     if sampled != eos {
         audio_ids.push(sampled);
     }
@@ -184,7 +185,7 @@ fn run_per_frame_pipeline(
             break;
         }
         let h_state = session.hidden_state().to_vec();
-        let (codes, out_embd) = predictor.predict_frame(&h_state, sampled)?;
+        let (codes, out_embd) = predictor.predict_frame(&h_state, sampled, 50, &mut rng)?;
         for &c in &codes {
             all_codes.push(c);
         }

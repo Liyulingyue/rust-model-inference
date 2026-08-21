@@ -25,17 +25,10 @@ pub struct RvqDecoder {
 impl RvqDecoder {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         // First (semantic) codebook: out_proj × codebook.
-        let first_out_w = load_q8_0_2d(
-            source,
-            "a.gen.wav.quant.first.out_proj.weight",
-            256,
-            512,
-        )?;
+        let first_out_w = load_q8_0_2d(source, "a.gen.wav.quant.first.out_proj.weight", 256, 512)?;
         let first_bytes = source
             .tensor_slice("a.gen.wav.quant.first.codebook.weight")
-            .ok_or_else(|| {
-                "Missing tensor: a.gen.wav.quant.first.codebook.weight".to_string()
-            })?;
+            .ok_or_else(|| "Missing tensor: a.gen.wav.quant.first.codebook.weight".to_string())?;
         let first_info = source
             .tensor_info("a.gen.wav.quant.first.codebook.weight")
             .ok_or_else(|| {
@@ -57,12 +50,7 @@ impl RvqDecoder {
         let first_codebook = dequant_q8_0_table(first_bytes, RVQ_VOCAB, RVQ_DIM)?;
 
         // Rest (acoustic) codebooks: out_proj × summed codebook.
-        let rest_out_w = load_q8_0_2d(
-            source,
-            "a.gen.wav.quant.rest.out_proj.weight",
-            256,
-            512,
-        )?;
+        let rest_out_w = load_q8_0_2d(source, "a.gen.wav.quant.rest.out_proj.weight", 256, 512)?;
         let rest_bytes = source
             .tensor_slice("a.gen.wav.quant.rest.codebook.weight")
             .ok_or_else(|| "Missing tensor: a.gen.wav.quant.rest.codebook.weight".to_string())?;
@@ -106,10 +94,6 @@ impl RvqDecoder {
     /// (256 → 512), summed acoustic codebooks → `out_proj` (256 → 512), then
     /// add the two halves.
     ///
-    /// Note: the talker's narrow output head emits audio-frame ids in
-    /// `[0, AUDIO_CODEBOOK_SIZE)` (3072). Only the first 2048 are valid
-    /// first-level RVQ codebook entries; ids `>= 2048` (e.g. EOS) are mapped
-    /// to 0 here so decoding stays in-bounds.
     pub fn decode(&self, codes: &[u32]) -> Result<Vec<f32>, String> {
         if codes.len() % RVQ_LEVELS != 0 {
             return Err(format!(
@@ -117,18 +101,26 @@ impl RvqDecoder {
                 codes.len(),
             ));
         }
-        let timesteps = codes.len() / RVQ_LEVELS;
+        let frames: Vec<[u32; RVQ_LEVELS]> = codes
+            .chunks_exact(RVQ_LEVELS)
+            .map(|frame| frame.try_into().expect("exact RVQ frame"))
+            .collect();
+        self.decode_frames(&frames)
+    }
+
+    pub fn decode_frames(&self, frames: &[[u32; RVQ_LEVELS]]) -> Result<Vec<f32>, String> {
+        validate_rvq_frames(frames)?;
+        let timesteps = frames.len();
         let hidden_dim = 512usize;
         let mut first_hidden = vec![0.0f32; timesteps * RVQ_DIM];
         let mut rest_hidden = vec![0.0f32; timesteps * RVQ_DIM];
-        for t in 0..timesteps {
-            let first_idx = (codes[t * RVQ_LEVELS] as usize) % RVQ_VOCAB;
+        for (t, frame) in frames.iter().enumerate() {
+            let first_idx = frame[0] as usize;
             for d in 0..RVQ_DIM {
-                first_hidden[t * RVQ_DIM + d] =
-                    self.first_codebook[first_idx * RVQ_DIM + d];
+                first_hidden[t * RVQ_DIM + d] = self.first_codebook[first_idx * RVQ_DIM + d];
             }
             for level in 1..RVQ_LEVELS {
-                let idx = (codes[t * RVQ_LEVELS + level] as usize) % RVQ_VOCAB;
+                let idx = frame[level] as usize;
                 let level_off = (level - 1) * RVQ_VOCAB * RVQ_DIM;
                 for d in 0..RVQ_DIM {
                     rest_hidden[t * RVQ_DIM + d] +=
@@ -136,17 +128,46 @@ impl RvqDecoder {
                 }
             }
         }
-        let first_proj = matmul_2d_f32(&self.first_out_w, &first_hidden, hidden_dim, RVQ_DIM, timesteps)?;
-        let rest_proj = matmul_2d_f32(&self.rest_out_w, &rest_hidden, hidden_dim, RVQ_DIM, timesteps)?;
+        let first_proj = matmul_2d_f32(
+            &self.first_out_w,
+            &first_hidden,
+            hidden_dim,
+            RVQ_DIM,
+            timesteps,
+        )?;
+        let rest_proj = matmul_2d_f32(
+            &self.rest_out_w,
+            &rest_hidden,
+            hidden_dim,
+            RVQ_DIM,
+            timesteps,
+        )?;
 
         let mut output = vec![0.0f32; timesteps * hidden_dim];
         for t in 0..timesteps {
             for d in 0..hidden_dim {
-                output[t * hidden_dim + d] = first_proj[t * hidden_dim + d] + rest_proj[t * hidden_dim + d];
+                output[t * hidden_dim + d] =
+                    first_proj[t * hidden_dim + d] + rest_proj[t * hidden_dim + d];
             }
         }
         Ok(output)
     }
+}
+
+fn validate_rvq_frames(frames: &[[u32; RVQ_LEVELS]]) -> Result<(), String> {
+    if frames.is_empty() {
+        return Err("RVQ requires at least one complete frame".into());
+    }
+    for (frame_index, frame) in frames.iter().enumerate() {
+        for (codebook, &code) in frame.iter().enumerate() {
+            if code as usize >= RVQ_VOCAB {
+                return Err(format!(
+                    "RVQ frame {frame_index} codebook {codebook} code {code} exceeds {RVQ_VOCAB}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn matmul_2d_f32(
@@ -193,10 +214,7 @@ fn load_q8_0_2d(
         .ok_or_else(|| format!("Missing tensor info: {name}"))?;
     let dims = [rows as u64, cols as u64];
     if info.dims != dims {
-        return Err(format!(
-            "{name}: dims {:?} != expected {dims:?}",
-            info.dims,
-        ));
+        return Err(format!("{name}: dims {:?} != expected {dims:?}", info.dims,));
     }
     if info.ggml_type != GGMLType::Q8_0 {
         return Err(format!("{name}: type {:?} not Q8_0", info.ggml_type));
@@ -255,3 +273,16 @@ const _: () = {
     assert!(Q8_0_BLOCK_SIZE == 34);
     assert!(RVQ_DIM % 32 == 0);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rvq_rejects_out_of_range_codes_instead_of_wrapping() {
+        let frames = [[0u32; 16], [2048u32; 16]];
+        assert!(validate_rvq_frames(&frames)
+            .unwrap_err()
+            .contains("frame 1 codebook 0"));
+    }
+}
