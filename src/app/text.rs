@@ -1024,6 +1024,7 @@ pub fn run_multimodal(
         ));
     }
 
+    let t_img_start = std::time::Instant::now();
     let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
         let projector_path = mmproj_path.unwrap_or(model_path);
         println!("Loading mmproj {} ...", projector_path.display());
@@ -1052,12 +1053,15 @@ pub fn run_multimodal(
             encoder.config.patch_size,
             encoder.config.spatial_merge_size
         );
+        let t_load = std::time::Instant::now();
         let image = decode_image(image_path)?;
+        let t_load = t_load.elapsed();
         let original_w = usize::try_from(image.width())
             .map_err(|_| "Original image width does not fit usize")?;
         let original_h = usize::try_from(image.height())
             .map_err(|_| "Original image height does not fit usize")?;
         let grid = qwen_smart_resize(original_w, original_h, &encoder.config)?;
+        let t_preproc = std::time::Instant::now();
         let pixels = normalize_resized_image(
             &image,
             grid.image_width(),
@@ -1065,6 +1069,7 @@ pub fn run_multimodal(
             &encoder.config.image_mean,
             &encoder.config.image_std,
         )?;
+        let t_preproc = t_preproc.elapsed();
         println!(
             "Image resized to {}x{} ({} vision tokens)",
             grid.image_width(),
@@ -1074,12 +1079,14 @@ pub fn run_multimodal(
         let projection_dim = encoder.config.projection_dim;
         let mut scratch = VisionScratchpad::new(&encoder.config);
         println!("Encoding image...");
+        let t_venc = std::time::Instant::now();
         let encoded_grid = encoder.encode_image(
             &pixels,
             grid.image_width(),
             grid.image_height(),
             &mut scratch,
         )?;
+        let t_venc = t_venc.elapsed();
         if encoded_grid != grid {
             return Err(format!(
                 "Vision grid mismatch: preprocess={grid:?}, encoder={encoded_grid:?}"
@@ -1095,6 +1102,14 @@ pub fn run_multimodal(
                 scratch.projected.len()
             ));
         }
+        let t_img_total = t_img_start.elapsed();
+        eprintln!(
+            "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
+            t_img_total.as_secs_f64(),
+            t_load.as_secs_f64(), t_load.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+            t_preproc.as_secs_f64(), t_preproc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+            t_venc.as_secs_f64(), t_venc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+        );
         println!(
             "Vision tokens: {} (dim={})",
             grid.token_count(),
