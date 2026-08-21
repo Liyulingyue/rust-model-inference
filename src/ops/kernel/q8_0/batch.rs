@@ -9,8 +9,10 @@
 
 use rayon::prelude::*;
 
+#[cfg(target_arch = "x86_64")]
 use crate::ops::has_avx2_fma;
 
+#[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_avx2_range;
 use super::scalar::matmul_q8_0_fallback_range;
 

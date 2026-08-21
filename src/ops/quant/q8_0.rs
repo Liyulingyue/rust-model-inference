@@ -108,15 +108,15 @@ unsafe fn quantize_q8_0_into_neon_range(
         let q5 = vminq_f32(vmaxq_f32(vmulq_f32(chunk5, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
         let q6 = vminq_f32(vmaxq_f32(vmulq_f32(chunk6, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
         let q7 = vminq_f32(vmaxq_f32(vmulq_f32(chunk7, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q8 = vminq_f32(vmaxq_f32(vmulq_f32(chunk8, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let i1 = vcvtq_s32_f32(q1);
-        let i2 = vcvtq_s32_f32(q2);
-        let i3 = vcvtq_s32_f32(q3);
-        let i4 = vcvtq_s32_f32(q4);
-        let i5 = vcvtq_s32_f32(q5);
-        let i6 = vcvtq_s32_f32(q6);
-        let i7 = vcvtq_s32_f32(q7);
-        let i8 = vcvtq_s32_f32(q8);
+        let q8v = vminq_f32(vmaxq_f32(vmulq_f32(chunk8, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
+        let i1 = vcvtnq_s32_f32(q1);
+        let i2 = vcvtnq_s32_f32(q2);
+        let i3 = vcvtnq_s32_f32(q3);
+        let i4 = vcvtnq_s32_f32(q4);
+        let i5 = vcvtnq_s32_f32(q5);
+        let i6 = vcvtnq_s32_f32(q6);
+        let i7 = vcvtnq_s32_f32(q7);
+        let i8 = vcvtnq_s32_f32(q8v);
         let n1 = vminq_s32(vmaxq_s32(i1, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n2 = vminq_s32(vmaxq_s32(i2, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n3 = vminq_s32(vmaxq_s32(i3, vdupq_n_s32(-127)), vdupq_n_s32(127));
@@ -125,22 +125,12 @@ unsafe fn quantize_q8_0_into_neon_range(
         let n6 = vminq_s32(vmaxq_s32(i6, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n7 = vminq_s32(vmaxq_s32(i7, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n8 = vminq_s32(vmaxq_s32(i8, vdupq_n_s32(-127)), vdupq_n_s32(127));
-        let b1 = vreinterpretq_u8_s8(n1);
-        let b2 = vreinterpretq_u8_s8(n2);
-        let b3 = vreinterpretq_u8_s8(n3);
-        let b4 = vreinterpretq_u8_s8(n4);
-        let b5 = vreinterpretq_u8_s8(n5);
-        let b6 = vreinterpretq_u8_s8(n6);
-        let b7 = vreinterpretq_u8_s8(n7);
-        let b8 = vreinterpretq_u8_s8(n8);
-        vst1q_u8(q8.as_mut_ptr().add(base), b1);
-        vst1q_u8(q8.as_mut_ptr().add(base + 4), b2);
-        vst1q_u8(q8.as_mut_ptr().add(base + 8), b3);
-        vst1q_u8(q8.as_mut_ptr().add(base + 12), b4);
-        vst1q_u8(q8.as_mut_ptr().add(base + 16), b5);
-        vst1q_u8(q8.as_mut_ptr().add(base + 20), b6);
-        vst1q_u8(q8.as_mut_ptr().add(base + 24), b7);
-        vst1q_u8(q8.as_mut_ptr().add(base + 28), b8);
+        let b12 = vmovn_s16(vcombine_s16(vmovn_s32(n1), vmovn_s32(n2)));
+        let b34 = vmovn_s16(vcombine_s16(vmovn_s32(n3), vmovn_s32(n4)));
+        let b56 = vmovn_s16(vcombine_s16(vmovn_s32(n5), vmovn_s32(n6)));
+        let b78 = vmovn_s16(vcombine_s16(vmovn_s32(n7), vmovn_s32(n8)));
+        vst1q_s8(q8.as_mut_ptr().add(base).cast(), vcombine_s8(b12, b34));
+        vst1q_s8(q8.as_mut_ptr().add(base + 16).cast(), vcombine_s8(b56, b78));
     }
 }
 

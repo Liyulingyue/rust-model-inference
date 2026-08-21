@@ -18,6 +18,8 @@ use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
+#[cfg(target_os = "macos")]
+use super::audio_processor::{vDSP_measqv, vDSP_sve, vDSP_vsadd, vDSP_vsmul};
 
 unsafe extern "C" {
     fn erff(value: f32) -> f32;

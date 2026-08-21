@@ -4,6 +4,7 @@
 //! `matmul_q8_0_quantized_range`; called by `parallel::matmul_q8_0_quantized_parallel_rows`
 //! and by external callers (`bin/server.rs`, `bin/micro_bench.rs`).
 
+#[cfg(target_arch = "x86_64")]
 use crate::ops::has_avx2_fma;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::has_neon;
@@ -12,6 +13,7 @@ use crate::ops::get_vulkan_context;
 #[cfg(feature = "wgpu")]
 use crate::ops::get_wgpu_context;
 
+#[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
 #[cfg(target_arch = "aarch64")]
 use super::neon::{matmul_q8_0_vs_q8_0_neon, matmul_q8_0_vs_q8_0_neon_nrc1};

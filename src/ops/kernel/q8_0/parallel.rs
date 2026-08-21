@@ -14,6 +14,7 @@ use crate::ops::get_vulkan_context;
 #[cfg(feature = "wgpu")]
 use crate::ops::get_wgpu_context;
 
+#[cfg(target_arch = "x86_64")]
 use super::avx2::{matmul_q8_0_avx2_range, matmul_q8_0_vs_q8_0_avx2};
 #[cfg(target_arch = "aarch64")]
 use super::neon::matmul_q8_0_vs_q8_0_neon;
