@@ -1,6 +1,7 @@
 use crate::core::tensor::TensorSource;
 use crate::models::qwen3::load_f32_tensor;
 use crate::models::qwen3a::audio_processor::{decode_pcm16_wav_any, RealFft};
+use crate::ops::{dot_f16, f32_slice_to_f16};
 
 use super::load_f16_or_f32_tensor;
 
@@ -9,6 +10,10 @@ const FFT_SIZE: usize = 1024;
 const HOP: usize = 256;
 const REFLECT_PAD: usize = 384;
 const MEL_BINS: usize = 128;
+
+unsafe extern "C" {
+    fn cosf(value: f32) -> f32;
+}
 
 pub struct SpeakerMel {
     pub values: Vec<f32>,
@@ -46,8 +51,8 @@ pub fn reference_wav_to_mel(bytes: &[u8]) -> Result<SpeakerMel, String> {
     ];
     let hann: Vec<f32> = (0..FFT_SIZE)
         .map(|index| {
-            let angle = 2.0 * std::f32::consts::PI * index as f32 / FFT_SIZE as f32;
-            0.5 * (1.0 - angle.cos())
+            let angle = (2.0 * std::f64::consts::PI * index as f64 / FFT_SIZE as f64) as f32;
+            (0.5 * (1.0 - f64::from(unsafe { cosf(angle) }))) as f32
         })
         .collect();
     let filters = mel_filters();
@@ -68,11 +73,20 @@ pub fn reference_wav_to_mel(bytes: &[u8]) -> Result<SpeakerMel, String> {
         }
         for mel in 0..MEL_BINS {
             let filter = &filters[mel * fft_bins..(mel + 1) * fft_bins];
-            let sum = magnitude
-                .iter()
-                .zip(filter)
-                .map(|(value, weight)| f64::from(*value * *weight))
-                .sum::<f64>();
+            let mut sum = 0.0f64;
+            let mut bin = 0;
+            while bin + 3 < fft_bins {
+                let group = magnitude[bin] * filter[bin]
+                    + magnitude[bin + 1] * filter[bin + 1]
+                    + magnitude[bin + 2] * filter[bin + 2]
+                    + magnitude[bin + 3] * filter[bin + 3];
+                sum += f64::from(group);
+                bin += 4;
+            }
+            while bin < fft_bins {
+                sum += f64::from(magnitude[bin] * filter[bin]);
+                bin += 1;
+            }
             let value = sum.max(1e-5).ln() as f32;
             if !value.is_finite() {
                 return Err("non-finite speaker Mel value".into());
@@ -81,6 +95,40 @@ pub fn reference_wav_to_mel(bytes: &[u8]) -> Result<SpeakerMel, String> {
         }
     }
     Ok(SpeakerMel { values, frames })
+}
+
+#[derive(Clone, Copy)]
+struct ResamplerBiquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    r1: f32,
+    r2: f32,
+}
+
+impl ResamplerBiquad {
+    fn low_pass(sine: f64, cosine: f64, q: f64) -> Self {
+        let alpha = sine / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: (((1.0 - cosine) / 2.0) / a0) as f32,
+            b1: ((1.0 - cosine) / a0) as f32,
+            b2: (((1.0 - cosine) / 2.0) / a0) as f32,
+            a1: (-2.0 * cosine / a0) as f32,
+            a2: ((1.0 - alpha) / a0) as f32,
+            r1: 0.0,
+            r2: 0.0,
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        let output = self.b0.mul_add(input, self.r1);
+        self.r1 = self.b1.mul_add(input, -self.a1 * output) + self.r2;
+        self.r2 = self.b2.mul_add(input, -self.a2 * output);
+        output
+    }
 }
 
 fn resample_linear(
@@ -94,26 +142,87 @@ fn resample_linear(
     if source_rate == target_rate {
         return Ok(samples.to_vec());
     }
-    let output_len = u64::try_from(samples.len())
-        .ok()
-        .and_then(|length| length.checked_mul(u64::from(target_rate)))
-        .and_then(|length| length.checked_add(u64::from(source_rate) / 2))
-        .map(|length| length / u64::from(source_rate))
+
+    let mut divisor = source_rate;
+    let mut remainder = target_rate;
+    while remainder != 0 {
+        (divisor, remainder) = (remainder, divisor % remainder);
+    }
+    let input_rate = source_rate / divisor;
+    let output_rate = target_rate / divisor;
+    let input_len = u64::try_from(samples.len()).map_err(|_| "reference audio is too large")?;
+    let preliminary = input_len
+        .checked_mul(u64::from(output_rate))
+        .ok_or("resampled reference audio size overflow")?
+        / u64::from(input_rate);
+    let consumed = u64::from(1u32)
+        .checked_add(
+            preliminary
+                .checked_mul(u64::from(input_rate / output_rate))
+                .ok_or("resampled reference audio size overflow")?,
+        )
+        .and_then(|value| {
+            preliminary
+                .checked_mul(u64::from(input_rate % output_rate))
+                .map(|fraction| value + fraction / u64::from(output_rate))
+        })
+        .ok_or("resampled reference audio size overflow")?;
+    let output_len = preliminary
+        .checked_add(u64::from(consumed <= input_len))
         .and_then(|length| usize::try_from(length).ok())
         .filter(|length| *length > 0)
         .ok_or("resampled reference audio size overflow")?;
-    let scale = source_rate as f64 / target_rate as f64;
-    let last = samples.len() - 1;
+
+    let angle = 2.0 * std::f64::consts::PI * (f64::from(input_rate.min(output_rate)) * 0.5)
+        / f64::from(input_rate.max(output_rate));
+    let sine = angle.sin();
+    let cosine = angle.cos();
+    let mut low_pass = [0usize, 1].map(|index| {
+        let q_angle = (1 + index * 2) as f64 * std::f64::consts::PI / 8.0;
+        ResamplerBiquad::low_pass(sine, cosine, 1.0 / (2.0 * q_angle.cos()))
+    });
+
     let mut output = Vec::with_capacity(output_len);
-    for index in 0..output_len {
-        let position = (index as f64 * scale).min(last as f64);
-        let left = position.floor() as usize;
-        let right = (left + 1).min(last);
-        let fraction = position - left as f64;
-        output.push(
-            (f64::from(samples[left]) * (1.0 - fraction) + f64::from(samples[right]) * fraction)
-                as f32,
-        );
+    let mut input_index = 0usize;
+    let mut input_time = 1u32;
+    let mut input_fraction = 0u32;
+    let mut previous = 0.0f32;
+    let mut current = 0.0f32;
+    for _ in 0..output_len {
+        while input_time > 0 && input_index < samples.len() {
+            previous = current;
+            current = samples[input_index];
+            input_index += 1;
+            input_time -= 1;
+            if input_rate > output_rate {
+                for filter in &mut low_pass {
+                    current = filter.process(current);
+                }
+            }
+        }
+        if input_time > 0 {
+            break;
+        }
+
+        let fraction = input_fraction as f32 / output_rate as f32;
+        let difference = current - previous;
+        let mut value = previous + difference * fraction;
+        if input_rate < output_rate {
+            for filter in &mut low_pass {
+                value = filter.process(value);
+            }
+        }
+        output.push(value);
+
+        input_time += input_rate / output_rate;
+        input_fraction += input_rate % output_rate;
+        if input_fraction >= output_rate {
+            input_fraction -= output_rate;
+            input_time += 1;
+        }
+    }
+    if output.len() != output_len {
+        return Err("reference audio ended during resampling".into());
     }
     Ok(output)
 }
@@ -176,7 +285,7 @@ fn conv1d_same(
     input: &[f32],
     in_channels: usize,
     frames: usize,
-    weight: &[f32],
+    weight: &[u16],
     bias: &[f32],
     out_channels: usize,
     dilation: usize,
@@ -214,19 +323,22 @@ fn conv1d_same(
         let reflected = reflect_pad(source, pad)?;
         padded[channel * padded_frames..(channel + 1) * padded_frames].copy_from_slice(&reflected);
     }
+    let row_len = kernel * in_channels;
+    let mut patch = vec![0.0; row_len];
+    let mut patch_f16 = vec![0; row_len];
     let mut output = vec![0.0; out_channels * frames];
-    for out_channel in 0..out_channels {
-        for frame in 0..frames {
-            let mut sum = bias[out_channel];
-            for in_channel in 0..in_channels {
-                for tap in 0..kernel {
-                    let weight_index =
-                        (tap * in_channels + in_channel) * out_channels + out_channel;
-                    let input_index = in_channel * padded_frames + frame + tap * dilation;
-                    sum = weight[weight_index].mul_add(padded[input_index], sum);
-                }
+    for frame in 0..frames {
+        for in_channel in 0..in_channels {
+            for tap in 0..kernel {
+                patch[tap + kernel * in_channel] =
+                    padded[in_channel * padded_frames + frame + tap * dilation];
             }
-            output[out_channel * frames + frame] = sum;
+        }
+        f32_slice_to_f16(&patch, &mut patch_f16);
+        for out_channel in 0..out_channels {
+            let weights = &weight[out_channel * row_len..(out_channel + 1) * row_len];
+            output[out_channel * frames + frame] =
+                dot_f16(weights, &patch_f16, row_len) + bias[out_channel];
         }
     }
     Ok(output)
@@ -305,7 +417,7 @@ fn weighted_stats(
 }
 
 struct SpeakerConv {
-    weight: Vec<f32>,
+    weight: Vec<u16>,
     bias: Vec<f32>,
     in_channels: usize,
     out_channels: usize,
@@ -324,12 +436,15 @@ impl SpeakerConv {
     ) -> Result<Self, String> {
         let weight_name = format!("{prefix}.weight");
         let bias_name = format!("{prefix}.bias");
+        let weight_f32 = load_f16_or_f32_tensor(
+            source,
+            &weight_name,
+            &[kernel as u64, in_channels as u64, out_channels as u64],
+        )?;
+        let mut weight = vec![0; weight_f32.len()];
+        f32_slice_to_f16(&weight_f32, &mut weight);
         Ok(Self {
-            weight: load_f16_or_f32_tensor(
-                source,
-                &weight_name,
-                &[kernel as u64, in_channels as u64, out_channels as u64],
-            )?,
+            weight,
             bias: load_f32_tensor(source, &bias_name, &[out_channels as u64])?,
             in_channels,
             out_channels,
@@ -488,6 +603,7 @@ impl Qwen3TtsSpeakerEncoder {
             context[(3072 + channel) * mel.frames..(3073 + channel) * mel.frames].fill(std);
         }
         let mut attention = self.asp_tdnn.forward(&context, mel.frames)?;
+        relu_inplace(&mut attention);
         for value in &mut attention {
             *value = value.tanh();
         }
@@ -498,6 +614,13 @@ impl Qwen3TtsSpeakerEncoder {
         if embedding.len() != 2048 || embedding.iter().any(|value| !value.is_finite()) {
             return Err("speaker embedding must contain 2048 finite values".into());
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.speaker_embedding",
+            None,
+            &[1, embedding.len()],
+            &embedding,
+        ));
         Ok(embedding)
     }
 }
@@ -584,10 +707,52 @@ mod tests {
     }
 
     #[test]
+    fn speaker_resampling_matches_miniaudio_phase_and_low_pass() {
+        let input =
+            [-203i16, -185, -154, -82, 2, 82, 135, 154].map(|sample| sample as f32 / 32768.0);
+        let output = resample_linear(&input, 16_000, 24_000).unwrap();
+        let expected = [
+            0.0,
+            -0.000_969_319_66,
+            -0.004_021_765_2,
+            -0.006_531_293,
+            -0.005_791_242,
+            -0.004_394_433_5,
+            -0.003_784_807,
+            -0.002_219_122_4,
+            -0.000_250_078_18,
+            0.001_240_870_9,
+            0.002_740_970_3,
+            0.003_887_218_7,
+        ];
+
+        assert_eq!(output.len(), expected.len());
+        assert_eq!(output.as_slice(), &expected);
+    }
+
+    #[test]
     fn reflect_same_conv_preserves_time_and_uses_dilation() {
-        let output =
-            conv1d_same(&[1.0, 2.0, 3.0], 1, 3, &[1.0, 1.0, 1.0], &[0.0], 1, 1, 3).unwrap();
+        let weight = [1.0, 1.0, 1.0].map(crate::ops::f32_to_f16);
+        let output = conv1d_same(&[1.0, 2.0, 3.0], 1, 3, &weight, &[0.0], 1, 1, 3).unwrap();
         assert_eq!(output, vec![5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn speaker_conv_reads_gguf_kernel_input_output_layout() {
+        let weight = [1.0, 2.0, 3.0, 4.0].map(crate::ops::f32_to_f16);
+        let output = conv1d_same(
+            &[1.0, 2.0, 10.0, 20.0],
+            2,
+            2,
+            &weight,
+            &[0.5, -0.5],
+            2,
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(output, vec![21.5, 42.5, 42.5, 85.5]);
     }
 
     #[test]

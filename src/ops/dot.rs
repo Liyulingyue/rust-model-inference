@@ -36,7 +36,7 @@ fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn dot_f32_neon(a: &[f32], b: &[f32], n: usize) -> f32 {
+pub(crate) unsafe fn dot_f32_neon(a: &[f32], b: &[f32], n: usize) -> f32 {
     use std::arch::aarch64::*;
     let mut acc0 = vdupq_n_f32(0.0);
     let mut acc1 = vdupq_n_f32(0.0);
@@ -442,7 +442,6 @@ unsafe fn vec_scale_f32_avx2(y: &mut [f32], v: f32) {
 }
 
 #[inline(always)]
-
 #[inline]
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn hsum_ps(v: std::arch::x86_64::__m256) -> f32 {

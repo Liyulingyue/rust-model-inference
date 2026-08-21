@@ -16,7 +16,26 @@ unsafe extern "C" {
     fn cosf(value: f32) -> f32;
     fn erff(value: f32) -> f32;
     fn log10(value: f64) -> f64;
-    fn sinf(value: f32) -> f32;
+    #[cfg(target_os = "macos")]
+    fn __sincosf_stret(value: f32) -> SinCos;
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct SinCos {
+    sin: f32,
+    cos: f32,
+}
+
+#[cfg(target_os = "macos")]
+fn sin_cos(value: f32) -> (f32, f32) {
+    let values = unsafe { __sincosf_stret(value) };
+    (values.sin, values.cos)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sin_cos(value: f32) -> (f32, f32) {
+    value.sin_cos()
 }
 
 #[cfg(target_os = "macos")]
@@ -341,8 +360,9 @@ impl RealFft {
             .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
         for index in 0..size {
             let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
-            sin.push(unsafe { sinf(angle) });
-            cos.push(unsafe { cosf(angle) });
+            let (sine, cosine) = sin_cos(angle);
+            sin.push(sine);
+            cos.push(cosine);
         }
         Ok(Self {
             size,
@@ -692,5 +712,14 @@ mod tests {
         let mut power = vec![0.0; FFT_SIZE / 2 + 1];
         fft.power(&input, &mut power);
         assert!(power.iter().all(|value| value.is_finite() && *value >= 0.0));
+    }
+
+    #[test]
+    fn fft_twiddle_rounding_matches_pinned_oracle() {
+        const SIZE: usize = 1024;
+        let input: Vec<f32> = (0..SIZE).map(|i| (i as f32 * 0.03125).sin()).collect();
+        let mut fft = RealFft::new(SIZE).unwrap();
+        fft.transform(&input);
+        assert_eq!(fft.output[6].to_bits(), 0x40fb_1deb);
     }
 }

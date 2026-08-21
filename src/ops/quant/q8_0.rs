@@ -11,7 +11,7 @@ pub fn quantize_q8_0_into(input: &[f32], n: usize, q8: &mut [u8], scales: &mut [
             }
         }
     }
-    #[cfg(all(target_arch = "aarch64", not(feature = "parity-trace")))]
+    #[cfg(target_arch = "aarch64")]
     {
         if super::super::has_neon() {
             unsafe {
@@ -93,22 +93,52 @@ unsafe fn quantize_q8_0_into_neon_range(
         let chunk7 = vld1q_f32(input.as_ptr().add(base + 24));
         let chunk8 = vld1q_f32(input.as_ptr().add(base + 28));
         let max_abs = vmaxq_f32(
-            vmaxq_f32(vmaxq_f32(vabsq_f32(chunk), vabsq_f32(chunk2)), vmaxq_f32(vabsq_f32(chunk3), vabsq_f32(chunk4))),
-            vmaxq_f32(vmaxq_f32(vabsq_f32(chunk5), vabsq_f32(chunk6)), vmaxq_f32(vabsq_f32(chunk7), vabsq_f32(chunk8))),
+            vmaxq_f32(
+                vmaxq_f32(vabsq_f32(chunk), vabsq_f32(chunk2)),
+                vmaxq_f32(vabsq_f32(chunk3), vabsq_f32(chunk4)),
+            ),
+            vmaxq_f32(
+                vmaxq_f32(vabsq_f32(chunk5), vabsq_f32(chunk6)),
+                vmaxq_f32(vabsq_f32(chunk7), vabsq_f32(chunk8)),
+            ),
         );
         let max_scalar = vmaxvq_f32(max_abs);
         let scale = max_scalar / 127.0;
         let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
         scales[b] = super::super::f16_to_f32(super::super::f32_to_f16(scale));
         let v_inv = vdupq_n_f32(inv_scale);
-        let q1 = vminq_f32(vmaxq_f32(vmulq_f32(chunk, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q2 = vminq_f32(vmaxq_f32(vmulq_f32(chunk2, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q3 = vminq_f32(vmaxq_f32(vmulq_f32(chunk3, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q4 = vminq_f32(vmaxq_f32(vmulq_f32(chunk4, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q5 = vminq_f32(vmaxq_f32(vmulq_f32(chunk5, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q6 = vminq_f32(vmaxq_f32(vmulq_f32(chunk6, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q7 = vminq_f32(vmaxq_f32(vmulq_f32(chunk7, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
-        let q8v = vminq_f32(vmaxq_f32(vmulq_f32(chunk8, v_inv), vdupq_n_f32(-127.0)), vdupq_n_f32(127.0));
+        let q1 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q2 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk2, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q3 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk3, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q4 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk4, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q5 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk5, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q6 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk6, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q7 = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk7, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
+        let q8v = vminq_f32(
+            vmaxq_f32(vmulq_f32(chunk8, v_inv), vdupq_n_f32(-127.0)),
+            vdupq_n_f32(127.0),
+        );
         let i1 = vcvtnq_s32_f32(q1);
         let i2 = vcvtnq_s32_f32(q2);
         let i3 = vcvtnq_s32_f32(q3);
@@ -136,12 +166,7 @@ unsafe fn quantize_q8_0_into_neon_range(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn quantize_q8_0_into_avx2(
-    input: &[f32],
-    n: usize,
-    q8: &mut [u8],
-    scales: &mut [f32],
-) {
+unsafe fn quantize_q8_0_into_avx2(input: &[f32], n: usize, q8: &mut [u8], scales: &mut [f32]) {
     let blocks = n / 32;
     quantize_q8_0_into_avx2_range(input, q8, scales, 0, blocks);
 }

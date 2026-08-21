@@ -21,9 +21,14 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::qwen3::{
     checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor, usize_to_u64,
 };
+use crate::models::tts::talker::{mad_f16_inplace, scale_f16_inplace};
+#[cfg(target_arch = "aarch64")]
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
-    dot_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox,
+    dot_f16, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    rope_neox, silu_mul_inplace, vec_scale_f32,
 };
 
 use super::{RVQ_CODEBOOK_SIZE, RVQ_LEVELS};
@@ -38,6 +43,34 @@ const PRED_N_FF: usize = 3072;
 const PRED_VOCAB: usize = RVQ_CODEBOOK_SIZE; // 2048 per level
 const PRED_ACOUSTIC_LEVELS: usize = RVQ_LEVELS - 1; // 15
 const PRED_N_SLOTS: usize = RVQ_LEVELS; // 16
+
+fn predictor_matmul(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        debug_assert_eq!((ith, nth), (0, 1));
+        matmul_q8_0_quantized_range_nrc1(weight, input_q8, input_scales, output, n_in, 0, n_out);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    matmul_q8_0_quantized_parallel_rows(
+        weight,
+        input_q8,
+        input_scales,
+        output,
+        n_in,
+        n_out,
+        ith,
+        nth,
+    );
+}
 
 pub(crate) struct PredLayer {
     ln1: Vec<f32>,
@@ -211,13 +244,12 @@ impl CodePredictor {
                 "predict_frame: semantic code {code0} >= {PRED_VOCAB}"
             ));
         }
-
         // KV cache: [layer][n_embd_head * n_head_kv * n_slots] in row-major.
         let n_embd_k = checked_product("pred k", PRED_N_HEAD_KV, PRED_HEAD_DIM)?;
         let cache_stride = n_embd_k;
         let cache_size = cache_stride * PRED_N_SLOTS;
-        let mut k_cache: Vec<Vec<f32>> = vec![vec![0.0f32; cache_size]; PRED_N_LAYER];
-        let mut v_cache: Vec<Vec<f32>> = vec![vec![0.0f32; cache_size]; PRED_N_LAYER];
+        let mut k_cache: Vec<Vec<u16>> = vec![vec![0; cache_size]; PRED_N_LAYER];
+        let mut v_cache: Vec<Vec<u16>> = vec![vec![0; cache_size]; PRED_N_LAYER];
 
         // Pre-allocated activations.
         let mut hidden = vec![0.0f32; PRED_N_EMBD];
@@ -335,6 +367,8 @@ impl CodePredictor {
             acoustic.iter().map(Vec::as_slice),
             PRED_N_EMBD_IN,
         )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::token_ids("tts.frame_codes", &codes));
         Ok((codes, sum))
     }
 }
@@ -368,9 +402,7 @@ fn matmul_with_bias(
     let mut scale_buf = vec![0.0f32; blocks];
     quantize_q8_0_into(input, in_dim, &mut q8_buf, &mut scale_buf);
     let mut out = vec![0.0f32; out_dim];
-    matmul_q8_0_quantized_parallel_rows(
-        weight, &q8_buf, &scale_buf, &mut out, in_dim, out_dim, 0, 1,
-    );
+    predictor_matmul(weight, &q8_buf, &scale_buf, &mut out, in_dim, out_dim, 0, 1);
     for (o, b) in out.iter_mut().zip(bias.iter()) {
         *o += *b;
     }
@@ -382,8 +414,8 @@ fn forward_layer_inplace(
     layer: &PredLayer,
     layer_idx: usize,
     hidden: &mut [f32],
-    k_cache: &mut [Vec<f32>],
-    v_cache: &mut [Vec<f32>],
+    k_cache: &mut [Vec<u16>],
+    v_cache: &mut [Vec<u16>],
     pos: usize,
     cache_stride: usize,
     eps: f32,
@@ -405,7 +437,7 @@ fn forward_layer_inplace(
     let mut q = vec![0.0f32; n_embd_q];
     let mut k = vec![0.0f32; n_embd_k];
     let mut v = vec![0.0f32; n_embd_v];
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.wq,
         &q8_buf,
         &scale_buf,
@@ -415,7 +447,7 @@ fn forward_layer_inplace(
         0,
         1,
     );
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.wk,
         &q8_buf,
         &scale_buf,
@@ -425,7 +457,7 @@ fn forward_layer_inplace(
         0,
         1,
     );
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.wv,
         &q8_buf,
         &scale_buf,
@@ -461,9 +493,9 @@ fn forward_layer_inplace(
     for head in 0..PRED_N_HEAD_KV {
         let off = head * PRED_HEAD_DIM;
         let k_dst = &mut k_cache[layer_idx][cache_row + off..cache_row + off + PRED_HEAD_DIM];
-        k_dst.copy_from_slice(&k[off..off + PRED_HEAD_DIM]);
+        f32_slice_to_f16(&k[off..off + PRED_HEAD_DIM], k_dst);
         let v_dst = &mut v_cache[layer_idx][cache_row + off..cache_row + off + PRED_HEAD_DIM];
-        v_dst.copy_from_slice(&v[off..off + PRED_HEAD_DIM]);
+        f32_slice_to_f16(&v[off..off + PRED_HEAD_DIM], v_dst);
     }
     // Causal attention: read K/V from THIS layer's cache rows 0..=pos.
     let mut attn_out = vec![0.0f32; n_attn];
@@ -471,33 +503,51 @@ fn forward_layer_inplace(
         let kv_head = head / group_size;
         let q_off = head * PRED_HEAD_DIM;
         let attn_off = head * PRED_HEAD_DIM;
-        let mut max_val = f32::NEG_INFINITY;
-        let mut scores = vec![0.0f32; pos + 1];
+        let mut query = vec![0; PRED_HEAD_DIM];
+        f32_slice_to_f16(&q[q_off..q_off + PRED_HEAD_DIM], &mut query);
+        let mut accumulator = vec![0; PRED_HEAD_DIM];
+        let mut sum = 0.0f32;
+        let mut max = f32::NEG_INFINITY;
         for j in 0..=pos {
             let k_off = j * cache_stride + kv_head * PRED_HEAD_DIM;
             let k_row = &k_cache[layer_idx][k_off..k_off + PRED_HEAD_DIM];
-            let q_row = &q[q_off..q_off + PRED_HEAD_DIM];
-            scores[j] = dot_f32(q_row, k_row, PRED_HEAD_DIM) * kq_scale;
-            if scores[j] > max_val {
-                max_val = scores[j];
+            let score = dot_f16(&query, k_row, PRED_HEAD_DIM) * kq_scale;
+            let mut rescale = 1.0f32;
+            let mut weight = 1.0f32;
+            if score > max {
+                rescale = (max - score).exp();
+                max = score;
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    scale_f16_inplace(&mut accumulator, rescale);
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                scale_f16_inplace(&mut accumulator, rescale);
+            } else {
+                weight = (score - max).exp();
             }
-        }
-        let mut exp_sum = 0.0f32;
-        for j in 0..=pos {
-            scores[j] = (scores[j] - max_val).exp();
-            exp_sum += scores[j];
-        }
-        for j in 0..=pos {
-            scores[j] /= exp_sum;
-        }
-        for dim in 0..PRED_HEAD_DIM {
-            let mut sum = 0.0f32;
-            for j in 0..=pos {
-                let v_off = j * cache_stride + kv_head * PRED_HEAD_DIM + dim;
-                sum += scores[j] * v_cache[layer_idx][v_off];
+            let v_off = j * cache_stride + kv_head * PRED_HEAD_DIM;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                mad_f16_inplace(
+                    &mut accumulator,
+                    &v_cache[layer_idx][v_off..v_off + PRED_HEAD_DIM],
+                    weight,
+                );
             }
-            attn_out[attn_off + dim] = sum;
+            #[cfg(not(target_arch = "aarch64"))]
+            mad_f16_inplace(
+                &mut accumulator,
+                &v_cache[layer_idx][v_off..v_off + PRED_HEAD_DIM],
+                weight,
+            );
+            sum = sum.mul_add(rescale, weight);
         }
+        let output = &mut attn_out[attn_off..attn_off + PRED_HEAD_DIM];
+        for (output, &value) in output.iter_mut().zip(&accumulator) {
+            *output = f16_to_f32(value);
+        }
+        vec_scale_f32(output, if sum == 0.0 { 0.0 } else { sum.recip() });
     }
     // attn_out projection + residual.
     let mut attn_proj = vec![0.0f32; PRED_N_EMBD];
@@ -505,7 +555,7 @@ fn forward_layer_inplace(
     let mut q8b = vec![0u8; n_attn];
     let mut sb = vec![0.0f32; q8_blocks];
     quantize_q8_0_into(&attn_out, n_attn, &mut q8b, &mut sb);
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.wo,
         &q8b,
         &sb,
@@ -525,7 +575,7 @@ fn forward_layer_inplace(
     quantize_q8_0_into(&normed, PRED_N_EMBD, &mut q8b2, &mut sb2);
     let mut gate = vec![0.0f32; PRED_N_FF];
     let mut up = vec![0.0f32; PRED_N_FF];
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.w_gate,
         &q8b2,
         &sb2,
@@ -535,7 +585,7 @@ fn forward_layer_inplace(
         0,
         1,
     );
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.w_up,
         &q8b2,
         &sb2,
@@ -546,16 +596,12 @@ fn forward_layer_inplace(
         1,
     );
     let q8b3 = (PRED_N_FF + 31) / 32;
-    let mut silu_mul = vec![0.0f32; PRED_N_FF];
-    for i in 0..PRED_N_FF {
-        let s = 1.0 / (1.0 + (-gate[i]).exp());
-        silu_mul[i] = s * gate[i] * up[i];
-    }
+    silu_mul_inplace(&gate, &mut up);
     let mut q8b3_buf = vec![0u8; PRED_N_FF];
     let mut sb3 = vec![0.0f32; q8b3];
-    quantize_q8_0_into(&silu_mul, PRED_N_FF, &mut q8b3_buf, &mut sb3);
+    quantize_q8_0_into(&up, PRED_N_FF, &mut q8b3_buf, &mut sb3);
     let mut down = vec![0.0f32; PRED_N_EMBD];
-    matmul_q8_0_quantized_parallel_rows(
+    predictor_matmul(
         layer.w_down,
         &q8b3_buf,
         &sb3,
@@ -596,22 +642,21 @@ fn sample_at_head<R: Rng + ?Sized>(
     }
     let mut normed = vec![0.0; n_embd];
     rms_norm(hidden, output_norm, &mut normed, eps);
+    let blocks = n_embd.div_ceil(32);
+    let mut input_q8 = vec![0; n_embd];
+    let mut input_scales = vec![0.0; blocks];
+    quantize_q8_0_into(&normed, n_embd, &mut input_q8, &mut input_scales);
     let mut logits = vec![0.0f32; vocab];
-    for v in 0..vocab {
-        let row_off = level_off + v * bytes_per_row;
-        let mut acc = 0.0f32;
-        for b in 0..blocks_per_row {
-            let off = row_off + b * 34;
-            let scale = half::f16::from_le_bytes([head_w[off], head_w[off + 1]]).to_f32();
-            for j in 0..32usize {
-                let q = head_w[off + 2 + j] as i8 as f32;
-                let w = scale * q;
-                let h = normed[b * 32 + j];
-                acc += h * w;
-            }
-        }
-        logits[v] = acc;
-    }
+    predictor_matmul(
+        &head_w[level_off..level_off + bytes_per_level],
+        &input_q8,
+        &input_scales,
+        &mut logits,
+        n_embd,
+        vocab,
+        0,
+        1,
+    );
     sample_top_k_with_draw(&logits, top_k, rng.gen())
 }
 

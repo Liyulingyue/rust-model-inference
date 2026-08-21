@@ -20,8 +20,14 @@ use crate::models::tts::codec::conv::{
     ConvTranspose1dState,
 };
 use crate::models::tts::codec::snake::snake1d_inplace;
-use crate::models::tts::load_f16_or_f32_tensor;
-use crate::ops::{matmul_q8_0_quantized_parallel, quantize_q8_0_into};
+use crate::models::tts::{load_f16_or_f32_tensor, load_f16_tensor};
+use crate::ops::{f16_to_f32, f32_to_f16, matmul_q8_0_quantized_parallel, quantize_q8_0_into};
+
+#[cfg(unix)]
+#[cfg_attr(not(target_vendor = "apple"), link(name = "m"))]
+unsafe extern "C" {
+    fn tanhf(value: f32) -> f32;
+}
 
 const DAC_ENTRY_KERNEL: usize = 7;
 const DAC_POST_KERNEL: usize = 7;
@@ -34,19 +40,19 @@ const CONVNEXT_KERNEL: usize = 7;
 
 pub struct DacDecoder {
     /// Causal Conv1d 512 → 1024, kernel 3.
-    pre_conv_w: Vec<f32>,
+    pre_conv_w: Vec<u16>,
     pre_conv_b: Vec<f32>,
     /// 2 ConvNeXt upsample stages (each 2× upsampling).
     upsample_blocks: Vec<UpsampleBlock>,
     /// Conv1d 1024 → 1536, kernel 7.
-    entry_weight: Vec<f32>,
+    entry_weight: Vec<u16>,
     entry_bias: Vec<f32>,
     /// 4 Snake + ConvTranspose1d + 3-residual-unit blocks.
     blocks: Vec<DacBlock>,
     /// Snake + Conv1d 96 → 1, kernel 7.
     post_snake_alpha: Vec<f32>,
     post_snake_beta: Vec<f32>,
-    post_weight: Vec<f32>,
+    post_weight: Vec<u16>,
     post_bias: Vec<f32>,
 }
 
@@ -55,7 +61,7 @@ pub struct UpsampleBlock {
     conv_w: Vec<f32>,
     conv_b: Vec<f32>,
     /// Depthwise Conv1d k=7 (per-channel, single group).
-    dwconv_w: Vec<f32>,
+    dwconv_w: Vec<u16>,
     dwconv_b: Vec<f32>,
     /// LayerNorm over channel dim.
     norm_w: Vec<f32>,
@@ -84,12 +90,12 @@ pub struct DacBlock {
 pub struct DacResidual {
     act1_alpha: Vec<f32>,
     act1_beta: Vec<f32>,
-    conv1_weight: Vec<f32>,
+    conv1_weight: Vec<u16>,
     conv1_bias: Vec<f32>,
     dilation: usize,
     act2_alpha: Vec<f32>,
     act2_beta: Vec<f32>,
-    conv2_weight: Vec<f32>,
+    conv2_weight: Vec<u16>,
     conv2_bias: Vec<f32>,
 }
 
@@ -118,8 +124,7 @@ impl DacDecoder {
 
 impl DacDecoder {
     fn from_source_dyn(source: &dyn TensorSource) -> Result<Self, String> {
-        let pre_conv_w =
-            load_f16_or_f32_tensor(source, "a.gen.wav.pre_conv.weight", &[3, 512, 1024])?;
+        let pre_conv_w = load_f16_tensor(source, "a.gen.wav.pre_conv.weight", &[3, 512, 1024])?;
         let pre_conv_b = load_f32_tensor(
             source,
             "a.gen.wav.pre_conv.bias",
@@ -129,7 +134,7 @@ impl DacDecoder {
         // so the DAC's `decode` method starts at 1024-dim. The 512 → 1024
         // pre_conv is exposed separately (via [`Self::pre_conv`]) for callers
         // that have 512-dim RVQ output (the common case).
-        let entry_weight = load_f16_or_f32_tensor(
+        let entry_weight = load_f16_tensor(
             source,
             "a.gen.wav.dac.entry.weight",
             &[DAC_ENTRY_KERNEL as u64, 1024, 1536],
@@ -149,7 +154,7 @@ impl DacDecoder {
             "a.gen.wav.dac.post_snake.beta",
             &[usize_to_u64(96, "post snake beta")?],
         )?;
-        let post_weight = load_f16_or_f32_tensor(
+        let post_weight = load_f16_tensor(
             source,
             "a.gen.wav.dac.post_conv.weight",
             &[DAC_POST_KERNEL as u64, 96, 1],
@@ -201,7 +206,7 @@ impl DacDecoder {
                 length,
             ));
         }
-        conv1d_causal(
+        let output = conv1d_causal(
             &self.pre_conv_w,
             Some(&self.pre_conv_b),
             input,
@@ -211,7 +216,15 @@ impl DacDecoder {
             3,
             1,
             &mut state.pre_conv,
-        )
+        )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.wav_pre_conv",
+            None,
+            &[length, 1024],
+            &output,
+        ));
+        Ok(output)
     }
 
     /// Decode a T-first `[length, 1024]` waveform embedding into mono F32 PCM.
@@ -278,7 +291,7 @@ impl DacDecoder {
             &self.post_snake_alpha,
             &self.post_snake_beta,
         )?;
-        conv1d_causal(
+        let output = conv1d_causal(
             &self.post_weight,
             Some(&self.post_bias),
             &cur,
@@ -288,7 +301,15 @@ impl DacDecoder {
             DAC_POST_KERNEL,
             1,
             &mut state.post_conv,
-        )
+        )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.pcm",
+            None,
+            &[output.len()],
+            &output,
+        ));
+        Ok(output)
     }
 }
 
@@ -424,7 +445,7 @@ fn load_dac_block(
             &format!("{res_prefix}.act1.beta"),
             &[usize_to_u64(out_channels, "dac res act1 beta")?],
         )?;
-        let conv1_weight = load_f16_or_f32_tensor(
+        let conv1_weight = load_f16_tensor(
             source,
             &format!("{res_prefix}.conv1.weight"),
             &[res_kernel as u64, out_channels as u64, out_channels as u64],
@@ -444,7 +465,7 @@ fn load_dac_block(
             &format!("{res_prefix}.act2.beta"),
             &[usize_to_u64(out_channels, "dac res act2 beta")?],
         )?;
-        let conv2_weight = load_f16_or_f32_tensor(
+        let conv2_weight = load_f16_tensor(
             source,
             &format!("{res_prefix}.conv2.weight"),
             &[1, out_channels as u64, out_channels as u64],
@@ -496,7 +517,7 @@ fn load_upsample_block(
         &format!("{prefix}.conv.bias"),
         &[usize_to_u64(1024, "upsample conv bias")?],
     )?;
-    let dwconv_w = load_f16_or_f32_tensor(
+    let dwconv_w = load_f16_tensor(
         source,
         &format!("{prefix}.dwconv.weight"),
         &[CONVNEXT_KERNEL as u64, 1, 1024],
@@ -581,12 +602,40 @@ fn upsample_block_forward(
         .chunks_exact(1024)
         .zip(normalized.chunks_exact_mut(1024))
     {
-        let mean = row.iter().sum::<f32>() / 1024.0;
-        let var = row.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / 1024.0;
-        let std = (var + 1e-6).sqrt();
+        let mean = row
+            .iter()
+            .fold(0.0f64, |sum, &value| sum + f64::from(value)) as f32
+            / 1024.0;
+        let mut variance = 0.0f64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use std::arch::aarch64::*;
+            let mean = vdupq_n_f32(mean);
+            for channel in (0..1024).step_by(4) {
+                let centered = vsubq_f32(vld1q_f32(row.as_ptr().add(channel)), mean);
+                vst1q_f32(output.as_mut_ptr().add(channel), centered);
+                variance += f64::from(vaddvq_f32(vmulq_f32(centered, centered)));
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        for channel in (0..1024).step_by(4) {
+            let centered = [
+                row[channel] - mean,
+                row[channel + 1] - mean,
+                row[channel + 2] - mean,
+                row[channel + 3] - mean,
+            ];
+            output[channel..channel + 4].copy_from_slice(&centered);
+            variance += f64::from(
+                (centered[0] * centered[0] + centered[1] * centered[1])
+                    + (centered[2] * centered[2] + centered[3] * centered[3]),
+            );
+        }
+        let scale = 1.0 / ((variance / 1024.0) as f32 + 1e-6).sqrt();
         for channel in 0..1024 {
-            output[channel] =
-                (row[channel] - mean) / std * block.norm_w[channel] + block.norm_b[channel];
+            output[channel] *= scale;
+            output[channel] *= block.norm_w[channel];
+            output[channel] += block.norm_b[channel];
         }
     }
     let expanded = matmul_2d_pw(
@@ -662,8 +711,17 @@ fn matmul_2d_pw(
 
 fn gelu_inplace(mut x: Vec<f32>) -> Vec<f32> {
     for v in x.iter_mut() {
-        let val = *v;
-        *v = 0.5 * val * (1.0 + (val * 0.7978845608028654 * (1.0 + 0.044715 * val * val)).tanh());
+        if *v <= -10.0 {
+            *v = 0.0;
+        } else if *v < 10.0 {
+            let value = f16_to_f32(f32_to_f16(*v));
+            let inner = 0.7978845608028654 * value * (1.0 + 0.044715 * value * value);
+            #[cfg(unix)]
+            let activation = unsafe { tanhf(inner) };
+            #[cfg(not(unix))]
+            let activation = inner.tanh();
+            *v = f16_to_f32(f32_to_f16(0.5 * value * (1.0 + activation)));
+        }
     }
     x
 }

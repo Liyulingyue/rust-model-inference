@@ -8,7 +8,7 @@ use crate::models::tts::codec::{
     write_wav_f32, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
 use crate::models::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
-use crate::models::tts::{Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
+use crate::models::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
 use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Instant;
@@ -128,7 +128,8 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
         |semantic| {
             let frame_index = frames.len();
             let hidden = session.hidden_state().to_vec();
-            let (frame, mut feedback) = predictor.predict_frame(&hidden, semantic, 50, rng)?;
+            let (frame, mut feedback) =
+                predictor.predict_frame(&hidden, semantic, predictor_top_k(temperature), rng)?;
             let overlay = &prompt.overlay[frame_index.min(prompt.overlay.len() - 1)];
             if feedback.len() != overlay.len() {
                 return Err(format!(

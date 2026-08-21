@@ -29,16 +29,8 @@ pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
             let (cos_a, sin_a) = rope_sin_cos(theta);
             let x0 = x[base + i];
             let x1 = x[base + i + half];
-            #[cfg(feature = "parity-trace")]
-            {
-                x[base + i] = x0 * cos_a - x1 * sin_a;
-                x[base + i + half] = x0 * sin_a + x1 * cos_a;
-            }
-            #[cfg(not(feature = "parity-trace"))]
-            {
-                x[base + i] = x0.mul_add(cos_a, x1 * -sin_a);
-                x[base + i + half] = x0.mul_add(sin_a, x1 * cos_a);
-            }
+            x[base + i] = x0.mul_add(cos_a, x1 * -sin_a);
+            x[base + i + half] = x0.mul_add(sin_a, x1 * cos_a);
             theta *= theta_scale;
         }
     }

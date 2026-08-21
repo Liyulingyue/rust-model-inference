@@ -48,6 +48,40 @@ pub fn attention_value_f32(
     super::dot_f32(values, weights, n_padded)
 }
 
+pub(crate) fn softmax_exp_sum(x: &mut [f32], max: f32) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    if super::has_neon() {
+        return unsafe { softmax_exp_sum_neon(x, max) };
+    }
+    let mut sum = 0.0f64;
+    for value in x {
+        *value = (*value - max).exp();
+        sum += f64::from(*value);
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn softmax_exp_sum_neon(x: &mut [f32], max: f32) -> f64 {
+    use std::arch::aarch64::*;
+
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let values = ggml_expf_neon(vsubq_f32(vld1q_f32(x.as_ptr().add(i)), vdupq_n_f32(max)));
+        vst1q_f32(x.as_mut_ptr().add(i), values);
+        sum += f64::from(vaddvq_f32(values));
+        i += 4;
+    }
+    while i < x.len() {
+        x[i] = (x[i] - max).exp();
+        sum += f64::from(x[i]);
+        i += 1;
+    }
+    sum
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn softmax_neon_ggml(x: &mut [f32]) {

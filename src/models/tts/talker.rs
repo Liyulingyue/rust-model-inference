@@ -32,12 +32,57 @@ use crate::models::qwen3::{
 };
 use crate::models::tts::AUDIO_CODEBOOK_SIZE;
 use crate::ops::{
-    dot_f16, embedding_lookup, f32_slice_to_f16, f32_to_f16, matmul_q8_0_quantized_parallel_rows,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope_interleaved, rope_neox,
-    silu_mul_inplace, softmax,
+    dot_f16, embedding_lookup, f16_to_f32, f32_slice_to_f16, f32_to_f16,
+    matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    rope_mrope_interleaved, rope_neox, silu_mul_inplace, softmax, vec_scale_f32,
 };
 
 const SEMANTIC_CODEBOOK_SIZE: usize = 2048;
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,fp16")]
+pub(crate) unsafe fn scale_f16_inplace(values: &mut [u16], scale: f32) {
+    use std::arch::aarch64::*;
+
+    let scale: float16x8_t = std::mem::transmute(vdupq_n_u16(f32_to_f16(scale)));
+    for values in values.chunks_exact_mut(8) {
+        let vector: float16x8_t = std::mem::transmute(vld1q_u16(values.as_ptr()));
+        vst1q_u16(
+            values.as_mut_ptr(),
+            std::mem::transmute(vmulq_f16(vector, scale)),
+        );
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,fp16")]
+pub(crate) unsafe fn mad_f16_inplace(output: &mut [u16], values: &[u16], scale: f32) {
+    use std::arch::aarch64::*;
+
+    let scale: float16x8_t = std::mem::transmute(vdupq_n_u16(f32_to_f16(scale)));
+    for (output, values) in output.chunks_exact_mut(8).zip(values.chunks_exact(8)) {
+        let accumulator: float16x8_t = std::mem::transmute(vld1q_u16(output.as_ptr()));
+        let values: float16x8_t = std::mem::transmute(vld1q_u16(values.as_ptr()));
+        vst1q_u16(
+            output.as_mut_ptr(),
+            std::mem::transmute(vfmaq_f16(accumulator, values, scale)),
+        );
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn scale_f16_inplace(values: &mut [u16], scale: f32) {
+    for value in values {
+        *value = f32_to_f16(f16_to_f32(*value) * scale);
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn mad_f16_inplace(output: &mut [u16], values: &[u16], scale: f32) {
+    for (output, value) in output.iter_mut().zip(values) {
+        *output = f32_to_f16(f16_to_f32(*output) + f16_to_f32(*value) * scale);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TtsSpecialTokens {
@@ -415,13 +460,27 @@ impl Qwen3TtsTalker {
                 parse_special: true,
             },
         );
-        compose_prompt_embeddings(
+        let prompt = compose_prompt_embeddings(
             &wrapper_ids,
             &specials,
             speaker,
             self.config.n_embd,
             |token_id| self.embedding_row(token_id),
-        )
+        )?;
+        #[cfg(feature = "parity-trace")]
+        {
+            crate::parity_trace::report(crate::parity_trace::token_ids(
+                "tts.prompt_ids",
+                &prompt.wrapper_ids,
+            ));
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "tts.prompt_embeddings",
+                None,
+                &[prompt.positions.len(), self.config.n_embd],
+                &prompt.embeddings,
+            ));
+        }
+        Ok(prompt)
     }
 
     fn embedding_row(&self, token_id: u32) -> Result<Vec<f32>, String> {
@@ -607,7 +666,7 @@ impl<'model> TtsSession<'model> {
             .chunks_exact(self.model.config.n_embd)
             .zip(&prompt.positions)
         {
-            self.forward_step_with_embedding(embedding, position)?;
+            self.forward_step_inner(None, Some(embedding), position, true)?;
         }
         Ok(())
     }
@@ -633,7 +692,7 @@ impl<'model> TtsSession<'model> {
         token_id: u32,
         position: [usize; 4],
     ) -> Result<(), String> {
-        self.forward_step_inner(Some(token_id), None, position)
+        self.forward_step_inner(Some(token_id), None, position, true)
     }
 }
 
@@ -647,13 +706,12 @@ impl TtsSession<'_> {
         embedding: &[f32],
         position: [usize; 4],
     ) -> Result<(), String> {
-        self.forward_step_inner(None, Some(embedding), position)
+        self.forward_step_inner(None, Some(embedding), position, true)
     }
 
-    /// Borrow the talker's current hidden state (length = `n_embd`, set by
-    /// the most recent forward step). Used by the code predictor as `h_state`.
+    /// Borrow the talker's normalized output state used by the code predictor.
     pub(crate) fn hidden_state(&self) -> &[f32] {
-        &self.scratch.x
+        &self.scratch.normed
     }
 
     /// Run the output norm + LM head on `scratch.x` and return the audio-
@@ -685,6 +743,7 @@ impl TtsSession<'_> {
         token_id: Option<u32>,
         precomputed_embedding: Option<&[f32]>,
         position: [usize; 4],
+        online_attention: bool,
     ) -> Result<(), String> {
         let model = self.model;
         let config = &model.config;
@@ -733,7 +792,6 @@ impl TtsSession<'_> {
                 return Err("forward_step_inner: no token_id or embedding".into());
             }
         }
-
         let (k_cache_ptr, v_cache_ptr) = match &mut self.kv_cache {
             KvCache::F16(cache) => (cache.k.as_mut_ptr(), cache.v.as_mut_ptr()),
             KvCache::F32(_) => {
@@ -858,55 +916,121 @@ impl TtsSession<'_> {
                 let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_attn) };
                 let k_cache = unsafe { std::slice::from_raw_parts(k_cache_ptr, kv_cache_size) };
                 let v_cache = unsafe { std::slice::from_raw_parts(v_cache_ptr, kv_cache_size) };
-                let scores = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        scores_ptr.add(thread * score_stride),
-                        score_stride,
-                    )
-                };
-                let f16_scratch = scores.as_mut_ptr().cast::<u16>();
                 let head_start = thread * config.n_head / threads;
                 let head_end = (thread + 1) * config.n_head / threads;
                 let layer_base = layer * layer_capacity * kv_stride;
-                let n_padded = (step + 1).div_ceil(256) * 256;
-                for head in head_start..head_end {
-                    let kv_head = head / group_size;
-                    let q_offset = head * config.n_embd_head_k;
-                    let output_offset = head * config.n_embd_head_v;
-                    let output = &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
-                    let query = unsafe {
+                if online_attention {
+                    let f16_scratch = unsafe {
                         std::slice::from_raw_parts_mut(
-                            output.as_mut_ptr().cast::<u16>(),
-                            config.n_embd_head_k,
+                            scores_ptr.add(thread * score_stride).cast::<u16>(),
+                            score_stride * 2,
                         )
                     };
-                    f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
-                    scores[..n_padded].fill(f32::NEG_INFINITY);
-                    for token in 0..=step {
-                        let row = layer_base + token * kv_stride;
-                        let key_offset = row + kv_head * config.n_embd_head_k;
-                        scores[token] = dot_f16(
-                            query,
-                            &k_cache[key_offset..key_offset + config.n_embd_head_k],
-                            config.n_embd_head_k,
-                        ) * kq_scale;
-                    }
-                    softmax(&mut scores[..n_padded]);
-                    for index in 0..n_padded {
-                        unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
-                    }
-                    let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
-                    let values = unsafe {
-                        std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
-                    };
-                    values[step + 1..].fill(0);
-                    for dimension in 0..config.n_embd_head_v {
+                    let (query, accumulator) = f16_scratch.split_at_mut(config.n_embd_head_k);
+                    let accumulator = &mut accumulator[..config.n_embd_head_v];
+                    for head in head_start..head_end {
+                        let kv_head = head / group_size;
+                        let q_offset = head * config.n_embd_head_k;
+                        let output_offset = head * config.n_embd_head_v;
+                        let output =
+                            &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                        f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
+                        accumulator.fill(0);
+                        let mut sum = 0.0f32;
+                        let mut max = f32::NEG_INFINITY;
                         for token in 0..=step {
                             let row = layer_base + token * kv_stride;
-                            values[token] =
-                                v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                            let key_offset = row + kv_head * config.n_embd_head_k;
+                            let score = dot_f16(
+                                query,
+                                &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                config.n_embd_head_k,
+                            ) * kq_scale;
+                            let mut rescale = 1.0f32;
+                            let mut weight = 1.0f32;
+                            if score > max {
+                                rescale = (max - score).exp();
+                                max = score;
+                                #[cfg(target_arch = "aarch64")]
+                                unsafe {
+                                    scale_f16_inplace(accumulator, rescale);
+                                }
+                                #[cfg(not(target_arch = "aarch64"))]
+                                scale_f16_inplace(accumulator, rescale);
+                            } else {
+                                weight = (score - max).exp();
+                            }
+                            let value_offset = row + kv_head * config.n_embd_head_v;
+                            #[cfg(target_arch = "aarch64")]
+                            unsafe {
+                                mad_f16_inplace(
+                                    accumulator,
+                                    &v_cache[value_offset..value_offset + config.n_embd_head_v],
+                                    weight,
+                                );
+                            }
+                            #[cfg(not(target_arch = "aarch64"))]
+                            mad_f16_inplace(
+                                accumulator,
+                                &v_cache[value_offset..value_offset + config.n_embd_head_v],
+                                weight,
+                            );
+                            sum = sum.mul_add(rescale, weight);
                         }
-                        output[dimension] = dot_f16(values, weights, n_padded);
+                        for (output, &value) in output.iter_mut().zip(accumulator.iter()) {
+                            *output = f16_to_f32(value);
+                        }
+                        vec_scale_f32(output, if sum == 0.0 { 0.0 } else { sum.recip() });
+                    }
+                } else {
+                    let scores = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            scores_ptr.add(thread * score_stride),
+                            score_stride,
+                        )
+                    };
+                    let f16_scratch = scores.as_mut_ptr().cast::<u16>();
+                    let n_padded = (step + 1).div_ceil(256) * 256;
+                    for head in head_start..head_end {
+                        let kv_head = head / group_size;
+                        let q_offset = head * config.n_embd_head_k;
+                        let output_offset = head * config.n_embd_head_v;
+                        let output =
+                            &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                        let query = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                output.as_mut_ptr().cast::<u16>(),
+                                config.n_embd_head_k,
+                            )
+                        };
+                        f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
+                        scores[..n_padded].fill(f32::NEG_INFINITY);
+                        for token in 0..=step {
+                            let row = layer_base + token * kv_stride;
+                            let key_offset = row + kv_head * config.n_embd_head_k;
+                            scores[token] = dot_f16(
+                                query,
+                                &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                config.n_embd_head_k,
+                            ) * kq_scale;
+                        }
+                        softmax(&mut scores[..n_padded]);
+                        for index in 0..n_padded {
+                            unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
+                        }
+                        let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
+                        let values = unsafe {
+                            std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
+                        };
+                        values[step + 1..].fill(0);
+                        for dimension in 0..config.n_embd_head_v {
+                            for token in 0..=step {
+                                let row = layer_base + token * kv_stride;
+                                values[token] =
+                                    v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                            }
+                            output[dimension] = dot_f16(values, weights, n_padded);
+                        }
                     }
                 }
             });

@@ -11,8 +11,13 @@ use crate::models::qwen3::{
     check_allocation, checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor,
     usize_to_u64,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
-    dot_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rope_neox, silu,
+    f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rope_neox, silu, softmax_exp_sum,
+    vec_scale_f32,
 };
 
 const TFM_N_LAYER: usize = 8;
@@ -22,8 +27,23 @@ const TFM_N_HEAD: usize = 16;
 const TFM_HEAD_DIM: usize = 64;
 const TFM_N_FF: usize = 1024;
 const TFM_WINDOW: usize = 72;
+const TFM_FA_TILE: usize = 64;
 const TFM_EPS: f32 = 1e-5;
 const TFM_ROPE_THETA: f32 = 10_000.0;
+
+fn tfm_matmul(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    matmul_q8_0_quantized_range_nrc1(weight, input_q8, input_scales, output, n_in, 0, n_out);
+    #[cfg(not(target_arch = "aarch64"))]
+    matmul_q8_0_quantized_parallel_rows(weight, input_q8, input_scales, output, n_in, n_out, 0, 1);
+}
 
 #[derive(Debug, Clone)]
 pub struct WaveformTransformerState {
@@ -260,6 +280,13 @@ impl WaveformTransformer {
             TFM_IN_DIM,
             frames,
         )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.wav_tfm",
+            None,
+            &[frames, TFM_IN_DIM],
+            &output,
+        ));
         next_state.advance(frames)?;
         *state = next_state;
         Ok(output)
@@ -300,35 +327,29 @@ fn forward_tfm_layer(
         let mut scale_buf = vec![0.0f32; blocks];
         quantize_q8_0_into(&normed, TFM_N_EMBD, &mut q8_buf, &mut scale_buf);
         let q_off = t * n_q;
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.wq,
             &q8_buf,
             &scale_buf,
             &mut q_all[q_off..q_off + n_q],
             TFM_N_EMBD,
             n_q,
-            0,
-            1,
         );
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.wk,
             &q8_buf,
             &scale_buf,
             &mut k_all[q_off..q_off + n_q],
             TFM_N_EMBD,
             n_q,
-            0,
-            1,
         );
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.wv,
             &q8_buf,
             &scale_buf,
             &mut v_all[q_off..q_off + n_q],
             TFM_N_EMBD,
             n_q,
-            0,
-            1,
         );
         let rope_position = position
             .checked_add(t)
@@ -349,7 +370,6 @@ fn forward_tfm_layer(
             );
         }
     }
-
     let mut keys = Vec::with_capacity(old_keys.len() + k_all.len());
     keys.extend_from_slice(old_keys);
     keys.extend_from_slice(&k_all);
@@ -358,6 +378,13 @@ fn forward_tfm_layer(
     values.extend_from_slice(&v_all);
     let history_start = position - prior_frames;
     let kq_scale = 1.0 / (TFM_HEAD_DIM as f32).sqrt();
+    let mut keys_f16 = vec![0; keys.len()];
+    let mut values_f16 = vec![0; values.len()];
+    f32_slice_to_f16(&keys, &mut keys_f16);
+    f32_slice_to_f16(&values, &mut values_f16);
+    let virtual_key_start = TFM_WINDOW - 1 - prior_frames;
+    let virtual_key_count = TFM_WINDOW - 1 + length;
+    let real_key_count = prior_frames + length;
     let mut attn_out = vec![0.0f32; length * n_attn];
     for head in 0..TFM_N_HEAD {
         let q_off = head * TFM_HEAD_DIM;
@@ -367,32 +394,59 @@ fn forward_tfm_layer(
             let visible = visible_key_range(query_position, position + i + 1, TFM_WINDOW);
             let key_start = visible.start.max(history_start) - history_start;
             let key_end = visible.end - history_start;
+            let q_row = &q_all[i * n_q + q_off..i * n_q + q_off + TFM_HEAD_DIM];
+            let mut accumulator = [0.0f32; TFM_HEAD_DIM];
+            let mut sum = 0.0f32;
             let mut max_val = f32::NEG_INFINITY;
-            let mut scores = vec![0.0f32; key_end - key_start];
-            for (score, j) in scores.iter_mut().zip(key_start..key_end) {
-                let q_row = &q_all[i * n_q + q_off..i * n_q + q_off + TFM_HEAD_DIM];
-                let k_row = &keys[j * n_q + q_off..j * n_q + q_off + TFM_HEAD_DIM];
-                *score = dot_f32(q_row, k_row, TFM_HEAD_DIM) * kq_scale;
-                max_val = max_val.max(*score);
+            for tile_start in (0..virtual_key_count).step_by(TFM_FA_TILE) {
+                let tile_end = (tile_start + TFM_FA_TILE).min(virtual_key_count);
+                let real_tile_start = tile_start
+                    .saturating_sub(virtual_key_start)
+                    .min(real_key_count);
+                let real_tile_end = tile_end
+                    .saturating_sub(virtual_key_start)
+                    .min(real_key_count);
+                let score_start = real_tile_start.max(key_start);
+                let score_end = real_tile_end.min(key_end);
+                if score_start >= score_end {
+                    continue;
+                }
+
+                let mut scores = [f32::NEG_INFINITY; TFM_FA_TILE];
+                for j in score_start..score_end {
+                    let k_row = &keys_f16[j * n_q + q_off..j * n_q + q_off + TFM_HEAD_DIM];
+                    let mut score = 0.0f32;
+                    for dim in 0..TFM_HEAD_DIM {
+                        score = q_row[dim].mul_add(f16_to_f32(k_row[dim]), score);
+                    }
+                    scores[virtual_key_start + j - tile_start] = score * kq_scale;
+                }
+
+                let tile_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let new_max = max_val.max(tile_max);
+                if new_max > max_val {
+                    let scale = (max_val - new_max).exp();
+                    vec_scale_f32(&mut accumulator, scale);
+                    sum *= scale;
+                }
+                max_val = new_max;
+                let tile_sum = softmax_exp_sum(&mut scores, new_max);
+                sum = (f64::from(sum) + tile_sum) as f32;
+
+                for (dim, output) in accumulator.iter_mut().enumerate() {
+                    for j in real_tile_start..real_tile_end {
+                        let slot = virtual_key_start + j - tile_start;
+                        let value = f16_to_f32(values_f16[j * n_q + q_off + dim]);
+                        *output = scores[slot].mul_add(value, *output);
+                    }
+                }
             }
-            let mut exp_sum = 0.0f32;
-            for score in &mut scores {
-                *score = (*score - max_val).exp();
-                exp_sum += *score;
-            }
-            if !exp_sum.is_finite() || exp_sum <= 0.0 {
+            if !sum.is_finite() || sum <= 0.0 {
                 return Err("waveform transformer attention normalization failed".into());
             }
-            for score in &mut scores {
-                *score /= exp_sum;
-            }
-            for dim in 0..TFM_HEAD_DIM {
-                let mut sum = 0.0f32;
-                for (&score, j) in scores.iter().zip(key_start..key_end) {
-                    sum += score * values[j * n_q + q_off + dim];
-                }
-                attn_out[i * n_attn + attn_off + dim] = sum;
-            }
+            let output = &mut attn_out[i * n_attn + attn_off..i * n_attn + attn_off + TFM_HEAD_DIM];
+            output.copy_from_slice(&accumulator);
+            vec_scale_f32(output, 1.0 / sum);
         }
     }
 
@@ -403,15 +457,13 @@ fn forward_tfm_layer(
         let mut q8_buf = vec![0u8; n_attn];
         let mut scale_buf = vec![0.0f32; blocks];
         quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.wo,
             &q8_buf,
             &scale_buf,
             &mut attn_proj[t * TFM_N_EMBD..t * TFM_N_EMBD + TFM_N_EMBD],
             n_attn,
             TFM_N_EMBD,
-            0,
-            1,
         );
         let off = t * TFM_N_EMBD;
         for i in 0..TFM_N_EMBD {
@@ -432,18 +484,16 @@ fn forward_tfm_layer(
         quantize_q8_0_into(&normed, TFM_N_EMBD, &mut q8_buf, &mut scale_buf);
         let mut gate = vec![0.0f32; TFM_N_FF];
         let mut up = vec![0.0f32; TFM_N_FF];
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.w_gate,
             &q8_buf,
             &scale_buf,
             &mut gate,
             TFM_N_EMBD,
             TFM_N_FF,
-            0,
-            1,
         );
-        matmul_q8_0_quantized_parallel_rows(
-            layer.w_up, &q8_buf, &scale_buf, &mut up, TFM_N_EMBD, TFM_N_FF, 0, 1,
+        tfm_matmul(
+            layer.w_up, &q8_buf, &scale_buf, &mut up, TFM_N_EMBD, TFM_N_FF,
         );
         let mut silu_mul = vec![0.0f32; TFM_N_FF];
         for i in 0..TFM_N_FF {
@@ -454,15 +504,13 @@ fn forward_tfm_layer(
         let mut scale_buf2 = vec![0.0f32; blocks2];
         quantize_q8_0_into(&silu_mul, TFM_N_FF, &mut q8_buf2, &mut scale_buf2);
         let mut down = vec![0.0f32; TFM_N_EMBD];
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             layer.w_down,
             &q8_buf2,
             &scale_buf2,
             &mut down,
             TFM_N_FF,
             TFM_N_EMBD,
-            0,
-            1,
         );
         for i in 0..TFM_N_EMBD {
             hidden[off + i] += layer.ls2[i] * down[i];
@@ -508,15 +556,13 @@ fn matmul_q8_bias(
             &mut scale_buf,
         );
         let o_off = t * out_dim;
-        matmul_q8_0_quantized_parallel_rows(
+        tfm_matmul(
             weight,
             &q8_buf,
             &scale_buf,
             &mut out[o_off..o_off + out_dim],
             in_dim,
             out_dim,
-            0,
-            1,
         );
         if let Some(bias) = bias {
             for v in 0..out_dim {

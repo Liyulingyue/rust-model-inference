@@ -6,7 +6,12 @@
 //! vectors across all 16 levels.
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::checked_product;
+use crate::models::qwen3::{checked_product, static_q8_matrix};
+#[cfg(target_arch = "aarch64")]
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::matmul_q8_0_quantized_parallel_rows;
+use crate::ops::quantize_q8_0_into;
 
 const RVQ_DIM: usize = crate::models::tts::codec::RVQ_CODE_DIM;
 const RVQ_VOCAB: usize = crate::models::tts::codec::RVQ_CODEBOOK_SIZE;
@@ -16,16 +21,21 @@ const Q8_0_BLOCK_SIZE: usize = 34;
 /// One RVQ decoder configuration. Holds the mmap-backed weight tensors for the
 /// 1 first + 15 residual codebook lookup tables.
 pub struct RvqDecoder {
-    first_out_w: Vec<f32>,
+    first_out_w: &'static [u8],
     first_codebook: Vec<f32>,
-    rest_out_w: Vec<f32>,
+    rest_out_w: &'static [u8],
     rest_codebook: Vec<f32>,
 }
 
 impl RvqDecoder {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         // First (semantic) codebook: out_proj × codebook.
-        let first_out_w = load_q8_0_2d(source, "a.gen.wav.quant.first.out_proj.weight", 256, 512)?;
+        let first_out_w = static_q8_matrix(
+            source,
+            "a.gen.wav.quant.first.out_proj.weight",
+            RVQ_DIM,
+            512,
+        )?;
         let first_bytes = source
             .tensor_slice("a.gen.wav.quant.first.codebook.weight")
             .ok_or_else(|| "Missing tensor: a.gen.wav.quant.first.codebook.weight".to_string())?;
@@ -50,7 +60,8 @@ impl RvqDecoder {
         let first_codebook = dequant_q8_0_table(first_bytes, RVQ_VOCAB, RVQ_DIM)?;
 
         // Rest (acoustic) codebooks: out_proj × summed codebook.
-        let rest_out_w = load_q8_0_2d(source, "a.gen.wav.quant.rest.out_proj.weight", 256, 512)?;
+        let rest_out_w =
+            static_q8_matrix(source, "a.gen.wav.quant.rest.out_proj.weight", RVQ_DIM, 512)?;
         let rest_bytes = source
             .tensor_slice("a.gen.wav.quant.rest.codebook.weight")
             .ok_or_else(|| "Missing tensor: a.gen.wav.quant.rest.codebook.weight".to_string())?;
@@ -128,21 +139,20 @@ impl RvqDecoder {
                 }
             }
         }
-        let first_proj = matmul_2d_f32(
-            &self.first_out_w,
+        let first_proj = matmul_2d_q8(
+            self.first_out_w,
             &first_hidden,
             hidden_dim,
             RVQ_DIM,
             timesteps,
         )?;
-        let rest_proj = matmul_2d_f32(
-            &self.rest_out_w,
+        let rest_proj = matmul_2d_q8(
+            self.rest_out_w,
             &rest_hidden,
             hidden_dim,
             RVQ_DIM,
             timesteps,
         )?;
-
         let mut output = vec![0.0f32; timesteps * hidden_dim];
         for t in 0..timesteps {
             for d in 0..hidden_dim {
@@ -150,6 +160,13 @@ impl RvqDecoder {
                     first_proj[t * hidden_dim + d] + rest_proj[t * hidden_dim + d];
             }
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.rvq_hidden",
+            None,
+            &[timesteps, hidden_dim],
+            &output,
+        ));
         Ok(output)
     }
 }
@@ -170,74 +187,59 @@ fn validate_rvq_frames(frames: &[[u32; RVQ_LEVELS]]) -> Result<(), String> {
     Ok(())
 }
 
-fn matmul_2d_f32(
-    weight: &[f32],
+fn matmul_2d_q8(
+    weight: &[u8],
     input: &[f32],
     out_dim: usize,
     in_dim: usize,
     n_tokens: usize,
 ) -> Result<Vec<f32>, String> {
-    if weight.len() != out_dim * in_dim {
+    let blocks = in_dim.div_ceil(32);
+    let expected = out_dim * blocks * Q8_0_BLOCK_SIZE;
+    if weight.len() != expected {
         return Err(format!(
-            "matmul_2d_f32: weight len {} != expected {}",
+            "matmul_2d_q8: weight len {} != expected {}",
             weight.len(),
-            out_dim * in_dim
+            expected,
         ));
     }
     if input.len() != n_tokens * in_dim {
-        return Err("matmul_2d_f32: input length mismatch".into());
+        return Err("matmul_2d_q8: input length mismatch".into());
     }
     let mut out = vec![0.0f32; n_tokens * out_dim];
+    let mut input_q8 = vec![0; in_dim];
+    let mut input_scales = vec![0.0; blocks];
     for t in 0..n_tokens {
-        for o in 0..out_dim {
-            let mut acc = 0.0f32;
-            for i in 0..in_dim {
-                acc += weight[o * in_dim + i] * input[t * in_dim + i];
-            }
-            out[t * out_dim + o] = acc;
+        quantize_q8_0_into(
+            &input[t * in_dim..(t + 1) * in_dim],
+            in_dim,
+            &mut input_q8,
+            &mut input_scales,
+        );
+        let output = &mut out[t * out_dim..(t + 1) * out_dim];
+        #[cfg(target_arch = "aarch64")]
+        {
+            matmul_q8_0_quantized_range_nrc1(
+                weight,
+                &input_q8,
+                &input_scales,
+                output,
+                in_dim,
+                0,
+                out_dim,
+            );
         }
-    }
-    Ok(out)
-}
-
-fn load_q8_0_2d(
-    source: &dyn TensorSource,
-    name: &str,
-    rows: usize,
-    cols: usize,
-) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor info: {name}"))?;
-    let dims = [rows as u64, cols as u64];
-    if info.dims != dims {
-        return Err(format!("{name}: dims {:?} != expected {dims:?}", info.dims,));
-    }
-    if info.ggml_type != GGMLType::Q8_0 {
-        return Err(format!("{name}: type {:?} not Q8_0", info.ggml_type));
-    }
-    let blocks_per_row = cols / 32;
-    let bytes_per_row = blocks_per_row * Q8_0_BLOCK_SIZE;
-    let expected = rows * bytes_per_row;
-    if bytes.len() != expected {
-        return Err(format!(
-            "{name}: bytes {} != expected {expected}",
-            bytes.len()
-        ));
-    }
-    let mut out = vec![0.0f32; rows * cols];
-    for row in 0..rows {
-        for b in 0..blocks_per_row {
-            let off = row * bytes_per_row + b * Q8_0_BLOCK_SIZE;
-            let scale = half::f16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32();
-            for j in 0..32usize {
-                let q = bytes[off + 2 + j] as i8 as f32;
-                out[row * cols + b * 32 + j] = scale * q;
-            }
-        }
+        #[cfg(not(target_arch = "aarch64"))]
+        matmul_q8_0_quantized_parallel_rows(
+            weight,
+            &input_q8,
+            &input_scales,
+            output,
+            in_dim,
+            out_dim,
+            0,
+            1,
+        );
     }
     Ok(out)
 }

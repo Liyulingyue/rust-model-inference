@@ -61,6 +61,39 @@ pub(crate) fn load_f16_or_f32_tensor(
     })
 }
 
+pub(crate) fn load_f16_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+) -> Result<Vec<u16>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || info.ggml_type != GGMLType::F16 {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F16",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = dims.iter().try_fold(2usize, |size, dim| {
+        size.checked_mul(*dim as usize)
+            .ok_or_else(|| format!("Tensor byte size overflow: {name}"))
+    })?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect())
+}
+
 /// Format used by the 12 Hz codec for its audio tokens. Each emitted token is
 /// a single codebook index in the range `audio_codebook_offset..audio_codebook_offset+3072`.
 pub const AUDIO_CODEBOOK_SIZE: usize = 3072;
@@ -68,3 +101,11 @@ pub const AUDIO_CODEBOOK_SIZE: usize = 3072;
 /// Sampling temperature suggested by `general.sampling.temp = 0.9` in the
 /// Qwen3-TTS Base GGUF metadata.
 pub const TTS_DEFAULT_TEMP: f32 = 0.9;
+
+pub fn predictor_top_k(temperature: f32) -> usize {
+    if temperature <= 0.0 {
+        1
+    } else {
+        50
+    }
+}

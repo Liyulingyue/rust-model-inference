@@ -11,6 +11,10 @@
 
 use rayon::prelude::*;
 
+#[cfg(target_arch = "aarch64")]
+use crate::ops::dot::dot_f32_neon;
+use crate::ops::{dot_f16, f32_to_f16};
+
 /// Standard 1D convolution (no padding, full output).
 ///
 /// `kernel` has shape `[out_channels, in_channels, kernel_size]` (PyTorch
@@ -164,7 +168,7 @@ pub struct ConvTranspose1dState {
 /// Stateful causal Conv1d over T-first `[length, channels]` buffers. GGUF
 /// kernels use `[kernel, in_channels, out_channels]` layout.
 pub fn conv1d_causal(
-    kernel: &[f32],
+    kernel: &[u16],
     bias: Option<&[f32]>,
     input: &[f32],
     in_channels: usize,
@@ -217,22 +221,20 @@ pub fn conv1d_causal(
         .par_chunks_mut(out_channels)
         .enumerate()
         .for_each(|(time, row)| {
-            if let Some(bias) = bias {
-                row.copy_from_slice(bias);
-            }
+            let dot_len = in_channels * kernel_size;
+            let mut input_f16 = vec![0; dot_len];
             for kernel_index in 0..kernel_size {
                 let input_time = time + kernel_index * dilation;
                 let input_row = &full[input_time * in_channels..(input_time + 1) * in_channels];
                 for input_channel in 0..in_channels {
-                    let input_value = input_row[input_channel];
-                    let weight_start = (kernel_index * in_channels + input_channel) * out_channels;
-                    for (value, weight) in row
-                        .iter_mut()
-                        .zip(&kernel[weight_start..weight_start + out_channels])
-                    {
-                        *value += weight * input_value;
-                    }
+                    input_f16[input_channel * kernel_size + kernel_index] =
+                        f32_to_f16(input_row[input_channel]);
                 }
+            }
+            for (output_channel, value) in row.iter_mut().enumerate() {
+                let weights = &kernel[output_channel * dot_len..(output_channel + 1) * dot_len];
+                *value = dot_f16(weights, &input_f16, dot_len)
+                    + bias.map_or(0.0, |values| values[output_channel]);
             }
         });
     if pad > 0 {
@@ -245,7 +247,7 @@ pub fn conv1d_causal(
 
 /// Depthwise counterpart for GGUF `[kernel, 1, channels]` weights.
 pub fn conv1d_causal_depthwise(
-    kernel: &[f32],
+    kernel: &[u16],
     bias: Option<&[f32]>,
     input: &[f32],
     channels: usize,
@@ -274,13 +276,15 @@ pub fn conv1d_causal_depthwise(
     full.extend_from_slice(input);
     let mut output = vec![0.0; length_in * channels];
     for time in 0..length_in {
+        let mut input_f16 = vec![0; kernel_size];
         for channel in 0..channels {
-            let mut value = bias.map_or(0.0, |values| values[channel]);
             for kernel_index in 0..kernel_size {
-                value += kernel[kernel_index * channels + channel]
-                    * full[(time + kernel_index) * channels + channel];
+                input_f16[kernel_index] =
+                    f32_to_f16(full[(time + kernel_index) * channels + channel]);
             }
-            output[time * channels + channel] = value;
+            let weights = &kernel[channel * kernel_size..(channel + 1) * kernel_size];
+            output[time * channels + channel] = dot_f16(weights, &input_f16, kernel_size)
+                + bias.map_or(0.0, |values| values[channel]);
         }
     }
     if pad > 0 {
@@ -334,8 +338,18 @@ pub fn conv_transpose1d_causal(
     let full_len = emit_len
         .checked_add(overlap)
         .ok_or_else(|| "conv_transpose1d_causal: output length overflow".to_string())?;
+    let mut transposed_kernel = vec![0.0; kernel.len()];
+    for input_channel in 0..in_channels {
+        for output_channel in 0..out_channels {
+            for kernel_index in 0..kernel_size {
+                transposed_kernel
+                    [(output_channel * kernel_size + kernel_index) * in_channels + input_channel] =
+                    kernel[(input_channel * out_channels + output_channel) * kernel_size
+                        + kernel_index];
+            }
+        }
+    }
     let mut full = vec![0.0; full_len * out_channels];
-    full[..state.tail.len()].copy_from_slice(&state.tail);
     full.par_chunks_mut(out_channels)
         .enumerate()
         .for_each(|(output_time, row)| {
@@ -351,14 +365,22 @@ pub fn conv_transpose1d_causal(
                 let kernel_index = output_time - input_time * stride;
                 let input_row = &input[input_time * in_channels..(input_time + 1) * in_channels];
                 for (output_channel, value) in row.iter_mut().enumerate() {
-                    let weight_start = (kernel_index * out_channels + output_channel) * in_channels;
-                    let weights = &kernel[weight_start..weight_start + in_channels];
-                    for (weight, input_value) in weights.iter().zip(input_row) {
-                        *value += weight * input_value;
-                    }
+                    let start = (output_channel * kernel_size + kernel_index) * in_channels;
+                    let weights = &transposed_kernel[start..start + in_channels];
+                    #[cfg(target_arch = "aarch64")]
+                    let dot = unsafe { dot_f32_neon(input_row, weights, in_channels) };
+                    #[cfg(not(target_arch = "aarch64"))]
+                    let dot = input_row
+                        .iter()
+                        .zip(weights)
+                        .fold(0.0f32, |sum, (&input, &weight)| sum + input * weight);
+                    *value += dot;
                 }
             }
         });
+    for (value, tail) in full.iter_mut().zip(&state.tail) {
+        *value += *tail;
+    }
     let mut output = full[..emit_len * out_channels].to_vec();
     if let Some(bias) = bias {
         for row in output.chunks_exact_mut(out_channels) {
@@ -379,7 +401,7 @@ mod tests {
 
     #[test]
     fn causal_conv_matches_when_input_is_split() {
-        let kernel = [0.25, 0.5, 1.0];
+        let kernel = [0.25, 0.5, 1.0].map(f32_to_f16);
         let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut whole_state = CausalConv1dState::default();
         let whole = conv1d_causal(&kernel, None, &input, 1, 6, 1, 3, 1, &mut whole_state).unwrap();
@@ -399,6 +421,14 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn causal_conv_uses_ggml_kernel_first_layout() {
+        let kernel = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(f32_to_f16);
+        let mut state = CausalConv1dState::default();
+        let output = conv1d_causal(&kernel, None, &[1.0, 10.0], 2, 1, 2, 2, 1, &mut state).unwrap();
+        assert_eq!(output, [42.0, 86.0]);
     }
 
     #[test]
