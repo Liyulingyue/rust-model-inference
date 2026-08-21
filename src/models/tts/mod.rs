@@ -10,11 +10,54 @@
 //!
 //! Stage 1 ships only the Talker; the codec decoder is added in Stage 2.
 
+use crate::core::tensor::{GGMLType, TensorSource};
+
 pub mod codec;
 pub mod speaker;
 pub mod talker;
 
 pub use talker::{Qwen3TtsGeneration, Qwen3TtsTalker, Qwen3TtsTalkerConfig};
+
+pub(crate) fn load_f16_or_f32_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || !matches!(info.ggml_type, GGMLType::F16 | GGMLType::F32) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F16/F32",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(match info.ggml_type {
+        GGMLType::F16 => bytes
+            .chunks_exact(2)
+            .map(|chunk| half::f16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
+            .collect(),
+        GGMLType::F32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+            .collect(),
+        _ => unreachable!("validated F16/F32 tensor"),
+    })
+}
 
 /// Format used by the 12 Hz codec for its audio tokens. Each emitted token is
 /// a single codebook index in the range `audio_codebook_offset..audio_codebook_offset+3072`.

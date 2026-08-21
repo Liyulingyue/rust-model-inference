@@ -19,6 +19,7 @@ use crate::models::qwen3::{
 };
 use crate::models::tts::codec::conv::{conv1d, conv_transpose1d};
 use crate::models::tts::codec::snake::snake1d_inplace;
+use crate::models::tts::load_f16_or_f32_tensor;
 
 const DAC_ENTRY_KERNEL: usize = 7;
 const DAC_POST_KERNEL: usize = 7;
@@ -99,12 +100,10 @@ impl DacDecoder {
 
 impl DacDecoder {
     fn from_source_dyn(source: &dyn TensorSource) -> Result<Self, String> {
-        let pre_conv_w = load_f16_or_f32_3d(
+        let pre_conv_w = load_f16_or_f32_tensor(
             source,
             "a.gen.wav.pre_conv.weight",
-            3,
-            512,
-            1024,
+            &[3, 512, 1024],
         )?;
         let pre_conv_b = load_f32_tensor(
             source,
@@ -115,12 +114,10 @@ impl DacDecoder {
         // so the DAC's `decode` method starts at 1024-dim. The 512 → 1024
         // pre_conv is exposed separately (via [`Self::pre_conv`]) for callers
         // that have 512-dim RVQ output (the common case).
-        let entry_weight = load_f16_or_f32_3d(
+        let entry_weight = load_f16_or_f32_tensor(
             source,
             "a.gen.wav.dac.entry.weight",
-            DAC_ENTRY_KERNEL,
-            1024,
-            1536,
+            &[DAC_ENTRY_KERNEL as u64, 1024, 1536],
         )?;
         let entry_bias = load_f32_tensor(
             source,
@@ -137,12 +134,10 @@ impl DacDecoder {
             "a.gen.wav.dac.post_snake.beta",
             &[usize_to_u64(96, "post snake beta")?],
         )?;
-        let post_weight = load_f16_or_f32_3d(
+        let post_weight = load_f16_or_f32_tensor(
             source,
             "a.gen.wav.dac.post_conv.weight",
-            DAC_POST_KERNEL,
-            96,
-            1,
+            &[DAC_POST_KERNEL as u64, 96, 1],
         )?;
         let post_bias = load_f32_tensor(
             source,
@@ -375,12 +370,10 @@ fn load_dac_block(
         &format!("{prefix}.snake.beta"),
         &[usize_to_u64(in_channels, "dac snake beta")?],
     )?;
-    let conv_weight = load_f16_or_f32_3d(
+    let conv_weight = load_f16_or_f32_tensor(
         source,
         &format!("{prefix}.conv.weight"),
-        kernel_size,
-        out_channels,
-        in_channels,
+        &[kernel_size as u64, out_channels as u64, in_channels as u64],
     )?;
     let conv_bias = load_f32_tensor(
         source,
@@ -401,12 +394,10 @@ fn load_dac_block(
             &format!("{res_prefix}.act1.beta"),
             &[usize_to_u64(out_channels, "dac res act1 beta")?],
         )?;
-        let conv1_weight = load_f16_or_f32_3d(
+        let conv1_weight = load_f16_or_f32_tensor(
             source,
             &format!("{res_prefix}.conv1.weight"),
-            res_kernel,
-            out_channels,
-            out_channels,
+            &[res_kernel as u64, out_channels as u64, out_channels as u64],
         )?;
         let conv1_bias = load_f32_tensor(
             source,
@@ -423,12 +414,10 @@ fn load_dac_block(
             &format!("{res_prefix}.act2.beta"),
             &[usize_to_u64(out_channels, "dac res act2 beta")?],
         )?;
-        let conv2_weight = load_f16_or_f32_3d(
+        let conv2_weight = load_f16_or_f32_tensor(
             source,
             &format!("{res_prefix}.conv2.weight"),
-            1,
-            out_channels,
-            out_channels,
+            &[1, out_channels as u64, out_channels as u64],
         )?;
         let conv2_bias = load_f32_tensor(
             source,
@@ -474,12 +463,10 @@ fn load_upsample_block(source: &dyn TensorSource, block_idx: usize) -> Result<Up
         &format!("{prefix}.conv.bias"),
         &[usize_to_u64(1024, "upsample conv bias")?],
     )?;
-    let dwconv_w = load_f16_or_f32_3d(
+    let dwconv_w = load_f16_or_f32_tensor(
         source,
         &format!("{prefix}.dwconv.weight"),
-        CONVNEXT_KERNEL,
-        1,
-        1024,
+        &[CONVNEXT_KERNEL as u64, 1, 1024],
     )?;
     let dwconv_b = load_f32_tensor(
         source,
@@ -884,39 +871,6 @@ fn conv1d_causal_rearranged(
         }
     }
     Ok(output)
-}
-
-fn load_f16_or_f32_3d(
-    source: &dyn TensorSource,
-    name: &str,
-    expected_k: usize,
-    expected_in: usize,
-    expected_out: usize,
-) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor info: {name}"))?;
-    let dims = [expected_k as u64, expected_in as u64, expected_out as u64];
-    if info.dims != dims {
-        return Err(format!(
-            "{name}: dims {:?} != expected {dims:?}",
-            info.dims,
-        ));
-    }
-    match info.ggml_type {
-        GGMLType::F16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-            .collect()),
-        GGMLType::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()),
-        other => Err(format!("{name}: type {other:?} not F16/F32")),
-    }
 }
 
 fn load_f32_tensor_3d(
