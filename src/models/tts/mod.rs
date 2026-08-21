@@ -11,9 +11,10 @@
 //! Stage 1 ships only the Talker; the codec decoder is added in Stage 2.
 
 pub mod codec;
+pub mod speaker;
 pub mod talker;
 
-pub use talker::{Qwen3TtsTalker, Qwen3TtsTalkerConfig, Qwen3TtsGeneration};
+pub use talker::{Qwen3TtsGeneration, Qwen3TtsTalker, Qwen3TtsTalkerConfig};
 
 /// Format used by the 12 Hz codec for its audio tokens. Each emitted token is
 /// a single codebook index in the range `audio_codebook_offset..audio_codebook_offset+3072`.
