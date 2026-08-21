@@ -1183,8 +1183,13 @@ pub fn run_multimodal(
     let mut decoder = tokenizer.streaming_decoder(false);
     println!("\n--- Generation ---");
     let t_gen_start = std::time::Instant::now();
+    let mut t_prompt = 0.0;
+    let mut t_decode = 0.0;
+    let mut prefill_evals = 0usize;
+    let mut decode_evals = 0usize;
 
     for step in 0..max_tokens {
+        let t0 = std::time::Instant::now();
         let tokens = if step == 0 {
             &prompt_tokens
         } else {
@@ -1220,7 +1225,13 @@ pub fn run_multimodal(
             &decode_position[..]
         };
         let logits = llm.forward(n_tok, &mut kv_cache, &mut llm_scratch, &pool, positions)?;
-        if step > 0 {
+        let t_step = t0.elapsed().as_secs_f64();
+        if step == 0 {
+            t_prompt += t_step;
+            prefill_evals += 1;
+        } else {
+            t_decode += t_step;
+            decode_evals += 1;
             next_text_position = next_text_position
                 .checked_add(1)
                 .ok_or("Qwen3.5 decode position overflow")?;
@@ -1266,10 +1277,19 @@ pub fn run_multimodal(
     } else {
         0.0
     };
+    let per_second = |count: usize, secs: f64| {
+        if secs > 0.0 {
+            count as f64 / secs
+        } else {
+            0.0
+        }
+    };
     println!("\n--- End ---");
     eprintln!(
-        "[{} gen tokens in {}ms | {:.1} tok/s]",
-        n_gen, gen_ms, tok_s
+        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        per_second(prefill_evals, t_prompt),
+        per_second(decode_evals, t_decode),
+        tok_s
     );
     Ok(())
 }
