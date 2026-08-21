@@ -46,14 +46,11 @@ fn main() -> Result<(), String> {
     // (Cannot access private fields; show first 5 preconv values instead.)
     eprintln!("preconv[:5] = {:?}", &preconv[..5.min(preconv.len())]);
     // Now run DAC and inspect output stats.
-    let lifted = preconv;
-
     // TFM: bypass — feed preconv directly to DAC. TFM is identity-ish for
     // small inputs (we don't have sliding-window attention, but for 30
     // frames within swa=72 it's equivalent to full causal).
     eprintln!("Skipping Waveform TFM");
-    let lifted = preconv;
-    let waveform = dac.decode(&lifted, timesteps)?;
+    let waveform = dac.decode(&preconv, timesteps)?;
     eprintln!(
         "After DAC: {} samples rms {} autocorr={}",
         waveform.len(),

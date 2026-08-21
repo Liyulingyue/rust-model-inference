@@ -12,7 +12,7 @@
 4. **Trait 架构** — 算子和内存通过 trait 解耦
 5. **无 C/C++ FFI** — 100% 纯 Rust，包括量化 kernel
 
-**支持的模型**：Qwen3-0.6B、Qwen3-Embedding、Qwen3-ASR、Qwen3-VL、MiniCPM5-1B、Hunyuan-MT2、Nanbeige
+**支持的模型**：Qwen3-0.6B、Qwen3-Embedding、Qwen3-ASR、Qwen3.5-VL、MiniCPM5-1B、Hunyuan-MT2、Nanbeige
 
 ## 快速开始
 
@@ -30,10 +30,10 @@ cargo run --release --bin rust-model-inference -- \
   --model models/Qwen3-Embedding-0.6B-Q8_0.gguf \
   --prompt "Hello, 世界! 123" --embedding --embedding-output raw --threads 1
 
-# 多模态（Qwen3-VL）
+# 多模态（Qwen3.5-VL）
 cargo run --release --bin rust-model-inference -- \
-  --model models/Qwen3-0.6B-Q8_0.gguf \
-  --mmproj models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf \
+  --model models/Qwen3.5-0.8B-Q8_0.gguf \
+  --mmproj models/Qwen3.5-0.8B-mmproj-F16.gguf \
   --image path/to/image.jpg \
   --prompt "描述这张图片"
 
