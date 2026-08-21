@@ -39,7 +39,40 @@
 - [ ] Row 切分支持（tensor parallelism across rows）
 - [ ] Layer 切分支持（pipeline parallelism across layers）
 
+### K-quant multi-row tile（vec_dot_q4k_q8k_avx2 / vec_dot_q6k_q8k_avx2）
+
+**目标**：Q4_K_M 从 ~76 t/s → 120-150 t/s，匹配 Q8_0 4-row tile（`src/ops/kernel/q8_0/avx2.rs:71-153`）模式。
+
+**现状**：单行 tile，每次 matmul 调用 reload 一次 Q8_K。vocab=151936 一次 forward 共 reload 151936 × 4 = 607744 次 Q8_K，FMA 流水线未饱和。
+
+**做法**：
+- `vec_dot_q4k_q8k_avx2_4x(&[u8]) -> [f32; 4]`：4 行并行 decode nibbles，**共享 Q8_K 加载**（每 super-block 一次 `qs` + `bsums` load，broadcast 到 4 个 acc），4 个独立 acc `fmadd`。
+- `vec_dot_q6k_q8k_avx2_4x(&[u8]) -> [f32; 4]`：同结构，复用现有 `_j in 0..2` unroll，4 行 weight 各 decode，Q8_K 共享。
+- 调用点 `q4_k.rs:68` 和 `q6_k.rs:53` 的 `forward_prepared` 加 4-row 循环 + 余数单行 fallback。沿用 Q8_0 的 caller 模式（`q8_0/parallel.rs:102`）。
+- Parity test：AVX2 4-row 结果 == scalar × 4，1 ULP 以内。参考 `src/ops/kernel/q4_0/avx2.rs::avx2_matches_scalar_on_real_q4_0_weights`。
+
+**风险**：
+- 寄存器压力（4 行 × {lo, hi} × Q8_K vector 至少 8+ 个）—— 用 `-C llvm-args=-x86-asm-syntax=intel` 检查。
+- L1I 缓存（典型 32 KB）—— 保持 `_j in 0..2` unrolled，参考 Q8_0 结构。
+- **Q6_K 已知有微小精度漂移**（temp 0.6 偶发采样分歧）—— 4-row tile 必须保持相同操作序列不引入新误差。
+
+**验收**：
+- [ ] `vec_dot_q4k_q8k_avx2_4x` parity vs scalar 1 ULP
+- [ ] `vec_dot_q6k_q8k_avx2_4x` parity vs scalar 1 ULP
+- [ ] `q4_k.rs` / `q6_k.rs` 调用 tiled path（`end - start >= 4`）
+- [ ] Q4_K_M 0.6B benchmark ≥ 120 t/s tg
+- [ ] Q4_K_M logits profile 占比下降（vocab matmul 受益最大）
+- [ ] Q4_K_M 正确性（temp 0 + temp 0.6 均稳定）
+
+**相关文件**：
+- `src/ops/quant/mod.rs:700` — `vec_dot_q4k_q8k_avx2`（单行基线）
+- `src/ops/quant/mod.rs:963` — `vec_dot_q6k_q8k_avx2`（单行基线）
+- `src/ops/kernel/q4_k.rs:68` — Q4_K 调用方
+- `src/ops/kernel/q6_k.rs:53` — Q6_K 调用方
+- `src/ops/kernel/q8_0/avx2.rs:53` — `matmul_q8_0_vs_q8_0_avx2`（4-row tile 参考实现）
+
 ## Low Priority
+
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
