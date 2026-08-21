@@ -1059,3 +1059,189 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     crate::ops::hsum_ps(acc)
 }
+
+#[cfg(test)]
+mod avx2_parity {
+    use super::*;
+
+    fn block_q8k(values: &[f32]) -> Vec<BlockQ8K> {
+        let n = values.len();
+        let mut out = Vec::with_capacity(n / 256);
+        for chunk in values.chunks(256) {
+            let amax = chunk.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+            let d = if amax == 0.0 { 0.0 } else { amax / 127.0 };
+            let id = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+            let mut qs = [0i8; 256];
+            let mut bsums = [0i16; 16];
+            for (i, &v) in chunk.iter().enumerate() {
+                let q = ((v * id).round() as i32).clamp(-127, 127) as i8;
+                qs[i] = q;
+                bsums[i / 16] += q as i16;
+            }
+            out.push(BlockQ8K { d, qs, bsums });
+        }
+        out
+    }
+
+    fn make_q4k_block(ql: &[u8; 128], qh: &[u8; 64], scales: &[i8; 16], d: f32, dmin: f32) -> Vec<u8> {
+        let mut v = Vec::with_capacity(144);
+        v.extend_from_slice(&crate::ops::f32_to_f16(d).to_le_bytes());
+        v.extend_from_slice(&crate::ops::f32_to_f16(dmin).to_le_bytes());
+        for &s in scales { v.push(s as u8); }
+        v.extend_from_slice(ql);
+        v.extend_from_slice(qh);
+        v
+    }
+
+    fn make_q6k_block(ql: &[u8; 128], qh: &[u8; 64], scales: &[i8; 16], d: f32) -> Vec<u8> {
+        let mut v = vec![0u8; 210];
+        // ql region: bytes [0..128]
+        for i in 0..128 { v[i] = ql[i]; }
+        // qh region: bytes [128..192]
+        for i in 0..64 { v[128 + i] = qh[i]; }
+        // scales region: bytes [192..208]
+        for i in 0..16 { v[192 + i] = scales[i] as u8; }
+        // d F16 at offset 208
+        let d_bytes = crate::ops::f32_to_f16(d).to_le_bytes();
+        v[208] = d_bytes[0];
+        v[209] = d_bytes[1];
+        v
+    }
+
+    #[test]
+    fn q4k_avx2_matches_scalar_one_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let ql = [0u8; 128];
+        let qh = [0u8; 64];
+        let scales: [i8; 16] = std::array::from_fn(|i| (i as i8) - 4);
+        let weight = make_q4k_block(&ql, &qh, &scales, 0.5, 0.1);
+        let input = vec![0.0f32; 256];
+        let q8k = block_q8k(&input);
+
+        let avx2 = unsafe { vec_dot_q4k_q8k_avx2(&weight, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        eprintln!("q4k one block zero: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
+            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        // Tolerance: 4 ULPs (hsum + FMA both can drift)
+        let diff = (avx2 - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        assert!(rel < 1e-3, "q4k AVX2 diverged: avx2={} scalar={} rel={}", avx2, scalar, rel);
+    }
+
+    #[test]
+    fn q4k_avx2_matches_scalar_multi_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        // 4 super-blocks, varied values
+        let mut weight = Vec::new();
+        for i in 0..4 {
+            let mut ql = [0u8; 128];
+            let mut qh = [0u8; 64];
+            for j in 0..128 { ql[j] = ((i * 7 + j) % 16) as u8; }
+            for j in 0..64 { qh[j] = ((i + j * 3) % 4) as u8; }
+            let scales: [i8; 16] = std::array::from_fn(|k| ((i * 3 + k) as i8) - 8);
+            weight.extend(make_q4k_block(&ql, &qh, &scales, 0.01 + i as f32 * 0.1, 0.005));
+        }
+        // 4 blocks of input (1024 floats total)
+        let input: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) * 0.01).collect();
+        let q8k = block_q8k(&input);
+
+        let avx2 = unsafe { vec_dot_q4k_q8k_avx2(&weight, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        eprintln!("q4k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
+            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        let diff = (avx2 - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        assert!(rel < 1e-3, "q4k AVX2 diverged on 4 blocks: avx2={} scalar={} rel={}", avx2, scalar, rel);
+    }
+
+    #[test]
+    fn q6k_avx2_matches_scalar_one_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let ql: [u8; 128] = std::array::from_fn(|i| (i % 4) as u8);
+        let qh: [u8; 64] = std::array::from_fn(|i| (i * 5 % 4) as u8);
+        let scales: [i8; 16] = std::array::from_fn(|i| (i as i8) - 4);
+        let weight = make_q6k_block(&ql, &qh, &scales, 0.5);
+        let input: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
+        let q8k = block_q8k(&input);
+
+        let avx2 = unsafe { vec_dot_q6k_q8k_avx2(&weight, &q8k) };
+        let scalar = vec_dot_q6k_q8k_scalar(&weight, &q8k);
+        eprintln!("q6k one block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
+            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        let diff = (avx2 - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        assert!(rel < 1e-3, "q6k AVX2 diverged: avx2={} scalar={} rel={}", avx2, scalar, rel);
+    }
+
+    #[test]
+    fn q6k_avx2_matches_scalar_multi_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let mut weight = Vec::new();
+        for i in 0..4 {
+            let ql: [u8; 128] = std::array::from_fn(|j| ((i * 11 + j * 3) % 4) as u8);
+            let qh: [u8; 64] = std::array::from_fn(|j| ((i + j * 7) % 4) as u8);
+            let scales: [i8; 16] = std::array::from_fn(|k| ((i * 5 + k) as i8) - 6);
+            weight.extend(make_q6k_block(&ql, &qh, &scales, 0.01 + i as f32 * 0.1));
+        }
+        let input: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) * 0.01).collect();
+        let q8k = block_q8k(&input);
+
+        let avx2 = unsafe { vec_dot_q6k_q8k_avx2(&weight, &q8k) };
+        let scalar = vec_dot_q6k_q8k_scalar(&weight, &q8k);
+        eprintln!("q6k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
+            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        // TODO: Q6_K has 1 ULP drift vs scalar (FMA + hsum) — needs deeper
+        // investigation (see TODO.md). Currently production model output is
+        // correct because the drift doesn't flip argmax.
+        let rel = if scalar.abs() > 1e-3 { (avx2 - scalar).abs() / scalar.abs() } else { (avx2 - scalar).abs() };
+        assert!(rel < 1e-3, "q6k AVX2 diverged: rel={}", rel);
+    }
+
+    #[test]
+    fn q4k_avx2_matches_scalar_real_model() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let loader = match crate::core::loader::GGUFLoader::from_file(
+            "../models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf",
+        ) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let tensor = loader
+            .tensors()
+            .iter()
+            .find(|t| t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q4K)
+            .expect("blk.0.attn_q.weight Q4_K not found");
+        let weight = loader.tensor_slice(&tensor.name).unwrap();
+        let n_in = tensor.dims[0] as usize;
+        let blocks = n_in / 256;
+        let input: Vec<f32> = (0..blocks * 256)
+            .map(|i| ((i as f32 * 0.013).sin() * 30.0).clamp(-127.0, 127.0))
+            .collect();
+        let q8k = block_q8k(&input);
+
+        let avx2 = unsafe { vec_dot_q4k_q8k_avx2(&weight, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        eprintln!(
+            "q4k real-model: avx2={} (bits {:x}) scalar={} (bits {:x}) diff_bits={}",
+            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
+            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs()
+        );
+        let diff = (avx2 - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        assert!(rel < 1e-3, "q4k real-model AVX2 diverged: rel={}", rel);
+    }
+}

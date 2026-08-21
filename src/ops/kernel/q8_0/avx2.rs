@@ -214,4 +214,86 @@ pub unsafe fn matmul_q8_0_avx2_range(
         let s = _mm256_add_ps(acc0, acc1);
         output[out_idx] = hsum_ps(s);
     }
+}#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range;
+
+    fn q8_uniform_block(weight: i8, scale: f32) -> Vec<u8> {
+        let mut v = Vec::with_capacity(34);
+        let s = crate::ops::f32_to_f16(scale).to_le_bytes();
+        v.extend_from_slice(&s);
+        for _ in 0..32 { v.push(weight as u8); }
+        v
+    }
+
+    fn assert_avx2_matches_scalar(label: &str, weight: &[u8], q8: &[u8], scales: &[f32]) {
+        let n_in = q8.len();
+        let n_out = weight.len() / (n_in / 32 * 34);
+        let mut avx2_out = vec![0.0f32; n_out];
+        let mut scalar_out = vec![0.0f32; n_out];
+        unsafe {
+            matmul_q8_0_vs_q8_0_avx2(weight, q8, scales, &mut avx2_out, n_in, 0, n_out);
+        }
+        matmul_q8_0_quantized_scalar_range(weight, q8, scales, &mut scalar_out, n_in, n_out, 0);
+        let max_diff = avx2_out
+            .iter()
+            .zip(scalar_out.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_scalar = scalar_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let rel = if max_scalar > 1e-3 { max_diff / max_scalar } else { max_diff };
+        eprintln!(
+            "[{}] {}x{} max_diff={} rel={}",
+            label, n_out, n_in, max_diff, rel
+        );
+        assert!(
+            rel < 1e-3,
+            "{} AVX2 diverged: max_diff={} rel={}",
+            label, max_diff, rel
+        );
+    }
+
+    #[test]
+    fn q8_0_avx2_matches_scalar_uniform() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let mut weight = Vec::new();
+        for _ in 0..128 {
+            weight.extend(q8_uniform_block(1, 0.5));
+        }
+        let q8: Vec<u8> = (0..(128 * 32))
+            .map(|i| (i as i8) as u8)
+            .collect();
+        let scales: Vec<f32> = (0..128).map(|i| 0.01 + (i as f32) * 0.001).collect();
+        assert_avx2_matches_scalar("q8_0-uniform-128", &weight, &q8, &scales);
+    }
+
+    #[test]
+    fn q8_0_avx2_matches_scalar_real_model() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let loader = match crate::core::loader::GGUFLoader::from_file(
+            "../models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf",
+        ) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let tensor = loader
+            .tensors()
+            .iter()
+            .find(|t| t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q8_0)
+            .expect("blk.0.attn_q.weight Q8_0 not found");
+        let weight = loader.tensor_slice(&tensor.name).unwrap();
+        let n_in = tensor.dims[0] as usize;
+        let n_out = tensor.dims[1] as usize;
+        let blocks = n_in / 32;
+        let q8: Vec<u8> = (0..blocks * 32)
+            .map(|i| (i as i8) as u8)
+            .collect();
+        let scales: Vec<f32> = (0..blocks).map(|b| 0.01 + (b as f32) * 0.001).collect();
+        assert_avx2_matches_scalar("q8_0-model-blk0-attnq", &weight, &q8, &scales);
+    }
 }

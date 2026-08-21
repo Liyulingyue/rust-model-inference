@@ -36,6 +36,18 @@
   - 真正的浪费：**当前 `qwen3.rs` 在 attention / FFN 的 Q/K/V / gate / up / down 上对同一份输入同时调用 `quantize_q8_0_into` 和 `quantize_row_q8_k_into`**，而每个 layer 只会用一份。多出来的那次量化 pass（Q8_0 或 Q8_K）纯属白做。
   - **优化方向**：(1) 把每次前向的量化入口按**当前 layer 的权重格式** dispatch——参考 `src/models/qwen35.rs:216-232` 的 `match QWeight::{Q4K|Q5K|Q6K|Q8_0}`，它已经是正确模板；(2) 对 Q8_0 权重跳 `quantize_row_q8_k_into`、对 K-quant 权重跳 `quantize_q8_0_into`；(3) 不必改 `forward_prepared` 签名，也不动 `ExecutionScratchpad` 字段（两份 buffer 都保留以兼容异构模型）。
   - **预期收益**：每次前向省一次量化 pass（与权重格式对应的另一份白做的量化）。K-quant-only 模型省 `quantize_q8_0_into`；Q8_0-only 模型省 `quantize_row_q8_k_into`；异构模型按层省一半。Q8_0-only 模型还能省 `q8k_buf` 的写回带宽（≈ `n_embd/256 * 292B`，最大模型 4.6 KB / 推理上下文，写一次前向 ≈ 每 token 一次，可忽略）。
+- [ ] **Q6_K AVX2 精度 drift 修复** — `src/ops/quant/mod.rs:963` 的 `vec_dot_q6k_q8k_avx2` 在合成 4-block 测试上仍有 1 ULP drift(漂移在最后 1 bit 位)。Q4_K AVX2 同类问题已通过显式累加顺序修复,Q6_K 修复未完成。可能漂移源:
+  - `_mm256_sub_epi32(sumi, q8sclsub)` 减法指令的顺序 vs scalar 的 per-element `aux32[l] += scale * q8 * (weight - 32)` 累加顺序
+  - `_mm256_madd_epi16(scale_l, p16l)` 累加 2 个 i16 → 1 个 i32 的顺序 vs scalar 的 2 个独立 mul+add 累加
+  - 4 个 `madd` 链 (`p16_0`, `p16_1`, `p16_2`, `p16_3`) 的累加顺序 vs scalar 的 chunk-by-chunk 累加
+
+  **当前状态**:模型 Q4_K_M 推理输出正确("巴黎"),drift 未大到翻转 argmax。但长期应消除以保证 temp 0.6 边缘情况稳定性。
+  **修复方向**:参照 Q4_0 修复路径(`docs/OPTIMIZATION.md` "经验: SIMD 浮点内核必须严格匹配 Scalar 的舍入顺序")。可能需要把 sumi 累加顺序与 scalar 的 chunk 顺序对齐;`_mm256_sub_epi32` 后改用 `cvt + mul + add` 链而非 fma;`hsum_ps` 替换为 sequential extraction+sum。
+  **验收**:parity test `vec_dot_q6k_q8k_avx2 == vec_dot_q6k_q8k_scalar` bit-exact(diff_bits == 0),含边界 cases(全零/全 max/全 min 输入,real-model Q4_K_M token_embd)。
+  **相关文件**:`src/ops/quant/mod.rs:963`(kernel),`src/ops/quant/mod.rs:1076`(`avx2_parity::q6k_avx2_matches_scalar_multi_block` 测试,当前为 `rel < 1e-3` 容差)。
+- [ ] **Q8_0 AVX2 精度 drift 调查(合成 uniform 数据上 diff=255,真实模型通过)** — `src/ops/kernel/q8_0/avx2.rs` 在极端 uniform 输入下 max_diff 达 255,但 `blk.0.attn_q.weight` 真实模型权重通过。问题尚未定位到具体指令。可能与 Q4_0 类似(FMA + hsum 顺序)但更深,因为 4-row tile 涉及跨行交叉累加。
+  **修复方向**:添加 parity test 用合成数据 + 真实模型权重,对比 `matmul_q8_0_vs_q8_0_avx2` 与 `matmul_q8_0_quantized_scalar_range` 的中间 i32 值,定位漂移源头。
+  **验收**:parity test bit-exact。
 - [ ] Row 切分支持（tensor parallelism across rows）
 - [ ] Layer 切分支持（pipeline parallelism across layers）
 
