@@ -9,6 +9,8 @@
 //! - `scalar.rs` — scalar fallback (`matmul_q4_0_scalar_range`). Hot path today.
 
 use super::Kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
 pub mod scalar;
 
 pub use scalar::matmul_q4_0_scalar_range;
@@ -49,6 +51,33 @@ impl<'a> Kernel for Q4_0Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        // Thread partition (matches scalar: each thread writes to its own
+        // contiguous slice of `output`).
+        let per_thread = (n_out + nth - 1) / nth;
+        let my_start = ith * per_thread;
+        let my_end = (my_start + per_thread).min(n_out);
+        if my_start >= my_end {
+            return;
+        }
+        let my_out = &mut output[my_start..my_end];
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2::matmul_q4_0_vs_q8_0_avx2(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        my_out,
+                        n_in,
+                        my_start,
+                        my_end,
+                    );
+                    return;
+                }
+            }
+        }
         matmul_q4_0_scalar_range(
             self.weight,
             input_q8,
