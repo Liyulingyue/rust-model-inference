@@ -519,6 +519,21 @@ impl<'model> Qwen3Session<'model> {
                 logits: vec![0.0; config.vocab],
                 q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
+                // Q8_K pre-quantization buffer for K-quant kernels (Q4_K / Q6_K).
+                // See TODO in docs/TODO.md: "Q8_0 与 Q8_K 量化路径按需量化".
+                // - `q8_buf` + `scale_buf` (Q8_0): consumed by the default kernel
+                //   path (`forward_prequantized`, see ops/kernel/mod.rs:70) and by
+                //   kernels with Q8_0 / f16 weights.
+                // - `q8k_buf` (Q8_K): consumed by K-quant kernels
+                //   (q4_k.rs:90, q6_k.rs:73) via `forward_prepared(.., Some(q8_k), ..)`;
+                //   those overrides name the Q8_0 args `_input_q8` / `_input_scales`
+                //   and discard them.
+                // A single layer's kernel uses exactly one of the two paths, but the
+                // model as a whole can be heterogeneous (some layers Q8_0, others
+                // Q4_K/Q6_K) so both buffers must stay allocated. The waste today is
+                // that we re-quantize the same input into BOTH formats on every
+                // forward even when a given layer only needs one — fix is to dispatch
+                // per-layer on weight format and skip the unused quantize call.
                 q8k_buf: vec![
                     crate::ops::quant::BlockQ8K {
                         d: 0.0,
