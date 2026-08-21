@@ -1,6 +1,4 @@
-﻿use rayon::prelude::*;
-
-use crate::models::clip_config::Qwen35Config;
+﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
 #[cfg(feature = "parity-trace")]
@@ -197,30 +195,6 @@ impl QWeight {
         });
     }
 
-    pub fn matmul_with_q8k_into_buf_rayon(&self, q8k: &[quant::BlockQ8K], buf: &mut [f32]) {
-        let n_rows = self.n_rows();
-        if n_rows < 512 {
-            self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
-            return;
-        }
-        let chunk_size = 256.max(n_rows / rayon::current_num_threads());
-        let n_chunks = (n_rows + chunk_size - 1) / chunk_size;
-        struct ChunkTask { weight: usize, q8k: usize, buf: usize, n_rows: usize, n_cols_hint: usize }
-        unsafe impl Send for ChunkTask {}
-        unsafe impl Sync for ChunkTask {}
-        let task = ChunkTask { weight: self as *const QWeight as usize, q8k: q8k.as_ptr() as usize, buf: buf.as_mut_ptr() as usize, n_rows, n_cols_hint: q8k.len() };
-        (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-            let start = chunk_idx * chunk_size;
-            let end = (start + chunk_size).min(task.n_rows);
-            unsafe {
-                let w = &*(task.weight as *const QWeight);
-                let q = std::slice::from_raw_parts(task.q8k as *const quant::BlockQ8K, task.n_cols_hint);
-                let b = std::slice::from_raw_parts_mut(task.buf as *mut f32, task.n_rows);
-                w.matmul_into_with_q8k(q, &mut b[start..end], start, end);
-            }
-        });
-    }
-
     pub fn quantize_and_matmul(&self, input: &[f32], q8k_buf: &mut [quant::BlockQ8K], buf: &mut [f32]) {
         let mut q8_buf = vec![0u8; input.len()];
         let mut scale_buf = vec![0.0f32; (input.len() + 31) / 32];
@@ -245,7 +219,7 @@ impl QWeight {
             | QWeight::Q6K { n_cols, .. } => {
                 let blocks = *n_cols / QK_K;
                 quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
-                self.matmul_with_q8k_into_buf_rayon(&q8k_buf[..blocks], buf);
+                self.matmul_with_q8k_into_buf_pooled(&q8k_buf[..blocks], buf, pool);
             }
             QWeight::Q8_0 { data, n_cols, n_rows } => {
                 let blocks = *n_cols / 32;
@@ -265,7 +239,29 @@ impl QWeight {
                     pool,
                 );
             }
-            QWeight::F32 { .. } | QWeight::F16 { .. } => self.matmul_into_buf_rayon(input, buf),
+            QWeight::F32 { .. } | QWeight::F16 { .. } => {
+                let n_rows = self.n_rows();
+                if pool.n_threads() <= 1 || n_rows < 256 {
+                    self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+                } else {
+                    let nth = pool.n_threads();
+                    let chunk_size = (n_rows + nth - 1) / nth;
+                    let weight_ptr = self as *const QWeight;
+                    let input_ptr = input.as_ptr();
+                    let buf_ptr = buf.as_mut_ptr();
+                    pool.compute(|ith, nth_pool| {
+                        let start = ith * chunk_size;
+                        let end = (start + chunk_size).min(n_rows);
+                        if start >= end { return; }
+                        unsafe {
+                            let w = &*weight_ptr;
+                            let inp = std::slice::from_raw_parts(input_ptr, input.len());
+                            let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                            w.matmul_into(inp, b, start, end);
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -357,26 +353,6 @@ impl QWeight {
                 s.spawn(move || {
                     weight.matmul_into(input, out, row_start, row_end);
                 });
-            }
-        });
-    }
-
-    pub fn matmul_into_buf_rayon(&self, input: &[f32], buf: &mut [f32]) {
-        let n_rows = self.n_rows();
-        let chunk_size = 256.max(n_rows / rayon::current_num_threads());
-        let n_chunks = (n_rows + chunk_size - 1) / chunk_size;
-        struct ChunkTask { weight: usize, input: usize, buf: usize, n_rows: usize, input_len: usize }
-        unsafe impl Send for ChunkTask {}
-        unsafe impl Sync for ChunkTask {}
-        let task = ChunkTask { weight: self as *const QWeight as usize, input: input.as_ptr() as usize, buf: buf.as_mut_ptr() as usize, n_rows, input_len: input.len() };
-        (0..n_chunks).into_par_iter().for_each(|chunk_idx| {
-            let start = chunk_idx * chunk_size;
-            let end = (start + chunk_size).min(task.n_rows);
-            unsafe {
-                let w = &*(task.weight as *const QWeight);
-                let inp = std::slice::from_raw_parts(task.input as *const f32, task.input_len);
-                let b = std::slice::from_raw_parts_mut(task.buf as *mut f32, task.n_rows);
-                w.matmul_into(inp, &mut b[start..end], start, end);
             }
         });
     }
