@@ -141,6 +141,23 @@ pub fn matmul_q8_0_quantized_parallel_rows(
 ///
 /// Chunks rows into `pool.n_threads() * 4` chunks; each chunk gets a
 /// copy of the weight/input slice pointers (Send-by-raw-pointer dance).
+///
+/// # Bug
+///
+/// `compute_with_chunks` uses a barrier that expects ALL `pool.n_threads()`
+/// participants to call `barrier.wait()`. However, when called from
+/// `pool.compute` (persistent worker pool), those workers are spinning in
+/// the epoch loop and **cannot** reach this barrier. Only the main thread
+/// + newly spawned threads (2-3 of 8 participants) arrive at the barrier.
+/// This causes output to be zeroed or unwritten instead of deadlocking.
+///
+/// # Correct Usage
+///
+/// This function is BROKEN when used with `pool.compute`. The correct approach
+/// is to use `pool.compute(|ith, nth| ...)` and call
+/// `matmul_q8_0_quantized_parallel_rows` directly, which divides work by
+/// thread index — matching how Qwen3 and all other models achieve parallelism.
+/// See `matmul_q8_0_quantized_parallel_rows` for the working implementation.
 pub fn matmul_q8_0_quantized_dynamic(
     weight: &[u8],
     input_q8: &[u8],

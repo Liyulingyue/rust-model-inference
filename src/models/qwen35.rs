@@ -229,15 +229,26 @@ impl QWeight {
                     &mut q8_buf[..*n_cols],
                     &mut scale_buf[..blocks],
                 );
-                crate::ops::matmul_q8_0_quantized_dynamic(
-                    data,
-                    &q8_buf[..*n_cols],
-                    &scale_buf[..blocks],
-                    &mut buf[..*n_rows],
-                    *n_cols,
-                    *n_rows,
-                    pool,
-                );
+                let n_cols = *n_cols;
+                let n_rows = *n_rows;
+                let q8_ptr = q8_buf.as_ptr();
+                let sc_ptr = scale_buf.as_ptr();
+                let out_ptr = buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_cols) };
+                    let sc = unsafe { std::slice::from_raw_parts(sc_ptr, blocks) };
+                    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_rows) };
+                    crate::ops::matmul_q8_0_quantized_parallel_rows(
+                        data,
+                        q8,
+                        sc,
+                        out,
+                        n_cols,
+                        n_rows,
+                        ith,
+                        nth,
+                    );
+                });
             }
             QWeight::F32 { .. } | QWeight::F16 { .. } => {
                 let n_rows = self.n_rows();
