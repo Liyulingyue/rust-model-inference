@@ -70,6 +70,7 @@ impl<'a> Kernel for Q4_KKernel<'a> {
         input_f32: &[f32],
         _input_q8: &[u8],
         _input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
@@ -83,14 +84,22 @@ impl<'a> Kernel for Q4_KKernel<'a> {
             return;
         }
 
-        // ponytail: each worker prepares Q8_K; share scratch if profiling shows this matters.
-        let input_q8_k = crate::ops::quant::quantize_row_q8_k(&input_f32[..n_in]);
+        // Use caller-prepared Q8_K if provided (shared across threads);
+        // otherwise each thread re-quantizes the same input (legacy path).
+        let owned_q8k;
+        let input_q8_k: &[crate::ops::quant::BlockQ8K] = match q8_k {
+            Some(buf) => buf,
+            None => {
+                owned_q8k = crate::ops::quant::quantize_row_q8_k(&input_f32[..n_in]);
+                &owned_q8k
+            }
+        };
         let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
         for out_idx in start..end {
             let offset = out_idx * row_bytes;
-            output[out_idx] = crate::ops::quant::vec_dot_q4k_q8k_scalar(
+            output[out_idx] = crate::ops::quant::vec_dot_q4k_q8k(
                 &self.weight[offset..offset + row_bytes],
-                &input_q8_k,
+                input_q8_k,
             );
         }
     }

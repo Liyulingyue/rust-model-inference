@@ -288,3 +288,45 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 | llama.cpp Metal（`-ngl 99`，F16 KV） | T8 | 273.576 eval/s | 不参与 |
 
 主批次的算术差距为 `(145.199 - 157.6) / 145.199 = -8.54%`，但三个 Rust 批次的中位数从 `106.1` 到 `157.6 eval/s`，结论互相冲突，因此**尚未证明稳定满足 10% CPU 门禁**。必须先进行测量环境与调度器 profiling，再考虑内核工作。本计划没有实现 DotProd/I8MM、权重重排或线程池重写。
+
+## 经验：SIMD 浮点内核必须严格匹配 Scalar 的舍入顺序
+
+**问题**:Q4_0 AVX2 实现曾在生产路径中产生 1 ULP 累积漂移，导致 softmax 后 top-1 token 在 temp 0.6 采样时被翻转("巴黎" → "尼斯")。Parity test 在合成数据上仅显示 1 ULP 差异，被误判为可接受。
+
+**根因**:IEEE 754 f32 **加法不满足结合律**。`(a + b) + c` 与 `a + (b + c)` 在 f32 中可能产生不同结果(舍入方向取决于中间值的指数)。SIMD 内核的累加顺序与 scalar 不同时，即使每个操作都"正确"，最终结果可能差 1 ULP。
+
+**两类高危操作**:
+
+1. **`f32::mul_add` / `_mm256_fmadd_ps`(FMA)**:fuses `a*b + c` 为单次舍入。Scalar 的 `a*b + c` 是两次舍入(乘 1 次 + 加 1 次)。在 AVX2+FMA 目标上,`mul_add` 会编译成 FMA → 1 ULP drift。
+
+2. **`hsum_ps`(树形 reduction)**:`_mm256_hadd_ps`, `hsum_ps` 等横向求和用树形(`(a+b)+(c+d)+...`),而 scalar 是顺序累加(`sum = (sum + s0) + s1 + ...`)。两种顺序的最终值可差 1 ULP。
+
+**Q4_0 AVX2 实际修复路径**(`src/ops/kernel/q4_0/avx2.rs`):
+
+```rust
+// ✗ 不匹配 scalar:加法不满足结合律
+acc += prod0 + prod1;     // = acc + (prod0 + prod1)
+
+// ✓ 匹配 scalar:顺序累加
+acc += prod0;
+acc += prod1;
+
+// ✗ FMA:1 次舍入 vs scalar 的 2 次
+let prod = dc.mul_add(d_b, 0.0).mul_add(si_b, 0.0);
+
+// ✓ 显式 mul+add:2 次舍入
+let prod = dc * d_b * si_b;
+```
+
+**Parity test 必须强制 bit-exact**:
+
+```rust
+let diff_bits = (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs();
+assert!(diff_bits == 0, "AVX2 diverged by {} ULP", diff_bits);
+```
+
+**不要**用 `rel < 1e-3` 这类容差测试,否则 1 ULP drift 会被掩盖。Q4_0 模型在合成数据 + 真实模型权重上跑了 9 个 parity case 全部 bit-exact 通过,然后才接入生产 dispatch。
+
+**已知未完全修复**(见 `docs/TODO.md`):
+- Q6_K AVX2 仍有 1 ULP drift,根因可能更深(`_mm256_madd_epi16` 累加顺序 vs scalar 的 per-element 累加,或 `_mm256_sub_epi32(sumi, q8sclsub)` 减法指令序列差异)。当前生产模型输出正确,但需进一步调查。
+- Q8_0 AVX2 在合成 uniform 数据上 drift 255(极端情况),但真实模型权重通过 — FMA + hsum 顺序问题,未深入定位。

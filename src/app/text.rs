@@ -283,6 +283,7 @@ pub fn run_inference(
             let up_buf_ptr = scratch.up_buf.as_mut_ptr();
             let q8_buf_ptr = scratch.q8_buf.as_mut_ptr();
             let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
+            let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
             let kv_cache_size = n_layer * max_ctx * n_embd_gqa;
             let (k_cache_f16_ptr, v_cache_f16_ptr) = match &kv_cache {
                 KvCache::F16(c) => (c.k.as_ptr() as *mut u16, c.v.as_ptr() as *mut u16),
@@ -298,6 +299,7 @@ pub fn run_inference(
             let normed = slice_from_mut!(normed_ptr, n_embd);
             let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
             let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
+            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
 
             let t0 = Instant::now();
             rms_norm(x, &lw.attn_norm, normed, eps);
@@ -309,18 +311,24 @@ pub fn run_inference(
             );
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
+            crate::ops::quantize_row_q8_k_into(
+                normed,
+                &mut q8k_buf[..n_embd / 256],
+            );
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
 
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(normed_ptr, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
+                let q8k = raw_parts!(q8k, n_embd / 256);
                 let q = slice_from_mut!(q_ptr, n_embd_q);
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.forward_prepared(input, q8, sc, q, n_embd, n_embd_q, ith, nth);
-                lw.wk.forward_prepared(input, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.forward_prepared(input, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq.forward_prepared(input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth);
+                lw.wk.forward_prepared(input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.forward_prepared(input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -490,6 +498,7 @@ pub fn run_inference(
             let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
             let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
             let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
+            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
             let t0 = Instant::now();
             quantize_q8_0_into(
                 attn_out,
@@ -497,14 +506,20 @@ pub fn run_inference(
                 &mut q8_buf[..n_embd_q],
                 &mut scale_buf[..n_embd_q / 32],
             );
+            crate::ops::quantize_row_q8_k_into(
+                attn_out,
+                &mut q8k_buf[..n_embd_q / 256],
+            );
             let q8 = q8_buf[..n_embd_q].as_ptr();
             let sc = scale_buf[..n_embd_q / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd_q / 256].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(attn_out_ptr, n_embd_q);
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
+                let q8k = raw_parts!(q8k, n_embd_q / 256);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.forward_prepared(input, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo.forward_prepared(input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
@@ -523,17 +538,23 @@ pub fn run_inference(
                 &mut q8_buf[..n_embd],
                 &mut scale_buf[..n_embd / 32],
             );
+            crate::ops::quantize_row_q8_k_into(
+                normed,
+                &mut q8k_buf[..n_embd / 256],
+            );
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
 
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(normed_ptr, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
+                let q8k = raw_parts!(q8k, n_embd / 256);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.forward_prepared(input, q8, sc, up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.forward_prepared(input, q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate.forward_prepared(input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.forward_prepared(input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -549,22 +570,29 @@ pub fn run_inference(
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
                 let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
+                let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
                 quantize_q8_0_into(
                     gate_buf,
                     n_ff,
                     &mut q8_buf[..n_ff],
                     &mut scale_buf[..n_ff / 32],
                 );
+                crate::ops::quantize_row_q8_k_into(
+                    gate_buf,
+                    &mut q8k_buf[..n_ff / 256],
+                );
             }
 
             let q8 = q8_buf[..n_ff].as_ptr();
             let sc = scale_buf[..n_ff / 32].as_ptr();
+            let q8k = q8k_buf[..n_ff / 256].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(gate_buf_ptr, n_ff);
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
+                let q8k = raw_parts!(q8k, n_ff / 256);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.forward_prepared(input, q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down.forward_prepared(input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
@@ -581,6 +609,7 @@ pub fn run_inference(
             let logits_ptr = scratch.logits.as_mut_ptr();
             let q8_buf = &mut scratch.q8_buf;
             let scale_buf = &mut scratch.scale_buf;
+            let q8k_buf = &mut scratch.q8k_buf;
 
             let t0 = Instant::now();
             rms_norm(x, &output_norm, normed, eps);
@@ -593,8 +622,13 @@ pub fn run_inference(
                 &mut q8_buf[..n_embd],
                 &mut scale_buf[..n_embd / 32],
             );
+            crate::ops::quantize_row_q8_k_into(
+                normed,
+                &mut q8k_buf[..n_embd / 256],
+            );
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
             let input = normed.as_ptr();
             let output_pw = crate::ops::kernel::QuantizedTensor::from_bytes(
                 output_weight,
@@ -606,8 +640,9 @@ pub fn run_inference(
                 let input = raw_parts!(input, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
+                let q8k = raw_parts!(q8k, n_embd / 256);
                 let logits = slice_from_mut!(logits_ptr, vocab);
-                output_pw.forward_prepared(input, q8, sc, logits, n_embd, vocab, ith, nth);
+                output_pw.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
             });
             t_logits += t0.elapsed().as_secs_f64();
         }
