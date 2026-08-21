@@ -519,6 +519,14 @@ impl<'model> Qwen3Session<'model> {
                 logits: vec![0.0; config.vocab],
                 q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
+                q8k_buf: vec![
+                    crate::ops::quant::BlockQ8K {
+                        d: 0.0,
+                        qs: [0; 256],
+                        bsums: [0; 16],
+                    };
+                    max_n_in / 256
+                ],
                 score_stride,
                 scores: vec![0.0; score_values],
             },

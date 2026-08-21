@@ -48,11 +48,17 @@ pub trait Kernel: Send + Sync {
     /// Matmul with both the original F32 input and its Q8_0 view available.
     /// K-quant kernels override this to prepare Q8_K activations; all other
     /// kernels retain the existing Q8_0 path.
+    ///
+    /// `q8_k` lets the caller pass a pre-quantized Q8_K activation (shared
+    /// across threads) instead of letting each thread re-quantize internally.
+    /// Pass `None` for kernels that don't need it (Q8_0 path) or when the
+    /// caller has not pre-quantized.
     fn forward_prepared(
         &self,
         input_f32: &[f32],
         input_q8: &[u8],
         input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
@@ -60,6 +66,7 @@ pub trait Kernel: Send + Sync {
         nth: usize,
     ) {
         let _ = input_f32;
+        let _ = q8_k;
         self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 
@@ -74,6 +81,7 @@ pub trait Kernel: Send + Sync {
             input,
             &input_q8,
             &input_scales,
+            None,
             output,
             n_in,
             n_out,
@@ -107,6 +115,7 @@ pub trait Kernel: Send + Sync {
                 &input[t * n_in..(t + 1) * n_in],
                 &input_q8,
                 &input_scales,
+                None,
                 &mut output[t * n_out..(t + 1) * n_out],
                 n_in,
                 n_out,
@@ -173,6 +182,7 @@ impl<'a> crate::ops::kernel::Kernel for QuantizedTensor<'a> {
         input_f32: &[f32],
         input_q8: &[u8],
         input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
@@ -183,6 +193,7 @@ impl<'a> crate::ops::kernel::Kernel for QuantizedTensor<'a> {
             input_f32,
             input_q8,
             input_scales,
+            q8_k,
             output,
             n_in,
             n_out,

@@ -12,6 +12,10 @@ pub struct ExecutionScratchpad {
     pub logits: Vec<f32>,
     pub q8_buf: Vec<u8>,
     pub scale_buf: Vec<f32>,
+    /// Pre-quantized Q8_K blocks for K-quant kernels (Q4_K / Q6_K). One
+    /// block holds 256 f32 elements as i8 + scales. Sized for the largest
+    /// n_in a K-quant matmul will see (= max(n_embd_q, n_ff)).
+    pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
     pub score_stride: usize,
     pub scores: Vec<f32>,
 }
@@ -57,6 +61,14 @@ impl ExecutionScratchpad {
             logits: vec![0.0f32; vocab],
             q8_buf: vec![0u8; max_n_in],
             scale_buf: vec![0.0f32; max_n_in / 32],
+            q8k_buf: vec![
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; 256],
+                    bsums: [0; 16],
+                };
+                max_n_in / 256
+            ],
             score_stride,
             scores: vec![0.0f32; n_threads * score_stride],
         }

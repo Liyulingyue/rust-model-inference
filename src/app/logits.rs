@@ -351,11 +351,11 @@ pub fn run_dump_logits(
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
                 lw.wq
-                    .forward_prepared(input, q8, sc, q, n_embd, n_embd_q, ith, nth);
+                    .forward_prepared(input, q8, sc, None, q, n_embd, n_embd_q, ith, nth);
                 lw.wk
-                    .forward_prepared(input, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                    .forward_prepared(input, q8, sc, None, k_new, n_embd, n_embd_gqa, ith, nth);
                 lw.wv
-                    .forward_prepared(input, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                    .forward_prepared(input, q8, sc, None, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             #[cfg(feature = "parity-trace")]
@@ -601,7 +601,7 @@ pub fn run_dump_logits(
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
                 lw.wo
-                    .forward_prepared(input, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                    .forward_prepared(input, q8, sc, None, attn_proj, n_embd_q, n_embd, ith, nth);
             });
 
             #[cfg(feature = "parity-trace")]
@@ -651,9 +651,9 @@ pub fn run_dump_logits(
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
                 lw.w_gate
-                    .forward_prepared(input, q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                    .forward_prepared(input, q8, sc, None, up_buf, n_embd, n_ff, ith, nth);
                 lw.w_up
-                    .forward_prepared(input, q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                    .forward_prepared(input, q8, sc, None, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -704,7 +704,7 @@ pub fn run_dump_logits(
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
                 lw.w_down
-                    .forward_prepared(input, q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                    .forward_prepared(input, q8, sc, None, down_buf, n_ff, n_embd, ith, nth);
             });
 
             #[cfg(feature = "parity-trace")]
@@ -749,7 +749,7 @@ pub fn run_dump_logits(
                 let q8 = raw_parts!(q8_ptr, n_embd);
                 let sc_ptr = raw_parts!(sc, n_embd / 32);
                 let logits = slice_from_mut!(logits_ptr, vocab);
-                output_pw.forward_prepared(input, q8, sc_ptr, logits, n_embd, vocab, ith, nth);
+                output_pw.forward_prepared(input, q8, sc_ptr, None, logits, n_embd, vocab, ith, nth);
             });
         }
 

@@ -59,6 +59,7 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
         input_f32: &[f32],
         input_q8: &[u8],
         input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
