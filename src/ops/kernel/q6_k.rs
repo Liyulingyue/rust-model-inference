@@ -80,7 +80,7 @@ impl<'a> Kernel for Q6_KKernel<'a> {
         let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q6K_SIZE;
         for out_idx in start..end {
             let offset = out_idx * row_bytes;
-            output[out_idx] = crate::ops::quant::vec_dot_q6k_q8k_scalar(
+            output[out_idx] = crate::ops::quant::vec_dot_q6k_q8k(
                 &self.weight[offset..offset + row_bytes],
                 input_q8_k,
             );
