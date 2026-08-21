@@ -11,6 +11,7 @@ use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel, quantize_q8_0_into,
 };
 use crate::core::thread_pool::ComputePool;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use super::audio_processor::{
@@ -453,16 +454,25 @@ impl Qwen3AudioModel {
         hidden
             .try_reserve_exact(hidden_len)
             .map_err(|_| "Failed to allocate convolution hidden values".to_string())?;
-        let mut chunk = reserved_f32(
-            "Mel convolution chunk",
-            checked_product("Mel convolution chunk", MEL_BINS, CHUNK_FRAMES)?,
-        )?;
-        let mut stage_a = Vec::new();
-        let mut stage_b = Vec::new();
-        let mut flattened = Vec::new();
-        let mut projected = Vec::new();
+        let conv0 = &self.conv[0];
+        let conv1 = &self.conv[1];
+        let conv2 = &self.conv[2];
+        let conv_out = &self.conv_out;
+        let window_values = &window.values;
 
-        for chunk_index in 0..chunks {
+        // Per-chunk closure: runs 3 conv2d layers + flatten + project.
+        // Each chunk gets its own scratch buffers; chunks are fully
+        // independent so rayon can dispatch them across threads.
+        let process_chunk = |chunk_index: usize| -> Result<(Vec<f32>, Option<(f64, f64)>), String> {
+            let mut chunk = reserved_f32(
+                "Mel convolution chunk",
+                checked_product("Mel convolution chunk", MEL_BINS, CHUNK_FRAMES)?,
+            )?;
+            let mut stage_a = Vec::new();
+            let mut stage_b = Vec::new();
+            let mut flattened = Vec::new();
+            let mut projected = Vec::new();
+
             let tcc0 = std::time::Instant::now();
             for mel in 0..MEL_BINS {
                 let source_start = checked_product("Mel chunk source", mel, window.frames)?
@@ -478,7 +488,7 @@ impl Qwen3AudioModel {
                 let destination_start =
                     checked_product("Mel chunk destination", mel, CHUNK_FRAMES)?;
                 chunk[destination_start..destination_start + CHUNK_FRAMES]
-                    .copy_from_slice(&window.values[source_start..source_end]);
+                    .copy_from_slice(&window_values[source_start..source_end]);
             }
 
             let (height, width) = conv2d_stride2_padding1(
@@ -486,15 +496,15 @@ impl Qwen3AudioModel {
                 1,
                 MEL_BINS,
                 CHUNK_FRAMES,
-                &self.conv[0],
+                conv0,
                 &mut stage_a,
             )?;
             apply_gelu(&mut stage_a)?;
             let (height, width) =
-                conv2d_stride2_padding1(&stage_a, 480, height, width, &self.conv[1], &mut stage_b)?;
+                conv2d_stride2_padding1(&stage_a, 480, height, width, conv1, &mut stage_b)?;
             apply_gelu(&mut stage_b)?;
             let (height, width) =
-                conv2d_stride2_padding1(&stage_b, 480, height, width, &self.conv[2], &mut stage_a)?;
+                conv2d_stride2_padding1(&stage_b, 480, height, width, conv2, &mut stage_a)?;
             apply_gelu(&mut stage_a)?;
             let tcc1 = std::time::Instant::now();
             if (height, width) != (16, 13) {
@@ -512,17 +522,37 @@ impl Qwen3AudioModel {
             ));
 
             flatten_conv_output(&stage_a, 480, height, width, &mut flattened)?;
-            self.conv_out
+            conv_out
                 .project_f16(&flattened, width, &mut projected)?;
             let tcc2 = std::time::Instant::now();
-            hidden.extend_from_slice(&projected);
-            if chunk_index == 0 {
+
+            // Only chunk 0 reports timing (matches original behaviour).
+            let timing = if chunk_index == 0 {
+                Some((
+                    (tcc1 - tcc0).as_secs_f64(),
+                    (tcc2 - tcc1).as_secs_f64(),
+                ))
+            } else {
+                None
+            };
+            Ok((projected, timing))
+        };
+
+        // Run chunks in parallel via rayon. Order of returned Vec matches
+        // chunk index order so `hidden.extend` preserves token order.
+        let per_chunk: Vec<(Vec<f32>, Option<(f64, f64)>)> = (0..chunks)
+            .into_par_iter()
+            .map(process_chunk)
+            .collect::<Result<Vec<_>, String>>()?;
+
+        for (projected, timing) in per_chunk {
+            if let Some((conv_s, proj_s)) = timing {
                 eprintln!(
                     "    [enc-conv] 3xconv2d={:.3}s project_f16={:.3}s",
-                    (tcc1 - tcc0).as_secs_f64(),
-                    (tcc2 - tcc1).as_secs_f64()
+                    conv_s, proj_s
                 );
             }
+            hidden.extend_from_slice(&projected);
         }
         if hidden.len() != hidden_len || hidden.iter().any(|value| !value.is_finite()) {
             return Err("Invalid convolution hidden output".into());

@@ -1,6 +1,53 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+// ============================================================================
+// TODO(architecture): Two-pool concurrency model — see below for unification
+// direction. Currently the codebase uses two distinct thread scheduling
+// systems:
+//
+//   1. ComputePool (this file): hand-rolled spin-loop + atomics thread pool.
+//      Used by LLM prefill/decode and any code path that needs predictable
+//      low-latency scheduling. One ComputePool per inference task (Arc-shared
+//      within a request), explicit row-partitioned work via (ith, nth).
+//
+//   2. rayon global pool: third-party library with work-stealing. Used by
+//      audio conv chunks (src/models/qwen3a/model.rs), vision patch encoding
+//      (src/models/vision.rs), and qwen35 SSM (src/models/qwen35.rs).
+//
+// The two pools are kept in lock-step via `app::init_rayon_global_pool(n)` at
+// startup (see src/main.rs and src/app/cli.rs), which calls
+// `rayon::ThreadPoolBuilder::num_threads(n).build_global()` to size rayon's
+// global pool to match the resolved `--threads N`.
+//
+// ## Current rationale (why two pools, not one)
+//   - LLM is the hot path: per-task lifecycle, byte-exact output, no
+//     work-stealing reordering. ComputePool gives this for free.
+//   - Other parallel work is stateless batch processing: rayon is simpler
+//     and avoids boilerplate.
+//   - They never run concurrently today (audio conv finishes before LLM
+//     prefill starts), so oversubscription is not an issue.
+//
+// ## Future unification — preferred direction: migrate audio/vision/qwen35
+//    TO ComputePool, NOT LLM to rayon
+//   - LLM is the riskiest surface to change (byte-exact requirement,
+//     every model goes through it). Migrating LLM would require parity
+//     testing across all model variants.
+//   - ComputePool's `compute_with_chunks(n, f)` is a drop-in replacement
+//     for `(0..n).into_par_iter().for_each(...)` — minimal API churn.
+//   - Single-pool architecture would remove the `init_rayon_global_pool`
+//     workaround and the risk of two-pool thread-count drift.
+//
+//   Affected files when migrating:
+//     src/models/qwen3a/model.rs   — encode_convolution (8 Mel chunks)
+//     src/models/qwen3a/model.rs   — audio 18 transformer layers (if MT'd)
+//     src/models/vision.rs         — patch parallel (image encoder)
+//     src/models/qwen35.rs         — SSM chunks (2 sites)
+//
+//   When this work happens, the rayon dependency can be dropped from
+//   Cargo.toml.
+// ============================================================================
+
 pub struct ComputePool {
     n_threads: usize,
     inner: Arc<Inner>,

@@ -95,6 +95,19 @@ pub fn resolve_thread_count(requested: usize, available: usize) -> usize {
     }
 }
 
+/// Initialize rayon's global thread pool to match the resolved thread
+/// count. Idempotent: subsequent calls (or env-var-only setups) silently
+/// succeed because `build_global` errors after the first call.
+///
+/// See the TODO at the top of `src/core/thread_pool.rs` for the rationale
+/// of the two-pool model and the preferred direction for unification.
+pub fn init_rayon_global_pool(thread_count: usize) {
+    let n = thread_count.max(1);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build_global();
+}
+
 pub fn inference_step_budget(prompt_tokens: usize, max_tokens: usize, bench: bool) -> usize {
     prompt_tokens
         + if bench {

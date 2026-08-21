@@ -23,6 +23,13 @@ fn main() {
         ops::enable_gpu();
     }
 
+    // Resolved thread count for both LLM ComputePool and rayon global pool.
+    let available_threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    app::init_rayon_global_pool(n_threads);
+
     if options.model.as_os_str().is_empty() {
         app::run_self_test();
         return;
