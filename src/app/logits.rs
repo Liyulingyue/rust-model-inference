@@ -67,6 +67,10 @@ pub fn run_dump_logits(
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
     let embd_type = embd_info.ggml_type;
+    let output_type = source
+        .tensor_info("output.weight")
+        .unwrap_or(embd_info)
+        .ggml_type;
 
     let layers: Vec<LayerWeights> = (0..n_layer)
         .map(|l| LayerWeights {
@@ -265,15 +269,16 @@ pub fn run_dump_logits(
             let sc = scale_buf[..n_embd / 32].as_ptr();
 
             pool.compute(move |ith: usize, nth: usize| {
+                let input = raw_parts!(normed_ptr, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
                 let q = slice_from_mut!(q_ptr, n_embd_q);
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.forward_prequantized(q8, sc, q, n_embd, n_embd_q, ith, nth);
-                lw.wk.forward_prequantized(q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.forward_prequantized(q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq.forward_prepared(input, q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk.forward_prepared(input, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.forward_prepared(input, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -427,10 +432,11 @@ pub fn run_dump_logits(
             let q8 = q8_buf[..n_embd_q].as_ptr();
             let sc = scale_buf[..n_embd_q / 32].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
+                let input = raw_parts!(attn_out_ptr, n_embd_q);
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.forward_prequantized(q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo.forward_prepared(input, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
 
             let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
@@ -451,12 +457,13 @@ pub fn run_dump_logits(
             let sc = scale_buf[..n_embd / 32].as_ptr();
 
             pool.compute(move |ith: usize, nth: usize| {
+                let input = raw_parts!(normed_ptr, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.forward_prequantized(q8, sc, up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.forward_prequantized(q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate.forward_prepared(input, q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.forward_prepared(input, q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -479,10 +486,11 @@ pub fn run_dump_logits(
             let q8 = q8_buf[..n_ff].as_ptr();
             let sc = scale_buf[..n_ff / 32].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
+                let input = raw_parts!(gate_buf_ptr, n_ff);
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.forward_prequantized(q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down.forward_prepared(input, q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
 
             let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
@@ -500,33 +508,27 @@ pub fn run_dump_logits(
             let scale_buf = &mut scratch.scale_buf;
 
             rms_norm(x, &output_norm, normed, eps);
-            let use_f32_input = embd_type == GGMLType::Q6K;
-            if !use_f32_input {
-                quantize_q8_0_into(
-                    normed,
-                    n_embd,
-                    &mut q8_buf[..n_embd],
-                    &mut scale_buf[..n_embd / 32],
-                );
-            }
+            quantize_q8_0_into(
+                normed,
+                n_embd,
+                &mut q8_buf[..n_embd],
+                &mut scale_buf[..n_embd / 32],
+            );
             let output_pw = crate::ops::kernel::QuantizedTensor::from_bytes(
                 output_weight,
-                embd_type,
+                output_type,
                 n_embd,
                 vocab,
             );
-            let q8_ptr = if use_f32_input {
-                normed.as_ptr() as *const u8
-            } else {
-                q8_buf.as_ptr()
-            };
-            let q8_len = if use_f32_input { n_embd * 4 } else { n_embd };
+            let q8_ptr = q8_buf.as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
+            let input = normed.as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
-                let q8 = raw_parts!(q8_ptr, q8_len);
-                let sc_ptr = raw_parts!(sc, if use_f32_input { 0 } else { n_embd / 32 });
+                let input = raw_parts!(input, n_embd);
+                let q8 = raw_parts!(q8_ptr, n_embd);
+                let sc_ptr = raw_parts!(sc, n_embd / 32);
                 let logits = slice_from_mut!(logits_ptr, vocab);
-                output_pw.forward_prequantized(q8, sc_ptr, logits, n_embd, vocab, ith, nth);
+                output_pw.forward_prepared(input, q8, sc_ptr, logits, n_embd, vocab, ith, nth);
             });
         }
 

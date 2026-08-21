@@ -59,9 +59,23 @@ pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
 
 fn quantize_row_q8_k_scalar(x: &[f32]) -> Vec<BlockQ8K> {
     let nb = x.len() / QK_K;
-    let mut result = Vec::with_capacity(nb);
+    let mut result = vec![
+        BlockQ8K {
+            d: 0.0,
+            qs: [0; QK_K],
+            bsums: [0; QK_K / 16],
+        };
+        nb
+    ];
     quantize_row_q8_k_scalar_into(x, &mut result);
     result
+}
+
+#[inline]
+fn nearest_int(value: f32) -> i32 {
+    debug_assert!(value.abs() <= 4_194_303.0);
+    let bits = (value + 12_582_912.0).to_bits();
+    ((bits & 0x007f_ffff) as i32) - 0x0040_0000
 }
 
 fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
@@ -89,7 +103,7 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
         let iscale = -127.0f32 / max_val;
         let mut qs = [0i8; 256];
         for j in 0..QK_K {
-            let v = (iscale * block[j]).round() as i32;
+            let v = nearest_int(iscale * block[j]);
             qs[j] = v.min(127) as i8;
         }
 
