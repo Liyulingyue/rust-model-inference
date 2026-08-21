@@ -2,7 +2,7 @@
 
 pub fn quantize_q8_0_into(input: &[f32], n: usize, q8: &mut [u8], scales: &mut [f32]) {
     let blocks = n / 32;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "parity-trace")))]
     {
         if super::super::has_avx2_fma() {
             unsafe {
@@ -11,7 +11,7 @@ pub fn quantize_q8_0_into(input: &[f32], n: usize, q8: &mut [u8], scales: &mut [
             }
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(feature = "parity-trace")))]
     {
         if super::super::has_neon() {
             unsafe {
@@ -34,7 +34,7 @@ pub fn quantize_q8_0_into_parallel(
     let blocks = n / 32;
     let block_start = ith * blocks / nth;
     let block_end = (ith + 1) * blocks / nth;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "parity-trace")))]
     {
         if super::super::has_avx2_fma() {
             unsafe {

@@ -45,6 +45,24 @@ pub trait Kernel: Send + Sync {
         nth: usize,
     );
 
+    /// Matmul with both the original F32 input and its Q8_0 view available.
+    /// K-quant kernels override this to prepare Q8_K activations; all other
+    /// kernels retain the existing Q8_0 path.
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let _ = input_f32;
+        self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+    }
+
     /// Convenience: f32 input, single-thread. Default impl quantizes the
     /// input to Q8_0 and delegates to `forward_prequantized`. Kernels that
     /// have a native f32-input path (e.g. F16) override this.
@@ -52,7 +70,16 @@ pub trait Kernel: Send + Sync {
         let mut input_q8 = vec![0u8; n_in];
         let mut input_scales = vec![0.0f32; n_in.div_ceil(32)];
         crate::ops::quantize_q8_0_into(input, n_in, &mut input_q8, &mut input_scales);
-        self.forward_prequantized(&input_q8, &input_scales, output, n_in, n_out, 0, 1);
+        self.forward_prepared(
+            input,
+            &input_q8,
+            &input_scales,
+            output,
+            n_in,
+            n_out,
+            0,
+            1,
+        );
     }
 
     /// Batched matmul: `input[n_tokens * n_in] → output[n_tokens * n_out]`.
@@ -76,7 +103,8 @@ pub trait Kernel: Send + Sync {
                 &mut input_q8,
                 &mut input_scales,
             );
-            self.forward_prequantized(
+            self.forward_prepared(
+                &input[t * n_in..(t + 1) * n_in],
                 &input_q8,
                 &input_scales,
                 &mut output[t * n_out..(t + 1) * n_out],
@@ -138,6 +166,29 @@ impl<'a> crate::ops::kernel::Kernel for QuantizedTensor<'a> {
         // (rare; the common path is `into_kernel()` for `LayerWeights`).
         let k = self.clone_to_kernel();
         k.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+    }
+
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        self.clone_to_kernel().forward_prepared(
+            input_f32,
+            input_q8,
+            input_scales,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
     }
 }
 

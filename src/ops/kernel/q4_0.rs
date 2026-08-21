@@ -96,7 +96,7 @@ pub fn matmul_q4_0_scalar_range(
                 let y1 = input_q8[base_y + 16 + l] as i8 as i32;
                 dot += x0 * y0 + x1 * y1;
             }
-            sum += d * scale * dot as f32;
+            sum += dot as f32 * d * scale;
         }
         output[out_idx] = sum;
     }

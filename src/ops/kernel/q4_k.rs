@@ -1,19 +1,10 @@
 //! Q4_K super-block matmul kernel implementation.
 //!
-//! Q4_K uses 256-element super-blocks (144 bytes). Unlike Q8_0, the production
-//! fast path does NOT consume a prequantized Q8 input — Q4_K is
-//! dequantized-to-f32-then-matmul because llama.cpp's Q4_K kernel family
-//! doesn't have a native Q8-input variant. This implementation therefore
-//! ignores `input_q8` and `input_scales` and materializes the f32 weights
-//! once per call. For Qwen3-0.6B Q8_0 this kernel is never reached (the
-//! active path is `Q8Kernel`); it exists for completeness and to support
-//! future Q4_K_M checkpoints.
+//! Q4_K uses 256-element super-blocks (144 bytes).
 
 use super::Kernel;
 
 /// Q4_K weight buffer: 256-element super-blocks, 144 bytes each.
-/// Placeholder for future Q4_K_M production path; currently the
-/// production Q4_K_M / Q5_K_M path goes through `QuantizedLinear::forward_dequant`.
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_KWeight<'a> {
     pub data: &'a [u8],
@@ -40,24 +31,67 @@ impl<'a> Q4_KKernel<'a> {
 impl<'a> Kernel for Q4_KKernel<'a> {
     fn forward_prequantized(
         &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        if start >= end {
+            return;
+        }
+
+        // ponytail: scalar row dequantization; add a Q4_K × Q8_K SIMD kernel if profiling needs it.
+        let input: Vec<f32> = input_q8
+            .iter()
+            .take(n_in)
+            .enumerate()
+            .map(|(i, &q)| q as i8 as f32 * input_scales[i / 32])
+            .collect();
+        let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
+        let mut row = vec![0.0; n_in];
+        for out_idx in start..end {
+            let offset = out_idx * row_bytes;
+            crate::ops::quant::dequantize_row_q4_k(
+                &self.weight[offset..offset + row_bytes],
+                &mut row,
+            );
+            output[out_idx] = row.iter().zip(&input).map(|(x, y)| x * y).sum();
+        }
+    }
+
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
         _input_q8: &[u8],
         _input_scales: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
-        _ith: usize,
-        _nth: usize,
+        ith: usize,
+        nth: usize,
     ) {
-        // Dequantize-to-f32 path: this is the same approach used by
-        // `core::model::QuantizedLinear::forward_dequant`. The
-        // `_input_q8` / `_input_scales` parameters are ignored because Q4_K
-        // does not have a native Q8-input kernel; the f32 dequantization
-        // operates on the weight directly. This path is currently a
-        // placeholder; the production Q4_K_M path goes through
-        // `QuantizedLinear` rather than `LayerWeights`.
-        let _ = (n_in, n_out);
-        for o in output.iter_mut() {
-            *o = 0.0;
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        if start >= end {
+            return;
+        }
+
+        // ponytail: each worker prepares Q8_K; share scratch if profiling shows this matters.
+        let input_q8_k = crate::ops::quant::quantize_row_q8_k(&input_f32[..n_in]);
+        let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
+        for out_idx in start..end {
+            let offset = out_idx * row_bytes;
+            output[out_idx] = crate::ops::quant::vec_dot_q4k_q8k_scalar(
+                &self.weight[offset..offset + row_bytes],
+                &input_q8_k,
+            );
         }
     }
 }

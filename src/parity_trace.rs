@@ -58,6 +58,16 @@ pub fn checkpoint(
     shape: &[usize],
     values: &[f32],
 ) -> io::Result<Option<PathBuf>> {
+    checkpoint_at(name, layer, None, shape, values)
+}
+
+pub fn checkpoint_at(
+    name: &str,
+    layer: Option<usize>,
+    step: Option<usize>,
+    shape: &[usize],
+    values: &[f32],
+) -> io::Result<Option<PathBuf>> {
     if !selected(name) {
         return Ok(None);
     }
@@ -86,6 +96,7 @@ pub fn checkpoint(
     append(&json!({
         "name": name,
         "layer": layer,
+        "step": step,
         "shape": shape,
         "len": values.len(),
         "finite": values.iter().all(|value| value.is_finite()),

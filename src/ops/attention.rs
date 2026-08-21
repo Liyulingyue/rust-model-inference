@@ -4,7 +4,21 @@ pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "parity-trace")]
+    {
+        let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f64;
+        for value in x.iter_mut() {
+            *value = (*value - max).exp();
+            sum += f64::from(*value);
+        }
+        let scale = (1.0 / sum) as f32;
+        for value in x {
+            *value *= scale;
+        }
+        return;
+    }
+    #[cfg(all(target_arch = "aarch64", not(feature = "parity-trace")))]
     if super::has_neon() {
         unsafe {
             softmax_neon_ggml(x);
@@ -63,7 +77,10 @@ unsafe fn vec_scale_f32_neon(x: &mut [f32], scale: f32) {
     let vscale = vdupq_n_f32(scale);
     let mut i = 0;
     while i + 4 <= x.len() {
-        vst1q_f32(x.as_mut_ptr().add(i), vmulq_f32(vld1q_f32(x.as_ptr().add(i)), vscale));
+        vst1q_f32(
+            x.as_mut_ptr().add(i),
+            vmulq_f32(vld1q_f32(x.as_ptr().add(i)), vscale),
+        );
         i += 4;
     }
     while i < x.len() {
