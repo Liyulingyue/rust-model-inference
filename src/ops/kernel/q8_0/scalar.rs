@@ -84,7 +84,7 @@ pub fn q8_0_dot_row(
         };
     }
     #[cfg(target_arch = "aarch64")]
-    if crate::ops::matmul::has_neon() {
+    if crate::ops::has_neon() {
         let mut output = [0.0];
         unsafe {
             super::neon::matmul_q8_0_vs_q8_0_neon(

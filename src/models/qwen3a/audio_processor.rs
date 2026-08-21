@@ -22,8 +22,8 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
-    fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
-    fn vDSP_vsadd(
+    pub(super) fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
+    pub(super) fn vDSP_vsadd(
         input: *const f32,
         input_stride: isize,
         scalar: *const f32,
@@ -31,8 +31,8 @@ unsafe extern "C" {
         output_stride: isize,
         count: usize,
     );
-    fn vDSP_measqv(input: *const f32, stride: isize, result: *mut f32, count: usize);
-    fn vDSP_vsmul(
+    pub(super) fn vDSP_measqv(input: *const f32, stride: isize, result: *mut f32, count: usize);
+    pub(super) fn vDSP_vsmul(
         input: *const f32,
         input_stride: isize,
         scalar: *const f32,

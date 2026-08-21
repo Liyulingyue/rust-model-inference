@@ -2,6 +2,8 @@ use super::super::f16_to_f32;
 use super::super::has_avx2_fma;
 use super::super::has_f16c;
 use super::super::has_neon;
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+use std::arch::asm;
 
 #[inline(always)]
 #[cfg(target_arch = "x86_64")]

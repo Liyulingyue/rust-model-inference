@@ -7,11 +7,13 @@
 //! production path in `parallel`. The hot path goes through
 //! `parallel::matmul_q8_0_quantized_parallel_rows` instead.
 
+#[cfg(target_arch = "x86_64")]
 use crate::ops::has_avx2_fma;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::has_neon;
 use crate::ops::quant::q8_0::quantize_q8_0_into;
 
+#[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
 #[cfg(target_arch = "aarch64")]
 use super::neon::matmul_q8_0_vs_q8_0_neon;
