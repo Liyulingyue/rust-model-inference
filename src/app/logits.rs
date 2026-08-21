@@ -1,14 +1,34 @@
-﻿use crate::app::cli::KvFormat;
-use crate::app::{LayerWeights, get_f32_tensor, slice_from_mut, slice_from_ref, raw_parts};
+use crate::app::cli::KvFormat;
+use crate::app::{get_f32_tensor, raw_parts, slice_from_mut, slice_from_ref, LayerWeights};
 use crate::core::loader::model_config_from_source;
-use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
+use crate::ops::{
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    rope_neox, softmax,
+};
 use std::sync::Arc;
+
+#[cfg(feature = "parity-trace")]
+macro_rules! trace_checkpoint {
+    ($name:expr, $layer:expr, $step:expr, $shape:expr, $values:expr) => {
+        crate::parity_trace::report(
+            crate::parity_trace::checkpoint_at($name, $layer, Some($step), $shape, $values)
+                .map(|_| ()),
+        );
+    };
+}
+
+#[cfg(feature = "parity-trace")]
+macro_rules! trace_tokens {
+    ($name:expr, $values:expr) => {
+        crate::parity_trace::report(crate::parity_trace::token_ids($name, $values));
+    };
+}
 
 pub fn run_dump_logits(
     source: &dyn TensorSource,
@@ -57,8 +77,13 @@ pub fn run_dump_logits(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
-    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
+    let embd_info = source
+        .tensor_info("token_embd.weight")
+        .expect("no token_embd.weight");
+    if !matches!(
+        embd_info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K
+    ) {
         panic!(
             "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
             embd_info.ggml_type
@@ -95,67 +120,102 @@ pub fn run_dump_logits(
                 None
             },
             wq: {
-                let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.attn_q.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_q.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_q,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             wk: {
-                let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.attn_k.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_k.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             wv: {
-                let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.attn_v.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_v.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_embd_gqa,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             wo: {
-                let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.attn_output.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_output.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd_q,
                     n_embd,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             w_gate: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.ffn_gate.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.ffn_gate.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             w_up: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.ffn_up.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_embd,
                     n_ff,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
             w_down: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
+                let info = source
+                    .tensor_info(&format!("blk.{}.ffn_down.weight", l))
+                    .unwrap();
                 crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                    source
+                        .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
+                        .unwrap(),
                     info.ggml_type,
                     n_ff,
                     n_embd,
-                ).into_kernel()
+                )
+                .into_kernel()
             },
         })
         .collect();
@@ -177,6 +237,8 @@ pub fn run_dump_logits(
         prompt_tokens.len(),
         prompt_tokens
     );
+    #[cfg(feature = "parity-trace")]
+    trace_tokens!("prompt_ids", &prompt_tokens);
 
     let vocab = tokenizer.vocab_size();
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 1 };
@@ -221,9 +283,19 @@ pub fn run_dump_logits(
         };
 
         let pos = step;
-        println!("[STEP] step={} token_id={} input_tokens.len()={}", step, token_id, input_tokens.len());
+        println!(
+            "[STEP] step={} token_id={} input_tokens.len()={}",
+            step,
+            token_id,
+            input_tokens.len()
+        );
+
+        #[cfg(feature = "parity-trace")]
+        trace_tokens!("input_token", &[token_id]);
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        #[cfg(feature = "parity-trace")]
+        trace_checkpoint!("embedding", None, step, &[n_embd], &scratch.x);
 
         for layer in 0..n_layer {
             let lw = &layers[layer];
@@ -258,6 +330,8 @@ pub fn run_dump_logits(
             let scale_buf = slice_from_mut!(scale_buf_ptr, n_embd_q.max(n_ff) / 32);
 
             rms_norm(x, &lw.attn_norm, normed, eps);
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("attn_norm", Some(layer), step, &[n_embd], normed);
             quantize_q8_0_into(
                 normed,
                 n_embd,
@@ -276,10 +350,20 @@ pub fn run_dump_logits(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.forward_prepared(input, q8, sc, q, n_embd, n_embd_q, ith, nth);
-                lw.wk.forward_prepared(input, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.forward_prepared(input, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq
+                    .forward_prepared(input, q8, sc, q, n_embd, n_embd_q, ith, nth);
+                lw.wk
+                    .forward_prepared(input, q8, sc, k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv
+                    .forward_prepared(input, q8, sc, v_new, n_embd, n_embd_gqa, ith, nth);
             });
+
+            #[cfg(feature = "parity-trace")]
+            {
+                trace_checkpoint!("q_proj", Some(layer), step, &[n_embd_q], &scratch.q);
+                trace_checkpoint!("k_proj", Some(layer), step, &[n_embd_gqa], &scratch.k_new);
+                trace_checkpoint!("v_proj", Some(layer), step, &[n_embd_gqa], &scratch.v_new);
+            }
 
             {
                 let q = slice_from_mut!(q_ptr, n_embd_q);
@@ -305,6 +389,12 @@ pub fn run_dump_logits(
                     }
                 }
 
+                #[cfg(feature = "parity-trace")]
+                {
+                    trace_checkpoint!("q_norm", Some(layer), step, &[n_embd_q], q);
+                    trace_checkpoint!("k_norm", Some(layer), step, &[n_embd_gqa], k_new);
+                }
+
                 for h in 0..n_head {
                     rope_neox(
                         &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
@@ -320,6 +410,12 @@ pub fn run_dump_logits(
                         n_embd_head_v,
                         freq_base,
                     );
+                }
+
+                #[cfg(feature = "parity-trace")]
+                {
+                    trace_checkpoint!("q_rope", Some(layer), step, &[n_embd_q], q);
+                    trace_checkpoint!("k_rope", Some(layer), step, &[n_embd_gqa], k_new);
                 }
 
                 let kb = layer * max_ctx * n_embd_gqa;
@@ -355,6 +451,17 @@ pub fn run_dump_logits(
                 }
             }
 
+            #[cfg(feature = "parity-trace")]
+            let n_cached = pos + 1;
+            #[cfg(feature = "parity-trace")]
+            let mut trace_scores = vec![0.0f32; n_head * n_cached];
+            #[cfg(feature = "parity-trace")]
+            let mut trace_probs = vec![0.0f32; n_head * n_cached];
+            #[cfg(feature = "parity-trace")]
+            let trace_scores_ptr = trace_scores.as_mut_ptr();
+            #[cfg(feature = "parity-trace")]
+            let trace_probs_ptr = trace_probs.as_mut_ptr();
+
             pool.compute(move |ith: usize, nth: usize| {
                 let q = slice_from_ref!(q_ptr, n_embd_q);
                 let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
@@ -380,7 +487,15 @@ pub fn run_dump_logits(
                                 n_embd_head_k,
                             ) * kq_scale;
                         }
+                        #[cfg(feature = "parity-trace")]
+                        slice_from_mut!(trace_scores_ptr, n_head * n_cached)
+                            [h * n_cached..(h + 1) * n_cached]
+                            .copy_from_slice(&scores[s_off..s_off + n_cached]);
                         softmax(&mut scores[s_off..s_off + n_cached]);
+                        #[cfg(feature = "parity-trace")]
+                        slice_from_mut!(trace_probs_ptr, n_head * n_cached)
+                            [h * n_cached..(h + 1) * n_cached]
+                            .copy_from_slice(&scores[s_off..s_off + n_cached]);
                         for d in 0..n_embd_head_v {
                             let mut val = 0.0f32;
                             for t in 0..n_cached {
@@ -408,7 +523,15 @@ pub fn run_dump_logits(
                                 n_embd_head_k,
                             ) * kq_scale;
                         }
+                        #[cfg(feature = "parity-trace")]
+                        slice_from_mut!(trace_scores_ptr, n_head * n_cached)
+                            [h * n_cached..(h + 1) * n_cached]
+                            .copy_from_slice(&scores[s_off..s_off + n_cached]);
                         softmax(&mut scores[s_off..s_off + n_cached]);
+                        #[cfg(feature = "parity-trace")]
+                        slice_from_mut!(trace_probs_ptr, n_head * n_cached)
+                            [h * n_cached..(h + 1) * n_cached]
+                            .copy_from_slice(&scores[s_off..s_off + n_cached]);
                         for d in 0..n_embd_head_v {
                             let mut val = 0.0f32;
                             for t in 0..n_cached {
@@ -420,6 +543,31 @@ pub fn run_dump_logits(
                     }
                 }
             });
+
+            #[cfg(feature = "parity-trace")]
+            {
+                trace_checkpoint!(
+                    "attn_scores",
+                    Some(layer),
+                    step,
+                    &[n_head, n_cached],
+                    &trace_scores
+                );
+                trace_checkpoint!(
+                    "attn_probs",
+                    Some(layer),
+                    step,
+                    &[n_head, n_cached],
+                    &trace_probs
+                );
+                trace_checkpoint!(
+                    "attn_values",
+                    Some(layer),
+                    step,
+                    &[n_embd_q],
+                    &scratch.attn_out
+                );
+            }
 
             let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
             quantize_q8_0_into(
@@ -436,8 +584,18 @@ pub fn run_dump_logits(
                 let q8 = raw_parts!(q8, n_embd_q);
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.forward_prepared(input, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo
+                    .forward_prepared(input, q8, sc, attn_proj, n_embd_q, n_embd, ith, nth);
             });
+
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!(
+                "attn_proj",
+                Some(layer),
+                step,
+                &[n_embd],
+                &scratch.attn_proj
+            );
 
             let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
             let x = slice_from_mut!(x_ptr, n_embd);
@@ -446,7 +604,12 @@ pub fn run_dump_logits(
                 x[i] += attn_proj[i];
             }
 
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("post_attn_residual", Some(layer), step, &[n_embd], x);
+
             rms_norm(x, &lw.ffn_norm, normed, eps);
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("ffn_norm", Some(layer), step, &[n_embd], normed);
             quantize_q8_0_into(
                 normed,
                 n_embd,
@@ -456,14 +619,25 @@ pub fn run_dump_logits(
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
 
+            #[cfg(feature = "parity-trace")]
+            let mut trace_ffn_gate = vec![0.0f32; n_ff];
+            #[cfg(feature = "parity-trace")]
+            let mut trace_ffn_up = vec![0.0f32; n_ff];
+            #[cfg(feature = "parity-trace")]
+            let trace_ffn_gate_ptr = trace_ffn_gate.as_mut_ptr();
+            #[cfg(feature = "parity-trace")]
+            let trace_ffn_up_ptr = trace_ffn_up.as_mut_ptr();
+
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(normed_ptr, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.forward_prepared(input, q8, sc, up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.forward_prepared(input, q8, sc, gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate
+                    .forward_prepared(input, q8, sc, up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up
+                    .forward_prepared(input, q8, sc, gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -472,8 +646,31 @@ pub fn run_dump_logits(
                 } else {
                     r_start + rows_per
                 };
-                crate::ops::silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                #[cfg(feature = "parity-trace")]
+                {
+                    slice_from_mut!(trace_ffn_gate_ptr, n_ff)[r_start..r_end]
+                        .copy_from_slice(&up_buf[r_start..r_end]);
+                    slice_from_mut!(trace_ffn_up_ptr, n_ff)[r_start..r_end]
+                        .copy_from_slice(&gate_buf[r_start..r_end]);
+                }
+                crate::ops::silu_mul_inplace(
+                    &up_buf[r_start..r_end],
+                    &mut gate_buf[r_start..r_end],
+                );
             });
+
+            #[cfg(feature = "parity-trace")]
+            {
+                trace_checkpoint!("ffn_gate", Some(layer), step, &[n_ff], &trace_ffn_gate);
+                trace_checkpoint!("ffn_up", Some(layer), step, &[n_ff], &trace_ffn_up);
+                trace_checkpoint!(
+                    "ffn_silu_gate",
+                    Some(layer),
+                    step,
+                    &[n_ff],
+                    &scratch.gate_buf
+                );
+            }
 
             let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
             quantize_q8_0_into(
@@ -490,14 +687,20 @@ pub fn run_dump_logits(
                 let q8 = raw_parts!(q8, n_ff);
                 let sc = raw_parts!(sc, n_ff / 32);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.forward_prepared(input, q8, sc, down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down
+                    .forward_prepared(input, q8, sc, down_buf, n_ff, n_embd, ith, nth);
             });
+
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("ffn_down", Some(layer), step, &[n_embd], &scratch.down_buf);
 
             let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
             let x = slice_from_mut!(x_ptr, n_embd);
             for i in 0..n_embd {
                 x[i] += down_buf[i];
             }
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("post_ffn_residual", Some(layer), step, &[n_embd], x);
         }
 
         {
@@ -508,6 +711,8 @@ pub fn run_dump_logits(
             let scale_buf = &mut scratch.scale_buf;
 
             rms_norm(x, &output_norm, normed, eps);
+            #[cfg(feature = "parity-trace")]
+            trace_checkpoint!("result_norm", None, step, &[n_embd], normed);
             quantize_q8_0_into(
                 normed,
                 n_embd,
@@ -531,6 +736,9 @@ pub fn run_dump_logits(
                 output_pw.forward_prepared(input, q8, sc_ptr, logits, n_embd, vocab, ith, nth);
             });
         }
+
+        #[cfg(feature = "parity-trace")]
+        trace_checkpoint!("result_output", None, step, &[vocab], &scratch.logits);
 
         if step < input_tokens.len() - 1 {
             continue;
@@ -584,5 +792,7 @@ pub fn run_dump_logits(
         generated_tokens.push(chosen);
         all_tokens.push(chosen);
     }
+    #[cfg(feature = "parity-trace")]
+    trace_tokens!("generated_ids", &generated_tokens);
     Ok(())
 }
