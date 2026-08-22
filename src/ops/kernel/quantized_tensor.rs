@@ -21,13 +21,6 @@ pub struct F16Weight<'a> {
     pub n_out: usize,
 }
 
-/// Concrete weight types for each Kernel impl.
-pub use crate::ops::kernel::q4_0::Q4_0Weight;
-pub use crate::ops::kernel::q4_1::Q4_1Weight;
-pub use crate::ops::kernel::q6_k::Q6_KWeight;
-pub use crate::ops::kernel::q4_k::Q4_KWeight;
-pub use crate::ops::kernel::q5_k::Q5_KWeight;
-
 /// Unified enum of supported quantized weight formats. Produces a
 /// `Box<dyn Kernel>` via [`QuantizedTensor::into_kernel`].
 ///
@@ -39,11 +32,11 @@ pub enum QuantizedTensor<'a> {
     F32(Vec<f32>),
     F16(F16Weight<'a>),
     Q8_0(&'a [u8]),
-    Q6_K(Q6_KWeight<'a>),
-    Q4_0(Q4_0Weight<'a>),
-    Q4_1(Q4_1Weight<'a>),
-    Q4_K(Q4_KWeight<'a>),
-    Q5_K(Q5_KWeight<'a>),
+    Q6_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q4_1 { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q4_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q5_K { data: &'a [u8], n_cols: usize, n_rows: usize },
 }
 
 impl<'a> crate::ops::kernel::Kernel for QuantizedTensor<'a> {
@@ -100,11 +93,21 @@ impl<'a> QuantizedTensor<'a> {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
             Self::Q8_0(bytes) => Box::new(q8_0::Q8Kernel::new(bytes)),
-            Self::Q6_K(w) => Box::new(q6_k::Q6_KKernel::new(w.data)),
-            Self::Q4_0(w) => Box::new(q4_0::Q4_0Kernel::new(w.data)),
-            Self::Q4_1(w) => Box::new(q4_1::Q4_1Kernel::new(w.data)),
-            Self::Q4_K(w) => Box::new(q4_k::Q4_KKernel::new(*w)),
-            Self::Q5_K(w) => Box::new(q5_k::Q5_KKernel::new(*w)),
+            Self::Q6_K { data, n_cols, n_rows } => {
+                Box::new(q6_k::Q6_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q4_0 { data, n_cols, n_rows } => {
+                Box::new(q4_0::Q4_0Kernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q4_1 { data, n_cols, n_rows } => {
+                Box::new(q4_1::Q4_1Kernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q4_K { data, n_cols, n_rows } => {
+                Box::new(q4_k::Q4_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q5_K { data, n_cols, n_rows } => {
+                Box::new(q5_k::Q5_KKernel::new(data, *n_cols, *n_rows))
+            }
         }
     }
 }
@@ -124,11 +127,11 @@ impl<'a> QuantizedTensor<'a> {
             }
             GGMLType::F16 => Self::F16(F16Weight { bytes: data, n_in, n_out }),
             GGMLType::Q8_0 => Self::Q8_0(data),
-            GGMLType::Q6K => Self::Q6_K(Q6_KWeight { data, n_in, n_out }),
-            GGMLType::Q4_0 => Self::Q4_0(Q4_0Weight { data, n_in, n_out }),
-            GGMLType::Q4_1 => Self::Q4_1(Q4_1Weight { data, n_in, n_out }),
-            GGMLType::Q4K => Self::Q4_K(Q4_KWeight { data, n_in, n_out }),
-            GGMLType::Q5K => Self::Q5_K(Q5_KWeight { data, n_in, n_out }),
+            GGMLType::Q6K => Self::Q6_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q4_1 => Self::Q4_1 { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q4K => Self::Q4_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q5K => Self::Q5_K { data, n_cols: n_in, n_rows: n_out },
             _ => panic!("unsupported weight type {:?} - use Q8_0 model", ggml_type),
         }
     }
@@ -138,11 +141,11 @@ impl<'a> QuantizedTensor<'a> {
             Self::F32(_) => GGMLType::F32,
             Self::F16(_) => GGMLType::F16,
             Self::Q8_0(_) => GGMLType::Q8_0,
-            Self::Q6_K(_) => GGMLType::Q6K,
-            Self::Q4_0(_) => GGMLType::Q4_0,
-            Self::Q4_1(_) => GGMLType::Q4_1,
-            Self::Q4_K(_) => GGMLType::Q4K,
-            Self::Q5_K(_) => GGMLType::Q5K,
+            Self::Q6_K { .. } => GGMLType::Q6K,
+            Self::Q4_0 { .. } => GGMLType::Q4_0,
+            Self::Q4_1 { .. } => GGMLType::Q4_1,
+            Self::Q4_K { .. } => GGMLType::Q4K,
+            Self::Q5_K { .. } => GGMLType::Q5K,
         }
     }
 
@@ -151,11 +154,11 @@ impl<'a> QuantizedTensor<'a> {
             Self::F32(slice) => slice.len(),
             Self::F16(w) => w.n_in,
             Self::Q8_0(bytes) => q8_0_block_count(*bytes) * 32,
-            Self::Q6_K(w) => w.n_in,
-            Self::Q4_0(w) => w.n_in,
-            Self::Q4_1(w) => w.n_in,
-            Self::Q4_K(w) => w.n_in,
-            Self::Q5_K(w) => w.n_in,
+            Self::Q6_K { n_cols, .. } => *n_cols,
+            Self::Q4_0 { n_cols, .. } => *n_cols,
+            Self::Q4_1 { n_cols, .. } => *n_cols,
+            Self::Q4_K { n_cols, .. } => *n_cols,
+            Self::Q5_K { n_cols, .. } => *n_cols,
         }
     }
 
@@ -166,11 +169,21 @@ impl<'a> QuantizedTensor<'a> {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
             Self::Q8_0(bytes) => Box::new(q8_0::Q8Kernel::new(bytes)),
-            Self::Q6_K(w) => Box::new(q6_k::Q6_KKernel::new(w.data)),
-            Self::Q4_0(w) => Box::new(q4_0::Q4_0Kernel::new(w.data)),
-            Self::Q4_1(w) => Box::new(q4_1::Q4_1Kernel::new(w.data)),
-            Self::Q4_K(w) => Box::new(q4_k::Q4_KKernel::new(w)),
-            Self::Q5_K(w) => Box::new(q5_k::Q5_KKernel::new(w)),
+            Self::Q6_K { data, n_cols, n_rows } => {
+                Box::new(q6_k::Q6_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::Q4_0 { data, n_cols, n_rows } => {
+                Box::new(q4_0::Q4_0Kernel::new(data, n_cols, n_rows))
+            }
+            Self::Q4_1 { data, n_cols, n_rows } => {
+                Box::new(q4_1::Q4_1Kernel::new(data, n_cols, n_rows))
+            }
+            Self::Q4_K { data, n_cols, n_rows } => {
+                Box::new(q4_k::Q4_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::Q5_K { data, n_cols, n_rows } => {
+                Box::new(q5_k::Q5_KKernel::new(data, n_cols, n_rows))
+            }
         }
     }
 }
@@ -211,5 +224,41 @@ mod tests {
         let q = QuantizedTensor::Q8_0(&q8_bytes);
         assert_eq!(q.ggml_type(), GGMLType::Q8_0);
         assert_eq!(q.n_in(), 32);
+    }
+
+    /// After `Q*KWeight<'a>` newtype removal, the K-quant variants are
+    /// struct variants (matching `Q8_0` style). Verify each variant
+    /// round-trips through `from_bytes` → `ggml_type` → `into_kernel`.
+    #[test]
+    fn k_quant_variants_construct_and_dispatch() {
+        use crate::ops::quant::{
+            BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, BLOCK_Q80_SIZE,
+        };
+        // Q4_1 block = 20 bytes (F16 scale + F16 min + 16 nibbles).
+        const BLOCK_Q4_1_SIZE: usize = 20;
+        // (ggml_type, n_cols, n_rows, block_bytes)
+        let cases: &[(GGMLType, usize, usize, usize)] = &[
+            (GGMLType::Q4_0, 32, 4, BLOCK_Q80_SIZE),
+            (GGMLType::Q4_1, 32, 4, BLOCK_Q4_1_SIZE),
+            (GGMLType::Q4K, 256, 2, BLOCK_Q4K_SIZE),
+            (GGMLType::Q5K, 256, 2, BLOCK_Q5K_SIZE),
+            (GGMLType::Q6K, 256, 2, BLOCK_Q6K_SIZE),
+        ];
+        for &(ggml_type, n_cols, n_rows, block_bytes) in cases {
+            let blocks_per_row = n_cols / 32;
+            let bytes = vec![0u8; n_rows * blocks_per_row * block_bytes];
+            let q = QuantizedTensor::from_bytes(&bytes, ggml_type, n_cols, n_rows);
+            assert_eq!(q.ggml_type(), ggml_type, "ggml_type round-trip for {:?}", ggml_type);
+            assert_eq!(q.n_in(), n_cols, "n_in for {:?}", ggml_type);
+
+            // into_kernel must produce a kernel that we can call without panicking.
+            let kernel = q.into_kernel();
+            let input_q8 = vec![0u8; n_cols];
+            let input_scales = vec![0.0f32; (n_cols + 31) / 32];
+            let mut out = vec![0.0f32; n_rows];
+            kernel.forward_prequantized(
+                &input_q8, &input_scales, &mut out, n_cols, n_rows, 0, 1,
+            );
+        }
     }
 }

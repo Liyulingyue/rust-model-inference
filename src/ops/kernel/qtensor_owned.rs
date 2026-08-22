@@ -98,12 +98,18 @@ impl QTensorOwned {
             QuantizedTensor::F32(v) => Self::F32 { data: v.clone(), n_cols: v.len(), n_rows: 1 },
             QuantizedTensor::F16(w) => Self::F16 { data: w.bytes.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
             QuantizedTensor::Q8_0(b) => Self::Q8_0 { data: b.to_vec(), n_cols: q.n_in(), n_rows: 1 },
-            QuantizedTensor::Q4_K(w) => Self::Q4_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
-            QuantizedTensor::Q5_K(w) => Self::Q5_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
-            QuantizedTensor::Q6_K(w) => Self::Q6_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
+            QuantizedTensor::Q4_K { data, n_cols, n_rows } => {
+                Self::Q4_K { data: data.to_vec(), n_cols, n_rows }
+            }
+            QuantizedTensor::Q5_K { data, n_cols, n_rows } => {
+                Self::Q5_K { data: data.to_vec(), n_cols, n_rows }
+            }
+            QuantizedTensor::Q6_K { data, n_cols, n_rows } => {
+                Self::Q6_K { data: data.to_vec(), n_cols, n_rows }
+            }
             // Q4_0 / Q4_1 are not modeled in QTensorOwned yet (Qwen3.5 doesn't
             // use them and qwen3 uses QuantizedTensor directly).
-            QuantizedTensor::Q4_0(_) | QuantizedTensor::Q4_1(_) => {
+            QuantizedTensor::Q4_0 { .. } | QuantizedTensor::Q4_1 { .. } => {
                 panic!("Q4_0 / Q4_1 not yet supported in QTensorOwned")
             }
         }
@@ -172,15 +178,15 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
                 );
             }
             Self::Q4_K { data, .. } => {
-                let kernel = q4_k::Q4_KKernel::new(q4_k::Q4_KWeight { data: data.as_slice(), n_in, n_out });
+                let kernel = q4_k::Q4_KKernel::new(data.as_slice(), n_in, n_out);
                 kernel.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }
             Self::Q5_K { data, .. } => {
-                let kernel = q5_k::Q5_KKernel::new(q5_k::Q5_KWeight { data: data.as_slice(), n_in, n_out });
+                let kernel = q5_k::Q5_KKernel::new(data.as_slice(), n_in, n_out);
                 kernel.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }
             Self::Q6_K { data, .. } => {
-                Box::new(q6_k::Q6_KKernel::new(data.as_slice())).forward_prequantized(
+                Box::new(q6_k::Q6_KKernel::new(data.as_slice(), n_in, n_out)).forward_prequantized(
                     input_q8, input_scales, output, n_in, n_out, ith, nth,
                 );
             }
@@ -212,15 +218,15 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
                 self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }
             Self::Q4_K { data, .. } => {
-                let kernel = q4_k::Q4_KKernel::new(q4_k::Q4_KWeight { data: data.as_slice(), n_in, n_out });
+                let kernel = q4_k::Q4_KKernel::new(data.as_slice(), n_in, n_out);
                 kernel.forward_prepared(input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth);
             }
             Self::Q5_K { data, .. } => {
-                let kernel = q5_k::Q5_KKernel::new(q5_k::Q5_KWeight { data: data.as_slice(), n_in, n_out });
+                let kernel = q5_k::Q5_KKernel::new(data.as_slice(), n_in, n_out);
                 kernel.forward_prepared(input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth);
             }
             Self::Q6_K { data, .. } => {
-                Box::new(q6_k::Q6_KKernel::new(data.as_slice())).forward_prepared(
+                Box::new(q6_k::Q6_KKernel::new(data.as_slice(), n_in, n_out)).forward_prepared(
                     input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth,
                 );
             }
