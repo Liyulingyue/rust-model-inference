@@ -153,7 +153,7 @@ pub use crate::ops::kernel::q5_k::Q5_KWeight;
 /// borrowed `QuantizedTensor<'a>` to avoid the clone cost.
 #[derive(Debug, Clone)]
 pub enum QTensorOwned {
-    F32 { data: Vec<f32> },
+    F32 { data: Vec<f32>, n_cols: usize, n_rows: usize },
     F16 { data: Vec<u8>, n_cols: usize, n_rows: usize },
     Q8_0 { data: Vec<u8>, n_cols: usize, n_rows: usize },
     Q4_K { data: Vec<u8>, n_cols: usize, n_rows: usize },
@@ -165,8 +165,8 @@ impl QTensorOwned {
     /// Read shape. Mirrors `QuantizedTensor::n_in()` / `n_out()`.
     pub fn n_in(&self) -> usize {
         match self {
-            Self::F32 { data } => data.len(),
-            Self::F16 { n_cols, .. }
+            Self::F32 { n_cols, .. }
+            | Self::F16 { n_cols, .. }
             | Self::Q8_0 { n_cols, .. }
             | Self::Q4_K { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
@@ -180,8 +180,8 @@ impl QTensorOwned {
 
     pub fn n_rows(&self) -> usize {
         match self {
-            Self::F32 { .. } => 1,
-            Self::F16 { n_rows, .. }
+            Self::F32 { n_rows, .. }
+            | Self::F16 { n_rows, .. }
             | Self::Q8_0 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
             | Self::Q5_K { n_rows, .. }
@@ -214,7 +214,7 @@ impl QTensorOwned {
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
-                Self::F32 { data: f32_data }
+                Self::F32 { data: f32_data, n_cols, n_rows }
             }
             GGMLType::F16 => Self::F16 { data: data.to_vec(), n_cols, n_rows },
             GGMLType::Q8_0 => Self::Q8_0 { data: data.to_vec(), n_cols, n_rows },
@@ -229,9 +229,9 @@ impl QTensorOwned {
     /// Use when a model needs to take ownership of weights for fusion.
     pub fn from_quantized(q: QuantizedTensor<'_>) -> Self {
         match q {
-            QuantizedTensor::F32(v) => Self::F32 { data: v },
+            QuantizedTensor::F32(v) => Self::F32 { data: v.clone(), n_cols: v.len(), n_rows: 1 },
             QuantizedTensor::F16(w) => Self::F16 { data: w.bytes.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
-            QuantizedTensor::Q8_0(b) => Self::Q8_0 { data: b.to_vec(), n_cols: q.n_in(), n_rows: q.n_rows_for_q8_0() },
+            QuantizedTensor::Q8_0(b) => Self::Q8_0 { data: b.to_vec(), n_cols: q.n_in(), n_rows: 1 },
             QuantizedTensor::Q4_K(w) => Self::Q4_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
             QuantizedTensor::Q5_K(w) => Self::Q5_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
             QuantizedTensor::Q6_K(w) => Self::Q6_K { data: w.data.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
@@ -249,18 +249,19 @@ impl QTensorOwned {
     ///
     /// Used for FFN gate+up fusion and attention QKV fusion: two matmuls
     /// with the same input become one.
-    pub fn fuse_vstack(a: Self, b: Self) -> Option<Self> {
-        if std::mem::discriminant(&a) != std::mem::discriminant(&b) || a.n_cols() != b.n_cols() {
+    pub fn fuse_vstack(a: &Self, b: &Self) -> Option<Self> {
+        if std::mem::discriminant(a) != std::mem::discriminant(b) || a.n_cols() != b.n_cols() {
             return None;
         }
-        let (ad, bd, n_cols) = match (&a, &b) {
+        let n_cols = a.n_in();
+        let (ad, bd) = match (a, b) {
             (Self::F32 { .. }, _) | (Self::F16 { .. }, _) => {
                 panic!("F32 / F16 fuse_vstack not implemented yet")
             }
-            (Self::Q8_0 { data: ad, .. }, Self::Q8_0 { data: bd, .. }) => (ad.clone(), bd.clone(), a.n_in()),
-            (Self::Q4_K { data: ad, .. }, Self::Q4_K { data: bd, .. }) => (ad.clone(), bd.clone(), a.n_in()),
-            (Self::Q5_K { data: ad, .. }, Self::Q5_K { data: bd, .. }) => (ad.clone(), bd.clone(), a.n_in()),
-            (Self::Q6_K { data: ad, .. }, Self::Q6_K { data: bd, .. }) => (ad.clone(), bd.clone(), a.n_in()),
+            (Self::Q8_0 { data: ad, .. }, Self::Q8_0 { data: bd, .. }) => (ad.clone(), bd.clone()),
+            (Self::Q4_K { data: ad, .. }, Self::Q4_K { data: bd, .. }) => (ad.clone(), bd.clone()),
+            (Self::Q5_K { data: ad, .. }, Self::Q5_K { data: bd, .. }) => (ad.clone(), bd.clone()),
+            (Self::Q6_K { data: ad, .. }, Self::Q6_K { data: bd, .. }) => (ad.clone(), bd.clone()),
             _ => return None,
         };
         let mut fused = Vec::with_capacity(ad.len() + bd.len());
@@ -311,7 +312,7 @@ impl Kernel for QTensorOwned {
         // `clone_to_kernel`). The data is `.as_slice()` from a Vec, identical
         // SIMD function as borrowed bytes.
         match self {
-            Self::F32 { data } => Box::new(f32::F32Kernel::new(data.clone())).forward_prequantized(
+            Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone())).forward_prequantized(
                 input_q8, input_scales, output, n_in, n_out, ith, nth,
             ),
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice())).forward_prequantized(
@@ -351,7 +352,7 @@ impl Kernel for QTensorOwned {
         nth: usize,
     ) {
         match self {
-            Self::F32 { data } => Box::new(f32::F32Kernel::new(data.clone())).forward_prepared(
+            Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone())).forward_prepared(
                 input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth,
             ),
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice())).forward_prepared(
@@ -381,6 +382,375 @@ impl Kernel for QTensorOwned {
         // Default impl works, but for Q8_0/Q4_K/Q5_K/Q6_K the kernel wants
         // pre-quantized input. Use the trait default.
         <Self as Kernel>::forward(self, input, output, n_in, n_out)
+    }
+}
+
+// ============================================================================
+// Convenience / general-purpose SIMD dispatch methods on `QTensorOwned`.
+// These mirror the original `qwen35::QWeight` API surface but live on the
+// shared type so any model (qwen35, future vision/TTS/embedding variants) can
+// use them. The `quantize_and_matmul_with_scratch` entry point that takes
+// scratch buffers stays in `qwen35` because the scratch layout is model-
+// specific.
+// ============================================================================
+
+impl QTensorOwned {
+    /// Convenience: allocate `n_rows`-length output and run matmul.
+    pub fn matmul(&self, input: &[f32]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let mut output = vec![0.0f32; n_rows];
+        self.matmul_into(input, &mut output, 0, n_rows);
+        output
+    }
+
+    /// Per-row f32-input matmul into `output[row_start..row_end]`. Used by
+    /// `matmul` and by `quantize_and_matmul_with_scratch` for F32/F16 path.
+    pub fn matmul_into(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        row_start: usize,
+        row_end: usize,
+    ) {
+        use crate::ops::quant::{
+            vec_dot_q4k_q8k_avx2_direct, vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_avx2_direct,
+            vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_avx2_direct, vec_dot_q6k_q8k_scalar,
+            BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K,
+        };
+        use crate::ops::{dot_f32, f16_to_f32, quantize_row_q8_k};
+        use crate::ops::has_avx2_fma;
+
+        match self {
+            Self::F32 { data, .. } => {
+                let in_dim = data.len() / self.n_rows().max(1);
+                for o in row_start..row_end {
+                    output[o - row_start] =
+                        dot_f32(&data[o * in_dim..o * in_dim + in_dim], input, in_dim);
+                }
+            }
+            Self::F16 { data, .. } => {
+                let in_dim = input.len();
+                let mut row = vec![0.0f32; in_dim];
+                for o in row_start..row_end {
+                    for j in 0..in_dim {
+                        let bits = u16::from_le_bytes([data[(o * in_dim + j) * 2], data[(o * in_dim + j) * 2 + 1]]);
+                        row[j] = f16_to_f32(bits);
+                    }
+                    output[o - row_start] = dot_f32(&row, input, in_dim);
+                }
+            }
+            Self::Q8_0 { data, n_cols, .. } => {
+                let in_dim = *n_cols;
+                let blocks_per_row = in_dim / 32;
+                for o in row_start..row_end {
+                    let row_off = o * blocks_per_row * 34;
+                    let mut sum = 0.0f32;
+                    let mut dequant_buf = [0.0f32; 32];
+                    for b in 0..blocks_per_row {
+                        let w_off = row_off + b * 34;
+                        let d = f16_to_f32(u16::from_le_bytes([data[w_off], data[w_off + 1]]));
+                        for j in 0..32 {
+                            dequant_buf[j] = d * (data[w_off + 2 + j] as i8) as f32;
+                        }
+                        sum += dot_f32(&dequant_buf, &input[b * 32..b * 32 + 32], 32);
+                    }
+                    output[o - row_start] = sum;
+                }
+            }
+            Self::Q4_K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q4K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q4k_q8k_avx2_direct(row_data, &q8k) }
+                    } else {
+                        vec_dot_q4k_q8k_scalar(row_data, &q8k)
+                    };
+                }
+            }
+            Self::Q5_K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q5K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q5k_q8k_avx2_direct(row_data, &q8k) }
+                    } else {
+                        vec_dot_q5k_q8k_scalar(row_data, &q8k)
+                    };
+                }
+            }
+            Self::Q6_K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q6K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q6k_q8k_avx2_direct(row_data, &q8k) }
+                    } else {
+                        vec_dot_q6k_q8k_scalar(row_data, &q8k)
+                    };
+                }
+            }
+        }
+    }
+
+    /// K-quant path: full matmul returning Vec.
+    pub fn matmul_with_q8k(&self, q8k: &[crate::ops::quant::BlockQ8K]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let mut output = vec![0.0f32; n_rows];
+        self.matmul_into_with_q8k(q8k, &mut output, 0, n_rows);
+        output
+    }
+
+    /// K-quant path: full matmul into `buf`.
+    pub fn matmul_with_q8k_into_buf(
+        &self,
+        q8k: &[crate::ops::quant::BlockQ8K],
+        buf: &mut [f32],
+    ) {
+        let n_rows = self.n_rows();
+        self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
+    }
+
+    /// K-quant path: per-row matmul into `output[row_start..row_end]`. Caller
+    /// supplies the pre-quantized Q8K activations.
+    pub fn matmul_into_with_q8k(
+        &self,
+        q8k: &[crate::ops::quant::BlockQ8K],
+        output: &mut [f32],
+        row_start: usize,
+        row_end: usize,
+    ) {
+        use crate::ops::quant::{
+            vec_dot_q4k_q8k_avx2_direct, vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_avx2_direct,
+            vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_avx2_direct, vec_dot_q6k_q8k_scalar,
+            BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K,
+        };
+        use crate::ops::has_avx2_fma;
+
+        match self {
+            Self::Q4_K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q4K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q4k_q8k_avx2_direct(row_data, q8k) }
+                    } else {
+                        vec_dot_q4k_q8k_scalar(row_data, q8k)
+                    };
+                }
+            }
+            Self::Q5_K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q5K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q5k_q8k_avx2_direct(row_data, q8k) }
+                    } else {
+                        vec_dot_q5k_q8k_scalar(row_data, q8k)
+                    };
+                }
+            }
+            Self::Q6_K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * BLOCK_Q6K_SIZE..];
+                    output[o - row_start] = if has_avx2_fma() {
+                        unsafe { vec_dot_q6k_q8k_avx2_direct(row_data, q8k) }
+                    } else {
+                        vec_dot_q6k_q8k_scalar(row_data, q8k)
+                    };
+                }
+            }
+            _ => panic!("matmul_with_q8k called on non-K-quant weight type"),
+        }
+    }
+
+    /// K-quant path: pool.compute-partitioned matmul into `buf`.
+    pub fn matmul_with_q8k_into_buf_pooled(
+        &self,
+        q8k: &[crate::ops::quant::BlockQ8K],
+        buf: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        let n_rows = self.n_rows();
+        if pool.n_threads() <= 1 || n_rows < 256 {
+            self.matmul_with_q8k_into_buf(q8k, buf);
+            return;
+        }
+        let nth = pool.n_threads();
+        let chunk_size = (n_rows + nth - 1) / nth;
+        let weight_ptr = self as *const QTensorOwned;
+        let q8k_ptr = q8k.as_ptr();
+        let q8k_len = q8k.len();
+        let buf_ptr = buf.as_mut_ptr();
+        pool.compute(move |ith, _nth| {
+            let start = ith * chunk_size;
+            let end = (start + chunk_size).min(n_rows);
+            if start >= end { return; }
+            unsafe {
+                let w = &*weight_ptr;
+                let q = std::slice::from_raw_parts(q8k_ptr, q8k_len);
+                let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                w.matmul_into_with_q8k(q, b, start, end);
+            }
+        });
+    }
+
+    /// F32/F16 path via pool.compute partition. Used by `quantize_and_matmul`
+    /// for the F32/F16 fallback.
+    pub fn matmul_into_buf_pooled(
+        &self,
+        input: &[f32],
+        buf: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        let n_rows = self.n_rows();
+        if pool.n_threads() <= 1 || n_rows < 256 {
+            self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let nth = pool.n_threads();
+        let chunk_size = (n_rows + nth - 1) / nth;
+        let weight_ptr = self as *const QTensorOwned;
+        let input_ptr = input.as_ptr();
+        let buf_ptr = buf.as_mut_ptr();
+        pool.compute(move |ith, _nth| {
+            let start = ith * chunk_size;
+            let end = (start + chunk_size).min(n_rows);
+            if start >= end { return; }
+            unsafe {
+                let w = &*weight_ptr;
+                let inp = std::slice::from_raw_parts(input_ptr, input.len());
+                let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                w.matmul_into(inp, b, start, end);
+            }
+        });
+    }
+
+    /// One-shot quantize-then-matmul. Internally allocates a temporary
+    /// single-thread `ComputePool`; for the hot path use
+    /// `quantize_and_matmul_with_scratch` directly (free function in
+    /// `models::qwen35`) when a real pool and pre-allocated scratch buffers
+    /// are available.
+    pub fn quantize_and_matmul(
+        &self,
+        input: &[f32],
+        q8k_buf: &mut [crate::ops::quant::BlockQ8K],
+        buf: &mut [f32],
+    ) {
+        let mut q8_buf = vec![0u8; input.len()];
+        let mut scale_buf = vec![0.0f32; (input.len() + 31) / 32];
+        let pool = crate::core::thread_pool::ComputePool::new(1);
+        self.quantize_and_matmul_with_scratch(input, q8k_buf, &mut q8_buf, &mut scale_buf, buf, &pool);
+    }
+
+    /// Pool-driven quantize + matmul using pre-allocated scratch buffers.
+    /// The three scratch buffers (`q8k_buf`, `q8_buf`, `scale_buf`) must be
+    /// sized for the input dim — see `Qwen35Scratchpad` for the exact
+    /// sizing. `buf` is the output, sized to `n_rows`.
+    pub fn quantize_and_matmul_with_scratch(
+        &self,
+        input: &[f32],
+        q8k_buf: &mut [crate::ops::quant::BlockQ8K],
+        q8_buf: &mut [u8],
+        scale_buf: &mut [f32],
+        buf: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        use crate::ops::quant::quantize_row_q8_k_into;
+        use crate::ops::quantize_q8_0_into;
+
+        match self {
+            Self::Q4_K { n_cols, .. }
+            | Self::Q5_K { n_cols, .. }
+            | Self::Q6_K { n_cols, .. } => {
+                let blocks = *n_cols / crate::ops::quant::QK_K;
+                quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
+                self.matmul_with_q8k_into_buf_pooled(&q8k_buf[..blocks], buf, pool);
+            }
+            Self::Q8_0 { data, n_cols, n_rows } => {
+                let blocks = *n_cols / 32;
+                quantize_q8_0_into(
+                    input,
+                    *n_cols,
+                    &mut q8_buf[..*n_cols],
+                    &mut scale_buf[..blocks],
+                );
+                let n_cols_local = *n_cols;
+                let n_rows_local = *n_rows;
+                let q8_ptr = q8_buf.as_ptr();
+                let sc_ptr = scale_buf.as_ptr();
+                let out_ptr = buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_cols_local) };
+                    let sc = unsafe { std::slice::from_raw_parts(sc_ptr, blocks) };
+                    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_rows_local) };
+                    crate::ops::matmul_q8_0_quantized_parallel_rows(
+                        data.as_slice(), q8, sc, out, n_cols_local, n_rows_local, ith, nth,
+                    );
+                });
+            }
+            Self::F32 { .. } | Self::F16 { .. } => {
+                let n_rows = self.n_rows();
+                if pool.n_threads() <= 1 || n_rows < 256 {
+                    self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+                } else {
+                    let nth = pool.n_threads();
+                    let chunk_size = (n_rows + nth - 1) / nth;
+                    let weight_ptr = self as *const QTensorOwned;
+                    let input_ptr = input.as_ptr();
+                    let buf_ptr = buf.as_mut_ptr();
+                    pool.compute(move |ith, _nth| {
+                        let start = ith * chunk_size;
+                        let end = (start + chunk_size).min(n_rows);
+                        if start >= end { return; }
+                        unsafe {
+                            let w = &*weight_ptr;
+                            let inp = std::slice::from_raw_parts(input_ptr, input.len());
+                            let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                            w.matmul_into(inp, b, start, end);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Dequantize any dtype to F32. Identity for F32; per-dtype dequant
+    /// for Q8_0 / Q4_K / Q5_K / Q6_K. F16 has no dequant helper here yet.
+    pub fn dequant_to_f32(self) -> Self {
+        use crate::ops::quant::{dequant_q5k_weight, dequant_q6k_weight, dequant_q80_weight,
+            dequantize_row_q4_k, BLOCK_Q4K_SIZE, QK_K};
+        match self {
+            Self::F32 { .. } => self,
+            Self::F16 { .. } => panic!("F16 -> F32 dequant not yet implemented in QTensorOwned"),
+            Self::Q8_0 { data, n_cols, n_rows } => {
+                let dequant = dequant_q80_weight(&data, n_cols, n_rows);
+                Self::F32 { data: dequant, n_cols, n_rows }
+            }
+            Self::Q4_K { data, n_cols, n_rows } => {
+                let mut out = vec![0.0f32; n_cols * n_rows];
+                let bpr = n_cols / QK_K;
+                for row in 0..n_rows {
+                    dequantize_row_q4_k(
+                        &data[row * bpr * BLOCK_Q4K_SIZE..],
+                        &mut out[row * n_cols..row * n_cols + n_cols],
+                    );
+                }
+                Self::F32 { data: out, n_cols, n_rows }
+            }
+            Self::Q5_K { data, n_cols, n_rows } => {
+                let dequant = dequant_q5k_weight(&data, n_cols, n_rows);
+                Self::F32 { data: dequant, n_cols, n_rows }
+            }
+            Self::Q6_K { data, n_cols, n_rows } => {
+                let dequant = dequant_q6k_weight(&data, n_cols, n_rows);
+                Self::F32 { data: dequant, n_cols, n_rows }
+            }
+        }
     }
 }
 
@@ -454,7 +824,7 @@ mod qtensor_owned_tests {
         let gate_owned = QTensorOwned::from_bytes_owned(&gate, GGMLType::Q8_0, 64, 4);
         let up_owned = QTensorOwned::from_bytes_owned(&up, GGMLType::Q8_0, 64, 6);
 
-        let fused = QTensorOwned::fuse_vstack(gate_owned, up_owned).expect("fuse");
+        let fused = QTensorOwned::fuse_vstack(&gate_owned, &up_owned).expect("fuse");
         assert_eq!(fused.n_rows(), 10);
         assert_eq!(fused.n_in(), 64);
         if let QTensorOwned::Q8_0 { data, .. } = &fused {
@@ -472,7 +842,7 @@ mod qtensor_owned_tests {
         let a = QTensorOwned::from_bytes_owned(&make_q8_0_weight(2, 64, 0), GGMLType::Q8_0, 64, 2);
         let b = QTensorOwned::from_bytes_owned(&make_q8_0_weight(2, 32, 0), GGMLType::Q8_0, 32, 2);
         // Different n_cols -> None.
-        assert!(QTensorOwned::fuse_vstack(a, b).is_none());
+        assert!(QTensorOwned::fuse_vstack(&a, &b).is_none());
     }
 
     #[test]
@@ -482,8 +852,8 @@ mod qtensor_owned_tests {
         let gate = make_q8_0_weight(4, 64, 0);
         let up = make_q8_0_weight(4, 64, 17);
         let fused = QTensorOwned::fuse_vstack(
-            QTensorOwned::from_bytes_owned(&gate, GGMLType::Q8_0, 64, 4),
-            QTensorOwned::from_bytes_owned(&up, GGMLType::Q8_0, 64, 4),
+            &QTensorOwned::from_bytes_owned(&gate, GGMLType::Q8_0, 64, 4),
+            &QTensorOwned::from_bytes_owned(&up, GGMLType::Q8_0, 64, 4),
         )
         .expect("fuse");
 
