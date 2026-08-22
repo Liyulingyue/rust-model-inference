@@ -1,8 +1,14 @@
-//! Owned weight enum `QTensorOwned`: for fuse / batch / weight-side transforms.
+//! Reserved owned weight enum `QTensorOwned` for future weight transforms.
+//!
+//! Prefer `QuantizedTensor<'a>` for normal inference. It keeps GGUF/mmap
+//! weights zero-copy and should remain the default representation whenever a
+//! weight can be used without changing its layout.
 //!
 //! Holds `Vec<u8>` (or `Vec<f32>` for F32) instead of borrowing. Required for
-//! operations that need to own weight bytes — chiefly `fuse_vstack`
-//! (FFN gate+up fusion, attention QKV fusion).
+//! operations that must materialize a new weight buffer, such as
+//! `fuse_vstack` (FFN gate+up fusion or attention QKV fusion), dequantization,
+//! or reordering. It is intentionally not the default model weight type:
+//! constructing it from GGUF bytes copies the selected tensor.
 //!
 //! The hot path uses `QuantizedTensor<'a>` (borrowed, zero-copy). `QTensorOwned`
 //! appears only at model load (when fuse is wired) and in the Kernel impl
@@ -17,6 +23,12 @@
 use super::quantized_tensor::QuantizedTensor;
 use crate::core::tensor::GGMLType;
 
+/// Owned fallback for weights that cannot remain borrowed.
+///
+/// Do not use this type merely to represent an ordinary GGUF tensor. Use
+/// `QuantizedTensor<'a>` for that case. Keep `QTensorOwned` at ownership
+/// boundaries where a transform creates new bytes or where the weight must
+/// outlive its source mapping.
 #[derive(Debug, Clone)]
 pub enum QTensorOwned {
     F32 { data: Vec<f32>, n_cols: usize, n_rows: usize },

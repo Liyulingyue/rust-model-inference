@@ -4,8 +4,9 @@
 //! - `Kernel` trait — per-dtype matmul dispatch interface (`trait.rs`)
 //! - `QuantizedTensor<'a>` — borrowed weight enum, zero-copy from mmap
 //!   (`quantized_tensor.rs`)
-//! - `QTensorOwned` — owned weight enum for fuse / batch / weight-side
-//!   transforms (`qtensor_owned.rs`)
+//! - `QTensorOwned` — reserved owned weight enum for fuse / batch /
+//!   weight-side transforms (`qtensor_owned.rs`); do not use for ordinary
+//!   model weights because loading it copies the tensor bytes
 //! - per-dtype SIMD kernels: `f16`, `f32`, `q4_0`, `q4_1`, `q4_k`, `q5_k`,
 //!   `q6_k`, `q8_0`
 //!
@@ -36,4 +37,6 @@ mod qtensor_owned;
 // Re-exports for convenient access from `ops::kernel::*`.
 pub use trait_::Kernel;
 pub use quantized_tensor::{F16Weight, QuantizedTensor};
+/// Reserved owned-weight representation. Prefer `QuantizedTensor` unless a
+/// transform or an independent lifetime requires materialized weight data.
 pub use qtensor_owned::QTensorOwned;
