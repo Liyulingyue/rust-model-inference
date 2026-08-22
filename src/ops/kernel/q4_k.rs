@@ -4,6 +4,14 @@
 
 use super::Kernel;
 
+/// Q4_K weight buffer: 256-element super-blocks, 144 bytes each.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 pub struct Q4_KKernel<'a> {
     pub weight: &'a [u8],
     pub n_in: usize,
@@ -11,8 +19,12 @@ pub struct Q4_KKernel<'a> {
 }
 
 impl<'a> Q4_KKernel<'a> {
-    pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+    pub fn new(weight: Q4_KWeight<'a>) -> Self {
+        Self {
+            weight: weight.data,
+            n_in: weight.n_in,
+            n_out: weight.n_out,
+        }
     }
 }
 

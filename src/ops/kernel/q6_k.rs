@@ -3,6 +3,15 @@
 //! Phase 2.5 + 2.7-final: Q6_K uses 256-element super-blocks (210 bytes).
 
 use super::Kernel;
+use crate::core::tensor::GGMLType;
+
+/// Q6_K weight buffer: 256-element super-blocks, 210 bytes each.
+#[derive(Debug, Clone, Copy)]
+pub struct Q6_KWeight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q6_KKernel<'a> {
@@ -13,8 +22,8 @@ impl<'a> Q6_KKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 210;
 
-    pub fn new(data: &'a [u8], _n_in: usize, _n_out: usize) -> Self {
-        Self { weight: data }
+    pub fn new(weight: &'a [u8]) -> Self {
+        Self { weight }
     }
 }
 
@@ -115,7 +124,10 @@ pub fn matmul_q6_k_scalar_range(
     }
 }
 
-// Phase 2.7-final cleanup: Q6_KWeight was removed in favor of inlining
-// the (data: &[u8], n_in, n_out) triple directly into the kernel constructor.
-// This `pub use` is kept as a no-op for downstream callers that previously
-// imported it; it will be deleted in the next cleanup pass.
+// Re-export Q6_KWeight for callers that imported it from `ops::matmul`.
+// Phase 2.7-final cleanup: keep the old import path working so the
+// transition is non-breaking.
+pub use crate::core::tensor::GGMLType as _GGMLType;
+
+// Compile-time check that Q6_KWeight is reachable through the new path.
+const _: GGMLType = GGMLType::Q6K;

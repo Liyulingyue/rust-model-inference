@@ -1,6 +1,5 @@
 ﻿use crate::core::tensor::TensorInfo;
 
-pub mod fuse;
 pub mod q8_0;
 
 pub const QK_K: usize = 256;

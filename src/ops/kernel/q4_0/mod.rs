@@ -15,6 +15,17 @@ pub mod scalar;
 
 pub use scalar::matmul_q4_0_scalar_range;
 
+/// Q4_0 weight buffer: 32-element blocks, 18-byte layout
+/// (2-byte F16 scale + 16-byte nibbles).
+///
+/// Phase 2.7-final: moved from `ops::matmul` to live alongside `Q4_0Kernel`.
+#[derive(Debug, Clone, Copy)]
+pub struct Q4_0Weight<'a> {
+    pub data: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_0Kernel<'a> {
     pub weight: &'a [u8],
@@ -24,8 +35,8 @@ impl<'a> Q4_0Kernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 32;
     pub const BLOCK_BYTES: usize = 18;
 
-    pub fn new(data: &'a [u8], _n_in: usize, _n_out: usize) -> Self {
-        Self { weight: data }
+    pub fn new(weight: &'a [u8]) -> Self {
+        Self { weight }
     }
 }
 
@@ -103,7 +114,7 @@ mod tests {
         let input_scales = vec![1.0f32];
 
         let mut output = [0.0f32; 1];
-        let kernel = Q4_0Kernel::new(&weight, 32, 1);
+        let kernel = Q4_0Kernel::new(&weight);
         kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
         assert_eq!(output, [0.0]);
@@ -116,7 +127,7 @@ mod tests {
         let input_scales = vec![1.0f32];
 
         let mut output = [0.0f32; 1];
-        let kernel = Q4_0Kernel::new(&weight, 32, 1);
+        let kernel = Q4_0Kernel::new(&weight);
         kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
         assert_eq!(output, [32.0]);

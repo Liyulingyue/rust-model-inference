@@ -1,24 +1,11 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::kernel::QTensorOwned;
 use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::ops::quant::{self, BlockQ8K, QK_K};
 use crate::core::thread_pool::ComputePool;
 use crate::models::vision::VisionGrid;
-
-/// `QWeight` is the qwen35 model-side name for the shared
-/// `QTensorOwned` enum from `ops::kernel`. The model file was the last
-/// holdout using its own weight enum; this type alias moves it onto the
-/// shared, owned-bytes weight type so all weight-side SIMD optimizations
-/// (batch-token matmul, fuse_vstack, etc.) added to `QTensorOwned` apply
-/// here too.
-///
-/// Field names match the original `QWeight` exactly, so pattern matches
-/// like `QWeight::Q8_0 { data, n_cols, n_rows }` keep working through the
-/// alias.
-pub type QWeight = QTensorOwned;
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],
@@ -85,6 +72,486 @@ pub struct Qwen35Model {
     pub layers: Vec<Qwen35LayerWeights>,
 }
 
+pub enum QWeight {
+    F32 { data: Vec<f32>, n_cols: usize, n_rows: usize },
+    Q4K { data: Vec<u8>, n_cols: usize, n_rows: usize },
+    Q5K { data: Vec<u8>, n_cols: usize, n_rows: usize },
+    Q6K { data: Vec<u8>, n_cols: usize, n_rows: usize },
+    Q8_0 { data: Vec<u8>, n_cols: usize, n_rows: usize },
+    F16 { data: Vec<f32>, n_cols: usize, n_rows: usize },
+}
+
+impl QWeight {
+    pub fn n_cols(&self) -> usize {
+        match self {
+            QWeight::F32 { n_cols, .. } => *n_cols,
+            QWeight::Q4K { n_cols, .. } => *n_cols,
+            QWeight::Q5K { n_cols, .. } => *n_cols,
+            QWeight::Q6K { n_cols, .. } => *n_cols,
+            QWeight::Q8_0 { n_cols, .. } => *n_cols,
+            QWeight::F16 { n_cols, .. } => *n_cols,
+        }
+    }
+
+    pub fn n_rows(&self) -> usize {
+        match self {
+            QWeight::F32 { n_rows, .. } => *n_rows,
+            QWeight::Q4K { n_rows, .. } => *n_rows,
+            QWeight::Q5K { n_rows, .. } => *n_rows,
+            QWeight::Q6K { n_rows, .. } => *n_rows,
+            QWeight::Q8_0 { n_rows, .. } => *n_rows,
+            QWeight::F16 { n_rows, .. } => *n_rows,
+        }
+    }
+
+    pub fn matmul(&self, input: &[f32]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let mut output = vec![0.0f32; n_rows];
+        self.matmul_into(input, &mut output, 0, n_rows);
+        output
+    }
+
+    pub fn matmul_with_q8k(&self, q8k: &[quant::BlockQ8K]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let mut output = vec![0.0f32; n_rows];
+        self.matmul_into_with_q8k(q8k, &mut output, 0, n_rows);
+        output
+    }
+
+    pub fn matmul_with_q8k_parallel(&self, q8k: &[quant::BlockQ8K], n_threads: usize) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        if n_threads <= 1 || n_rows < 512 {
+            return self.matmul_with_q8k(q8k);
+        }
+        let mut output = vec![0.0f32; n_rows];
+        let chunk = (n_rows + n_threads - 1) / n_threads;
+        let mut chunks: Vec<(usize, usize, Vec<f32>)> = (0..n_threads)
+            .filter_map(|t| {
+                let start = t * chunk;
+                let end = (start + chunk).min(n_rows);
+                if start < end { Some((start, end, vec![0.0f32; end - start])) } else { None }
+            })
+            .collect();
+        std::thread::scope(|s| {
+            for (start, end, out_chunk) in &mut chunks {
+                let start = *start;
+                let end = *end;
+                let out_slice = out_chunk.as_mut_slice();
+                let weight = self;
+                s.spawn(move || {
+                    weight.matmul_into_with_q8k(q8k, out_slice, start, end);
+                });
+            }
+        });
+        for (start, end, out_chunk) in chunks {
+            output[start..end].copy_from_slice(&out_chunk);
+        }
+        output
+    }
+
+    pub fn matmul_with_q8k_into_buf(&self, q8k: &[quant::BlockQ8K], buf: &mut [f32]) {
+        let n_rows = self.n_rows();
+        self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
+    }
+
+    pub fn matmul_with_q8k_into_buf_parallel(&self, q8k: &[quant::BlockQ8K], buf: &mut [f32], n_threads: usize) {
+        let n_rows = self.n_rows();
+        if n_threads <= 1 || n_rows < 256 {
+            self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let chunk_size = (n_rows + n_threads - 1) / n_threads;
+        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(n_threads);
+        let mut row = 0usize;
+        while row < n_rows {
+            let end = (row + chunk_size).min(n_rows);
+            ranges.push((row, end));
+            row = end;
+        }
+        let actual_threads = ranges.len();
+        if actual_threads <= 1 {
+            self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let mut per_thread_bufs: Vec<&mut [f32]> = Vec::with_capacity(actual_threads);
+        {
+            let mut remaining: &mut [f32] = &mut buf[..n_rows];
+            for i in 0..actual_threads {
+                let len = ranges[i].1 - ranges[i].0;
+                let (left, right) = remaining.split_at_mut(len);
+                per_thread_bufs.push(left);
+                remaining = right;
+            }
+        }
+        std::thread::scope(|s| {
+            for (i, out_slice) in per_thread_bufs.iter_mut().enumerate() {
+                let (row_start, row_end) = ranges[i];
+                let weight = self;
+                let out = &mut **out_slice;
+                s.spawn(move || {
+                    weight.matmul_into_with_q8k(q8k, out, row_start, row_end);
+                });
+            }
+        });
+    }
+
+    pub fn quantize_and_matmul(&self, input: &[f32], q8k_buf: &mut [quant::BlockQ8K], buf: &mut [f32]) {
+        let mut q8_buf = vec![0u8; input.len()];
+        let mut scale_buf = vec![0.0f32; (input.len() + 31) / 32];
+        let pool = ComputePool::new(1);
+        self.quantize_and_matmul_with_scratch(input, q8k_buf, &mut q8_buf, &mut scale_buf, buf, &pool);
+    }
+
+    fn quantize_and_matmul_with_scratch(
+        &self,
+        input: &[f32],
+        q8k_buf: &mut [quant::BlockQ8K],
+        q8_buf: &mut [u8],
+        scale_buf: &mut [f32],
+        buf: &mut [f32],
+        pool: &ComputePool,
+    ) {
+        debug_assert_eq!(input.len(), self.n_cols());
+        // ponytail: shared activations are re-quantized per projection; cache only if profiling justifies the extra state.
+        match self {
+            QWeight::Q4K { n_cols, .. }
+            | QWeight::Q5K { n_cols, .. }
+            | QWeight::Q6K { n_cols, .. } => {
+                let blocks = *n_cols / QK_K;
+                quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
+                self.matmul_with_q8k_into_buf_pooled(&q8k_buf[..blocks], buf, pool);
+            }
+            QWeight::Q8_0 { data, n_cols, n_rows } => {
+                let blocks = *n_cols / 32;
+                crate::ops::quantize_q8_0_into(
+                    input,
+                    *n_cols,
+                    &mut q8_buf[..*n_cols],
+                    &mut scale_buf[..blocks],
+                );
+                let n_cols = *n_cols;
+                let n_rows = *n_rows;
+                let q8_ptr = q8_buf.as_ptr();
+                let sc_ptr = scale_buf.as_ptr();
+                let out_ptr = buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_cols) };
+                    let sc = unsafe { std::slice::from_raw_parts(sc_ptr, blocks) };
+                    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_rows) };
+                    crate::ops::matmul_q8_0_quantized_parallel_rows(
+                        data,
+                        q8,
+                        sc,
+                        out,
+                        n_cols,
+                        n_rows,
+                        ith,
+                        nth,
+                    );
+                });
+            }
+            QWeight::F32 { .. } | QWeight::F16 { .. } => {
+                let n_rows = self.n_rows();
+                if pool.n_threads() <= 1 || n_rows < 256 {
+                    self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+                } else {
+                    let nth = pool.n_threads();
+                    let chunk_size = (n_rows + nth - 1) / nth;
+                    let weight_ptr = self as *const QWeight;
+                    let input_ptr = input.as_ptr();
+                    let buf_ptr = buf.as_mut_ptr();
+                    pool.compute(|ith, nth_pool| {
+                        let start = ith * chunk_size;
+                        let end = (start + chunk_size).min(n_rows);
+                        if start >= end { return; }
+                        unsafe {
+                            let w = &*weight_ptr;
+                            let inp = std::slice::from_raw_parts(input_ptr, input.len());
+                            let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                            w.matmul_into(inp, b, start, end);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn matmul_with_q8k_into_buf_pooled(&self, q8k: &[quant::BlockQ8K], buf: &mut [f32], pool: &ComputePool) {
+        let n_rows = self.n_rows();
+        if pool.n_threads() <= 1 || n_rows < 256 {
+            self.matmul_into_with_q8k(q8k, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let nth = pool.n_threads();
+        let chunk_size = (n_rows + nth - 1) / nth;
+        let weight_ptr = self as *const QWeight;
+        let q8k_ptr = q8k as *const [quant::BlockQ8K];
+        let buf_ptr = buf.as_mut_ptr();
+        pool.compute(|ith, nth_pool| {
+            let start = ith * chunk_size;
+            let end = (start + chunk_size).min(n_rows);
+            if start >= end { return; }
+            unsafe {
+                let w = &*weight_ptr;
+                let q = &*q8k_ptr;
+                let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                w.matmul_into_with_q8k(q, b, start, end);
+            }
+        });
+    }
+
+    fn matmul_into_with_q8k(&self, q8k: &[quant::BlockQ8K], output: &mut [f32], row_start: usize, row_end: usize) {
+        match self {
+            QWeight::Q4K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q4K_SIZE..];
+                    output[o - row_start] = vec_dot_q4k_q8k_fast(row_data, q8k);
+                }
+            }
+            QWeight::Q5K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q5K_SIZE..];
+                    output[o - row_start] = vec_dot_q5k_q8k_fast(row_data, q8k);
+                }
+            }
+            QWeight::Q6K { data, n_cols, .. } => {
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q6K_SIZE..];
+                    output[o - row_start] = vec_dot_q6k_q8k_fast(row_data, q8k);
+                }
+            }
+            _ => panic!("matmul_with_q8k called on non-quantized weight type"),
+        }
+    }
+
+    pub fn matmul_into_buf_parallel(&self, input: &[f32], buf: &mut [f32], n_threads: usize) {
+        let n_rows = self.n_rows();
+        if n_threads <= 1 || n_rows < 256 {
+            self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let chunk_size = (n_rows + n_threads - 1) / n_threads;
+        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(n_threads);
+        let mut row = 0usize;
+        while row < n_rows {
+            let end = (row + chunk_size).min(n_rows);
+            ranges.push((row, end));
+            row = end;
+        }
+        let actual_threads = ranges.len();
+        if actual_threads <= 1 {
+            self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let mut per_thread_bufs: Vec<&mut [f32]> = Vec::with_capacity(actual_threads);
+        {
+            let mut remaining: &mut [f32] = &mut buf[..n_rows];
+            for i in 0..actual_threads {
+                let len = ranges[i].1 - ranges[i].0;
+                let (left, right) = remaining.split_at_mut(len);
+                per_thread_bufs.push(left);
+                remaining = right;
+            }
+        }
+        std::thread::scope(|s| {
+            for (i, out_slice) in per_thread_bufs.iter_mut().enumerate() {
+                let (row_start, row_end) = ranges[i];
+                let weight = self;
+                let out = &mut **out_slice;
+                s.spawn(move || {
+                    weight.matmul_into(input, out, row_start, row_end);
+                });
+            }
+        });
+    }
+
+    pub fn matmul_into_buf_pooled(&self, input: &[f32], buf: &mut [f32], pool: &ComputePool) {
+        let n_rows = self.n_rows();
+        if pool.n_threads() <= 1 || n_rows < 256 {
+            self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
+            return;
+        }
+        let nth = pool.n_threads();
+        let chunk_size = (n_rows + nth - 1) / nth;
+        let weight_ptr = self as *const QWeight;
+        let input_ptr = input.as_ptr();
+        let buf_ptr = buf.as_mut_ptr();
+        pool.compute(|ith, nth_pool| {
+            let start = ith * chunk_size;
+            let end = (start + chunk_size).min(n_rows);
+            if start >= end { return; }
+            unsafe {
+                let w = &*weight_ptr;
+                let inp = std::slice::from_raw_parts(input_ptr, input.len());
+                let b = std::slice::from_raw_parts_mut(buf_ptr.add(start), end - start);
+                w.matmul_into(inp, b, start, end);
+            }
+        });
+    }
+
+    pub fn matmul_parallel(&self, input: &[f32], n_threads: usize) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        if n_threads <= 1 || n_rows < 512 {
+            return self.matmul(input);
+        }
+        let mut output = vec![0.0f32; n_rows];
+        let chunk = (n_rows + n_threads - 1) / n_threads;
+        let mut chunks: Vec<(usize, usize, Vec<f32>)> = (0..n_threads)
+            .filter_map(|t| {
+                let start = t * chunk;
+                let end = (start + chunk).min(n_rows);
+                if start < end { Some((start, end, vec![0.0f32; end - start])) } else { None }
+            })
+            .collect();
+        std::thread::scope(|s| {
+            for (start, end, out_chunk) in &mut chunks {
+                let start = *start;
+                let end = *end;
+                let out_slice = out_chunk.as_mut_slice();
+                let weight = self;
+                s.spawn(move || {
+                    weight.matmul_into(input, out_slice, start, end);
+                });
+            }
+        });
+        for (start, end, out_chunk) in chunks {
+            output[start..end].copy_from_slice(&out_chunk);
+        }
+        output
+    }
+
+    pub fn matmul_into(&self, input: &[f32], output: &mut [f32], row_start: usize, row_end: usize) {
+        match self {
+            QWeight::F32 { data, n_cols, .. } => {
+                let in_dim = *n_cols;
+                for o in row_start..row_end {
+                    output[o - row_start] = dot_f32(&data[o * in_dim..o * in_dim + in_dim], input, in_dim);
+                }
+            }
+            QWeight::Q4K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k_cached(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q4K_SIZE..];
+                    output[o - row_start] = vec_dot_q4k_q8k_fast(row_data, &q8k);
+                }
+            }
+            QWeight::Q5K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k_cached(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q5K_SIZE..];
+                    output[o - row_start] = vec_dot_q5k_q8k_fast(row_data, &q8k);
+                }
+            }
+            QWeight::Q6K { data, n_cols, .. } => {
+                let q8k = quantize_row_q8_k_cached(input);
+                let blocks_per_row = *n_cols / QK_K;
+                for o in row_start..row_end {
+                    let row_data = &data[o * blocks_per_row * quant::BLOCK_Q6K_SIZE..];
+                    output[o - row_start] = vec_dot_q6k_q8k_fast(row_data, &q8k);
+                }
+            }
+            QWeight::Q8_0 { data, n_cols, .. } => {
+                let in_dim = input.len();
+                let blocks_per_row = *n_cols / 32;
+                for o in row_start..row_end {
+                    let row_off = o * blocks_per_row * 34;
+                    let mut sum = 0.0f32;
+                    let mut dequant_buf = [0.0f32; 32];
+                    for b in 0..blocks_per_row {
+                        let w_off = row_off + b * 34;
+                        let d = f16_at(data, w_off / 2);
+                        for j in 0..32 {
+                            dequant_buf[j] = d * data[w_off + 2 + j] as i8 as f32;
+                        }
+                        sum += dot_f32(&dequant_buf, &input[b * 32..b * 32 + 32], 32);
+                    }
+                    output[o - row_start] = sum;
+                }
+            }
+            QWeight::F16 { data, n_cols, .. } => {
+                let in_dim = *n_cols;
+                for o in row_start..row_end {
+                    output[o - row_start] = dot_f32(&data[o * in_dim..o * in_dim + in_dim], input, in_dim);
+                }
+            }
+        }
+    }
+
+    pub fn dequant_to_f32_weight(self) -> Self {
+        match self {
+            QWeight::F32 { .. } | QWeight::F16 { .. } => self,
+            QWeight::Q8_0 { data, n_cols, n_rows } => {
+                let dequant = quant::dequant_q80_weight(&data, n_cols, n_rows);
+                QWeight::F32 { data: dequant, n_cols, n_rows }
+            }
+            QWeight::Q4K { data, n_cols, n_rows } => {
+                let mut out = vec![0.0f32; n_cols * n_rows];
+                let bpr = n_cols / QK_K;
+                for row in 0..n_rows {
+                    quant::dequantize_row_q4_k(&data[row * bpr * quant::BLOCK_Q4K_SIZE..], &mut out[row * n_cols..row * n_cols + n_cols]);
+                }
+                QWeight::F32 { data: out, n_cols, n_rows }
+            }
+            QWeight::Q5K { data, n_cols, n_rows } => {
+                let dequant = quant::dequant_q5k_weight(&data, n_cols, n_rows);
+                QWeight::F32 { data: dequant, n_cols, n_rows }
+            }
+            QWeight::Q6K { data, n_cols, n_rows } => {
+                let dequant = quant::dequant_q6k_weight(&data, n_cols, n_rows);
+                QWeight::F32 { data: dequant, n_cols, n_rows }
+            }
+        }
+    }
+
+    fn f32_byte_size(&self) -> usize {
+        match self {
+            QWeight::F32 { data, .. } => data.len() * 4,
+            QWeight::F16 { n_cols, n_rows, .. } => n_cols * n_rows * 4,
+            QWeight::Q8_0 { n_cols, n_rows, .. } => n_cols * n_rows * 4,
+            QWeight::Q4K { n_cols, n_rows, .. } => n_cols * n_rows * 4,
+            QWeight::Q5K { n_cols, n_rows, .. } => n_cols * n_rows * 4,
+            QWeight::Q6K { n_cols, n_rows, .. } => n_cols * n_rows * 4,
+        }
+    }
+
+    pub fn fuse_vstack(a: &QWeight, b: &QWeight) -> Option<QWeight> {
+        match (a, b) {
+            (QWeight::Q5K { data: da, n_cols, n_rows: na }, QWeight::Q5K { data: db, n_cols: nc, n_rows: nb }) if n_cols == nc => {
+                let row_bytes_a = da.len() / na;
+                let row_bytes_b = db.len() / nb;
+                if row_bytes_a != row_bytes_b { return None; }
+                let mut fused = Vec::with_capacity(da.len() + db.len());
+                fused.extend_from_slice(da);
+                fused.extend_from_slice(db);
+                Some(QWeight::Q5K { data: fused, n_cols: *n_cols, n_rows: na + nb })
+            }
+            (QWeight::Q4K { data: da, n_cols, n_rows: na }, QWeight::Q4K { data: db, n_cols: nc, n_rows: nb }) if n_cols == nc => {
+                let row_bytes_a = da.len() / na;
+                let row_bytes_b = db.len() / nb;
+                if row_bytes_a != row_bytes_b { return None; }
+                let mut fused = Vec::with_capacity(da.len() + db.len());
+                fused.extend_from_slice(da);
+                fused.extend_from_slice(db);
+                Some(QWeight::Q4K { data: fused, n_cols: *n_cols, n_rows: na + nb })
+            }
+            (QWeight::Q6K { data: da, n_cols, n_rows: na }, QWeight::Q6K { data: db, n_cols: nc, n_rows: nb }) if n_cols == nc => {
+                let row_bytes_a = da.len() / na;
+                let row_bytes_b = db.len() / nb;
+                if row_bytes_a != row_bytes_b { return None; }
+                let mut fused = Vec::with_capacity(da.len() + db.len());
+                fused.extend_from_slice(da);
+                fused.extend_from_slice(db);
+                Some(QWeight::Q6K { data: fused, n_cols: *n_cols, n_rows: na + nb })
+            }
+            _ => None,
+        }
+    }
+}
 
 fn load_weight<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<QWeight> {
     let ti = source.tensor_info(name)?;
@@ -103,11 +570,17 @@ fn load_weight<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<QWeig
             }
             Some(QWeight::F32 { data: out, n_cols, n_rows })
         }
-        GGMLType::F16 => Some(QWeight::F16 { data: data.to_vec(), n_cols, n_rows }),
+        GGMLType::F16 => {
+            let mut out = Vec::with_capacity(n_cols * n_rows);
+            for i in 0..n_cols * n_rows {
+                out.push(f16_at(data, i));
+            }
+            Some(QWeight::F16 { data: out, n_cols, n_rows })
+        }
         GGMLType::Q8_0 => Some(QWeight::Q8_0 { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q4K => Some(QWeight::Q4_K { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q5K => Some(QWeight::Q5_K { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q6K => Some(QWeight::Q6_K { data: data.to_vec(), n_cols, n_rows }),
+        GGMLType::Q4K => Some(QWeight::Q4K { data: data.to_vec(), n_cols, n_rows }),
+        GGMLType::Q5K => Some(QWeight::Q5K { data: data.to_vec(), n_cols, n_rows }),
+        GGMLType::Q6K => Some(QWeight::Q6K { data: data.to_vec(), n_cols, n_rows }),
         _ => {
             eprintln!("WARNING: unsupported quant type {:?} for tensor {}", ti.ggml_type, name);
             None
@@ -247,20 +720,20 @@ impl Qwen35Model {
         let test_input: Vec<f32> = (0..self.config.n_embd).map(|i| (i as f32 * 0.01).sin()).collect();
         let ref_output = self.layers[0].ffn_gate.matmul(&test_input);
 
-        self.output_weight = std::mem::replace(&mut self.output_weight, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
+        self.output_weight = std::mem::replace(&mut self.output_weight, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32_weight();
         for layer in &mut self.layers {
-            if let Some(w) = layer.wq.take() { layer.wq = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wk.take() { layer.wk = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wv.take() { layer.wv = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wo.take() { layer.wo = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wqkv.take() { layer.wqkv = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wqkv_gate.take() { layer.wqkv_gate = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_beta.take() { layer.ssm_beta = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_alpha.take() { layer.ssm_alpha = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_out.take() { layer.ssm_out = Some(w.dequant_to_f32()); }
-            layer.ffn_gate = std::mem::replace(&mut layer.ffn_gate, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-            layer.ffn_up = std::mem::replace(&mut layer.ffn_up, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-            layer.ffn_down = std::mem::replace(&mut layer.ffn_down, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
+            if let Some(w) = layer.wq.take() { layer.wq = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.wk.take() { layer.wk = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.wv.take() { layer.wv = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.wo.take() { layer.wo = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.wqkv.take() { layer.wqkv = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.wqkv_gate.take() { layer.wqkv_gate = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.ssm_beta.take() { layer.ssm_beta = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.ssm_alpha.take() { layer.ssm_alpha = Some(w.dequant_to_f32_weight()); }
+            if let Some(w) = layer.ssm_out.take() { layer.ssm_out = Some(w.dequant_to_f32_weight()); }
+            layer.ffn_gate = std::mem::replace(&mut layer.ffn_gate, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32_weight();
+            layer.ffn_up = std::mem::replace(&mut layer.ffn_up, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32_weight();
+            layer.ffn_down = std::mem::replace(&mut layer.ffn_down, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32_weight();
         }
 
         let new_output = self.layers[0].ffn_gate.matmul(&test_input);
@@ -1012,7 +1485,7 @@ fn l2_norm(x: &mut [f32], eps: f32) {
 fn sigmoid_f32(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
 fn softplus_f32(x: f32) -> f32 { if x > 20.0 { x } else { (1.0 + x.exp()).ln() } }
 
-fn quantize_row_q8_k(input: &[f32]) -> Vec<BlockQ8K> {
+fn quantize_row_q8_k_cached(input: &[f32]) -> Vec<BlockQ8K> {
     quant::quantize_row_q8_k(input)
 }
 
