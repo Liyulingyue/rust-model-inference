@@ -15,16 +15,23 @@
 //! The KV cache has 16 slots (one per code level, indexed 0..=15). Slot 0 holds
 //! the talker h_state seed; slots 1..=15 hold the 15 acoustic codes.
 
+use rand::Rng;
+
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::qwen3::{
     checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor, usize_to_u64,
 };
+use crate::models::tts::talker::{mad_f16_inplace, scale_f16_inplace};
+#[cfg(target_arch = "aarch64")]
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
-    dot_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox,
+    dot_f16, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    rope_neox, silu_mul_inplace, vec_scale_f32,
 };
 
-use super::{RVQ_CODE_DIM, RVQ_CODEBOOK_SIZE, RVQ_LEVELS};
+use super::{RVQ_CODEBOOK_SIZE, RVQ_LEVELS};
 
 const PRED_N_LAYER: usize = 5;
 const PRED_N_EMBD_IN: usize = 2048; // after out_embd / embd lookup
@@ -36,6 +43,34 @@ const PRED_N_FF: usize = 3072;
 const PRED_VOCAB: usize = RVQ_CODEBOOK_SIZE; // 2048 per level
 const PRED_ACOUSTIC_LEVELS: usize = RVQ_LEVELS - 1; // 15
 const PRED_N_SLOTS: usize = RVQ_LEVELS; // 16
+
+fn predictor_matmul(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        debug_assert_eq!((ith, nth), (0, 1));
+        matmul_q8_0_quantized_range_nrc1(weight, input_q8, input_scales, output, n_in, 0, n_out);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    matmul_q8_0_quantized_parallel_rows(
+        weight,
+        input_q8,
+        input_scales,
+        output,
+        n_in,
+        n_out,
+        ith,
+        nth,
+    );
+}
 
 pub(crate) struct PredLayer {
     ln1: Vec<f32>,
@@ -52,8 +87,8 @@ pub(crate) struct PredLayer {
 }
 
 pub struct CodePredictor {
-    out_embd: Vec<f32>,         // [vocab=3072, embd=2048] lookup for code0
-    embd: Vec<f32>,            // [levels=15, vocab=2048, embd=2048] lookup for code[1..15]
+    out_embd: Vec<f32>, // [vocab=3072, embd=2048] lookup for code0
+    embd: Vec<f32>,     // [levels=15, vocab=2048, embd=2048] lookup for code[1..15]
     proj_in_w: &'static [u8],
     proj_in_b: Vec<f32>,
     layers: Vec<PredLayer>,
@@ -129,10 +164,30 @@ impl CodePredictor {
                     &format!("{prefix}.attn_k_norm.weight"),
                     &head_dim,
                 )?,
-                wq: static_q8_matrix(source, &format!("{prefix}.attn_q.weight"), PRED_N_EMBD, n_attn)?,
-                wk: static_q8_matrix(source, &format!("{prefix}.attn_k.weight"), PRED_N_EMBD, n_embd_k)?,
-                wv: static_q8_matrix(source, &format!("{prefix}.attn_v.weight"), PRED_N_EMBD, n_embd_v)?,
-                wo: static_q8_matrix(source, &format!("{prefix}.attn_out.weight"), n_attn, PRED_N_EMBD)?,
+                wq: static_q8_matrix(
+                    source,
+                    &format!("{prefix}.attn_q.weight"),
+                    PRED_N_EMBD,
+                    n_attn,
+                )?,
+                wk: static_q8_matrix(
+                    source,
+                    &format!("{prefix}.attn_k.weight"),
+                    PRED_N_EMBD,
+                    n_embd_k,
+                )?,
+                wv: static_q8_matrix(
+                    source,
+                    &format!("{prefix}.attn_v.weight"),
+                    PRED_N_EMBD,
+                    n_embd_v,
+                )?,
+                wo: static_q8_matrix(
+                    source,
+                    &format!("{prefix}.attn_out.weight"),
+                    n_attn,
+                    PRED_N_EMBD,
+                )?,
                 w_gate: static_q8_matrix(
                     source,
                     &format!("{prefix}.ffn_gate.weight"),
@@ -170,78 +225,150 @@ impl CodePredictor {
     ///
     /// Returns `(codes[0..16], out_embd)` where `out_embd` is the sum of all
     /// 16 codebook embeddings — to be fed back to the talker as the next
-    /// frame's embedding. Uses top-K=50 sampling (matches the reference
-    /// decoder) using `rand::thread_rng()`.
-    pub fn predict_frame(
+    /// frame's embedding.
+    pub fn predict_frame<R: Rng + ?Sized>(
         &self,
         h_state: &[f32],
-        sampled_token: u32,
-    ) -> Result<(Vec<u32>, Vec<f32>), String> {
+        code0: u32,
+        top_k: usize,
+        rng: &mut R,
+    ) -> Result<([u32; RVQ_LEVELS], Vec<f32>), String> {
         if h_state.len() != PRED_N_EMBD_IN {
             return Err(format!(
                 "predict_frame: h_state length {} != {PRED_N_EMBD_IN}",
                 h_state.len()
             ));
         }
-        if sampled_token as usize >= 3072 {
+        if code0 as usize >= PRED_VOCAB {
             return Err(format!(
-                "predict_frame: sampled token {sampled_token} >= 3072"
+                "predict_frame: semantic code {code0} >= {PRED_VOCAB}"
             ));
         }
-
         // KV cache: [layer][n_embd_head * n_head_kv * n_slots] in row-major.
         let n_embd_k = checked_product("pred k", PRED_N_HEAD_KV, PRED_HEAD_DIM)?;
         let cache_stride = n_embd_k;
         let cache_size = cache_stride * PRED_N_SLOTS;
-        let mut k_cache: Vec<Vec<f32>> = vec![vec![0.0f32; cache_size]; PRED_N_LAYER];
-        let mut v_cache: Vec<Vec<f32>> = vec![vec![0.0f32; cache_size]; PRED_N_LAYER];
+        let mut k_cache: Vec<Vec<u16>> = vec![vec![0; cache_size]; PRED_N_LAYER];
+        let mut v_cache: Vec<Vec<u16>> = vec![vec![0; cache_size]; PRED_N_LAYER];
 
         // Pre-allocated activations.
         let mut hidden = vec![0.0f32; PRED_N_EMBD];
 
         // ----- Step 0: seed KV cache with h_state at pos 0. Output discarded. -----
-        let h_hidden = matmul_with_bias(self.proj_in_w, &self.proj_in_b, h_state, PRED_N_EMBD_IN, PRED_N_EMBD)?;
+        let h_hidden = matmul_with_bias(
+            self.proj_in_w,
+            &self.proj_in_b,
+            h_state,
+            PRED_N_EMBD_IN,
+            PRED_N_EMBD,
+        )?;
         hidden.copy_from_slice(&h_hidden);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            forward_layer_inplace(layer, layer_idx, &mut hidden, &mut k_cache, &mut v_cache, 0, cache_stride, self.eps)?;
+            forward_layer_inplace(
+                layer,
+                layer_idx,
+                &mut hidden,
+                &mut k_cache,
+                &mut v_cache,
+                0,
+                cache_stride,
+                self.eps,
+            )?;
         }
 
         // ----- Step 1: code0_embd at pos 1 -> head[0] -> sample -> codes[1] -----
-        let code0_embd = lookup_f32(&self.out_embd, sampled_token as usize, PRED_N_EMBD_IN);
-        let c0_hidden = matmul_with_bias(self.proj_in_w, &self.proj_in_b, &code0_embd, PRED_N_EMBD_IN, PRED_N_EMBD)?;
+        let code0_embd = lookup_f32(&self.out_embd, code0 as usize, PRED_N_EMBD_IN);
+        let c0_hidden = matmul_with_bias(
+            self.proj_in_w,
+            &self.proj_in_b,
+            &code0_embd,
+            PRED_N_EMBD_IN,
+            PRED_N_EMBD,
+        )?;
         hidden.copy_from_slice(&c0_hidden);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            forward_layer_inplace(layer, layer_idx, &mut hidden, &mut k_cache, &mut v_cache, 1, cache_stride, self.eps)?;
+            forward_layer_inplace(
+                layer,
+                layer_idx,
+                &mut hidden,
+                &mut k_cache,
+                &mut v_cache,
+                1,
+                cache_stride,
+                self.eps,
+            )?;
         }
         // Sample from head[0].
-        let code1 = sample_at_head(&self.head_w, &hidden, 0)?;
+        let code1 = sample_at_head(
+            &self.head_w,
+            &hidden,
+            &self.output_norm,
+            self.eps,
+            0,
+            top_k,
+            rng,
+        )?;
 
         // ----- Steps 2..16: each step g (g=1..14) reads cache[g], uses embd[g-1]. -----
-        let mut codes = vec![0u32; PRED_N_SLOTS];
-        codes[0] = sampled_token;
+        let mut codes = [0u32; PRED_N_SLOTS];
+        codes[0] = code0;
         codes[1] = code1;
         let mut prev_code = code1;
         for g in 1..PRED_ACOUSTIC_LEVELS as u32 {
-            let emb = lookup_embd_f32(&self.embd, (g - 1) as usize, prev_code as usize, PRED_N_EMBD_IN);
-            let h = matmul_with_bias(self.proj_in_w, &self.proj_in_b, &emb, PRED_N_EMBD_IN, PRED_N_EMBD)?;
+            let emb = lookup_embd_f32(
+                &self.embd,
+                (g - 1) as usize,
+                prev_code as usize,
+                PRED_N_EMBD_IN,
+            );
+            let h = matmul_with_bias(
+                self.proj_in_w,
+                &self.proj_in_b,
+                &emb,
+                PRED_N_EMBD_IN,
+                PRED_N_EMBD,
+            )?;
             hidden.copy_from_slice(&h);
             let pos = (g + 1) as usize;
             for (layer_idx, layer) in self.layers.iter().enumerate() {
-                forward_layer_inplace(layer, layer_idx, &mut hidden, &mut k_cache, &mut v_cache, pos, cache_stride, self.eps)?;
+                forward_layer_inplace(
+                    layer,
+                    layer_idx,
+                    &mut hidden,
+                    &mut k_cache,
+                    &mut v_cache,
+                    pos,
+                    cache_stride,
+                    self.eps,
+                )?;
             }
-            let sampled = sample_at_head(&self.head_w, &hidden, g as usize)?;
+            let sampled = sample_at_head(
+                &self.head_w,
+                &hidden,
+                &self.output_norm,
+                self.eps,
+                g as usize,
+                top_k,
+                rng,
+            )?;
             codes[(g + 1) as usize] = sampled;
             prev_code = sampled;
         }
 
         // ----- Sum all 16 codebook embeddings to produce out_embd. -----
-        let mut sum = lookup_f32(&self.out_embd, codes[0] as usize, PRED_N_EMBD_IN);
-        for (level, &code) in codes[1..].iter().enumerate() {
-            let emb = lookup_embd_f32(&self.embd, level, code as usize, PRED_N_EMBD_IN);
-            for (s, e) in sum.iter_mut().zip(emb.iter()) {
-                *s += *e;
-            }
-        }
+        let semantic = lookup_f32(&self.out_embd, codes[0] as usize, PRED_N_EMBD_IN);
+        let acoustic: Vec<Vec<f32>> = codes[1..]
+            .iter()
+            .enumerate()
+            .map(|(level, &code)| lookup_embd_f32(&self.embd, level, code as usize, PRED_N_EMBD_IN))
+            .collect();
+        let sum = sum_frame_embeddings(
+            &semantic,
+            acoustic.iter().map(Vec::as_slice),
+            PRED_N_EMBD_IN,
+        )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::token_ids("tts.frame_codes", &codes));
         Ok((codes, sum))
     }
 }
@@ -275,9 +402,7 @@ fn matmul_with_bias(
     let mut scale_buf = vec![0.0f32; blocks];
     quantize_q8_0_into(input, in_dim, &mut q8_buf, &mut scale_buf);
     let mut out = vec![0.0f32; out_dim];
-    matmul_q8_0_quantized_parallel_rows(
-        weight, &q8_buf, &scale_buf, &mut out, in_dim, out_dim, 0, 1,
-    );
+    predictor_matmul(weight, &q8_buf, &scale_buf, &mut out, in_dim, out_dim, 0, 1);
     for (o, b) in out.iter_mut().zip(bias.iter()) {
         *o += *b;
     }
@@ -289,8 +414,8 @@ fn forward_layer_inplace(
     layer: &PredLayer,
     layer_idx: usize,
     hidden: &mut [f32],
-    k_cache: &mut [Vec<f32>],
-    v_cache: &mut [Vec<f32>],
+    k_cache: &mut [Vec<u16>],
+    v_cache: &mut [Vec<u16>],
     pos: usize,
     cache_stride: usize,
     eps: f32,
@@ -312,34 +437,65 @@ fn forward_layer_inplace(
     let mut q = vec![0.0f32; n_embd_q];
     let mut k = vec![0.0f32; n_embd_k];
     let mut v = vec![0.0f32; n_embd_v];
-    matmul_q8_0_quantized_parallel_rows(
-        layer.wq, &q8_buf, &scale_buf, &mut q, PRED_N_EMBD, n_embd_q, 0, 1,
+    predictor_matmul(
+        layer.wq,
+        &q8_buf,
+        &scale_buf,
+        &mut q,
+        PRED_N_EMBD,
+        n_embd_q,
+        0,
+        1,
     );
-    matmul_q8_0_quantized_parallel_rows(
-        layer.wk, &q8_buf, &scale_buf, &mut k, PRED_N_EMBD, n_embd_k, 0, 1,
+    predictor_matmul(
+        layer.wk,
+        &q8_buf,
+        &scale_buf,
+        &mut k,
+        PRED_N_EMBD,
+        n_embd_k,
+        0,
+        1,
     );
-    matmul_q8_0_quantized_parallel_rows(
-        layer.wv, &q8_buf, &scale_buf, &mut v, PRED_N_EMBD, n_embd_v, 0, 1,
+    predictor_matmul(
+        layer.wv,
+        &q8_buf,
+        &scale_buf,
+        &mut v,
+        PRED_N_EMBD,
+        n_embd_v,
+        0,
+        1,
     );
     // Q/K per-head RMSNorm + Neox RoPE.
     for head in 0..PRED_N_HEAD {
         let off = head * PRED_HEAD_DIM;
         rms_norm_inplace(&mut q[off..off + PRED_HEAD_DIM], &layer.q_norm, eps);
-        rope_neox(&mut q[off..off + PRED_HEAD_DIM], pos, PRED_HEAD_DIM, 1_000_000.0);
+        rope_neox(
+            &mut q[off..off + PRED_HEAD_DIM],
+            pos,
+            PRED_HEAD_DIM,
+            1_000_000.0,
+        );
     }
     for head in 0..PRED_N_HEAD_KV {
         let off = head * PRED_HEAD_DIM;
         rms_norm_inplace(&mut k[off..off + PRED_HEAD_DIM], &layer.k_norm, eps);
-        rope_neox(&mut k[off..off + PRED_HEAD_DIM], pos, PRED_HEAD_DIM, 1_000_000.0);
+        rope_neox(
+            &mut k[off..off + PRED_HEAD_DIM],
+            pos,
+            PRED_HEAD_DIM,
+            1_000_000.0,
+        );
     }
     // Write K/V into THIS layer's cache row at `pos`.
     let cache_row = pos * cache_stride;
     for head in 0..PRED_N_HEAD_KV {
         let off = head * PRED_HEAD_DIM;
         let k_dst = &mut k_cache[layer_idx][cache_row + off..cache_row + off + PRED_HEAD_DIM];
-        k_dst.copy_from_slice(&k[off..off + PRED_HEAD_DIM]);
+        f32_slice_to_f16(&k[off..off + PRED_HEAD_DIM], k_dst);
         let v_dst = &mut v_cache[layer_idx][cache_row + off..cache_row + off + PRED_HEAD_DIM];
-        v_dst.copy_from_slice(&v[off..off + PRED_HEAD_DIM]);
+        f32_slice_to_f16(&v[off..off + PRED_HEAD_DIM], v_dst);
     }
     // Causal attention: read K/V from THIS layer's cache rows 0..=pos.
     let mut attn_out = vec![0.0f32; n_attn];
@@ -347,33 +503,51 @@ fn forward_layer_inplace(
         let kv_head = head / group_size;
         let q_off = head * PRED_HEAD_DIM;
         let attn_off = head * PRED_HEAD_DIM;
-        let mut max_val = f32::NEG_INFINITY;
-        let mut scores = vec![0.0f32; pos + 1];
+        let mut query = vec![0; PRED_HEAD_DIM];
+        f32_slice_to_f16(&q[q_off..q_off + PRED_HEAD_DIM], &mut query);
+        let mut accumulator = vec![0; PRED_HEAD_DIM];
+        let mut sum = 0.0f32;
+        let mut max = f32::NEG_INFINITY;
         for j in 0..=pos {
             let k_off = j * cache_stride + kv_head * PRED_HEAD_DIM;
             let k_row = &k_cache[layer_idx][k_off..k_off + PRED_HEAD_DIM];
-            let q_row = &q[q_off..q_off + PRED_HEAD_DIM];
-            scores[j] = dot_f32(q_row, k_row, PRED_HEAD_DIM) * kq_scale;
-            if scores[j] > max_val {
-                max_val = scores[j];
+            let score = dot_f16(&query, k_row, PRED_HEAD_DIM) * kq_scale;
+            let mut rescale = 1.0f32;
+            let mut weight = 1.0f32;
+            if score > max {
+                rescale = (max - score).exp();
+                max = score;
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    scale_f16_inplace(&mut accumulator, rescale);
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                scale_f16_inplace(&mut accumulator, rescale);
+            } else {
+                weight = (score - max).exp();
             }
-        }
-        let mut exp_sum = 0.0f32;
-        for j in 0..=pos {
-            scores[j] = (scores[j] - max_val).exp();
-            exp_sum += scores[j];
-        }
-        for j in 0..=pos {
-            scores[j] /= exp_sum;
-        }
-        for dim in 0..PRED_HEAD_DIM {
-            let mut sum = 0.0f32;
-            for j in 0..=pos {
-                let v_off = j * cache_stride + kv_head * PRED_HEAD_DIM + dim;
-                sum += scores[j] * v_cache[layer_idx][v_off];
+            let v_off = j * cache_stride + kv_head * PRED_HEAD_DIM;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                mad_f16_inplace(
+                    &mut accumulator,
+                    &v_cache[layer_idx][v_off..v_off + PRED_HEAD_DIM],
+                    weight,
+                );
             }
-            attn_out[attn_off + dim] = sum;
+            #[cfg(not(target_arch = "aarch64"))]
+            mad_f16_inplace(
+                &mut accumulator,
+                &v_cache[layer_idx][v_off..v_off + PRED_HEAD_DIM],
+                weight,
+            );
+            sum = sum.mul_add(rescale, weight);
         }
+        let output = &mut attn_out[attn_off..attn_off + PRED_HEAD_DIM];
+        for (output, &value) in output.iter_mut().zip(&accumulator) {
+            *output = f16_to_f32(value);
+        }
+        vec_scale_f32(output, if sum == 0.0 { 0.0 } else { sum.recip() });
     }
     // attn_out projection + residual.
     let mut attn_proj = vec![0.0f32; PRED_N_EMBD];
@@ -381,8 +555,15 @@ fn forward_layer_inplace(
     let mut q8b = vec![0u8; n_attn];
     let mut sb = vec![0.0f32; q8_blocks];
     quantize_q8_0_into(&attn_out, n_attn, &mut q8b, &mut sb);
-    matmul_q8_0_quantized_parallel_rows(
-        layer.wo, &q8b, &sb, &mut attn_proj, n_attn, PRED_N_EMBD, 0, 1,
+    predictor_matmul(
+        layer.wo,
+        &q8b,
+        &sb,
+        &mut attn_proj,
+        n_attn,
+        PRED_N_EMBD,
+        0,
+        1,
     );
     for (h, p) in hidden.iter_mut().zip(attn_proj.iter()) {
         *h += *p;
@@ -394,24 +575,41 @@ fn forward_layer_inplace(
     quantize_q8_0_into(&normed, PRED_N_EMBD, &mut q8b2, &mut sb2);
     let mut gate = vec![0.0f32; PRED_N_FF];
     let mut up = vec![0.0f32; PRED_N_FF];
-    matmul_q8_0_quantized_parallel_rows(
-        layer.w_gate, &q8b2, &sb2, &mut gate, PRED_N_EMBD, PRED_N_FF, 0, 1,
+    predictor_matmul(
+        layer.w_gate,
+        &q8b2,
+        &sb2,
+        &mut gate,
+        PRED_N_EMBD,
+        PRED_N_FF,
+        0,
+        1,
     );
-    matmul_q8_0_quantized_parallel_rows(
-        layer.w_up, &q8b2, &sb2, &mut up, PRED_N_EMBD, PRED_N_FF, 0, 1,
+    predictor_matmul(
+        layer.w_up,
+        &q8b2,
+        &sb2,
+        &mut up,
+        PRED_N_EMBD,
+        PRED_N_FF,
+        0,
+        1,
     );
     let q8b3 = (PRED_N_FF + 31) / 32;
-    let mut silu_mul = vec![0.0f32; PRED_N_FF];
-    for i in 0..PRED_N_FF {
-        let s = 1.0 / (1.0 + (-gate[i]).exp());
-        silu_mul[i] = s * gate[i] * up[i];
-    }
+    silu_mul_inplace(&gate, &mut up);
     let mut q8b3_buf = vec![0u8; PRED_N_FF];
     let mut sb3 = vec![0.0f32; q8b3];
-    quantize_q8_0_into(&silu_mul, PRED_N_FF, &mut q8b3_buf, &mut sb3);
+    quantize_q8_0_into(&up, PRED_N_FF, &mut q8b3_buf, &mut sb3);
     let mut down = vec![0.0f32; PRED_N_EMBD];
-    matmul_q8_0_quantized_parallel_rows(
-        layer.w_down, &q8b3_buf, &sb3, &mut down, PRED_N_FF, PRED_N_EMBD, 0, 1,
+    predictor_matmul(
+        layer.w_down,
+        &q8b3_buf,
+        &sb3,
+        &mut down,
+        PRED_N_FF,
+        PRED_N_EMBD,
+        0,
+        1,
     );
     for (h, d) in hidden.iter_mut().zip(down.iter()) {
         *h += *d;
@@ -419,10 +617,14 @@ fn forward_layer_inplace(
     Ok(())
 }
 
-fn sample_at_head(
+fn sample_at_head<R: Rng + ?Sized>(
     head_w: &[u8],
     hidden: &[f32],
+    output_norm: &[f32],
+    eps: f32,
     level: usize,
+    top_k: usize,
+    rng: &mut R,
 ) -> Result<u32, String> {
     let n_embd = PRED_N_EMBD;
     let vocab = PRED_VOCAB;
@@ -438,60 +640,46 @@ fn sample_at_head(
             level_off + expected
         ));
     }
+    let mut normed = vec![0.0; n_embd];
+    rms_norm(hidden, output_norm, &mut normed, eps);
+    let blocks = n_embd.div_ceil(32);
+    let mut input_q8 = vec![0; n_embd];
+    let mut input_scales = vec![0.0; blocks];
+    quantize_q8_0_into(&normed, n_embd, &mut input_q8, &mut input_scales);
     let mut logits = vec![0.0f32; vocab];
-    for v in 0..vocab {
-        let row_off = level_off + v * bytes_per_row;
-        let mut acc = 0.0f32;
-        for b in 0..blocks_per_row {
-            let off = row_off + b * 34;
-            let scale =
-                half::f16::from_le_bytes([head_w[off], head_w[off + 1]]).to_f32();
-            for j in 0..32usize {
-                let q = head_w[off + 2 + j] as i8 as f32;
-                let w = scale * q;
-                let h = hidden[b * 32 + j];
-                acc += h * w;
-            }
-        }
-        logits[v] = acc;
-    }
-    sample_top_k_inline(&logits, 50)
+    predictor_matmul(
+        &head_w[level_off..level_off + bytes_per_level],
+        &input_q8,
+        &input_scales,
+        &mut logits,
+        n_embd,
+        vocab,
+        0,
+        1,
+    );
+    sample_top_k_with_draw(&logits, top_k, rng.gen())
 }
 
-/// Top-K sampling with softmax normalization (matches the reference codec
-/// decoder's `do_sampling`). Uses `rand::thread_rng()` for the draw.
-fn sample_top_k_inline(logits: &[f32], k: usize) -> Result<u32, String> {
-    use rand::Rng;
-    let n = logits.len();
-    let keep = k.min(n);
-    let mut top: Vec<(usize, f32)> = Vec::with_capacity(keep);
-    let mut min_in_top = f32::NEG_INFINITY;
-    let mut worst_idx = 0;
-    for (i, &v) in logits.iter().enumerate() {
-        if top.len() < keep {
-            top.push((i, v));
-            if top.len() == keep {
-                let mut w = 0;
-                for j in 1..keep {
-                    if top[j].1 < top[w].1 {
-                        w = j;
-                    }
-                }
-                worst_idx = w;
-                min_in_top = top[w].1;
-            }
-        } else if v > min_in_top {
-            top[worst_idx] = (i, v);
-            let mut w = 0;
-            for j in 1..keep {
-                if top[j].1 < top[w].1 {
-                    w = j;
-                }
-            }
-            worst_idx = w;
-            min_in_top = top[w].1;
-        }
+/// Top-K sampling with an injected draw for deterministic tests and one RNG
+/// stream shared by the complete request.
+fn sample_top_k_with_draw(logits: &[f32], k: usize, draw: f32) -> Result<u32, String> {
+    if logits.is_empty() || k == 0 {
+        return Err("top-K sampling requires non-empty logits and k > 0".into());
     }
+    if logits.iter().any(|value| !value.is_finite()) {
+        return Err("top-K sampling requires finite logits".into());
+    }
+    if !(0.0..1.0).contains(&draw) || !draw.is_finite() {
+        return Err(format!("top-K sampling draw {draw} is outside [0, 1)"));
+    }
+    let mut top: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    top.sort_unstable_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    top.truncate(k.min(top.len()));
     let max_val = top
         .iter()
         .map(|&(_, v)| v)
@@ -501,21 +689,58 @@ fn sample_top_k_inline(logits: &[f32], k: usize) -> Result<u32, String> {
         *v = (*v - max_val).exp();
         sum += *v;
     }
-    if sum > 0.0 {
-        for (_, p) in top.iter_mut() {
-            *p /= sum;
-        }
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("top-K probability sum is not finite and positive".into());
     }
-    let mut rng = rand::thread_rng();
-    let target: f32 = rng.gen::<f32>();
+    for (_, probability) in &mut top {
+        *probability /= sum;
+    }
     let mut cumulative = 0.0f32;
-    for &(idx, p) in &top {
-        cumulative += p;
-        if cumulative >= target {
-            return Ok(idx as u32);
+    for &(index, probability) in &top {
+        cumulative += probability;
+        if cumulative > draw {
+            return u32::try_from(index).map_err(|_| "sampled code does not fit u32".into());
         }
     }
-    Ok(top.last().map(|&(i, _)| i as u32).unwrap_or(0))
+    u32::try_from(top.last().expect("non-empty top-K").0)
+        .map_err(|_| "sampled code does not fit u32".into())
+}
+
+fn sum_frame_embeddings<'a, I>(
+    semantic: &[f32],
+    acoustic: I,
+    dim: usize,
+) -> Result<Vec<f32>, String>
+where
+    I: IntoIterator<Item = &'a [f32]>,
+{
+    if semantic.len() != dim || semantic.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "semantic feedback embedding must contain {dim} finite values"
+        ));
+    }
+    let mut sum = semantic.to_vec();
+    let mut levels = 0;
+    for (level, embedding) in acoustic.into_iter().enumerate() {
+        if embedding.len() != dim || embedding.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "acoustic feedback embedding {level} must contain {dim} finite values"
+            ));
+        }
+        for (sum, value) in sum.iter_mut().zip(embedding) {
+            *sum += *value;
+        }
+        levels += 1;
+    }
+    if levels != PRED_ACOUSTIC_LEVELS {
+        return Err(format!(
+            "feedback contains {levels} acoustic levels; expected {PRED_ACOUSTIC_LEVELS}"
+        ));
+    }
+    if sum.iter().any(|value| !value.is_finite()) {
+        return Err("feedback embedding sum contains non-finite values".into());
+    }
+    Ok(sum)
 }
 
 fn load_q8_lookup_f32(
@@ -561,4 +786,24 @@ fn load_q8_lookup_f32(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_draw_selects_a_reproducible_top_k_code() {
+        let logits = [0.0, 1.0, 2.0, 3.0];
+        assert_eq!(sample_top_k_with_draw(&logits, 2, 0.0).unwrap(), 3);
+        assert_eq!(sample_top_k_with_draw(&logits, 2, 0.999_999).unwrap(), 2);
+    }
+
+    #[test]
+    fn feedback_sum_keeps_semantic_and_all_fifteen_acoustic_levels() {
+        let code0 = vec![1.0, 2.0];
+        let acoustic: Vec<Vec<f32>> = (1..=15).map(|level| vec![level as f32, 1.0]).collect();
+        let sum = sum_frame_embeddings(&code0, acoustic.iter().map(Vec::as_slice), 2).unwrap();
+        assert_eq!(sum, vec![121.0, 17.0]);
+    }
 }

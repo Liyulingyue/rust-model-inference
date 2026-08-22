@@ -20,6 +20,7 @@ pub struct CliOptions {
     pub model: PathBuf,
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
+    pub ref_audio: Option<PathBuf>,
     pub image: Option<PathBuf>,
     pub vae: Option<PathBuf>,
     pub text_encoder: Option<PathBuf>,
@@ -50,6 +51,22 @@ pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, St
             "Invalid --embedding-output {value:?}; expected summary or raw"
         )),
         None => Err("Missing value for --embedding-output".into()),
+    }
+}
+
+pub fn normalize_tts_language(language: Option<&str>) -> Result<&'static str, String> {
+    match language.unwrap_or("en").to_ascii_lowercase().as_str() {
+        "cn" | "zh" | "chinese" => Ok("chinese"),
+        "en" | "english" => Ok("english"),
+        "ge" | "de" | "german" => Ok("german"),
+        "it" | "italian" => Ok("italian"),
+        "po" | "pt" | "portuguese" => Ok("portuguese"),
+        "sp" | "es" | "spanish" => Ok("spanish"),
+        "ja" | "japanese" => Ok("japanese"),
+        "ko" | "korean" => Ok("korean"),
+        "fr" | "french" => Ok("french"),
+        "ru" | "russian" => Ok("russian"),
+        value => Err(format!("Unsupported TTS language {value:?}")),
     }
 }
 
@@ -225,6 +242,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.audio = Some(value.as_str().into());
                 i += 1;
             }
+            "--ref-audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --ref-audio")?;
+                options.ref_audio = Some(value.as_str().into());
+                i += 1;
+            }
             "--language" => {
                 let value = args
                     .get(i + 1)
@@ -254,6 +279,51 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.tts {
+        if options.prompt.as_deref().is_none_or(|value| value.trim().is_empty()) {
+            return Err("--tts requires a non-empty --prompt".into());
+        }
+        if options
+            .mmproj
+            .as_deref()
+            .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            return Err("--tts requires --mmproj".into());
+        }
+        if options
+            .out
+            .as_deref()
+            .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            return Err("--tts requires --out".into());
+        }
+        if options.max_tokens == Some(0) {
+            return Err("--tts requires --max-tokens greater than 0".into());
+        }
+        let conflict = if options.audio.is_some() {
+            Some("--audio")
+        } else if options.image.is_some() {
+            Some("--image")
+        } else if options.embedding {
+            Some("--embedding")
+        } else if options.dump_logits {
+            Some("--dump-logits")
+        } else if options.bench {
+            Some("--bench")
+        } else if options.profile {
+            Some("--profile")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(format!("--tts cannot be used with {conflict}"));
+        }
+        normalize_tts_language(options.language.as_deref())?;
+        return Ok(());
+    }
+    if options.ref_audio.is_some() {
+        return Err("--ref-audio requires --tts".into());
+    }
     if options.audio.is_none() {
         return if options.language.is_some() {
             Err("--language requires --audio".into())
@@ -427,6 +497,88 @@ mod tests {
             audio: Some("missing.wav".into()),
             ..CliOptions::default()
         }
+    }
+
+    #[test]
+    fn tts_cli_requires_complete_waveform_inputs_before_model_load() {
+        let parse = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+            parse_cli_options(&args).unwrap()
+        };
+
+        let valid = parse(&[
+            "rmi",
+            "--tts",
+            "--model",
+            "missing.gguf",
+            "--mmproj",
+            "missing-mmproj.gguf",
+            "--prompt",
+            "hello",
+            "--language",
+            "cn",
+            "--ref-audio",
+            "speaker.wav",
+            "--out",
+            "output.wav",
+        ]);
+        assert_eq!(valid.ref_audio.as_deref(), Some(Path::new("speaker.wav")));
+        assert!(validate_cli_options(&valid).is_ok());
+
+        for args in [
+            vec!["rmi", "--ref-audio", "speaker.wav"],
+            vec!["rmi", "--tts", "--prompt", "hello", "--out", "output.wav"],
+            vec!["rmi", "--tts", "--prompt", "hello", "--mmproj", "mm.gguf"],
+            vec![
+                "rmi",
+                "--tts",
+                "--prompt",
+                "",
+                "--mmproj",
+                "mm.gguf",
+                "--out",
+                "o.wav",
+            ],
+        ] {
+            let options = parse(&args);
+            assert!(validate_cli_options(&options).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn tts_languages_match_cli_and_oracle_aliases() {
+        for (input, expected) in [
+            (None, "english"),
+            (Some("cn"), "chinese"),
+            (Some("zh"), "chinese"),
+            (Some("chinese"), "chinese"),
+            (Some("en"), "english"),
+            (Some("english"), "english"),
+            (Some("ge"), "german"),
+            (Some("de"), "german"),
+            (Some("german"), "german"),
+            (Some("it"), "italian"),
+            (Some("italian"), "italian"),
+            (Some("po"), "portuguese"),
+            (Some("pt"), "portuguese"),
+            (Some("portuguese"), "portuguese"),
+            (Some("sp"), "spanish"),
+            (Some("es"), "spanish"),
+            (Some("spanish"), "spanish"),
+            (Some("ja"), "japanese"),
+            (Some("japanese"), "japanese"),
+            (Some("ko"), "korean"),
+            (Some("korean"), "korean"),
+            (Some("fr"), "french"),
+            (Some("french"), "french"),
+            (Some("ru"), "russian"),
+            (Some("russian"), "russian"),
+        ] {
+            assert_eq!(normalize_tts_language(input).unwrap(), expected);
+        }
+        assert!(normalize_tts_language(Some("auto"))
+            .unwrap_err()
+            .contains("TTS language"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub(crate) mod text;
 pub(crate) mod tts;
 
 pub use audio::run_asr_cli;
-pub use cli::{parse_cli_options, validate_cli_options, resolve_cli_generation_options, transcription_options, resolve_thread_count, init_rayon_global_pool, validate_qwen3vl_decoder_mode, CliOptions, EmbeddingOutput, KvFormat, DEFAULT_THREAD_CAP, per_second, inference_step_budget};
+pub use cli::{parse_cli_options, validate_cli_options, normalize_tts_language, resolve_cli_generation_options, transcription_options, resolve_thread_count, init_rayon_global_pool, validate_qwen3vl_decoder_mode, CliOptions, EmbeddingOutput, KvFormat, DEFAULT_THREAD_CAP, per_second, inference_step_budget};
 pub use embedding::run_embedding;
 pub use image::run_pig_image;
 pub use logits::run_dump_logits;

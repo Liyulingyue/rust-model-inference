@@ -1,7 +1,7 @@
 //! 4-stage DAC upsampler (Descript Audio Codec) plus 2 ConvNeXt upsample
 //! blocks for the Qwen3-TTS codec.
 //!
-//! Full decode pipeline (C-first layout, `[channels, length]`):
+//! Full decode pipeline (T-first layout, `[length, channels]`):
 //!
 //! 1. `pre_conv` (Conv1d k=3): 512 → 1024 channels.
 //! 2. **2 upsample stages** (each): causal ConvTranspose1d (kernel=2, stride=2)
@@ -11,14 +11,23 @@
 //! 4. **4 DAC blocks**: Snake → causal ConvTranspose1d (kernel=2×stride, stride
 //!    in {8, 5, 4, 3}) → 3 residual units with dilations `[1, 3, 9]`.
 //! 5. `dac_post`: Snake → Conv1d k=7, 96 → 1 channel.
-//! 6. Clamp to `[-1, 1]`.
+//! Clamping is deferred to PCM serialization.
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::{
-    checked_product, load_f32_tensor, usize_to_u64,
+use crate::models::qwen3::{load_f32_tensor, static_q8_matrix, usize_to_u64};
+use crate::models::tts::codec::conv::{
+    conv1d_causal, conv1d_causal_depthwise, conv_transpose1d_causal, CausalConv1dState,
+    ConvTranspose1dState,
 };
-use crate::models::tts::codec::conv::{conv1d, conv_transpose1d};
 use crate::models::tts::codec::snake::snake1d_inplace;
+use crate::models::tts::{load_f16_or_f32_tensor, load_f16_tensor};
+use crate::ops::{f16_to_f32, f32_to_f16, matmul_q8_0_quantized_parallel, quantize_q8_0_into};
+
+#[cfg(unix)]
+#[cfg_attr(not(target_vendor = "apple"), link(name = "m"))]
+unsafe extern "C" {
+    fn tanhf(value: f32) -> f32;
+}
 
 const DAC_ENTRY_KERNEL: usize = 7;
 const DAC_POST_KERNEL: usize = 7;
@@ -28,23 +37,22 @@ const DAC_DILATIONS: [usize; 3] = [1, 3, 9];
 const UPSAMPLE_KERNEL: usize = 2;
 const UPSAMPLE_STRIDE: usize = 2;
 const CONVNEXT_KERNEL: usize = 7;
-const CONVNEXT_EXPANSION: usize = 4;
 
 pub struct DacDecoder {
-    /// Conv1d 512 → 1024, kernel 3 (length shrinks by 2).
-    pre_conv_w: Vec<f32>,
+    /// Causal Conv1d 512 → 1024, kernel 3.
+    pre_conv_w: Vec<u16>,
     pre_conv_b: Vec<f32>,
     /// 2 ConvNeXt upsample stages (each 2× upsampling).
     upsample_blocks: Vec<UpsampleBlock>,
     /// Conv1d 1024 → 1536, kernel 7.
-    entry_weight: Vec<f32>,
+    entry_weight: Vec<u16>,
     entry_bias: Vec<f32>,
     /// 4 Snake + ConvTranspose1d + 3-residual-unit blocks.
     blocks: Vec<DacBlock>,
     /// Snake + Conv1d 96 → 1, kernel 7.
     post_snake_alpha: Vec<f32>,
     post_snake_beta: Vec<f32>,
-    post_weight: Vec<f32>,
+    post_weight: Vec<u16>,
     post_bias: Vec<f32>,
 }
 
@@ -53,15 +61,15 @@ pub struct UpsampleBlock {
     conv_w: Vec<f32>,
     conv_b: Vec<f32>,
     /// Depthwise Conv1d k=7 (per-channel, single group).
-    dwconv_w: Vec<f32>,
+    dwconv_w: Vec<u16>,
     dwconv_b: Vec<f32>,
     /// LayerNorm over channel dim.
     norm_w: Vec<f32>,
     norm_b: Vec<f32>,
     /// Pointwise Conv1d: pw1 (1024 → 4096), pw2 (4096 → 1024).
-    pw1_w: Vec<f32>,
+    pw1_w: Vec<u8>,
     pw1_b: Vec<f32>,
-    pw2_w: Vec<f32>,
+    pw2_w: Vec<u8>,
     pw2_b: Vec<f32>,
     /// Per-channel scale (gamma) for the residual branch.
     gamma: Vec<f32>,
@@ -82,13 +90,30 @@ pub struct DacBlock {
 pub struct DacResidual {
     act1_alpha: Vec<f32>,
     act1_beta: Vec<f32>,
-    conv1_weight: Vec<f32>,
+    conv1_weight: Vec<u16>,
     conv1_bias: Vec<f32>,
     dilation: usize,
     act2_alpha: Vec<f32>,
     act2_beta: Vec<f32>,
-    conv2_weight: Vec<f32>,
+    conv2_weight: Vec<u16>,
     conv2_bias: Vec<f32>,
+}
+
+#[derive(Debug, Default)]
+pub struct DacState {
+    pre_conv: CausalConv1dState,
+    upsample: [ConvTranspose1dState; 2],
+    upsample_depthwise: [CausalConv1dState; 2],
+    entry: CausalConv1dState,
+    block_upsample: [ConvTranspose1dState; 4],
+    residual: [[CausalConv1dState; 3]; 4],
+    post_conv: CausalConv1dState,
+}
+
+impl DacState {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl DacDecoder {
@@ -99,13 +124,7 @@ impl DacDecoder {
 
 impl DacDecoder {
     fn from_source_dyn(source: &dyn TensorSource) -> Result<Self, String> {
-        let pre_conv_w = load_f16_or_f32_3d(
-            source,
-            "a.gen.wav.pre_conv.weight",
-            3,
-            512,
-            1024,
-        )?;
+        let pre_conv_w = load_f16_tensor(source, "a.gen.wav.pre_conv.weight", &[3, 512, 1024])?;
         let pre_conv_b = load_f32_tensor(
             source,
             "a.gen.wav.pre_conv.bias",
@@ -115,12 +134,10 @@ impl DacDecoder {
         // so the DAC's `decode` method starts at 1024-dim. The 512 → 1024
         // pre_conv is exposed separately (via [`Self::pre_conv`]) for callers
         // that have 512-dim RVQ output (the common case).
-        let entry_weight = load_f16_or_f32_3d(
+        let entry_weight = load_f16_tensor(
             source,
             "a.gen.wav.dac.entry.weight",
-            DAC_ENTRY_KERNEL,
-            1024,
-            1536,
+            &[DAC_ENTRY_KERNEL as u64, 1024, 1536],
         )?;
         let entry_bias = load_f32_tensor(
             source,
@@ -137,18 +154,12 @@ impl DacDecoder {
             "a.gen.wav.dac.post_snake.beta",
             &[usize_to_u64(96, "post snake beta")?],
         )?;
-        let post_weight = load_f16_or_f32_3d(
+        let post_weight = load_f16_tensor(
             source,
             "a.gen.wav.dac.post_conv.weight",
-            DAC_POST_KERNEL,
-            96,
-            1,
+            &[DAC_POST_KERNEL as u64, 96, 1],
         )?;
-        let post_bias = load_f32_tensor(
-            source,
-            "a.gen.wav.dac.post_conv.bias",
-            &[1],
-        )?;
+        let post_bias = load_f32_tensor(source, "a.gen.wav.dac.post_conv.bias", &[1])?;
 
         // 2 upsample blocks.
         let mut upsample_blocks = Vec::with_capacity(2);
@@ -176,10 +187,18 @@ impl DacDecoder {
         })
     }
 
-    /// Apply the 512 → 1024 pre_conv (causal Conv1d k=3) and return the new
-    /// `(length, 1024)` C-first buffer. Length is preserved (zero-pad on the
-    /// left) so the waveform TFM sees the same temporal extent as the input.
+    /// Apply the 512 → 1024 causal pre-convolution to a T-first buffer.
     pub fn pre_conv(&self, input: &[f32], length: usize) -> Result<Vec<f32>, String> {
+        let mut state = DacState::new();
+        self.pre_conv_window(input, length, &mut state)
+    }
+
+    pub fn pre_conv_window(
+        &self,
+        input: &[f32],
+        length: usize,
+        state: &mut DacState,
+    ) -> Result<Vec<f32>, String> {
         if input.len() != 512 * length {
             return Err(format!(
                 "DacDecoder.pre_conv: input length {} != 512 * length {}",
@@ -187,7 +206,7 @@ impl DacDecoder {
                 length,
             ));
         }
-        let out = conv1d_causal_rearranged(
+        let output = conv1d_causal(
             &self.pre_conv_w,
             Some(&self.pre_conv_b),
             input,
@@ -195,14 +214,31 @@ impl DacDecoder {
             length,
             1024,
             3,
+            1,
+            &mut state.pre_conv,
         )?;
-        Ok(out)
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.wav_pre_conv",
+            None,
+            &[length, 1024],
+            &output,
+        ));
+        Ok(output)
     }
 
-    /// Decode `[1024, length]` waveform embedding into a 1-channel PCM buffer
-    /// (after clamp to `[-1, 1]`). Caller should pass the output of
-    /// [`Self::pre_conv`] followed by the waveform transformer's `out_proj`.
+    /// Decode a T-first `[length, 1024]` waveform embedding into mono F32 PCM.
     pub fn decode(&self, input: &[f32], length: usize) -> Result<Vec<f32>, String> {
+        let mut state = DacState::new();
+        self.decode_window(input, length, &mut state)
+    }
+
+    pub fn decode_window(
+        &self,
+        input: &[f32],
+        length: usize,
+        state: &mut DacState,
+    ) -> Result<Vec<f32>, String> {
         if input.len() != 1024 * length {
             return Err(format!(
                 "DacDecoder: input length {} != 1024 * length {}",
@@ -211,7 +247,6 @@ impl DacDecoder {
             ));
         }
 
-        // 1. Two ConvNeXt upsample stages (each 2×).
         let mut current = input.to_vec();
         let mut current_len = length;
         for (block_idx, block) in self.upsample_blocks.iter().enumerate() {
@@ -219,13 +254,13 @@ impl DacDecoder {
                 block,
                 &current,
                 current_len,
-                block_idx,
+                &mut state.upsample[block_idx],
+                &mut state.upsample_depthwise[block_idx],
             )?;
             current_len = current.len() / 1024;
         }
 
-        // 2. DAC entry: Conv1d 1024 -> 1536 with kernel 7.
-        let (mut cur_len, mut cur) = conv1d_rearranged(
+        let mut cur = conv1d_causal(
             &self.entry_weight,
             Some(&self.entry_bias),
             &current,
@@ -233,19 +268,30 @@ impl DacDecoder {
             current_len,
             1536,
             DAC_ENTRY_KERNEL,
+            1,
+            &mut state.entry,
         )?;
+        let mut cur_len = current_len;
 
-        // 4. 4 DAC blocks.
-        for block in &self.blocks {
-            cur = block.forward(&cur, cur_len)?;
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            cur = block.forward_window(
+                &cur,
+                cur_len,
+                &mut state.block_upsample[block_index],
+                &mut state.residual[block_index],
+            )?;
             cur_len = cur.len() / block.out_channels;
         }
         let block_last_out = self.blocks.last().unwrap().out_channels;
         let block_last_len = cur.len() / block_last_out;
 
-        // 5. Post: Snake + Conv1d 96 -> 1.
-        snake1d_inplace(&mut cur, block_last_len, &self.post_snake_alpha, &self.post_snake_beta)?;
-        let (_post_len, post_out) = conv1d_rearranged(
+        snake1d_inplace(
+            &mut cur,
+            block_last_len,
+            &self.post_snake_alpha,
+            &self.post_snake_beta,
+        )?;
+        let output = conv1d_causal(
             &self.post_weight,
             Some(&self.post_bias),
             &cur,
@@ -253,19 +299,28 @@ impl DacDecoder {
             block_last_len,
             1,
             DAC_POST_KERNEL,
+            1,
+            &mut state.post_conv,
         )?;
-        // post_out is [1, post_len]. The reference decoder then clamps to
-        // [-1, 1]; we leave clamping to the WAV writer (which clamps to i16).
-        let mut audio = post_out;
-        for v in audio.iter_mut() {
-            *v = v.clamp(-1.0, 1.0);
-        }
-        Ok(audio)
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "tts.pcm",
+            None,
+            &[output.len()],
+            &output,
+        ));
+        Ok(output)
     }
 }
 
 impl DacBlock {
-    fn forward(&self, input: &[f32], length: usize) -> Result<Vec<f32>, String> {
+    fn forward_window(
+        &self,
+        input: &[f32],
+        length: usize,
+        upsample_state: &mut ConvTranspose1dState,
+        residual_states: &mut [CausalConv1dState; 3],
+    ) -> Result<Vec<f32>, String> {
         if input.len() != self.in_channels * length {
             return Err(format!(
                 "DacBlock.forward: input length {} != expected {}",
@@ -273,7 +328,6 @@ impl DacBlock {
                 self.in_channels * length,
             ));
         }
-        // Snake first (operates on in_channels because Snake input dim = pre-ConvT channel count).
         let mut after_snake = input.to_vec();
         snake1d_inplace(
             &mut after_snake,
@@ -281,10 +335,7 @@ impl DacBlock {
             &self.snake_alpha,
             &self.snake_beta,
         )?;
-        // ConvTranspose1d with kernel=2*stride; the (K-stride) tail is
-        // discarded because at startup the prior tail is empty. We use a
-        // simpler full-padding implementation here for correctness.
-        let (upsampled_len, mut upsampled) = conv_transpose1d(
+        let mut cur = conv_transpose1d_causal(
             &self.conv_weight,
             Some(&self.conv_bias),
             &after_snake,
@@ -293,24 +344,22 @@ impl DacBlock {
             self.out_channels,
             self.kernel_size,
             self.stride,
+            upsample_state,
         )?;
-        // Apply residual units with dilations [1, 3, 9].
-        let mut cur = upsampled;
-        let mut cur_len = upsampled_len;
-        for (i, residual) in self.residual.iter().enumerate() {
-            cur = residual.forward(&cur, cur_len, DAC_DILATIONS[i])?;
-            // Residual units preserve length.
+        let cur_len = length * self.stride;
+        for (residual, residual_state) in self.residual.iter().zip(residual_states) {
+            cur = residual.forward_window(&cur, cur_len, residual_state)?;
         }
         Ok(cur)
     }
 }
 
 impl DacResidual {
-    fn forward(
+    fn forward_window(
         &self,
         input: &[f32],
         length: usize,
-        dilation: usize,
+        state: &mut CausalConv1dState,
     ) -> Result<Vec<f32>, String> {
         let ch = self.act1_alpha.len();
         if input.len() != ch * length {
@@ -320,12 +369,10 @@ impl DacResidual {
                 ch * length,
             ));
         }
-        // Snake act1
         let mut after_act1 = input.to_vec();
         snake1d_inplace(&mut after_act1, length, &self.act1_alpha, &self.act1_beta)?;
-        // Dilated Conv1d ch -> ch, kernel 7 (or 3 for blk.3).
         let kernel_size = self.conv1_weight.len() / (ch * ch);
-        let (after_conv1_len, after_conv1) = conv1d_dilated_rearranged(
+        let after_conv1 = conv1d_causal(
             &self.conv1_weight,
             Some(&self.conv1_bias),
             &after_act1,
@@ -333,23 +380,22 @@ impl DacResidual {
             length,
             ch,
             kernel_size,
-            dilation,
+            self.dilation,
+            state,
         )?;
-        // Snake act2
         let mut after_act2 = after_conv1;
-        snake1d_inplace(&mut after_act2, after_conv1_len, &self.act2_alpha, &self.act2_beta)?;
-        // Conv1d ch -> ch kernel 1.
-        let (after_conv2_len, after_conv2) = conv1d_rearranged(
+        snake1d_inplace(&mut after_act2, length, &self.act2_alpha, &self.act2_beta)?;
+        let after_conv2 = conv1d_causal(
             &self.conv2_weight,
             Some(&self.conv2_bias),
             &after_act2,
             ch,
-            after_conv1_len,
+            length,
             ch,
             1,
+            1,
+            &mut CausalConv1dState::default(),
         )?;
-        // Residual add (lengths match because the conv kernel of conv2 is 1).
-        debug_assert_eq!(after_conv2_len, length);
         let mut out = input.to_vec();
         for (acc, add) in out.iter_mut().zip(after_conv2.iter()) {
             *acc += *add;
@@ -375,12 +421,10 @@ fn load_dac_block(
         &format!("{prefix}.snake.beta"),
         &[usize_to_u64(in_channels, "dac snake beta")?],
     )?;
-    let conv_weight = load_f16_or_f32_3d(
+    let conv_weight = load_f16_or_f32_tensor(
         source,
         &format!("{prefix}.conv.weight"),
-        kernel_size,
-        out_channels,
-        in_channels,
+        &[kernel_size as u64, out_channels as u64, in_channels as u64],
     )?;
     let conv_bias = load_f32_tensor(
         source,
@@ -401,12 +445,10 @@ fn load_dac_block(
             &format!("{res_prefix}.act1.beta"),
             &[usize_to_u64(out_channels, "dac res act1 beta")?],
         )?;
-        let conv1_weight = load_f16_or_f32_3d(
+        let conv1_weight = load_f16_tensor(
             source,
             &format!("{res_prefix}.conv1.weight"),
-            res_kernel,
-            out_channels,
-            out_channels,
+            &[res_kernel as u64, out_channels as u64, out_channels as u64],
         )?;
         let conv1_bias = load_f32_tensor(
             source,
@@ -423,12 +465,10 @@ fn load_dac_block(
             &format!("{res_prefix}.act2.beta"),
             &[usize_to_u64(out_channels, "dac res act2 beta")?],
         )?;
-        let conv2_weight = load_f16_or_f32_3d(
+        let conv2_weight = load_f16_tensor(
             source,
             &format!("{res_prefix}.conv2.weight"),
-            1,
-            out_channels,
-            out_channels,
+            &[1, out_channels as u64, out_channels as u64],
         )?;
         let conv2_bias = load_f32_tensor(
             source,
@@ -460,7 +500,10 @@ fn load_dac_block(
     })
 }
 
-fn load_upsample_block(source: &dyn TensorSource, block_idx: usize) -> Result<UpsampleBlock, String> {
+fn load_upsample_block(
+    source: &dyn TensorSource,
+    block_idx: usize,
+) -> Result<UpsampleBlock, String> {
     let prefix = format!("a.gen.wav.up.blk.{block_idx}");
     let conv_w = load_f32_tensor_3d(
         source,
@@ -474,12 +517,10 @@ fn load_upsample_block(source: &dyn TensorSource, block_idx: usize) -> Result<Up
         &format!("{prefix}.conv.bias"),
         &[usize_to_u64(1024, "upsample conv bias")?],
     )?;
-    let dwconv_w = load_f16_or_f32_3d(
+    let dwconv_w = load_f16_tensor(
         source,
         &format!("{prefix}.dwconv.weight"),
-        CONVNEXT_KERNEL,
-        1,
-        1024,
+        &[CONVNEXT_KERNEL as u64, 1, 1024],
     )?;
     let dwconv_b = load_f32_tensor(
         source,
@@ -496,23 +537,13 @@ fn load_upsample_block(source: &dyn TensorSource, block_idx: usize) -> Result<Up
         &format!("{prefix}.norm.bias"),
         &[usize_to_u64(1024, "upsample norm bias")?],
     )?;
-    let pw1_w = load_q8_2d(
-        source,
-        &format!("{prefix}.pw1.weight"),
-        1024,
-        4096,
-    )?;
+    let pw1_w = static_q8_matrix(source, &format!("{prefix}.pw1.weight"), 1024, 4096)?.to_vec();
     let pw1_b = load_f32_tensor(
         source,
         &format!("{prefix}.pw1.bias"),
         &[usize_to_u64(4096, "upsample pw1 bias")?],
     )?;
-    let pw2_w = load_q8_2d(
-        source,
-        &format!("{prefix}.pw2.weight"),
-        4096,
-        1024,
-    )?;
+    let pw2_w = static_q8_matrix(source, &format!("{prefix}.pw2.weight"), 4096, 1024)?.to_vec();
     let pw2_b = load_f32_tensor(
         source,
         &format!("{prefix}.pw2.bias"),
@@ -542,10 +573,10 @@ fn upsample_block_forward(
     block: &UpsampleBlock,
     input: &[f32],
     length: usize,
-    block_idx: usize,
+    upsample_state: &mut ConvTranspose1dState,
+    depthwise_state: &mut CausalConv1dState,
 ) -> Result<Vec<f32>, String> {
-    // ConvTranspose1d (k=2, stride=2, channel-preserving 1024->1024).
-    let (upsampled_len, mut upsampled) = conv_transpose1d(
+    let upsampled = conv_transpose1d_causal(
         &block.conv_w,
         Some(&block.conv_b),
         input,
@@ -554,77 +585,125 @@ fn upsample_block_forward(
         1024,
         UPSAMPLE_KERNEL,
         UPSAMPLE_STRIDE,
+        upsample_state,
     )?;
-    // ConvNeXt block: depthwise conv1d k=7 → LayerNorm → pw1 → GELU → pw2 → gamma → residual.
-    // The depthwise conv uses one filter per output channel (groups=in_channels),
-    // so the kernel has shape [K, 1, C] in GGUF = K * C values total.
-    let (dwconv_len, dwconv_out) = depthwise_conv1d_causal_rearranged(
+    let upsampled_len = length * UPSAMPLE_STRIDE;
+    let dwconv_out = conv1d_causal_depthwise(
         &block.dwconv_w,
         Some(&block.dwconv_b),
         &upsampled,
         1024,
         upsampled_len,
         CONVNEXT_KERNEL,
+        depthwise_state,
     )?;
-    // Apply per-channel LayerNorm to dwconv output (note: weights layout is [C]
-    // in this codebase's convention).
     let mut normalized = vec![0.0f32; dwconv_out.len()];
-    for c in 0..1024 {
-        let row = &dwconv_out[c * dwconv_len..(c + 1) * dwconv_len];
-        let mean: f32 = row.iter().sum::<f32>() / dwconv_len as f32;
-        let var: f32 =
-            row.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / dwconv_len as f32;
-        let std = (var + 1e-6).sqrt();
-        let out_row = &mut normalized[c * dwconv_len..(c + 1) * dwconv_len];
-        for t in 0..dwconv_len {
-            let v = (row[t] - mean) / std;
-            out_row[t] = v * block.norm_w[c] + block.norm_b[c];
+    for (row, output) in dwconv_out
+        .chunks_exact(1024)
+        .zip(normalized.chunks_exact_mut(1024))
+    {
+        let mean = row
+            .iter()
+            .fold(0.0f64, |sum, &value| sum + f64::from(value)) as f32
+            / 1024.0;
+        let mut variance = 0.0f64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use std::arch::aarch64::*;
+            let mean = vdupq_n_f32(mean);
+            for channel in (0..1024).step_by(4) {
+                let centered = vsubq_f32(vld1q_f32(row.as_ptr().add(channel)), mean);
+                vst1q_f32(output.as_mut_ptr().add(channel), centered);
+                variance += f64::from(vaddvq_f32(vmulq_f32(centered, centered)));
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        for channel in (0..1024).step_by(4) {
+            let centered = [
+                row[channel] - mean,
+                row[channel + 1] - mean,
+                row[channel + 2] - mean,
+                row[channel + 3] - mean,
+            ];
+            output[channel..channel + 4].copy_from_slice(&centered);
+            variance += f64::from(
+                (centered[0] * centered[0] + centered[1] * centered[1])
+                    + (centered[2] * centered[2] + centered[3] * centered[3]),
+            );
+        }
+        let scale = 1.0 / ((variance / 1024.0) as f32 + 1e-6).sqrt();
+        for channel in 0..1024 {
+            output[channel] *= scale;
+            output[channel] *= block.norm_w[channel];
+            output[channel] += block.norm_b[channel];
         }
     }
-    // pw1 (1024 -> 4096) and pw2 (4096 -> 1024) are matmuls over the channel dim.
-    // Apply per-token matmul (no length mixing): out[o, t] = sum_i w[o, i] * in[i, t].
-    let expanded = matmul_2d_pw(&block.pw1_w, &normalized, 4096, 1024, dwconv_len)?;
+    let expanded = matmul_2d_pw(
+        &block.pw1_w,
+        Some(&block.pw1_b),
+        &normalized,
+        4096,
+        1024,
+        upsampled_len,
+    )?;
     let expanded = gelu_inplace(expanded);
-    let projected = matmul_2d_pw(&block.pw2_w, &expanded, 1024, 4096, dwconv_len)?;
-    // Apply per-channel gamma and add residual.
+    let projected = matmul_2d_pw(
+        &block.pw2_w,
+        Some(&block.pw2_b),
+        &expanded,
+        1024,
+        4096,
+        upsampled_len,
+    )?;
     let mut out = upsampled.clone();
-    for c in 0..1024 {
-        let row_in = &projected[c * dwconv_len..(c + 1) * dwconv_len];
-        let row_out = &mut out[c * dwconv_len..(c + 1) * dwconv_len];
-        for t in 0..dwconv_len {
-            row_out[t] += block.gamma[c] * row_in[t];
+    for (row, projected_row) in out.chunks_exact_mut(1024).zip(projected.chunks_exact(1024)) {
+        for channel in 0..1024 {
+            row[channel] += block.gamma[channel] * projected_row[channel];
         }
     }
-    let _ = block_idx; // unused, kept for symmetry with reference.
     Ok(out)
 }
 
 fn matmul_2d_pw(
-    weight: &[f32],
+    weight: &[u8],
+    bias: Option<&[f32]>,
     input: &[f32],
     out_dim: usize,
     in_dim: usize,
     length: usize,
 ) -> Result<Vec<f32>, String> {
-    if weight.len() != out_dim * in_dim {
+    let blocks = in_dim / 32;
+    let expected_weight = blocks * out_dim * 34;
+    if in_dim % 32 != 0 || weight.len() != expected_weight {
         return Err(format!(
-            "matmul_2d_pw: weight len {} != {}*{}",
+            "matmul_2d_pw: weight len {} != Q8_0 matrix {}x{}",
             weight.len(),
+            in_dim,
             out_dim,
-            in_dim
         ));
     }
     if input.len() != in_dim * length {
         return Err("matmul_2d_pw: input length mismatch".into());
     }
-    let mut out = vec![0.0f32; out_dim * length];
+    if bias.is_some_and(|values| values.len() != out_dim) {
+        return Err("matmul_2d_pw: bias length mismatch".into());
+    }
+    let mut out = vec![0.0f32; length * out_dim];
     for t in 0..length {
-        for o in 0..out_dim {
-            let mut acc = 0.0f32;
-            for i in 0..in_dim {
-                acc += weight[o * in_dim + i] * input[i * length + t];
+        let mut input_q8 = vec![0u8; in_dim];
+        let mut input_scales = vec![0.0f32; blocks];
+        quantize_q8_0_into(
+            &input[t * in_dim..(t + 1) * in_dim],
+            in_dim,
+            &mut input_q8,
+            &mut input_scales,
+        );
+        let row = &mut out[t * out_dim..(t + 1) * out_dim];
+        matmul_q8_0_quantized_parallel(weight, &input_q8, &input_scales, row, in_dim, out_dim);
+        if let Some(bias) = bias {
+            for (value, bias) in row.iter_mut().zip(bias) {
+                *value += *bias;
             }
-            out[o * length + t] = acc;
         }
     }
     Ok(out)
@@ -632,9 +711,17 @@ fn matmul_2d_pw(
 
 fn gelu_inplace(mut x: Vec<f32>) -> Vec<f32> {
     for v in x.iter_mut() {
-        let val = *v;
-        *v = 0.5 * val
-            * (1.0 + (val * 0.7978845608028654 * (1.0 + 0.044715 * val * val)).tanh());
+        if *v <= -10.0 {
+            *v = 0.0;
+        } else if *v < 10.0 {
+            let value = f16_to_f32(f32_to_f16(*v));
+            let inner = 0.7978845608028654 * value * (1.0 + 0.044715 * value * value);
+            #[cfg(unix)]
+            let activation = unsafe { tanhf(inner) };
+            #[cfg(not(unix))]
+            let activation = inner.tanh();
+            *v = f16_to_f32(f32_to_f16(0.5 * value * (1.0 + activation)));
+        }
     }
     x
 }
@@ -658,267 +745,6 @@ fn dac_residual_conv1_kernel(_block_idx: usize, _res_idx: usize) -> usize {
     7
 }
 
-/// Conv1d with dilation (zero padding on the left so that the right edge is
-/// preserved — used by the DAC residual units with dilations `[1, 3, 9]`).
-fn conv1d_dilated_rearranged(
-    kernel: &[f32],
-    bias: Option<&[f32]>,
-    input: &[f32],
-    in_channels: usize,
-    length_in: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    dilation: usize,
-) -> Result<(usize, Vec<f32>), String> {
-    let length_out = length_in;
-    let expected_kernel = in_channels * out_channels * kernel_size;
-    if kernel.len() != expected_kernel {
-        return Err(format!(
-            "conv1d_dilated_rearranged: kernel len {} != expected {}",
-            kernel.len(),
-            expected_kernel,
-        ));
-    }
-    let mut rearranged = vec![0.0f32; expected_kernel];
-    for k in 0..kernel_size {
-        for ic in 0..in_channels {
-            for oc in 0..out_channels {
-                let src = k * in_channels * out_channels + ic * out_channels + oc;
-                let dst = oc * in_channels * kernel_size + ic * kernel_size + k;
-                rearranged[dst] = kernel[src];
-            }
-        }
-    }
-    let pad = (kernel_size - 1) * dilation;
-    let mut padded = vec![0.0f32; in_channels * (length_in + pad)];
-    for ic in 0..in_channels {
-        let src_start = ic * length_in;
-        let dst_start = ic * (length_in + pad) + pad;
-        for t in 0..length_in {
-            padded[dst_start + t] = input[src_start + t];
-        }
-    }
-    let mut output = vec![0.0f32; out_channels * length_out];
-    for oc in 0..out_channels {
-        let bias_val = bias.map_or(0.0, |b| b[oc]);
-        let base = oc * length_out;
-        for o in 0..length_out {
-            let mut acc = bias_val;
-            for ic in 0..in_channels {
-                for k in 0..kernel_size {
-                    let kernel_idx = oc * in_channels * kernel_size + ic * kernel_size + k;
-                    let input_idx = ic * (length_in + pad) + o + k * dilation;
-                    acc += rearranged[kernel_idx] * padded[input_idx];
-                }
-            }
-            output[base + o] = acc;
-        }
-    }
-    Ok((length_out, output))
-}
-
-/// Run `conv1d` on a kernel stored in the GGUF layout `[k, in, out]` (the
-/// reverse of PyTorch's `[out, in, k]`) and return the resulting
-/// `[out_channels, length_out]` buffer along with its length.
-fn conv1d_rearranged(
-    kernel: &[f32],
-    bias: Option<&[f32]>,
-    input: &[f32],
-    in_channels: usize,
-    length_in: usize,
-    out_channels: usize,
-    kernel_size: usize,
-) -> Result<(usize, Vec<f32>), String> {
-    let expected_kernel = in_channels * out_channels * kernel_size;
-    if kernel.len() != expected_kernel {
-        return Err(format!(
-            "conv1d_rearranged: kernel length {} != expected {}",
-            kernel.len(),
-            expected_kernel,
-        ));
-    }
-    let length_out = length_in
-        .checked_sub(kernel_size)
-        .ok_or_else(|| "conv1d_rearranged: kernel larger than input".to_string())?
-        .checked_add(1)
-        .ok_or_else(|| "conv1d_rearranged: length_out overflow".to_string())?;
-    let mut rearranged = vec![0.0f32; expected_kernel];
-    for k in 0..kernel_size {
-        for ic in 0..in_channels {
-            for oc in 0..out_channels {
-                let src_idx = k * in_channels * out_channels + ic * out_channels + oc;
-                let dst_idx = oc * in_channels * kernel_size + ic * kernel_size + k;
-                rearranged[dst_idx] = kernel[src_idx];
-            }
-        }
-    }
-    conv1d(
-        &rearranged,
-        bias,
-        input,
-        in_channels,
-        length_in,
-        out_channels,
-        kernel_size,
-        length_out,
-    )
-    .map(|v| (length_out, v))
-}
-
-/// Causal depthwise Conv1d: each output channel uses its own filter
-/// (`groups = in_channels`). The kernel has shape `[K, 1, C]` in GGUF (=
-/// `K * C` f32 values total), and we left-pad with `K - 1` zeros so the
-/// output length matches the input length.
-fn depthwise_conv1d_causal_rearranged(
-    kernel: &[f32],
-    bias: Option<&[f32]>,
-    input: &[f32],
-    channels: usize,
-    length_in: usize,
-    kernel_size: usize,
-) -> Result<(usize, Vec<f32>), String> {
-    let expected_kernel = kernel_size * channels;
-    if kernel.len() != expected_kernel {
-        return Err(format!(
-            "depthwise_conv1d_causal_rearranged: kernel len {} != expected {}",
-            kernel.len(),
-            expected_kernel
-        ));
-    }
-    if input.len() != channels * length_in {
-        return Err("depthwise_conv1d_causal_rearranged: input length mismatch".into());
-    }
-    // GGUF stores depthwise as [K, 1, C]; rearrange to per-channel weight
-    // vectors [C, K] for easier indexing below.
-    let mut w = vec![0.0f32; expected_kernel];
-    for k in 0..kernel_size {
-        for c in 0..channels {
-            let src = k * channels + c;
-            let dst = c * kernel_size + k;
-            w[dst] = kernel[src];
-        }
-    }
-    let pad = kernel_size - 1;
-    let padded_len = length_in + pad;
-    let mut padded = vec![0.0f32; channels * padded_len];
-    for c in 0..channels {
-        let src_start = c * length_in;
-        let dst_start = c * padded_len + pad;
-        padded[dst_start..dst_start + length_in]
-            .copy_from_slice(&input[src_start..src_start + length_in]);
-    }
-    let mut output = vec![0.0f32; channels * length_in];
-    for c in 0..channels {
-        let bias_val = bias.map_or(0.0, |b| b[c]);
-        let row_w = &w[c * kernel_size..(c + 1) * kernel_size];
-        let base = c * length_in;
-        for t in 0..length_in {
-            let mut acc = bias_val;
-            for k in 0..kernel_size {
-                acc += row_w[k] * padded[c * padded_len + t + k];
-            }
-            output[base + t] = acc;
-        }
-    }
-    Ok((length_in, output))
-}
-
-/// Causal Conv1d: pads the input on the LEFT with `kernel_size - 1` zeros so
-/// that the output has the same length as the input. The kernel is stored in
-/// the GGUF layout `[k, in, out]` (reverse of PyTorch's `[out, in, k]`).
-fn conv1d_causal_rearranged(
-    kernel: &[f32],
-    bias: Option<&[f32]>,
-    input: &[f32],
-    in_channels: usize,
-    length_in: usize,
-    out_channels: usize,
-    kernel_size: usize,
-) -> Result<Vec<f32>, String> {
-    let expected_kernel = in_channels * out_channels * kernel_size;
-    if kernel.len() != expected_kernel {
-        return Err(format!(
-            "conv1d_causal_rearranged: kernel len {} != expected {}",
-            kernel.len(),
-            expected_kernel,
-        ));
-    }
-    if input.len() != in_channels * length_in {
-        return Err("conv1d_causal_rearranged: input length mismatch".into());
-    }
-    // Rearrange GGUF `[k, in, out]` → PyTorch Conv1d `[out, in, k]`.
-    let mut rearranged = vec![0.0f32; expected_kernel];
-    for k in 0..kernel_size {
-        for ic in 0..in_channels {
-            for oc in 0..out_channels {
-                let src_idx = k * in_channels * out_channels + ic * out_channels + oc;
-                let dst_idx = oc * in_channels * kernel_size + ic * kernel_size + k;
-                rearranged[dst_idx] = kernel[src_idx];
-            }
-        }
-    }
-    let pad = kernel_size - 1;
-    // Left-pad the input: zeros on the left of each channel's row.
-    let padded_len = length_in + pad;
-    let mut padded = vec![0.0f32; in_channels * padded_len];
-    for ic in 0..in_channels {
-        let src_start = ic * length_in;
-        let dst_start = ic * padded_len + pad;
-        padded[dst_start..dst_start + length_in]
-            .copy_from_slice(&input[src_start..src_start + length_in]);
-    }
-    let mut output = vec![0.0f32; out_channels * length_in];
-    for oc in 0..out_channels {
-        let bias_val = bias.map_or(0.0, |b| b[oc]);
-        let base = oc * length_in;
-        for o in 0..length_in {
-            let mut acc = bias_val;
-            for ic in 0..in_channels {
-                for k in 0..kernel_size {
-                    let kernel_idx = oc * in_channels * kernel_size + ic * kernel_size + k;
-                    let input_idx = ic * padded_len + o + k;
-                    acc += rearranged[kernel_idx] * padded[input_idx];
-                }
-            }
-            output[base + o] = acc;
-        }
-    }
-    Ok(output)
-}
-
-fn load_f16_or_f32_3d(
-    source: &dyn TensorSource,
-    name: &str,
-    expected_k: usize,
-    expected_in: usize,
-    expected_out: usize,
-) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor info: {name}"))?;
-    let dims = [expected_k as u64, expected_in as u64, expected_out as u64];
-    if info.dims != dims {
-        return Err(format!(
-            "{name}: dims {:?} != expected {dims:?}",
-            info.dims,
-        ));
-    }
-    match info.ggml_type {
-        GGMLType::F16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-            .collect()),
-        GGMLType::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()),
-        other => Err(format!("{name}: type {other:?} not F16/F32")),
-    }
-}
-
 fn load_f32_tensor_3d(
     source: &dyn TensorSource,
     name: &str,
@@ -934,10 +760,7 @@ fn load_f32_tensor_3d(
         .ok_or_else(|| format!("Missing tensor info: {name}"))?;
     let dims = [expected_k as u64, expected_in as u64, expected_out as u64];
     if info.dims != dims {
-        return Err(format!(
-            "{name}: dims {:?} != expected {dims:?}",
-            info.dims,
-        ));
+        return Err(format!("{name}: dims {:?} != expected {dims:?}", info.dims,));
     }
     if info.ggml_type != GGMLType::F32 {
         return Err(format!("{name}: type {:?} not F32", info.ggml_type));
@@ -946,43 +769,4 @@ fn load_f32_tensor_3d(
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
-}
-
-fn load_q8_2d(
-    source: &dyn TensorSource,
-    name: &str,
-    rows: usize,
-    cols: usize,
-) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor info: {name}"))?;
-    let dims = [rows as u64, cols as u64];
-    if info.dims != dims {
-        return Err(format!("{name}: dims {:?} != expected {dims:?}", info.dims));
-    }
-    if info.ggml_type != GGMLType::Q8_0 {
-        return Err(format!("{name}: type {:?} not Q8_0", info.ggml_type));
-    }
-    let blocks_per_row = cols / 32;
-    let bytes_per_row = blocks_per_row * 34;
-    let expected = checked_product("q8 bytes", rows, bytes_per_row)?;
-    if bytes.len() != expected {
-        return Err(format!("{name}: bytes {} != expected {expected}", bytes.len()));
-    }
-    let mut out = vec![0.0f32; rows * cols];
-    for row in 0..rows {
-        for b in 0..blocks_per_row {
-            let off = row * bytes_per_row + b * 34;
-            let scale = half::f16::from_le_bytes([bytes[off], bytes[off + 1]]).to_f32();
-            for j in 0..32usize {
-                let q = bytes[off + 2 + j] as i8 as f32;
-                out[row * cols + b * 32 + j] = scale * q;
-            }
-        }
-    }
-    Ok(out)
 }

@@ -1,0 +1,237 @@
+diff --git a/tools/mtmd/qwen3tts-trace.h b/tools/mtmd/qwen3tts-trace.h
+new file mode 100644
+--- /dev/null
++++ b/tools/mtmd/qwen3tts-trace.h
+@@ -0,0 +1,52 @@
++#pragma once
++
++#include <cstdlib>
++#include <fstream>
++#include <string>
++#include <vector>
++
++static inline bool qwen3tts_trace_raw(
++        const char * name,
++        const char * dtype,
++        const void * data,
++        size_t element_size,
++        size_t count,
++        const std::vector<int64_t> & shape) {
++    const char * directory = std::getenv("QWEN3_TTS_ORACLE_TRACE");
++    if (!directory) {
++        return true;
++    }
++    const std::string filename = std::string(name) + "." + dtype;
++    const std::string path = std::string(directory) + "/" + filename;
++    std::ofstream binary(path, std::ios::binary | std::ios::trunc);
++    binary.write(static_cast<const char *>(data), static_cast<std::streamsize>(element_size * count));
++    binary.close();
++    if (!binary) {
++        return false;
++    }
++    std::ofstream metadata(std::string(directory) + "/trace.jsonl", std::ios::app);
++    metadata << "{\"name\":\"" << name << "\",\"shape\":[";
++    for (size_t i = 0; i < shape.size(); ++i) {
++        if (i) {
++            metadata << ',';
++        }
++        metadata << shape[i];
++    }
++    metadata << "],\"dtype\":\"" << dtype << "\",\"path\":\"" << filename
++             << "\",\"count\":" << count << "}\n";
++    return metadata.good();
++}
++
++static inline bool qwen3tts_trace_f32(
++        const char * name,
++        const std::vector<float> & values,
++        const std::vector<int64_t> & shape) {
++    return qwen3tts_trace_raw(name, "f32", values.data(), sizeof(float), values.size(), shape);
++}
++
++static inline bool qwen3tts_trace_i32(
++        const char * name,
++        const std::vector<int32_t> & values,
++        const std::vector<int64_t> & shape) {
++    return qwen3tts_trace_raw(name, "i32", values.data(), sizeof(int32_t), values.size(), shape);
++}
+diff --git a/tools/mtmd/mtmd-helper-gen.cpp b/tools/mtmd/mtmd-helper-gen.cpp
+--- a/tools/mtmd/mtmd-helper-gen.cpp
++++ b/tools/mtmd/mtmd-helper-gen.cpp
+@@ -3,6 +3,7 @@
+ #include "mtmd-helper-common.h"
+ #include "llama.h"
+ #include "../src/llama-ext.h"
++#include "qwen3tts-trace.h"
+ 
+ #include <algorithm>
+ #include <cstring>
+@@ -112,5 +113,6 @@ public:
+         pos = 0;
+         codes_buf.clear();
++        all_codes.clear();
+         c2w_state.clear();
+         audio_pcm.clear();
+         overlay.clear();
+@@ -142,6 +144,9 @@ public:
+                 return 1;
+             }
+         }
++        if (!speaker_embd.empty() && !qwen3tts_trace_f32("tts.speaker_embedding", speaker_embd, { 1, n_embd })) {
++            return 1;
++        }
+ 
+         const int n_e = n_embd;
+         auto row = [&](llama_token t) {
+@@ -194,6 +199,14 @@ public:
+         for (int i = 0; i < n_prompt; i++) {
+             memcpy(prompt_embd_buf.data() + (size_t) i * n_e, prompt[(size_t) i].data(), (size_t) n_e * sizeof(float));
+         }
++        std::vector<int32_t> prompt_ids(ids.begin(), ids.end());
++        if (!qwen3tts_trace_i32("tts.prompt_ids", prompt_ids, { (int64_t) prompt_ids.size() }) ||
++            !qwen3tts_trace_f32(
++                "tts.prompt_embeddings",
++                prompt_embd_buf,
++                { (int64_t) n_prompt, (int64_t) n_e })) {
++            return 1;
++        }
+ 
+         prompt_batch.reset(new decode_embd_batch(prompt_embd_buf.data(), n_prompt, n_pos_per_embd, n_e));
+         if (mrope) prompt_batch->set_position_mrope_1d(0, seq_id);
+@@ -258,6 +270,13 @@ public:
+         }
+ 
+         codes_buf.insert(codes_buf.end(), out.codes, out.codes + out.n_codes);
++        all_codes.insert(all_codes.end(), out.codes, out.codes + out.n_codes);
++        if (!qwen3tts_trace_i32(
++                "tts.frame_codes",
++                all_codes,
++                { (int64_t) (all_codes.size() / 16), 16 })) {
++            return 1;
++        }
+         if (out.n_codes > 0 && codes_buf.size() / out.n_codes >= window_frames) {
+             if (!flush_gen_wav()) {
+                 return 1;
+@@ -293,6 +312,10 @@ public:
+             return 1;
+         }
+ 
++        if (!qwen3tts_trace_f32("tts.pcm", audio_pcm, { (int64_t) audio_pcm.size() })) {
++            return 1;
++        }
++
+         *out_sample_rate = info.sample_rate;
+         if (out_n_samples) {
+             *out_n_samples = (int64_t) audio_pcm.size();
+@@ -433,6 +454,7 @@ private:
+     int32_t top_k = 50;
+     float   top_p = 1.0f;
+     std::vector<int32_t> codes_buf;
++    std::vector<int32_t> all_codes;
+     std::vector<uint8_t> c2w_state;
+     std::vector<float>   audio_pcm;
+     std::vector<std::vector<float>> overlay;
+diff --git a/tools/mtmd/models/qwen3tts-gen.cpp b/tools/mtmd/models/qwen3tts-gen.cpp
+--- a/tools/mtmd/models/qwen3tts-gen.cpp
++++ b/tools/mtmd/models/qwen3tts-gen.cpp
+@@ -408,6 +408,7 @@ ggml_tensor * clip_graph_qwen3tts_gen::code2wav::quant_decode(ggml_tensor * inp_
+ 
+     ggml_tensor * hidden = ggml_add(ctx0, sem_out, ac_out);
+     cb(hidden, "wav_quant_hidden", -1);
++    ggml_set_output(hidden);
+     return hidden;
+ }
+ 
+@@ -551,6 +552,7 @@ ggml_tensor * clip_graph_qwen3tts_gen::code2wav::decode(ggml_tensor * inp_codes)
+     ggml_tensor * x = ggml_cont(ctx0, ggml_transpose(ctx0, hidden)); // [N, 512]
+     x = causal_conv1d(x, c2w.pre_conv_w, c2w.pre_conv_b, 1, "pre_conv"); // [N, 1024]
+     cb(x, "wav_pre_conv_out", -1);
++    ggml_set_output(x);
+ 
+     // 3. pre_transformer: back to C-first [1024, N], project down, run the layers, project back up
+     ggml_tensor * cur = ggml_cont(ctx0, ggml_transpose(ctx0, x)); // [1024, N]
+@@ -566,6 +568,7 @@ ggml_tensor * clip_graph_qwen3tts_gen::code2wav::decode(ggml_tensor * inp_codes)
+     cur = ggml_mul_mat(ctx0, c2w.tfm_out_proj_w, cur);
+     cur = ggml_add(ctx0, cur, c2w.tfm_out_proj_b); // [1024, N]
+     cb(cur, "wav_tfm_out", -1);
++    ggml_set_output(cur);
+ 
+     // 4. upsample: 2x (causal ConvTranspose1d, stride 2 + ConvNeXt block), back to T-first
+     // kernel == stride here, so there is no overlap tail to persist
+@@ -752,6 +755,9 @@ ggml_cgraph * clip_graph_qwen3tts_gen::build() {
+     }
+ 
+     // out_embd goes last, clip_encode() reads it back via ggml_graph_node(gf, -1)
++    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++        ggml_graph_node(gf, i)->flags &= ~GGML_TENSOR_FLAG_COMPUTE;
++    }
+     ggml_tensor * outs[2];
+     outs[0] = out_codes; outs[1] = out_audio;
+     ggml_build_forward_select(gf, outs, 2, idx);
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -3,6 +3,7 @@
+ #include "clip-model.h"
+ #include "clip-graph.h"
+ #include "models/models.h"
++#include "qwen3tts-trace.h"
+ 
+ #include "ggml.h"
+ #include "ggml-cpp.h"
+@@ -28,6 +29,44 @@
+ 
+ struct clip_logger_state g_logger_state = {clip_log_callback_default, NULL};
+ 
++static bool qwen3tts_trace_graph_tensor(
++        ggml_cgraph * graph,
++        const char * tensor_name,
++        const char * trace_name,
++        bool transpose) {
++    if (!std::getenv("QWEN3_TTS_ORACLE_TRACE")) {
++        return true;
++    }
++    ggml_tensor * tensor = ggml_graph_get_tensor(graph, tensor_name);
++    if (!tensor) {
++        return true;
++    }
++    if (tensor->type != GGML_TYPE_F32 || tensor->ne[2] != 1 || tensor->ne[3] != 1) {
++        return false;
++    }
++    const int64_t ne0 = tensor->ne[0];
++    const int64_t ne1 = tensor->ne[1];
++    std::vector<float> raw((size_t) ggml_nelements(tensor));
++    ggml_backend_tensor_get(tensor, raw.data(), 0, ggml_nbytes(tensor));
++    if (!transpose) {
++        return qwen3tts_trace_f32(trace_name, raw, { ne1, ne0 });
++    }
++    std::vector<float> values(raw.size());
++    for (int64_t row = 0; row < ne1; ++row) {
++        for (int64_t column = 0; column < ne0; ++column) {
++            values[(size_t) column * (size_t) ne1 + (size_t) row] =
++                raw[(size_t) row * (size_t) ne0 + (size_t) column];
++        }
++    }
++    return qwen3tts_trace_f32(trace_name, values, { ne0, ne1 });
++}
++
++static bool qwen3tts_trace_code2wav(ggml_cgraph * graph) {
++    return qwen3tts_trace_graph_tensor(graph, "wav_quant_hidden", "tts.rvq_hidden", false) &&
++           qwen3tts_trace_graph_tensor(graph, "wav_pre_conv_out", "tts.wav_pre_conv", true) &&
++           qwen3tts_trace_graph_tensor(graph, "wav_tfm_out", "tts.wav_tfm", false);
++}
++
+ //#define CLIP_DEBUG_FUNCTIONS
+ 
+ #ifdef CLIP_DEBUG_FUNCTIONS
+@@ -5203,5 +5245,10 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+         return false;
+     }
+ 
++    if (!params->out_embd && !qwen3tts_trace_code2wav(gf)) {
++        LOG_ERR("%s: failed to write Qwen3-TTS oracle trace\n", __func__);
++        return false;
++    }
++
+     // the last node is the embedding tensor, code2wav has no out_embd
+     ggml_tensor * embeddings = params->out_embd ? ggml_graph_node(gf, -1) : nullptr;

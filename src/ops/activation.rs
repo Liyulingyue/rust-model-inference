@@ -43,7 +43,7 @@ unsafe fn silu_inplace_neon(values: &mut [f32]) {
 #[inline(always)]
 pub fn silu_mul_inplace(gate: &[f32], up: &mut [f32]) {
     debug_assert_eq!(gate.len(), up.len());
-    #[cfg(all(target_arch = "aarch64", not(feature = "parity-trace")))]
+    #[cfg(target_arch = "aarch64")]
     if super::has_neon() {
         unsafe {
             silu_mul_inplace_neon(gate, up);

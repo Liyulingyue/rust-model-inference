@@ -1,4 +1,4 @@
-﻿// Qwen3-Audio audio pre-processing: WAV decoding + log-mel feature extraction.
+// Qwen3-Audio audio pre-processing: WAV decoding + log-mel feature extraction.
 //
 // Phase 4b split from qwen3a.rs. Owns: AsrAudioError, decode_pcm16_wav, MelWindow,
 // LogMel, AudioFft, compute_log_mel, split_mel_windows, log_mel_windows.
@@ -16,7 +16,26 @@ unsafe extern "C" {
     fn cosf(value: f32) -> f32;
     fn erff(value: f32) -> f32;
     fn log10(value: f64) -> f64;
-    fn sinf(value: f32) -> f32;
+    #[cfg(target_os = "macos")]
+    fn __sincosf_stret(value: f32) -> SinCos;
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct SinCos {
+    sin: f32,
+    cos: f32,
+}
+
+#[cfg(target_os = "macos")]
+fn sin_cos(value: f32) -> (f32, f32) {
+    let values = unsafe { __sincosf_stret(value) };
+    (values.sin, values.cos)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sin_cos(value: f32) -> (f32, f32) {
+    value.sin_cos()
 }
 
 #[cfg(target_os = "macos")]
@@ -68,7 +87,35 @@ fn wav_u32(bytes: &[u8], offset: usize) -> Result<u32, AsrAudioError> {
     Ok(u32::from_le_bytes(value.try_into().unwrap()))
 }
 
+#[derive(Debug, Clone)]
+pub struct DecodedPcm16Wav {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
 pub fn decode_pcm16_wav(bytes: &[u8]) -> Result<Vec<f32>, AsrAudioError> {
+    let decoded = decode_pcm16_wav_any(bytes)?;
+    if decoded.channels != 1 {
+        return Err(AsrAudioError::Unsupported("expected mono audio".into()));
+    }
+    if decoded.sample_rate != 16_000 {
+        return Err(AsrAudioError::Unsupported(
+            "expected 16000 Hz sample rate".into(),
+        ));
+    }
+
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "asr.pcm",
+        None,
+        &[decoded.samples.len()],
+        &decoded.samples,
+    ));
+    Ok(decoded.samples)
+}
+
+pub fn decode_pcm16_wav_any(bytes: &[u8]) -> Result<DecodedPcm16Wav, AsrAudioError> {
     if bytes.get(0..4) != Some(b"RIFF") {
         return Err(AsrAudioError::Unsupported("expected RIFF/WAVE".into()));
     }
@@ -130,25 +177,49 @@ pub fn decode_pcm16_wav(bytes: &[u8]) -> Result<Vec<f32>, AsrAudioError> {
     }
 
     let format = format.ok_or_else(|| AsrAudioError::Invalid("missing fmt chunk".into()))?;
-    let expected = [
-        (wav_u16(format, 0)? as u32, 1, "PCM format"),
-        (wav_u16(format, 2)? as u32, 1, "mono audio"),
-        (wav_u32(format, 4)?, 16_000, "16000 Hz sample rate"),
-        (wav_u32(format, 8)?, 32_000, "32000 byte rate"),
-        (wav_u16(format, 12)? as u32, 2, "2-byte block align"),
-        (wav_u16(format, 14)? as u32, 16, "16-bit samples"),
-    ];
-    if let Some((_, _, contract)) = expected
-        .iter()
-        .find(|(actual, expected, _)| actual != expected)
-    {
-        return Err(AsrAudioError::Unsupported(format!("expected {contract}")));
+    let format_tag = wav_u16(format, 0)?;
+    let channels = wav_u16(format, 2)?;
+    let sample_rate = wav_u32(format, 4)?;
+    let byte_rate = wav_u32(format, 8)?;
+    let block_align = wav_u16(format, 12)?;
+    let bits_per_sample = wav_u16(format, 14)?;
+    if format_tag != 1 {
+        return Err(AsrAudioError::Unsupported("expected PCM format".into()));
+    }
+    if channels == 0 {
+        return Err(AsrAudioError::Unsupported(
+            "expected at least one audio channel".into(),
+        ));
+    }
+    if sample_rate == 0 {
+        return Err(AsrAudioError::Invalid(
+            "sample rate must be greater than zero".into(),
+        ));
+    }
+    if bits_per_sample != 16 {
+        return Err(AsrAudioError::Unsupported("expected 16-bit samples".into()));
+    }
+    let expected_block_align = channels
+        .checked_mul(2)
+        .ok_or_else(|| AsrAudioError::Invalid("WAV block align overflow".into()))?;
+    if block_align != expected_block_align {
+        return Err(AsrAudioError::Unsupported(format!(
+            "expected {expected_block_align}-byte block align"
+        )));
+    }
+    let expected_byte_rate = sample_rate
+        .checked_mul(u32::from(expected_block_align))
+        .ok_or_else(|| AsrAudioError::Invalid("WAV byte rate overflow".into()))?;
+    if byte_rate != expected_byte_rate {
+        return Err(AsrAudioError::Unsupported(format!(
+            "expected {expected_byte_rate} byte rate"
+        )));
     }
 
     let pcm = pcm.ok_or_else(|| AsrAudioError::Invalid("missing data chunk".into()))?;
-    if pcm.is_empty() || pcm.len() & 1 != 0 {
+    if pcm.is_empty() || pcm.len() % usize::from(block_align) != 0 {
         return Err(AsrAudioError::Invalid(
-            "PCM data must contain complete samples".into(),
+            "PCM data must contain complete interleaved frames".into(),
         ));
     }
     let mut samples = Vec::new();
@@ -163,14 +234,11 @@ pub fn decode_pcm16_wav(bytes: &[u8]) -> Result<Vec<f32>, AsrAudioError> {
         samples.push(sample);
     }
 
-    #[cfg(feature = "parity-trace")]
-    crate::parity_trace::report(crate::parity_trace::checkpoint(
-        "asr.pcm",
-        None,
-        &[samples.len()],
-        &samples,
-    ));
-    Ok(samples)
+    Ok(DecodedPcm16Wav {
+        samples,
+        sample_rate,
+        channels,
+    })
 }
 
 pub(crate) struct MelWindow {
@@ -263,51 +331,81 @@ pub(crate) fn periodic_hann_window() -> Vec<f32> {
         .collect()
 }
 
-struct AudioFft {
+pub(crate) struct RealFft {
+    size: usize,
     sin: Vec<f32>,
     cos: Vec<f32>,
     input: Vec<f32>,
     output: Vec<f32>,
 }
 
-impl AudioFft {
-    fn new() -> Self {
-        let mut sin = Vec::with_capacity(FFT_SIZE);
-        let mut cos = Vec::with_capacity(FFT_SIZE);
-        for index in 0..FFT_SIZE {
-            let angle = (2.0 * std::f64::consts::PI * index as f64 / FFT_SIZE as f64) as f32;
-            sin.push(unsafe { sinf(angle) });
-            cos.push(unsafe { cosf(angle) });
+impl RealFft {
+    pub(crate) fn new(size: usize) -> Result<Self, AsrAudioError> {
+        if size == 0 {
+            return Err(AsrAudioError::Invalid(
+                "FFT size must be greater than zero".into(),
+            ));
         }
-        Self {
+        let input_len = size
+            .checked_mul(2)
+            .ok_or_else(|| AsrAudioError::Invalid("FFT input size overflow".into()))?;
+        let output_len = size
+            .checked_mul(8)
+            .ok_or_else(|| AsrAudioError::Invalid("FFT output size overflow".into()))?;
+        let mut sin = Vec::new();
+        let mut cos = Vec::new();
+        sin.try_reserve_exact(size)
+            .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
+        cos.try_reserve_exact(size)
+            .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
+        for index in 0..size {
+            let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
+            let (sine, cosine) = sin_cos(angle);
+            sin.push(sine);
+            cos.push(cosine);
+        }
+        Ok(Self {
+            size,
             sin,
             cos,
-            input: vec![0.0; FFT_SIZE * 2],
-            output: vec![0.0; FFT_SIZE * 8],
-        }
+            input: zeroed_f32(input_len)?,
+            output: zeroed_f32(output_len)?,
+        })
     }
 
     fn transform(&mut self, input: &[f32]) {
-        self.input[..FFT_SIZE].copy_from_slice(input);
+        self.input[..self.size].copy_from_slice(input);
         fft_real(
             &self.sin,
             &self.cos,
             &mut self.input,
             0,
-            FFT_SIZE,
+            self.size,
+            self.size,
             &mut self.output,
             0,
         );
     }
 
-    fn power(&mut self, input: &[f32], output: &mut [f32]) {
-        debug_assert_eq!(input.len(), FFT_SIZE);
-        debug_assert_eq!(output.len(), FFT_SIZE / 2 + 1);
+    pub(crate) fn power(&mut self, input: &[f32], output: &mut [f32]) {
+        debug_assert_eq!(input.len(), self.size);
+        debug_assert_eq!(output.len(), self.size / 2 + 1);
         self.transform(input);
         for (bin, value) in output.iter_mut().enumerate() {
             let real = self.output[bin * 2];
             let imaginary = self.output[bin * 2 + 1];
             *value = real.mul_add(real, imaginary * imaginary);
+        }
+    }
+
+    pub(crate) fn magnitude(&mut self, input: &[f32], output: &mut [f32]) {
+        debug_assert_eq!(input.len(), self.size);
+        debug_assert_eq!(output.len(), self.size / 2 + 1);
+        self.transform(input);
+        for (bin, value) in output.iter_mut().enumerate() {
+            let real = self.output[bin * 2];
+            let imaginary = self.output[bin * 2 + 1];
+            *value = real.mul_add(real, imaginary * imaginary).sqrt();
         }
     }
 }
@@ -319,6 +417,7 @@ fn fft_real(
     input: &mut [f32],
     input_offset: usize,
     n: usize,
+    root_size: usize,
     output: &mut [f32],
     output_offset: usize,
 ) {
@@ -329,12 +428,12 @@ fn fft_real(
     }
     let half = n / 2;
     if n % 2 != 0 {
-        let step = FFT_SIZE / n;
+        let step = root_size / n;
         for k in 0..n {
             let mut real = 0.0f32;
             let mut imaginary = 0.0f32;
             for index in 0..n {
-                let table = (k * index * step) % FFT_SIZE;
+                let table = (k * index * step) % root_size;
                 let value = input[input_offset + index];
                 real = value.mul_add(cos[table], real);
                 imaginary = (-value).mul_add(sin[table], imaginary);
@@ -350,14 +449,14 @@ fn fft_real(
         input[scratch + index] = input[input_offset + index * 2];
     }
     let even = output_offset + n * 2;
-    fft_real(sin, cos, input, scratch, half, output, even);
+    fft_real(sin, cos, input, scratch, half, root_size, output, even);
     for index in 0..half {
         input[scratch + index] = input[input_offset + index * 2 + 1];
     }
     let odd = even + n;
-    fft_real(sin, cos, input, scratch, half, output, odd);
+    fft_real(sin, cos, input, scratch, half, root_size, output, odd);
 
-    let step = FFT_SIZE / n;
+    let step = root_size / n;
     for k in 0..half {
         let real = cos[k * step];
         let sine = sin[k * step];
@@ -403,7 +502,7 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
     let fft_bins = FFT_SIZE / 2 + 1;
     let mut frame = zeroed_f32(FFT_SIZE)?;
     let hann = periodic_hann_window();
-    let mut fft = AudioFft::new();
+    let mut fft = RealFft::new(FFT_SIZE)?;
     let mut power = zeroed_f32(fft_bins)?;
 
     for frame_index in 0..frames {
@@ -489,7 +588,10 @@ pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> 
     })
 }
 
-pub(crate) fn split_mel_windows(normalized: &[f32], frames: usize) -> Result<Vec<MelWindow>, AsrAudioError> {
+pub(crate) fn split_mel_windows(
+    normalized: &[f32],
+    frames: usize,
+) -> Result<Vec<MelWindow>, AsrAudioError> {
     let expected_len = MEL_BINS
         .checked_mul(frames)
         .ok_or_else(|| AsrAudioError::Invalid("normalized Mel size overflow".into()))?;
@@ -562,4 +664,62 @@ pub(crate) fn split_mel_windows(normalized: &[f32], frames: usize) -> Result<Vec
 pub(crate) fn log_mel_windows(samples: &[f32]) -> Result<Vec<MelWindow>, AsrAudioError> {
     let log_mel = compute_log_mel(samples)?;
     split_mel_windows(&log_mel.normalized, log_mel.frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm16_wav(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let data_len = u32::try_from(samples.len() * 2).unwrap();
+        let block_align = channels * 2;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * u32::from(block_align)).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn generic_pcm16_decode_exposes_rate_channels_but_asr_stays_strict() {
+        let wav = pcm16_wav(48_000, 2, &[32767, -32768, 16384, 16384]);
+        let decoded = decode_pcm16_wav_any(&wav).unwrap();
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 4);
+        assert!(matches!(
+            decode_pcm16_wav(&wav),
+            Err(AsrAudioError::Unsupported(message)) if message.contains("mono audio")
+        ));
+    }
+
+    #[test]
+    fn size_parameterized_fft_keeps_asr_power_bits() {
+        let input: Vec<f32> = (0..FFT_SIZE).map(|i| (i as f32 * 0.03125).sin()).collect();
+        let mut fft = RealFft::new(FFT_SIZE).unwrap();
+        let mut power = vec![0.0; FFT_SIZE / 2 + 1];
+        fft.power(&input, &mut power);
+        assert!(power.iter().all(|value| value.is_finite() && *value >= 0.0));
+    }
+
+    #[test]
+    fn fft_twiddle_rounding_matches_pinned_oracle() {
+        const SIZE: usize = 1024;
+        let input: Vec<f32> = (0..SIZE).map(|i| (i as f32 * 0.03125).sin()).collect();
+        let mut fft = RealFft::new(SIZE).unwrap();
+        fft.transform(&input);
+        assert_eq!(fft.output[6].to_bits(), 0x40fb_1deb);
+    }
 }
