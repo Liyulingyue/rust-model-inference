@@ -31,7 +31,7 @@ struct Qwen3State {
 
 struct Qwen35State {
     source: Arc<dyn TensorSource>,
-    model: Arc<Qwen35Model>,
+    model: Arc<Qwen35Model<'static>>,
     tokenizer: Arc<BPETokenizer>,
     pool: Arc<ComputePool>,
 }
@@ -979,12 +979,12 @@ async fn main() {
     let n_threads = if n_threads > 0 { n_threads } else { 4 };
     eprintln!("Loading model: {} ...", model_path);
 
-    let source: Arc<dyn TensorSource> = Arc::from(
+    let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(Arc::from(
         open_model_source(Path::new(&model_path), ComponentRole::Llm).unwrap_or_else(|error| {
             eprintln!("Failed to load model: {error}");
             std::process::exit(1);
         }),
-    );
+    )));
     let arch = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -1003,7 +1003,7 @@ async fn main() {
             std::process::exit(1);
         });
         ModelBackend::Qwen35(Qwen35State {
-            source: Arc::clone(&source),
+            source: Arc::clone(source),
             model: Arc::new(model),
             tokenizer: Arc::new(tokenizer),
             pool,

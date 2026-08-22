@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::kernel::QTensorOwned;
+use crate::ops::kernel::QuantizedTensor;
 use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -8,17 +8,7 @@ use crate::ops::quant::{self, BlockQ8K, QK_K};
 use crate::core::thread_pool::ComputePool;
 use crate::models::vision::VisionGrid;
 
-/// `QWeight` is the qwen35 model-side name for the shared
-/// `QTensorOwned` enum from `ops::kernel`. The model file was the last
-/// holdout using its own weight enum; this type alias moves it onto the
-/// shared, owned-bytes weight type so all weight-side SIMD optimizations
-/// (batch-token matmul, fuse_vstack, etc.) added to `QTensorOwned` apply
-/// here too.
-///
-/// Field names match the original `QWeight` exactly, so pattern matches
-/// like `QWeight::Q8_0 { data, n_cols, n_rows }` keep working through the
-/// alias.
-pub type QWeight = QTensorOwned;
+pub type QWeight<'a> = QuantizedTensor<'a>;
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],
@@ -77,37 +67,25 @@ pub fn build_qwen35_positions(
     Ok((positions, next))
 }
 
-pub struct Qwen35Model {
+pub struct Qwen35Model<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Vec<f32>,
     pub output_norm: Vec<f32>,
-    pub output_weight: QWeight,
-    pub layers: Vec<Qwen35LayerWeights>,
+    pub output_weight: QWeight<'a>,
+    pub layers: Vec<Qwen35LayerWeights<'a>>,
 }
 
-
-fn load_weight<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<QWeight> {
+fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<QWeight<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
     let n_cols = ti.dims[0] as usize;
     let n_rows = if ti.dims.len() >= 2 { ti.dims[1] as usize } else { 1 };
 
     match ti.ggml_type {
-        GGMLType::F32 => {
-            let mut out = Vec::with_capacity(n_cols * n_rows);
-            for i in 0..n_cols * n_rows {
-                let off = i * 4;
-                if off + 4 <= data.len() {
-                    out.push(f32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]));
-                } else { out.push(0.0); }
-            }
-            Some(QWeight::F32 { data: out, n_cols, n_rows })
+        GGMLType::F32 | GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0
+        | GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
+            Some(QWeight::from_bytes(data, ti.ggml_type, n_cols, n_rows))
         }
-        GGMLType::F16 => Some(QWeight::F16 { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q8_0 => Some(QWeight::Q8_0 { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q4K => Some(QWeight::Q4_K { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q5K => Some(QWeight::Q5_K { data: data.to_vec(), n_cols, n_rows }),
-        GGMLType::Q6K => Some(QWeight::Q6_K { data: data.to_vec(), n_cols, n_rows }),
         _ => {
             eprintln!("WARNING: unsupported quant type {:?} for tensor {}", ti.ggml_type, name);
             None
@@ -139,32 +117,31 @@ fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<V
     }
 }
 
-pub struct Qwen35LayerWeights {
+pub struct Qwen35LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub attn_post_norm: Vec<f32>,
-    pub wq: Option<QWeight>,
-    pub wk: Option<QWeight>,
-    pub wv: Option<QWeight>,
-    pub wo: Option<QWeight>,
+    pub wq: Option<QWeight<'a>>,
+    pub wk: Option<QWeight<'a>>,
+    pub wv: Option<QWeight<'a>>,
+    pub wo: Option<QWeight<'a>>,
     pub attn_q_norm: Option<Vec<f32>>,
     pub attn_k_norm: Option<Vec<f32>>,
-    pub wqkv: Option<QWeight>,
-    pub wqkv_gate: Option<QWeight>,
+    pub wqkv: Option<QWeight<'a>>,
+    pub wqkv_gate: Option<QWeight<'a>>,
     pub ssm_conv1d: Option<Vec<f32>>,
     pub ssm_dt: Option<Vec<f32>>,
     pub ssm_a: Option<Vec<f32>>,
-    pub ssm_beta: Option<QWeight>,
-    pub ssm_alpha: Option<QWeight>,
+    pub ssm_beta: Option<QWeight<'a>>,
+    pub ssm_alpha: Option<QWeight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
-    pub ssm_out: Option<QWeight>,
-    pub ffn_gate: QWeight,
-    pub ffn_up: QWeight,
-    pub ffn_down: QWeight,
-    pub ffn_gate_up: Option<QWeight>,
+    pub ssm_out: Option<QWeight<'a>>,
+    pub ffn_gate: QWeight<'a>,
+    pub ffn_up: QWeight<'a>,
+    pub ffn_down: QWeight<'a>,
 }
 
-impl Qwen35Model {
-    pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
+impl<'a> Qwen35Model<'a> {
+    pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let config = Qwen35Config::from_source(source)?;
 
         let tok_embd = {
@@ -226,52 +203,15 @@ impl Qwen35Model {
                 .ok_or_else(|| format!("Missing blk.{}.ffn_up.weight", i))?;
             let ffn_down = load_weight(source, &format!("blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing blk.{}.ffn_down.weight", i))?;
-            let ffn_gate_up = QWeight::fuse_vstack(&ffn_gate, &ffn_up);
-
             layers.push(Qwen35LayerWeights {
                 attn_norm, attn_post_norm, wq, wk, wv, wo,
                 attn_q_norm, attn_k_norm,
                 wqkv, wqkv_gate, ssm_conv1d, ssm_dt, ssm_a, ssm_beta, ssm_alpha, ssm_norm, ssm_out,
                 ffn_gate, ffn_up, ffn_down,
-                ffn_gate_up,
             });
         }
 
         Ok(Self { config, tok_embd, output_norm, output_weight, layers })
-    }
-
-    pub fn precompute_f32(&mut self) {
-        let t0 = std::time::Instant::now();
-
-        // Validate: compare matmul output before and after dequant for one weight
-        let test_input: Vec<f32> = (0..self.config.n_embd).map(|i| (i as f32 * 0.01).sin()).collect();
-        let ref_output = self.layers[0].ffn_gate.matmul(&test_input);
-
-        self.output_weight = std::mem::replace(&mut self.output_weight, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-        for layer in &mut self.layers {
-            if let Some(w) = layer.wq.take() { layer.wq = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wk.take() { layer.wk = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wv.take() { layer.wv = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wo.take() { layer.wo = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wqkv.take() { layer.wqkv = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.wqkv_gate.take() { layer.wqkv_gate = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_beta.take() { layer.ssm_beta = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_alpha.take() { layer.ssm_alpha = Some(w.dequant_to_f32()); }
-            if let Some(w) = layer.ssm_out.take() { layer.ssm_out = Some(w.dequant_to_f32()); }
-            layer.ffn_gate = std::mem::replace(&mut layer.ffn_gate, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-            layer.ffn_up = std::mem::replace(&mut layer.ffn_up, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-            layer.ffn_down = std::mem::replace(&mut layer.ffn_down, QWeight::F32 { data: Vec::new(), n_cols: 0, n_rows: 0 }).dequant_to_f32();
-        }
-
-        let new_output = self.layers[0].ffn_gate.matmul(&test_input);
-        let max_diff = ref_output.iter().zip(new_output.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        eprintln!("precompute_f32: validation max_diff for ffn_gate[0] = {}", max_diff);
-        if max_diff > 0.1 {
-            let n = ref_output.len().min(5).min(new_output.len());
-            eprintln!("WARNING: dequant validation failed! ref_len={} new_len={} first ref: {:?}, new: {:?}", ref_output.len(), new_output.len(), &ref_output[..n], &new_output[..n]);
-        }
-
-        eprintln!("precompute_f32: all weights dequantized to F32 in {:.0}ms", t0.elapsed().as_millis());
     }
 
     pub fn forward(
@@ -827,23 +767,13 @@ impl Qwen35Model {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
 
-        if let Some(ref gate_up) = layer.ffn_gate_up {
-            for t in 0..n_tokens {
-                let off = t * n_embd;
-                let inp = &hidden[off..off + n_embd];
-                gate_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-                scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-                scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[n_ff..2 * n_ff]);
-            }
-        } else {
-            for t in 0..n_tokens {
-                let off = t * n_embd;
-                let inp = &hidden[off..off + n_embd];
-                layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-                scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-                layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-                scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-            }
+        for t in 0..n_tokens {
+            let off = t * n_embd;
+            let inp = &hidden[off..off + n_embd];
+            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
+            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
         }
 
         crate::ops::silu_mul_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
@@ -1069,7 +999,7 @@ mod tests {
         }
     }
 
-    fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model {
+    fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'static> {
         let config = Qwen35Config {
             n_embd: 2,
             n_layer: 1,
@@ -1092,7 +1022,7 @@ mod tests {
             key_length: 2,
             value_length: 2,
         };
-        let weight = |data: Vec<f32>, n_rows| QWeight::F32 { data, n_cols: 2, n_rows };
+        let weight = |data: Vec<f32>, _n_rows| QWeight::F32(data);
         let identity = || weight(vec![1.0, 0.0, 0.0, 1.0], 2);
         let layer = Qwen35LayerWeights {
             attn_norm: vec![1.0; 2],
@@ -1115,7 +1045,6 @@ mod tests {
             ffn_gate: identity(),
             ffn_up: identity(),
             ffn_down: identity(),
-            ffn_gate_up: None,
         };
         Qwen35Model {
             config,
@@ -1214,7 +1143,7 @@ mod tests {
                 data.extend(std::iter::repeat_n(quantized_value, 32));
             }
         }
-        let weight = QWeight::Q8_0 { data, n_cols: 256, n_rows: 2 };
+        let weight = QWeight::Q8_0 { data: &data, n_cols: 256, n_rows: 2 };
         let input = [1.0f32; 256];
         let mut q8k_buf = vec![BlockQ8K { d: 0.0, qs: [0; 256], bsums: [0; 16] }; 1];
         let mut output = [0.0f32; 2];

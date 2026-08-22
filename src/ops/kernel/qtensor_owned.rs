@@ -97,7 +97,9 @@ impl QTensorOwned {
         match q {
             QuantizedTensor::F32(v) => Self::F32 { data: v.clone(), n_cols: v.len(), n_rows: 1 },
             QuantizedTensor::F16(w) => Self::F16 { data: w.bytes.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
-            QuantizedTensor::Q8_0(b) => Self::Q8_0 { data: b.to_vec(), n_cols: q.n_in(), n_rows: 1 },
+            QuantizedTensor::Q8_0 { data: b, n_cols, n_rows } => {
+                Self::Q8_0 { data: b.to_vec(), n_cols, n_rows }
+            }
             QuantizedTensor::Q4_K { data, n_cols, n_rows } => {
                 Self::Q4_K { data: data.to_vec(), n_cols, n_rows }
             }
@@ -659,7 +661,7 @@ mod qtensor_owned_tests {
         let mut out_owned = vec![0.0f32; 8];
         owned.forward_prequantized(&input_q8, &input_scales, &mut out_owned, 64, 8, 0, 1);
 
-        let borrowed = QuantizedTensor::Q8_0(&bytes);
+        let borrowed = QuantizedTensor::Q8_0 { data: &bytes, n_cols: 64, n_rows: 4 };
         let kernel = borrowed.clone_to_kernel();
         let mut out_borrowed = vec![0.0f32; 8];
         kernel.forward_prequantized(&input_q8, &input_scales, &mut out_borrowed, 64, 8, 0, 1);
@@ -713,8 +715,8 @@ mod qtensor_owned_tests {
         let mut out_fused = vec![0.0f32; 8];
         fused.forward_prequantized(&input_q8, &input_scales, &mut out_fused, 64, 8, 0, 1);
 
-        let g_kernel = QuantizedTensor::Q8_0(&gate).clone_to_kernel();
-        let u_kernel = QuantizedTensor::Q8_0(&up).clone_to_kernel();
+        let g_kernel = QuantizedTensor::Q8_0 { data: &gate, n_cols: 64, n_rows: 4 }.clone_to_kernel();
+        let u_kernel = QuantizedTensor::Q8_0 { data: &up, n_cols: 64, n_rows: 4 }.clone_to_kernel();
         let mut out_g = vec![0.0f32; 4];
         let mut out_u = vec![0.0f32; 4];
         g_kernel.forward_prequantized(&input_q8, &input_scales, &mut out_g, 64, 4, 0, 1);

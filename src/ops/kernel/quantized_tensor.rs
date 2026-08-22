@@ -12,6 +12,7 @@
 //! etc.
 
 use crate::core::tensor::GGMLType;
+use crate::ops::kernel::Kernel;
 
 /// F16 weight layout reserved for future use.
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +32,7 @@ pub struct F16Weight<'a> {
 pub enum QuantizedTensor<'a> {
     F32(Vec<f32>),
     F16(F16Weight<'a>),
-    Q8_0(&'a [u8]),
+    Q8_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q6_K { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_1 { data: &'a [u8], n_cols: usize, n_rows: usize },
@@ -92,7 +93,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
-            Self::Q8_0(bytes) => Box::new(q8_0::Q8Kernel::new(bytes)),
+            Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, *n_cols, *n_rows))
             }
@@ -126,7 +127,7 @@ impl<'a> QuantizedTensor<'a> {
                 Self::F32(f32_data)
             }
             GGMLType::F16 => Self::F16(F16Weight { bytes: data, n_in, n_out }),
-            GGMLType::Q8_0 => Self::Q8_0(data),
+            GGMLType::Q8_0 => Self::Q8_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q6K => Self::Q6_K { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_1 => Self::Q4_1 { data, n_cols: n_in, n_rows: n_out },
@@ -140,7 +141,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(_) => GGMLType::F32,
             Self::F16(_) => GGMLType::F16,
-            Self::Q8_0(_) => GGMLType::Q8_0,
+            Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q6_K { .. } => GGMLType::Q6K,
             Self::Q4_0 { .. } => GGMLType::Q4_0,
             Self::Q4_1 { .. } => GGMLType::Q4_1,
@@ -153,7 +154,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(slice) => slice.len(),
             Self::F16(w) => w.n_in,
-            Self::Q8_0(bytes) => q8_0_block_count(*bytes) * 32,
+            Self::Q8_0 { n_cols, .. } => *n_cols,
             Self::Q6_K { n_cols, .. } => *n_cols,
             Self::Q4_0 { n_cols, .. } => *n_cols,
             Self::Q4_1 { n_cols, .. } => *n_cols,
@@ -168,7 +169,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
-            Self::Q8_0(bytes) => Box::new(q8_0::Q8Kernel::new(bytes)),
+            Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, n_cols, n_rows))
             }
@@ -183,6 +184,121 @@ impl<'a> QuantizedTensor<'a> {
             }
             Self::Q5_K { data, n_cols, n_rows } => {
                 Box::new(q5_k::Q5_KKernel::new(data, n_cols, n_rows))
+            }
+        }
+    }
+
+    pub fn n_rows(&self) -> usize {
+        match self {
+            Self::F32(values) => usize::from(!values.is_empty()),
+            Self::F16(weight) => weight.n_out,
+            Self::Q8_0 { n_rows, .. } => *n_rows,
+            Self::Q6_K { n_rows, .. }
+            | Self::Q4_0 { n_rows, .. }
+            | Self::Q4_1 { n_rows, .. }
+            | Self::Q4_K { n_rows, .. }
+            | Self::Q5_K { n_rows, .. } => *n_rows,
+        }
+    }
+
+    pub fn matmul(&self, input: &[f32]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let mut output = vec![0.0; n_rows];
+        let mut input_q8 = vec![0u8; input.len()];
+        let mut input_scales = vec![0.0; input.len().div_ceil(32)];
+        crate::ops::quantize_q8_0_into(
+            input,
+            input.len(),
+            &mut input_q8,
+            &mut input_scales,
+        );
+        self.forward_prepared(
+            input,
+            &input_q8,
+            &input_scales,
+            None,
+            &mut output,
+            input.len(),
+            n_rows,
+            0,
+            1,
+        );
+        output
+    }
+
+    pub fn quantize_and_matmul(
+        &self,
+        input: &[f32],
+        q8k_buf: &mut [crate::ops::quant::BlockQ8K],
+        output: &mut [f32],
+    ) {
+        let mut q8_buf = vec![0u8; input.len()];
+        let mut scale_buf = vec![0.0f32; input.len().div_ceil(32)];
+        let pool = crate::core::thread_pool::ComputePool::new(1);
+        self.quantize_and_matmul_with_scratch(
+            input,
+            q8k_buf,
+            &mut q8_buf,
+            &mut scale_buf,
+            output,
+            &pool,
+        );
+    }
+
+    pub fn quantize_and_matmul_with_scratch(
+        &self,
+        input: &[f32],
+        q8k_buf: &mut [crate::ops::quant::BlockQ8K],
+        q8_buf: &mut [u8],
+        scale_buf: &mut [f32],
+        output: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        let n_rows = self.n_rows();
+        let output_ptr = output.as_mut_ptr();
+        match self {
+            Self::Q4_K { n_cols, .. }
+            | Self::Q5_K { n_cols, .. }
+            | Self::Q6_K { n_cols, .. } => {
+                let blocks = *n_cols / crate::ops::quant::QK_K;
+                crate::ops::quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
+                pool.compute(|ith, nth| {
+                    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_rows) };
+                    self.forward_prepared(
+                        input,
+                        q8_buf,
+                        scale_buf,
+                        Some(&q8k_buf[..blocks]),
+                        output,
+                        *n_cols,
+                        n_rows,
+                        ith,
+                        nth,
+                    );
+                });
+            }
+            _ => {
+                let blocks = input.len().div_ceil(32);
+                crate::ops::quantize_q8_0_into(
+                    input,
+                    input.len(),
+                    &mut q8_buf[..input.len()],
+                    &mut scale_buf[..blocks],
+                );
+                pool.compute(|ith, nth| {
+                    let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_rows) };
+                    self.forward_prepared(
+                        input,
+                        &q8_buf[..input.len()],
+                        &scale_buf[..blocks],
+                        None,
+                        output,
+                        input.len(),
+                        n_rows,
+                        ith,
+                        nth,
+                    );
+                });
             }
         }
     }
@@ -221,7 +337,7 @@ mod tests {
         assert_eq!(q.ggml_type(), GGMLType::F32);
 
         let q8_bytes = vec![0u8; 34];
-        let q = QuantizedTensor::Q8_0(&q8_bytes);
+        let q = QuantizedTensor::Q8_0 { data: &q8_bytes, n_cols: 32, n_rows: 1 };
         assert_eq!(q.ggml_type(), GGMLType::Q8_0);
         assert_eq!(q.n_in(), 32);
     }
