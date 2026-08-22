@@ -517,7 +517,7 @@ impl<'model> Qwen3Session<'model> {
                 gate_buf: vec![0.0; config.n_ff],
                 up_buf: vec![0.0; config.n_ff],
                 logits: vec![0.0; config.vocab],
-                q8_buf: vec![0; max_n_in],
+q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
                 // Q8_K pre-quantization buffer for K-quant kernels (Q4_K / Q6_K).
                 // See TODO in docs/TODO.md: "Q8_0 与 Q8_K 量化路径按需量化".

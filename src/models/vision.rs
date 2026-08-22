@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32};
+use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,12 +424,15 @@ impl<'a> VisionEncoder<'a> {
         }
 
         scratch.ensure_capacity(cfg, grid)?;
+        let t_embed = std::time::Instant::now();
         self.patch_embed(
             image_pixels,
             grid.image_width(),
             grid.image_height(),
             scratch,
         );
+        let t_embed = t_embed.elapsed();
+        let t_merge = std::time::Instant::now();
         spatial_merge(
             &mut scratch.patch_embd[..n_patches * n_embd],
             n_patches_x,
@@ -438,7 +441,9 @@ impl<'a> VisionEncoder<'a> {
             merge,
             &mut scratch.merged[..n_patches * n_embd],
         );
+        let t_merge = t_merge.elapsed();
 
+        let t_bias = std::time::Instant::now();
         if let Some(ref precomputed) = self.precomputed {
             if let Some(ref bias) = precomputed.patch_bias {
                 for token in 0..n_tokens {
@@ -457,7 +462,9 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         }
+        let t_bias = t_bias.elapsed();
 
+        let t_pos = std::time::Instant::now();
         if let Some(position_data) = self.position_embd {
             self.apply_position_embedding_merged(
                 &mut scratch.merged[..n_tokens * n_embd],
@@ -469,12 +476,16 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.pos_embd_buf,
             );
         }
+        let t_pos = t_pos.elapsed();
 
+        let t_layers = std::time::Instant::now();
         let mrope_positions = build_vit_mrope_positions(n_patches_x, n_patches_y, merge);
         for layer in 0..cfg.n_layer {
             self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions);
         }
+        let t_layers = t_layers.elapsed();
 
+        let t_postln = std::time::Instant::now();
         if let Some(ref precomputed) = self.precomputed {
             if !precomputed.post_ln_weight.is_empty() {
                 for token in 0..n_tokens {
@@ -510,8 +521,24 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
         }
+        let t_postln = t_postln.elapsed();
 
+        let t_proj = std::time::Instant::now();
         self.project(n_patches_x, n_patches_y, n_embd, merge, scratch);
+        let t_proj = t_proj.elapsed();
+
+        let total = t_embed + t_merge + t_bias + t_pos + t_layers + t_postln + t_proj;
+        eprintln!(
+            "[vision-timing] total={:.3}s  patch_embed={:.3}s ({:.1}%)  spatial_merge={:.3}s ({:.1}%)  patch_bias={:.3}s ({:.1}%)  pos_emb={:.3}s ({:.1}%)  vit_layers={:.3}s ({:.1}%)  post_ln={:.3}s ({:.1}%)  projection={:.3}s ({:.1}%)",
+            total.as_secs_f64(),
+            t_embed.as_secs_f64(), t_embed.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_merge.as_secs_f64(), t_merge.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_bias.as_secs_f64(), t_bias.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_pos.as_secs_f64(), t_pos.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_layers.as_secs_f64(), t_layers.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_postln.as_secs_f64(), t_postln.as_secs_f64()/total.as_secs_f64()*100.0,
+            t_proj.as_secs_f64(), t_proj.as_secs_f64()/total.as_secs_f64()*100.0,
+        );
         let expected_projected = checked_len(
             "projected vision output",
             &[n_projected, cfg.projection_dim],
@@ -591,14 +618,19 @@ impl<'a> VisionEncoder<'a> {
     }
 
     fn forward_vit_layer(&self, il: usize, scratch: &mut VisionScratchpad, n_tokens: usize, mrope_positions: &[[usize; 4]]) {
+        let do_profile = std::env::var("PROFILE_VIT_LAYER").is_ok();
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_head = cfg.n_head;
         let d_head = cfg.d_head();
         let eps = cfg.eps;
 
+        let t0_res = std::time::Instant::now();
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
 
+        let (mut t_ln1, mut t_qkv, mut t_rope, mut t_attn, mut t_attn_out, mut t_ln2_ffn, mut t_act, mut t_ffn_down) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+
+        let t_ln1_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln1_biases[il] {
                 for t in 0..n_tokens {
@@ -620,9 +652,8 @@ impl<'a> VisionEncoder<'a> {
 
             if let Some(ref bias) = pc.qkv_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd * 3 {
-                        scratch.qkv_buf[t * n_embd * 3 + j] += bias[j];
-                    }
+                    let off = t * n_embd * 3;
+                    vec_add_into(bias.as_slice(), &mut scratch.qkv_buf[off..off + n_embd * 3]);
                 }
             }
         } else {
@@ -658,7 +689,9 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         }
+        t_ln1 = t_ln1_start.elapsed().as_secs_f64();
 
+        let t_rope_start = std::time::Instant::now();
         for t in 0..n_tokens {
             let src_off = t * n_embd * 3;
             for h in 0..n_head {
@@ -694,7 +727,9 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
         }
+        t_rope = t_rope_start.elapsed().as_secs_f64();
 
+        let t_attn_start = std::time::Instant::now();
         let scale = 1.0 / (d_head as f32).sqrt();
         let attn_buf = &scratch.attn_buf[..3 * n_head * n_tokens * d_head];
 
@@ -779,7 +814,9 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         });
+        t_attn = t_attn_start.elapsed().as_secs_f64();
 
+        let t_attn_out_start = std::time::Instant::now();
         for t in 0..n_tokens {
             for h in 0..n_head {
                 for d in 0..d_head {
@@ -796,9 +833,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.out_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         } else {
@@ -811,19 +847,20 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.out_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         }
-
-        for i in 0..n_tokens * n_embd {
-            scratch.merged[i] = scratch.residual[i] + scratch.proj_buf[i];
+        for t in 0..n_tokens {
+            let off = t * n_embd;
+            vec_add(&scratch.residual[off..off + n_embd], &scratch.proj_buf[off..off + n_embd], &mut scratch.merged[off..off + n_embd]);
         }
+        t_attn_out = t_attn_out_start.elapsed().as_secs_f64();
 
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
 
+        let t_ln2_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln2_biases[il] {
                 for t in 0..n_tokens {
@@ -844,9 +881,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.ffn_up_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..cfg.n_ff {
-                        scratch.ffn_buf[t * cfg.n_ff + j] += bias[j];
-                    }
+                    let off = t * cfg.n_ff;
+                    vec_add_into(bias.as_slice(), &mut scratch.ffn_buf[off..off + cfg.n_ff]);
                 }
             }
         } else {
@@ -875,17 +911,18 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.ffn_up_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..cfg.n_ff {
-                        scratch.ffn_buf[t * cfg.n_ff + j] += bias[j];
-                    }
+                    let off = t * cfg.n_ff;
+                    vec_add_into(&bias, &mut scratch.ffn_buf[off..off + cfg.n_ff]);
                 }
             }
         }
+        t_ln2_ffn = t_ln2_start.elapsed().as_secs_f64();
 
-        for x in scratch.ffn_buf[..n_tokens * cfg.n_ff].iter_mut() {
-            *x = gelu(*x);
-        }
+        let t_act_start = std::time::Instant::now();
+        gelu_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
+        t_act = t_act_start.elapsed().as_secs_f64();
 
+        let t_ffn_down_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             pc.ffn_down_weights[il].matmul_batch(
                 &scratch.ffn_buf[..n_tokens * cfg.n_ff],
@@ -894,9 +931,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.ffn_down_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         } else {
@@ -910,15 +946,24 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.ffn_down_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         }
 
-        for i in 0..n_tokens * n_embd {
-            scratch.merged[i] = scratch.residual[i] + scratch.proj_buf[i];
+        for t in 0..n_tokens {
+            let off = t * n_embd;
+            vec_add(&scratch.residual[off..off + n_embd], &scratch.proj_buf[off..off + n_embd], &mut scratch.merged[off..off + n_embd]);
+        }
+        t_ffn_down = t_ffn_down_start.elapsed().as_secs_f64();
+
+        if do_profile {
+            let total_layer = t_ln1 + t_rope + t_attn + t_attn_out + t_ln2_ffn + t_act + t_ffn_down;
+            eprintln!(
+                "  vit_layer[{}]: ln1+qkv={:.3}s rope={:.3}s attn={:.3}s attn_out={:.3}s ln2+ffn_up={:.3}s act={:.3}s ffn_down={:.3}s | layer={:.3}s",
+                il, t_ln1, t_rope, t_attn, t_attn_out, t_ln2_ffn, t_act, t_ffn_down, total_layer
+            );
         }
     }
 
@@ -990,9 +1035,7 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        for x in mm0_out[..n_projected * merged_embd].iter_mut() {
-            *x = gelu(*x);
-        }
+        crate::ops::gelu_inplace(&mut mm0_out[..n_projected * merged_embd]);
 
         if let Some(ref pc) = self.precomputed {
             for t in 0..n_projected {
@@ -1583,10 +1626,6 @@ fn matmul_f16_f32_single(weight_f16: &[u8], input: &[f32], output: &mut [f32], i
         let row_u16 = &w_u16[row_off..row_off + n_half];
         output[o] = dot_f16_f32(&input[..in_dim], row_u16, in_dim);
     }
-}
-
-fn gelu(x: f32) -> f32 {
-    0.5 * x * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
 }
 
 #[cfg(target_arch = "x86_64")]
