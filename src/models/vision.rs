@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32, gelu_inplace};
+use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,9 +652,8 @@ impl<'a> VisionEncoder<'a> {
 
             if let Some(ref bias) = pc.qkv_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd * 3 {
-                        scratch.qkv_buf[t * n_embd * 3 + j] += bias[j];
-                    }
+                    let off = t * n_embd * 3;
+                    vec_add_into(bias.as_slice(), &mut scratch.qkv_buf[off..off + n_embd * 3]);
                 }
             }
         } else {
@@ -834,9 +833,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.out_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         } else {
@@ -849,17 +847,16 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.out_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         }
-
-        for i in 0..n_tokens * n_embd {
-            scratch.merged[i] = scratch.residual[i] + scratch.proj_buf[i];
+        for t in 0..n_tokens {
+            let off = t * n_embd;
+            vec_add(&scratch.residual[off..off + n_embd], &scratch.proj_buf[off..off + n_embd], &mut scratch.merged[off..off + n_embd]);
         }
-        let t_attn_out = t_attn_out_start.elapsed().as_secs_f64();
+        t_attn_out = t_attn_out_start.elapsed().as_secs_f64();
 
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
 
@@ -884,9 +881,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.ffn_up_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..cfg.n_ff {
-                        scratch.ffn_buf[t * cfg.n_ff + j] += bias[j];
-                    }
+                    let off = t * cfg.n_ff;
+                    vec_add_into(bias.as_slice(), &mut scratch.ffn_buf[off..off + cfg.n_ff]);
                 }
             }
         } else {
@@ -915,9 +911,8 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.ffn_up_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..cfg.n_ff {
-                        scratch.ffn_buf[t * cfg.n_ff + j] += bias[j];
-                    }
+                    let off = t * cfg.n_ff;
+                    vec_add_into(&bias, &mut scratch.ffn_buf[off..off + cfg.n_ff]);
                 }
             }
         }
@@ -936,9 +931,8 @@ impl<'a> VisionEncoder<'a> {
             );
             if let Some(ref bias) = pc.ffn_down_biases[il] {
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         } else {
@@ -952,15 +946,15 @@ impl<'a> VisionEncoder<'a> {
             if let Some(bias_data) = layer.ffn_down_bias {
                 let bias = decode_f32_slice(bias_data);
                 for t in 0..n_tokens {
-                    for j in 0..n_embd {
-                        scratch.proj_buf[t * n_embd + j] += bias[j];
-                    }
+                    let off = t * n_embd;
+                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
                 }
             }
         }
 
-        for i in 0..n_tokens * n_embd {
-            scratch.merged[i] = scratch.residual[i] + scratch.proj_buf[i];
+        for t in 0..n_tokens {
+            let off = t * n_embd;
+            vec_add(&scratch.residual[off..off + n_embd], &scratch.proj_buf[off..off + n_embd], &mut scratch.merged[off..off + n_embd]);
         }
         t_ffn_down = t_ffn_down_start.elapsed().as_secs_f64();
 
