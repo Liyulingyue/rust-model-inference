@@ -36,6 +36,13 @@
   - 真正的浪费：**当前 `qwen3.rs` 在 attention / FFN 的 Q/K/V / gate / up / down 上对同一份输入同时调用 `quantize_q8_0_into` 和 `quantize_row_q8_k_into`**，而每个 layer 只会用一份。多出来的那次量化 pass（Q8_0 或 Q8_K）纯属白做。
   - **优化方向**：(1) 把每次前向的量化入口按**当前 layer 的权重格式** dispatch——参考 `src/models/qwen35.rs:216-232` 的 `match QWeight::{Q4K|Q5K|Q6K|Q8_0}`，它已经是正确模板；(2) 对 Q8_0 权重跳 `quantize_row_q8_k_into`、对 K-quant 权重跳 `quantize_q8_0_into`；(3) 不必改 `forward_prepared` 签名，也不动 `ExecutionScratchpad` 字段（两份 buffer 都保留以兼容异构模型）。
   - **预期收益**：每次前向省一次量化 pass（与权重格式对应的另一份白做的量化）。K-quant-only 模型省 `quantize_q8_0_into`；Q8_0-only 模型省 `quantize_row_q8_k_into`；异构模型按层省一半。Q8_0-only 模型还能省 `q8k_buf` 的写回带宽（≈ `n_embd/256 * 292B`，最大模型 4.6 KB / 推理上下文，写一次前向 ≈ 每 token 一次，可忽略）。
+- [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 当前 `Qwen35Model::from_source` 将量化权重复制为 `QTensorOwned`，并通过 `fuse_vstack` 生成 `ffn_gate_up`。这使加载期多一次整模型复制；同时原 gate/up 与拼接后的 fused weight 都常驻，FFN 相关权重会额外占用约一份 `gate + up` 大小的内存。
+  - **候选基线**：令 Qwen3.5 持有借用 GGUF/mmap 数据的权重；对同一 FFN 输入仅做一次 activation quantization，然后分别执行 `gate * q(x)` 与 `up * q(x)`。Q8_0 复用 `q8_buf + scale_buf`，K-quant 复用 `q8k_buf`。
+  - **预期差异**：该方案消除权重复制和重复 activation quantization，但仍有两次权重读取、两套 dot-product 及两次 matmul 调用。`fuse_vstack` 同样只量化一次，潜在收益在于一次调用/线程池调度、更大的行分块及连续布局；不减少总乘加或权重读取。
+  - **中期架构方向**：将“权重格式”与“存储所有权”分离，采用模型拥有 source 的混合存储，而非让 `ByteStorage<'a>` 生命周期传播到 `Qwen35Model` 与服务 API。建议形态为 `ByteStorage::{Mmap { backing: Arc<ModelBacking>, offset, len }, Owned(Vec<u8>)}`：普通 GGUF 权重由 `Mmap` 零拷贝读取，只有 `fuse_vstack`、转置、预打包或 GPU 上传等真实变换才创建 `Owned` 数据。这样模型可安全进入缓存、线程与异步任务（`'static`），同时避免为少量可变换权重复制整个模型。
+  - **推进条件与风险控制**：这是中期重构，不阻塞局部 FFN 优化。先测量现有 Qwen3.5 的加载时间与 RSS，确认权重复制是实际瓶颈；随后仅迁移 Qwen3.5，完成 logits/token parity、加载时间、峰值/常驻 RSS、prefill/decode 吞吐验证后，再扩展到其他模型。统一设计时 Q8_0 必须显式保存 `n_cols/n_rows`，不能再由总字节数反推 shape。
+  - **实施顺序**：(1) 拆分 prepare-activation 与 prepared-matmul API，并使 FFN gate/up 复用 prepared input；(2) 基准比较 borrowed-two-matmul 与 owned-vstack 的加载时间、RSS、decode tok/s、prefill tok/s；(3) 仅当两次调用的调度开销可测量地显著时，再考虑不复制权重的 `matmul_pair_prepared`。
+  - **验收**：两条路径 logits/token parity；报告模型加载时间、峰值/常驻 RSS、单 token decode 与 45-token prefill 吞吐。不要仅凭“融合 matmul”假设保留额外权重副本。
 - [ ] **Q6_K AVX2 精度 drift 修复** — `src/ops/quant/mod.rs:963` 的 `vec_dot_q6k_q8k_avx2` 在合成 4-block 测试上仍有 1 ULP drift(漂移在最后 1 bit 位)。Q4_K AVX2 同类问题已通过显式累加顺序修复,Q6_K 修复未完成。可能漂移源:
   - `_mm256_sub_epi32(sumi, q8sclsub)` 减法指令的顺序 vs scalar 的 per-element `aux32[l] += scale * q8 * (weight - 32)` 累加顺序
   - `_mm256_madd_epi16(scale_l, p16l)` 累加 2 个 i16 → 1 个 i32 的顺序 vs scalar 的 2 个独立 mul+add 累加
