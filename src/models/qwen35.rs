@@ -513,6 +513,7 @@ impl<'a> Qwen35Model<'a> {
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
                 softmax(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
+                scratch.attn_out_buf[out_base..out_base + n_embd_head].fill(0.0);
                 for s in 0..n_attend {
                     let v_row_base = il * v_len + s * v_dim + kv_h * n_embd_head;
                     let score = scratch.score_buf[s];
