@@ -556,42 +556,46 @@ impl<'a> VisionEncoder<'a> {
         let cfg = &self.config;
         let ps = cfg.patch_size;
         let n_embd = cfg.n_embd;
-        let n_patches_x = img_w / ps;
-        let n_patches_y = img_h / ps;
 
         if scratch.patch_weight_buf.is_empty() {
             scratch.patch_weight_buf = decode_f16_slice_to_f32(self.patch_embd_weight);
             scratch.patch_weight_1_buf = self.patch_embd_weight_1.map(|d| decode_f16_slice_to_f32(d));
         }
         let w0 = &scratch.patch_weight_buf;
-        let w1 = &scratch.patch_weight_1_buf;
+        let w1 = scratch.patch_weight_1_buf.as_deref();
 
-        for py in 0..n_patches_y {
-            for px in 0..n_patches_x {
-                let patch_idx = py * n_patches_x + px;
-                let out_off = patch_idx * n_embd;
-                for e in 0..n_embd {
-                    let mut sum0 = 0.0f32;
-                    let mut sum1 = 0.0f32;
-                    for c in 0..3usize {
-                        for ky in 0..ps {
-                            for kx in 0..ps {
-                                let pix_x = px * ps + kx;
-                                let pix_y = py * ps + ky;
-                                let pix_val = pixels[(pix_y * img_w + pix_x) * 3 + c];
-                                let w0_idx = kx + ky * ps + c * ps * ps + e * ps * ps * 3;
-                                sum0 += w0[w0_idx] * pix_val;
-                                if let Some(ref w1d) = w1 {
-                                    let w1_idx = kx + ky * ps + c * ps * ps + e * ps * ps * 3;
-                                    sum1 += w1d[w1_idx] * pix_val;
-                                }
-                            }
-                        }
-                    }
-                    scratch.patch_embd[out_off + e] = sum0 + sum1;
-                }
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::has_avx2_fma() && ps == 16 && n_embd % 8 == 0 {
+            if scratch.patch_weight_packed.is_empty() {
+                let patch_dim = 3 * ps * ps;
+                scratch.patch_weight_packed = repack_patch_weights(w0, n_embd, patch_dim);
+                scratch.patch_weight_1_packed = w1.map(|d| repack_patch_weights(d, n_embd, patch_dim));
             }
+            unsafe {
+                patch_embed_simd_avx2(
+                    pixels,
+                    img_w,
+                    img_h,
+                    &scratch.patch_weight_packed,
+                    scratch.patch_weight_1_packed.as_deref(),
+                    &mut scratch.patch_embd,
+                    ps,
+                    n_embd,
+                );
+            }
+            return;
         }
+
+        patch_embed_scalar(
+            pixels,
+            img_w,
+            img_h,
+            w0,
+            w1,
+            &mut scratch.patch_embd,
+            ps,
+            n_embd,
+        );
     }
 
     fn apply_position_embedding_merged(&self, merged: &mut [f32], n_patches_x: usize, n_patches_y: usize, n_embd: usize, merge: usize, pos_data: &[u8], pos_merged_buf: &mut [f32]) {
@@ -1192,6 +1196,8 @@ pub struct VisionScratchpad {
     pub residual: Vec<f32>,
     pub patch_weight_buf: Vec<f32>,
     pub patch_weight_1_buf: Option<Vec<f32>>,
+    pub patch_weight_packed: Vec<f32>,
+    pub patch_weight_1_packed: Option<Vec<f32>>,
     pub project_concat_buf: Vec<f32>,
     pub project_mm0_out: Vec<f32>,
     pub q8_buf: Vec<u8>,
@@ -1215,6 +1221,8 @@ impl VisionScratchpad {
             residual: Vec::new(),
             patch_weight_buf: Vec::new(),
             patch_weight_1_buf: None,
+            patch_weight_packed: Vec::new(),
+            patch_weight_1_packed: None,
             project_concat_buf: Vec::new(),
             project_mm0_out: Vec::new(),
             q8_buf: Vec::new(),
@@ -1594,6 +1602,137 @@ fn matmul_f32_single(weight: &[f32], input: &[f32], output: &mut [f32], in_dim: 
     }
 }
 
+fn patch_embed_scalar(
+    pixels: &[f32],
+    img_w: usize,
+    img_h: usize,
+    w0: &[f32],
+    w1: Option<&[f32]>,
+    output: &mut [f32],
+    ps: usize,
+    n_embd: usize,
+) {
+    let n_patches_x = img_w / ps;
+    let n_patches_y = img_h / ps;
+    let patch_dim = 3 * ps * ps;
+    for py in 0..n_patches_y {
+        for px in 0..n_patches_x {
+            let patch_idx = py * n_patches_x + px;
+            let out_off = patch_idx * n_embd;
+            for e in 0..n_embd {
+                let mut sum0 = 0.0f32;
+                let mut sum1 = 0.0f32;
+                let w0_row = &w0[e * patch_dim..e * patch_dim + patch_dim];
+                let w1_row = w1.map(|w| &w[e * patch_dim..e * patch_dim + patch_dim]);
+                for c in 0..3usize {
+                    for ky in 0..ps {
+                        for kx in 0..ps {
+                            let pix_x = px * ps + kx;
+                            let pix_y = py * ps + ky;
+                            let pix_val = pixels[(pix_y * img_w + pix_x) * 3 + c];
+                            let w_idx = c * ps * ps + ky * ps + kx;
+                            sum0 += w0_row[w_idx] * pix_val;
+                            if let Some(w1d) = w1_row {
+                                sum1 += w1d[w_idx] * pix_val;
+                            }
+                        }
+                    }
+                }
+                output[out_off + e] = sum0 + sum1;
+            }
+        }
+    }
+}
+
+fn repack_patch_weights(weights: &[f32], n_embd: usize, patch_dim: usize) -> Vec<f32> {
+    let mut packed = vec![0.0f32; patch_dim * n_embd];
+    for e in 0..n_embd {
+        for k in 0..patch_dim {
+            packed[k * n_embd + e] = weights[e * patch_dim + k];
+        }
+    }
+    packed
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn patch_embed_simd_avx2(
+    pixels: &[f32],
+    img_w: usize,
+    img_h: usize,
+    w0_packed: &[f32],
+    w1_packed: Option<&[f32]>,
+    output: &mut [f32],
+    ps: usize,
+    n_embd: usize,
+) {
+    use std::arch::x86_64::*;
+    let n_patches_x = img_w / ps;
+    let n_patches_y = img_h / ps;
+    let patch_dim = 3 * ps * ps;
+    let n_embd_8 = n_embd / 8;
+
+    for py in 0..n_patches_y {
+        for px in 0..n_patches_x {
+            let patch_idx = py * n_patches_x + px;
+            let out_off = patch_idx * n_embd;
+
+            let mut acc0: Vec<__m256> = vec![_mm256_setzero_ps(); n_embd_8];
+            let mut acc1: Vec<__m256> = if w1_packed.is_some() {
+                vec![_mm256_setzero_ps(); n_embd_8]
+            } else {
+                Vec::new()
+            };
+            let acc1_ptr = if acc1.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                acc1.as_mut_ptr()
+            };
+
+            for c in 0..3usize {
+                for ky in 0..ps {
+                    for kx in 0..ps {
+                        let pix_x = px * ps + kx;
+                        let pix_y = py * ps + ky;
+                        let pix_val = pixels[(pix_y * img_w + pix_x) * 3 + c];
+                        let pix_vec = _mm256_set1_ps(pix_val);
+                        let w_idx = c * ps * ps + ky * ps + kx;
+                        let w_row_base = w_idx * n_embd;
+                        let acc0_ptr_inner = acc0.as_mut_ptr();
+                        let w0_ptr = w0_packed.as_ptr().add(w_row_base);
+                        let w1_ptr = if w1_packed.is_some() {
+                            w1_packed.unwrap().as_ptr().add(w_row_base)
+                        } else {
+                            std::ptr::null()
+                        };
+                        let mut e = 0;
+                        while e < n_embd_8 {
+                            let w_vec = _mm256_loadu_ps(w0_ptr.add(e * 8));
+                            *acc0_ptr_inner.add(e) = _mm256_fmadd_ps(w_vec, pix_vec, *acc0_ptr_inner.add(e));
+                            if !w1_ptr.is_null() {
+                                let w1_vec = _mm256_loadu_ps(w1_ptr.add(e * 8));
+                                *acc1_ptr.add(e) = _mm256_fmadd_ps(w1_vec, pix_vec, *acc1_ptr.add(e));
+                            }
+                            e += 1;
+                        }
+                    }
+                }
+            }
+
+            for e in 0..n_embd_8 {
+                _mm256_storeu_ps(output.as_mut_ptr().add(out_off + e * 8), acc0[e]);
+            }
+            if !acc1_ptr.is_null() {
+                for e in 0..n_embd_8 {
+                    let existing = _mm256_loadu_ps(output.as_ptr().add(out_off + e * 8));
+                    let sum = _mm256_add_ps(existing, acc1[e]);
+                    _mm256_storeu_ps(output.as_mut_ptr().add(out_off + e * 8), sum);
+                }
+            }
+        }
+    }
+}
+
 fn matmul_f32_batch(weight: &[f32], input: &[f32], output: &mut [f32], in_dim: usize, out_dim: usize, n_tokens: usize) {
     let total_rows = n_tokens * out_dim;
     if total_rows >= 512 {
@@ -1854,6 +1993,151 @@ mod tests {
         vec_mad_f32(&mut out, &k, 0.5);
         for i in 0..13 {
             close(out[i], 0.25 + 0.5 * k[i]);
+        }
+    }
+
+    fn make_patch_embed_inputs(
+        img_w: usize,
+        img_h: usize,
+        ps: usize,
+        n_embd: usize,
+        seed: u64,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let patch_dim = 3 * ps * ps;
+        let mut pixels: Vec<f32> = vec![0.0; img_w * img_h * 3];
+        let mut weights: Vec<f32> = vec![0.0; n_embd * patch_dim];
+        let mut state = seed.wrapping_add(1);
+        for v in pixels.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = ((state >> 33) as i32 as f32) / (1u32 << 31) as f32 * 0.5;
+        }
+        for v in weights.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = ((state >> 33) as i32 as f32) / (1u32 << 31) as f32 * 0.1;
+        }
+        (pixels, weights)
+    }
+
+    #[test]
+    fn patch_embed_scalar_matches_naive_loop() {
+        let (img_w, img_h) = (32, 32);
+        let ps = 16;
+        let n_embd = 64;
+        let n_patches = (img_w / ps) * (img_h / ps);
+        let (pixels, weights) = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 7);
+        let mut naive = vec![0.0f32; n_patches * n_embd];
+        let patch_dim = 3 * ps * ps;
+        for py in 0..img_h / ps {
+            for px in 0..img_w / ps {
+                let out_off = (py * img_w / ps + px) * n_embd;
+                for e in 0..n_embd {
+                    let mut sum = 0.0f32;
+                    for c in 0..3usize {
+                        for ky in 0..ps {
+                            for kx in 0..ps {
+                                let pix_val = pixels[((py * ps + ky) * img_w + (px * ps + kx)) * 3 + c];
+                                let w_idx = e * patch_dim + c * ps * ps + ky * ps + kx;
+                                sum += weights[w_idx] * pix_val;
+                            }
+                        }
+                    }
+                    naive[out_off + e] = sum;
+                }
+            }
+        }
+        let mut out = vec![0.0f32; n_patches * n_embd];
+        patch_embed_scalar(&pixels, img_w, img_h, &weights, None, &mut out, ps, n_embd);
+        for (a, b) in naive.iter().zip(out.iter()) {
+            assert_eq!(*a, *b, "scalar mismatch: naive={a} out={b}");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn patch_embed_simd_matches_scalar() {
+        for &(img_dim, ps, n_embd) in &[(32usize, 16usize, 64usize), (64, 16, 128), (128, 16, 256)] {
+            let (img_w, img_h) = (img_dim, img_dim);
+            let n_patches = (img_w / ps) * (img_h / ps);
+            let (pixels, weights) = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 11);
+            let mut scalar_out = vec![0.0f32; n_patches * n_embd];
+            patch_embed_scalar(&pixels, img_w, img_h, &weights, None, &mut scalar_out, ps, n_embd);
+            let patch_dim = 3 * ps * ps;
+            let packed = repack_patch_weights(&weights, n_embd, patch_dim);
+            let mut simd_out = vec![0.0f32; n_patches * n_embd];
+            unsafe {
+                patch_embed_simd_avx2(
+                    &pixels,
+                    img_w,
+                    img_h,
+                    &packed,
+                    None,
+                    &mut simd_out,
+                    ps,
+                    n_embd,
+                );
+            }
+            let mut max_abs = 0.0f32;
+            let mut max_rel = 0.0f32;
+            for (a, b) in scalar_out.iter().zip(simd_out.iter()) {
+                max_abs = max_abs.max((*a - *b).abs());
+                let denom = a.abs().max(*b).max(1e-6);
+                max_rel = max_rel.max(((*a - *b).abs()) / denom);
+            }
+            println!("img={img_dim} ps={ps} n_embd={n_embd}: max_abs_err={max_abs:.3e} max_rel_err={max_rel:.3e}");
+            assert!(
+                max_abs < 1e-2,
+                "img={img_dim} ps={ps} n_embd={n_embd}: max_abs_err={max_abs}"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn patch_embed_simd_with_w1_matches_scalar() {
+        let (img_w, img_h) = (32, 32);
+        let ps = 16;
+        let n_embd = 64;
+        let patch_dim = 3 * ps * ps;
+        let n_patches = (img_w / ps) * (img_h / ps);
+        let (pixels, w0) = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 23);
+        let w1 = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 29).1;
+        let mut scalar_out = vec![0.0f32; n_patches * n_embd];
+        patch_embed_scalar(&pixels, img_w, img_h, &w0, Some(&w1), &mut scalar_out, ps, n_embd);
+        let p0 = repack_patch_weights(&w0, n_embd, patch_dim);
+        let p1 = repack_patch_weights(&w1, n_embd, patch_dim);
+        let mut simd_out = vec![0.0f32; n_patches * n_embd];
+        unsafe {
+            patch_embed_simd_avx2(
+                &pixels,
+                img_w,
+                img_h,
+                &p0,
+                Some(&p1),
+                &mut simd_out,
+                ps,
+                n_embd,
+            );
+        }
+        let mut max_abs = 0.0f32;
+        for (a, b) in scalar_out.iter().zip(simd_out.iter()) {
+            max_abs = max_abs.max((*a - *b).abs());
+        }
+        assert!(max_abs < 1e-2, "max_abs_err with w1={max_abs}");
+    }
+
+    #[test]
+    fn repack_patch_weights_round_trip() {
+        let patch_dim = 3 * 16 * 16;
+        let n_embd = 64;
+        let mut w = vec![0.0f32; n_embd * patch_dim];
+        for (i, v) in w.iter_mut().enumerate() {
+            *v = i as f32 * 0.01;
+        }
+        let packed = repack_patch_weights(&w, n_embd, patch_dim);
+        for e in 0..n_embd {
+            for k in 0..patch_dim {
+                assert_eq!(packed[k * n_embd + e], w[e * patch_dim + k]);
+            }
         }
     }
 }

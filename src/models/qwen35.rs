@@ -1,7 +1,7 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::QuantizedTensor;
-use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope};
+use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::ops::quant::{self, BlockQ8K, QK_K};
@@ -512,20 +512,16 @@ impl<'a> Qwen35Model<'a> {
                 }
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
                 softmax(&mut scratch.score_buf[..n_padded]);
-                scratch.attention_value_buf[n_attend..n_padded].fill(0.0);
-                for d in 0..n_embd_head {
-                    for s in 0..n_attend {
-                        scratch.attention_value_buf[s] = v_cache[
-                            il * v_len + s * v_dim + kv_h * n_embd_head + d
-                        ];
-                    }
-                    scratch.attn_out_buf[t * n_embd_heads_total + h * n_embd_head + d] =
-                        attention_value_f32(
-                            &scratch.attention_value_buf[..n_padded],
-                            &scratch.score_buf[..n_padded],
-                            n_attend,
-                            n_padded,
-                        );
+                let out_base = t * n_embd_heads_total + h * n_embd_head;
+                for s in 0..n_attend {
+                    let v_row_base = il * v_len + s * v_dim + kv_h * n_embd_head;
+                    let score = scratch.score_buf[s];
+                    let v_row = &v_cache[v_row_base..v_row_base + n_embd_head];
+                    vec_mad_f32(
+                        &mut scratch.attn_out_buf[out_base..out_base + n_embd_head],
+                        v_row,
+                        score,
+                    );
                 }
             }
         }
