@@ -19,7 +19,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
-use crate::ops::kernel::Kernel;
+use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
     rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace,
@@ -38,13 +38,13 @@ pub struct Qwen3LayerWeights<'a> {
     pub ffn_norm: Vec<f32>,
     pub q_norm: Option<Vec<f32>>,
     pub k_norm: Option<Vec<f32>>,
-    pub wq: Box<dyn Kernel + 'a>,
-    pub wk: Box<dyn Kernel + 'a>,
-    pub wv: Box<dyn Kernel + 'a>,
-    pub wo: Box<dyn Kernel + 'a>,
-    pub w_gate: Box<dyn Kernel + 'a>,
-    pub w_up: Box<dyn Kernel + 'a>,
-    pub w_down: Box<dyn Kernel + 'a>,
+    pub wq: Weight<'a>,
+    pub wk: Weight<'a>,
+    pub wv: Weight<'a>,
+    pub wo: Weight<'a>,
+    pub w_gate: Weight<'a>,
+    pub w_up: Weight<'a>,
+    pub w_down: Weight<'a>,
 }
 
 pub fn get_f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected_len: usize) -> Vec<f32> {
@@ -158,69 +158,48 @@ pub fn run_inference(
             } else {
                 None
             },
-            wq: {
-                let info = source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd,
-                    n_embd_q,
-                ).into_kernel()
-            },
-            wk: {
-                let info = source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd,
-                    n_embd_gqa,
-                ).into_kernel()
-            },
-            wv: {
-                let info = source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd,
-                    n_embd_gqa,
-                ).into_kernel()
-            },
-            wo: {
-                let info = source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd_q,
-                    n_embd,
-                ).into_kernel()
-            },
-            w_gate: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd,
-                    n_ff,
-                ).into_kernel()
-            },
-            w_up: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_embd,
-                    n_ff,
-                ).into_kernel()
-            },
-            w_down: {
-                let info = source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap();
-                crate::ops::kernel::QuantizedTensor::from_bytes(
-                    source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
-                    info.ggml_type,
-                    n_ff,
-                    n_embd,
-                ).into_kernel()
-            },
+            wq: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_q,
+            )),
+            wk: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_gqa,
+            )),
+            wv: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_gqa,
+            )),
+            wo: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap().ggml_type,
+                n_embd_q,
+                n_embd,
+            )),
+            w_gate: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_ff,
+            )),
+            w_up: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_ff,
+            )),
+            w_down: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap().ggml_type,
+                n_ff,
+                n_embd,
+            )),
         })
         .collect();
 
@@ -364,9 +343,9 @@ pub fn run_inference(
                 let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
                 let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
 
-                lw.wq.forward_prepared(input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth);
-                lw.wk.forward_prepared(input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.forward_prepared(input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wq.kernel.forward_prepared(input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth);
+                lw.wk.kernel.forward_prepared(input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth);
+                lw.wv.kernel.forward_prepared(input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth);
             });
 
             {
@@ -518,7 +497,7 @@ pub fn run_inference(
                 let sc = raw_parts!(sc, n_embd_q / 32);
                 let q8k = raw_parts!(q8k, n_embd_q / 256);
                 let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.forward_prepared(input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth);
+                lw.wo.kernel.forward_prepared(input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
@@ -544,8 +523,8 @@ pub fn run_inference(
                 let q8k = raw_parts!(q8k, n_embd / 256);
                 let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
                 let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.forward_prepared(input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.forward_prepared(input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth);
+                lw.w_gate.kernel.forward_prepared(input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth);
+                lw.w_up.kernel.forward_prepared(input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth);
 
                 let rows_per = n_ff / nth;
                 let r_start = ith * rows_per;
@@ -571,7 +550,7 @@ pub fn run_inference(
                 let sc = raw_parts!(sc, n_ff / 32);
                 let q8k = raw_parts!(q8k, n_ff / 256);
                 let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.forward_prepared(input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth);
+                lw.w_down.kernel.forward_prepared(input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
@@ -601,14 +580,14 @@ pub fn run_inference(
             let sc = scale_buf[..n_embd / 32].as_ptr();
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
             let input = normed.as_ptr();
-            let output_pw = crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab);
+            let output_pw = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab));
             pool.compute(move |ith: usize, nth: usize| {
                 let input = raw_parts!(input, n_embd);
                 let q8 = raw_parts!(q8, n_embd);
                 let sc = raw_parts!(sc, n_embd / 32);
                 let q8k = raw_parts!(q8k, n_embd / 256);
                 let logits = slice_from_mut!(logits_ptr, vocab);
-                output_pw.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
+                output_pw.kernel.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
             });
             t_logits += t0.elapsed().as_secs_f64();
         }

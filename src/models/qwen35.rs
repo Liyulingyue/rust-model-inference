@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::kernel::QuantizedTensor;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{attention_value_f32, dot_f32, softmax_inplace, rope_neox, rope_mrope, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -71,11 +71,11 @@ pub struct Qwen35Model<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Vec<f32>,
     pub output_norm: Vec<f32>,
-    pub output_weight: QuantizedTensor<'a>,
+    pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
 }
 
-fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<QuantizedTensor<'a>> {
+fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<Weight<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
     let n_cols = ti.dims[0] as usize;
@@ -84,7 +84,7 @@ fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Optio
     match ti.ggml_type {
         GGMLType::F32 | GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0
         | GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
-            Some(QuantizedTensor::from_bytes(data, ti.ggml_type, n_cols, n_rows))
+            Some(Weight::from_quantized(QuantizedTensor::from_bytes(data, ti.ggml_type, n_cols, n_rows)))
         }
         _ => {
             eprintln!("WARNING: unsupported quant type {:?} for tensor {}", ti.ggml_type, name);
@@ -120,24 +120,24 @@ fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<V
 pub struct Qwen35LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub attn_post_norm: Vec<f32>,
-    pub wq: Option<QuantizedTensor<'a>>,
-    pub wk: Option<QuantizedTensor<'a>>,
-    pub wv: Option<QuantizedTensor<'a>>,
-    pub wo: Option<QuantizedTensor<'a>>,
+    pub wq: Option<Weight<'a>>,
+    pub wk: Option<Weight<'a>>,
+    pub wv: Option<Weight<'a>>,
+    pub wo: Option<Weight<'a>>,
     pub attn_q_norm: Option<Vec<f32>>,
     pub attn_k_norm: Option<Vec<f32>>,
-    pub wqkv: Option<QuantizedTensor<'a>>,
-    pub wqkv_gate: Option<QuantizedTensor<'a>>,
+    pub wqkv: Option<Weight<'a>>,
+    pub wqkv_gate: Option<Weight<'a>>,
     pub ssm_conv1d: Option<Vec<f32>>,
     pub ssm_dt: Option<Vec<f32>>,
     pub ssm_a: Option<Vec<f32>>,
-    pub ssm_beta: Option<QuantizedTensor<'a>>,
-    pub ssm_alpha: Option<QuantizedTensor<'a>>,
+    pub ssm_beta: Option<Weight<'a>>,
+    pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
-    pub ssm_out: Option<QuantizedTensor<'a>>,
-    pub ffn_gate: QuantizedTensor<'a>,
-    pub ffn_up: QuantizedTensor<'a>,
-    pub ffn_down: QuantizedTensor<'a>,
+    pub ssm_out: Option<Weight<'a>>,
+    pub ffn_gate: Weight<'a>,
+    pub ffn_up: Weight<'a>,
+    pub ffn_down: Weight<'a>,
 }
 
 impl<'a> Qwen35Model<'a> {
@@ -352,6 +352,7 @@ impl<'a> Qwen35Model<'a> {
             &mut scratch.q8_buf,
             &mut scratch.scale_buf,
             &mut scratch.matmul_out,
+            cfg.vocab_size,
             pool,
         );
         let mut result = vec![0.0f32; cfg.vocab_size];
@@ -401,11 +402,11 @@ impl<'a> Qwen35Model<'a> {
             let inp_off = t * n_embd;
             let t0 = std::time::Instant::now();
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wq.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wq.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, q_dim, pool);
             scratch.q_buf[t * q_dim..t * q_dim + q_dim].copy_from_slice(&scratch.matmul_out[..q_dim]);
-            wk.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wk.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, k_dim, pool);
             scratch.k_buf[t * k_dim..t * k_dim + k_dim].copy_from_slice(&scratch.matmul_out[..k_dim]);
-            wv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, v_dim, pool);
             scratch.v_buf[t * v_dim..t * v_dim + v_dim].copy_from_slice(&scratch.matmul_out[..v_dim]);
             t_qkv += t0.elapsed().as_secs_f64();
         }
@@ -542,7 +543,7 @@ impl<'a> Qwen35Model<'a> {
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
             let wo_input = &scratch.attn_out_buf[t * n_embd_heads_total..t * n_embd_heads_total + n_embd_heads_total];
-            wo.quantize_and_matmul_with_scratch(wo_input, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wo.quantize_and_matmul_with_scratch(wo_input, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }        t_wo += t0.elapsed().as_secs_f64();
         if profile {
@@ -589,16 +590,16 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let inp_off = t * n_embd;
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wqkv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wqkv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, conv_dim, pool);
             scratch.qkv_buf[t * conv_dim..t * conv_dim + conv_dim].copy_from_slice(&scratch.matmul_out[..conv_dim]);
-            wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, value_dim, pool);
             scratch.z_buf[t * value_dim..t * value_dim + value_dim].copy_from_slice(&scratch.matmul_out[..value_dim]);
-            ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            let n_beta = ssm_beta.n_rows().min(num_v_heads);
+            ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, num_v_heads, pool);
+            let n_beta = num_v_heads;
             scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta].copy_from_slice(&scratch.matmul_out[..n_beta]);
             for v in 0..num_v_heads { scratch.beta_buf[t * num_v_heads + v] = sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]); }
-            ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            let n_alpha = ssm_alpha.n_rows().min(num_v_heads);
+            ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, num_v_heads, pool);
+            let n_alpha = num_v_heads;
             scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha].copy_from_slice(&scratch.matmul_out[..n_alpha]);
             for v in 0..num_v_heads {
                 let a_biased = scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
@@ -750,7 +751,7 @@ impl<'a> Qwen35Model<'a> {
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
             let inp = &scratch.attn_out_buf[t * value_dim..][..value_dim];
-            ssm_out.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            ssm_out.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
         let t_out_matmul = t0.elapsed().as_secs_f64();
@@ -767,9 +768,9 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let inp = &hidden[off..off + n_embd];
-            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_ff, pool);
             scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_ff, pool);
             scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
         }
 
@@ -777,7 +778,7 @@ impl<'a> Qwen35Model<'a> {
 
         for t in 0..n_tokens {
             let down_inp = &scratch.ffn_up_buf[t * n_ff..][..n_ff];
-            layer.ffn_down.quantize_and_matmul_with_scratch(down_inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            layer.ffn_down.quantize_and_matmul_with_scratch(down_inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
             scratch.buf[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
     }
@@ -792,18 +793,18 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let t0 = std::time::Instant::now();
-            let gate_out = layer.ffn_gate.matmul(&hidden[off..off + n_embd]);
+            let gate_out = layer.ffn_gate.matmul(&hidden[off..off + n_embd], n_ff);
             t_gate += t0.elapsed().as_secs_f64();
             scratch.ffn_gate_buf[t * n_ff..t * n_ff + gate_out.len().min(n_ff)].copy_from_slice(&gate_out[..gate_out.len().min(n_ff)]);
             let t0 = std::time::Instant::now();
-            let up_out = layer.ffn_up.matmul(&hidden[off..off + n_embd]);
+            let up_out = layer.ffn_up.matmul(&hidden[off..off + n_embd], n_ff);
             t_up += t0.elapsed().as_secs_f64();
             scratch.ffn_up_buf[t * n_ff..t * n_ff + up_out.len().min(n_ff)].copy_from_slice(&up_out[..up_out.len().min(n_ff)]);
         }
         crate::ops::silu_mul_approx_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
         for t in 0..n_tokens {
             let t0 = std::time::Instant::now();
-            let down_out = layer.ffn_down.matmul(&scratch.ffn_up_buf[t * n_ff..][..n_ff]);
+            let down_out = layer.ffn_down.matmul(&scratch.ffn_up_buf[t * n_ff..][..n_ff], n_embd);
             t_down += t0.elapsed().as_secs_f64();
             scratch.buf[t * n_embd..t * n_embd + down_out.len().min(n_embd)].copy_from_slice(&down_out[..down_out.len().min(n_embd)]);
         }
@@ -1019,7 +1020,7 @@ mod tests {
             key_length: 2,
             value_length: 2,
         };
-        let weight = |data: Vec<f32>, _n_rows| QuantizedTensor::F32(data);
+        let weight = |data: Vec<f32>, _n_rows| Weight::from_quantized(QuantizedTensor::F32(data));
         let identity = || weight(vec![1.0, 0.0, 0.0, 1.0], 2);
         let layer = Qwen35LayerWeights {
             attn_norm: vec![1.0; 2],
