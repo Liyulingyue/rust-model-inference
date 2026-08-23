@@ -31,6 +31,7 @@
 //! - `static_q8_tensor()` 会因 `info.ggml_type != GGMLType::Q8_0` 报错
 //! - 因为它硬编码期望 Q8_0，不识别 GGUF 文件中的实际量化类型
 
+use crate::app::cli::resolve_thread_count;
 use crate::core::loader::{
     check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs,
 };
@@ -40,10 +41,15 @@ use crate::core::tensor::{
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
+use crate::prompt::{
+    build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage,
+};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use std::io::{self, Write};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen3Rope {
@@ -1189,6 +1195,92 @@ q8_buf: vec![0; max_n_in],
             prompt_tokens: n_prompt,
         })
     }
+}
+
+pub fn run_shared_inference(
+    source: Arc<dyn TensorSource>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    thinking: bool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    let available_threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(4);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        available_threads,
+    )));
+    let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
+    let arch = model.config().architecture.clone();
+    let input_tokens = if arch == "hunyuan-dense" {
+        build_hunyuan_chat_prompt(
+            &tokenizer,
+            &[HunyuanMessage {
+                role: "user",
+                content: prompt,
+            }],
+            true,
+        )?
+    } else {
+        build_qwen_chat_prompt(
+            &tokenizer,
+            &[QwenMessage {
+                role: "user",
+                content: prompt,
+            }],
+            thinking,
+        )?
+    };
+    let positions = qwen_text_positions(input_tokens.len());
+    println!(
+        "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
+        model.config().architecture,
+        model.config().n_embd,
+        model.config().n_layer,
+        model.config().n_head,
+        model.config().n_head_kv,
+        model.config().n_ff,
+        started.elapsed().as_millis(),
+    );
+    eprintln!("compute pool: {} threads", model.pool().n_threads());
+    println!("Prompt: {} ({} tokens)", prompt, input_tokens.len());
+    print!("Output: ");
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let inference_started = Instant::now();
+    let generation = model.generate(
+        Qwen3Input {
+            token_ids: &input_tokens,
+            positions: &positions,
+            embeddings: None,
+        },
+        Qwen3GenerateOptions {
+            max_new_tokens: max_tokens,
+            temperature,
+        },
+    )?;
+    print!("{}", generation.text);
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let elapsed_ms = inference_started.elapsed().as_millis();
+    let tokens_per_second = if elapsed_ms > 0 {
+        generation.token_ids.len() as f64 / elapsed_ms as f64 * 1000.0
+    } else {
+        0.0
+    };
+    println!();
+    println!(
+        "[end-to-end: {} output tokens in {}ms | {:.1} tok/s]",
+        generation.token_ids.len(),
+        elapsed_ms,
+        tokens_per_second,
+    );
+    Ok(())
 }
 
 #[cfg(test)]

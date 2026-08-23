@@ -90,82 +90,9 @@ pub fn run_shared_inference(
     n_threads_arg: usize,
     thinking: bool,
 ) -> Result<(), String> {
-    let started = Instant::now();
-    let tokenizer = std::sync::Arc::new(
-        BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
-            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
-    );
-    let available_threads = std::thread::available_parallelism()
-        .map(|threads| threads.get())
-        .unwrap_or(4);
-    let pool = std::sync::Arc::new(ComputePool::new(resolve_thread_count(
-        n_threads_arg,
-        available_threads,
-    )));
-    let model = Qwen3Model::from_source(source, std::sync::Arc::clone(&tokenizer), pool)?;
-    let arch = model.config().architecture.clone();
-    let input_tokens = if arch == "hunyuan-dense" {
-        build_hunyuan_chat_prompt(
-            &tokenizer,
-            &[HunyuanMessage {
-                role: "user",
-                content: prompt,
-            }],
-            true,
-        )?
-    } else {
-        build_qwen_chat_prompt(
-            &tokenizer,
-            &[QwenMessage {
-                role: "user",
-                content: prompt,
-            }],
-            thinking,
-        )?
-    };
-    let positions = qwen_text_positions(input_tokens.len());
-    println!(
-        "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
-        model.config().architecture,
-        model.config().n_embd,
-        model.config().n_layer,
-        model.config().n_head,
-        model.config().n_head_kv,
-        model.config().n_ff,
-        started.elapsed().as_millis(),
-    );
-    eprintln!("compute pool: {} threads", model.pool().n_threads());
-    println!("Prompt: {} ({} tokens)", prompt, input_tokens.len());
-    print!("Output: ");
-    io::stdout().flush().map_err(|error| error.to_string())?;
-    let inference_started = Instant::now();
-    let generation = model.generate(
-        Qwen3Input {
-            token_ids: &input_tokens,
-            positions: &positions,
-            embeddings: None,
-        },
-        Qwen3GenerateOptions {
-            max_new_tokens: max_tokens,
-            temperature,
-        },
-    )?;
-    print!("{}", generation.text);
-    io::stdout().flush().map_err(|error| error.to_string())?;
-    let elapsed_ms = inference_started.elapsed().as_millis();
-    let tokens_per_second = if elapsed_ms > 0 {
-        generation.token_ids.len() as f64 / elapsed_ms as f64 * 1000.0
-    } else {
-        0.0
-    };
-    println!();
-    println!(
-        "[end-to-end: {} output tokens in {}ms | {:.1} tok/s]",
-        generation.token_ids.len(),
-        elapsed_ms,
-        tokens_per_second,
-    );
-    Ok(())
+    crate::models::qwen3_multimodal::run_shared_inference(
+        source, prompt, max_tokens, temperature, n_threads_arg, thinking,
+    )
 }
 
 pub fn inject_vision_embeddings(
