@@ -1,10 +1,7 @@
-﻿use crate::app::cli::{resolve_thread_count, per_second, inference_step_budget, KvFormat};
+﻿use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::models::qwen3::run_inference as qwen3_run_inference;
-use crate::{slice_from_mut, slice_from_ref, raw_parts};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::core::loader::model_config_from_source;
-use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
+use crate::core::tensor::TensorSource;
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
 use crate::models::qwen3_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};

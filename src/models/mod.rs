@@ -2,6 +2,7 @@ pub mod asr;
 pub mod clip_config;
 pub mod diffusion;
 pub mod qwen3;
+pub mod qwen3_embedding;
 pub mod qwen3_multimodal;
 pub mod qwen3_multimodal_text_encode;
 pub mod qwen3a;
