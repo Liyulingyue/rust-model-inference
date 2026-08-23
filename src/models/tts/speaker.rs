@@ -575,16 +575,23 @@ impl Qwen3TtsSpeakerEncoder {
         if mel.frames == 0 || mel.values.len() != 128 * mel.frames {
             return Err("speaker Mel shape mismatch".into());
         }
+        eprintln!("  [speaker] stem.forward start, frames={}", mel.frames);
         let mut current = self.stem.forward(&mel.values, mel.frames)?;
+        eprintln!("  [speaker] stem.forward done, current.len={}", current.len());
         relu_inplace(&mut current);
         let mut block_outputs = Vec::with_capacity(1536 * mel.frames);
-        for block in &self.blocks {
+        for (i, block) in self.blocks.iter().enumerate() {
+            eprintln!("  [speaker] block[{}].forward start", i);
             current = block.forward(&current, mel.frames)?;
+            eprintln!("  [speaker] block[{}].forward done", i);
             block_outputs.extend_from_slice(&current);
         }
+        eprintln!("  [speaker] mfa.forward start");
         let mut mfa = self.mfa.forward(&block_outputs, mel.frames)?;
+        eprintln!("  [speaker] mfa.forward done");
         relu_inplace(&mut mfa);
 
+        eprintln!("  [speaker] computing context (1536 channels)");
         let mut context = vec![0.0; 4608 * mel.frames];
         for channel in 0..1536 {
             let row = &mfa[channel * mel.frames..(channel + 1) * mel.frames];
@@ -602,15 +609,23 @@ impl Qwen3TtsSpeakerEncoder {
             context[(1536 + channel) * mel.frames..(1537 + channel) * mel.frames].fill(mean as f32);
             context[(3072 + channel) * mel.frames..(3073 + channel) * mel.frames].fill(std);
         }
+        eprintln!("  [speaker] asp_tdnn.forward start");
         let mut attention = self.asp_tdnn.forward(&context, mel.frames)?;
+        eprintln!("  [speaker] asp_tdnn.forward done");
         relu_inplace(&mut attention);
         for value in &mut attention {
             *value = value.tanh();
         }
+        eprintln!("  [speaker] asp_attn.forward start");
         attention = self.asp_attn.forward(&attention, mel.frames)?;
+        eprintln!("  [speaker] asp_attn.forward done");
+        eprintln!("  [speaker] softmax_rows start");
         softmax_rows(&mut attention, 1536, mel.frames)?;
+        eprintln!("  [speaker] weighted_stats start");
         let statistics = weighted_stats(&mfa, &attention, 1536, mel.frames)?;
+        eprintln!("  [speaker] projection.forward start");
         let embedding = self.projection.forward(&statistics, 1)?;
+        eprintln!("  [speaker] projection.forward done");
         if embedding.len() != 2048 || embedding.iter().any(|value| !value.is_finite()) {
             return Err("speaker embedding must contain 2048 finite values".into());
         }
