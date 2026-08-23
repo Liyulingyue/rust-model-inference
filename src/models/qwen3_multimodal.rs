@@ -19,7 +19,7 @@
 //! main.rs -> app::run_qwen3vl / run_asr / run_tts
 //!   -> Qwen3Model::from_source()
 //!   -> Qwen3Model::text_encode()
-//!   -> qwen3_text_encode::text_encode()
+//!   -> qwen3_multimodal_text_encode::text_encode()
 //! ```
 //! - 使用 `static_q8_tensor()` 强制 `GGMLType::Q8_0` 加载权重
 //! - **仅支持 Q8_0 量化**，不支持 Q4_K/Q6_K 等格式
@@ -434,7 +434,7 @@ impl Qwen3Model {
     }
 
     pub fn text_encode(&self, token_ids: &[u32], positions: &[[usize; 4]]) -> Result<Vec<f32>, String> {
-        crate::models::qwen3_text_encode::text_encode(self, token_ids, positions)
+        crate::models::qwen3_multimodal_text_encode::text_encode(self, token_ids, positions)
     }
 
     pub fn generate(
