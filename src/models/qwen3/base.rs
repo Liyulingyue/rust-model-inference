@@ -439,6 +439,20 @@ pub fn run_inference_tokens(
                 x[i] += attn_proj[i];
             }
 
+            // FFN — uses `kernel.forward_prepared` with `ExecutionScratchpad`-managed
+            // buffers instead of `quantize_and_matmul_with_scratch`.  This enables
+            // two optimizations:
+            //
+            // 1. **Fused gate+up**: both projections share the same quantized input
+            //    and run inside a single `pool.compute` call, avoiding a second
+            //    round of quantization.
+            //
+            // 2. **Buffer reuse**: `gate_buf / up_buf / down_buf` are allocated once
+            //    in `ExecutionScratchpad` and reused across every token position.
+            //
+            // Contrast with embedding.rs which processes each token independently
+            // and uses `quantize_and_matmul_with_scratch` — a natural fit when there
+            // is no pre-allocated scratch context.
             let t0 = Instant::now();
             rms_norm(x, &lw.ffn_norm, normed, eps);
             quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);

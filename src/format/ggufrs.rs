@@ -1,6 +1,6 @@
 ﻿use crate::core::loader::{ByteReader, GGUFLoader};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
-use crate::models::qwen3a::model::validate_qwen3a_source;
+use crate::models::qwen3::qwen3a::model::validate_qwen3a_source;
 use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,6 +1,7 @@
 pub mod base;
 pub mod embedding;
 pub mod hunyuan;
+pub mod qwen3a;
 pub mod skeleton;
 
 pub use base::{run_inference, run_inference_tokens};

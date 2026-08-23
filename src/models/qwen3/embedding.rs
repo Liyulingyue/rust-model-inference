@@ -81,6 +81,25 @@ fn attention_key_end(query: usize, n_tokens: usize, causal: bool) -> usize {
     }
 }
 
+/// FFN matmul for embedding extraction.
+///
+/// Uses `Weight::quantize_and_matmul_with_scratch` instead of the
+/// `ExecutionScratchpad` + manual quantization path in base.rs.  This is
+/// because embedding has no pre-allocated scratch buffers and each token
+/// position processes independently — the "with scratch" helper is a natural
+/// fit for the per-row quantization → matmul → silu → down pattern.
+///
+/// Architecture (per token row):
+///   1. quantize_and_matmul(gate) → gate_buf   (quantizes input → matmul)
+///   2. quantize_and_matmul(up)   → up_buf     (same quantized input, different weight)
+///   3. silu_mul(gate_buf, up_buf)               (in-place SiLU gating)
+///   4. quantize_and_matmul(down)  → down_buf   (quantizes gate*up result → matmul)
+///   5. residual += down_buf
+///
+/// Contrast with base.rs: there the FFN gate+up share one quantized input and
+/// run fused inside a single `pool.compute` call, then SILU, then down-projection
+/// in a second `pool.compute` call — enabled by `ExecutionScratchpad`'s
+/// pre-allocated reusable buffers.
 #[allow(clippy::too_many_arguments)]
 fn apply_embedding_ffn_typed(
     hidden: &mut [f32],
