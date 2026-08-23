@@ -11,12 +11,12 @@ pub fn exp_inplace(values: &mut [f32]) {
 pub fn exp_approx_inplace(values: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     if crate::ops::has_avx2_fma() {
-        unsafe { exp_approx_avx2_inplace(values) };
+        unsafe { exp_approx_inplace_avx2(values) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if crate::ops::has_neon() {
-        unsafe { exp_approx_neon_inplace(values) };
+        unsafe { exp_approx_inplace_neon(values) };
         return;
     }
     exp_inplace(values);
@@ -24,7 +24,7 @@ pub fn exp_approx_inplace(values: &mut [f32]) {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn exp_approx_avx2_inplace(values: &mut [f32]) {
+unsafe fn exp_approx_inplace_avx2(values: &mut [f32]) {
     use std::arch::x86_64::*;
 
     let mut i = 0;
@@ -80,7 +80,7 @@ pub(crate) unsafe fn exp_approx_avx2(
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn exp_approx_neon_inplace(values: &mut [f32]) {
+unsafe fn exp_approx_inplace_neon(values: &mut [f32]) {
     use std::arch::aarch64::*;
 
     let mut i = 0;

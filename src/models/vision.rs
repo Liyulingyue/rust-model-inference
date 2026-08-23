@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
+use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax, vec_mad_f32, vec_add, vec_add_into, gelu_approx_inplace};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,7 +923,7 @@ impl<'a> VisionEncoder<'a> {
         t_ln2_ffn = t_ln2_start.elapsed().as_secs_f64();
 
         let t_act_start = std::time::Instant::now();
-        gelu_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
+        gelu_approx_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
         t_act = t_act_start.elapsed().as_secs_f64();
 
         let t_ffn_down_start = std::time::Instant::now();
@@ -1039,7 +1039,7 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        crate::ops::gelu_inplace(&mut mm0_out[..n_projected * merged_embd]);
+        crate::ops::gelu_approx_inplace(&mut mm0_out[..n_projected * merged_embd]);
 
         if let Some(ref pc) = self.precomputed {
             for t in 0..n_projected {

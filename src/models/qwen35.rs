@@ -630,7 +630,7 @@ impl<'a> Qwen35Model<'a> {
                 }
                 scratch.qkv_buf[qkv_off + c] = conv_val;
             }
-            crate::ops::silu_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
+            crate::ops::silu_approx_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -733,7 +733,7 @@ impl<'a> Qwen35Model<'a> {
                 crate::ops::rms_norm_inplace(&mut scratch.attn_out_buf[off..off + head_v_dim], ssm_norm_w, eps);
             }
             let z_off = t * value_dim;
-            crate::ops::silu_mul_inplace(&scratch.z_buf[z_off..z_off + value_dim], &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim]);
+            crate::ops::silu_mul_approx_inplace(&scratch.z_buf[z_off..z_off + value_dim], &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim]);
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -773,7 +773,7 @@ impl<'a> Qwen35Model<'a> {
             scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
         }
 
-        crate::ops::silu_mul_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
+        crate::ops::silu_mul_approx_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
 
         for t in 0..n_tokens {
             let down_inp = &scratch.ffn_up_buf[t * n_ff..][..n_ff];
@@ -800,7 +800,7 @@ impl<'a> Qwen35Model<'a> {
             t_up += t0.elapsed().as_secs_f64();
             scratch.ffn_up_buf[t * n_ff..t * n_ff + up_out.len().min(n_ff)].copy_from_slice(&up_out[..up_out.len().min(n_ff)]);
         }
-        crate::ops::silu_mul_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
+        crate::ops::silu_mul_approx_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
         for t in 0..n_tokens {
             let t0 = std::time::Instant::now();
             let down_out = layer.ffn_down.matmul(&scratch.ffn_up_buf[t * n_ff..][..n_ff]);

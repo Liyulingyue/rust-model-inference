@@ -669,7 +669,7 @@ pub fn run_dump_logits(
                     slice_from_mut!(trace_ffn_up_ptr, n_ff)[r_start..r_end]
                         .copy_from_slice(&gate_buf[r_start..r_end]);
                 }
-                crate::ops::silu_mul_inplace(
+                crate::ops::silu_mul_approx_inplace(
                     &up_buf[r_start..r_end],
                     &mut gate_buf[r_start..r_end],
                 );
