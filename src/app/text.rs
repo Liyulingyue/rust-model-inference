@@ -1,5 +1,4 @@
 ﻿use crate::app::cli::{resolve_thread_count, KvFormat};
-use crate::models::qwen3::run_inference as qwen3_run_inference;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
@@ -27,17 +26,34 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
 ) -> Result<(), String> {
-    qwen3_run_inference(
-        source,
-        prompt,
-        max_tokens,
-        temperature,
-        n_threads_arg,
-        thinking,
-        bench,
-        profile,
-        kv_format,
-    )
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+
+    if arch == "hunyuan-dense" {
+        crate::models::qwen3::hunyuan::run_inference(
+            source,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+        )
+    } else {
+        crate::models::qwen3::base::run_inference(
+            source,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            thinking,
+            bench,
+            profile,
+            kv_format,
+        )
+    }
 }
 
 pub fn run_interactive(

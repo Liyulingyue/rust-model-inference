@@ -18,6 +18,7 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
@@ -25,10 +26,7 @@ use crate::ops::{
     rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace,
     vec_mad_f16_f32, vec_scale_f32,
 };
-use crate::prompt::{
-    build_hunyuan_chat_prompt, build_qwen_chat_prompt,
-    HunyuanMessage, QwenMessage,
-};
+
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,6 +89,52 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
 ) -> Result<(), String> {
+    let input_tokens = {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+        if bench {
+            tokenizer.encode(
+                prompt,
+                EncodeOptions {
+                    add_special: true,
+                    parse_special: true,
+                },
+            )
+        } else {
+            build_qwen_chat_prompt(
+                &tokenizer,
+                &[QwenMessage {
+                    role: "user",
+                    content: prompt,
+                }],
+                thinking,
+            )?
+        }
+    };
+
+    run_inference_tokens(
+        source,
+        input_tokens,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        bench,
+        profile,
+        kv_format,
+    )
+}
+
+pub fn run_inference_tokens(
+    source: &dyn TensorSource,
+    input_tokens: Vec<u32>,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    bench: bool,
+    profile: bool,
+    kv_format: KvFormat,
+) -> Result<(), String> {
     let t0 = Instant::now();
     let config = model_config_from_source(source)
         .map_err(|error| format!("Failed to parse model config: {error}"))?;
@@ -99,11 +143,6 @@ pub fn run_inference(
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
-    let is_qwen3 = arch == "qwen3" || arch == "hunyuan-dense";
-
-    if arch == "pig" {
-        return Err("pig model requires image generation flow, not text inference".into());
-    }
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -148,16 +187,8 @@ pub fn run_inference(
         .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if is_qwen3 {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
-            k_norm: if is_qwen3 {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
+            q_norm: Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k)),
+            k_norm: Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k)),
             wq: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
                 source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
                 source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap().ggml_type,
@@ -215,33 +246,6 @@ pub fn run_inference(
     };
 
     let vocab = tokenizer.vocab_size();
-    let input_tokens = if bench {
-        tokenizer.encode(
-            prompt,
-            EncodeOptions {
-                add_special: true,
-                parse_special: true,
-            },
-        )
-    } else if arch == "hunyuan-dense" {
-        build_hunyuan_chat_prompt(
-            &tokenizer,
-            &[HunyuanMessage {
-                role: "user",
-                content: prompt,
-            }],
-            true,
-        )?
-    } else {
-        build_qwen_chat_prompt(
-            &tokenizer,
-            &[QwenMessage {
-                role: "user",
-                content: prompt,
-            }],
-            thinking,
-        )?
-    };
 
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
@@ -249,7 +253,7 @@ pub fn run_inference(
     let mut scratch = ExecutionScratchpad::new(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx);
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
-    println!("Prompt: {} ({} tokens)", prompt, input_tokens.len());
+    println!("Prompt: {} tokens", input_tokens.len());
 
     let eos_id = tokenizer.eos_id();
     let im_end_id = tokenizer.special_token_id("im_end");
