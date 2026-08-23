@@ -49,12 +49,7 @@ unsafe fn gelu_avx2(values: &mut [f32]) {
         let x3 = _mm256_mul_ps(x2, x);
         let lin = _mm256_add_ps(x, _mm256_mul_ps(c, x3));
         let inner = _mm256_mul_ps(sq2opi, lin);
-        let mut buf = [0.0f32; 8];
-        _mm256_storeu_ps(buf.as_mut_ptr(), inner);
-        for j in 0..8 {
-            buf[j] = buf[j].tanh();
-        }
-        let y = _mm256_loadu_ps(buf.as_ptr());
+        let y = tanh_avx2(inner);
         let one_plus_y = _mm256_add_ps(one, y);
         let result = _mm256_mul_ps(half, _mm256_mul_ps(x, one_plus_y));
         _mm256_storeu_ps(values.as_mut_ptr().add(i), result);
@@ -64,6 +59,23 @@ unsafe fn gelu_avx2(values: &mut [f32]) {
         values[i] = gelu(values[i]);
         i += 1;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn tanh_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let two = _mm256_set1_ps(2.0);
+    let min_x = _mm256_max_ps(x, _mm256_set1_ps(-10.0));
+    let max_x = _mm256_min_ps(min_x, _mm256_set1_ps(10.0));
+    let exp_2x = super::math::exp::exp_approx_avx2(_mm256_mul_ps(two, max_x));
+    let numerator = _mm256_sub_ps(exp_2x, one);
+    let denominator = _mm256_add_ps(exp_2x, one);
+    let result = _mm256_div_ps(numerator, denominator);
+    _mm256_blendv_ps(result, zero, _mm256_cmp_ps(x, x, _CMP_UNORD_Q))
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -121,7 +133,7 @@ unsafe fn silu_inplace_neon(values: &mut [f32]) {
     while i + 4 <= values.len() {
         let x = vld1q_f32(values.as_ptr().add(i));
         let neg_x = vsubq_f32(vdupq_n_f32(0.0), x);
-        let exp_neg_x = super::attention::ggml_expf_neon(neg_x);
+        let exp_neg_x = super::math::exp::exp_approx_neon(neg_x);
         let one_plus_exp_neg_x = vaddq_f32(vdupq_n_f32(1.0), exp_neg_x);
         vst1q_f32(values.as_mut_ptr().add(i), vdivq_f32(x, one_plus_exp_neg_x));
         i += 4;
@@ -162,7 +174,7 @@ unsafe fn silu_mul_inplace_neon(gate: &[f32], up: &mut [f32]) {
         let one = vdupq_n_f32(1.0);
         let zero = vdupq_n_f32(0.0);
         let neg_x = vsubq_f32(zero, x);
-        let exp_neg_x = super::attention::ggml_expf_neon(neg_x);
+        let exp_neg_x = super::math::exp::exp_approx_neon(neg_x);
         let one_plus_exp_neg_x = vaddq_f32(one, exp_neg_x);
         let silu = vdivq_f32(x, one_plus_exp_neg_x);
         vst1q_f32(up.as_mut_ptr().add(i), vmulq_f32(silu, multiplier));

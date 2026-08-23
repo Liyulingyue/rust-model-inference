@@ -7,6 +7,7 @@ pub mod dot;
 pub mod embedding;
 pub mod float;
 pub mod kernel;
+pub mod math;
 pub mod matmul;
 pub mod norm;
 pub mod quant;
