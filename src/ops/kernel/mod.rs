@@ -102,6 +102,10 @@ impl<'a> Weight<'a> {
 		self.kernel.forward(input, &mut output, input.len(), n_out);
 		output
 	}
+
+	pub fn embedding_lookup(&self, token_id: u32, out: &mut [f32]) {
+		self.kernel.embedding_lookup(token_id, self.n_in, out);
+	}
 }
 
 

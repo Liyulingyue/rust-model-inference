@@ -19,7 +19,6 @@
 //! main.rs -> app::run_qwen3vl / run_asr / run_tts
 //!   -> Qwen3Model::from_source()
 //!   -> Qwen3Model::text_encode()
-//!   -> qwen3_multimodal_text_encode::text_encode()
 //! ```
 //! - 使用 `static_q8_tensor()` 强制 `GGMLType::Q8_0` 加载权重
 //! - **仅支持 Q8_0 量化**，不支持 Q4_K/Q6_K 等格式
@@ -38,15 +37,15 @@ use crate::core::loader::{
 use crate::core::tensor::{
     GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
 };
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
-use crate::prompt::{
-    build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage,
-};
+use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::models::qwen3::{load_layers_static, Qwen3LayerWeights};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -253,25 +252,10 @@ pub struct Qwen3Model {
     pub(crate) tokenizer: Arc<BPETokenizer>,
     pub(crate) pool: Arc<ComputePool>,
     pub(crate) config: Qwen3Config,
-    pub(crate) layers: Vec<Qwen3LayerWeights>,
+    pub(crate) layers: Vec<Qwen3LayerWeights<'static>>,
     pub(crate) output_norm: Vec<f32>,
-    pub(crate) token_embedding: &'static [u8],
-    pub(crate) output: &'static [u8],
-    pub(crate) embedding_type: GGMLType,
-}
-
-pub(crate) struct Qwen3LayerWeights {
-    pub(crate) attn_norm: Vec<f32>,
-    pub(crate) ffn_norm: Vec<f32>,
-    pub(crate) q_norm: Option<Vec<f32>>,
-    pub(crate) k_norm: Option<Vec<f32>>,
-    pub(crate) wq: &'static [u8],
-    pub(crate) wk: &'static [u8],
-    pub(crate) wv: &'static [u8],
-    pub(crate) wo: &'static [u8],
-    pub(crate) w_gate: &'static [u8],
-    pub(crate) w_up: &'static [u8],
-    pub(crate) w_down: &'static [u8],
+    pub(crate) token_embedding: Weight<'static>,
+    pub(crate) output: Weight<'static>,
 }
 
 pub struct Qwen3Session<'model> {
@@ -310,83 +294,36 @@ impl Qwen3Model {
             "output_norm.weight",
             &[usize_to_u64(config.n_embd, "embedding width")?],
         )?;
-        let embedding_dims = [
-            usize_to_u64(config.n_embd, "embedding width")?,
-            usize_to_u64(config.vocab, "vocabulary size")?,
-        ];
-        let embedding_type = source
-            .tensor_info("token_embd.weight")
-            .map(|info| info.ggml_type)
-            .unwrap_or(GGMLType::Q8_0);
-        let token_embedding = static_tensor(source.as_ref(), "token_embd.weight", &embedding_dims, embedding_type)?;
-        let output = if source.tensor_info("output.weight").is_some() {
-            static_tensor(source.as_ref(), "output.weight", &embedding_dims, GGMLType::Q8_0)?
-        } else {
-            token_embedding
-        };
+        let token_embedding_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
+        let token_embedding_bytes = source.tensor_slice("token_embd.weight").expect("no embd");
+        let token_embedding_bytes_static: &'static [u8] = unsafe { std::mem::transmute(token_embedding_bytes) };
+        let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+            token_embedding_bytes_static,
+            token_embedding_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
 
-        check_allocation(
-            "decoder layers",
+        let output_info = source.tensor_info("output.weight").unwrap_or(token_embedding_info);
+        let output_bytes = source.tensor_slice("output.weight").unwrap_or(token_embedding_bytes);
+        let output_bytes_static: &'static [u8] = unsafe { std::mem::transmute(output_bytes) };
+        let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+            output_bytes_static,
+            output_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
+
+        let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
+            Arc::clone(&source),
             config.n_layer,
-            std::mem::size_of::<Qwen3LayerWeights>(),
-        )?;
-        let mut layers = Vec::new();
-        layers
-            .try_reserve_exact(config.n_layer)
-            .map_err(|error| format!("Failed to allocate decoder layers: {error}"))?;
-        for layer in 0..config.n_layer {
-            let name = |suffix: &str| format!("blk.{layer}.{suffix}");
-            let n_embd_dim = [usize_to_u64(config.n_embd, "embedding width")?];
-            let head_dim = [usize_to_u64(config.n_embd_head_k, "key head width")?];
-            layers.push(Qwen3LayerWeights {
-                attn_norm: load_f32_tensor(
-                    source.as_ref(),
-                    &name("attn_norm.weight"),
-                    &n_embd_dim,
-                )?,
-                ffn_norm: load_f32_tensor(source.as_ref(), &name("ffn_norm.weight"), &n_embd_dim)?,
-                q_norm: if config.has_qk_norm {
-                    Some(load_f32_tensor(
-                        source.as_ref(),
-                        &name("attn_q_norm.weight"),
-                        &head_dim,
-                    )?)
-                } else {
-                    None
-                },
-                k_norm: if config.has_qk_norm {
-                    Some(load_f32_tensor(
-                        source.as_ref(),
-                        &name("attn_k_norm.weight"),
-                        &head_dim,
-                    )?)
-                } else {
-                    None
-                },
-                wq: static_q8_matrix(source.as_ref(), &name("attn_q.weight"), config.n_embd, n_embd_q)?,
-                wk: static_q8_matrix(source.as_ref(), &name("attn_k.weight"), config.n_embd, n_embd_k)?,
-                wv: static_q8_matrix(source.as_ref(), &name("attn_v.weight"), config.n_embd, n_embd_v)?,
-                wo: static_q8_matrix(source.as_ref(), &name("attn_output.weight"), n_attn, config.n_embd)?,
-                w_gate: static_q8_matrix(
-                    source.as_ref(),
-                    &name("ffn_gate.weight"),
-                    config.n_embd,
-                    config.n_ff,
-                )?,
-                w_up: static_q8_matrix(
-                    source.as_ref(),
-                    &name("ffn_up.weight"),
-                    config.n_embd,
-                    config.n_ff,
-                )?,
-                w_down: static_q8_matrix(
-                    source.as_ref(),
-                    &name("ffn_down.weight"),
-                    config.n_ff,
-                    config.n_embd,
-                )?,
-            });
-        }
+            config.n_embd,
+            n_embd_q,
+            n_embd_k,
+            config.n_ff,
+            config.n_embd_head_k,
+            config.has_qk_norm,
+        );
 
         Ok(Self {
             source,
@@ -397,7 +334,6 @@ impl Qwen3Model {
             output_norm,
             token_embedding,
             output,
-            embedding_type,
         })
     }
 
@@ -434,13 +370,13 @@ impl Qwen3Model {
             .chunks_exact_mut(self.config.n_embd)
             .zip(token_ids)
         {
-            embedding_lookup_q8_0(self.token_embedding, token_id, self.config.n_embd, row);
+            self.token_embedding.embedding_lookup(token_id, row);
         }
         Ok(embeddings)
     }
 
     pub fn text_encode(&self, token_ids: &[u32], positions: &[[usize; 4]]) -> Result<Vec<f32>, String> {
-        crate::models::qwen3::qwen3_multimodal_text_encode::text_encode(self, token_ids, positions)
+        text_encode(self, token_ids, positions)
     }
 
     pub fn generate(
@@ -706,25 +642,17 @@ q8_buf: vec![0; max_n_in],
                         .x
                         .copy_from_slice(&embeddings[start..start + config.n_embd]);
                 } else {
-                    embedding_lookup(
-                        model.token_embedding,
-                        input.token_ids[step],
-                        config.n_embd,
-                        model.embedding_type,
-                        &mut self.scratch.x,
-                    );
+                    model
+                        .token_embedding
+                        .embedding_lookup(input.token_ids[step], &mut self.scratch.x);
                 }
             } else {
                 let token_id = *generated_tokens
                     .last()
                     .ok_or_else(|| "Missing generated token for decoder step".to_string())?;
-                embedding_lookup(
-                    model.token_embedding,
-                    token_id,
-                    config.n_embd,
-                    model.embedding_type,
-                    &mut self.scratch.x,
-                );
+                model
+                    .token_embedding
+                    .embedding_lookup(token_id, &mut self.scratch.x);
             }
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
@@ -780,30 +708,33 @@ q8_buf: vec![0; max_n_in],
                     let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
                     let k = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_k) };
                     let v = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_v) };
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.wq,
+                    weights.wq.kernel.forward_prepared(
+                        normed,
                         q8,
                         scales,
+                        None,
                         q,
                         config.n_embd,
                         n_embd_q,
                         thread,
                         threads,
                     );
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.wk,
+                    weights.wk.kernel.forward_prepared(
+                        normed,
                         q8,
                         scales,
+                        None,
                         k,
                         config.n_embd,
                         n_embd_k,
                         thread,
                         threads,
                     );
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.wv,
+                    weights.wv.kernel.forward_prepared(
+                        normed,
                         q8,
                         scales,
+                        None,
                         v,
                         config.n_embd,
                         n_embd_v,
@@ -998,10 +929,11 @@ q8_buf: vec![0; max_n_in],
                     let scales = unsafe { std::slice::from_raw_parts(scales, n_attn / 32) };
                     let output =
                         unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, config.n_embd) };
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.wo,
+                    weights.wo.kernel.forward_prepared(
+                        &[],
                         q8,
                         scales,
+                        None,
                         output,
                         n_attn,
                         config.n_embd,
@@ -1032,26 +964,14 @@ q8_buf: vec![0; max_n_in],
                     let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
                     let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
                     let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.w_gate,
-                        q8,
-                        scales,
-                        up,
-                        config.n_embd,
-                        config.n_ff,
-                        thread,
-                        threads,
-                    );
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.w_up,
-                        q8,
-                        scales,
-                        gate,
-                        config.n_embd,
-                        config.n_ff,
-                        thread,
-                        threads,
-                    );
+                    weights
+                        .w_gate
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, up, config.n_embd, config.n_ff, thread, threads);
+                    weights
+                        .w_up
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
                     let start = thread * config.n_ff / threads;
                     let end = (thread + 1) * config.n_ff / threads;
                     silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
@@ -1072,16 +992,10 @@ q8_buf: vec![0; max_n_in],
                     let scales = unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
                     let down =
                         unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
-                    matmul_q8_0_quantized_parallel_rows(
-                        weights.w_down,
-                        q8,
-                        scales,
-                        down,
-                        config.n_ff,
-                        config.n_embd,
-                        thread,
-                        threads,
-                    );
+                    weights
+                        .w_down
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, down, config.n_ff, config.n_embd, thread, threads);
                 });
 
                 let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
@@ -1127,10 +1041,11 @@ q8_buf: vec![0; max_n_in],
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, config.vocab) };
-                matmul_q8_0_quantized_parallel_rows(
-                    model.output,
+                model.output.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     logits,
                     config.n_embd,
                     config.vocab,
@@ -1197,6 +1112,312 @@ q8_buf: vec![0; max_n_in],
     }
 }
 
+fn text_encode(
+    model: &Qwen3Model,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+) -> Result<Vec<f32>, String> {
+    validate_token_ids(token_ids, model.config.vocab)?;
+    let n_tokens = token_ids.len();
+    if positions.len() != n_tokens {
+        return Err(format!(
+            "positions length {} != token_ids length {}",
+            positions.len(),
+            n_tokens
+        ));
+    }
+    if n_tokens == 0 {
+        return Ok(Vec::new());
+    }
+
+    let cfg = &model.config;
+    let n_embd_q = checked_product("query width", cfg.n_head, cfg.n_embd_head_k)?;
+    let n_embd_k = checked_product("key width", cfg.n_head_kv, cfg.n_embd_head_k)?;
+    let n_embd_v = checked_product("value width", cfg.n_head_kv, cfg.n_embd_head_v)?;
+    let n_attn = checked_product("attn width", cfg.n_head, cfg.n_embd_head_v)?;
+    let group_size = cfg.n_head / cfg.n_head_kv;
+    let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
+
+    let embeddings = model.embed_tokens(token_ids)?;
+    let mut hidden = embeddings;
+
+    for layer_idx in 0..cfg.n_layer {
+        let layer = &model.layers[layer_idx];
+
+        let mut normed = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            rms_norm(
+                &hidden[off..off + cfg.n_embd],
+                &layer.attn_norm,
+                &mut normed[off..off + cfg.n_embd],
+                cfg.eps,
+            );
+        }
+
+        let mut q_all = vec![0.0; n_tokens * n_embd_q];
+        let mut k_all = vec![0.0; n_tokens * n_embd_k];
+        let mut v_all = vec![0.0; n_tokens * n_embd_v];
+        for tok in 0..n_tokens {
+            let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+            let q_off = tok * n_embd_q;
+            let k_off = tok * n_embd_k;
+            let v_off = tok * n_embd_v;
+
+            let blocks = (cfg.n_embd + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_embd];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+
+            layer.wq.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut q_all[q_off..q_off + n_embd_q],
+                cfg.n_embd,
+                n_embd_q,
+                0,
+                1,
+            );
+            layer.wk.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut k_all[k_off..k_off + n_embd_k],
+                cfg.n_embd,
+                n_embd_k,
+                0,
+                1,
+            );
+            layer.wv.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut v_all[v_off..v_off + n_embd_v],
+                cfg.n_embd,
+                n_embd_v,
+                0,
+                1,
+            );
+        }
+
+        if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
+            for head in 0..cfg.n_head {
+                let off = head * cfg.n_embd_head_k;
+                rms_norm_inplace(&mut q_all[off..off + cfg.n_embd_head_k], q_norm, cfg.eps);
+            }
+            for head in 0..cfg.n_head_kv {
+                let off = head * cfg.n_embd_head_k;
+                rms_norm_inplace(&mut k_all[off..off + cfg.n_embd_head_k], k_norm, cfg.eps);
+            }
+        }
+
+        for tok in 0..n_tokens {
+            let pos = positions[tok];
+            for head in 0..cfg.n_head {
+                let off = head * cfg.n_embd_head_k;
+                let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
+                match cfg.rope {
+                    Qwen3Rope::Neox => {
+                        rope_neox(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                    }
+                    Qwen3Rope::Interleaved { sections, n_dims } => {
+                        rope_mrope_interleaved(
+                            q_slice,
+                            pos,
+                            sections,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            n_dims,
+                        );
+                    }
+                }
+            }
+            for head in 0..cfg.n_head_kv {
+                let off = head * cfg.n_embd_head_k;
+                let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
+                match cfg.rope {
+                    Qwen3Rope::Neox => {
+                        rope_neox(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                    }
+                    Qwen3Rope::Interleaved { sections, n_dims } => {
+                        rope_mrope_interleaved(
+                            k_slice,
+                            pos,
+                            sections,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            n_dims,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut attn_out = vec![0.0; n_tokens * n_attn];
+        for head in 0..cfg.n_head {
+            let kv_head = head / group_size;
+            let q_off = head * cfg.n_embd_head_k;
+            let k_off = kv_head * cfg.n_embd_head_k;
+            let v_off = kv_head * cfg.n_embd_head_v;
+            let attn_off = head * cfg.n_embd_head_v;
+
+            for i in 0..n_tokens {
+                let mut max_val = f32::NEG_INFINITY;
+                let mut scores = vec![0.0; n_tokens];
+                for j in 0..=i {
+                    let q_row = &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
+                    let k_row = &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
+                    scores[j] = dot_f32(q_row, k_row, cfg.n_embd_head_k) * kq_scale;
+                    if scores[j] > max_val {
+                        max_val = scores[j];
+                    }
+                }
+                let mut exp_sum = 0.0f32;
+                for j in 0..=i {
+                    scores[j] = (scores[j] - max_val).exp();
+                    exp_sum += scores[j];
+                }
+                for j in 0..=i {
+                    scores[j] /= exp_sum;
+                }
+                for dim in 0..cfg.n_embd_head_v {
+                    let mut sum = 0.0f32;
+                    for j in 0..=i {
+                        let v_row = &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
+                        sum += scores[j] * v_row[dim];
+                    }
+                    attn_out[i * n_attn + attn_off + dim] = sum;
+                }
+            }
+        }
+
+        let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
+            let blocks = (n_attn + 31) / 32;
+            let mut q8_buf = vec![0u8; n_attn];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
+            layer.wo.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                n_attn,
+                cfg.n_embd,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            for j in 0..cfg.n_embd {
+                hidden[off + j] += attn_proj_out[off + j];
+            }
+        }
+
+        let mut ffn_normed = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            rms_norm(
+                &hidden[off..off + cfg.n_embd],
+                &layer.ffn_norm,
+                &mut ffn_normed[off..off + cfg.n_embd],
+                cfg.eps,
+            );
+        }
+
+        let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
+        let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
+        for tok in 0..n_tokens {
+            let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+            let blocks = (cfg.n_embd + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_embd];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+            layer.w_gate.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_embd,
+                cfg.n_ff,
+                0,
+                1,
+            );
+            layer.w_up.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_embd,
+                cfg.n_ff,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_ff;
+            for i in 0..cfg.n_ff {
+                gate_buf[off + i] = silu(gate_buf[off + i]) * up_buf[off + i];
+            }
+        }
+
+        let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let blocks = (cfg.n_ff + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_ff];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(
+                &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_ff,
+                &mut q8_buf,
+                &mut scale_buf,
+            );
+            layer.w_down.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                cfg.n_ff,
+                cfg.n_embd,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            for i in 0..cfg.n_embd {
+                hidden[off + i] += down_buf[off + i];
+            }
+        }
+    }
+
+    let mut output = vec![0.0; n_tokens * cfg.n_embd];
+    for tok in 0..n_tokens {
+        let off = tok * cfg.n_embd;
+        rms_norm(
+            &hidden[off..off + cfg.n_embd],
+            &model.output_norm,
+            &mut output[off..off + cfg.n_embd],
+            cfg.eps,
+        );
+    }
+
+    Ok(output)
+}
+
 pub fn run_shared_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -1218,26 +1439,14 @@ pub fn run_shared_inference(
         available_threads,
     )));
     let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
-    let arch = model.config().architecture.clone();
-    let input_tokens = if arch == "hunyuan-dense" {
-        build_hunyuan_chat_prompt(
-            &tokenizer,
-            &[HunyuanMessage {
-                role: "user",
-                content: prompt,
-            }],
-            true,
-        )?
-    } else {
-        build_qwen_chat_prompt(
-            &tokenizer,
-            &[QwenMessage {
-                role: "user",
-                content: prompt,
-            }],
-            thinking,
-        )?
-    };
+    let input_tokens = build_qwen_chat_prompt(
+        &tokenizer,
+        &[QwenMessage {
+            role: "user",
+            content: prompt,
+        }],
+        thinking,
+    )?;
     let positions = qwen_text_positions(input_tokens.len());
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
@@ -1305,7 +1514,20 @@ impl TensorSource for TestTensorSource {
 pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usize) -> Qwen3Model {
     assert!(n_embd > 0 && n_embd % 32 == 0);
     let row_bytes = n_embd / 32 * 34;
-    let token_embedding = Box::leak(vec![0; tokenizer.vocab_size() * row_bytes].into_boxed_slice());
+    let embd_box = vec![0u8; tokenizer.vocab_size() * row_bytes].into_boxed_slice();
+    let embd_bytes: &'static [u8] = Box::leak(embd_box);
+    let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
+    let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
     Qwen3Model {
         source: Arc::new(TestTensorSource),
         pool: Arc::new(ComputePool::new(1)),
@@ -1329,8 +1551,7 @@ pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usi
         layers: Vec::new(),
         output_norm: vec![1.0; n_embd],
         token_embedding,
-        output: token_embedding,
-        embedding_type: GGMLType::Q8_0,
+        output,
     }
 }
 
