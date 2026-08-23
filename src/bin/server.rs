@@ -696,7 +696,7 @@ fn generate_qwen3(
                 } else {
                     r_start + rows_per
                 };
-                silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
             });
 
             {

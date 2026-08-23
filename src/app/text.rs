@@ -3,7 +3,7 @@ use crate::app::{LayerWeights, get_f32_tensor, slice_from_mut, slice_from_ref, r
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::loader::model_config_from_source;
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_inplace, softmax, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
+use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
 use crate::models::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
@@ -475,7 +475,7 @@ pub fn run_inference(
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax(&mut scores[s_off..s_off + n_padded]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
                         let mut values = [0.0f32; 512];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
@@ -563,7 +563,7 @@ pub fn run_inference(
                 } else {
                     r_start + rows_per
                 };
-                silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
             });
 
             {

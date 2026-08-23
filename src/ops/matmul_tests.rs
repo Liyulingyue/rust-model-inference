@@ -335,7 +335,7 @@
     fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
         let mut values = [-1.0, 0.0, 1.0, f32::NEG_INFINITY];
 
-        softmax(&mut values);
+        softmax_inplace(&mut values);
 
         assert_eq!(
             values.map(f32::to_bits),

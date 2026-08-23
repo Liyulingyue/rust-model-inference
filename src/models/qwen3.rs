@@ -912,7 +912,7 @@ q8_buf: vec![0; max_n_in],
                                 config.n_embd_head_k,
                             ) * kq_scale;
                         }
-                        softmax(&mut scores[..n_padded]);
+                        softmax_inplace(&mut scores[..n_padded]);
                         for index in 0..n_padded {
                             unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
                         }
@@ -1015,7 +1015,7 @@ q8_buf: vec![0; max_n_in],
                     );
                     let start = thread * config.n_ff / threads;
                     let end = (thread + 1) * config.n_ff / threads;
-                    silu_mul_inplace(&up[start..end], &mut gate[start..end]);
+                    silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
                 });
 
                 let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };

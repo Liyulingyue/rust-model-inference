@@ -34,7 +34,7 @@ use crate::models::tts::AUDIO_CODEBOOK_SIZE;
 use crate::ops::{
     dot_f16, embedding_lookup, f16_to_f32, f32_slice_to_f16, f32_to_f16,
     matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_mrope_interleaved, rope_neox, silu_mul_inplace, softmax, vec_scale_f32,
+    rope_mrope_interleaved, rope_neox, silu_mul_approx_inplace, softmax_inplace, vec_scale_f32,
 };
 
 const SEMANTIC_CODEBOOK_SIZE: usize = 2048;
@@ -1014,7 +1014,7 @@ impl TtsSession<'_> {
                                 config.n_embd_head_k,
                             ) * kq_scale;
                         }
-                        softmax(&mut scores[..n_padded]);
+                        softmax_inplace(&mut scores[..n_padded]);
                         for index in 0..n_padded {
                             unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
                         }
@@ -1107,7 +1107,7 @@ impl TtsSession<'_> {
                 );
                 let start = thread * config.n_ff / threads;
                 let end = (thread + 1) * config.n_ff / threads;
-                silu_mul_inplace(&up[start..end], &mut gate[start..end]);
+                silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
             });
 
             let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };

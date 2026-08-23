@@ -28,7 +28,7 @@ use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
     dot_f16, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox, silu_mul_inplace, vec_scale_f32,
+    rope_neox, silu_mul_approx_inplace, vec_scale_f32,
 };
 
 use super::{RVQ_CODEBOOK_SIZE, RVQ_LEVELS};
@@ -596,7 +596,7 @@ fn forward_layer_inplace(
         1,
     );
     let q8b3 = (PRED_N_FF + 31) / 32;
-    silu_mul_inplace(&gate, &mut up);
+    silu_mul_approx_inplace(&gate, &mut up);
     let mut q8b3_buf = vec![0u8; PRED_N_FF];
     let mut sb3 = vec![0.0f32; q8b3];
     quantize_q8_0_into(&up, PRED_N_FF, &mut q8b3_buf, &mut sb3);

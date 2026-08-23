@@ -1,5 +1,5 @@
 ﻿use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::{dot_f32, f16_to_f32, matmul_q8_0_quantized, quantize_q8_0_into, rms_norm, rms_norm_inplace, silu_mul_inplace};
+use crate::ops::{dot_f32, f16_to_f32, matmul_q8_0_quantized, quantize_q8_0_into, rms_norm, rms_norm_inplace, silu_mul_approx_inplace};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::app::cli::EmbeddingOutput;
 use crate::core::thread_pool::ComputePool;
@@ -325,7 +325,7 @@ fn apply_embedding_ffn_typed(
             activation_scratch,
         )?;
 
-        silu_mul_inplace(gate_buf, up_buf);
+        silu_mul_approx_inplace(gate_buf, up_buf);
 
         embedding_matmul_group(
             up_buf,
@@ -626,7 +626,7 @@ pub fn run_embedding(
                     ) * kq_scale;
                 }
                 scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
-                crate::ops::softmax(&mut scores[..n_padded]);
+                crate::ops::softmax_inplace(&mut scores[..n_padded]);
                 for d in 0..n_embd_head_v {
                     for s in 0..n_cached {
                         values[s] = v_buf[s * n_embd_gqa + kv_h * n_embd_head_v + d];
