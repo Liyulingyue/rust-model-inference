@@ -4,6 +4,7 @@
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::{QuantizedTensor, Weight};
+use std::sync::Arc;
 
 pub struct Qwen3LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
@@ -98,6 +99,56 @@ pub fn load_layers<'a>(
                 n_ff,
                 n_embd,
             )),
+        })
+        .collect()
+}
+
+fn static_weight(
+    source: &dyn TensorSource,
+    name: &str,
+    rows: usize,
+    cols: usize,
+) -> Weight<'static> {
+    let bytes = source.tensor_slice(name).unwrap_or_else(|| panic!("tensor {name} not found"));
+    let info = source.tensor_info(name).unwrap_or_else(|| panic!("tensor info {name} not found"));
+    let ggml_type = info.ggml_type;
+    let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+    Weight::from_quantized(QuantizedTensor::from_bytes(bytes_static, ggml_type, rows, cols))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn load_layers_static(
+    source: Arc<dyn TensorSource>,
+    n_layer: usize,
+    n_embd: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_ff: usize,
+    n_embd_head_k: usize,
+    has_qk_norm: bool,
+) -> Vec<Qwen3LayerWeights<'static>> {
+    let source = source.as_ref();
+    (0..n_layer)
+        .map(|l| Qwen3LayerWeights {
+            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
+            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
+            q_norm: if has_qk_norm {
+                Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k))
+            } else {
+                None
+            },
+            k_norm: if has_qk_norm {
+                Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k))
+            } else {
+                None
+            },
+            wq: static_weight(source, &format!("blk.{}.attn_q.weight", l), n_embd, n_embd_q),
+            wk: static_weight(source, &format!("blk.{}.attn_k.weight", l), n_embd, n_embd_gqa),
+            wv: static_weight(source, &format!("blk.{}.attn_v.weight", l), n_embd, n_embd_gqa),
+            wo: static_weight(source, &format!("blk.{}.attn_output.weight", l), n_embd_q, n_embd),
+            w_gate: static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
+            w_up: static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
+            w_down: static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
         })
         .collect()
 }
