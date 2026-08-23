@@ -36,14 +36,30 @@ mod qtensor_owned;
 ///
 /// The kernel retains the borrowed GGUF bytes, so wrapping a
 /// [`QuantizedTensor`] keeps the mmap-backed zero-copy representation.
+///
+/// The metadata fields (`ggml_type`, `n_in`, `n_out`) are populated once
+/// at construction time and enable introspection (logging, validation,
+/// pre-fuse / pre-transform assertions) without re-dispatching through
+/// the kernel. They do **not** enable fuse or weight-side transforms —
+/// those still require raw byte access via [`QuantizedTensor`] or
+/// [`QTensorOwned`].
 pub struct Weight<'a> {
 	pub kernel: Box<dyn Kernel + 'a>,
+	pub ggml_type: crate::core::tensor::GGMLType,
+	pub n_in: usize,
+	pub n_out: usize,
 }
 
 impl<'a> Weight<'a> {
 	pub fn from_quantized(tensor: QuantizedTensor<'a>) -> Self {
+		let ggml_type = tensor.ggml_type();
+		let n_in = tensor.n_in();
+		let n_out = tensor.n_rows();
 		Self {
 			kernel: tensor.into_kernel(),
+			ggml_type,
+			n_in,
+			n_out,
 		}
 	}
 
@@ -54,10 +70,10 @@ impl<'a> Weight<'a> {
 		q8_buf: &mut [u8],
 		scale_buf: &mut [f32],
 		output: &mut [f32],
-		n_out: usize,
 		pool: &crate::core::thread_pool::ComputePool,
 	) {
 		let n_in = input.len();
+		let n_out = self.n_out;
 		let q8_blocks = n_in.div_ceil(32);
 		let q8k_blocks = n_in.div_ceil(crate::ops::quant::QK_K);
 		crate::ops::quantize_q8_0_into(input, n_in, &mut q8_buf[..n_in], &mut scale_buf[..q8_blocks]);
@@ -80,7 +96,8 @@ impl<'a> Weight<'a> {
 		});
 	}
 
-	pub fn matmul(&self, input: &[f32], n_out: usize) -> Vec<f32> {
+	pub fn matmul(&self, input: &[f32]) -> Vec<f32> {
+		let n_out = self.n_out;
 		let mut output = vec![0.0; n_out];
 		self.kernel.forward(input, &mut output, input.len(), n_out);
 		output

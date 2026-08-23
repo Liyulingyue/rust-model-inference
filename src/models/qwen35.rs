@@ -352,7 +352,6 @@ impl<'a> Qwen35Model<'a> {
             &mut scratch.q8_buf,
             &mut scratch.scale_buf,
             &mut scratch.matmul_out,
-            cfg.vocab_size,
             pool,
         );
         let mut result = vec![0.0f32; cfg.vocab_size];
@@ -402,11 +401,11 @@ impl<'a> Qwen35Model<'a> {
             let inp_off = t * n_embd;
             let t0 = std::time::Instant::now();
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wq.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, q_dim, pool);
+            wq.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.q_buf[t * q_dim..t * q_dim + q_dim].copy_from_slice(&scratch.matmul_out[..q_dim]);
-            wk.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, k_dim, pool);
+            wk.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.k_buf[t * k_dim..t * k_dim + k_dim].copy_from_slice(&scratch.matmul_out[..k_dim]);
-            wv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, v_dim, pool);
+            wv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.v_buf[t * v_dim..t * v_dim + v_dim].copy_from_slice(&scratch.matmul_out[..v_dim]);
             t_qkv += t0.elapsed().as_secs_f64();
         }
@@ -543,7 +542,7 @@ impl<'a> Qwen35Model<'a> {
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
             let wo_input = &scratch.attn_out_buf[t * n_embd_heads_total..t * n_embd_heads_total + n_embd_heads_total];
-            wo.quantize_and_matmul_with_scratch(wo_input, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
+            wo.quantize_and_matmul_with_scratch(wo_input, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }        t_wo += t0.elapsed().as_secs_f64();
         if profile {
@@ -590,15 +589,15 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let inp_off = t * n_embd;
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wqkv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, conv_dim, pool);
+            wqkv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.qkv_buf[t * conv_dim..t * conv_dim + conv_dim].copy_from_slice(&scratch.matmul_out[..conv_dim]);
-            wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, value_dim, pool);
+            wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.z_buf[t * value_dim..t * value_dim + value_dim].copy_from_slice(&scratch.matmul_out[..value_dim]);
-            ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, num_v_heads, pool);
+            ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             let n_beta = num_v_heads;
             scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta].copy_from_slice(&scratch.matmul_out[..n_beta]);
             for v in 0..num_v_heads { scratch.beta_buf[t * num_v_heads + v] = sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]); }
-            ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, num_v_heads, pool);
+            ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             let n_alpha = num_v_heads;
             scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha].copy_from_slice(&scratch.matmul_out[..n_alpha]);
             for v in 0..num_v_heads {
@@ -751,7 +750,7 @@ impl<'a> Qwen35Model<'a> {
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
             let inp = &scratch.attn_out_buf[t * value_dim..][..value_dim];
-            ssm_out.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
+            ssm_out.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
         let t_out_matmul = t0.elapsed().as_secs_f64();
@@ -768,9 +767,9 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let inp = &hidden[off..off + n_embd];
-            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_ff, pool);
+            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_ff, pool);
+            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
         }
 
@@ -778,7 +777,7 @@ impl<'a> Qwen35Model<'a> {
 
         for t in 0..n_tokens {
             let down_inp = &scratch.ffn_up_buf[t * n_ff..][..n_ff];
-            layer.ffn_down.quantize_and_matmul_with_scratch(down_inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, n_embd, pool);
+            layer.ffn_down.quantize_and_matmul_with_scratch(down_inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.buf[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
     }
@@ -793,18 +792,18 @@ impl<'a> Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let t0 = std::time::Instant::now();
-            let gate_out = layer.ffn_gate.matmul(&hidden[off..off + n_embd], n_ff);
+            let gate_out = layer.ffn_gate.matmul(&hidden[off..off + n_embd]);
             t_gate += t0.elapsed().as_secs_f64();
             scratch.ffn_gate_buf[t * n_ff..t * n_ff + gate_out.len().min(n_ff)].copy_from_slice(&gate_out[..gate_out.len().min(n_ff)]);
             let t0 = std::time::Instant::now();
-            let up_out = layer.ffn_up.matmul(&hidden[off..off + n_embd], n_ff);
+            let up_out = layer.ffn_up.matmul(&hidden[off..off + n_embd]);
             t_up += t0.elapsed().as_secs_f64();
             scratch.ffn_up_buf[t * n_ff..t * n_ff + up_out.len().min(n_ff)].copy_from_slice(&up_out[..up_out.len().min(n_ff)]);
         }
         crate::ops::silu_mul_approx_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
         for t in 0..n_tokens {
             let t0 = std::time::Instant::now();
-            let down_out = layer.ffn_down.matmul(&scratch.ffn_up_buf[t * n_ff..][..n_ff], n_embd);
+            let down_out = layer.ffn_down.matmul(&scratch.ffn_up_buf[t * n_ff..][..n_ff]);
             t_down += t0.elapsed().as_secs_f64();
             scratch.buf[t * n_embd..t * n_embd + down_out.len().min(n_embd)].copy_from_slice(&down_out[..down_out.len().min(n_embd)]);
         }
