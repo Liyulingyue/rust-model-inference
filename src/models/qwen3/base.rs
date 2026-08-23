@@ -18,6 +18,7 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::models::qwen3::skeleton::{load_layers, Qwen3LayerWeights, get_f32_tensor};
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, Weight};
@@ -30,32 +31,6 @@ use crate::ops::{
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-pub struct Qwen3LayerWeights<'a> {
-    pub attn_norm: Vec<f32>,
-    pub ffn_norm: Vec<f32>,
-    pub q_norm: Option<Vec<f32>>,
-    pub k_norm: Option<Vec<f32>>,
-    pub wq: Weight<'a>,
-    pub wk: Weight<'a>,
-    pub wv: Weight<'a>,
-    pub wo: Weight<'a>,
-    pub w_gate: Weight<'a>,
-    pub w_up: Weight<'a>,
-    pub w_down: Weight<'a>,
-}
-
-pub fn get_f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected_len: usize) -> Vec<f32> {
-    let info = source.tensor_info(name).unwrap_or_else(|| panic!("tensor {name} not found"));
-    let bytes = source.tensor_slice(name).unwrap_or_else(|| panic!("slice {name} not found"));
-    let mut output = vec![0.0; expected_len];
-    if info.ggml_type == GGMLType::F32 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-            *value = f32::from_le_bytes(chunk.try_into().unwrap());
-        }
-    }
-    output
-}
 
 #[macro_export]
 macro_rules! slice_from_mut {
@@ -183,56 +158,8 @@ pub fn run_inference_tokens(
     let embd_type = embd_info.ggml_type;
     let output_type = source.tensor_info("output.weight").unwrap_or(embd_info).ggml_type;
 
-    let layers: Vec<Qwen3LayerWeights> = (0..n_layer)
-        .map(|l| Qwen3LayerWeights {
-            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
-            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k)),
-            k_norm: Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k)),
-            wq: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap().ggml_type,
-                n_embd,
-                n_embd_q,
-            )),
-            wk: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap().ggml_type,
-                n_embd,
-                n_embd_gqa,
-            )),
-            wv: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap().ggml_type,
-                n_embd,
-                n_embd_gqa,
-            )),
-            wo: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap().ggml_type,
-                n_embd_q,
-                n_embd,
-            )),
-            w_gate: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap().ggml_type,
-                n_embd,
-                n_ff,
-            )),
-            w_up: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap().ggml_type,
-                n_embd,
-                n_ff,
-            )),
-            w_down: Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
-                source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap().ggml_type,
-                n_ff,
-                n_embd,
-            )),
-        })
-        .collect();
+    let layers: Vec<Qwen3LayerWeights> =
+        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, true);
 
     let load_ms = t0.elapsed().as_millis();
     println!(

@@ -7,26 +7,12 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::get_f32_tensor;
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::models::qwen3::{Qwen3LayerWeights, get_f32_tensor, load_layers};
+use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{attention_value_f32, dot_f32, embedding_lookup, f32_slice_to_f16, rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace};
 use std::sync::Arc;
 use std::time::Instant;
-
-struct Qwen3EmbeddingLayerWeights<'a> {
-    attn_norm: Vec<f32>,
-    ffn_norm: Vec<f32>,
-    q_norm: Option<Vec<f32>>,
-    k_norm: Option<Vec<f32>>,
-    wq: Weight<'a>,
-    wk: Weight<'a>,
-    wv: Weight<'a>,
-    wo: Weight<'a>,
-    w_gate: Weight<'a>,
-    w_up: Weight<'a>,
-    w_down: Weight<'a>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmbeddingPooling {
@@ -254,67 +240,8 @@ pub fn run_embedding(
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let embd_type = embd_info.ggml_type;
 
-    let layers: Vec<Qwen3EmbeddingLayerWeights> = (0..n_layer)
-        .map(|l| {
-            let wq_bytes = source.tensor_slice(&format!("blk.{l}.attn_q.weight")).unwrap();
-            let wq_info = source.tensor_info(&format!("blk.{l}.attn_q.weight")).unwrap();
-            let wq_tensor = QuantizedTensor::from_bytes(wq_bytes, wq_info.ggml_type, n_embd, n_embd_q);
-
-            let wk_bytes = source.tensor_slice(&format!("blk.{l}.attn_k.weight")).unwrap();
-            let wk_info = source.tensor_info(&format!("blk.{l}.attn_k.weight")).unwrap();
-            let wk_tensor = QuantizedTensor::from_bytes(wk_bytes, wk_info.ggml_type, n_embd, n_embd_gqa);
-
-            let wv_bytes = source.tensor_slice(&format!("blk.{l}.attn_v.weight")).unwrap();
-            let wv_info = source.tensor_info(&format!("blk.{l}.attn_v.weight")).unwrap();
-            let wv_tensor = QuantizedTensor::from_bytes(wv_bytes, wv_info.ggml_type, n_embd, n_embd_gqa);
-
-            let wo_bytes = source.tensor_slice(&format!("blk.{l}.attn_output.weight")).unwrap();
-            let wo_info = source.tensor_info(&format!("blk.{l}.attn_output.weight")).unwrap();
-            let wo_tensor = QuantizedTensor::from_bytes(wo_bytes, wo_info.ggml_type, n_embd_q, n_embd);
-
-            let w_gate_bytes = source.tensor_slice(&format!("blk.{l}.ffn_gate.weight")).unwrap();
-            let w_gate_info = source.tensor_info(&format!("blk.{l}.ffn_gate.weight")).unwrap();
-            let w_gate_tensor = QuantizedTensor::from_bytes(w_gate_bytes, w_gate_info.ggml_type, n_embd, n_ff);
-
-            let w_up_bytes = source.tensor_slice(&format!("blk.{l}.ffn_up.weight")).unwrap();
-            let w_up_info = source.tensor_info(&format!("blk.{l}.ffn_up.weight")).unwrap();
-            let w_up_tensor = QuantizedTensor::from_bytes(w_up_bytes, w_up_info.ggml_type, n_embd, n_ff);
-
-            let w_down_bytes = source.tensor_slice(&format!("blk.{l}.ffn_down.weight")).unwrap();
-            let w_down_info = source.tensor_info(&format!("blk.{l}.ffn_down.weight")).unwrap();
-            let w_down_tensor = QuantizedTensor::from_bytes(w_down_bytes, w_down_info.ggml_type, n_ff, n_embd);
-
-            Qwen3EmbeddingLayerWeights {
-                attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
-                ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-                q_norm: if is_qwen3 {
-                    Some(get_f32_tensor(
-                        source,
-                        &format!("blk.{}.attn_q_norm.weight", l),
-                        n_embd_head_k,
-                    ))
-                } else {
-                    None
-                },
-                k_norm: if is_qwen3 {
-                    Some(get_f32_tensor(
-                        source,
-                        &format!("blk.{}.attn_k_norm.weight", l),
-                        n_embd_head_k,
-                    ))
-                } else {
-                    None
-                },
-                wq: Weight::from_quantized(wq_tensor),
-                wk: Weight::from_quantized(wk_tensor),
-                wv: Weight::from_quantized(wv_tensor),
-                wo: Weight::from_quantized(wo_tensor),
-                w_gate: Weight::from_quantized(w_gate_tensor),
-                w_up: Weight::from_quantized(w_up_tensor),
-                w_down: Weight::from_quantized(w_down_tensor),
-            }
-        })
-        .collect();
+    let layers: Vec<Qwen3LayerWeights> =
+        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, is_qwen3);
 
     let load_ms = t0.elapsed().as_millis();
     if output == EmbeddingOutput::Summary {
