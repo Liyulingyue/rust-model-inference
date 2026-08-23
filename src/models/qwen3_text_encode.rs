@@ -12,7 +12,7 @@
 //! masking matches the autoregressive prefill step so the produced hidden
 //! states match the first `n_tokens` positions of a KV-cached run.
 
-use crate::models::qwen3::{
+use crate::models::qwen3_multimodal::{
     checked_product, Qwen3Model, Qwen3Rope,
 };
 use crate::ops::{
@@ -25,7 +25,7 @@ pub fn text_encode(
     token_ids: &[u32],
     positions: &[[usize; 4]],
 ) -> Result<Vec<f32>, String> {
-    crate::models::qwen3::validate_token_ids(token_ids, model.config.vocab)?;
+    crate::models::qwen3_multimodal::validate_token_ids(token_ids, model.config.vocab)?;
     let n_tokens = token_ids.len();
     if positions.len() != n_tokens {
         return Err(format!(

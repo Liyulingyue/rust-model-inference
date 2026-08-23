@@ -6,7 +6,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::{dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace, attention_value_f32, vec_mad_f16_f32, vec_scale_f32};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::models::qwen3::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen3_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};

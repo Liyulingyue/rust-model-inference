@@ -26,7 +26,7 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::{
+use crate::models::qwen3_multimodal::{
     check_allocation, checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor,
     static_tensor, usize_to_u64, Qwen3Config,
 };
@@ -807,6 +807,7 @@ impl TtsSession<'_> {
         let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
 
         for layer in 0..config.n_layer {
+            let t_layer_start = std::time::Instant::now();
             let weights = &model.layers[layer];
             let x_ptr = self.scratch.x.as_mut_ptr();
             let normed_ptr = self.scratch.normed.as_mut_ptr();
@@ -1141,6 +1142,7 @@ impl TtsSession<'_> {
             for (hidden, projection) in x.iter_mut().zip(down) {
                 *hidden += *projection;
             }
+            eprintln!("  [layer {}] took {:.3}ms (step={})", layer, t_layer_start.elapsed().as_secs_f64() * 1000.0, step);
         }
         Ok(())
     }

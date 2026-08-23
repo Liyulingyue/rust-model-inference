@@ -1,6 +1,6 @@
 ﻿use crate::core::tensor::TensorSource;
 use crate::models::diffusion::pig;
-use crate::models::qwen3::Qwen3Model;
+use crate::models::qwen3_multimodal::Qwen3Model;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
