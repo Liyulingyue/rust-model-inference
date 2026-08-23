@@ -41,9 +41,7 @@ use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
-use crate::prompt::{
-    build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage,
-};
+use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
@@ -256,9 +254,8 @@ pub struct Qwen3Model {
     pub(crate) config: Qwen3Config,
     pub(crate) layers: Vec<Qwen3LayerWeights<'static>>,
     pub(crate) output_norm: Vec<f32>,
-    pub(crate) token_embedding: &'static [u8],
-    pub(crate) output: &'static [u8],
-    pub(crate) embedding_type: GGMLType,
+    pub(crate) token_embedding: Weight<'static>,
+    pub(crate) output: Weight<'static>,
 }
 
 pub struct Qwen3Session<'model> {
@@ -297,20 +294,25 @@ impl Qwen3Model {
             "output_norm.weight",
             &[usize_to_u64(config.n_embd, "embedding width")?],
         )?;
-        let embedding_dims = [
-            usize_to_u64(config.n_embd, "embedding width")?,
-            usize_to_u64(config.vocab, "vocabulary size")?,
-        ];
-        let embedding_type = source
-            .tensor_info("token_embd.weight")
-            .map(|info| info.ggml_type)
-            .unwrap_or(GGMLType::Q8_0);
-        let token_embedding = static_tensor(source.as_ref(), "token_embd.weight", &embedding_dims, embedding_type)?;
-        let output = if source.tensor_info("output.weight").is_some() {
-            static_tensor(source.as_ref(), "output.weight", &embedding_dims, GGMLType::Q8_0)?
-        } else {
-            token_embedding
-        };
+        let token_embedding_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
+        let token_embedding_bytes = source.tensor_slice("token_embd.weight").expect("no embd");
+        let token_embedding_bytes_static: &'static [u8] = unsafe { std::mem::transmute(token_embedding_bytes) };
+        let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+            token_embedding_bytes_static,
+            token_embedding_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
+
+        let output_info = source.tensor_info("output.weight").unwrap_or(token_embedding_info);
+        let output_bytes = source.tensor_slice("output.weight").unwrap_or(token_embedding_bytes);
+        let output_bytes_static: &'static [u8] = unsafe { std::mem::transmute(output_bytes) };
+        let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+            output_bytes_static,
+            output_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
 
         let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
             Arc::clone(&source),
@@ -332,7 +334,6 @@ impl Qwen3Model {
             output_norm,
             token_embedding,
             output,
-            embedding_type,
         })
     }
 
@@ -369,7 +370,7 @@ impl Qwen3Model {
             .chunks_exact_mut(self.config.n_embd)
             .zip(token_ids)
         {
-            embedding_lookup_q8_0(self.token_embedding, token_id, self.config.n_embd, row);
+            self.token_embedding.embedding_lookup(token_id, row);
         }
         Ok(embeddings)
     }
@@ -641,25 +642,17 @@ q8_buf: vec![0; max_n_in],
                         .x
                         .copy_from_slice(&embeddings[start..start + config.n_embd]);
                 } else {
-                    embedding_lookup(
-                        model.token_embedding,
-                        input.token_ids[step],
-                        config.n_embd,
-                        model.embedding_type,
-                        &mut self.scratch.x,
-                    );
+                    model
+                        .token_embedding
+                        .embedding_lookup(input.token_ids[step], &mut self.scratch.x);
                 }
             } else {
                 let token_id = *generated_tokens
                     .last()
                     .ok_or_else(|| "Missing generated token for decoder step".to_string())?;
-                embedding_lookup(
-                    model.token_embedding,
-                    token_id,
-                    config.n_embd,
-                    model.embedding_type,
-                    &mut self.scratch.x,
-                );
+                model
+                    .token_embedding
+                    .embedding_lookup(token_id, &mut self.scratch.x);
             }
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
@@ -1048,10 +1041,11 @@ q8_buf: vec![0; max_n_in],
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, config.vocab) };
-                matmul_q8_0_quantized_parallel_rows(
-                    model.output,
+                model.output.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     logits,
                     config.n_embd,
                     config.vocab,
@@ -1445,26 +1439,14 @@ pub fn run_shared_inference(
         available_threads,
     )));
     let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
-    let arch = model.config().architecture.clone();
-    let input_tokens = if arch == "hunyuan-dense" {
-        build_hunyuan_chat_prompt(
-            &tokenizer,
-            &[HunyuanMessage {
-                role: "user",
-                content: prompt,
-            }],
-            true,
-        )?
-    } else {
-        build_qwen_chat_prompt(
-            &tokenizer,
-            &[QwenMessage {
-                role: "user",
-                content: prompt,
-            }],
-            thinking,
-        )?
-    };
+    let input_tokens = build_qwen_chat_prompt(
+        &tokenizer,
+        &[QwenMessage {
+            role: "user",
+            content: prompt,
+        }],
+        thinking,
+    )?;
     let positions = qwen_text_positions(input_tokens.len());
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
@@ -1532,7 +1514,20 @@ impl TensorSource for TestTensorSource {
 pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usize) -> Qwen3Model {
     assert!(n_embd > 0 && n_embd % 32 == 0);
     let row_bytes = n_embd / 32 * 34;
-    let token_embedding = Box::leak(vec![0; tokenizer.vocab_size() * row_bytes].into_boxed_slice());
+    let embd_box = vec![0u8; tokenizer.vocab_size() * row_bytes].into_boxed_slice();
+    let embd_bytes: &'static [u8] = Box::leak(embd_box);
+    let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
+    let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
     Qwen3Model {
         source: Arc::new(TestTensorSource),
         pool: Arc::new(ComputePool::new(1)),
@@ -1556,8 +1551,7 @@ pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usi
         layers: Vec::new(),
         output_norm: vec![1.0; n_embd],
         token_embedding,
-        output: token_embedding,
-        embedding_type: GGMLType::Q8_0,
+        output,
     }
 }
 
