@@ -3,6 +3,7 @@ use crate::ops::{dot_f32, f16_to_f32, matmul_q8_0_quantized, quantize_q8_0_into,
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::app::cli::EmbeddingOutput;
 use crate::core::thread_pool::ComputePool;
+use crate::models::qwen3::get_f32_tensor;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -447,16 +448,16 @@ pub fn run_embedding(
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
 
-    let output_norm = crate::app::get_f32_tensor(source, "output_norm.weight", n_embd);
+    let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_weight = EmbeddingWeight::load(source, "token_embd.weight", n_embd, tokenizer.vocab_size())
         .unwrap_or_else(|error| panic!("Failed to load embedding token weights: {error}"));
 
     let layers: Vec<EmbeddingLayerWeights> = (0..n_layer)
         .map(|l| EmbeddingLayerWeights {
-            attn_norm: crate::app::get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
-            ffn_norm: crate::app::get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
+            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
+            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
             q_norm: if is_qwen3 {
-                Some(crate::app::get_f32_tensor(
+                Some(get_f32_tensor(
                     source,
                     &format!("blk.{}.attn_q_norm.weight", l),
                     n_embd_head_k,
@@ -465,7 +466,7 @@ pub fn run_embedding(
                 None
             },
             k_norm: if is_qwen3 {
-                Some(crate::app::get_f32_tensor(
+                Some(get_f32_tensor(
                     source,
                     &format!("blk.{}.attn_k_norm.weight", l),
                     n_embd_head_k,

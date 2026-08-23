@@ -1,8 +1,7 @@
 pub mod app;
-pub use app::LayerWeights;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
-pub use app::get_f32_tensor;
+pub use models::qwen3::{Qwen3LayerWeights, get_f32_tensor};
 pub mod core;
 pub mod format;
 pub mod models;

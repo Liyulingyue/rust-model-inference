@@ -1,5 +1,6 @@
 use crate::app::cli::KvFormat;
-use crate::app::{get_f32_tensor, raw_parts, slice_from_mut, slice_from_ref, LayerWeights};
+use crate::models::qwen3::{get_f32_tensor, Qwen3LayerWeights};
+use crate::{raw_parts, slice_from_mut, slice_from_ref};
 use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, TensorSource};
@@ -97,8 +98,8 @@ pub fn run_dump_logits(
         .unwrap_or(embd_info)
         .ggml_type;
 
-    let layers: Vec<LayerWeights> = (0..n_layer)
-        .map(|l| LayerWeights {
+    let layers: Vec<Qwen3LayerWeights> = (0..n_layer)
+        .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
             q_norm: if is_qwen3 {
