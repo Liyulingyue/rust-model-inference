@@ -9,6 +9,7 @@ use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel, quantize_q8_0_into,
+    vec_mad_f32,
 };
 use crate::core::thread_pool::ComputePool;
 use rayon::prelude::*;
@@ -1246,7 +1247,6 @@ fn full_attention_into(
     resize_f32(scores, "attention scores", tokens)?;
     resize_f32(output, "attention output", len)?;
     output.fill(0.0);
-    let mut value_column = reserved_f32("attention value column", tokens)?;
     let scale = 1.0 / (head_dim as f32).sqrt();
     for query_token in 0..tokens {
         for head in 0..heads {
@@ -1265,11 +1265,14 @@ fn full_attention_into(
             }
             attention_softmax(&mut scores[..tokens])?;
             let output_start = query_token * width + head * head_dim;
-            for lane in 0..head_dim {
-                for key_token in 0..tokens {
-                    value_column[key_token] = value[key_token * width + head * head_dim + lane];
-                }
-                output[output_start + lane] = dot_f32(scores, &value_column, tokens);
+            let output_row = &mut output[output_start..output_start + head_dim];
+            output_row.fill(0.0);
+
+            for key_token in 0..tokens {
+                let value_row =
+                    &value[key_token * width + head * head_dim..][..head_dim];
+
+                vec_mad_f32(output_row, value_row, scores[key_token]);
             }
         }
     }
