@@ -8,7 +8,7 @@ use crate::ops::quant::{self, BlockQ8K, QK_K};
 use crate::core::thread_pool::ComputePool;
 use crate::models::vision::VisionGrid;
 
-pub type QWeight<'a> = QuantizedTensor<'a>;
+
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],
@@ -71,11 +71,11 @@ pub struct Qwen35Model<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Vec<f32>,
     pub output_norm: Vec<f32>,
-    pub output_weight: QWeight<'a>,
+    pub output_weight: QuantizedTensor<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
 }
 
-fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<QWeight<'a>> {
+fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<QuantizedTensor<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
     let n_cols = ti.dims[0] as usize;
@@ -84,7 +84,7 @@ fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Optio
     match ti.ggml_type {
         GGMLType::F32 | GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0
         | GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
-            Some(QWeight::from_bytes(data, ti.ggml_type, n_cols, n_rows))
+            Some(QuantizedTensor::from_bytes(data, ti.ggml_type, n_cols, n_rows))
         }
         _ => {
             eprintln!("WARNING: unsupported quant type {:?} for tensor {}", ti.ggml_type, name);
@@ -120,24 +120,24 @@ fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<V
 pub struct Qwen35LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub attn_post_norm: Vec<f32>,
-    pub wq: Option<QWeight<'a>>,
-    pub wk: Option<QWeight<'a>>,
-    pub wv: Option<QWeight<'a>>,
-    pub wo: Option<QWeight<'a>>,
+    pub wq: Option<QuantizedTensor<'a>>,
+    pub wk: Option<QuantizedTensor<'a>>,
+    pub wv: Option<QuantizedTensor<'a>>,
+    pub wo: Option<QuantizedTensor<'a>>,
     pub attn_q_norm: Option<Vec<f32>>,
     pub attn_k_norm: Option<Vec<f32>>,
-    pub wqkv: Option<QWeight<'a>>,
-    pub wqkv_gate: Option<QWeight<'a>>,
+    pub wqkv: Option<QuantizedTensor<'a>>,
+    pub wqkv_gate: Option<QuantizedTensor<'a>>,
     pub ssm_conv1d: Option<Vec<f32>>,
     pub ssm_dt: Option<Vec<f32>>,
     pub ssm_a: Option<Vec<f32>>,
-    pub ssm_beta: Option<QWeight<'a>>,
-    pub ssm_alpha: Option<QWeight<'a>>,
+    pub ssm_beta: Option<QuantizedTensor<'a>>,
+    pub ssm_alpha: Option<QuantizedTensor<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
-    pub ssm_out: Option<QWeight<'a>>,
-    pub ffn_gate: QWeight<'a>,
-    pub ffn_up: QWeight<'a>,
-    pub ffn_down: QWeight<'a>,
+    pub ssm_out: Option<QuantizedTensor<'a>>,
+    pub ffn_gate: QuantizedTensor<'a>,
+    pub ffn_up: QuantizedTensor<'a>,
+    pub ffn_down: QuantizedTensor<'a>,
 }
 
 impl<'a> Qwen35Model<'a> {
@@ -1019,7 +1019,7 @@ mod tests {
             key_length: 2,
             value_length: 2,
         };
-        let weight = |data: Vec<f32>, _n_rows| QWeight::F32(data);
+        let weight = |data: Vec<f32>, _n_rows| QuantizedTensor::F32(data);
         let identity = || weight(vec![1.0, 0.0, 0.0, 1.0], 2);
         let layer = Qwen35LayerWeights {
             attn_norm: vec![1.0; 2],
@@ -1140,7 +1140,7 @@ mod tests {
                 data.extend(std::iter::repeat_n(quantized_value, 32));
             }
         }
-        let weight = QWeight::Q8_0 { data: &data, n_cols: 256, n_rows: 2 };
+        let weight = QuantizedTensor::Q8_0 { data: &data, n_cols: 256, n_rows: 2 };
         let input = [1.0f32; 256];
         let mut q8k_buf = vec![BlockQ8K { d: 0.0, qs: [0; 256], bsums: [0; 16] }; 1];
         let mut output = [0.0f32; 2];
