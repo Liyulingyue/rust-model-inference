@@ -1,6 +1,6 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::kernel::QuantizedTensor;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{attention_value_f32, dot_f32, softmax_inplace, rope_neox, rope_mrope, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -8,7 +8,7 @@ use crate::ops::quant::{self, BlockQ8K, QK_K};
 use crate::core::thread_pool::ComputePool;
 use crate::models::vision::VisionGrid;
 
-pub type QWeight<'a> = QuantizedTensor<'a>;
+
 
 pub fn build_qwen35_positions(
     token_ids: &[u32],
@@ -71,11 +71,11 @@ pub struct Qwen35Model<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Vec<f32>,
     pub output_norm: Vec<f32>,
-    pub output_weight: QWeight<'a>,
+    pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
 }
 
-fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<QWeight<'a>> {
+fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Option<Weight<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
     let n_cols = ti.dims[0] as usize;
@@ -84,7 +84,7 @@ fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Optio
     match ti.ggml_type {
         GGMLType::F32 | GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0
         | GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
-            Some(QWeight::from_bytes(data, ti.ggml_type, n_cols, n_rows))
+            Some(Weight::from_quantized(QuantizedTensor::from_bytes(data, ti.ggml_type, n_cols, n_rows)))
         }
         _ => {
             eprintln!("WARNING: unsupported quant type {:?} for tensor {}", ti.ggml_type, name);
@@ -120,24 +120,24 @@ fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) -> Option<V
 pub struct Qwen35LayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub attn_post_norm: Vec<f32>,
-    pub wq: Option<QWeight<'a>>,
-    pub wk: Option<QWeight<'a>>,
-    pub wv: Option<QWeight<'a>>,
-    pub wo: Option<QWeight<'a>>,
+    pub wq: Option<Weight<'a>>,
+    pub wk: Option<Weight<'a>>,
+    pub wv: Option<Weight<'a>>,
+    pub wo: Option<Weight<'a>>,
     pub attn_q_norm: Option<Vec<f32>>,
     pub attn_k_norm: Option<Vec<f32>>,
-    pub wqkv: Option<QWeight<'a>>,
-    pub wqkv_gate: Option<QWeight<'a>>,
+    pub wqkv: Option<Weight<'a>>,
+    pub wqkv_gate: Option<Weight<'a>>,
     pub ssm_conv1d: Option<Vec<f32>>,
     pub ssm_dt: Option<Vec<f32>>,
     pub ssm_a: Option<Vec<f32>>,
-    pub ssm_beta: Option<QWeight<'a>>,
-    pub ssm_alpha: Option<QWeight<'a>>,
+    pub ssm_beta: Option<Weight<'a>>,
+    pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
-    pub ssm_out: Option<QWeight<'a>>,
-    pub ffn_gate: QWeight<'a>,
-    pub ffn_up: QWeight<'a>,
-    pub ffn_down: QWeight<'a>,
+    pub ssm_out: Option<Weight<'a>>,
+    pub ffn_gate: Weight<'a>,
+    pub ffn_up: Weight<'a>,
+    pub ffn_down: Weight<'a>,
 }
 
 impl<'a> Qwen35Model<'a> {
@@ -594,11 +594,11 @@ impl<'a> Qwen35Model<'a> {
             wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
             scratch.z_buf[t * value_dim..t * value_dim + value_dim].copy_from_slice(&scratch.matmul_out[..value_dim]);
             ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            let n_beta = ssm_beta.n_rows().min(num_v_heads);
+            let n_beta = num_v_heads;
             scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta].copy_from_slice(&scratch.matmul_out[..n_beta]);
             for v in 0..num_v_heads { scratch.beta_buf[t * num_v_heads + v] = sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]); }
             ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            let n_alpha = ssm_alpha.n_rows().min(num_v_heads);
+            let n_alpha = num_v_heads;
             scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha].copy_from_slice(&scratch.matmul_out[..n_alpha]);
             for v in 0..num_v_heads {
                 let a_biased = scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
@@ -1019,7 +1019,7 @@ mod tests {
             key_length: 2,
             value_length: 2,
         };
-        let weight = |data: Vec<f32>, _n_rows| QWeight::F32(data);
+        let weight = |data: Vec<f32>, _n_rows| Weight::from_quantized(QuantizedTensor::F32(data));
         let identity = || weight(vec![1.0, 0.0, 0.0, 1.0], 2);
         let layer = Qwen35LayerWeights {
             attn_norm: vec![1.0; 2],
@@ -1140,7 +1140,7 @@ mod tests {
                 data.extend(std::iter::repeat_n(quantized_value, 32));
             }
         }
-        let weight = QWeight::Q8_0 { data: &data, n_cols: 256, n_rows: 2 };
+        let weight = QuantizedTensor::Q8_0 { data: &data, n_cols: 256, n_rows: 2 };
         let input = [1.0f32; 256];
         let mut q8k_buf = vec![BlockQ8K { d: 0.0, qs: [0; 256], bsums: [0; 16] }; 1];
         let mut output = [0.0f32; 2];

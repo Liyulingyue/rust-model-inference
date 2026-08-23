@@ -76,19 +76,37 @@ impl Code2WavDecoder {
             .map_err(|error| format!("Failed to allocate Code2Wav output: {error}"))?;
         let mut transformer_state = WaveformTransformerState::new();
         let mut dac_state = DacState::new();
+        let t_start = std::time::Instant::now();
+        let mut t_rvq = std::time::Duration::ZERO;
+        let mut t_dac_pre = std::time::Duration::ZERO;
+        let mut t_transformer = std::time::Duration::ZERO;
+        let mut t_dac_decode = std::time::Duration::ZERO;
         for chunk in frames.chunks(chunk_size) {
+            let t0 = std::time::Instant::now();
             let hidden = self.rvq.decode_frames(chunk)?;
+            t_rvq += t0.elapsed();
+
+            let t1 = std::time::Instant::now();
             let pre_conv = self
                 .dac
                 .pre_conv_window(&hidden, chunk.len(), &mut dac_state)?;
+            t_dac_pre += t1.elapsed();
+
+            let t2 = std::time::Instant::now();
             let transformed =
                 self.transformer
                     .forward_window(&pre_conv, chunk.len(), &mut transformer_state)?;
+            t_transformer += t2.elapsed();
+
+            let t3 = std::time::Instant::now();
             output.extend(
                 self.dac
                     .decode_window(&transformed, chunk.len(), &mut dac_state)?,
             );
+            t_dac_decode += t3.elapsed();
         }
+        eprintln!("  [codec_decode] total={:.3}s rvq={:.3}s dac_pre={:.3}s transformer={:.3}s dac_decode={:.3}s",
+            t_start.elapsed().as_secs_f64(), t_rvq.as_secs_f64(), t_dac_pre.as_secs_f64(), t_transformer.as_secs_f64(), t_dac_decode.as_secs_f64());
         if output.len() != expected_samples {
             return Err(format!(
                 "Code2Wav produced {} samples, expected {expected_samples}",

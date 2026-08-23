@@ -119,17 +119,28 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
         return Err("TTS prompt overlay must not be empty".into());
     }
     let mut session = talker.new_session()?;
+    let t_prefill = std::time::Instant::now();
     session.prefill_prompt(prompt)?;
+    eprintln!("  [frame_loop] prefill_prompt took {:.3}s", t_prefill.elapsed().as_secs_f64());
     let next_semantic = Cell::new(session.sample_semantic(temperature, rng)?);
     let mut frames = Vec::with_capacity(max_frames);
+    let mut t_total = std::time::Instant::now();
+    let mut t_hidden = std::time::Duration::ZERO;
+    let mut t_codec = std::time::Duration::ZERO;
+    let mut t_tts = std::time::Duration::ZERO;
+    let mut t_sample = std::time::Duration::ZERO;
     drive_frames(
         max_frames,
         || next_semantic.take(),
         |semantic| {
             let frame_index = frames.len();
+            let t_h = std::time::Instant::now();
             let hidden = session.hidden_state().to_vec();
+            t_hidden += t_h.elapsed();
+            let t_c = std::time::Instant::now();
             let (frame, mut feedback) =
                 predictor.predict_frame(&hidden, semantic, predictor_top_k(temperature), rng)?;
+            t_codec += t_c.elapsed();
             let overlay = &prompt.overlay[frame_index.min(prompt.overlay.len() - 1)];
             if feedback.len() != overlay.len() {
                 return Err(format!(
@@ -147,11 +158,21 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
                 .checked_add(frame_index)
                 .ok_or_else(|| "TTS frame position overflow".to_string())?;
             frames.push(frame);
+            let t_t = std::time::Instant::now();
             session.forward_step_with_embedding(&feedback, [position; 4])?;
+            t_tts += t_t.elapsed();
+            let t_s = std::time::Instant::now();
             next_semantic.set(session.sample_semantic(temperature, rng)?);
+            t_sample += t_s.elapsed();
+            if frame_index % 5 == 0 {
+                eprintln!("  [frame_loop] frame {} done, hidden={:.3}s codec={:.3}s tts={:.3}s sample={:.3}s", 
+                    frame_index, t_hidden.as_secs_f64(), t_codec.as_secs_f64(), t_tts.as_secs_f64(), t_sample.as_secs_f64());
+            }
             Ok(())
         },
     )?;
+    eprintln!("  [frame_loop] total={:.3}s hidden={:.3}s codec={:.3}s tts={:.3}s sample={:.3}s", 
+        t_total.elapsed().as_secs_f64(), t_hidden.as_secs_f64(), t_codec.as_secs_f64(), t_tts.as_secs_f64(), t_sample.as_secs_f64());
     Ok(frames)
 }
 

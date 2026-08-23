@@ -1,0 +1,103 @@
+//! # Qwen3 Shared Skeleton
+//!
+//! Contains types and loaders shared between text inference and embedding extraction.
+
+use crate::core::tensor::{GGMLType, TensorSource};
+use crate::ops::kernel::{QuantizedTensor, Weight};
+
+pub struct Qwen3LayerWeights<'a> {
+    pub attn_norm: Vec<f32>,
+    pub ffn_norm: Vec<f32>,
+    pub q_norm: Option<Vec<f32>>,
+    pub k_norm: Option<Vec<f32>>,
+    pub wq: Weight<'a>,
+    pub wk: Weight<'a>,
+    pub wv: Weight<'a>,
+    pub wo: Weight<'a>,
+    pub w_gate: Weight<'a>,
+    pub w_up: Weight<'a>,
+    pub w_down: Weight<'a>,
+}
+
+pub fn get_f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected_len: usize) -> Vec<f32> {
+    let info = source.tensor_info(name).unwrap_or_else(|| panic!("tensor {name} not found"));
+    let bytes = source.tensor_slice(name).unwrap_or_else(|| panic!("slice {name} not found"));
+    let mut output = vec![0.0; expected_len];
+    if info.ggml_type == GGMLType::F32 {
+        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
+            *value = f32::from_le_bytes(chunk.try_into().unwrap());
+        }
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn load_layers<'a>(
+    source: &'a dyn TensorSource,
+    n_layer: usize,
+    n_embd: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_ff: usize,
+    n_embd_head_k: usize,
+    has_qk_norm: bool,
+) -> Vec<Qwen3LayerWeights<'a>> {
+    (0..n_layer)
+        .map(|l| Qwen3LayerWeights {
+            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
+            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
+            q_norm: if has_qk_norm {
+                Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k))
+            } else {
+                None
+            },
+            k_norm: if has_qk_norm {
+                Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k))
+            } else {
+                None
+            },
+            wq: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_q,
+            )),
+            wk: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_k.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_gqa,
+            )),
+            wv: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_v.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_embd_gqa,
+            )),
+            wo: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.attn_output.weight", l)).unwrap().ggml_type,
+                n_embd_q,
+                n_embd,
+            )),
+            w_gate: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_gate.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_ff,
+            )),
+            w_up: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_up.weight", l)).unwrap().ggml_type,
+                n_embd,
+                n_ff,
+            )),
+            w_down: Weight::from_quantized(QuantizedTensor::from_bytes(
+                source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                source.tensor_info(&format!("blk.{}.ffn_down.weight", l)).unwrap().ggml_type,
+                n_ff,
+                n_embd,
+            )),
+        })
+        .collect()
+}

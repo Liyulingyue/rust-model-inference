@@ -18,7 +18,7 @@
 use rand::Rng;
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::{
+use crate::models::qwen3_multimodal::{
     checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor, usize_to_u64,
 };
 use crate::models::tts::talker::{mad_f16_inplace, scale_f16_inplace};

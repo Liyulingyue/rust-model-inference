@@ -1,8 +1,7 @@
 pub mod app;
-pub use app::LayerWeights;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
-pub use app::get_f32_tensor;
+pub use models::qwen3::{Qwen3LayerWeights, get_f32_tensor};
 pub mod core;
 pub mod format;
 pub mod models;
@@ -35,7 +34,7 @@ pub use format::load_plan::{
 pub use models::asr::*;
 pub use models::clip_config::{ClipVisionConfig, Qwen35Config};
 pub use models::diffusion::pig::{PigConfig, PigModel, PigVAE};
-pub use models::qwen3::*;
+pub use models::qwen3_multimodal::*;
 pub use models::qwen35::{build_qwen35_positions, Qwen35Model};
 pub use models::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
 
