@@ -120,7 +120,7 @@ fn parity_rope_neox_uses_llama_combined_sincos() {
 fn parity_softmax_uses_llama_scalar_exp_and_double_sum() {
     let mut values = [0x4100_5f5f, 0x40e9_d754, 0x411f_b16f, 0x4110_0e1d].map(f32::from_bits);
 
-    rust_model_inference::ops::softmax(&mut values);
+    rust_model_inference::ops::softmax_inplace(&mut values);
 
     assert_eq!(
         values.map(f32::to_bits),

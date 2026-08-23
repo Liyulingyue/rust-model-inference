@@ -1,7 +1,7 @@
 ﻿use crate::models::clip_config::Qwen35Config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::QuantizedTensor;
-use crate::ops::{attention_value_f32, dot_f32, softmax, rope_neox, rope_mrope, vec_mad_f32};
+use crate::ops::{attention_value_f32, dot_f32, softmax_inplace, rope_neox, rope_mrope, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::ops::quant::{self, BlockQ8K, QK_K};
@@ -511,7 +511,7 @@ impl<'a> Qwen35Model<'a> {
                     scratch.score_buf[s] = dot * scale;
                 }
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
-                softmax(&mut scratch.score_buf[..n_padded]);
+                softmax_inplace(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
                 scratch.attn_out_buf[out_base..out_base + n_embd_head].fill(0.0);
                 for s in 0..n_attend {

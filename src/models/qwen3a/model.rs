@@ -1187,7 +1187,7 @@ fn apply_gelu_erf(values: &mut [f32]) -> Result<(), String> {
 }
 
 fn attention_softmax(scores: &mut [f32]) -> Result<(), String> {
-    crate::ops::softmax(scores);
+    crate::ops::softmax_inplace(scores);
     if scores.iter().any(|score| !score.is_finite()) {
         return Err("Invalid attention softmax".into());
     }
@@ -1720,7 +1720,7 @@ mod tests {
         let mut expected = actual;
 
         attention_softmax(&mut actual).unwrap();
-        crate::ops::softmax(&mut expected);
+        crate::ops::softmax_inplace(&mut expected);
 
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }

@@ -626,7 +626,7 @@ pub fn run_embedding(
                     ) * kq_scale;
                 }
                 scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
-                crate::ops::softmax(&mut scores[..n_padded]);
+                crate::ops::softmax_inplace(&mut scores[..n_padded]);
                 for d in 0..n_embd_head_v {
                     for s in 0..n_cached {
                         values[s] = v_buf[s * n_embd_gqa + kv_h * n_embd_head_v + d];

@@ -9,7 +9,7 @@ use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
 use crate::ops::{
     dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox, softmax,
+    rope_neox, softmax_inplace,
 };
 use std::sync::Arc;
 
@@ -491,7 +491,7 @@ pub fn run_dump_logits(
                         slice_from_mut!(trace_scores_ptr, n_head * n_cached)
                             [h * n_cached..(h + 1) * n_cached]
                             .copy_from_slice(&scores[s_off..s_off + n_cached]);
-                        softmax(&mut scores[s_off..s_off + n_cached]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_cached]);
                         #[cfg(feature = "parity-trace")]
                         slice_from_mut!(trace_probs_ptr, n_head * n_cached)
                             [h * n_cached..(h + 1) * n_cached]
@@ -527,7 +527,7 @@ pub fn run_dump_logits(
                         slice_from_mut!(trace_scores_ptr, n_head * n_cached)
                             [h * n_cached..(h + 1) * n_cached]
                             .copy_from_slice(&scores[s_off..s_off + n_cached]);
-                        softmax(&mut scores[s_off..s_off + n_cached]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_cached]);
                         #[cfg(feature = "parity-trace")]
                         slice_from_mut!(trace_probs_ptr, n_head * n_cached)
                             [h * n_cached..(h + 1) * n_cached]
