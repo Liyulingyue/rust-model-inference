@@ -132,14 +132,6 @@ fn main() {
                 options.threads,
                 options.thinking,
             ));
-        } else if options.dump_logits {
-            app::run_or_exit(app::run_dump_logits(
-                source.as_ref(),
-                prompt,
-                max_tokens,
-                options.threads,
-                options.kv_format,
-            ));
         } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
             app::run_or_exit(app::run_inference(
                 source.as_ref(),
