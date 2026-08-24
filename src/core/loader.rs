@@ -548,12 +548,12 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         .to_string();
     if !matches!(
         arch.as_str(),
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense"
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "lfm2"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
     }
 
-    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense");
+    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense" | "lfm2");
 
     let rope_sections = if arch == "qwen3vl" {
         let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;

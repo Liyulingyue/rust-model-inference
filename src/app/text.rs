@@ -1,7 +1,7 @@
 ﻿use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
-use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
+use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
 use crate::models::qwen3_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
@@ -40,6 +40,19 @@ pub fn run_inference(
             n_threads_arg,
             profile,
             kv_format,
+        )
+    } else if arch == "lfm2" {
+        crate::models::lfm2::run_inference(
+            source,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            match kv_format {
+                KvFormat::F16 => crate::models::lfm2::KvCacheFmt::F16,
+                _ => crate::models::lfm2::KvCacheFmt::F32,
+            },
         )
     } else {
         crate::models::qwen3::base::run_inference(
