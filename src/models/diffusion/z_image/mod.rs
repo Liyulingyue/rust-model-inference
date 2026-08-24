@@ -6,6 +6,13 @@ pub(crate) mod dit;
 pub(crate) mod text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ZImageOptions {
+    pub(crate) steps: usize,
+    pub(crate) resolution: usize,
+    pub(crate) seed: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Component {
     Text,
     Dit,

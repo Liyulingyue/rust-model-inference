@@ -1,3 +1,13 @@
+use std::sync::Arc;
+
+use half::f16;
+
+use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
+use crate::ops::{dot_f32, rms_norm, rms_norm_inplace, silu, softmax_inplace};
+
+use super::{linear_into, validate_component, Component, Q8Scratch, ZImageOptions};
+
 const MT_N: usize = 624;
 const MT_M: usize = 397;
 const MT_MATRIX_A: u32 = 0x9908_b0df;
@@ -8,6 +18,861 @@ const ROPE_THETA: f32 = 256.0;
 const ROPE_AXES: [usize; 3] = [32, 48, 48];
 const ROPE_HEAD_WIDTH: usize = 128;
 const SEQUENCE_MULTIPLE: usize = 32;
+const LATENT_CHANNELS: usize = 16;
+const PATCH_WIDTH: usize = LATENT_CHANNELS * PATCH_SIZE * PATCH_SIZE;
+const CAP_WIDTH: usize = 2_560;
+const HIDDEN: usize = 3_840;
+const HEADS: usize = 30;
+const QKV_WIDTH: usize = HIDDEN * 3;
+const FFN_WIDTH: usize = 10_240;
+const TIME_WIDTH: usize = 256;
+const TIME_HIDDEN: usize = 1_024;
+const MAIN_LAYERS: usize = 30;
+const REFINER_LAYERS: usize = 2;
+const RMS_EPSILON: f32 = 1e-5;
+const QK_RMS_EPSILON: f32 = 1e-6;
+const FINAL_NORM_EPSILON: f32 = 1e-6;
+
+struct ModulationWeights {
+    matrix: String,
+    bias: Vec<f32>,
+}
+
+struct BlockWeights {
+    qkv: String,
+    out: String,
+    w1: String,
+    w2: String,
+    w3: String,
+    attention_norm1: Vec<f32>,
+    attention_norm2: Vec<f32>,
+    q_norm: Vec<f32>,
+    k_norm: Vec<f32>,
+    ffn_norm1: Vec<f32>,
+    ffn_norm2: Vec<f32>,
+    modulation: Option<ModulationWeights>,
+}
+
+pub(crate) struct ZImageDit {
+    source: Arc<dyn TensorSource>,
+    pool: Arc<ComputePool>,
+    cap_norm: Vec<f32>,
+    cap_bias: Vec<f32>,
+    x_bias: Vec<f32>,
+    cap_pad_token: Vec<f32>,
+    x_pad_token: Vec<f32>,
+    time_0_bias: Vec<f32>,
+    time_2_bias: Vec<f32>,
+    context_refiners: Vec<BlockWeights>,
+    noise_refiners: Vec<BlockWeights>,
+    layers: Vec<BlockWeights>,
+    final_modulation_bias: Vec<f32>,
+    final_bias: Vec<f32>,
+}
+
+pub(crate) struct DitScratch {
+    text: Vec<f32>,
+    image: Vec<f32>,
+    tokens: Vec<f32>,
+    qkv: Vec<f32>,
+    attention: Vec<f32>,
+    ffn: Vec<f32>,
+    scores: Vec<f32>,
+    modulation: Vec<f32>,
+    rope: Vec<f32>,
+    patches: Vec<f32>,
+    velocity: Vec<f32>,
+    time_frequency: [f32; TIME_WIDTH],
+    time_hidden: [f32; TIME_HIDDEN],
+    time: [f32; TIME_WIDTH],
+    q8: Q8Scratch,
+}
+
+impl DitScratch {
+    pub(crate) fn new() -> Self {
+        Self {
+            text: Vec::new(),
+            image: Vec::new(),
+            tokens: Vec::new(),
+            qkv: Vec::new(),
+            attention: Vec::new(),
+            ffn: Vec::new(),
+            scores: Vec::new(),
+            modulation: Vec::new(),
+            rope: Vec::new(),
+            patches: Vec::new(),
+            velocity: Vec::new(),
+            time_frequency: [0.0; TIME_WIDTH],
+            time_hidden: [0.0; TIME_HIDDEN],
+            time: [0.0; TIME_WIDTH],
+            q8: Q8Scratch::new(FFN_WIDTH),
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        text_tokens: usize,
+        image_tokens: usize,
+        latent_values: usize,
+    ) -> Result<(), String> {
+        let total_tokens = text_tokens
+            .checked_add(image_tokens)
+            .ok_or("Z-Image token count overflow")?;
+        resize_zeroed(
+            &mut self.text,
+            checked_product(text_tokens, HIDDEN, "text tokens")?,
+            "Z-Image text tokens",
+        )?;
+        resize_zeroed(
+            &mut self.image,
+            checked_product(image_tokens, HIDDEN, "image tokens")?,
+            "Z-Image image tokens",
+        )?;
+        resize_zeroed(
+            &mut self.tokens,
+            checked_product(total_tokens, HIDDEN, "joint tokens")?,
+            "Z-Image joint tokens",
+        )?;
+        resize_zeroed(
+            &mut self.qkv,
+            checked_product(total_tokens, QKV_WIDTH, "QKV")?,
+            "Z-Image QKV",
+        )?;
+        resize_zeroed(
+            &mut self.attention,
+            checked_product(total_tokens, HIDDEN, "attention")?,
+            "Z-Image attention",
+        )?;
+        resize_zeroed(
+            &mut self.ffn,
+            checked_product(total_tokens, FFN_WIDTH, "FFN")?,
+            "Z-Image FFN",
+        )?;
+        resize_zeroed(&mut self.scores, total_tokens, "Z-Image attention scores")?;
+        resize_zeroed(&mut self.modulation, HIDDEN * 4, "Z-Image AdaLN modulation")?;
+        resize_zeroed(
+            &mut self.rope,
+            checked_product(total_tokens, ROPE_HEAD_WIDTH, "RoPE")?,
+            "Z-Image RoPE",
+        )?;
+        resize_zeroed(
+            &mut self.patches,
+            checked_product(image_tokens, PATCH_WIDTH, "patches")?,
+            "Z-Image patches",
+        )?;
+        resize_zeroed(&mut self.velocity, latent_values, "Z-Image velocity")
+    }
+}
+
+fn checked_product(left: usize, right: usize, name: &str) -> Result<usize, String> {
+    left.checked_mul(right)
+        .ok_or_else(|| format!("Z-Image {name} shape overflow"))
+}
+
+fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(format!("Non-finite Z-Image {name}"))
+    }
+}
+
+fn resize_zeroed(values: &mut Vec<f32>, len: usize, name: &str) -> Result<(), String> {
+    if values.capacity() < len {
+        values
+            .try_reserve_exact(len - values.len())
+            .map_err(|error| format!("Failed to allocate {name}: {error}"))?;
+    }
+    values.resize(len, 0.0);
+    Ok(())
+}
+
+fn load_f32_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [len as u64] || info.ggml_type != GGMLType::F32 {
+        return Err(format!("Invalid vector tensor: {name}"));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != checked_product(len, 4, name)? {
+        return Err(format!("Invalid {name} byte length"));
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
+
+fn load_f16_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [len as u64, 1] || info.ggml_type != GGMLType::F16 {
+        return Err(format!("Invalid vector tensor: {name}"));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != checked_product(len, 2, name)? {
+        return Err(format!("Invalid {name} byte length"));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|chunk| f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32())
+        .collect())
+}
+
+fn load_block(
+    source: &dyn TensorSource,
+    prefix: String,
+    modulated: bool,
+) -> Result<BlockWeights, String> {
+    let vector = |suffix: &str, len| load_f32_vector(source, &format!("{prefix}.{suffix}"), len);
+    Ok(BlockWeights {
+        qkv: format!("{prefix}.attention.qkv.weight"),
+        out: format!("{prefix}.attention.out.weight"),
+        w1: format!("{prefix}.feed_forward.w1.weight"),
+        w2: format!("{prefix}.feed_forward.w2.weight"),
+        w3: format!("{prefix}.feed_forward.w3.weight"),
+        attention_norm1: vector("attention_norm1.weight", HIDDEN)?,
+        attention_norm2: vector("attention_norm2.weight", HIDDEN)?,
+        q_norm: vector("attention.q_norm.weight", ROPE_HEAD_WIDTH)?,
+        k_norm: vector("attention.k_norm.weight", ROPE_HEAD_WIDTH)?,
+        ffn_norm1: vector("ffn_norm1.weight", HIDDEN)?,
+        ffn_norm2: vector("ffn_norm2.weight", HIDDEN)?,
+        modulation: if modulated {
+            Some(ModulationWeights {
+                matrix: format!("{prefix}.adaLN_modulation.0.weight"),
+                bias: vector("adaLN_modulation.0.bias", HIDDEN * 4)?,
+            })
+        } else {
+            None
+        },
+    })
+}
+
+pub(crate) fn pad_rows_to_32(
+    values: &mut Vec<f32>,
+    rows: usize,
+    pad_token: &[f32],
+) -> Result<(), String> {
+    if pad_token.is_empty() || values.len() != checked_product(rows, pad_token.len(), "rows")? {
+        return Err("Invalid Z-Image rows for padding".into());
+    }
+    let padded_rows = padded_to_sequence_multiple(rows)?;
+    let target = checked_product(padded_rows, pad_token.len(), "padded rows")?;
+    values
+        .try_reserve_exact(target.saturating_sub(values.len()))
+        .map_err(|error| format!("Failed to allocate Z-Image padding: {error}"))?;
+    while values.len() < target {
+        values.extend_from_slice(pad_token);
+    }
+    Ok(())
+}
+
+pub(crate) fn euler_flow_step(latent: &mut [f32], velocity: &[f32], sigma: f32, sigma_next: f32) {
+    for (x, v) in latent.iter_mut().zip(velocity) {
+        *x += (sigma_next - sigma) * *v;
+    }
+}
+
+fn timestep_embedding(timestep: f32, output: &mut [f32]) -> Result<(), String> {
+    if output.is_empty() || output.len() % 2 != 0 {
+        return Err("Z-Image timestep embedding width must be positive and even".into());
+    }
+    let half = output.len() / 2;
+    for index in 0..half {
+        let frequency = (-10_000.0f32.ln() * index as f32 / half as f32).exp();
+        let angle = timestep * frequency;
+        output[index] = angle.cos();
+        output[index + half] = angle.sin();
+    }
+    Ok(())
+}
+
+fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
+    if values.len() != rope.len() || values.len() % 2 != 0 {
+        return Err("Invalid compact Z-Image RoPE slice".into());
+    }
+    for (value, rotation) in values.chunks_exact_mut(2).zip(rope.chunks_exact(2)) {
+        let first = value[0];
+        let second = value[1];
+        value[0] = first * rotation[0] - second * rotation[1];
+        value[1] = first * rotation[1] + second * rotation[0];
+    }
+    Ok(())
+}
+
+fn attention_into(
+    qkv: &[f32],
+    tokens: usize,
+    heads: usize,
+    head_width: usize,
+    scores: &mut [f32],
+    output: &mut [f32],
+) -> Result<(), String> {
+    let hidden = checked_product(heads, head_width, "attention hidden")?;
+    let qkv_width = checked_product(hidden, 3, "attention QKV")?;
+    if qkv.len() != checked_product(tokens, qkv_width, "attention QKV rows")?
+        || output.len() != checked_product(tokens, hidden, "attention output")?
+        || scores.len() < tokens
+    {
+        return Err("Invalid Z-Image attention buffers".into());
+    }
+    let scale = 1.0 / (head_width as f32).sqrt();
+    for query in 0..tokens {
+        for head in 0..heads {
+            let query_start = query * qkv_width + head * head_width;
+            let query_values = &qkv[query_start..query_start + head_width];
+            for key in 0..tokens {
+                let key_start = key * qkv_width + hidden + head * head_width;
+                scores[key] = dot_f32(
+                    query_values,
+                    &qkv[key_start..key_start + head_width],
+                    head_width,
+                ) * scale;
+            }
+            softmax_inplace(&mut scores[..tokens]);
+            let output_start = query * hidden + head * head_width;
+            for dimension in 0..head_width {
+                let mut value = 0.0f32;
+                for key in 0..tokens {
+                    value += scores[key]
+                        * qkv[key * qkv_width + hidden * 2 + head * head_width + dimension];
+                }
+                output[output_start + dimension] = value;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
+    if input.is_empty() || input.len() != output.len() {
+        return Err("Invalid Z-Image final LayerNorm buffers".into());
+    }
+    let mean =
+        (input.iter().map(|value| f64::from(*value)).sum::<f64>() / input.len() as f64) as f32;
+    let variance = (input
+        .iter()
+        .map(|value| {
+            let centered = *value - mean;
+            f64::from(centered * centered)
+        })
+        .sum::<f64>()
+        / input.len() as f64) as f32;
+    let inverse = 1.0 / (variance + eps).sqrt();
+    for (output, input) in output.iter_mut().zip(input) {
+        *output = (*input - mean) * inverse;
+    }
+    Ok(())
+}
+
+impl ZImageDit {
+    pub(crate) fn load(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        validate_component(source.as_ref(), Component::Dit)?;
+        let context_refiners = (0..REFINER_LAYERS)
+            .map(|layer| load_block(source.as_ref(), format!("context_refiner.{layer}"), false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let noise_refiners = (0..REFINER_LAYERS)
+            .map(|layer| load_block(source.as_ref(), format!("noise_refiner.{layer}"), true))
+            .collect::<Result<Vec<_>, _>>()?;
+        let layers = (0..MAIN_LAYERS)
+            .map(|layer| load_block(source.as_ref(), format!("layers.{layer}"), true))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            cap_norm: load_f32_vector(source.as_ref(), "cap_embedder.0.weight", CAP_WIDTH)?,
+            cap_bias: load_f32_vector(source.as_ref(), "cap_embedder.1.bias", HIDDEN)?,
+            x_bias: load_f32_vector(source.as_ref(), "x_embedder.bias", HIDDEN)?,
+            cap_pad_token: load_f16_vector(source.as_ref(), "cap_pad_token", HIDDEN)?,
+            x_pad_token: load_f16_vector(source.as_ref(), "x_pad_token", HIDDEN)?,
+            time_0_bias: load_f32_vector(source.as_ref(), "t_embedder.mlp.0.bias", TIME_HIDDEN)?,
+            time_2_bias: load_f32_vector(source.as_ref(), "t_embedder.mlp.2.bias", TIME_WIDTH)?,
+            context_refiners,
+            noise_refiners,
+            layers,
+            final_modulation_bias: load_f32_vector(
+                source.as_ref(),
+                "final_layer.adaLN_modulation.1.bias",
+                HIDDEN,
+            )?,
+            final_bias: load_f32_vector(source.as_ref(), "final_layer.linear.bias", PATCH_WIDTH)?,
+            source,
+            pool,
+        })
+    }
+
+    pub(crate) fn predict_flow(
+        &self,
+        latent: &[f32],
+        latent_side: usize,
+        context: &[f32],
+        context_tokens: usize,
+        sigma: f32,
+        scratch: &mut DitScratch,
+    ) -> Result<(), String> {
+        if latent_side == 0 || context_tokens == 0 {
+            return Err("Z-Image latent side and context token count must be positive".into());
+        }
+        if !sigma.is_finite() || !(0.0..=1.0).contains(&sigma) {
+            return Err("Z-Image sigma must be finite and within [0, 1]".into());
+        }
+        let latent_values = checked_product(
+            LATENT_CHANNELS,
+            checked_product(latent_side, latent_side, "latent spatial")?,
+            "latent",
+        )?;
+        if latent.len() != latent_values {
+            return Err(format!(
+                "Invalid Z-Image latent length: expected {latent_values}, got {}",
+                latent.len()
+            ));
+        }
+        let context_values = checked_product(context_tokens, CAP_WIDTH, "context")?;
+        if context.len() != context_values {
+            return Err(format!(
+                "Invalid Z-Image context length: expected {context_values}, got {}",
+                context.len()
+            ));
+        }
+        require_finite(latent, "latent")?;
+        require_finite(context, "context")?;
+
+        let (patch_height, patch_width, _) =
+            patch_shape(LATENT_CHANNELS, latent_side, latent_side)?;
+        let image_tokens = checked_product(patch_height, patch_width, "image tokens")?;
+        let padded_text = padded_to_sequence_multiple(context_tokens)?;
+        let padded_image = padded_to_sequence_multiple(image_tokens)?;
+        scratch.prepare(padded_text, padded_image, latent_values)?;
+
+        timestep_embedding(sigma * 1_000.0, &mut scratch.time_frequency)?;
+        linear_into(
+            self.source.as_ref(),
+            "t_embedder.mlp.0.weight",
+            TIME_WIDTH,
+            TIME_HIDDEN,
+            &scratch.time_frequency,
+            &mut scratch.time_hidden,
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (value, bias) in scratch.time_hidden.iter_mut().zip(&self.time_0_bias) {
+            *value = silu(*value + *bias);
+        }
+        linear_into(
+            self.source.as_ref(),
+            "t_embedder.mlp.2.weight",
+            TIME_HIDDEN,
+            TIME_WIDTH,
+            &scratch.time_hidden,
+            &mut scratch.time,
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (value, bias) in scratch.time.iter_mut().zip(&self.time_2_bias) {
+            *value += *bias;
+        }
+
+        for row in 0..context_tokens {
+            let normalized = &mut scratch.attention[..CAP_WIDTH];
+            rms_norm(
+                &context[row * CAP_WIDTH..(row + 1) * CAP_WIDTH],
+                &self.cap_norm,
+                normalized,
+                RMS_EPSILON,
+            );
+            linear_into(
+                self.source.as_ref(),
+                "cap_embedder.1.weight",
+                CAP_WIDTH,
+                HIDDEN,
+                normalized,
+                &mut scratch.text[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (value, bias) in scratch.text[row * HIDDEN..(row + 1) * HIDDEN]
+                .iter_mut()
+                .zip(&self.cap_bias)
+            {
+                *value += *bias;
+            }
+        }
+
+        patchify_latent_into(
+            latent,
+            LATENT_CHANNELS,
+            latent_side,
+            latent_side,
+            &mut scratch.patches,
+        )?;
+        for row in 0..image_tokens {
+            linear_into(
+                self.source.as_ref(),
+                "x_embedder.weight",
+                PATCH_WIDTH,
+                HIDDEN,
+                &scratch.patches[row * PATCH_WIDTH..(row + 1) * PATCH_WIDTH],
+                &mut scratch.image[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (value, bias) in scratch.image[row * HIDDEN..(row + 1) * HIDDEN]
+                .iter_mut()
+                .zip(&self.x_bias)
+            {
+                *value += *bias;
+            }
+        }
+
+        scratch.text.truncate(context_tokens * HIDDEN);
+        pad_rows_to_32(&mut scratch.text, context_tokens, &self.cap_pad_token)?;
+        scratch.image.truncate(image_tokens * HIDDEN);
+        pad_rows_to_32(&mut scratch.image, image_tokens, &self.x_pad_token)?;
+        z_image_rope_into(context_tokens, latent_side, latent_side, &mut scratch.rope)?;
+
+        let text_hidden = padded_text * HIDDEN;
+        let image_hidden = padded_image * HIDDEN;
+        let text_rope = padded_text * ROPE_HEAD_WIDTH;
+        let image_rope = padded_image * ROPE_HEAD_WIDTH;
+        for block in &self.context_refiners {
+            run_block(
+                self.source.as_ref(),
+                self.pool.as_ref(),
+                block,
+                padded_text,
+                &mut scratch.text[..text_hidden],
+                &scratch.rope[..text_rope],
+                None,
+                &mut scratch.qkv,
+                &mut scratch.attention,
+                &mut scratch.ffn,
+                &mut scratch.scores,
+                &mut scratch.modulation,
+                &mut scratch.q8,
+            )?;
+        }
+        for block in &self.noise_refiners {
+            run_block(
+                self.source.as_ref(),
+                self.pool.as_ref(),
+                block,
+                padded_image,
+                &mut scratch.image[..image_hidden],
+                &scratch.rope[text_rope..text_rope + image_rope],
+                Some(&scratch.time),
+                &mut scratch.qkv,
+                &mut scratch.attention,
+                &mut scratch.ffn,
+                &mut scratch.scores,
+                &mut scratch.modulation,
+                &mut scratch.q8,
+            )?;
+        }
+
+        scratch.tokens[..text_hidden].copy_from_slice(&scratch.text[..text_hidden]);
+        scratch.tokens[text_hidden..text_hidden + image_hidden]
+            .copy_from_slice(&scratch.image[..image_hidden]);
+        let total_tokens = padded_text + padded_image;
+        let total_hidden = text_hidden + image_hidden;
+        let total_rope = text_rope + image_rope;
+        for block in &self.layers {
+            run_block(
+                self.source.as_ref(),
+                self.pool.as_ref(),
+                block,
+                total_tokens,
+                &mut scratch.tokens[..total_hidden],
+                &scratch.rope[..total_rope],
+                Some(&scratch.time),
+                &mut scratch.qkv,
+                &mut scratch.attention,
+                &mut scratch.ffn,
+                &mut scratch.scores,
+                &mut scratch.modulation,
+                &mut scratch.q8,
+            )?;
+        }
+
+        for (output, input) in scratch.time_frequency.iter_mut().zip(&scratch.time) {
+            *output = silu(*input);
+        }
+        linear_into(
+            self.source.as_ref(),
+            "final_layer.adaLN_modulation.1.weight",
+            TIME_WIDTH,
+            HIDDEN,
+            &scratch.time_frequency,
+            &mut scratch.modulation[..HIDDEN],
+            &mut scratch.q8,
+            self.pool.as_ref(),
+        )?;
+        for (value, bias) in scratch.modulation[..HIDDEN]
+            .iter_mut()
+            .zip(&self.final_modulation_bias)
+        {
+            *value += *bias;
+        }
+
+        resize_zeroed(
+            &mut scratch.patches,
+            checked_product(image_tokens, PATCH_WIDTH, "output patches")?,
+            "Z-Image output patches",
+        )?;
+        for row in 0..image_tokens {
+            let joint_row = padded_text + row;
+            let normalized = &mut scratch.attention[..HIDDEN];
+            layer_norm_no_affine(
+                &scratch.tokens[joint_row * HIDDEN..(joint_row + 1) * HIDDEN],
+                normalized,
+                FINAL_NORM_EPSILON,
+            )?;
+            for (value, scale) in normalized.iter_mut().zip(&scratch.modulation[..HIDDEN]) {
+                *value *= 1.0 + *scale;
+            }
+            linear_into(
+                self.source.as_ref(),
+                "final_layer.linear.weight",
+                HIDDEN,
+                PATCH_WIDTH,
+                normalized,
+                &mut scratch.patches[row * PATCH_WIDTH..(row + 1) * PATCH_WIDTH],
+                &mut scratch.q8,
+                self.pool.as_ref(),
+            )?;
+            for (value, bias) in scratch.patches[row * PATCH_WIDTH..(row + 1) * PATCH_WIDTH]
+                .iter_mut()
+                .zip(&self.final_bias)
+            {
+                *value = -(*value + *bias);
+            }
+        }
+
+        for channel in 0..LATENT_CHANNELS {
+            for y in 0..latent_side {
+                for x in 0..latent_side {
+                    let token = (y / PATCH_SIZE) * patch_width + x / PATCH_SIZE;
+                    let patch_offset =
+                        ((y % PATCH_SIZE) * PATCH_SIZE + x % PATCH_SIZE) * LATENT_CHANNELS;
+                    scratch.velocity[(channel * latent_side + y) * latent_side + x] =
+                        scratch.patches[token * PATCH_WIDTH + patch_offset + channel];
+                }
+            }
+        }
+        require_finite(&scratch.velocity, "predicted flow")
+    }
+
+    pub(crate) fn denoise(
+        &self,
+        context: &[f32],
+        context_tokens: usize,
+        options: &ZImageOptions,
+    ) -> Result<Vec<f32>, String> {
+        if options.resolution == 0 || options.resolution % 8 != 0 {
+            return Err("Z-Image resolution must be a positive multiple of 8".into());
+        }
+        let sigmas = z_image_sigmas(options.steps)?;
+        let latent_side = options.resolution / 8;
+        let latent_len = checked_product(
+            LATENT_CHANNELS,
+            checked_product(latent_side, latent_side, "latent spatial")?,
+            "latent",
+        )?;
+        let mut latent = zeroed_f32("Z-Image initial noise", latent_len)?;
+        TorchMt19937::new(options.seed as u64).fill_normal(&mut latent);
+        let mut scratch = DitScratch::new();
+        for pair in sigmas.windows(2) {
+            let sigma = pair[0];
+            let sigma_next = pair[1];
+            self.predict_flow(
+                &latent,
+                latent_side,
+                context,
+                context_tokens,
+                sigma,
+                &mut scratch,
+            )?;
+            euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next);
+            require_finite(&latent, "Euler latent")?;
+        }
+        Ok(latent)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_block(
+    source: &dyn TensorSource,
+    pool: &ComputePool,
+    block: &BlockWeights,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+) -> Result<(), String> {
+    let hidden_len = checked_product(rows, HIDDEN, "block tokens")?;
+    let qkv_len = checked_product(rows, QKV_WIDTH, "block QKV")?;
+    let ffn_len = checked_product(rows, FFN_WIDTH, "block FFN")?;
+    if tokens.len() != hidden_len
+        || rope.len() != checked_product(rows, ROPE_HEAD_WIDTH, "block RoPE")?
+        || qkv.len() < qkv_len
+        || attention.len() < hidden_len
+        || ffn.len() < ffn_len
+        || scores.len() < rows
+        || modulation.len() < HIDDEN * 4
+    {
+        return Err("Invalid Z-Image transformer scratch".into());
+    }
+
+    let modulations = if let Some(weights) = &block.modulation {
+        let time = time.ok_or("Missing Z-Image AdaLN input")?;
+        linear_into(
+            source,
+            &weights.matrix,
+            TIME_WIDTH,
+            HIDDEN * 4,
+            time,
+            &mut modulation[..HIDDEN * 4],
+            q8,
+            pool,
+        )?;
+        for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
+            *value += *bias;
+        }
+        Some(&modulation[..HIDDEN * 4])
+    } else {
+        if time.is_some() {
+            return Err("Unexpected Z-Image AdaLN input".into());
+        }
+        None
+    };
+
+    for row in 0..rows {
+        let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+        let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm(token, &block.attention_norm1, normalized, RMS_EPSILON);
+        if let Some(values) = modulations {
+            for (value, scale) in normalized.iter_mut().zip(&values[..HIDDEN]) {
+                *value *= 1.0 + *scale;
+            }
+        }
+        linear_into(
+            source,
+            &block.qkv,
+            HIDDEN,
+            QKV_WIDTH,
+            normalized,
+            &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH],
+            q8,
+            pool,
+        )?;
+    }
+
+    for row in 0..rows {
+        let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
+        let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
+        for head in 0..HEADS {
+            let start = head * ROPE_HEAD_WIDTH;
+            let query = &mut row_qkv[start..start + ROPE_HEAD_WIDTH];
+            rms_norm_inplace(query, &block.q_norm, QK_RMS_EPSILON);
+            rotate_interleaved_inplace(query, rotation)?;
+
+            let key_start = HIDDEN + start;
+            let key = &mut row_qkv[key_start..key_start + ROPE_HEAD_WIDTH];
+            rms_norm_inplace(key, &block.k_norm, QK_RMS_EPSILON);
+            rotate_interleaved_inplace(key, rotation)?;
+        }
+    }
+
+    attention_into(
+        &qkv[..qkv_len],
+        rows,
+        HEADS,
+        ROPE_HEAD_WIDTH,
+        scores,
+        &mut attention[..hidden_len],
+    )?;
+
+    for row in 0..rows {
+        linear_into(
+            source,
+            &block.out,
+            HIDDEN,
+            HIDDEN,
+            &attention[row * HIDDEN..(row + 1) * HIDDEN],
+            &mut qkv[row * HIDDEN..(row + 1) * HIDDEN],
+            q8,
+            pool,
+        )?;
+        let projected = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm_inplace(projected, &block.attention_norm2, RMS_EPSILON);
+        for index in 0..HIDDEN {
+            let gate = modulations.map_or(1.0, |values| values[HIDDEN + index].tanh());
+            tokens[row * HIDDEN + index] += projected[index] * gate;
+        }
+    }
+
+    for row in 0..rows {
+        let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+        let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
+        if let Some(values) = modulations {
+            for (value, scale) in normalized.iter_mut().zip(&values[HIDDEN * 2..HIDDEN * 3]) {
+                *value *= 1.0 + *scale;
+            }
+        }
+        linear_into(
+            source,
+            &block.w1,
+            HIDDEN,
+            FFN_WIDTH,
+            normalized,
+            &mut qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+            q8,
+            pool,
+        )?;
+        linear_into(
+            source,
+            &block.w3,
+            HIDDEN,
+            FFN_WIDTH,
+            normalized,
+            &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+            q8,
+            pool,
+        )?;
+        for index in row * FFN_WIDTH..(row + 1) * FFN_WIDTH {
+            qkv[index] = silu(qkv[index]) * ffn[index];
+        }
+        linear_into(
+            source,
+            &block.w2,
+            FFN_WIDTH,
+            HIDDEN,
+            &qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+            normalized,
+            q8,
+            pool,
+        )?;
+        rms_norm_inplace(normalized, &block.ffn_norm2, RMS_EPSILON);
+        for index in 0..HIDDEN {
+            let gate = modulations.map_or(1.0, |values| values[HIDDEN * 3 + index].tanh());
+            tokens[row * HIDDEN + index] += normalized[index] * gate;
+        }
+    }
+    Ok(())
+}
 
 pub(crate) struct TorchMt19937 {
     state: [u32; MT_N],
@@ -191,6 +1056,18 @@ pub(crate) fn patchify_latent(
     height: usize,
     width: usize,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    patchify_latent_into(latent, channels, height, width, &mut output)?;
+    Ok(output)
+}
+
+fn patchify_latent_into(
+    latent: &[f32],
+    channels: usize,
+    height: usize,
+    width: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
     let expected = channels
         .checked_mul(height)
         .and_then(|value| value.checked_mul(width))
@@ -206,7 +1083,8 @@ pub(crate) fn patchify_latent(
         .checked_mul(patch_width)
         .and_then(|value| value.checked_mul(patch_width_channels))
         .ok_or("Z-Image patch shape overflow")?;
-    let mut output = zeroed_f32("Z-Image patches", output_len)?;
+    resize_zeroed(output, output_len, "Z-Image patches")?;
+    output.fill(0.0);
 
     for patch_y in 0..patch_height {
         for patch_x in 0..patch_width {
@@ -231,7 +1109,7 @@ pub(crate) fn patchify_latent(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(crate) fn unpatchify_latent(
@@ -282,6 +1160,17 @@ pub(crate) fn z_image_rope(
     image_width: usize,
     image_height: usize,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    z_image_rope_into(text_tokens, image_width, image_height, &mut output)?;
+    Ok(output)
+}
+
+fn z_image_rope_into(
+    text_tokens: usize,
+    image_width: usize,
+    image_height: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
     if text_tokens == 0 || image_width == 0 || image_height == 0 {
         return Err("Z-Image RoPE dimensions must be positive".into());
     }
@@ -315,7 +1204,7 @@ pub(crate) fn z_image_rope(
     let output_len = position_count
         .checked_mul(ROPE_HEAD_WIDTH)
         .ok_or("Z-Image RoPE output size overflow")?;
-    let mut output = zeroed_f32("Z-Image RoPE", output_len)?;
+    resize_zeroed(output, output_len, "Z-Image RoPE")?;
 
     for position_index in 0..position_count {
         let positions = if position_index < padded_text {
@@ -348,15 +1237,19 @@ pub(crate) fn z_image_rope(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        patchify_latent, time_snr_shift, unpatchify_latent, z_image_rope, z_image_sigmas,
-        TorchMt19937,
+        attention_into, euler_flow_step, layer_norm_no_affine, pad_rows_to_32, patchify_latent,
+        patchify_latent_into, require_finite, rotate_interleaved_inplace, time_snr_shift,
+        timestep_embedding, unpatchify_latent, z_image_rope, z_image_sigmas, TorchMt19937,
+        ZImageDit,
     };
+    use crate::core::thread_pool::ComputePool;
+    use std::sync::Arc;
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
@@ -482,5 +1375,86 @@ mod tests {
         assert!(patchify_latent(&[], 16, 64, 64).is_err());
         assert!(patchify_latent(&[], usize::MAX, 2, 2).is_err());
         assert!(unpatchify_latent(&[], 16, 64, 64).is_err());
+    }
+
+    #[test]
+    fn reused_patch_buffer_zeros_out_of_bounds_spatial_slots() {
+        let mut patches = Vec::new();
+        patchify_latent_into(&[1.0, 2.0, 3.0, 4.0], 1, 2, 2, &mut patches).unwrap();
+        patchify_latent_into(&[9.0], 1, 1, 1, &mut patches).unwrap();
+        assert_eq!(patches, [9.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn padding_uses_the_learned_token_not_zero_context() {
+        let mut values = vec![1.0; 31 * 3840];
+        pad_rows_to_32(&mut values, 31, &[2.0; 3840]).unwrap();
+        assert_eq!(&values[31 * 3840..32 * 3840], &[2.0; 3840]);
+    }
+
+    #[test]
+    fn euler_flow_update_consumes_the_next_sigma_once() {
+        let mut latent = [2.0, -3.0];
+        euler_flow_step(&mut latent, &[0.5, -0.25], 0.9, 0.4);
+        assert_eq!(latent, [1.75, -2.875]);
+    }
+
+    #[test]
+    fn timestep_embedding_uses_pinned_cos_then_sin_layout() {
+        let mut embedding = [0.0; 4];
+        timestep_embedding(1.0, &mut embedding).unwrap();
+        assert!((embedding[0] - 1.0f32.cos()).abs() < 1e-6);
+        assert!((embedding[1] - 0.01f32.cos()).abs() < 1e-6);
+        assert!((embedding[2] - 1.0f32.sin()).abs() < 1e-6);
+        assert!((embedding[3] - 0.01f32.sin()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compact_rope_rotates_interleaved_values_once() {
+        let mut values = [1.0, 2.0, 3.0, 4.0];
+        rotate_interleaved_inplace(&mut values, &[0.0, 1.0, 1.0, 0.0]).unwrap();
+        assert_eq!(values, [-2.0, 1.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn attention_reads_qkv_rows_and_softmaxes_each_query() {
+        let qkv = [
+            0.0, 0.0, 0.0, 0.0, 2.0, 4.0, // token 0: q, k, v
+            0.0, 0.0, 0.0, 0.0, 6.0, 8.0, // token 1: q, k, v
+        ];
+        let mut scores = [0.0; 2];
+        let mut output = [0.0; 4];
+        attention_into(&qkv, 2, 1, 2, &mut scores, &mut output).unwrap();
+        assert_eq!(output, [4.0, 6.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn final_layer_norm_uses_population_variance_without_affine() {
+        let mut output = [0.0; 2];
+        layer_norm_no_affine(&[1.0, 3.0], &mut output, 0.0).unwrap();
+        assert_eq!(output, [-1.0, 1.0]);
+    }
+
+    #[test]
+    fn dit_boundaries_reject_non_finite_values() {
+        assert!(require_finite(&[0.0, -1.0], "context").is_ok());
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                require_finite(&[0.0, value], "context").unwrap_err(),
+                "Non-finite Z-Image context"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Z_IMAGE_DIT"]
+    fn dit_loader_accepts_supplied_tensor_signature() {
+        let source = Arc::new(
+            crate::core::loader::GGUFLoader::from_file(
+                std::env::var("Z_IMAGE_DIT").expect("missing Z_IMAGE_DIT"),
+            )
+            .unwrap(),
+        );
+        ZImageDit::load(source, Arc::new(ComputePool::new(1))).unwrap();
     }
 }
