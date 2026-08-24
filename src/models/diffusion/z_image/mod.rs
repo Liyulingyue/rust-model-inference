@@ -429,6 +429,29 @@ mod tests {
         data: HashMap<String, Vec<u8>>,
     }
 
+    struct MaskedSource<'a> {
+        inner: &'a crate::core::loader::GGUFLoader,
+        missing: &'a str,
+    }
+
+    impl TensorSource for MaskedSource<'_> {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.inner.metadata(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name != self.missing)
+                .then(|| self.inner.tensor_info(name))
+                .flatten()
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name != self.missing)
+                .then(|| self.inner.tensor_slice(name))
+                .flatten()
+        }
+    }
+
     impl TestSource {
         fn with_metadata(mut self, key: &str, value: &str) -> Self {
             self.metadata
@@ -520,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn q8_linear_overwrites_output() {
+    fn q8_linear_with_two_threads_overwrites_output() {
         let mut weight = f16::from_f32(1.0).to_bits().to_le_bytes().to_vec();
         weight.extend([1u8; 32]);
         let source = TestSource::default().with_raw_tensor("w", &[32, 1], GGMLType::Q8_0, weight);
@@ -533,7 +556,7 @@ mod tests {
             &[2.0; 32],
             &mut out,
             &mut Q8Scratch::new(32),
-            &ComputePool::new(1),
+            &ComputePool::new(2),
         )
         .unwrap();
         assert!((out[0] - 64.0).abs() < 0.01, "{}", out[0]);
@@ -623,5 +646,53 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "Unsupported matrix type F32 for w");
+    }
+
+    #[test]
+    #[ignore = "requires Z_IMAGE_TEXT_GGUF, Z_IMAGE_DIT_GGUF, and Z_IMAGE_VAE_GGUF"]
+    fn supplied_ggufs_cover_every_component_signature() {
+        let load = |name: &str| {
+            crate::core::loader::GGUFLoader::from_file(
+                std::env::var(name).unwrap_or_else(|_| panic!("missing {name}")),
+            )
+            .unwrap()
+        };
+        let cases = [
+            (load("Z_IMAGE_TEXT_GGUF"), Component::Text, None, 398),
+            (load("Z_IMAGE_DIT_GGUF"), Component::Dit, None, 453),
+            (
+                load("Z_IMAGE_VAE_GGUF"),
+                Component::Vae,
+                Some("decoder."),
+                138,
+            ),
+        ];
+
+        for (source, component, prefix, expected_count) in &cases {
+            validate_component(source, *component).unwrap();
+            for other in [Component::Text, Component::Dit, Component::Vae] {
+                if other != *component {
+                    assert!(validate_component(source, other).is_err());
+                }
+            }
+
+            let required: Vec<_> = source
+                .tensors()
+                .iter()
+                .filter(|info| prefix.is_none_or(|prefix| info.name.starts_with(prefix)))
+                .collect();
+            assert_eq!(required.len(), *expected_count);
+            for info in required {
+                let masked = MaskedSource {
+                    inner: source,
+                    missing: &info.name,
+                };
+                assert!(
+                    validate_component(&masked, *component).is_err(),
+                    "{component:?} accepted missing tensor {}",
+                    info.name
+                );
+            }
+        }
     }
 }
