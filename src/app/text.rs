@@ -41,6 +41,17 @@ pub fn run_inference(
             profile,
             kv_format,
         )
+    } else if arch == "llama" {
+        crate::models::llama::run_inference(
+            source,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            profile,
+            kv_format,
+        )
     } else {
         crate::models::qwen3::base::run_inference(
             source,
