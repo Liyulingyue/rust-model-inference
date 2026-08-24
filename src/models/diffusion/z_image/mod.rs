@@ -2,6 +2,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{f16::F16Kernel, Kernel};
 
+pub(crate) mod dit;
 pub(crate) mod text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
