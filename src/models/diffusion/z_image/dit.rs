@@ -273,10 +273,152 @@ pub(crate) fn pad_rows_to_32(
     Ok(())
 }
 
-pub(crate) fn euler_flow_step(latent: &mut [f32], velocity: &[f32], sigma: f32, sigma_next: f32) {
+pub(crate) fn euler_flow_step(
+    latent: &mut [f32],
+    velocity: &[f32],
+    sigma: f32,
+    sigma_next: f32,
+) -> Result<(), String> {
+    if latent.len() != velocity.len() {
+        return Err(format!(
+            "Invalid Z-Image Euler buffer lengths: latent {}, velocity {}",
+            latent.len(),
+            velocity.len()
+        ));
+    }
     for (x, v) in latent.iter_mut().zip(velocity) {
         *x += (sigma_next - sigma) * *v;
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct AdaLnModulation<'a> {
+    scale_msa: &'a [f32],
+    gate_msa: &'a [f32],
+    scale_mlp: &'a [f32],
+    gate_mlp: &'a [f32],
+}
+
+fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulation<'_>, String> {
+    let expected = hidden
+        .checked_mul(4)
+        .ok_or("Z-Image AdaLN width overflow")?;
+    if hidden == 0 || values.len() != expected {
+        return Err(format!(
+            "Invalid Z-Image AdaLN length: expected {expected}, got {}",
+            values.len()
+        ));
+    }
+    let (scale_msa, rest) = values.split_at(hidden);
+    let (gate_msa, rest) = rest.split_at(hidden);
+    let (scale_mlp, gate_mlp) = rest.split_at(hidden);
+    Ok(AdaLnModulation {
+        scale_msa,
+        gate_msa,
+        scale_mlp,
+        gate_mlp,
+    })
+}
+
+fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<(), String> {
+    let Some(scales) = scales else {
+        return Ok(());
+    };
+    if values.len() != scales.len() {
+        return Err("Invalid Z-Image AdaLN scale buffers".into());
+    }
+    for (value, scale) in values.iter_mut().zip(scales) {
+        *value *= 1.0 + *scale;
+    }
+    Ok(())
+}
+
+fn add_modulated_residual(
+    tokens: &mut [f32],
+    residual: &[f32],
+    gates: Option<&[f32]>,
+) -> Result<(), String> {
+    if tokens.len() != residual.len() || gates.is_some_and(|values| values.len() != tokens.len()) {
+        return Err("Invalid Z-Image AdaLN residual buffers".into());
+    }
+    match gates {
+        Some(gates) => {
+            for ((token, residual), gate) in tokens.iter_mut().zip(residual).zip(gates) {
+                *token += *residual * gate.tanh();
+            }
+        }
+        None => {
+            for (token, residual) in tokens.iter_mut().zip(residual) {
+                *token += *residual;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn real_image_row<'a>(
+    tokens: &'a [f32],
+    padded_text_rows: usize,
+    real_image_rows: usize,
+    padded_image_rows: usize,
+    image_row: usize,
+    width: usize,
+) -> Result<&'a [f32], String> {
+    if width == 0 || real_image_rows > padded_image_rows {
+        return Err("Invalid Z-Image final image-row shape".into());
+    }
+    let total_rows = padded_text_rows
+        .checked_add(padded_image_rows)
+        .ok_or("Z-Image final row count overflow")?;
+    let expected = checked_product(total_rows, width, "final token rows")?;
+    if tokens.len() != expected {
+        return Err(format!(
+            "Invalid Z-Image final token length: expected {expected}, got {}",
+            tokens.len()
+        ));
+    }
+    if image_row >= real_image_rows {
+        return Err(format!(
+            "Invalid Z-Image real image row: {image_row} >= {real_image_rows}"
+        ));
+    }
+    let row = padded_text_rows
+        .checked_add(image_row)
+        .ok_or("Z-Image final row offset overflow")?;
+    let start = checked_product(row, width, "final row offset")?;
+    Ok(&tokens[start..start + width])
+}
+
+fn sign_and_unpatchify_image(
+    patches: &mut [f32],
+    bias: &[f32],
+    channels: usize,
+    height: usize,
+    width: usize,
+    output: &mut [f32],
+) -> Result<(), String> {
+    let (patch_height, patch_width, patch_width_channels) = patch_shape(channels, height, width)?;
+    let patch_rows = checked_product(patch_height, patch_width, "output patch rows")?;
+    let expected_patches =
+        checked_product(patch_rows, patch_width_channels, "output patch values")?;
+    let expected_output = channels
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(width))
+        .ok_or("Z-Image latent shape overflow")?;
+    if patches.len() != expected_patches
+        || bias.len() != patch_width_channels
+        || output.len() != expected_output
+    {
+        return Err("Invalid Z-Image final output buffers".into());
+    }
+
+    for patch in patches.chunks_exact_mut(patch_width_channels) {
+        for (value, bias) in patch.iter_mut().zip(bias) {
+            *value = -(*value + *bias);
+        }
+    }
+    unpatchify_latent_into(patches, channels, height, width, output)
 }
 
 fn timestep_embedding(timestep: f32, output: &mut [f32]) -> Result<(), String> {
@@ -626,10 +768,16 @@ impl ZImageDit {
             "Z-Image output patches",
         )?;
         for row in 0..image_tokens {
-            let joint_row = padded_text + row;
             let normalized = &mut scratch.attention[..HIDDEN];
             layer_norm_no_affine(
-                &scratch.tokens[joint_row * HIDDEN..(joint_row + 1) * HIDDEN],
+                real_image_row(
+                    &scratch.tokens[..total_hidden],
+                    padded_text,
+                    image_tokens,
+                    padded_image,
+                    row,
+                    HIDDEN,
+                )?,
                 normalized,
                 FINAL_NORM_EPSILON,
             )?;
@@ -646,25 +794,16 @@ impl ZImageDit {
                 &mut scratch.q8,
                 self.pool.as_ref(),
             )?;
-            for (value, bias) in scratch.patches[row * PATCH_WIDTH..(row + 1) * PATCH_WIDTH]
-                .iter_mut()
-                .zip(&self.final_bias)
-            {
-                *value = -(*value + *bias);
-            }
         }
 
-        for channel in 0..LATENT_CHANNELS {
-            for y in 0..latent_side {
-                for x in 0..latent_side {
-                    let token = (y / PATCH_SIZE) * patch_width + x / PATCH_SIZE;
-                    let patch_offset =
-                        ((y % PATCH_SIZE) * PATCH_SIZE + x % PATCH_SIZE) * LATENT_CHANNELS;
-                    scratch.velocity[(channel * latent_side + y) * latent_side + x] =
-                        scratch.patches[token * PATCH_WIDTH + patch_offset + channel];
-                }
-            }
-        }
+        sign_and_unpatchify_image(
+            &mut scratch.patches,
+            &self.final_bias,
+            LATENT_CHANNELS,
+            latent_side,
+            latent_side,
+            &mut scratch.velocity,
+        )?;
         require_finite(&scratch.velocity, "predicted flow")
     }
 
@@ -698,7 +837,7 @@ impl ZImageDit {
                 sigma,
                 &mut scratch,
             )?;
-            euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next);
+            euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next)?;
             require_finite(&latent, "Euler latent")?;
         }
         Ok(latent)
@@ -750,7 +889,7 @@ fn run_block(
         for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
             *value += *bias;
         }
-        Some(&modulation[..HIDDEN * 4])
+        Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
     } else {
         if time.is_some() {
             return Err("Unexpected Z-Image AdaLN input".into());
@@ -762,11 +901,7 @@ fn run_block(
         let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
         let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm(token, &block.attention_norm1, normalized, RMS_EPSILON);
-        if let Some(values) = modulations {
-            for (value, scale) in normalized.iter_mut().zip(&values[..HIDDEN]) {
-                *value *= 1.0 + *scale;
-            }
-        }
+        scale_modulated_branch(normalized, modulations.map(|values| values.scale_msa))?;
         linear_into(
             source,
             &block.qkv,
@@ -817,21 +952,18 @@ fn run_block(
         )?;
         let projected = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm_inplace(projected, &block.attention_norm2, RMS_EPSILON);
-        for index in 0..HIDDEN {
-            let gate = modulations.map_or(1.0, |values| values[HIDDEN + index].tanh());
-            tokens[row * HIDDEN + index] += projected[index] * gate;
-        }
+        add_modulated_residual(
+            &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+            projected,
+            modulations.map(|values| values.gate_msa),
+        )?;
     }
 
     for row in 0..rows {
         let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
         let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
-        if let Some(values) = modulations {
-            for (value, scale) in normalized.iter_mut().zip(&values[HIDDEN * 2..HIDDEN * 3]) {
-                *value *= 1.0 + *scale;
-            }
-        }
+        scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
         linear_into(
             source,
             &block.w1,
@@ -866,10 +998,11 @@ fn run_block(
             pool,
         )?;
         rms_norm_inplace(normalized, &block.ffn_norm2, RMS_EPSILON);
-        for index in 0..HIDDEN {
-            let gate = modulations.map_or(1.0, |values| values[HIDDEN * 3 + index].tanh());
-            tokens[row * HIDDEN + index] += normalized[index] * gate;
-        }
+        add_modulated_residual(
+            &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+            normalized,
+            modulations.map(|values| values.gate_mlp),
+        )?;
     }
     Ok(())
 }
@@ -1134,6 +1267,38 @@ pub(crate) fn unpatchify_latent(
         .and_then(|value| value.checked_mul(width))
         .ok_or("Z-Image latent shape overflow")?;
     let mut output = zeroed_f32("Z-Image latent", output_len)?;
+    unpatchify_latent_into(patches, channels, height, width, &mut output)?;
+    Ok(output)
+}
+
+fn unpatchify_latent_into(
+    patches: &[f32],
+    channels: usize,
+    height: usize,
+    width: usize,
+    output: &mut [f32],
+) -> Result<(), String> {
+    let (patch_height, patch_width, patch_width_channels) = patch_shape(channels, height, width)?;
+    let expected = patch_height
+        .checked_mul(patch_width)
+        .and_then(|value| value.checked_mul(patch_width_channels))
+        .ok_or("Z-Image patch shape overflow")?;
+    if patches.len() != expected {
+        return Err(format!(
+            "Invalid Z-Image patch length: expected {expected}, got {}",
+            patches.len()
+        ));
+    }
+    let output_len = channels
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(width))
+        .ok_or("Z-Image latent shape overflow")?;
+    if output.len() != output_len {
+        return Err(format!(
+            "Invalid Z-Image latent output length: expected {output_len}, got {}",
+            output.len()
+        ));
+    }
 
     for channel in 0..channels {
         for y in 0..height {
@@ -1145,7 +1310,7 @@ pub(crate) fn unpatchify_latent(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 fn padded_to_sequence_multiple(value: usize) -> Result<usize, String> {
@@ -1243,10 +1408,11 @@ fn z_image_rope_into(
 #[cfg(test)]
 mod tests {
     use super::{
-        attention_into, euler_flow_step, layer_norm_no_affine, pad_rows_to_32, patchify_latent,
-        patchify_latent_into, require_finite, rotate_interleaved_inplace, time_snr_shift,
-        timestep_embedding, unpatchify_latent, z_image_rope, z_image_sigmas, TorchMt19937,
-        ZImageDit,
+        add_modulated_residual, attention_into, euler_flow_step, layer_norm_no_affine,
+        pad_rows_to_32, patchify_latent, patchify_latent_into, real_image_row, require_finite,
+        rotate_interleaved_inplace, scale_modulated_branch, sign_and_unpatchify_image,
+        split_adaln_modulation, time_snr_shift, timestep_embedding, unpatchify_latent,
+        z_image_rope, z_image_sigmas, TorchMt19937, ZImageDit,
     };
     use crate::core::thread_pool::ComputePool;
     use std::sync::Arc;
@@ -1395,8 +1561,106 @@ mod tests {
     #[test]
     fn euler_flow_update_consumes_the_next_sigma_once() {
         let mut latent = [2.0, -3.0];
-        euler_flow_step(&mut latent, &[0.5, -0.25], 0.9, 0.4);
+        euler_flow_step(&mut latent, &[0.5, -0.25], 0.9, 0.4).unwrap();
         assert_eq!(latent, [1.75, -2.875]);
+    }
+
+    #[test]
+    fn euler_flow_update_rejects_mismatched_lengths_before_mutation() {
+        let mut latent = [2.0, -3.0];
+        let before = latent;
+        assert_eq!(
+            euler_flow_step(&mut latent, &[0.5], 0.9, 0.4).unwrap_err(),
+            "Invalid Z-Image Euler buffer lengths: latent 2, velocity 1"
+        );
+        assert_eq!(latent, before);
+    }
+
+    #[test]
+    fn final_image_rows_use_the_padded_text_offset_and_skip_image_padding() {
+        let tokens = [
+            1.0, 2.0, // padded text row 0
+            3.0, 4.0, // padded text row 1
+            10.0, 11.0, // real image row 0
+            20.0, 21.0, // real image row 1
+            90.0, 91.0, // padded image row
+        ];
+        assert_eq!(
+            real_image_row(&tokens, 2, 2, 3, 0, 2).unwrap(),
+            &[10.0, 11.0]
+        );
+        assert_eq!(
+            real_image_row(&tokens, 2, 2, 3, 1, 2).unwrap(),
+            &[20.0, 21.0]
+        );
+        assert!(real_image_row(&tokens, 2, 2, 3, 2, 2).is_err());
+    }
+
+    #[test]
+    fn final_sign_bias_and_unpatchify_use_channel_major_layout() {
+        let mut patches = [0.0, 10.0, 1.0, 11.0, 2.0, 12.0, 3.0, 13.0];
+        let bias = [100.0, 200.0, 100.0, 200.0, 100.0, 200.0, 100.0, 200.0];
+        let mut velocity = [0.0; 8];
+        sign_and_unpatchify_image(&mut patches, &bias, 2, 2, 2, &mut velocity).unwrap();
+        assert_eq!(
+            velocity,
+            [-100.0, -101.0, -102.0, -103.0, -210.0, -211.0, -212.0, -213.0]
+        );
+    }
+
+    #[test]
+    fn final_image_helpers_reject_invalid_lengths() {
+        assert!(real_image_row(&[0.0; 9], 2, 2, 3, 0, 2).is_err());
+        assert!(real_image_row(&[0.0; 10], 2, 4, 3, 0, 2).is_err());
+
+        let mut short_patches = [0.0; 7];
+        let mut velocity = [0.0; 8];
+        assert!(
+            sign_and_unpatchify_image(&mut short_patches, &[0.0; 8], 2, 2, 2, &mut velocity)
+                .is_err()
+        );
+
+        let mut patches = [0.0; 8];
+        assert!(
+            sign_and_unpatchify_image(&mut patches, &[0.0; 7], 2, 2, 2, &mut velocity).is_err()
+        );
+        assert!(
+            sign_and_unpatchify_image(&mut patches, &[0.0; 8], 2, 2, 2, &mut [0.0; 7]).is_err()
+        );
+    }
+
+    #[test]
+    fn adaln_chunk_order_applies_attention_before_feed_forward() {
+        let gate_msa = 0.5f32.atanh();
+        let gate_mlp = 0.25f32.atanh();
+        let values = [1.0, 2.0, gate_msa, gate_msa, 3.0, 4.0, gate_mlp, gate_mlp];
+        let modulation = split_adaln_modulation(&values, 2).unwrap();
+        assert_eq!(modulation.scale_msa, &[1.0, 2.0]);
+        assert_eq!(modulation.gate_msa, &[gate_msa, gate_msa]);
+        assert_eq!(modulation.scale_mlp, &[3.0, 4.0]);
+        assert_eq!(modulation.gate_mlp, &[gate_mlp, gate_mlp]);
+
+        let mut attention_branch = [10.0, 20.0];
+        scale_modulated_branch(&mut attention_branch, Some(modulation.scale_msa)).unwrap();
+        assert_eq!(attention_branch, [20.0, 60.0]);
+
+        let mut tokens = [100.0, 200.0];
+        add_modulated_residual(&mut tokens, &[8.0, 4.0], Some(modulation.gate_msa)).unwrap();
+        assert_eq!(tokens, [104.0, 202.0]);
+
+        let mut feed_forward_branch = tokens;
+        scale_modulated_branch(&mut feed_forward_branch, Some(modulation.scale_mlp)).unwrap();
+        assert_eq!(feed_forward_branch, [416.0, 1010.0]);
+
+        add_modulated_residual(&mut tokens, &[4.0, 8.0], Some(modulation.gate_mlp)).unwrap();
+        assert_eq!(tokens, [105.0, 204.0]);
+    }
+
+    #[test]
+    fn adaln_helpers_reject_invalid_lengths() {
+        assert!(split_adaln_modulation(&[0.0; 7], 2).is_err());
+        assert!(scale_modulated_branch(&mut [1.0, 2.0], Some(&[1.0])).is_err());
+        assert!(add_modulated_residual(&mut [1.0, 2.0], &[1.0], Some(&[0.0, 0.0])).is_err());
     }
 
     #[test]
