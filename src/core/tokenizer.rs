@@ -76,6 +76,40 @@ const QWEN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<|endoftext|>", "endoftext"),
 ];
 
+const QWEN2_ORACLE_SPECIAL_TOKENS: &[&str] = &[
+    "<|endoftext|>",
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|object_ref_start|>",
+    "<|object_ref_end|>",
+    "<|box_start|>",
+    "<|box_end|>",
+    "<|quad_start|>",
+    "<|quad_end|>",
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|vision_pad|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+    "<tool_call>",
+    "</tool_call>",
+    "<|fim_prefix|>",
+    "<|fim_middle|>",
+    "<|fim_suffix|>",
+    "<|fim_pad|>",
+    "<|repo_name|>",
+    "<|file_sep|>",
+    "<tool_response>",
+    "</tool_response>",
+    "<think>",
+    "</think>",
+    "<|boi_token|>",
+    "<|bor_token|>",
+    "<|eor_token|>",
+    "<|bot_token|>",
+    "<|tms_token|>",
+];
+
 const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<｜hy_begin▁of▁sentence｜>", "hy_begin"),
     ("<｜hy_User｜>", "hy_user"),
@@ -164,6 +198,109 @@ fn bool_meta(value: Option<MetaValue>, key: &str) -> Result<bool, String> {
 }
 
 impl BPETokenizer {
+    pub fn from_qwen3_embedded_merges() -> Result<Self, String> {
+        const ORACLE_NAMED_VOCAB_SIZE: usize = 151_674;
+        const MODEL_VOCAB_SIZE: usize = 151_936;
+        let byte_encoder = build_byte_encoder();
+        let mut tokens = byte_encoder.clone();
+        tokens.sort_by_key(|token| token.chars().next());
+        let mut token_types = vec![TokenType::Normal; tokens.len()];
+        let mut merge_ranks = HashMap::new();
+
+        for (rank, merge) in include_str!("../models/diffusion/z_image/qwen_merges.txt")
+            .lines()
+            .enumerate()
+        {
+            let (left, right) = merge
+                .split_once(' ')
+                .ok_or_else(|| format!("Invalid embedded Qwen merge at line {}", rank + 1))?;
+            if left.is_empty() || right.is_empty() {
+                return Err(format!("Invalid embedded Qwen merge at line {}", rank + 1));
+            }
+            merge_ranks.insert((left.into(), right.into()), rank as u32);
+            tokens.push(format!("{left}{right}"));
+            token_types.push(TokenType::Normal);
+        }
+
+        for token in QWEN2_ORACLE_SPECIAL_TOKENS {
+            tokens.push((*token).into());
+            token_types.push(TokenType::Control);
+        }
+        if tokens.len() != ORACLE_NAMED_VOCAB_SIZE {
+            return Err(format!(
+                "Embedded Qwen oracle vocabulary has {} named IDs; expected {ORACLE_NAMED_VOCAB_SIZE}",
+                tokens.len()
+            ));
+        }
+        // The pinned oracle names IDs through 151673, while the supplied model has
+        // 151936 embedding rows. Preserve the remaining rows as deliberately
+        // unencodable placeholders instead of inventing tokenizer semantics.
+        while tokens.len() < MODEL_VOCAB_SIZE {
+            tokens.push(format!("<|reserved_{}|>", tokens.len()));
+            token_types.push(TokenType::Unused);
+        }
+
+        let token_to_id: HashMap<String, u32> = tokens
+            .iter()
+            .zip(&token_types)
+            .enumerate()
+            .filter(|(_, (_, kind))| **kind != TokenType::Unused)
+            .map(|(id, (token, _))| (token.clone(), id as u32))
+            .collect();
+        let mut byte_decoder = HashMap::new();
+        for (byte, token) in byte_encoder.iter().enumerate() {
+            let value = token
+                .chars()
+                .next()
+                .ok_or_else(|| "Invalid embedded Qwen byte symbol".to_string())?;
+            byte_decoder.insert(value, byte as u8);
+        }
+        let mut special_tokens: Vec<_> = QWEN2_ORACLE_SPECIAL_TOKENS
+            .iter()
+            .map(|text| SpecialToken {
+                text: (*text).into(),
+                id: *token_to_id
+                    .get(*text)
+                    .expect("embedded special token was just inserted"),
+                kind: TokenType::Control,
+            })
+            .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+        let semantic_tokens = QWEN_SEMANTIC_TOKENS
+            .iter()
+            .filter_map(|(literal, name)| {
+                token_to_id
+                    .get(*literal)
+                    .map(|id| ((*name).to_string(), *id))
+            })
+            .collect();
+        let eos_id = token_to_id.get("<|endoftext|>").copied();
+
+        let tokenizer = Self {
+            tokens,
+            token_types,
+            token_to_id,
+            merge_ranks,
+            byte_encoder,
+            byte_decoder,
+            pre: PreTokenizer::Qwen2,
+            special_tokens,
+            semantic_tokens,
+            bos_id: None,
+            eos_id,
+            add_bos: false,
+            add_eos: false,
+            byte_fallback: false,
+        };
+        if tokenizer.vocab_size() != MODEL_VOCAB_SIZE {
+            return Err(format!(
+                "Embedded Qwen vocabulary has {} IDs; expected {MODEL_VOCAB_SIZE}",
+                tokenizer.vocab_size()
+            ));
+        }
+        Ok(tokenizer)
+    }
+
     pub fn from_gguf_metadata(
         get_meta: impl Fn(&str) -> Option<MetaValue>,
     ) -> Result<Self, String> {
@@ -815,6 +952,33 @@ use crate::core::tensor::{MetaValue, MetaValueType};
         assert_eq!(
             scan_qwen_words("a  b", PreTokenizer::Qwen2),
             vec!["a", " ", " b"]
+        );
+    }
+
+    #[test]
+    fn embedded_qwen3_tokenizer_matches_z_image_chatml() {
+        let tokenizer = BPETokenizer::from_qwen3_embedded_merges().unwrap();
+        assert_eq!(tokenizer.vocab_size(), 151_936);
+        assert_eq!(tokenizer.token_types[151_674], TokenType::Unused);
+        assert!(!tokenizer.token_to_id.contains_key("<|reserved_151674|>"));
+        assert_eq!(
+            tokenizer.special_tokens.len(),
+            QWEN2_ORACLE_SPECIAL_TOKENS.len()
+        );
+        assert_eq!(tokenizer.special_token_id("reserved_151674"), None);
+        assert_eq!(
+            tokenizer.encode("hello   world", EncodeOptions::default()),
+            vec![14_990, 256, 1_879]
+        );
+        assert_eq!(
+            tokenizer.encode(
+                "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            ),
+            vec![151_644, 872, 198, 9_707, 151_645, 198, 151_644, 77_091, 198]
         );
     }
 
