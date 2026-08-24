@@ -4,6 +4,13 @@ use crate::ops::kernel::{f16::F16Kernel, Kernel};
 
 pub(crate) mod dit;
 pub(crate) mod text;
+pub(crate) mod vae;
+
+pub struct ZImageRgb {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ZImageOptions {
