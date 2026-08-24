@@ -281,10 +281,8 @@ impl QTensorOwned {
         row_start: usize,
         row_end: usize,
     ) {
-        use crate::ops::has_avx2_fma;
         use crate::ops::quant::{
-            vec_dot_q4k_q8k_avx2_direct, vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_avx2_direct,
-            vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_avx2_direct, vec_dot_q6k_q8k_scalar,
+            vec_dot_q4k_q8k, vec_dot_q5k_q8k, vec_dot_q6k_q8k,
             BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K,
         };
         use crate::ops::{dot_f32, f16_to_f32, quantize_row_q8_k};
@@ -331,11 +329,7 @@ impl QTensorOwned {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q4K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q4k_q8k_avx2_direct(row_data, &q8k) }
-                    } else {
-                        vec_dot_q4k_q8k_scalar(row_data, &q8k)
-                    };
+                    output[o - row_start] = vec_dot_q4k_q8k(row_data, &q8k);
                 }
             }
             Self::Q5_K { data, n_cols, .. } => {
@@ -343,11 +337,7 @@ impl QTensorOwned {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q5K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q5k_q8k_avx2_direct(row_data, &q8k) }
-                    } else {
-                        vec_dot_q5k_q8k_scalar(row_data, &q8k)
-                    };
+                    output[o - row_start] = vec_dot_q5k_q8k(row_data, &q8k);
                 }
             }
             Self::Q6_K { data, n_cols, .. } => {
@@ -355,11 +345,7 @@ impl QTensorOwned {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q6K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q6k_q8k_avx2_direct(row_data, &q8k) }
-                    } else {
-                        vec_dot_q6k_q8k_scalar(row_data, &q8k)
-                    };
+                    output[o - row_start] = vec_dot_q6k_q8k(row_data, &q8k);
                 }
             }
         }
@@ -392,10 +378,8 @@ impl QTensorOwned {
         row_start: usize,
         row_end: usize,
     ) {
-        use crate::ops::has_avx2_fma;
         use crate::ops::quant::{
-            vec_dot_q4k_q8k_avx2_direct, vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_avx2_direct,
-            vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_avx2_direct, vec_dot_q6k_q8k_scalar,
+            vec_dot_q4k_q8k, vec_dot_q5k_q8k, vec_dot_q6k_q8k,
             BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K,
         };
 
@@ -404,33 +388,21 @@ impl QTensorOwned {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q4K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q4k_q8k_avx2_direct(row_data, q8k) }
-                    } else {
-                        vec_dot_q4k_q8k_scalar(row_data, q8k)
-                    };
+                    output[o - row_start] = vec_dot_q4k_q8k(row_data, q8k);
                 }
             }
             Self::Q5_K { data, n_cols, .. } => {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q5K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q5k_q8k_avx2_direct(row_data, q8k) }
-                    } else {
-                        vec_dot_q5k_q8k_scalar(row_data, q8k)
-                    };
+                    output[o - row_start] = vec_dot_q5k_q8k(row_data, q8k);
                 }
             }
             Self::Q6_K { data, n_cols, .. } => {
                 let blocks_per_row = *n_cols / QK_K;
                 for o in row_start..row_end {
                     let row_data = &data[o * blocks_per_row * BLOCK_Q6K_SIZE..];
-                    output[o - row_start] = if has_avx2_fma() {
-                        unsafe { vec_dot_q6k_q8k_avx2_direct(row_data, q8k) }
-                    } else {
-                        vec_dot_q6k_q8k_scalar(row_data, q8k)
-                    };
+                    output[o - row_start] = vec_dot_q6k_q8k(row_data, q8k);
                 }
             }
             _ => panic!("matmul_with_q8k called on non-K-quant weight type"),

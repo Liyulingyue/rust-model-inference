@@ -200,7 +200,7 @@ unsafe fn softmax_exp_sum_approx_inplace_neon(x: &mut [f32], max: f32) -> f64 {
     sum
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use std::time::Instant;

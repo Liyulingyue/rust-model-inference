@@ -1,10 +1,15 @@
 ﻿
 
-    use super::*;
     use crate::ops::{
-        dot_f32, dot_f16_f16_bytes, f16_to_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-        rope_neox, rope_mrope,
+        attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32,
+        f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+        rope_mrope, rope_neox, silu_inplace, silu_mul_inplace, softmax_inplace, ssm_matvec,
+        ssm_matvec_scaled, ssm_outer_product_update, vec_mad_f32, vec_scale_f32,
     };
+    #[cfg(target_arch = "aarch64")]
+    use crate::ops::dot::dot_f32_neon;
+    #[cfg(target_arch = "aarch64")]
+    use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 
     #[cfg(target_arch = "aarch64")]
     #[test]
@@ -299,7 +304,7 @@
         let mut output = [0.0f32];
 
         unsafe {
-            super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &input_q8, &input_scales, &mut output, 64, 0, 1);
+            crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &input_q8, &input_scales, &mut output, 64, 0, 1);
         }
 
         assert_eq!(output[0].to_bits(), 0x3d1c_c57d);
@@ -431,13 +436,13 @@
         assert_close(unsafe { dot_f32_neon(&a, &b, a.len()) }, expected_dot);
 
         let mut scaled = a.clone();
-        unsafe { vec_scale_f32_neon(&mut scaled, -0.25) };
+        vec_scale_f32(&mut scaled, -0.25);
         for (actual, source) in scaled.iter().zip(&a) {
             assert_close(*actual, source * -0.25);
         }
 
         let mut mad = a.clone();
-        unsafe { vec_mad_f32_neon(&mut mad, &b, 0.5) };
+        vec_mad_f32(&mut mad, &b, 0.5);
         for i in 0..mad.len() {
             assert_close(mad[i], a[i] + 0.5 * b[i]);
         }
@@ -448,13 +453,13 @@
     fn neon_f16_ops_match_scalar_with_tail() {
         let src: Vec<f32> = (0..13).map(|i| i as f32 * 0.2 - 1.1).collect();
         let mut bits = vec![0u16; src.len()];
-        unsafe { f32_slice_to_f16_neon(&src, &mut bits) };
+        f32_slice_to_f16(&src, &mut bits);
         let expected: Vec<u16> = src.iter().map(|&v| f32_to_f16(v)).collect();
         assert_eq!(bits, expected);
 
         let expected_dot: f32 = src.iter().zip(&bits).map(|(x, h)| x * f16_to_f32(*h)).sum();
         assert_close(
-            unsafe { dot_f16_f32_neon(&src, &bits, src.len()) },
+            dot_f16_f32(&src, &bits, src.len()),
             expected_dot,
         );
     }
@@ -535,8 +540,8 @@
         let mut scalar_s = vec![0.0f32; 2];
         let mut neon_q = vec![0u8; 64];
         let mut neon_s = vec![0.0f32; 2];
-        quantize_q8_0_into_scalar_range(&input, &mut scalar_q, &mut scalar_s, 0, 2);
-        unsafe { quantize_q8_0_into_neon_range(&input, &mut neon_q, &mut neon_s, 0, 2) };
+        quantize_q8_0_into_scalar_range(&input, input.len(), &mut scalar_q, &mut scalar_s, 0, 2);
+        quantize_q8_0_into(&input, input.len(), &mut neon_q, &mut neon_s);
         assert_eq!(neon_q, scalar_q);
         assert_eq!(neon_s, scalar_s);
     }
@@ -550,7 +555,7 @@
         let mut q8 = [0u8; 32];
         let mut scales = [0.0f32; 1];
 
-        unsafe { quantize_q8_0_into_neon_range(&input, &mut q8, &mut scales, 0, 1) };
+        quantize_q8_0_into(&input, input.len(), &mut q8, &mut scales);
 
         assert_eq!(q8[1] as i8, 34);
     }
@@ -581,8 +586,8 @@
         quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
         let mut scalar = vec![0.0f32; 5];
         let mut neon = vec![0.0f32; 5];
-        super::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
-        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
+        crate::ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(&weights, &q8, &scales, &mut scalar, n_in, 1, 6);
+        unsafe { crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon(&weights, &q8, &scales, &mut neon, n_in, 1, 6) };
         for i in 0..5 {
             assert_close(neon[i], scalar[i]);
         }
@@ -597,8 +602,8 @@
         let mut q8 = vec![0u8; n_in];
         let mut scales = vec![0.0f32; n_in / 32];
         quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
-        let mut actual = vec![0.0; 3];
-        unsafe { super::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(&weights, &q8, &scales, &mut actual, n_in, 0, 3) };
+        let mut actual = vec![0.0f32; 3];
+        unsafe { crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(&weights, &q8, &scales, &mut actual, n_in, 0, 3) };
 
         let stride = n_in / 32 * 34;
         for row in 0..3 {
