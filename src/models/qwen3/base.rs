@@ -10,7 +10,7 @@
 //! | 路径 | 模块 | 量化支持 | 用途 |
 //! |------|------|----------|------|
 //! | 纯文本推理 | `models::qwen3` | 所有格式 | CLI 文本生成 |
-//! | VL/ASR/TTS | `models::qwen3_multimodal` | 仅 Q8_0 | 多模态推理 |
+//! | VL/ASR/TTS | `models::qwen3::base_multimodal` | 多量化 | 多模态推理 |
 
 use crate::app::cli::{per_second, inference_step_budget, resolve_thread_count, KvFormat};
 use crate::core::loader::model_config_from_source;
