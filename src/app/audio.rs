@@ -11,10 +11,15 @@ use std::time::Instant;
 
 pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
     let started = Instant::now();
-    eprintln!("Loading ASR decoder from {}", options.model.display());
     let llm_source: Arc<dyn TensorSource> = Arc::from(
         open_or_exit(&options.model, ComponentRole::Llm),
     );
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    crate::app::reject_incomplete_z_image_architecture(arch)?;
+    eprintln!("Loading ASR decoder from {}", options.model.display());
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         llm_source.metadata(key).cloned()
     })?);

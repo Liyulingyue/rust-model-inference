@@ -18,6 +18,13 @@ use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
 use std::path::Path;
 
+pub fn reject_incomplete_z_image_architecture(arch: &str) -> Result<(), String> {
+    if arch == "pig" {
+        return Err("Z-Image model requires --text-encoder, --vae, --prompt, and --out".into());
+    }
+    Ok(())
+}
+
 pub fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
     open_model_source(path, role).unwrap_or_else(|error| {
         eprintln!(

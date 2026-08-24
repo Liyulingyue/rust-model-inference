@@ -15,30 +15,14 @@ enum GenericDispatchMode {
     Model,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GenericDispatchPlan {
-    enable_gpu: bool,
-    mode: GenericDispatchMode,
-}
-
-fn generic_dispatch_plan(
-    arch: &str,
-    options: &app::CliOptions,
-) -> Result<GenericDispatchPlan, String> {
-    if arch == "pig" {
-        return Err("Z-Image model requires --text-encoder, --vae, --prompt, and --out".into());
-    }
-    let mode = if options.tts {
+fn generic_dispatch_mode(options: &app::CliOptions) -> GenericDispatchMode {
+    if options.tts {
         GenericDispatchMode::Tts
     } else if options.audio.is_some() {
         GenericDispatchMode::Asr
     } else {
         GenericDispatchMode::Model
-    };
-    Ok(GenericDispatchPlan {
-        enable_gpu: options.gpu,
-        mode,
-    })
+    }
 }
 
 fn main() {
@@ -93,36 +77,31 @@ fn main() {
         return;
     }
 
+    match generic_dispatch_mode(&options) {
+        GenericDispatchMode::Tts => {
+            app::run_or_exit(app::run_tts_cli(&options));
+            return;
+        }
+        GenericDispatchMode::Asr => {
+            app::run_or_exit(app::run_asr_cli(&options));
+            return;
+        }
+        GenericDispatchMode::Model => {}
+    }
+
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
-    let dispatch = match generic_dispatch_plan(&arch, &options) {
-        Ok(dispatch) => dispatch,
-        Err(error) => {
-            app::run_or_exit(Err(error));
-            return;
-        }
-    };
-
-    if dispatch.enable_gpu {
-        ops::enable_gpu();
+    if let Err(error) = app::reject_incomplete_z_image_architecture(&arch) {
+        app::run_or_exit(Err(error));
+        return;
     }
 
-    match dispatch.mode {
-        GenericDispatchMode::Tts => {
-            drop(source);
-            app::run_or_exit(app::run_tts_cli(&options));
-            return;
-        }
-        GenericDispatchMode::Asr => {
-            drop(source);
-            app::run_or_exit(app::run_asr_cli(&options));
-            return;
-        }
-        GenericDispatchMode::Model => {}
+    if options.gpu {
+        ops::enable_gpu();
     }
 
     let (max_tokens, temperature) = app::resolve_cli_generation_options(&options);
@@ -246,34 +225,37 @@ fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
 mod tests {
     use super::*;
 
-    fn assert_pig_route_is_rejected(options: app::CliOptions) {
+    #[test]
+    fn pig_architecture_requires_complete_z_image_route() {
         assert_eq!(
-            generic_dispatch_plan("pig", &options).unwrap_err(),
+            app::reject_incomplete_z_image_architecture("pig").unwrap_err(),
             "Z-Image model requires --text-encoder, --vae, --prompt, and --out"
         );
     }
 
     #[test]
-    fn pig_only_tts_is_rejected_before_tts_dispatch() {
-        assert_pig_route_is_rejected(app::CliOptions {
-            tts: true,
-            ..app::CliOptions::default()
-        });
+    fn ordinary_tts_and_asr_dispatch_before_main_model_open() {
+        assert_eq!(
+            generic_dispatch_mode(&app::CliOptions {
+                tts: true,
+                ..app::CliOptions::default()
+            }),
+            GenericDispatchMode::Tts
+        );
+        assert_eq!(
+            generic_dispatch_mode(&app::CliOptions {
+                audio: Some("speech.wav".into()),
+                ..app::CliOptions::default()
+            }),
+            GenericDispatchMode::Asr
+        );
     }
 
     #[test]
-    fn pig_only_asr_is_rejected_before_asr_dispatch() {
-        assert_pig_route_is_rejected(app::CliOptions {
-            audio: Some("speech.wav".into()),
-            ..app::CliOptions::default()
-        });
-    }
-
-    #[test]
-    fn pig_only_gpu_is_rejected_before_gpu_enablement() {
-        assert_pig_route_is_rejected(app::CliOptions {
-            gpu: true,
-            ..app::CliOptions::default()
-        });
+    fn ordinary_model_dispatch_stays_in_main() {
+        assert_eq!(
+            generic_dispatch_mode(&app::CliOptions::default()),
+            GenericDispatchMode::Model
+        );
     }
 }
