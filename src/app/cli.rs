@@ -176,16 +176,25 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--steps" => {
-                if i + 1 < args.len() {
-                    options.steps = Some(args[i + 1].parse().unwrap_or(20));
-                    i += 1;
-                }
+                let value = args.get(i + 1).ok_or("Missing value for --steps")?;
+                options.steps = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --steps value: {error}"))?,
+                );
+                i += 1;
             }
             "--resolution" | "--size" => {
-                if i + 1 < args.len() {
-                    options.resolution = Some(args[i + 1].parse().unwrap_or(512));
-                    i += 1;
-                }
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("Missing value for {flag}"))?;
+                options.resolution = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid {flag} value: {error}"))?,
+                );
+                i += 1;
             }
             "--seed" => {
                 let value = args.get(i + 1).ok_or("Missing value for --seed")?;
@@ -241,16 +250,20 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--vae" => {
-                if i + 1 < args.len() {
-                    options.vae = Some(args[i + 1].as_str().into());
-                    i += 1;
-                }
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --vae")?;
+                options.vae = Some(value.as_str().into());
+                i += 1;
             }
             "--text-encoder" => {
-                if i + 1 < args.len() {
-                    options.text_encoder = Some(args[i + 1].as_str().into());
-                    i += 1;
-                }
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --text-encoder")?;
+                options.text_encoder = Some(value.as_str().into());
+                i += 1;
             }
             "--audio" => {
                 let value = args
@@ -340,6 +353,7 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    z_image_cli_options(options)?;
     if options.tts {
         if options.prompt.as_deref().is_none_or(|value| value.trim().is_empty()) {
             return Err("--tts requires a non-empty --prompt".into());
@@ -598,6 +612,60 @@ mod tests {
     fn seed_requires_a_signed_i64_value() {
         assert!(parse_cli_options(&args(&["rmi", "--seed"])).is_err());
         assert!(parse_cli_options(&args(&["rmi", "--seed", "nan"])).is_err());
+    }
+
+    #[test]
+    fn validate_cli_options_enforces_z_image_contract() {
+        let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
+        assert!(validate_cli_options(&parse(&["rmi", "--seed", "42"])).is_err());
+        assert!(validate_cli_options(&parse(&["rmi", "--text-encoder", "text.gguf",])).is_err());
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn z_image_cli_rejects_malformed_steps_and_resolution() {
+        for flag in ["--steps", "--resolution"] {
+            assert!(
+                parse_cli_options(&args(&[
+                    "rmi",
+                    "--text-encoder",
+                    "text.gguf",
+                    "--vae",
+                    "vae.gguf",
+                    "--prompt",
+                    "fox",
+                    "--out",
+                    "fox.png",
+                    flag,
+                    "nope",
+                ]))
+                .is_err(),
+                "{flag}"
+            );
+            assert!(parse_cli_options(&args(&["rmi", flag])).is_err(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn z_image_component_flags_require_values() {
+        for flag in ["--text-encoder", "--vae"] {
+            assert!(parse_cli_options(&args(&["rmi", flag])).is_err(), "{flag}");
+            assert!(
+                parse_cli_options(&args(&["rmi", flag, ""])).is_err(),
+                "{flag}"
+            );
+        }
     }
 
     #[test]
