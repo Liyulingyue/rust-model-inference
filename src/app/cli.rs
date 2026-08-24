@@ -29,6 +29,7 @@ pub struct CliOptions {
     pub max_tokens: Option<usize>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
+    pub seed: Option<i64>,
     pub temperature: Option<f32>,
     pub threads: usize,
     pub thinking: bool,
@@ -41,6 +42,14 @@ pub struct CliOptions {
     pub gpu: bool,
     pub tts: bool,
     pub out: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct ZImageCliOptions {
+    pub steps: usize,
+    pub resolution: usize,
+    pub seed: i64,
+    pub out: PathBuf,
 }
 
 pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -178,6 +187,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--seed" => {
+                let value = args.get(i + 1).ok_or("Missing value for --seed")?;
+                options.seed = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|error| format!("Invalid --seed value: {error}"))?,
+                );
+                i += 1;
+            }
             "--temp" => {
                 if i + 1 < args.len() {
                     options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
@@ -276,6 +294,49 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         i += 1;
     }
     Ok(options)
+}
+
+pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
+    if options.text_encoder.is_none() && options.vae.is_none() {
+        return if options.seed.is_some() {
+            Err("--seed requires Z-Image components".into())
+        } else {
+            Ok(None)
+        };
+    }
+    options
+        .text_encoder
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --text-encoder")?;
+    options
+        .vae
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --vae")?;
+    let out = options
+        .out
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --out")?;
+    if options
+        .prompt
+        .as_deref()
+        .is_none_or(|prompt| prompt.trim().is_empty())
+    {
+        return Err("Z-Image requires a non-empty --prompt".into());
+    }
+    let steps = options.steps.unwrap_or(8);
+    let resolution = options.resolution.unwrap_or(512);
+    if steps == 0 || resolution == 0 || resolution % 16 != 0 {
+        return Err("Z-Image requires positive --steps and --resolution divisible by 16".into());
+    }
+    Ok(Some(ZImageCliOptions {
+        steps,
+        resolution,
+        seed: options.seed.unwrap_or(0),
+        out,
+    }))
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
@@ -497,6 +558,46 @@ mod tests {
             audio: Some("missing.wav".into()),
             ..CliOptions::default()
         }
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn z_image_cli_requires_all_components_prompt_and_out() {
+        let complete = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+            "--seed",
+            "42",
+        ]))
+        .unwrap();
+        assert_eq!(z_image_cli_options(&complete).unwrap().unwrap().seed, 42);
+        for argv in [
+            ["rmi", "--model", "dit.gguf", "--text-encoder", "text.gguf"].as_slice(),
+            ["rmi", "--model", "dit.gguf", "--vae", "vae.gguf", "--prompt", "fox"].as_slice(),
+        ] {
+            assert!(
+                z_image_cli_options(&parse_cli_options(&args(argv)).unwrap()).is_err(),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_requires_a_signed_i64_value() {
+        assert!(parse_cli_options(&args(&["rmi", "--seed"])).is_err());
+        assert!(parse_cli_options(&args(&["rmi", "--seed", "nan"])).is_err());
     }
 
     #[test]
