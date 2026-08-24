@@ -1175,6 +1175,30 @@ mod tests {
     }
 
     #[test]
+    fn group_norm_combines_two_channels_in_each_group() {
+        let mut input = [0.0; 64 * 4];
+        for group in 0..32 {
+            let first = group * 2 * 4;
+            let second = first + 4;
+            input[first..first + 4].copy_from_slice(&[1.0, 1.0, 3.0, 3.0]);
+            input[second..second + 4].copy_from_slice(&[5.0, 5.0, 7.0, 7.0]);
+        }
+        let mut output = [0.0; 64 * 4];
+        group_norm_32_into(&input, 64, 2, &[1.0; 64], &[0.0; 64], &mut output).unwrap();
+
+        let expected_first = [-1.3416407, -1.3416407, -0.44721356, -0.44721356];
+        let expected_second = [0.44721356, 0.44721356, 1.3416407, 1.3416407];
+        for group in 0..32 {
+            let first = group * 2 * 4;
+            let second = first + 4;
+            for position in 0..4 {
+                assert!((output[first + position] - expected_first[position]).abs() < 1e-6);
+                assert!((output[second + position] - expected_second[position]).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
     fn group_norm_adds_epsilon_to_variance_before_square_root() {
         let input = (0..32)
             .flat_map(|_| [0.0, 0.0, 0.002, 0.002])
