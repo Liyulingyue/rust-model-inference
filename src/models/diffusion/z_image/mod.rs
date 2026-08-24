@@ -1,6 +1,7 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{f16::F16Kernel, Kernel};
+use std::sync::Arc;
 
 pub(crate) mod dit;
 pub(crate) mod text;
@@ -17,6 +18,87 @@ pub(crate) struct ZImageOptions {
     pub(crate) steps: usize,
     pub(crate) resolution: usize,
     pub(crate) seed: i64,
+}
+
+pub(crate) struct ZImagePipeline {
+    dit: dit::ZImageDit,
+    text: text::Qwen3TextEncoder,
+    vae: vae::FluxVae,
+}
+
+impl ZImagePipeline {
+    pub(crate) fn load(
+        diffusion: Arc<dyn TensorSource>,
+        text: Arc<dyn TensorSource>,
+        vae: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        validate_component(diffusion.as_ref(), Component::Dit)?;
+        validate_component(text.as_ref(), Component::Text)?;
+        validate_component(vae.as_ref(), Component::Vae)?;
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
+        Ok(Self {
+            dit: dit::ZImageDit::load(diffusion, Arc::clone(&pool))?,
+            text: text::Qwen3TextEncoder::load(text, pool)?,
+            vae: vae::FluxVae::load(vae)?,
+        })
+    }
+
+    pub(crate) fn generate_rgb(
+        &self,
+        prompt: &str,
+        options: &ZImageOptions,
+    ) -> Result<ZImageRgb, String> {
+        validate_generate_request(prompt, options)?;
+        let context = self.text.encode_layer_35(prompt)?;
+        let context_tokens = context_token_count(&context)?;
+        let latent = self.dit.denoise(&context, context_tokens, options)?;
+        drop(context);
+        let latent_side = validate_latent_shape(&latent, options.resolution)?;
+        let rgb = self.vae.decode_rgb(&latent, latent_side)?;
+        let resolution = u32::try_from(options.resolution)
+            .map_err(|_| "Z-Image output resolution does not fit u32")?;
+        if rgb.width != resolution || rgb.height != resolution {
+            return Err("Invalid Z-Image decoded RGB dimensions".into());
+        }
+        Ok(rgb)
+    }
+}
+
+fn validate_generate_request(prompt: &str, options: &ZImageOptions) -> Result<(), String> {
+    if prompt.trim().is_empty() {
+        return Err("Z-Image prompt must not be empty".into());
+    }
+    if options.steps == 0 || options.resolution == 0 || options.resolution % 16 != 0 {
+        return Err("Z-Image requires positive steps and a resolution divisible by 16".into());
+    }
+    Ok(())
+}
+
+fn context_token_count(context: &[f32]) -> Result<usize, String> {
+    const WIDTH: usize = 2_560;
+    if context.is_empty() || context.len() % WIDTH != 0 {
+        return Err(format!(
+            "Invalid Z-Image context length: expected non-empty rows of {WIDTH}, got {}",
+            context.len()
+        ));
+    }
+    Ok(context.len() / WIDTH)
+}
+
+fn validate_latent_shape(latent: &[f32], resolution: usize) -> Result<usize, String> {
+    let latent_side = resolution / 8;
+    let expected = latent_side
+        .checked_mul(latent_side)
+        .and_then(|spatial| spatial.checked_mul(16))
+        .ok_or("Z-Image latent shape overflow")?;
+    if latent_side == 0 || latent.len() != expected {
+        return Err(format!(
+            "Invalid Z-Image denoised latent length: expected {expected}, got {}",
+            latent.len()
+        ));
+    }
+    Ok(latent_side)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,6 +745,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "Unsupported matrix type F32 for w");
+    }
+
+    #[test]
+    fn pipeline_requires_nonempty_complete_qwen_context_rows() {
+        assert_eq!(context_token_count(&vec![0.0; 5_120]).unwrap(), 2);
+        assert!(context_token_count(&[]).is_err());
+        assert!(context_token_count(&vec![0.0; 2_561]).is_err());
+    }
+
+    #[test]
+    fn pipeline_revalidates_generation_options_and_latent_shape() {
+        let valid = ZImageOptions {
+            steps: 1,
+            resolution: 16,
+            seed: 42,
+        };
+        validate_generate_request("fox", &valid).unwrap();
+        assert_eq!(validate_latent_shape(&vec![0.0; 64], 16).unwrap(), 2);
+        assert!(validate_generate_request("  ", &valid).is_err());
+        assert!(validate_generate_request("fox", &ZImageOptions { steps: 0, ..valid }).is_err());
+        assert!(validate_generate_request(
+            "fox",
+            &ZImageOptions {
+                resolution: 24,
+                ..valid
+            }
+        )
+        .is_err());
+        assert!(validate_latent_shape(&vec![0.0; 63], 16).is_err());
     }
 
     #[test]

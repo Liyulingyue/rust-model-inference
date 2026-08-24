@@ -317,6 +317,47 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
             Ok(None)
         };
     }
+    let conflict = if options.tts {
+        Some("--tts")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.ref_audio.is_some() {
+        Some("--ref-audio")
+    } else if options.image.is_some() {
+        Some("--image")
+    } else if options.mmproj.is_some() {
+        Some("--mmproj")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.dump_logits {
+        Some("--dump-logits")
+    } else if options.bench {
+        Some("--bench")
+    } else if options.profile {
+        Some("--profile")
+    } else if options.gpu {
+        Some("--gpu")
+    } else if options.thinking {
+        Some("--thinking")
+    } else if options.kv_format == KvFormat::F32 {
+        Some("--kv-cache f32")
+    } else if options.language.is_some() {
+        Some("--language")
+    } else if options.max_tokens.is_some() {
+        Some("--max-tokens")
+    } else if options.temperature.is_some() {
+        Some("--temp")
+    } else if options.embedding_output != EmbeddingOutput::Summary {
+        Some("--embedding-output")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("Z-Image cannot be used with {conflict}"));
+    }
+    if options.model.as_os_str().is_empty() {
+        return Err("Z-Image requires --model for the diffusion component".into());
+    }
     options
         .text_encoder
         .as_ref()
@@ -630,7 +671,62 @@ mod tests {
             "--out",
             "fox.png",
         ]))
+        .is_err());
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ]))
         .is_ok());
+    }
+
+    #[test]
+    fn z_image_rejects_other_modes_before_model_loading() {
+        let base = [
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ];
+        for (extra, expected) in [
+            (vec!["--tts"], "--tts"),
+            (vec!["--audio", "speech.wav"], "--audio"),
+            (vec!["--ref-audio", "voice.wav"], "--ref-audio"),
+            (vec!["--image", "input.png"], "--image"),
+            (vec!["--mmproj", "mmproj.gguf"], "--mmproj"),
+            (vec!["--embedding"], "--embedding"),
+            (vec!["--dump-logits"], "--dump-logits"),
+            (vec!["--bench"], "--bench"),
+            (vec!["--profile"], "--profile"),
+            (vec!["--gpu"], "--gpu"),
+            (vec!["--thinking"], "--thinking"),
+            (vec!["--kv-cache", "f32"], "--kv-cache f32"),
+            (vec!["--language", "en"], "--language"),
+            (vec!["--max-tokens", "1"], "--max-tokens"),
+            (vec!["--temp", "0"], "--temp"),
+            (vec!["--embedding-output", "raw"], "--embedding-output"),
+        ] {
+            let mut argv = base.to_vec();
+            argv.extend(extra);
+            let error =
+                validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+            assert!(error.contains(expected), "{argv:?}: {error}");
+        }
     }
 
     #[test]
