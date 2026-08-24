@@ -8,6 +8,39 @@ use rust_model_inference::ops;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenericDispatchMode {
+    Tts,
+    Asr,
+    Model,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GenericDispatchPlan {
+    enable_gpu: bool,
+    mode: GenericDispatchMode,
+}
+
+fn generic_dispatch_plan(
+    arch: &str,
+    options: &app::CliOptions,
+) -> Result<GenericDispatchPlan, String> {
+    if arch == "pig" {
+        return Err("Z-Image model requires --text-encoder, --vae, --prompt, and --out".into());
+    }
+    let mode = if options.tts {
+        GenericDispatchMode::Tts
+    } else if options.audio.is_some() {
+        GenericDispatchMode::Asr
+    } else {
+        GenericDispatchMode::Model
+    };
+    Ok(GenericDispatchPlan {
+        enable_gpu: options.gpu,
+        mode,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let options = app::parse_cli_options(&args).unwrap_or_else(|error| {
@@ -60,36 +93,41 @@ fn main() {
         return;
     }
 
-    if options.gpu {
+    let model_path = options.model.as_path();
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    let dispatch = match generic_dispatch_plan(&arch, &options) {
+        Ok(dispatch) => dispatch,
+        Err(error) => {
+            app::run_or_exit(Err(error));
+            return;
+        }
+    };
+
+    if dispatch.enable_gpu {
         ops::enable_gpu();
     }
 
-    if options.tts {
-        app::run_or_exit(app::run_tts_cli(&options));
-        return;
-    }
-
-    if options.audio.is_some() {
-        app::run_or_exit(app::run_asr_cli(&options));
-        return;
+    match dispatch.mode {
+        GenericDispatchMode::Tts => {
+            drop(source);
+            app::run_or_exit(app::run_tts_cli(&options));
+            return;
+        }
+        GenericDispatchMode::Asr => {
+            drop(source);
+            app::run_or_exit(app::run_asr_cli(&options));
+            return;
+        }
+        GenericDispatchMode::Model => {}
     }
 
     let (max_tokens, temperature) = app::resolve_cli_generation_options(&options);
     let prompt = options.prompt.as_deref().unwrap_or_default();
 
-    let model_path = options.model.as_path();
-    let source: Arc<dyn TensorSource> =
-        std::sync::Arc::from(open_or_exit(model_path, ComponentRole::Llm));
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(MetaValue::to_string_val)
-        .unwrap_or_default();
-    if arch == "pig" {
-        app::run_or_exit(Err(
-            "Z-Image model requires --text-encoder, --vae, --prompt, and --out".into(),
-        ));
-        return;
-    }
     let explicit_mmproj = options
         .mmproj
         .as_deref()
@@ -202,4 +240,40 @@ fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
         );
         std::process::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_pig_route_is_rejected(options: app::CliOptions) {
+        assert_eq!(
+            generic_dispatch_plan("pig", &options).unwrap_err(),
+            "Z-Image model requires --text-encoder, --vae, --prompt, and --out"
+        );
+    }
+
+    #[test]
+    fn pig_only_tts_is_rejected_before_tts_dispatch() {
+        assert_pig_route_is_rejected(app::CliOptions {
+            tts: true,
+            ..app::CliOptions::default()
+        });
+    }
+
+    #[test]
+    fn pig_only_asr_is_rejected_before_asr_dispatch() {
+        assert_pig_route_is_rejected(app::CliOptions {
+            audio: Some("speech.wav".into()),
+            ..app::CliOptions::default()
+        });
+    }
+
+    #[test]
+    fn pig_only_gpu_is_rejected_before_gpu_enablement() {
+        assert_pig_route_is_rejected(app::CliOptions {
+            gpu: true,
+            ..app::CliOptions::default()
+        });
+    }
 }

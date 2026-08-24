@@ -56,11 +56,7 @@ impl ZImagePipeline {
         drop(context);
         let latent_side = validate_latent_shape(&latent, options.resolution)?;
         let rgb = self.vae.decode_rgb(&latent, latent_side)?;
-        let resolution = u32::try_from(options.resolution)
-            .map_err(|_| "Z-Image output resolution does not fit u32")?;
-        if rgb.width != resolution || rgb.height != resolution {
-            return Err("Invalid Z-Image decoded RGB dimensions".into());
-        }
+        validate_decoded_rgb(&rgb, options.resolution)?;
         Ok(rgb)
     }
 }
@@ -83,6 +79,9 @@ fn context_token_count(context: &[f32]) -> Result<usize, String> {
             context.len()
         ));
     }
+    if !context.iter().all(|value| value.is_finite()) {
+        return Err("Non-finite Z-Image context".into());
+    }
     Ok(context.len() / WIDTH)
 }
 
@@ -98,7 +97,34 @@ fn validate_latent_shape(latent: &[f32], resolution: usize) -> Result<usize, Str
             latent.len()
         ));
     }
+    if !latent.iter().all(|value| value.is_finite()) {
+        return Err("Non-finite Z-Image denoised latent".into());
+    }
     Ok(latent_side)
+}
+
+fn validate_decoded_rgb(rgb: &ZImageRgb, resolution: usize) -> Result<(), String> {
+    let resolution =
+        u32::try_from(resolution).map_err(|_| "Z-Image output resolution does not fit u32")?;
+    if rgb.width != resolution || rgb.height != resolution {
+        return Err("Invalid Z-Image decoded RGB dimensions".into());
+    }
+    let expected = usize::try_from(rgb.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(rgb.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or("Z-Image decoded RGB size overflow")?;
+    if rgb.bytes.len() != expected {
+        return Err(format!(
+            "Invalid Z-Image decoded RGB length: expected {expected}, got {}",
+            rgb.bytes.len()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -752,6 +778,44 @@ mod tests {
         assert_eq!(context_token_count(&vec![0.0; 5_120]).unwrap(), 2);
         assert!(context_token_count(&[]).is_err());
         assert!(context_token_count(&vec![0.0; 2_561]).is_err());
+    }
+
+    #[test]
+    fn pipeline_context_boundary_rejects_nan_and_infinity() {
+        for value in [f32::NAN, f32::INFINITY] {
+            let mut context = vec![0.0; 2_560];
+            context[17] = value;
+            assert!(context_token_count(&context).is_err());
+        }
+    }
+
+    #[test]
+    fn pipeline_latent_boundary_rejects_nan_and_infinity() {
+        for value in [f32::NAN, f32::NEG_INFINITY] {
+            let mut latent = vec![0.0; 64];
+            latent[17] = value;
+            assert!(validate_latent_shape(&latent, 16).is_err());
+        }
+    }
+
+    #[test]
+    fn pipeline_decoded_rgb_boundary_rejects_malformed_byte_length() {
+        let malformed = ZImageRgb {
+            width: 2,
+            height: 2,
+            bytes: vec![0; 11],
+        };
+        assert!(validate_decoded_rgb(&malformed, 2).is_err());
+    }
+
+    #[test]
+    fn pipeline_decoded_rgb_boundary_rejects_length_overflow() {
+        let overflow = ZImageRgb {
+            width: u32::MAX,
+            height: u32::MAX,
+            bytes: Vec::new(),
+        };
+        assert!(validate_decoded_rgb(&overflow, u32::MAX as usize).is_err());
     }
 
     #[test]
