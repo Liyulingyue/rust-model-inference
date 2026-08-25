@@ -22,6 +22,108 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Read sampling defaults from GGUF metadata (matching llama.cpp's
+/// behaviour). MiniCPM5 ships `general.sampling.{top_k,top_p,temp}` keys
+/// that override the C++ defaults (40, 0.95, 1.0).
+fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
+    let top_k = source
+        .metadata("general.sampling.top_k")
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(40);
+    let top_p = source
+        .metadata("general.sampling.top_p")
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.95);
+    (top_k, top_p)
+}
+
+/// Print first 8 floats of `buf` to stderr, tagged by step/layer/label.
+/// Triggered by the `RUST_LLAMA_DEBUG_TENSORS` env var (set to a layer
+/// count, e.g. `RUST_LLAMA_DEBUG_TENSORS=1`).
+fn dbg_tensor(step: usize, label: &'static str, il: usize, buf: &[f32]) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let n = buf.len().min(8);
+    let mut line = format!("RUST_TENSOR step={} il={} {} first8=", step, il, label);
+    for v in &buf[..n] {
+        line.push_str(&format!("{:.5} ", v));
+    }
+    line.push('\n');
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
+}
+
+/// Print a single scalar (scale/mean) tagged by step/layer/label.
+fn dbg_scalar(step: usize, label: &'static str, il: usize, value: f32) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let line = format!("RUST_SCALAR step={} il={} {}={:.10}\n", step, il, label, value);
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
+}
+
+fn dbg_scalar_full(step: usize, label: &'static str, il: usize, value: f64) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let line = format!("RUST_SCALAR step={} il={} {}={:.10}\n", step, il, label, value);
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
+}
+
+/// Dump full values of `buf` to a file specified by RUST_LLAMA_DEBUG_OUTFILE.
+fn dbg_full(step: usize, label: &'static str, il: usize, buf: &[f32], n: usize) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let path = match std::env::var("RUST_LLAMA_DEBUG_OUTFILE") {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mut line = format!("[step={} il={} {}]", step, il, label);
+    for i in 0..n {
+        line.push_str(&format!(" {:.5}", buf[i]));
+    }
+    line.push('\n');
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 pub fn run_inference(
     source: &dyn TensorSource,
     prompt: &str,
@@ -32,52 +134,42 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
 ) -> Result<(), String> {
-    let input_tokens = {
+let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-        // Build the prompt with the ChatML template. This mirrors the
-        // llama.cpp chat template that wraps `user\n{prompt}<|im_end|>\n
-        // <|im_start|>assistant\n`. Special tokens are emitted explicitly
-        // so the tokenizer's BPE does not fragment them across multiple
-        // token ids.
-        let im_start = tokenizer.special_token_id("im_start");
-        let im_end = tokenizer.special_token_id("im_end");
-        if let (Some(im_start), Some(im_end)) = (im_start, im_end) {
-            let raw = format!("user\n{}\n", prompt);
-            let body = tokenizer.encode(
-                &raw,
-                EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            );
-            let mut tokens: Vec<u32> = Vec::with_capacity(body.len() + 4);
-            if tokenizer.bos_id().is_some() {
-                tokens.push(tokenizer.bos_id().expect("validated"));
-            }
-            tokens.push(im_start);
-            tokens.extend(body);
-            tokens.push(im_end);
-            tokens.push(im_start);
-            let suffix = tokenizer.encode(
-                "assistant\n",
-                EncodeOptions {
-                    add_special: false,
-                    parse_special: false,
-                },
-            );
-            tokens.extend(suffix);
-            tokens
-        } else {
-            tokenizer.encode(
-                prompt,
-                EncodeOptions {
-                    add_special: true,
-                    parse_special: true,
-                },
-            )
+        // Build the prompt using MiniCPM5's chat template (rendered via
+        // the Jinja template that ships in the GGUF; auto-detected by
+        // llama.cpp with `enable_thinking=true`). The rendered format for
+        // a single user message is:
+        //
+        //     <s><|im_start|>user\n{prompt}<|im_end|>\n
+        //     <|im_start|>assistant\n<think>\n
+        //
+        // (BOS is added because the chat template explicitly emits `<s>`.)
+        let im_start_str = "<|im_start|>";
+        let im_end_str = "<|im_end|>";
+        // Build the prompt text with the literal special tokens inline.
+        let prompt_text = format!(
+            "{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n"
+        );
+        // encode() with add_special=true prepends `<s>` and parse_special=true
+        // emits the literal `<|im_start|>`/`<|im_end|>` strings as single token ids.
+        let mut body = tokenizer.encode(
+            &prompt_text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        // The chat template starts with `{{- bos_token }}`, but MiniCPM5
+        // has `tokenizer.ggml.add_bos_token=false`, so encode() does not
+        // emit BOS automatically. Prepend BOS manually to match llama.cpp.
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
         }
+        eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+        body
     };
 
     run_inference_tokens(
@@ -153,6 +245,28 @@ pub fn run_inference_tokens(
     let layers: Vec<LlamaLayerWeights> =
         load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
 
+    // DEBUG: dump first N bytes of L23's w_gate, w_up, w_down for comparison with llama.cpp.
+    if std::env::var("RUST_LLAMA_DEBUG_L23_WEIGHTS").is_ok() {
+        let l = n_layer - 1; // L23 = last layer
+        let layer = &layers[l];
+        let dump_n = 256usize; // first 256 bytes (= ~7.5 Q8_0 blocks)
+        for (name, qw) in [
+            ("w_gate", &layer.w_gate),
+            ("w_up", &layer.w_up),
+            ("w_down", &layer.w_down),
+        ] {
+            // Get the raw bytes from the QuantizedTensor
+            // The bytes are stored in the tensor slice from the source
+            // We need to re-fetch them since QuantizedTensor doesn't expose raw bytes
+            let source_bytes = source.tensor_slice(&format!("blk.{}.ffn_{}.weight", l, &name[2..])).unwrap();
+            eprintln!("[RUST_W_L23] {} first {} bytes:", name, dump_n);
+            for chunk in source_bytes[..dump_n].chunks(16) {
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  {}", hex.join(" "));
+            }
+        }
+    }
+
     let load_ms = t0.elapsed().as_millis();
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
@@ -212,6 +326,7 @@ pub fn run_inference_tokens(
         let pos = step;
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        dbg_tensor(step, "embed_out", 0, &scratch.x);
 
         for layer in 0..n_layer {
             let lw = &layers[layer];
@@ -250,6 +365,7 @@ pub fn run_inference_tokens(
 
             let t0 = Instant::now();
             rms_norm(x, &lw.attn_norm, normed, eps);
+            dbg_tensor(step, "attn_norm", layer, normed);
             quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
@@ -283,6 +399,9 @@ pub fn run_inference_tokens(
                 for h in 0..n_head_kv {
                     rope_neox(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_v, freq_base);
                 }
+                dbg_tensor(step, "Qcur", layer, q);
+                dbg_tensor(step, "Kcur", layer, k_new);
+                dbg_tensor(step, "Vcur", layer, v_new);
 
                 let kb = layer * max_ctx * n_embd_gqa;
 
@@ -397,6 +516,7 @@ pub fn run_inference_tokens(
             t_qkv += t0.elapsed().as_secs_f64();
 
             let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            dbg_tensor(step, "attn_out", layer, attn_out);
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
             let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
@@ -417,19 +537,44 @@ pub fn run_inference_tokens(
             t_wo += t0.elapsed().as_secs_f64();
 
             let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            dbg_tensor(step, "attn_proj", layer, attn_proj);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             for i in 0..n_embd {
                 x[i] += attn_proj[i];
             }
+            dbg_tensor(step, "ffn_inp", layer, x);
+            dbg_full(step, "ffn_inp", layer, x, n_embd);
 
             let t0 = Instant::now();
+            {
+                let sum_sq: f64 = x[..n_embd].iter().map(|&v| f64::from(v * v)).sum();
+                let mean_sq = (sum_sq / n_embd as f64) as f32;
+                let scale = 1.0f32 / (mean_sq + eps).sqrt();
+                dbg_scalar(step, "ffn_norm_scale", layer, scale);
+                dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
+                dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+            }
             rms_norm(x, &lw.ffn_norm, normed, eps);
+            dbg_tensor(step, "ffn_norm", layer, normed);
+            dbg_full(step, "ffn_norm", layer, normed, n_embd);
+            dbg_tensor(step, "ffn_norm_weight", layer, &lw.ffn_norm[..n_embd.min(lw.ffn_norm.len())]);
+            dbg_full(step, "ffn_norm_weight", layer, &lw.ffn_norm[..n_embd.min(lw.ffn_norm.len())], n_embd);
             quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
             crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
+
+            // DEBUG: dump ffn_norm Q8_0 quantization to verify against Python reference
+            if std::env::var("RUST_LLAMA_DEBUG_FFN_Q8").is_ok() && layer == n_layer - 1 && step == 0 {
+                let q8_slice = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc_slice = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                eprintln!("[RUST_FFN_Q8_L23] input q8 first 32 bytes (block 0): {:?}", &q8_slice[..32]);
+                eprintln!("[RUST_FFN_Q8_L23] input q8 bytes 32..64 (block 1): {:?}", &q8_slice[32..64]);
+                eprintln!("[RUST_FFN_Q8_L23] input scale[0..4]: {:?}", &sc_slice[..4]);
+                eprintln!("[RUST_FFN_Q8_L23] input q8 last 32 bytes: {:?}", &q8_slice[n_embd-32..]);
+            }
 
             pool.compute(move |ith: usize, nth: usize| {
                 let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
@@ -446,6 +591,15 @@ pub fn run_inference_tokens(
                 let r_end = if ith == nth - 1 { n_ff } else { r_start + rows_per };
                 silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
             });
+
+            {
+                let gate_buf = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+                let up_buf = unsafe { std::slice::from_raw_parts(up_buf_ptr, n_ff) };
+                dbg_tensor(step, "ffn_gate_buf_raw", layer, gate_buf);
+                dbg_tensor(step, "ffn_up_buf_raw", layer, up_buf);
+                dbg_full(step, "ffn_gate_buf_raw", layer, gate_buf, n_ff);
+                dbg_full(step, "ffn_up_buf_raw", layer, up_buf, n_ff);
+            }
 
             {
                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
@@ -469,11 +623,27 @@ pub fn run_inference_tokens(
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
+            // DEBUG: print raw down_buf (W_down matmul output) for L23 step 0.
+            // Marker: [RUST_L23_DOWN_BUF_RAW]
+            if std::env::var("RUST_LLAMA_DEBUG_L23_DOWN").is_ok() && layer == n_layer - 1 && step == 0 {
+                let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+                eprint!("[RUST_L23_DOWN_BUF_RAW] first16=");
+                for v in down_buf.iter().take(16) {
+                    eprint!(" {:.5}", v);
+                }
+                eprintln!();
+            }
+
             let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+            dbg_tensor(step, "down_buf", layer, down_buf);
+            dbg_full(step, "down_buf", layer, down_buf, n_embd);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             for i in 0..n_embd {
                 x[i] += down_buf[i];
             }
+            dbg_tensor(step, "ffn_out", layer, x);
+            dbg_tensor(step, "l_out", layer, x);
+            dbg_full(step, "ffn_out", layer, x, n_embd);
         }
 
         {
@@ -486,6 +656,7 @@ pub fn run_inference_tokens(
 
             let t0 = Instant::now();
             rms_norm(x, &output_norm, normed, eps);
+            dbg_tensor(step, "output_norm", 0, normed);
             t_norm += t0.elapsed().as_secs_f64();
 
             let t0 = Instant::now();
@@ -505,6 +676,17 @@ pub fn run_inference_tokens(
                 output_pw.kernel.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
             });
             t_logits += t0.elapsed().as_secs_f64();
+
+            // DEBUG: print LOGITS for step 0 (first 16 values).
+            // Marker: [RUST_LOGITS_RAW]
+            if std::env::var("RUST_LLAMA_DEBUG_LOGITS").is_ok() && step == 0 {
+                let logits = unsafe { std::slice::from_raw_parts(logits_ptr, vocab) };
+                eprint!("[RUST_LOGITS_RAW] first16=");
+                for v in logits.iter().take(16) {
+                    eprint!(" {:.5}", v);
+                }
+                eprintln!();
+            }
         }
 
         let eval_elapsed = eval_started.elapsed();
@@ -521,29 +703,40 @@ pub fn run_inference_tokens(
         }
 
         let logits = &mut scratch.logits;
-        let chosen = if temperature <= 0.0 {
-            logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0)
-        } else {
-            for l in logits.iter_mut() {
-                *l /= temperature;
+        // DEBUG: print top-10 logits so we can diff against llama.cpp.
+        if std::env::var("RUST_LLAMA_DEBUG_LOGITS").is_ok() {
+            let mut idxs: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let mut line = format!("RUST_LOGITS step={} top10:", step);
+            for k in 0..10 {
+                line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
             }
-            let top = crate::ops::sample_top_k(logits, 40);
-            let mut rng = 0u64;
+            line.push('\n');
+            let _ = io::stderr().write_all(line.as_bytes());
+            let _ = io::stderr().flush();
+        }
+        // Sample using llama.cpp's default sampler chain:
+        //   top_k=20 -> top_p=0.95 -> temperature=0.6 -> dist sample.
+        // The top_k / top_p values come from the GGUF metadata
+        // (`general.sampling.top_k` / `.top_p`) when available.
+        let (top_k, top_p) = sample_defaults(source);
+        let rng_u64 = if temperature <= 0.0 {
+            0
+        } else {
+            // Seed RNG from generated history (deterministic per prompt).
+            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
             for &t in &all_tokens {
                 rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
             }
-            let r = ((rng >> 33) as f32) / (1u64 << 31) as f32;
-            let mut cum = 0.0f32;
-            let mut chosen = top[0].0;
-            for &(idx, prob) in &top {
-                cum += prob;
-                if cum >= r {
-                    chosen = idx;
-                    break;
-                }
-            }
-            chosen
+            rng
         };
+        let chosen = crate::ops::sample_llama_cpp(
+            logits,
+            top_k,
+            top_p,
+            temperature,
+            rng_u64,
+        );
 
         let chosen_id = chosen as u32;
         if !bench && eos_id == Some(chosen_id) {

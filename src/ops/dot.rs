@@ -446,13 +446,10 @@ unsafe fn vec_scale_f32_avx2(y: &mut [f32], v: f32) {
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn hsum_ps(v: std::arch::x86_64::__m256) -> f32 {
     use std::arch::x86_64::*;
-    let hi = _mm256_extractf128_ps(v, 1);
-    let lo = _mm256_castps256_ps128(v);
-    let s128 = _mm_add_ps(hi, lo);
-    let shuf = _mm_movehdup_ps(s128);
-    let s2 = _mm_add_ps(s128, shuf);
-    let s3 = _mm_movehl_ps(shuf, s2);
-    _mm_cvtss_f32(_mm_add_ss(s2, s3))
+    let mut res = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
+    res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+    res = _mm_add_ss(res, _mm_movehdup_ps(res));
+    _mm_cvtss_f32(res)
 }
 pub fn vec_mad_f32(y: &mut [f32], x: &[f32], v: f32) {
     debug_assert_eq!(y.len(), x.len());
