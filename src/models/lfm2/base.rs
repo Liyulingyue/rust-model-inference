@@ -122,14 +122,20 @@ pub fn run_inference(
     println!("Prompt: {} tokens", input_tokens.len());
 
     let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
+    // Accumulated b*x from prompt tokens (for batch-prefill simulation).
+    // Each element is the b*x output for one token at one layer.
+    // We keep the last d_conv tokens' b*x for the decode state.
+    let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
     for (l, lw) in layers.iter().enumerate() {
         if lw.is_attn {
             shortconv_states.push(Vec::new());
+            accumulated_bx.push(Vec::new());
         } else {
             // [d_conv, n_embd], padded in time dimension (row major: time is fast).
             // The llama.cpp convention is [n_embd, d_conv] (channels x time). We use
             // the same: state[l][c * d_conv + t].
             shortconv_states.push(vec![0.0f32; n_embd * cfg.d_conv]);
+            accumulated_bx.push(Vec::new());
             let _ = l;
         }
     }
@@ -168,8 +174,32 @@ pub fn run_inference(
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
 
+        let is_prefill = step < input_tokens.len();
         for layer in 0..n_layer {
             let lw = &layers[layer];
+            // During prefill, before processing token k, set state to the last
+            // d_conv accumulated b*x values (with zero padding for early tokens).
+            // This makes each prefill token's step-by-step computation match the
+            // batched prefill semantics in llama.cpp (where the SSM conv kernel
+            // spans d_conv-1 previous tokens' b*x with all-zero state).
+            if !lw.is_attn && is_prefill {
+                let d_conv = cfg.d_conv;
+                let n_embd = cfg.n_embd;
+                let state = &mut shortconv_states[layer];
+                state.resize(d_conv * n_embd, 0.0);
+                let hist = &accumulated_bx[layer];
+                // hist contains the most recent min(step, d_conv) b*x values
+                // from earlier tokens, with hist[0] = b*x_{max(0, step-d_conv)}.
+                // state[k_p] = hist[k_p] (when available), else 0.
+                for k_p in 0..d_conv {
+                    if k_p < hist.len() {
+                        let src = &hist[k_p];
+                        for ci in 0..n_embd {
+                            state[k_p * n_embd + ci] = src[ci];
+                        }
+                    }
+                }
+            }
             forward_layer(
                 &pool,
                 lw,
@@ -183,6 +213,8 @@ pub fn run_inference(
                 eps,
                 freq_base,
                 &mut shortconv_states[layer],
+                &mut accumulated_bx[layer],
+                is_prefill,
             );
         }
 
@@ -257,7 +289,7 @@ pub fn run_inference(
             logits
                 .iter()
                 .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .map(|(i, _)| i)
                 .unwrap_or(0)
         } else {
@@ -296,10 +328,6 @@ pub fn run_inference(
         let text = decoder.push(chosen_id);
         print!("{}", text);
         io::stdout().flush().unwrap();
-
-        if generated_tokens.len() == 1 {
-            eprintln!();
-        }
     }
 
     let tail = decoder.finish();
@@ -348,6 +376,8 @@ fn forward_layer(
     eps: f32,
     freq_base: f32,
     shortconv_state: &mut Vec<f32>,
+    accumulated_bx: &mut Vec<Vec<f32>>,
+    is_prefill: bool,
 ) {
     let n_embd = cfg.n_embd;
     let n_embd_q = cfg.n_head * cfg.n_embd_head_k;
@@ -410,13 +440,16 @@ let cur_after_block = if lw.is_attn {
         }
         unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     } else {
-        let cur = forward_shortconv(
+        let (cur, bx) = forward_shortconv(
             &pool,
             lw,
+            layer,
             cfg,
             &mut scratch,
             pos,
             shortconv_state,
+            accumulated_bx,
+            is_prefill,
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         for i in 0..n_embd {
@@ -445,88 +478,30 @@ let cur_after_block = if lw.is_attn {
     let q8k = &q8k_buf[..n_embd / 256];
     let n_ff = cfg.n_ff;
 
-    pool.compute({
-        let input_ptr = normed_ptr;
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        let up_buf_ptr = up_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
-            let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-            lw.w_gate.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                up_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            lw.w_up.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                gate_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            let rows_per = n_ff / nth;
-            let r_start = ith * rows_per;
-            let r_end = if ith == nth - 1 { n_ff } else { r_start + rows_per };
-            silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+    // F32 matmul: single-threaded to guarantee scalar precision (no AVX2 / approx).
+    {
+        let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+        let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+        let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
+        // gate_matmul -> up_buf (will be silu input)
+        lw.w_gate_f32.kernel.forward(input, up_buf, n_embd, n_ff);
+        // up_matmul -> gate_buf (will be multiplied)
+        lw.w_up_f32.kernel.forward(input, gate_buf, n_embd, n_ff);
+        // silu(up_buf) * gate_buf -> gate_buf (in-place)
+        for i in 0..n_ff {
+            let x = up_buf[i];
+            let silu_x = x / (1.0 + (-x).exp());
+            gate_buf[i] = silu_x * gate_buf[i];
         }
-    });
+    }
 
-    let gate_buf =
+let gate_buf =
         unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
-    quantize_q8_0_into(
-        gate_buf,
-        n_ff,
-        &mut q8_buf[..n_ff],
-        &mut scale_buf[..n_ff / 32],
-    );
-    quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
-    let q8 = &q8_buf[..n_ff];
-    let sc = &scale_buf[..n_ff / 32];
-    let q8k = &q8k_buf[..n_ff / 256];
-    pool.compute({
-        let gate_buf_ptr = gate_buf_ptr;
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let down_buf_ptr = down_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_ff) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_ff / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
-            let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
-            lw.w_down.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                down_buf,
-                n_ff,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+    let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+    // F32 down matmul (single-threaded scalar).
+    lw.w_down_f32.kernel.forward(gate_buf, down_buf, n_ff, n_embd);
 
-    let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     for i in 0..n_embd {
         x[i] += down_buf[i];
@@ -576,57 +551,16 @@ fn forward_attention(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    pool.compute({
-        let input_ptr = normed_ptr;
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let q_ptr = q_ptr;
-        let k_ptr = k_ptr;
-        let v_ptr = v_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
-            let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
-            let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
-            lw.wq.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                q,
-                n_embd,
-                n_embd_q,
-                ith,
-                nth,
-            );
-            lw.wk.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                k_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-            lw.wv.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                v_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-        }
-    });
+    // F32 matmul (single-threaded scalar) for Q/K/V projections.
+    unsafe {
+        let input = std::slice::from_raw_parts(normed_ptr, n_embd);
+        let q = std::slice::from_raw_parts_mut(q_ptr, n_embd_q);
+        let k_new = std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa);
+        let v_new = std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa);
+        lw.wq_f32.kernel.forward(input, q, n_embd, n_embd_q);
+        lw.wk_f32.kernel.forward(input, k_new, n_embd, n_embd_gqa);
+        lw.wv_f32.kernel.forward(input, v_new, n_embd, n_embd_gqa);
+    }
 
     // Q/K norm + RoPE.
     unsafe {
@@ -815,41 +749,25 @@ fn forward_attention(
     let sc = &scale_buf[..n_embd_q / 32];
     let q8k = &q8k_buf[..n_embd_q / 256];
 
-    pool.compute({
-        let attn_out_ptr = attn_out_ptr;
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let attn_proj_ptr = attn_proj_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
-            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
-            lw.wo.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                attn_proj,
-                n_embd_q,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+// F32 matmul (single-threaded scalar) for output projection.
+    unsafe {
+        let input = std::slice::from_raw_parts(attn_out_ptr, n_embd_q);
+        let attn_proj = std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd);
+        lw.wo_f32.kernel.forward(input, attn_proj, n_embd_q, n_embd);
+    }
 }
 
 fn forward_shortconv(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
+    layer_idx: usize,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     pos: usize,
     state: &mut Vec<f32>,
-) -> Vec<f32> {
+    accumulated_bx: &mut Vec<Vec<f32>>,
+    is_prefill: bool,
+) -> (Vec<f32>, Vec<f32>) {
     let n_embd = cfg.n_embd;
     let d_conv = cfg.d_conv;
     let l_cache = cfg.l_cache;
@@ -880,46 +798,19 @@ fn forward_shortconv(
     }
 
     // Step 1: in_proj -> 3 chunks of size n_embd: b, c, x.
-    let q8 = &q8_buf[..n_embd];
-    let sc = &scale_buf[..n_embd / 32];
-    let q8k = &q8k_buf[..n_embd / 256];
+    // Use F32 path (dequantized) for shortconv_in_proj to maximize precision.
     let three_n = 3 * n_embd;
 
-    pool.compute({
-        let input_ptr = normed_ptr;
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            // gate_buf holds `[b | c | x]` (concatenated, length 3*n_embd).
-            let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
-            lw.shortconv_in.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                bcx,
-                n_embd,
-                three_n,
-                ith,
-                nth,
-            );
-        }
-    });
-
-    // DEBUG: dump bcx first 16 values for layer 0
-    if pos == 0 && cfg.d_conv > 0 && false {
-        unsafe {
-            let bcx_debug = std::slice::from_raw_parts(gate_buf_ptr, three_n);
-            eprintln!("[LFM2-DEBUG] layer 0 step 0 bcx shape={} d_conv={} pos={}", three_n, cfg.d_conv, pos);
-            eprintln!("[LFM2-DEBUG] bcx[0]={} bcx[1]={} bcx[2]={} bcx[3]={}", bcx_debug[0], bcx_debug[1], bcx_debug[2], bcx_debug[3]);
-            eprintln!("[LFM2-DEBUG] x[0..4] (4096..4100): bcx[4096]={} bcx[4097]={} bcx[4098]={} bcx[4099]={}", bcx_debug[4096], bcx_debug[4097], bcx_debug[4098], bcx_debug[4099]);
-        }
+    // F32 matmul: do it single-threaded outside pool.compute to avoid race conditions.
+    {
+        let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+        let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
+        lw.shortconv_in_f32.as_ref().unwrap().kernel.forward(
+            input,
+            bcx,
+            n_embd,
+            three_n,
+        );
     }
 
     // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
@@ -934,93 +825,85 @@ fn forward_shortconv(
         bx[i] = b[i] * x[i];
     }
 
-    // bx_buf is full conv input (state || bx). State has d_conv rows, bx has 1 row.
-    let mut bx_buf: Vec<f32> = Vec::with_capacity(d_conv * n_embd + n_embd);
+    // Accumulate b*x so the main loop can build the next token's state.
+    // The main loop sets state = [b*x_{step-d_conv}, ..., b*x_{step-1}] before
+    // calling forward_shortconv, matching llama.cpp's batched prefill semantics.
+    if is_prefill {
+        accumulated_bx.push(bx.clone());
+        // Trim history to last d_conv entries so memory stays bounded.
+        let keep = cfg.d_conv;
+        if accumulated_bx.len() > keep {
+            let drop_n = accumulated_bx.len() - keep;
+            accumulated_bx.drain(0..drop_n);
+        }
+    }
+
+    // bx_buf is the SSM conv input. For single-token decode (n_seq_tokens=1):
+    // GGML shape [d_conv + n_seq_tokens, n_embd] = [3, 2048].
+    // Memory layout: [c=0, t=0..2, c=1, t=0..2, ...] = bx_buf[c * 3 + t].
+    // Rows 0..d_conv-1 are OLD state, row d_conv is b*x (from in_proj).
+    let l_buf = d_conv + 1; // 3 for d_conv=2
+    let mut bx_buf: Vec<f32> = vec![0.0f32; n_embd * l_buf];
     if state.len() != d_conv * n_embd {
         state.resize(d_conv * n_embd, 0.0);
     }
-    bx_buf.extend_from_slice(state);
-    bx_buf.extend_from_slice(&bx);
-
-    // DEBUG: print bx for layer 0 BOS
-    if pos == 0 && cfg.d_conv > 0 && false {
-        eprintln!("[LFM2-DEBUG] layer 0 pos={} bx[0..8] = {:?}", pos, &bx[..8]);
+    // state is stored row-major [s_0_c_0, s_0_c_1, ..., s_(d_conv-1)_c_(n_embd-1)].
+    // Reorganize to GGML layout: bx_buf[c * l_buf + k] where k < d_conv is state time.
+    for c in 0..n_embd {
+        for k in 0..d_conv {
+            bx_buf[c * l_buf + k] = state[k * n_embd + c];
+        }
+    }
+    // bx = b * x (element-wise)
+    let mut bx: Vec<f32> = vec![0.0; n_embd];
+    for i in 0..n_embd {
+        bx[i] = b[i] * x[i];
     }
 
-    // Update state: keep the last `d_conv` columns of bx_buf.
-    // bx_buf[d_conv * n_embd..] = the new bx.
-    // The new state is the last d_conv columns, i.e. bx_buf[n_embd..(d_conv + 1) * n_embd].
-    let new_state_start = n_embd; // skip the first (oldest) row, take the remaining d_conv rows
-    for (i, v) in bx_buf[new_state_start..new_state_start + d_conv * n_embd]
-        .iter()
-        .enumerate()
-    {
-        state[i] = *v;
+    // Row d_conv is b*x.
+    for ci in 0..n_embd {
+        bx_buf[ci * l_buf + d_conv] = bx[ci];
     }
 
-    // Per-channel conv1d with kernel of size `l_cache`. The conv slides over
-    // bx_buf (which has `d_conv + 1` rows). Number of output positions:
-    // `n_t = (d_conv + 1) - l_cache + 1 = (d_conv + 1) - (d_conv + 1) + 1 + 1 - 1`
-    // Hmm wait that's confusing. Let me restate:
-    //   d_conv = l_cache - 1
-    //   bx_buf.len() (rows) = d_conv + 1 = l_cache
-    //   For ssm_conv: n_t = (l_cache) - l_cache + 1 = 1
-    // So we get exactly 1 output. Good.
+    // Update state: the new state is b*x (copy to all d_conv rows).
+    // During prefill, the post-state will be reconstructed by the caller from
+    // the accumulated b*x history (last d_conv tokens) to match llama.cpp's
+    // batched prefill semantics.
+    if !is_prefill {
+        for k in 0..d_conv {
+            for ci in 0..n_embd {
+                state[k * n_embd + ci] = bx[ci];
+            }
+        }
+    }
+
+    // SSM conv: input bx_buf [l_buf, n_embd], kernel [l_cache, n_embd].
+    // For single token: l_buf=3, l_cache=3, output has 1 position (3-3+1=1).
     let kernel = lw.shortconv_conv.as_ref().unwrap();
     debug_assert_eq!(kernel.len(), l_cache * n_embd);
-    // Per-channel conv1d: y[c] = sum_{k=0..l_cache-1} bx_buf[i2 + k][c] * kernel[k][c]
-    // For n_t = 1, only i2 = 0:
+    // GGML layout: kernel[k, c] at offset c * l_cache + k.
+    // bx_buf[t, c] at offset c * l_buf + t.
     let mut conv_out: Vec<f32> = vec![0.0; n_embd];
     for c_idx in 0..n_embd {
+        let k_off = c_idx * l_cache;
+        let b_off = c_idx * l_buf;
         let mut acc = 0.0f32;
         for k in 0..l_cache {
-            acc += bx_buf[k * n_embd + c_idx] * kernel[k * n_embd + c_idx];
+            acc += bx_buf[b_off + k] * kernel[k_off + k];
         }
         conv_out[c_idx] = acc;
     }
 
-    // y = c * conv_out (per-channel gating)
-    for i in 0..n_embd {
-        conv_out[i] *= c[i];
+    // y = c * conv_out (per-channel gating).
+    for c_idx in 0..n_embd {
+        conv_out[c_idx] *= c[c_idx];
     }
 
-    // Step 3: out_proj.
-    quantize_q8_0_into(
-        &conv_out,
-        n_embd,
-        &mut q8_buf[..n_embd],
-        &mut scale_buf[..n_embd / 32],
-    );
-    quantize_row_q8_k_into(&conv_out, &mut q8k_buf[..n_embd / 256]);
-    let q8 = &q8_buf[..n_embd];
-    let sc = &scale_buf[..n_embd / 32];
-    let q8k = &q8k_buf[..n_embd / 256];
+    // out_proj: weight [n_embd, n_embd] @ conv_out [n_embd] = [n_embd].
+    let kernel_f32 = lw.shortconv_out_f32.as_ref().unwrap();
     let mut out: Vec<f32> = vec![0.0; n_embd];
-    pool.compute({
-        let q8_ptr = q8.as_ptr();
-        let sc_ptr = sc.as_ptr();
-        let q8k_ptr = q8k.as_ptr();
-        let out_ptr = out.as_mut_ptr();
-        move |ith, nth| {
-            let input = &conv_out[..];
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
-            lw.shortconv_out.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                o,
-                n_embd,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+    kernel_f32.kernel.forward(&conv_out, &mut out, n_embd, n_embd);
 
     let _ = pos;
-    out
+    (out, bx)
 }
