@@ -427,7 +427,7 @@ impl<'model> Qwen3Session<'model> {
     /// - `KvFormat::F16/F32`：选择 KV 精度
     /// - `KvLifecycle::Ephemeral/Timed/Persistent`：选择生命周期策略
     ///
-    /// 当前阶段 `base_multimodal` 主要需要 F16（与原代码一致）。
+    /// 当前阶段 `base` 主要需要 F16（与原代码一致）。
     /// 未来可以无缝扩展到 F32 或其他格式。
     pub fn new_with_kv_state(
         model: &'model Qwen3Model,

@@ -1,10 +1,10 @@
 //! # Qwen3 纯文本推理（CLI 入口）
 //!
 //! 此模块是 CLI 文本推理的 thin wrapper：直接复用
-//! `models::qwen3::base_multimodal::Qwen3Model` + `Qwen3Session`，
+//! `models::qwen3::base::Qwen3Model` + `Qwen3Session`，
 //! 调用其 `generate_streaming` 接口完成 token 生成。
 //!
-//! 底层推理逻辑已统一到 `base_multimodal`（`Qwen3Session::generate_inner`）。
+//! 底层推理逻辑已统一到 `base`（`Qwen3Session::generate_inner`）。
 //! 本模块负责：
 //! 1. 把 `&dyn TensorSource` 升级成 `Arc<dyn TensorSource>` 以满足 `Qwen3Model::from_source` 的接口
 //! 2. CLI 特有的 prompt 模板（`build_qwen_chat_prompt`）
@@ -15,7 +15,7 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::base_multimodal::{
+use crate::models::qwen3::base::{
     Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
 };
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
@@ -134,7 +134,7 @@ pub fn run_inference_tokens(
     );
     println!("Prompt: {} tokens", input_tokens.len());
 
-    // 2) 创建标准会话（共享 base_multimodal::Qwen3Session）
+    // 2) 创建标准会话（共享 base::Qwen3Session）
     let mut session = Qwen3Session::new_with_kv_state(
         &model,
         max_ctx,

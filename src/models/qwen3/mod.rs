@@ -1,7 +1,7 @@
 pub mod asr;
+pub mod base;
 pub mod embedding;
 pub mod hunyuan;
-pub mod base_multimodal;
 pub mod skeleton;
 pub mod tts;
 pub mod text;
