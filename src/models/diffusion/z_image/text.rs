@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::core::scratchpad::KvCacheF16;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::{
-    dot_f16_f32, embedding_lookup, f16_to_f32, f32_slice_to_f16, rms_norm, rms_norm_inplace,
-    rope_neox, silu_mul_inplace, softmax_inplace,
-};
+#[cfg(target_arch = "aarch64")]
+use crate::ops::{attention_value_f32, dot_f32_neon, silu_mul_approx_inplace};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
+use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -103,7 +103,17 @@ impl Qwen3TextEncoder {
         if ids.is_empty() {
             return Err("Z-Image prompt produced no tokens".into());
         }
-        self.forward_to_block(&ids, LAYER_35_BLOCKS)
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::token_ids("z_image.prompt_ids", &ids));
+        let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.text_layer_35",
+            Some(LAYER_35_BLOCKS),
+            &[HIDDEN, ids.len()],
+            &output,
+        ));
+        Ok(output)
     }
 
     fn forward_to_block(&self, ids: &[u32], blocks: usize) -> Result<Vec<f32>, String> {
@@ -125,9 +135,9 @@ impl Qwen3TextEncoder {
             .and_then(|value| value.checked_mul(KV_WIDTH))
             .ok_or("Qwen3 KV cache size overflow")?;
         let mut output = reserve_f32("Qwen3 layer-35 output", output_len)?;
-        let mut cache = KvCacheF16 {
-            k: reserve_u16("Qwen3 key cache", cache_len)?,
-            v: reserve_u16("Qwen3 value cache", cache_len)?,
+        let mut cache = TextKvCache {
+            k: reserve_f32("Qwen3 key cache", cache_len)?,
+            v: reserve_f32("Qwen3 value cache", cache_len)?,
         };
         let embedding = self
             .source
@@ -185,8 +195,8 @@ impl Qwen3TextEncoder {
                 rope_neox(&mut scratch.k, position, HEAD_WIDTH, ROPE_BASE);
 
                 let cache_row = (layer_index * token_count + position) * KV_WIDTH;
-                f32_slice_to_f16(&scratch.k, &mut cache.k[cache_row..cache_row + KV_WIDTH]);
-                f32_slice_to_f16(&scratch.v, &mut cache.v[cache_row..cache_row + KV_WIDTH]);
+                cache.k[cache_row..cache_row + KV_WIDTH].copy_from_slice(&scratch.k);
+                cache.v[cache_row..cache_row + KV_WIDTH].copy_from_slice(&scratch.v);
                 attention(
                     &scratch.q,
                     &cache,
@@ -194,6 +204,7 @@ impl Qwen3TextEncoder {
                     position,
                     token_count,
                     &mut scratch.scores,
+                    &mut scratch.value_column,
                     &mut scratch.attention,
                 );
                 linear_into(
@@ -236,7 +247,7 @@ impl Qwen3TextEncoder {
                     &mut scratch.q8,
                     self.pool.as_ref(),
                 )?;
-                silu_mul_inplace(&scratch.gate, &mut scratch.up);
+                qwen_swiglu(&scratch.gate, &mut scratch.up);
                 linear_into(
                     self.source.as_ref(),
                     &layer.down_proj,
@@ -257,6 +268,11 @@ impl Qwen3TextEncoder {
     }
 }
 
+struct TextKvCache {
+    k: Vec<f32>,
+    v: Vec<f32>,
+}
+
 struct TextScratch {
     hidden: Vec<f32>,
     normed: Vec<f32>,
@@ -268,6 +284,7 @@ struct TextScratch {
     gate: Vec<f32>,
     up: Vec<f32>,
     scores: Vec<f32>,
+    value_column: Vec<f32>,
     q8: Q8Scratch,
 }
 
@@ -284,6 +301,7 @@ impl TextScratch {
             gate: vec![0.0; FFN_WIDTH],
             up: vec![0.0; FFN_WIDTH],
             scores: vec![0.0; token_count],
+            value_column: vec![0.0; token_count],
             q8: Q8Scratch::new(FFN_WIDTH),
         }
     }
@@ -291,40 +309,95 @@ impl TextScratch {
 
 fn attention(
     query: &[f32],
-    cache: &KvCacheF16,
+    cache: &TextKvCache,
     layer: usize,
     position: usize,
     token_count: usize,
     scores: &mut [f32],
+    value_column: &mut [f32],
     output: &mut [f32],
 ) {
     output.fill(0.0);
     let scale = 1.0 / (HEAD_WIDTH as f32).sqrt();
-    let active_scores = &mut scores[..=position];
     for query_head in 0..QUERY_HEADS {
         let kv_head = query_head / (QUERY_HEADS / KV_HEADS);
         let query = &query[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
-        for (key_position, score) in active_scores.iter_mut().enumerate() {
-            let key_start = (layer * token_count + key_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-            *score = dot_f16_f32(
-                query,
-                &cache.k[key_start..key_start + HEAD_WIDTH],
-                HEAD_WIDTH,
-            ) * scale;
+        {
+            let active_scores = &mut scores[..=position];
+            for (key_position, score) in active_scores.iter_mut().enumerate() {
+                let key_start =
+                    (layer * token_count + key_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
+                *score = attention_dot(query, &cache.k[key_start..key_start + HEAD_WIDTH]) * scale;
+            }
         }
-        softmax_inplace(active_scores);
+        attention_softmax(scores, position, token_count);
         let output_head = &mut output[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
-        for (value_position, &weight) in active_scores.iter().enumerate() {
+        #[cfg(target_arch = "aarch64")]
+        for dimension in 0..HEAD_WIDTH {
+            for (value_position, value) in value_column.iter_mut().enumerate() {
+                let value_start = (layer * token_count + value_position) * KV_WIDTH
+                    + kv_head * HEAD_WIDTH
+                    + dimension;
+                *value = cache.v[value_start];
+            }
+            output_head[dimension] = qwen_attention_value(value_column, scores);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        for (value_position, &weight) in scores[..=position].iter().enumerate() {
             let value_start =
                 (layer * token_count + value_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-            for (result, value) in output_head
+            for (result, &value) in output_head
                 .iter_mut()
                 .zip(&cache.v[value_start..value_start + HEAD_WIDTH])
             {
-                *result += weight * f16_to_f32(*value);
+                *result += weight * value;
             }
         }
     }
+}
+
+#[inline]
+fn qwen_attention_value(values: &[f32], weights: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return attention_value_f32(values, weights, values.len(), values.len());
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    values
+        .iter()
+        .zip(weights)
+        .fold(0.0, |sum, (value, weight)| sum + value * weight)
+}
+
+#[inline]
+fn qwen_swiglu(gate: &[f32], up: &mut [f32]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        silu_mul_approx_inplace(gate, up);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    silu_mul_inplace(gate, up);
+}
+
+#[inline]
+fn attention_softmax(scores: &mut [f32], position: usize, token_count: usize) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        scores[position + 1..token_count].fill(f32::NEG_INFINITY);
+        crate::ops::softmax_approx_inplace(&mut scores[..token_count]);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    softmax_inplace(&mut scores[..=position]);
+}
+
+#[inline]
+fn attention_dot(query: &[f32], key: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { dot_f32_neon(query, key, HEAD_WIDTH) };
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    dot_f32(query, key, HEAD_WIDTH)
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
@@ -353,15 +426,6 @@ fn reserve_f32(name: &str, len: usize) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
-fn reserve_u16(name: &str, len: usize) -> Result<Vec<u16>, String> {
-    let mut values = Vec::new();
-    values
-        .try_reserve_exact(len)
-        .map_err(|error| format!("Failed to allocate {name}: {error}"))?;
-    values.resize(len, 0);
-    Ok(values)
-}
-
 fn validate_hidden_output(output: Vec<f32>, token_count: usize) -> Result<Vec<f32>, String> {
     let expected = token_count
         .checked_mul(HIDDEN)
@@ -381,6 +445,8 @@ pub(crate) fn z_image_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "aarch64")]
+    use super::{qwen_attention_value, qwen_swiglu};
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
@@ -428,6 +494,121 @@ mod tests {
         assert_eq!(
             validate_hidden_output(vec![0.0; 2_560], 1).unwrap().len(),
             2_560
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn qwen_swiglu_uses_the_pinned_ggml_neon_activation() {
+        let gate = [0x3f6c_76fc, 0x3fe2_6ebc, 0xbf66_8824, 0xc009_429b].map(f32::from_bits);
+        let mut up = [0xbfa1_5cef, 0x4013_8811, 0x3f8f_08d4, 0xbfe4_c88a].map(f32::from_bits);
+
+        qwen_swiglu(&gate, &mut up);
+
+        assert_eq!(
+            up.map(f32::to_bits),
+            [0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn qwen_attention_value_uses_the_pinned_ggml_neon_reduction() {
+        let values = [
+            0xbc43_7f80,
+            0x3dcf_0c16,
+            0x3ab2_6fac,
+            0xbc9e_b19e,
+            0xbc68_338b,
+            0x3e83_1f48,
+            0xbd8d_9b7b,
+            0xbea6_6c9f,
+            0xbe7e_b316,
+            0x3dcd_159e,
+            0xbd1d_9b7f,
+            0xbe02_e230,
+            0x3d0c_95ad,
+            0xbe0a_58fc,
+            0xbe55_ef52,
+            0x3d88_c14e,
+        ]
+        .map(f32::from_bits);
+        let weights = [
+            0x3dd4_b07f,
+            0x3ca8_09ef,
+            0x3eb9_f242,
+            0x3e8f_d4ec,
+            0x3e6d_1827,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+        ]
+        .map(f32::from_bits);
+
+        assert_eq!(
+            qwen_attention_value(&values, &weights).to_bits(),
+            0xbbf2_4ce4
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn qwen_attention_uses_the_pinned_ggml_neon_reduction() {
+        let left = (0..super::HEAD_WIDTH)
+            .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
+            .collect::<Vec<_>>();
+        let right = (0..super::HEAD_WIDTH)
+            .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction() {
+        let mut scores = vec![0.0; 16];
+        scores[..5].copy_from_slice(
+            &[
+                0x40d4_779d,
+                0x40a0_90be,
+                0x40fc_8756,
+                0x40f4_4f84,
+                0x40ee_1fbb,
+            ]
+            .map(f32::from_bits),
+        );
+
+        super::attention_softmax(&mut scores, 4, 16);
+
+        assert_eq!(
+            scores.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
+            [
+                0x3dd4_b07f,
+                0x3ca8_09ef,
+                0x3eb9_f242,
+                0x3e8f_d4ec,
+                0x3e6d_1827,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+            ],
         );
     }
 

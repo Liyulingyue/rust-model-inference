@@ -1,6 +1,6 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::{f16::F16Kernel, Kernel};
+use crate::ops::kernel::f16::F16Kernel;
 use std::sync::Arc;
 
 pub(crate) mod dit;
@@ -461,6 +461,7 @@ fn validate_vae_block(
 }
 
 pub(crate) struct Q8Scratch {
+    scaled: Vec<f32>,
     values: Vec<u8>,
     scales: Vec<f32>,
 }
@@ -468,6 +469,7 @@ pub(crate) struct Q8Scratch {
 impl Q8Scratch {
     pub(crate) fn new(n_in: usize) -> Self {
         Self {
+            scaled: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
         }
@@ -482,6 +484,20 @@ impl Q8Scratch {
         crate::ops::quantize_q8_0_into(input, n_in, &mut self.values, &mut self.scales);
         Ok(())
     }
+
+    fn prepare_scaled(&mut self, input: &[f32], n_in: usize, scale: f32) -> Result<(), String> {
+        if input.len() != n_in {
+            return Err("Invalid linear input length".into());
+        }
+        self.scaled.resize(n_in, 0.0);
+        for (scaled, &value) in self.scaled.iter_mut().zip(input) {
+            *scaled = value * scale;
+        }
+        self.values.resize(n_in, 0);
+        self.scales.resize(n_in.div_ceil(32), 0.0);
+        crate::ops::quantize_q8_0_into(&self.scaled, n_in, &mut self.values, &mut self.scales);
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -494,6 +510,57 @@ pub(crate) fn linear_into(
     output: &mut [f32],
     q8: &mut Q8Scratch,
     pool: &ComputePool,
+) -> Result<(), String> {
+    linear_into_scaled_impl(
+        source, name, n_in, n_out, input, output, q8, pool, 1.0, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn linear_into_ggml(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+) -> Result<(), String> {
+    linear_into_scaled_impl(
+        source, name, n_in, n_out, input, output, q8, pool, 1.0, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn linear_into_scaled(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    scale: f32,
+) -> Result<(), String> {
+    linear_into_scaled_impl(
+        source, name, n_in, n_out, input, output, q8, pool, scale, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn linear_into_scaled_impl(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    scale: f32,
+    ggml_reduction: bool,
 ) -> Result<(), String> {
     if input.len() != n_in {
         return Err("Invalid linear input length".into());
@@ -527,16 +594,91 @@ pub(crate) fn linear_into(
         return Err(format!("Invalid {name} byte length"));
     }
     match info.ggml_type {
-        GGMLType::F16 => F16Kernel::new(bytes).forward(input, output, n_in, n_out),
+        GGMLType::F16 => F16Kernel::new(bytes).forward_scaled(input, output, n_in, n_out, scale),
         GGMLType::Q8_0 => {
-            q8.prepare(input, n_in)?;
-            crate::ops::matmul_q8_0_quantized_dynamic(
-                bytes, &q8.values, &q8.scales, output, n_in, n_out, pool,
-            );
+            if scale == 1.0 {
+                q8.prepare(input, n_in)?;
+            } else {
+                q8.prepare_scaled(input, n_in, scale)?;
+            }
+            if ggml_reduction {
+                matmul_q8_0_ggml(bytes, &q8.values, &q8.scales, output, n_in, n_out, pool);
+            } else {
+                crate::ops::matmul_q8_0_quantized_dynamic(
+                    bytes, &q8.values, &q8.scales, output, n_in, n_out, pool,
+                );
+            }
+            if scale != 1.0 {
+                let inverse_scale = scale.recip();
+                for value in output {
+                    *value *= inverse_scale;
+                }
+            }
         }
         _ => unreachable!(),
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn matmul_q8_0_ggml(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    pool: &ComputePool,
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let weight_ptr = weight.as_ptr() as usize;
+        let weight_len = weight.len();
+        let input_ptr = input_q8.as_ptr() as usize;
+        let input_len = input_q8.len();
+        let scale_ptr = input_scales.as_ptr() as usize;
+        let scale_len = input_scales.len();
+        let output_ptr = output.as_mut_ptr() as usize;
+        pool.compute(move |thread, threads| {
+            let rows_per_thread = n_out.div_ceil(threads);
+            let row_start = thread * rows_per_thread;
+            let row_end = (row_start + rows_per_thread).min(n_out);
+            if row_start >= row_end {
+                return;
+            }
+            let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+            let input_q8 = unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
+            let input_scales =
+                unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
+            let output = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (output_ptr as *mut f32).add(row_start),
+                    row_end - row_start,
+                )
+            };
+            unsafe {
+                crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(
+                    weight,
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    row_start,
+                    row_end,
+                );
+            }
+        });
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    crate::ops::matmul_q8_0_quantized_dynamic(
+        weight,
+        input_q8,
+        input_scales,
+        output,
+        n_in,
+        n_out,
+        pool,
+    );
 }
 
 #[cfg(test)]
@@ -685,6 +827,43 @@ mod tests {
         )
         .unwrap();
         assert!((out[0] - 64.0).abs() < 0.01, "{}", out[0]);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn ggml_q8_linear_uses_even_odd_lane_reduction() {
+        let mut state = 1u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state
+        };
+        let mut weight = Vec::with_capacity(8 * 34);
+        for _ in 0..8 {
+            let scale = f16::from_f32(((next() % 10_000) as f32 + 1.0) * 1e-5);
+            weight.extend_from_slice(&scale.to_bits().to_le_bytes());
+            for _ in 0..32 {
+                weight.push(((next() % 255) as i16 - 127) as i8 as u8);
+            }
+        }
+        let input = (0..256)
+            .map(|_| ((next() % 20_001) as f32 - 10_000.0) * 1e-4)
+            .collect::<Vec<_>>();
+        let source = TestSource::default().with_raw_tensor("w", &[256, 1], GGMLType::Q8_0, weight);
+        let mut output = [0.0f32];
+
+        linear_into_ggml(
+            &source,
+            "w",
+            256,
+            1,
+            &input,
+            &mut output,
+            &mut Q8Scratch::new(256),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0xc24b_f6df);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{validate_component, Component, ZImageRgb};
 use crate::core::tensor::TensorSource;
-use crate::ops::{f16_to_f32, silu, softmax_inplace};
+use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_approx_inplace, softmax_inplace};
 use std::sync::Arc;
 
 const LATENT_CHANNELS: usize = 16;
@@ -259,6 +259,13 @@ impl FluxVae {
                 return Err("Z-Image VAE mapped latent contains NaN or infinity".into());
             }
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.mapped_latent",
+            None,
+            &[latent_side, latent_side, LATENT_CHANNELS],
+            &current,
+        ));
         let mut scratch = VaeScratch::new();
         let mid_len = checked_feature_len(512, latent_spatial, "VAE middle feature")?;
         resize_f32(&mut scratch.first, "VAE convolution input output", mid_len)?;
@@ -270,12 +277,40 @@ impl FluxVae {
             &mut scratch.first,
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.conv_in",
+            None,
+            &[latent_side, latent_side, 512],
+            &current,
+        ));
 
         scratch.prepare_features(mid_len)?;
         self.run_residual_block(&self.mid_block_1, &mut current, latent_side, &mut scratch)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.mid.block_1",
+            None,
+            &[latent_side, latent_side, 512],
+            &current,
+        ));
         scratch.prepare_attention(mid_len, latent_spatial)?;
         self.run_attention(&mut current, latent_side, &mut scratch)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.mid.attention",
+            None,
+            &[latent_side, latent_side, 512],
+            &current,
+        ));
         self.run_residual_block(&self.mid_block_2, &mut current, latent_side, &mut scratch)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.mid",
+            None,
+            &[latent_side, latent_side, 512],
+            &current,
+        ));
 
         let mut side = latent_side;
         for stage in &self.stages {
@@ -313,6 +348,13 @@ impl FluxVae {
                 std::mem::swap(&mut current, &mut scratch.second);
                 side = next_side;
             }
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                &format!("z_image.vae.up.{}", stage.index),
+                Some(stage.index),
+                &[side, side, stage.output_channels],
+                &current,
+            ));
         }
         if side != output_side {
             return Err("Invalid Z-Image VAE spatial factor".into());
@@ -342,6 +384,13 @@ impl FluxVae {
         if current.len() != rgb_len || current.iter().any(|value| !value.is_finite()) {
             return Err("Invalid Z-Image VAE RGB channel output".into());
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.rgb_channels",
+            None,
+            &[output_side, output_side, 3],
+            &current,
+        ));
         let bytes = rgb_bytes_from_channels(&current, output_side)?;
         let expected_bytes = output_spatial
             .checked_mul(3)
@@ -629,51 +678,54 @@ fn conv_f16_into(
         return Err("Non-finite VAE convolution input".into());
     }
 
+    let patch_len = kernel
+        .checked_mul(kernel)
+        .and_then(|value| value.checked_mul(input_channels))
+        .ok_or_else(|| "VAE convolution patch size overflow".to_string())?;
+    let mut patch = Vec::new();
+    patch
+        .try_reserve_exact(patch_len)
+        .map_err(|error| format!("Failed to allocate VAE convolution patch: {error}"))?;
+    patch.resize(patch_len, 0);
     let padding = kernel / 2;
-    for output_channel in 0..output_channels {
-        let output_plane = &mut output[output_channel * spatial..(output_channel + 1) * spatial];
-        output_plane.fill(bias.map_or(0.0, |values| values[output_channel]));
-        for input_channel in 0..input_channels {
-            let input_plane = &input[input_channel * spatial..(input_channel + 1) * spatial];
-            for kernel_y in 0..kernel {
-                for kernel_x in 0..kernel {
-                    let weight_index = kernel_x
-                        + kernel
-                            * (kernel_y
-                                + kernel * (input_channel + input_channels * output_channel));
-                    let byte_index = weight_index * 2;
-                    let weight = f16_to_f32(u16::from_le_bytes([
-                        weights[byte_index],
-                        weights[byte_index + 1],
-                    ]));
-                    if !weight.is_finite() {
-                        return Err("Non-finite VAE convolution weight".into());
-                    }
-                    for output_y in 0..side {
+    for output_y in 0..side {
+        for output_x in 0..side {
+            patch.fill(0);
+            for input_channel in 0..input_channels {
+                let input_plane = &input[input_channel * spatial..(input_channel + 1) * spatial];
+                for kernel_y in 0..kernel {
+                    for kernel_x in 0..kernel {
                         let Some(input_y) = output_y
                             .checked_add(kernel_y)
                             .and_then(|value| value.checked_sub(padding))
                         else {
                             continue;
                         };
-                        if input_y >= side {
+                        let Some(input_x) = output_x
+                            .checked_add(kernel_x)
+                            .and_then(|value| value.checked_sub(padding))
+                        else {
+                            continue;
+                        };
+                        if input_y >= side || input_x >= side {
                             continue;
                         }
-                        for output_x in 0..side {
-                            let Some(input_x) = output_x
-                                .checked_add(kernel_x)
-                                .and_then(|value| value.checked_sub(padding))
-                            else {
-                                continue;
-                            };
-                            if input_x >= side {
-                                continue;
-                            }
-                            output_plane[output_y * side + output_x] +=
-                                input_plane[input_y * side + input_x] * weight;
-                        }
+                        let patch_index = kernel_x + kernel * (kernel_y + kernel * input_channel);
+                        patch[patch_index] = f32_to_f16(input_plane[input_y * side + input_x]);
                     }
                 }
+            }
+
+            let output_position = output_y * side + output_x;
+            for output_channel in 0..output_channels {
+                let row_start = output_channel * patch_len * 2;
+                let dot = dot_f16_f16_bytes(
+                    &patch,
+                    &weights[row_start..row_start + patch_len * 2],
+                    patch_len,
+                );
+                output[output_channel * spatial + output_position] =
+                    dot + bias.map_or(0.0, |values| values[output_channel]);
             }
         }
     }
@@ -734,25 +786,36 @@ fn group_norm_32_into(
     let values_per_group = channels_per_group
         .checked_mul(spatial)
         .ok_or_else(|| "VAE GroupNorm group size overflow".to_string())?;
-    let denominator = values_per_group as f32;
     for group in 0..GROUPS {
         let channel_start = group * channels_per_group;
         let channel_end = channel_start + channels_per_group;
-        let mut mean = 0.0f32;
+        let mut sum = 0.0f64;
         for channel in channel_start..channel_end {
-            for &value in &input[channel * spatial..(channel + 1) * spatial] {
-                mean += value;
+            let channel_values = &input[channel * spatial..(channel + 1) * spatial];
+            for row in channel_values.chunks_exact(side) {
+                let mut row_sum = 0.0f64;
+                for &value in row {
+                    row_sum += f64::from(value);
+                }
+                sum += row_sum;
             }
         }
-        mean /= denominator;
-        let mut variance = 0.0f32;
+        let mean = (sum / values_per_group as f64) as f32;
+        let mut sum_squared = 0.0f64;
         for channel in channel_start..channel_end {
-            for &value in &input[channel * spatial..(channel + 1) * spatial] {
-                let centered = value - mean;
-                variance += centered * centered;
+            for row in 0..side {
+                let row_start = channel * spatial + row * side;
+                let mut row_sum_squared = 0.0f64;
+                for position in 0..side {
+                    let index = row_start + position;
+                    let centered = input[index] - mean;
+                    output[index] = centered;
+                    row_sum_squared += f64::from(centered * centered);
+                }
+                sum_squared += row_sum_squared;
             }
         }
-        variance /= denominator;
+        let variance = (sum_squared / values_per_group as f64) as f32;
         let inverse_std = (variance + GROUP_NORM_EPSILON).sqrt().recip();
         if !inverse_std.is_finite() {
             return Err("Non-finite VAE GroupNorm statistics".into());
@@ -760,11 +823,21 @@ fn group_norm_32_into(
         for channel in channel_start..channel_end {
             for position in 0..spatial {
                 let index = channel * spatial + position;
-                let value = (input[index] - mean) * inverse_std * weight[channel] + bias[channel];
+                output[index] *= inverse_std;
+            }
+        }
+        for channel in channel_start..channel_end {
+            for position in 0..spatial {
+                output[channel * spatial + position] *= weight[channel];
+            }
+        }
+        for channel in channel_start..channel_end {
+            for position in 0..spatial {
+                let value = &mut output[channel * spatial + position];
+                *value += bias[channel];
                 if !value.is_finite() {
                     return Err("Non-finite VAE GroupNorm output".into());
                 }
-                output[index] = value;
             }
         }
     }
@@ -772,11 +845,9 @@ fn group_norm_32_into(
 }
 
 fn silu_inplace_checked(values: &mut [f32]) -> Result<(), String> {
-    for value in values {
-        *value = silu(*value);
-        if !value.is_finite() {
-            return Err("Non-finite VAE SiLU output".into());
-        }
+    silu_approx_inplace(values);
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE SiLU output".into());
     }
     Ok(())
 }
@@ -1127,6 +1198,112 @@ mod tests {
             .collect()
     }
 
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[test]
+    fn conv_f16_matches_pinned_ggml_im2col_dot_and_post_bias() {
+        let input = [
+            0x403b_7bad,
+            0x4008_55cd,
+            0x3f93_53de,
+            0x4000_6fa8,
+            0xc027_ed45,
+            0xbdfa_667d,
+            0x3f2a_0050,
+            0xbfdf_e6bd,
+            0xbee7_1555,
+            0xbf23_6130,
+            0xc020_627c,
+            0xc03c_40ba,
+            0xbe16_4c3a,
+            0xbf17_c63e,
+            0x3f74_e6b4,
+            0x3f86_eba9,
+            0xbf66_5ae1,
+            0x3f85_74b8,
+            0xbe97_b12d,
+            0xbf7b_7473,
+            0xbf1d_af46,
+            0x3d89_389d,
+            0xbe50_4cbc,
+            0xbf5b_d04c,
+            0xbf98_0dc3,
+            0xc01c_508c,
+            0xc028_7b93,
+            0xc03b_c8b2,
+            0x3fe2_02e8,
+            0x3e94_b97e,
+            0x3d41_656c,
+            0x3ff6_37e2,
+            0xbfb8_2bf1,
+            0xc01b_6836,
+            0xc07a_29d8,
+            0xbebe_92b2,
+            0xbf44_353d,
+            0x3f30_f267,
+            0xbf5f_a659,
+            0x3fd2_6b29,
+            0x3d06_ae4c,
+            0x3f52_a60a,
+            0x3f6d_0935,
+            0x3d7c_956e,
+            0x3f38_02f2,
+            0xbfb7_4b77,
+            0xc01a_389b,
+            0xbf6c_3a61,
+            0x3f91_d9e8,
+            0xbf69_a40b,
+            0xc01d_d891,
+            0xbf99_8256,
+            0x3fd0_f493,
+            0x4019_0727,
+            0x4027_bc25,
+            0x4078_b217,
+            0xbfba_b1a2,
+            0xbfbc_fafe,
+            0x3f3b_8f4f,
+            0x3d21_48c6,
+            0x3f31_73ef,
+            0x3f27_3161,
+            0xbfcc_849e,
+            0xbfb3_6697,
+        ]
+        .map(f32::from_bits);
+        let weights = [
+            0xa038u16, 0xac61, 0xa446, 0x9b8d, 0xb039, 0xa2ff, 0xa226, 0xa5e2, 0x9dc3, 0x2694,
+            0xae51, 0xa7fd, 0xa3ab, 0xa45e, 0x2865, 0x9ea0, 0xa563, 0x231e, 0xa807, 0xa51b, 0xa9df,
+            0xabcc, 0x2a8e, 0xa3d8, 0x2a59, 0xa9e6, 0x1572, 0x2a6e, 0x2ba8, 0x2997, 0x299e, 0x3256,
+            0x2c2f, 0x20a6, 0x9320, 0x27ed, 0x9c45, 0xad9d, 0x2351, 0xac46, 0x2aae, 0x1d00, 0x22f5,
+            0x9ef1, 0xaa74, 0xaa1e, 0x2c44, 0xa749, 0xa45c, 0x2c25, 0xa493, 0x26da, 0xa6cf, 0xa561,
+            0x24f3, 0xa8e8, 0x2bbf, 0x275c, 0x2d08, 0xac48, 0xa1fb, 0x2654, 0xa763, 0x27e7, 0x9893,
+            0xabf6, 0x281d, 0x2847, 0xa491, 0xaceb, 0x9a96, 0xa983, 0x28c3, 0xa6f4, 0x2c85, 0x2c1a,
+            0xab51, 0xa7c8, 0xa80a, 0xa008, 0xa3cc, 0x0d4e, 0x282b, 0xa6e0, 0x280e, 0x2c15, 0xa5af,
+            0xab10, 0x2c1b, 0x28bb, 0xa840, 0x2c1b, 0x2b09, 0x2a17, 0xad3f, 0xa9b4, 0x28c1, 0x2ca1,
+            0x2a1d, 0x2425, 0xa894, 0xab0f, 0x2b2b, 0xb002, 0x9b4f, 0xab1f, 0xa01a, 0x23cc, 0x22a1,
+            0xa793, 0x2082, 0xaa1a, 0xae56, 0xa9f7, 0xa641, 0x2613, 0xa3f1, 0x23ab, 0xa8d3, 0x28bd,
+            0xaa78, 0x2f62, 0x97a1, 0x9d67, 0xa9d2, 0xa65b, 0xaac7, 0x2881, 0x2674, 0x2cdb, 0xadc0,
+            0x290c, 0x21dc, 0x2275, 0x26bc, 0x2364, 0x241a, 0xab79, 0xa8b1, 0xb030, 0x2bb3, 0xa85b,
+            0xa53c, 0xa5e2,
+        ]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+        let mut output = [0.0; 4];
+
+        conv_f16_into(
+            &input,
+            16,
+            2,
+            &weights,
+            1,
+            3,
+            Some(&[f32::from_bits(0xbd69_17db)]),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0xbeb5_c582);
+    }
+
     #[test]
     fn diffusion_latent_uses_flux_scale_and_shift() {
         assert_eq!(diffusion_to_vae(0.3611), 1.1159);
@@ -1196,6 +1373,76 @@ mod tests {
                 assert!((output[second + position] - expected_second[position]).abs() < 1e-6);
             }
         }
+    }
+
+    #[test]
+    fn group_norm_matches_pinned_ggml_double_statistics_and_staged_affine() {
+        let group = [
+            0xbeb5_c582,
+            0x3e9b_14b4,
+            0xbe1e_2320,
+            0xbebc_655b,
+            0xbf48_edd1,
+            0x3d85_35da,
+            0x3ebf_b47c,
+            0xbe9e_b9e5,
+        ]
+        .map(f32::from_bits);
+        let input = (0..32).flat_map(|_| group).collect::<Vec<_>>();
+        let mut output = vec![0.0; input.len()];
+
+        group_norm_32_into(&input, 64, 2, &[1.0; 64], &[0.0; 64], &mut output).unwrap();
+
+        let actual = output[..8]
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                0xbf0e_9a5c,
+                0x3fa1_c256,
+                0xbaf9_7dfc,
+                0xbf17_c4ff,
+                0xbfdf_9307,
+                0x3f1b_01c6,
+                0x3fbb_193a,
+                0xbedd_6d7b,
+            ]
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[test]
+    fn silu_matches_pinned_ggml_neon_vector_path() {
+        let mut values = [
+            0xbf0e_9a5c,
+            0x3fa1_c256,
+            0xbaf9_7dfc,
+            0xbf17_c4ff,
+            0xbfdf_9307,
+            0x3f1b_01c6,
+            0x3fbb_193a,
+            0xbedd_6d7b,
+        ]
+        .map(f32::from_bits);
+
+        silu_inplace_checked(&mut values).unwrap();
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [
+                0xbe4f_c323,
+                0x3f7c_3cc7,
+                0xba79_4131,
+                0xbe58_1bc2,
+                0xbe84_c615,
+                0x3ec8_8d48,
+                0x3f97_e2aa,
+                0xbe2e_4779,
+            ]
+        );
     }
 
     #[test]

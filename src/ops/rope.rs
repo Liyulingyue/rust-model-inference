@@ -6,7 +6,7 @@ extern "C" {
 }
 
 #[inline]
-fn rope_sin_cos(theta: f32) -> (f32, f32) {
+pub(crate) fn rope_sin_cos(theta: f32) -> (f32, f32) {
     #[cfg(all(feature = "parity-trace", target_os = "macos"))]
     {
         let mut sin = 0.0f32;

@@ -1,0 +1,264 @@
+diff --git a/src/conditioning/conditioner.hpp b/src/conditioning/conditioner.hpp
+index 3d7ff03..fc64eb7 100644
+--- a/src/conditioning/conditioner.hpp
++++ b/src/conditioning/conditioner.hpp
+@@ -2025,6 +2025,13 @@ struct LLMEmbedder : public Conditioner {
+         auto& weights            = std::get<1>(tokens_weights_mask);
+         auto& mask               = std::get<2>(tokens_weights_mask);
+
++        if (sd_version_is_z_image(version)) {
++            std::vector<int32_t> trace_tokens(tokens.begin(), tokens.end());
++            GGML_ASSERT(z_image_trace_i32("z_image.prompt_ids",
++                                          trace_tokens,
++                                          {static_cast<int64_t>(trace_tokens.size())}));
++        }
++
+         sd::Tensor<int32_t> input_ids({static_cast<int64_t>(tokens.size())}, tokens);
+         sd::Tensor<float> attention_mask;
+         if (!mask.empty()) {
+@@ -2057,6 +2064,11 @@ struct LLMEmbedder : public Conditioner {
+                                           image_grids);
+         GGML_ASSERT(!hidden_states.empty());
+         hidden_states = apply_token_weights(std::move(hidden_states), weights);
++        if (sd_version_is_z_image(version)) {
++            GGML_ASSERT(z_image_trace_f32("z_image.text_layer_35",
++                                          hidden_states.values(),
++                                          hidden_states.shape()));
++        }
+         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
+
+         int64_t zero_pad_len = 0;
+diff --git a/src/core/ggml_extend.hpp b/src/core/ggml_extend.hpp
+index 9ed2875..c1d9fdb 100644
+--- a/src/core/ggml_extend.hpp
++++ b/src/core/ggml_extend.hpp
+@@ -26,6 +26,7 @@
+
+ #include "core/ggml_extend_backend.h"
+ #include "core/ggml_graph_cut.h"
++#include "z_image_trace.hpp"
+ #include "core/layer_split_partition.h"
+ #include "ggml-alloc.h"
+ #include "ggml-backend.h"
+@@ -2899,6 +2900,12 @@ protected:
+                     continue;
+                 }
+                 auto debug_tensor = sd::make_sd_tensor_from_ggml<float>(tensor);
++                if (!z_image_trace_f32(entry.second, debug_tensor.values(), debug_tensor.shape())) {
++                    LOG_ERROR("%s failed to write Z-Image oracle trace tensor '%s'",
++                              get_desc().c_str(),
++                              entry.second.c_str());
++                    return std::nullopt;
++                }
+                 print_sd_tensor(debug_tensor, false, entry.second.c_str());
+             }
+         }
+diff --git a/src/model/diffusion/z_image.hpp b/src/model/diffusion/z_image.hpp
+index 176adfc..8497f8a 100644
+--- a/src/model/diffusion/z_image.hpp
++++ b/src/model/diffusion/z_image.hpp
+@@ -469,6 +469,9 @@ namespace ZImage {
+                 img                 = ggml_concat(ctx->ggml_ctx, img, img_pad_tokens, 1);  // [N, n_img_token + n_img_pad_token, hidden_size]
+             }
+
++            ctx->capture_tensor("z_image.dit.prelude.text", txt);
++            ctx->capture_tensor("z_image.dit.prelude.image", img);
++
+             GGML_ASSERT(txt->ne[1] + img->ne[1] == pe->ne[3]);
+
+             auto txt_pe = ggml_ext_slice(ctx->ggml_ctx, pe, 3, 0, txt->ne[1]);
+@@ -478,6 +481,7 @@ namespace ZImage {
+                 auto block = std::dynamic_pointer_cast<JointTransformerBlock>(blocks["context_refiner." + std::to_string(i)]);
+
+                 txt = block->forward(ctx, txt, txt_pe, nullptr, nullptr);
++                ctx->capture_tensor("z_image.dit.context_refiner." + std::to_string(i), txt);
+                 sd::ggml_graph_cut::mark_graph_cut(txt, "z_image.context_refiner." + std::to_string(i), "txt");
+             }
+
+@@ -485,6 +489,7 @@ namespace ZImage {
+                 auto block = std::dynamic_pointer_cast<JointTransformerBlock>(blocks["noise_refiner." + std::to_string(i)]);
+
+                 img = block->forward(ctx, img, img_pe, nullptr, t_emb);
++                ctx->capture_tensor("z_image.dit.noise_refiner." + std::to_string(i), img);
+                 sd::ggml_graph_cut::mark_graph_cut(img, "z_image.noise_refiner." + std::to_string(i), "img");
+             }
+
+@@ -495,6 +500,9 @@ namespace ZImage {
+                 auto block = std::dynamic_pointer_cast<JointTransformerBlock>(blocks["layers." + std::to_string(i)]);
+
+                 txt_img = block->forward(ctx, txt_img, pe, nullptr, t_emb);
++                if (i == 0 || i == config.num_layers - 1) {
++                    ctx->capture_tensor("z_image.dit.layer." + std::to_string(i), txt_img);
++                }
+                 sd::ggml_graph_cut::mark_graph_cut(txt_img, "z_image.layers." + std::to_string(i), "txt_img");
+             }
+
+@@ -542,6 +550,8 @@ namespace ZImage {
+
+             out = ggml_ext_scale(ctx->ggml_ctx, out, -1.f);
+
++            ctx->capture_tensor("z_image.dit.velocity", out);
++
+             return out;
+         }
+     };
+diff --git a/src/model/vae/auto_encoder_kl.hpp b/src/model/vae/auto_encoder_kl.hpp
+index 604347d..e68e318 100644
+--- a/src/model/vae/auto_encoder_kl.hpp
++++ b/src/model/vae/auto_encoder_kl.hpp
+@@ -456,14 +456,18 @@ public:
+
+         // conv_in
+         auto h = conv_in->forward(ctx, z);  // [N, block_in, h, w]
++        ctx->capture_tensor("z_image.vae.conv_in", h);
+         // sd::ggml_graph_cut::mark_graph_cut(h, "vae.decoder.prelude", "h");
+
+         // middle
+         h = mid_block_1->forward(ctx, h);
++        ctx->capture_tensor("z_image.vae.mid.block_1", h);
+         // return h;
+
+         h = mid_attn_1->forward(ctx, h);
++        ctx->capture_tensor("z_image.vae.mid.attention", h);
+         h = mid_block_2->forward(ctx, h);  // [N, block_in, h, w]
++        ctx->capture_tensor("z_image.vae.mid", h);
+         // sd::ggml_graph_cut::mark_graph_cut(h, "vae.decoder.mid", "h");
+
+         // upsampling
+@@ -483,11 +487,13 @@ public:
+                 h = up_sample->forward(ctx, h);
+                 // sd::ggml_graph_cut::mark_graph_cut(h, "vae.decoder.up." + std::to_string(i) + ".upsample", "h");
+             }
++            ctx->capture_tensor("z_image.vae.up." + std::to_string(i), h);
+         }
+
+         h = norm_out->forward(ctx, h);
+         h = ggml_silu_inplace(ctx->ggml_ctx, h);  // nonlinearity/swish
+         h = conv_out->forward(ctx, h);            // [N, out_ch, h*8, w*8]
++        ctx->capture_tensor("z_image.vae.rgb_channels", h);
+         return h;
+     }
+ };
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+index 109a2a4..ba2e7e8 100644
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -3064,6 +3064,11 @@ public:
+             return sd::ops::clamp((x + 1.f) * 0.5f, 0.0f, 1.0f);
+         }
+         auto latents = first_stage_model->diffusion_to_vae_latents(x);
++        if (sd_version_is_z_image(version)) {
++            GGML_ASSERT(z_image_trace_f32("z_image.vae.mapped_latent",
++                                          latents.values(),
++                                          latents.shape()));
++        }
+         first_stage_model->set_temporal_tiling_enabled(vae_tiling_params.temporal_tiling);
+         auto decoded = first_stage_model->decode(n_threads, latents, vae_tiling_params, decode_video, circular_x, circular_y);
+         if (decoded.empty() && auto_fit_enabled) {
+@@ -5681,6 +5686,17 @@ SD_API bool generate_image(sd_ctx_t* sd_ctx,
+         sd_ctx->sd->rng->manual_seed(cur_seed);
+         sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
+         sd::Tensor<float> noise = sd::randn_like<float>(latents.init_latent, sd_ctx->sd->rng);
++        if (sd_version_is_z_image(sd_ctx->sd->version)) {
++            GGML_ASSERT(z_image_trace_f32("z_image.initial_noise", noise.values(), noise.shape()));
++            GGML_ASSERT(z_image_trace_f32("z_image.sigmas",
++                                          plan.sigmas,
++                                          {static_cast<int64_t>(plan.sigmas.size())}));
++            std::vector<float> timesteps(plan.sigmas.begin(), plan.sigmas.end() - 1);
++            for (float& timestep : timesteps) timestep *= 1000.f;
++            GGML_ASSERT(z_image_trace_f32("z_image.timesteps",
++                                          timesteps,
++                                          {static_cast<int64_t>(timesteps.size())}));
++        }
+
+         sd::Tensor<float> x_0 = sd_ctx->sd->sample(sd_ctx->sd->diffusion_model,
+                                                    true,
+@@ -5709,6 +5725,9 @@ SD_API bool generate_image(sd_ctx_t* sd_ctx,
+         int64_t sampling_end  = ggml_time_ms();
+         if (!x_0.empty()) {
+             LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
++            if (sd_version_is_z_image(sd_ctx->sd->version)) {
++                GGML_ASSERT(z_image_trace_f32("z_image.final_latent", x_0.values(), x_0.shape()));
++            }
+             final_latents.push_back(std::move(x_0));
+             continue;
+         }
+diff --git a/src/z_image_trace.hpp b/src/z_image_trace.hpp
+new file mode 100644
+index 0000000..d0e68be
+--- /dev/null
++++ b/src/z_image_trace.hpp
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++inline const char* z_image_trace_path() {
++    return std::getenv("Z_IMAGE_ORACLE_TRACE");
++}
++
++inline std::string z_image_trace_json_string(const std::string& value) {
++    std::string out = "\"";
++    for (char ch : value) {
++        if (ch == '\\' || ch == '\"') out += '\\';
++        out += ch;
++    }
++    return out + "\"";
++}
++
++inline bool z_image_trace_raw(const std::string& name,
++                              const void* data,
++                              size_t element_size,
++                              size_t count,
++                              std::vector<int64_t> shape,
++                              const char* type) {
++    const char* trace = z_image_trace_path();
++    if (trace == nullptr) return true;
++    while (shape.size() > 1 && shape.back() == 1) shape.pop_back();
++    size_t expected = 1;
++    for (int64_t dimension : shape) {
++        if (dimension < 0) return false;
++        expected *= static_cast<size_t>(dimension);
++    }
++    if (expected != count) return false;
++
++    static std::mutex mutex;
++    static std::map<std::string, size_t> occurrences;
++    std::lock_guard<std::mutex> lock(mutex);
++    size_t occurrence = occurrences[name]++;
++    std::string sidecar = std::string(trace) + "." + name;
++    if (occurrence != 0) sidecar += "." + std::to_string(occurrence);
++    sidecar += "." + std::string(type);
++
++    std::ofstream binary(sidecar, std::ios::binary | std::ios::trunc);
++    binary.write(static_cast<const char*>(data), static_cast<std::streamsize>(count * element_size));
++    if (!binary) return false;
++
++    std::ofstream json(trace, std::ios::app);
++    json << "{\"name\":" << z_image_trace_json_string(name) << ",\"shape\":[";
++    for (size_t i = 0; i < shape.size(); ++i) {
++        if (i != 0) json << ',';
++        json << shape[i];
++    }
++    json << "],\"len\":" << count << ",\"occurrence\":" << occurrence
++         << ",\"binary_path\":" << z_image_trace_json_string(sidecar) << "}\n";
++    return static_cast<bool>(json);
++}
++
++inline bool z_image_trace_f32(const std::string& name,
++                              const std::vector<float>& values,
++                              std::vector<int64_t> shape) {
++    return z_image_trace_raw(name, values.data(), sizeof(float), values.size(), std::move(shape), "f32");
++}
++
++inline bool z_image_trace_i32(const std::string& name,
++                              const std::vector<int32_t>& values,
++                              std::vector<int64_t> shape) {
++    return z_image_trace_raw(name, values.data(), sizeof(int32_t), values.size(), std::move(shape), "i32");
++}
