@@ -31,9 +31,9 @@ pub use format::load_plan::{
     build_load_plan, load_logical_cpu, LoadPlan, LogicalCpuDeviceLoad, LogicalCpuLoad,
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
-pub use models::asr::*;
+pub use models::qwen3::asr::model::*;
 pub use models::clip_config::{ClipVisionConfig, Qwen35Config};
-pub use models::qwen3_multimodal::*;
+pub use models::qwen3::base_multimodal::*;
 pub use models::qwen35::{build_qwen35_positions, Qwen35Model};
 pub use models::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
 

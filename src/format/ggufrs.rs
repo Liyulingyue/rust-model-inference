@@ -1,6 +1,6 @@
 ﻿use crate::core::loader::{ByteReader, GGUFLoader};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
-use crate::models::qwen3::qwen3a::model::validate_qwen3a_source;
+use crate::models::qwen3::asr::mel_encoder::validate_qwen3a_source;
 use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -3351,8 +3351,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::asr::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
-    use crate::models::qwen3_multimodal::Qwen3Model;
+    use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
+    use crate::models::qwen3::base_multimodal::Qwen3Model;
     use crate::core::thread_pool::ComputePool;
     use crate::core::tokenizer::BPETokenizer;
 

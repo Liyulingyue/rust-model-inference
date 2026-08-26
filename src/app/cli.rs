@@ -483,13 +483,13 @@ pub fn resolve_cli_generation_options(options: &CliOptions) -> (usize, f32) {
     )
 }
 
-pub fn transcription_options(options: &CliOptions) -> crate::models::asr::TranscriptionOptions {
+pub fn transcription_options(options: &CliOptions) -> crate::models::qwen3::asr::model::TranscriptionOptions {
     let language = options
         .language
         .as_ref()
         .filter(|language| !language.eq_ignore_ascii_case("auto"))
         .cloned();
-    crate::models::asr::TranscriptionOptions {
+    crate::models::qwen3::asr::model::TranscriptionOptions {
         language,
         prompt: options.prompt.clone(),
         max_new_tokens: resolve_cli_generation_options(options).0,
@@ -499,7 +499,7 @@ pub fn transcription_options(options: &CliOptions) -> crate::models::asr::Transc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::asr::{normalize_language, TranscriptionOptions};
+    use crate::models::qwen3::asr::model::{normalize_language, TranscriptionOptions};
     use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use crate::core::tokenizer::BPETokenizer;
     use std::collections::HashMap;

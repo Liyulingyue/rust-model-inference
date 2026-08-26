@@ -430,6 +430,19 @@ unsafe fn vec_scale_f32_avx2(y: &mut [f32], v: f32) {
     }
 }
 
+// Horizontal sum of an __m256 (8x f32 lanes).
+//
+// TODO(minicpm): the current reduction order is `_mm_add_ps(v_hi, v_lo) ->
+// _mm_add_ps(_, movehl) -> _mm_add_ss(_, movehdup)`. For MiniCPM-Small (Q8_0
+// matmul kernels) the same total is reproduced bit-exactly by:
+//   res = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
+//   res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+//   res = _mm_add_ss(res, _mm_movehdup_ps(res));
+//   _mm_cvtss_f32(res)
+// which matches llama.cpp's `hsum_float_8` (the same pattern, no extra
+// rounds).  If a future model needs a different rounding mode, e.g. Kahan
+// pairwise summation, add it here behind a config flag and keep the current
+// fast path as the default.
 #[inline(always)]
 #[inline]
 #[cfg(target_arch = "x86_64")]

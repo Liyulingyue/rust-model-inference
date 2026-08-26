@@ -53,6 +53,10 @@ impl<'a> Kernel for Q8Kernel<'a> {
             nth,
         );
     }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_q8_0(self.weight, token_id, n_embd, out);
+    }
 }
 
 #[cfg(test)]

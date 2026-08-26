@@ -4,6 +4,8 @@
 // weight structs, validate_qwen3a_source, and corresponding tests.
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::quant::BlockQ8K;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
@@ -49,8 +51,7 @@ struct F16Tensor {
 }
 
 struct AudioLinear {
-    weight: &'static [u8],
-    kind: GGMLType,
+    weight: Weight<'static>,
     input: usize,
     output: usize,
     bias: Vec<f32>,
@@ -626,14 +627,19 @@ impl AudioLinear {
             to_u64(input, "audio linear input")?,
             to_u64(output, "audio linear output")?,
         ];
-        let weight = static_tensor(source, weight_name, &dims, kind)?;
+        let weight_bytes = static_tensor(source, weight_name, &dims, kind)?;
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            weight_bytes,
+            kind,
+            input,
+            output,
+        ));
         let bias = match bias_name {
             Some(name) => load_f32_tensor(source.as_ref(), name, &[dims[1]])?,
             None => Vec::new(),
         };
         Ok(Self {
             weight,
-            kind,
             input,
             output,
             bias,
@@ -641,7 +647,7 @@ impl AudioLinear {
     }
 
     fn project_f16(&self, input: &[f32], rows: usize, result: &mut Vec<f32>) -> Result<(), String> {
-        if self.kind != GGMLType::F16 || !self.bias.is_empty() {
+        if self.weight.ggml_type != GGMLType::F16 || !self.bias.is_empty() {
             return Err("Convolution projection must be bias-free F16".into());
         }
         let input_len = checked_product("audio projection input", rows, self.input)?;
@@ -654,25 +660,10 @@ impl AudioLinear {
         if input.iter().all(|value| *value == 0.0) {
             return Ok(());
         }
-        let mut input_f16 = vec![crate::ops::f32_to_f16(0.0); self.input];
         for row in 0..rows {
             let input_row = &input[row * self.input..(row + 1) * self.input];
-            for (bits, value) in input_f16.iter_mut().zip(input_row) {
-                *bits = crate::ops::f32_to_f16(*value);
-            }
-            for output in 0..self.output {
-                let weight_start = checked_product("audio projection weight", output, self.input)?;
-                let weight_byte = checked_product("audio projection weight byte", weight_start, 2)?;
-                let sum = dot_f16_f16_bytes(
-                    &input_f16,
-                    &self.weight[weight_byte..weight_byte + self.input * 2],
-                    self.input,
-                );
-                if !sum.is_finite() {
-                    return Err("Non-finite audio projection output".into());
-                }
-                result[row * self.output + output] = sum;
-            }
+            let output_row = &mut result[row * self.output..(row + 1) * self.output];
+            self.weight.kernel.forward(input_row, output_row, self.input, self.output);
         }
         Ok(())
     }
@@ -686,7 +677,7 @@ impl AudioLinear {
         q8: &mut [u8],
         scales: &mut [f32],
     ) -> Result<(), String> {
-        if self.kind != GGMLType::Q8_0
+        if self.weight.ggml_type != GGMLType::Q8_0
             || rows == 0
             || self.input == 0
             || self.input % 32 != 0
@@ -698,100 +689,43 @@ impl AudioLinear {
         }
         let input_len = checked_product("Q8_0 audio projection input", rows, self.input)?;
         let output_len = checked_product("Q8_0 audio projection output", rows, self.output)?;
-        let row_bytes = checked_product("Q8_0 audio projection row bytes", self.input / 32, 34)?;
-        let weight_len =
-            checked_product("Q8_0 audio projection weight bytes", self.output, row_bytes)?;
         if input.len() != input_len
             || input.iter().any(|value| !value.is_finite())
-            || self.weight.len() != weight_len
             || q8.len() < self.input
             || scales.len() < self.input / 32
         {
             return Err("Invalid Q8_0 audio projection tensors".into());
         }
         resize_f32(result, "Q8_0 audio projection output", output_len)?;
-        #[cfg(target_arch = "aarch64")]
-        let (output_chunk, input_chunk) = ggml_q8_chunk_shape(self.output, rows, pool.n_threads());
+        result.fill(0.0);
+
+        let n_in = self.input;
+        let n_out = self.output;
+
         for row in 0..rows {
-            let input = &input[row * self.input..(row + 1) * self.input];
+            let input_row = &input[row * n_in..(row + 1) * n_in];
+            let output_row = &mut result[row * n_out..(row + 1) * n_out];
+
             quantize_q8_0_into(
-                input,
-                self.input,
-                &mut q8[..self.input],
-                &mut scales[..self.input / 32],
+                input_row,
+                n_in,
+                &mut q8[..n_in],
+                &mut scales[..n_in / 32],
             );
-            let output = &mut result[row * self.output..(row + 1) * self.output];
-            let output_ptr = output.as_mut_ptr();
-            let weight = self.weight;
-            let q8_ptr = q8.as_ptr();
-            let scales_ptr = scales.as_ptr();
-            let input_width = self.input;
-            let output_width = self.output;
-            pool.compute(move |thread, threads| {
-                let Some(partition) = q8_worker_output_partition(output_width, thread, threads)
-                else {
-                    return;
-                };
-                // SAFETY: the checked worker partitions are disjoint, lie within the output row,
-                // and the pool returns only after every worker finishes.
-                let output = unsafe {
-                    std::slice::from_raw_parts_mut(output_ptr.add(partition.start), partition.len())
-                };
-                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, input_width) };
-                let scales = unsafe { std::slice::from_raw_parts(scales_ptr, input_width / 32) };
-                #[cfg(target_arch = "aarch64")]
-                {
-                    let input_chunk_start = row / input_chunk * input_chunk;
-                    let input_chunk_len =
-                        (input_chunk_start + input_chunk).min(rows) - input_chunk_start;
-                    let mut start = partition.start;
-                    while start < partition.end {
-                        let output_chunk_start = start / output_chunk * output_chunk;
-                        let output_chunk_len = (output_chunk_start + output_chunk)
-                            .min(output_width)
-                            - output_chunk_start;
-                        let end = (output_chunk_start + output_chunk).min(partition.end);
-                        let result = &mut output[start - partition.start..end - partition.start];
-                        if output_width % 2 != 0
-                            || rows % 2 != 0
-                            || output_chunk_len % 2 != 0
-                            || input_chunk_len % 2 != 0
-                        {
-                            matmul_q8_0_quantized_range_nrc1(
-                                weight,
-                                q8,
-                                scales,
-                                result,
-                                input_width,
-                                start,
-                                end,
-                            );
-                        } else {
-                            matmul_q8_0_quantized_range(
-                                weight,
-                                q8,
-                                scales,
-                                result,
-                                input_width,
-                                start,
-                                end,
-                            );
-                        }
-                        start = end;
-                    }
-                }
-                #[cfg(not(target_arch = "aarch64"))]
-                matmul_q8_0_quantized_range(
-                    weight,
-                    q8,
-                    scales,
-                    output,
-                    input_width,
-                    partition.start,
-                    partition.end,
-                );
-            });
-            for (value, bias) in output.iter_mut().zip(&self.bias) {
+
+            self.weight.kernel.forward_prepared(
+                input_row,
+                &q8[..n_in],
+                &scales[..n_in / 32],
+                None,
+                output_row,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+
+            for (value, bias) in output_row.iter_mut().zip(&self.bias) {
                 *value += *bias;
                 if !value.is_finite() {
                     return Err("Non-finite Q8_0 audio projection output".into());

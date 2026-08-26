@@ -1,8 +1,8 @@
 #[cfg(target_arch = "aarch64")]
-use rust_model_inference::models::tts::codec::conv::{
+use rust_model_inference::models::qwen3::tts::codec::conv::{
     conv_transpose1d_causal, ConvTranspose1dState,
 };
-use rust_model_inference::models::tts::predictor_top_k;
+use rust_model_inference::models::qwen3::tts::predictor_top_k;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -4,11 +4,11 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
-use crate::models::tts::codec::{
+use crate::models::qwen3::tts::codec::{
     write_wav_f32, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
-use crate::models::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
-use crate::models::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
+use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
+use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
 use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Instant;

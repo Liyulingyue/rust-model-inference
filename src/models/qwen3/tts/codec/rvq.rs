@@ -6,16 +6,16 @@
 //! vectors across all 16 levels.
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3_multimodal::{checked_product, static_q8_matrix};
+use crate::models::qwen3::base_multimodal::{checked_product, static_q8_matrix};
 #[cfg(target_arch = "aarch64")]
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 #[cfg(not(target_arch = "aarch64"))]
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::quantize_q8_0_into;
 
-const RVQ_DIM: usize = crate::models::tts::codec::RVQ_CODE_DIM;
-const RVQ_VOCAB: usize = crate::models::tts::codec::RVQ_CODEBOOK_SIZE;
-const RVQ_LEVELS: usize = crate::models::tts::codec::RVQ_LEVELS;
+const RVQ_DIM: usize = crate::models::qwen3::tts::codec::RVQ_CODE_DIM;
+const RVQ_VOCAB: usize = crate::models::qwen3::tts::codec::RVQ_CODEBOOK_SIZE;
+const RVQ_LEVELS: usize = crate::models::qwen3::tts::codec::RVQ_LEVELS;
 const Q8_0_BLOCK_SIZE: usize = 34;
 
 /// One RVQ decoder configuration. Holds the mmap-backed weight tensors for the

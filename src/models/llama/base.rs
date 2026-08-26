@@ -1,30 +1,20 @@
-//! # Qwen3 纯文本推理
+//! # LLaMA Text Inference
 //!
-//! 此模块包含 Qwen3 纯文本推理的完整实现，通过 `QuantizedTensor` 分派
-//! 量化 kernel，支持 Q4_K、Q6_K、Q8_0 等所有 GGUF 量化格式。
-//!
-//! ## 架构说明
-//!
-//! Qwen3 推理存在两套代码路径：
-//!
-//! | 路径 | 模块 | 量化支持 | 用途 |
-//! |------|------|----------|------|
-//! | 纯文本推理 | `models::qwen3` | 所有格式 | CLI 文本生成 |
-//! | VL/ASR/TTS | `models::qwen3::base_multimodal` | 多量化 | 多模态推理 |
+//! LLaMA-family text generation, aligning with llama.cpp's forward pass and
+//! sample/decode path. Standard LLaMA has no Q/K per-head RMSNorm.
 
-use crate::app::cli::{per_second, inference_step_budget, resolve_thread_count, KvFormat};
+use crate::app::cli::{inference_step_budget, resolve_thread_count, KvFormat};
 use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::skeleton::{load_layers, Qwen3LayerWeights, get_f32_tensor};
-use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
+use crate::models::llama::skeleton::{get_f32_tensor, load_layers, LlamaLayerWeights};
 use crate::ops::embedding_lookup;
-use crate::ops::kernel::{Kernel, Weight};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace,
+    rms_norm, rope_neox, silu_mul_approx_inplace, softmax_inplace,
     vec_mad_f16_f32, vec_scale_f32,
 };
 
@@ -32,25 +22,106 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[macro_export]
-macro_rules! slice_from_mut {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts_mut($ptr, $len) }
-    };
+/// Read sampling defaults from GGUF metadata (matching llama.cpp's
+/// behaviour). MiniCPM5 ships `general.sampling.{top_k,top_p,temp}` keys
+/// that override the C++ defaults (40, 0.95, 1.0).
+fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
+    let top_k = source
+        .metadata("general.sampling.top_k")
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .unwrap_or(40);
+    let top_p = source
+        .metadata("general.sampling.top_p")
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.95);
+    (top_k, top_p)
 }
 
-#[macro_export]
-macro_rules! slice_from_ref {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts($ptr, $len) }
-    };
+/// Print first 8 floats of `buf` to stderr, tagged by step/layer/label.
+/// Triggered by the `RUST_LLAMA_DEBUG_TENSORS` env var (set to a layer
+/// count, e.g. `RUST_LLAMA_DEBUG_TENSORS=1`).
+fn dbg_tensor(step: usize, label: &'static str, il: usize, buf: &[f32]) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let n = buf.len().min(8);
+    let mut line = format!("RUST_TENSOR step={} il={} {} first8=", step, il, label);
+    for v in &buf[..n] {
+        line.push_str(&format!("{:.5} ", v));
+    }
+    line.push('\n');
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
 }
 
-#[macro_export]
-macro_rules! raw_parts {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts($ptr, $len) }
+/// Print a single scalar (scale/mean) tagged by step/layer/label.
+fn dbg_scalar(step: usize, label: &'static str, il: usize, value: f32) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let line = format!("RUST_SCALAR step={} il={} {}={:.10}\n", step, il, label, value);
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
+}
+
+fn dbg_scalar_full(step: usize, label: &'static str, il: usize, value: f64) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let line = format!("RUST_SCALAR step={} il={} {}={:.10}\n", step, il, label, value);
+    let _ = io::stderr().write_all(line.as_bytes());
+    let _ = io::stderr().flush();
+}
+
+/// Dump full values of `buf` to a file specified by RUST_LLAMA_DEBUG_OUTFILE.
+fn dbg_full(step: usize, label: &'static str, il: usize, buf: &[f32], n: usize) {
+    static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let limit = ON.get_or_init(|| {
+        std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if *limit == 0 || (il as u32) >= *limit {
+        return;
+    }
+    let path = match std::env::var("RUST_LLAMA_DEBUG_OUTFILE") {
+        Ok(p) => p,
+        Err(_) => return,
     };
+    let mut line = format!("[step={} il={} {}]", step, il, label);
+    for i in 0..n {
+        line.push_str(&format!(" {:.5}", buf[i]));
+    }
+    line.push('\n');
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
 pub fn run_inference(
@@ -59,33 +130,46 @@ pub fn run_inference(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
-    thinking: bool,
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
 ) -> Result<(), String> {
-    let input_tokens = {
+let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-        if bench {
-            tokenizer.encode(
-                prompt,
-                EncodeOptions {
-                    add_special: true,
-                    parse_special: true,
-                },
-            )
-        } else {
-            build_qwen_chat_prompt(
-                &tokenizer,
-                &[QwenMessage {
-                    role: "user",
-                    content: prompt,
-                }],
-                thinking,
-            )?
+        // Build the prompt using MiniCPM5's chat template (rendered via
+        // the Jinja template that ships in the GGUF; auto-detected by
+        // llama.cpp with `enable_thinking=true`). The rendered format for
+        // a single user message is:
+        //
+        //     <s><|im_start|>user\n{prompt}<|im_end|>\n
+        //     <|im_start|>assistant\n<think>\n
+        //
+        // (BOS is added because the chat template explicitly emits `<s>`.)
+        let im_start_str = "<|im_start|>";
+        let im_end_str = "<|im_end|>";
+        // Build the prompt text with the literal special tokens inline.
+        let prompt_text = format!(
+            "{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n"
+        );
+        // encode() with add_special=true prepends `<s>` and parse_special=true
+        // emits the literal `<|im_start|>`/`<|im_end|>` strings as single token ids.
+        let mut body = tokenizer.encode(
+            &prompt_text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        // The chat template starts with `{{- bos_token }}`, but MiniCPM5
+        // has `tokenizer.ggml.add_bos_token=false`, so encode() does not
+        // emit BOS automatically. Prepend BOS manually to match llama.cpp.
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
         }
+        eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+        body
     };
 
     run_inference_tokens(
@@ -158,8 +242,30 @@ pub fn run_inference_tokens(
     let embd_type = embd_info.ggml_type;
     let output_type = source.tensor_info("output.weight").unwrap_or(embd_info).ggml_type;
 
-    let layers: Vec<Qwen3LayerWeights> =
-        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, true);
+    let layers: Vec<LlamaLayerWeights> =
+        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
+
+    // DEBUG: dump first N bytes of L23's w_gate, w_up, w_down for comparison with llama.cpp.
+    if std::env::var("RUST_LLAMA_DEBUG_L23_WEIGHTS").is_ok() {
+        let l = n_layer - 1; // L23 = last layer
+        let layer = &layers[l];
+        let dump_n = 256usize; // first 256 bytes (= ~7.5 Q8_0 blocks)
+        for (name, qw) in [
+            ("w_gate", &layer.w_gate),
+            ("w_up", &layer.w_up),
+            ("w_down", &layer.w_down),
+        ] {
+            // Get the raw bytes from the QuantizedTensor
+            // The bytes are stored in the tensor slice from the source
+            // We need to re-fetch them since QuantizedTensor doesn't expose raw bytes
+            let source_bytes = source.tensor_slice(&format!("blk.{}.ffn_{}.weight", l, &name[2..])).unwrap();
+            eprintln!("[RUST_W_L23] {} first {} bytes:", name, dump_n);
+            for chunk in source_bytes[..dump_n].chunks(16) {
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+                eprintln!("  {}", hex.join(" "));
+            }
+        }
+    }
 
     let load_ms = t0.elapsed().as_millis();
     println!(
@@ -183,7 +289,6 @@ pub fn run_inference_tokens(
     println!("Prompt: {} tokens", input_tokens.len());
 
     let eos_id = tokenizer.eos_id();
-    let im_end_id = tokenizer.special_token_id("im_end");
     let mut generated_tokens: Vec<u32> = Vec::new();
     let mut all_tokens: Vec<u32> = input_tokens.clone();
     let mut decoder = tokenizer.streaming_decoder(false);
@@ -221,6 +326,7 @@ pub fn run_inference_tokens(
         let pos = step;
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        dbg_tensor(step, "embed_out", 0, &scratch.x);
 
         for layer in 0..n_layer {
             let lw = &layers[layer];
@@ -251,14 +357,15 @@ pub fn run_inference_tokens(
             };
 
             let max_n_in = n_embd_q.max(n_ff);
-            let x = slice_from_mut!(x_ptr, n_embd);
-            let normed = slice_from_mut!(normed_ptr, n_embd);
-            let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-            let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+            let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+            let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
             let t0 = Instant::now();
             rms_norm(x, &lw.attn_norm, normed, eps);
+            dbg_tensor(step, "attn_norm", layer, normed);
             quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
@@ -266,13 +373,13 @@ pub fn run_inference_tokens(
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
 
             pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(normed_ptr, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let q = slice_from_mut!(q_ptr, n_embd_q);
-                let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
-                let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
+                let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+                let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
 
                 lw.wq.kernel.forward_prepared(input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth);
                 lw.wk.kernel.forward_prepared(input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth);
@@ -280,20 +387,11 @@ pub fn run_inference_tokens(
             });
 
             {
-                let q = slice_from_mut!(q_ptr, n_embd_q);
-                let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
-                let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
-                let q_norm = lw.q_norm.as_deref();
-                let k_norm = lw.k_norm.as_deref();
+                let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+                let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
 
-                if let (Some(qn), Some(kn)) = (q_norm, k_norm) {
-                    for h in 0..n_head {
-                        rms_norm_inplace(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], qn, eps);
-                    }
-                    for h in 0..n_head_kv {
-                        rms_norm_inplace(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], kn, eps);
-                    }
-                }
+                // LLaMA does not have QK norm.
 
                 for h in 0..n_head {
                     rope_neox(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_k, freq_base);
@@ -301,12 +399,15 @@ pub fn run_inference_tokens(
                 for h in 0..n_head_kv {
                     rope_neox(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_v, freq_base);
                 }
+                dbg_tensor(step, "Qcur", layer, q);
+                dbg_tensor(step, "Kcur", layer, k_new);
+                dbg_tensor(step, "Vcur", layer, v_new);
 
                 let kb = layer * max_ctx * n_embd_gqa;
 
                 if kv_format == KvFormat::F16 {
-                    let k_cache = slice_from_mut!(k_cache_f16_ptr, kv_cache_size);
-                    let v_cache = slice_from_mut!(v_cache_f16_ptr, kv_cache_size);
+                    let k_cache = unsafe { std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size) };
+                    let v_cache = unsafe { std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size) };
                     for h in 0..n_head_kv {
                         let off = h * n_embd_head_k;
                         f32_slice_to_f16(
@@ -319,8 +420,8 @@ pub fn run_inference_tokens(
                         );
                     }
                 } else {
-                    let k_cache = slice_from_mut!(k_cache_f32_ptr, kv_cache_size);
-                    let v_cache = slice_from_mut!(v_cache_f32_ptr, kv_cache_size);
+                    let k_cache = unsafe { std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size) };
+                    let v_cache = unsafe { std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size) };
                     for h in 0..n_head_kv {
                         let off = h * n_embd_head_k;
                         k_cache[kb + pos * n_embd_gqa + off..kb + pos * n_embd_gqa + off + n_embd_head_k]
@@ -332,21 +433,20 @@ pub fn run_inference_tokens(
             }
 
             pool.compute(move |ith: usize, nth: usize| {
-                let q = slice_from_ref!(q_ptr, n_embd_q);
-                let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
+                let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
+                let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
                 let h_start = ith * n_head / nth;
                 let h_end = (ith + 1) * n_head / nth;
 
                 let kb = layer * max_ctx * n_embd_gqa;
 
                 if kv_format == KvFormat::F16 {
-                    let k_cache = slice_from_ref!(k_cache_f16_ptr, kv_cache_size);
-                    let v_cache = slice_from_ref!(v_cache_f16_ptr, kv_cache_size);
+                    let k_cache = unsafe { std::slice::from_raw_parts(k_cache_f16_ptr, kv_cache_size) };
+                    let v_cache = unsafe { std::slice::from_raw_parts(v_cache_f16_ptr, kv_cache_size) };
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
                         let n_cached = pos + 1;
-                        let n_padded = (n_cached + 255) / 256 * 256;
                         let out_base = h * n_embd_head_v;
                         let mut ms = 0.0f32;
                         let mut s_sum = 0.0f32;
@@ -375,9 +475,9 @@ pub fn run_inference_tokens(
                         vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
                     }
                 } else {
-                    let k_cache = slice_from_ref!(k_cache_f32_ptr, kv_cache_size);
-                    let v_cache = slice_from_ref!(v_cache_f32_ptr, kv_cache_size);
-                    let scores = slice_from_mut!(scores_ptr, n_threads * score_stride);
+                    let k_cache = unsafe { std::slice::from_raw_parts(k_cache_f32_ptr, kv_cache_size) };
+                    let v_cache = unsafe { std::slice::from_raw_parts(v_cache_f32_ptr, kv_cache_size) };
+                    let scores = unsafe { std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride) };
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
@@ -395,7 +495,10 @@ pub fn run_inference_tokens(
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[s_off..s_off + n_padded]);
-                        let mut values = [0.0f32; 512];
+                        // The values scratch is sized to the next multiple of
+                        // 256 above max_ctx (n_padded_max). Heap-allocated so
+                        // long contexts don't overflow.
+                        let mut values = vec![0.0f32; n_padded];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
@@ -412,10 +515,11 @@ pub fn run_inference_tokens(
             });
             t_qkv += t0.elapsed().as_secs_f64();
 
-            let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
-            let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-            let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
+            let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            dbg_tensor(step, "attn_out", layer, attn_out);
+            let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+            let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
             let t0 = Instant::now();
             quantize_q8_0_into(attn_out, n_embd_q, &mut q8_buf[..n_embd_q], &mut scale_buf[..n_embd_q / 32]);
             crate::ops::quantize_row_q8_k_into(attn_out, &mut q8k_buf[..n_embd_q / 256]);
@@ -423,51 +527,62 @@ pub fn run_inference_tokens(
             let sc = scale_buf[..n_embd_q / 32].as_ptr();
             let q8k = q8k_buf[..n_embd_q / 256].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(attn_out_ptr, n_embd_q);
-                let q8 = raw_parts!(q8, n_embd_q);
-                let sc = raw_parts!(sc, n_embd_q / 32);
-                let q8k = raw_parts!(q8k, n_embd_q / 256);
-                let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
+                let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd_q) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd_q / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd_q / 256) };
+                let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
                 lw.wo.kernel.forward_prepared(input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth);
             });
             t_wo += t0.elapsed().as_secs_f64();
 
-            let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-            let x = slice_from_mut!(x_ptr, n_embd);
-            let normed = slice_from_mut!(normed_ptr, n_embd);
+            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            dbg_tensor(step, "attn_proj", layer, attn_proj);
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             for i in 0..n_embd {
                 x[i] += attn_proj[i];
             }
+            dbg_tensor(step, "ffn_inp", layer, x);
+            dbg_full(step, "ffn_inp", layer, x, n_embd);
 
-            // FFN — uses `kernel.forward_prepared` with `ExecutionScratchpad`-managed
-            // buffers instead of `quantize_and_matmul_with_scratch`.  This enables
-            // two optimizations:
-            //
-            // 1. **Fused gate+up**: both projections share the same quantized input
-            //    and run inside a single `pool.compute` call, avoiding a second
-            //    round of quantization.
-            //
-            // 2. **Buffer reuse**: `gate_buf / up_buf / down_buf` are allocated once
-            //    in `ExecutionScratchpad` and reused across every token position.
-            //
-            // Contrast with embedding.rs which processes each token independently
-            // and uses `quantize_and_matmul_with_scratch` — a natural fit when there
-            // is no pre-allocated scratch context.
             let t0 = Instant::now();
+            {
+                let sum_sq: f64 = x[..n_embd].iter().map(|&v| f64::from(v * v)).sum();
+                let mean_sq = (sum_sq / n_embd as f64) as f32;
+                let scale = 1.0f32 / (mean_sq + eps).sqrt();
+                dbg_scalar(step, "ffn_norm_scale", layer, scale);
+                dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
+                dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+            }
             rms_norm(x, &lw.ffn_norm, normed, eps);
+            dbg_tensor(step, "ffn_norm", layer, normed);
+            dbg_full(step, "ffn_norm", layer, normed, n_embd);
+            dbg_tensor(step, "ffn_norm_weight", layer, &lw.ffn_norm[..n_embd.min(lw.ffn_norm.len())]);
+            dbg_full(step, "ffn_norm_weight", layer, &lw.ffn_norm[..n_embd.min(lw.ffn_norm.len())], n_embd);
             quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
             crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
             let q8 = q8_buf[..n_embd].as_ptr();
             let sc = scale_buf[..n_embd / 32].as_ptr();
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
 
+            // DEBUG: dump ffn_norm Q8_0 quantization to verify against Python reference
+            if std::env::var("RUST_LLAMA_DEBUG_FFN_Q8").is_ok() && layer == n_layer - 1 && step == 0 {
+                let q8_slice = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc_slice = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                eprintln!("[RUST_FFN_Q8_L23] input q8 first 32 bytes (block 0): {:?}", &q8_slice[..32]);
+                eprintln!("[RUST_FFN_Q8_L23] input q8 bytes 32..64 (block 1): {:?}", &q8_slice[32..64]);
+                eprintln!("[RUST_FFN_Q8_L23] input scale[0..4]: {:?}", &sc_slice[..4]);
+                eprintln!("[RUST_FFN_Q8_L23] input q8 last 32 bytes: {:?}", &q8_slice[n_embd-32..]);
+            }
+
             pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(normed_ptr, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
-                let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
+                let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
                 lw.w_gate.kernel.forward_prepared(input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth);
                 lw.w_up.kernel.forward_prepared(input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth);
 
@@ -478,10 +593,19 @@ pub fn run_inference_tokens(
             });
 
             {
-                let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
-                let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-                let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-                let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
+                let gate_buf = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+                let up_buf = unsafe { std::slice::from_raw_parts(up_buf_ptr, n_ff) };
+                dbg_tensor(step, "ffn_gate_buf_raw", layer, gate_buf);
+                dbg_tensor(step, "ffn_up_buf_raw", layer, up_buf);
+                dbg_full(step, "ffn_gate_buf_raw", layer, gate_buf, n_ff);
+                dbg_full(step, "ffn_up_buf_raw", layer, up_buf, n_ff);
+            }
+
+            {
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+                let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+                let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
                 quantize_q8_0_into(gate_buf, n_ff, &mut q8_buf[..n_ff], &mut scale_buf[..n_ff / 32]);
                 crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
             }
@@ -490,20 +614,36 @@ pub fn run_inference_tokens(
             let sc = scale_buf[..n_ff / 32].as_ptr();
             let q8k = q8k_buf[..n_ff / 256].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(gate_buf_ptr, n_ff);
-                let q8 = raw_parts!(q8, n_ff);
-                let sc = raw_parts!(sc, n_ff / 32);
-                let q8k = raw_parts!(q8k, n_ff / 256);
-                let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
+                let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_ff) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_ff / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_ff / 256) };
+                let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
                 lw.w_down.kernel.forward_prepared(input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth);
             });
             t_ffn1 += t0.elapsed().as_secs_f64();
 
-            let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-            let x = slice_from_mut!(x_ptr, n_embd);
+            // DEBUG: print raw down_buf (W_down matmul output) for L23 step 0.
+            // Marker: [RUST_L23_DOWN_BUF_RAW]
+            if std::env::var("RUST_LLAMA_DEBUG_L23_DOWN").is_ok() && layer == n_layer - 1 && step == 0 {
+                let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+                eprint!("[RUST_L23_DOWN_BUF_RAW] first16=");
+                for v in down_buf.iter().take(16) {
+                    eprint!(" {:.5}", v);
+                }
+                eprintln!();
+            }
+
+            let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+            dbg_tensor(step, "down_buf", layer, down_buf);
+            dbg_full(step, "down_buf", layer, down_buf, n_embd);
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             for i in 0..n_embd {
                 x[i] += down_buf[i];
             }
+            dbg_tensor(step, "ffn_out", layer, x);
+            dbg_tensor(step, "l_out", layer, x);
+            dbg_full(step, "ffn_out", layer, x, n_embd);
         }
 
         {
@@ -516,6 +656,7 @@ pub fn run_inference_tokens(
 
             let t0 = Instant::now();
             rms_norm(x, &output_norm, normed, eps);
+            dbg_tensor(step, "output_norm", 0, normed);
             t_norm += t0.elapsed().as_secs_f64();
 
             let t0 = Instant::now();
@@ -525,16 +666,27 @@ pub fn run_inference_tokens(
             let sc = scale_buf[..n_embd / 32].as_ptr();
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
             let input = normed.as_ptr();
-            let output_pw = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab));
+            let output_pw = Weight::from_quantized(QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab));
             pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(input, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let logits = slice_from_mut!(logits_ptr, vocab);
+                let input = unsafe { std::slice::from_raw_parts(input, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
                 output_pw.kernel.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
             });
             t_logits += t0.elapsed().as_secs_f64();
+
+            // DEBUG: print LOGITS for step 0 (first 16 values).
+            // Marker: [RUST_LOGITS_RAW]
+            if std::env::var("RUST_LLAMA_DEBUG_LOGITS").is_ok() && step == 0 {
+                let logits = unsafe { std::slice::from_raw_parts(logits_ptr, vocab) };
+                eprint!("[RUST_LOGITS_RAW] first16=");
+                for v in logits.iter().take(16) {
+                    eprint!(" {:.5}", v);
+                }
+                eprintln!();
+            }
         }
 
         let eval_elapsed = eval_started.elapsed();
@@ -551,32 +703,43 @@ pub fn run_inference_tokens(
         }
 
         let logits = &mut scratch.logits;
-        let chosen = if temperature <= 0.0 {
-            logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0)
-        } else {
-            for l in logits.iter_mut() {
-                *l /= temperature;
+        // DEBUG: print top-10 logits so we can diff against llama.cpp.
+        if std::env::var("RUST_LLAMA_DEBUG_LOGITS").is_ok() {
+            let mut idxs: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let mut line = format!("RUST_LOGITS step={} top10:", step);
+            for k in 0..10 {
+                line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
             }
-            let top = crate::ops::sample_top_k(logits, 40);
-            let mut rng = 0u64;
+            line.push('\n');
+            let _ = io::stderr().write_all(line.as_bytes());
+            let _ = io::stderr().flush();
+        }
+        // Sample using llama.cpp's default sampler chain:
+        //   top_k=20 -> top_p=0.95 -> temperature=0.6 -> dist sample.
+        // The top_k / top_p values come from the GGUF metadata
+        // (`general.sampling.top_k` / `.top_p`) when available.
+        let (top_k, top_p) = sample_defaults(source);
+        let rng_u64 = if temperature <= 0.0 {
+            0
+        } else {
+            // Seed RNG from generated history (deterministic per prompt).
+            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
             for &t in &all_tokens {
                 rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
             }
-            let r = ((rng >> 33) as f32) / (1u64 << 31) as f32;
-            let mut cum = 0.0f32;
-            let mut chosen = top[0].0;
-            for &(idx, prob) in &top {
-                cum += prob;
-                if cum >= r {
-                    chosen = idx;
-                    break;
-                }
-            }
-            chosen
+            rng
         };
+        let chosen = crate::ops::sample_llama_cpp(
+            logits,
+            top_k,
+            top_p,
+            temperature,
+            rng_u64,
+        );
 
         let chosen_id = chosen as u32;
-        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
+        if !bench && eos_id == Some(chosen_id) {
             break;
         }
         if generated_tokens.len() >= max_tokens {
@@ -611,24 +774,10 @@ pub fn run_inference_tokens(
     if bench || profile {
         eprintln!();
     }
-    if bench {
-        eprintln!(
-            "BENCH: pp {} evals in {:.3}s | {:.1} eval/s",
-            prefill_evals,
-            prefill_time.as_secs_f64(),
-            per_second(prefill_evals, prefill_time),
-        );
-        eprintln!(
-            "BENCH: tg {} evals in {:.3}s | {:.1} eval/s",
-            decode_evals,
-            decode_time.as_secs_f64(),
-            per_second(decode_evals, decode_time),
-        );
-    }
     eprintln!(
         "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
-        per_second(prefill_evals, prefill_time),
-        per_second(decode_evals, decode_time),
+        crate::app::cli::per_second(prefill_evals, prefill_time),
+        crate::app::cli::per_second(decode_evals, decode_time),
         tok_s
     );
     if profile {

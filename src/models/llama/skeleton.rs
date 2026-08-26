@@ -1,16 +1,16 @@
-//! # Qwen3 Shared Skeleton
+//! # LLaMA Skeleton
 //!
-//! Contains types and loaders shared between text inference and embedding extraction.
+//! Tensor loading for LLaMA-family architectures. Tensor names follow the
+//! llama.cpp convention: `blk.{i}.attn_norm`, `blk.{i}.attn_q`, etc.
+//! LLaMA does NOT use Q/K per-head RMSNorm.
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
-pub struct Qwen3LayerWeights<'a> {
+pub struct LlamaLayerWeights<'a> {
     pub attn_norm: Vec<f32>,
     pub ffn_norm: Vec<f32>,
-    pub q_norm: Option<Vec<f32>>,
-    pub k_norm: Option<Vec<f32>>,
     pub wq: Weight<'a>,
     pub wk: Weight<'a>,
     pub wv: Weight<'a>,
@@ -40,23 +40,11 @@ pub fn load_layers<'a>(
     n_embd_q: usize,
     n_embd_gqa: usize,
     n_ff: usize,
-    n_embd_head_k: usize,
-    has_qk_norm: bool,
-) -> Vec<Qwen3LayerWeights<'a>> {
+) -> Vec<LlamaLayerWeights<'a>> {
     (0..n_layer)
-        .map(|l| Qwen3LayerWeights {
+        .map(|l| LlamaLayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if has_qk_norm {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
-            k_norm: if has_qk_norm {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
             wq: Weight::from_quantized(QuantizedTensor::from_bytes(
                 source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
                 source.tensor_info(&format!("blk.{}.attn_q.weight", l)).unwrap().ggml_type,
@@ -103,7 +91,7 @@ pub fn load_layers<'a>(
         .collect()
 }
 
-pub fn static_weight(
+fn static_weight(
     source: &dyn TensorSource,
     name: &str,
     rows: usize,
@@ -124,24 +112,12 @@ pub fn load_layers_static(
     n_embd_q: usize,
     n_embd_gqa: usize,
     n_ff: usize,
-    n_embd_head_k: usize,
-    has_qk_norm: bool,
-) -> Vec<Qwen3LayerWeights<'static>> {
+) -> Vec<LlamaLayerWeights<'static>> {
     let source = source.as_ref();
     (0..n_layer)
-        .map(|l| Qwen3LayerWeights {
+        .map(|l| LlamaLayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if has_qk_norm {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_q_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
-            k_norm: if has_qk_norm {
-                Some(get_f32_tensor(source, &format!("blk.{}.attn_k_norm.weight", l), n_embd_head_k))
-            } else {
-                None
-            },
             wq: static_weight(source, &format!("blk.{}.attn_q.weight", l), n_embd, n_embd_q),
             wk: static_weight(source, &format!("blk.{}.attn_k.weight", l), n_embd, n_embd_gqa),
             wv: static_weight(source, &format!("blk.{}.attn_v.weight", l), n_embd, n_embd_gqa),

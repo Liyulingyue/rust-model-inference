@@ -77,6 +77,10 @@ impl<'a> Kernel for Q6_KKernel<'a> {
             );
         }
     }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_q6_k(self.weight, token_id, n_embd, out);
+    }
 }
 
 /// Q6_K scalar matmul kernel. Phase 2.7-final: moved from `ops::matmul`.

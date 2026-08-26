@@ -10,6 +10,11 @@ pub struct HunyuanMessage<'a> {
     pub content: &'a str,
 }
 
+pub struct Lfm2Message<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
 const PLAIN_TEXT: EncodeOptions = EncodeOptions {
     add_special: false,
     parse_special: false,
@@ -63,6 +68,36 @@ fn required_control(tokenizer: &BPETokenizer, name: &str, literal: &str) -> Resu
     tokenizer
         .special_token_id(name)
         .ok_or_else(|| format!("Required ChatML token missing: {literal}"))
+}
+
+pub fn build_lfm2_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+) -> Result<Vec<u32>, String> {
+    // LFM2 / LFM2.5 chat format is a literal "role\n{content}\n" sequence
+    // (no ChatML control tokens). The official Jinja template starts with
+    // `bos_token` and ends each turn with a newline, followed by an
+    // "assistant\n" prompt for generation. The tokenizer should treat
+    // "system", "user", "assistant" as regular tokens (no special tokens).
+    let mut out = Vec::new();
+    if let Some(bos) = tokenizer.bos_id() {
+        out.push(bos);
+    }
+    for message in messages {
+        // The role itself can include a trailing newline so that the role
+        // name and the content are separated by a single `\n`. We use
+        // `parse_special: false` so the literal "system" / "user" /
+        // "assistant" strings get tokenized as ordinary tokens.
+        out.extend(tokenizer.encode(
+            &format!("{}\n", message.role),
+            PLAIN_TEXT,
+        ));
+        out.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+        out.extend(tokenizer.encode("\n", PLAIN_TEXT));
+    }
+    // Generation prompt: append "assistant\n".
+    out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
+    Ok(out)
 }
 
 pub fn build_qwen_chat_prompt(

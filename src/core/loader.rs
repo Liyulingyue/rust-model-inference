@@ -388,7 +388,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig") {
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig" | "lfm2") {
         return Err(format!("Unsupported architecture: {arch}"));
     }
 
@@ -442,7 +442,15 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         n_embd,
         n_layer: as_usize(format!("{prefix}.block_count"))?,
         n_head,
-        n_head_kv: as_usize(format!("{prefix}.attention.head_count_kv"))?,
+        n_head_kv: if arch == "lfm2" {
+            // LFM2 stores head_count_kv as a per-layer array; the attention
+            // layers (kv=8) are the ones that matter for ModelConfig defaults.
+            // lfm2 skeleton reads its own head_count_kv_array for per-layer
+            // dispatch.
+            8
+        } else {
+            as_usize(format!("{prefix}.attention.head_count_kv"))?
+        },
         n_embd_head: n_embd / n_head,
         n_ff: as_usize(format!("{prefix}.feed_forward_length"))?,
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
@@ -477,7 +485,7 @@ impl TensorSource for GGUFLoader {
 /// Architecture-specific knobs derived from `general.architecture` for the
 /// Qwen3 model family (Qwen2/Qwen3/Qwen3-VL/Qwen3.5/LLaMA/Hunyuan-Dense).
 ///
-/// Phase 4c: extracted from `models::qwen3_multimodal::Qwen3Config::from_source` so that
+/// Phase 4c: extracted from `models::qwen3::base_multimodal::Qwen3Config::from_source` so that
 /// architecture dispatch lives next to the GGUF metadata it interprets, rather
 /// than inside a model implementation that historically knew too much about
 /// other architectures.
@@ -534,7 +542,7 @@ const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions 
 /// Resolve the Qwen3-family knobs from `general.architecture`.
 ///
 /// This is the **single** place where architecture dispatch happens. It is
-/// called by `models::qwen3_multimodal::Qwen3Config::from_source` after
+/// called by `models::qwen3::base_multimodal::Qwen3Config::from_source` after
 /// `model_config_from_source` has produced the dimension set; together they
 /// replace the older `Qwen3Config::from_source` that hardcoded the arch list
 /// inside the model file.
@@ -548,12 +556,12 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         .to_string();
     if !matches!(
         arch.as_str(),
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense"
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "lfm2"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
     }
 
-    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense");
+    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense" | "lfm2");
 
     let rope_sections = if arch == "qwen3vl" {
         let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;

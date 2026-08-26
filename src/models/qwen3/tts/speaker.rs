@@ -1,6 +1,6 @@
 use crate::core::tensor::TensorSource;
-use crate::models::qwen3_multimodal::load_f32_tensor;
-use crate::models::qwen3::qwen3a::audio_processor::{decode_pcm16_wav_any, RealFft};
+use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
+use crate::models::qwen3::base_multimodal::load_f32_tensor;
 use crate::ops::{dot_f16, f32_slice_to_f16};
 
 use super::load_f16_or_f32_tensor;
