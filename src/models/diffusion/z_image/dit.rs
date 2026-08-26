@@ -1738,7 +1738,12 @@ mod tests {
 
         force_f32_linear_into(&source, "w", &input, &mut output, 128, 1, &mut scratch).unwrap();
 
-        assert_eq!(output[0].to_bits(), 0x41d3_f6d4);
+        let expected = if crate::ops::has_avx2_fma() {
+            0x41d3_f6d4
+        } else {
+            0x41d3_f6d2
+        };
+        assert_eq!(output[0].to_bits(), expected);
     }
 
     #[test]
