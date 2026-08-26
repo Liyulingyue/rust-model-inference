@@ -31,7 +31,7 @@ pub use format::load_plan::{
     build_load_plan, load_logical_cpu, LoadPlan, LogicalCpuDeviceLoad, LogicalCpuLoad,
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
-pub use models::asr::*;
+pub use models::qwen3::asr::model::*;
 pub use models::clip_config::{ClipVisionConfig, Qwen35Config};
 pub use models::diffusion::pig::{PigConfig, PigModel, PigVAE};
 pub use models::qwen3_multimodal::*;

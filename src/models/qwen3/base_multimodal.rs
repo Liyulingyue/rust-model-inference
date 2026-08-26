@@ -10,8 +10,6 @@
 //! ```text
 //! main.rs -> app::run_inference() -> app/text.rs
 //! ```
-//! - 使用 `QuantizedTensor::from_bytes(...).into_kernel()` 分派量化 kernel
-//! - 支持 Q4_K、Q6_K、Q8_0 等所有 GGUF 量化格式
 //! - **推荐用于纯文本生成任务**
 //!
 //! ### 路径 2：Qwen3Model 路径（`models/qwen3.rs`）
@@ -20,15 +18,9 @@
 //!   -> Qwen3Model::from_source()
 //!   -> Qwen3Model::text_encode()
 //! ```
-//! - 使用 `static_q8_tensor()` 强制 `GGMLType::Q8_0` 加载权重
-//! - **仅支持 Q8_0 量化**，不支持 Q4_K/Q6_K 等格式
+//! - 支持多量化格式（Q4_K、Q6_K、Q8_0 等）
+//! - 支持 RoPE：Neox 和 Interleaved (mrope)
 //! - 用于：Qwen3-VL 解码器、Qwen3-ASR、Qwen3-TTS、Z-Image 文本编码器
-//!
-//! ## 混用后果
-//!
-//! 如果用 `--model Qwen3-0.6B-Q4_K_M.gguf` 加载 `Qwen3Model`：
-//! - `static_q8_tensor()` 会因 `info.ggml_type != GGMLType::Q8_0` 报错
-//! - 因为它硬编码期望 Q8_0，不识别 GGUF 文件中的实际量化类型
 
 use crate::app::cli::resolve_thread_count;
 use crate::core::loader::{
