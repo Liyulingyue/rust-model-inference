@@ -31,8 +31,13 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         .as_deref()
         .ok_or_else(|| "--tts requires --out".to_string())?;
 
-    eprintln!("Loading TTS talker from {}", options.model.display());
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    crate::app::reject_incomplete_z_image_architecture(arch)?;
+    eprintln!("Loading TTS talker from {}", options.model.display());
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         source.metadata(key).cloned()
     })?);

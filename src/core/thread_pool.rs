@@ -198,7 +198,7 @@ impl ComputePool {
 
         self.inner.call_fn.store(0, Ordering::Relaxed);
         self.inner.call_data.store(0, Ordering::Relaxed);
-        self.inner.chunk_counter.store(self.n_threads as i32, Ordering::Relaxed);
+        self.inner.chunk_counter.store(0, Ordering::Relaxed);
         self.inner.chunk_barrier.store(
             Arc::as_ptr(&barrier) as usize,
             Ordering::Relaxed
@@ -298,5 +298,18 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(1))
             .expect("single-thread ComputePool::drop timed out");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn chunks_begin_at_zero_and_execute_exactly_once() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let worker_seen = Arc::clone(&seen);
+        ComputePool::new(2).compute_with_chunks(7, move |_thread, chunk| {
+            worker_seen.lock().unwrap().push(chunk);
+        });
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..7).collect::<Vec<_>>());
     }
 }

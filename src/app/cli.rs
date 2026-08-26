@@ -24,6 +24,7 @@ pub struct CliOptions {
     pub max_tokens: Option<usize>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
+    pub seed: Option<i64>,
     pub temperature: Option<f32>,
     pub threads: usize,
     pub thinking: bool,
@@ -36,6 +37,14 @@ pub struct CliOptions {
     pub gpu: bool,
     pub tts: bool,
     pub out: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct ZImageCliOptions {
+    pub steps: usize,
+    pub resolution: usize,
+    pub seed: i64,
+    pub out: PathBuf,
 }
 
 pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -162,16 +171,34 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--steps" => {
-                if i + 1 < args.len() {
-                    options.steps = Some(args[i + 1].parse().unwrap_or(20));
-                    i += 1;
-                }
+                let value = args.get(i + 1).ok_or("Missing value for --steps")?;
+                options.steps = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --steps value: {error}"))?,
+                );
+                i += 1;
             }
             "--resolution" | "--size" => {
-                if i + 1 < args.len() {
-                    options.resolution = Some(args[i + 1].parse().unwrap_or(512));
-                    i += 1;
-                }
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("Missing value for {flag}"))?;
+                options.resolution = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid {flag} value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--seed" => {
+                let value = args.get(i + 1).ok_or("Missing value for --seed")?;
+                options.seed = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|error| format!("Invalid --seed value: {error}"))?,
+                );
+                i += 1;
             }
             "--temp" => {
                 if i + 1 < args.len() {
@@ -218,16 +245,20 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--vae" => {
-                if i + 1 < args.len() {
-                    options.vae = Some(args[i + 1].as_str().into());
-                    i += 1;
-                }
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --vae")?;
+                options.vae = Some(value.as_str().into());
+                i += 1;
             }
             "--text-encoder" => {
-                if i + 1 < args.len() {
-                    options.text_encoder = Some(args[i + 1].as_str().into());
-                    i += 1;
-                }
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --text-encoder")?;
+                options.text_encoder = Some(value.as_str().into());
+                i += 1;
             }
             "--audio" => {
                 let value = args
@@ -273,7 +304,90 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     Ok(options)
 }
 
+pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
+    if options.text_encoder.is_none() && options.vae.is_none() {
+        return if options.seed.is_some() {
+            Err("--seed requires Z-Image components".into())
+        } else {
+            Ok(None)
+        };
+    }
+    let conflict = if options.tts {
+        Some("--tts")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.ref_audio.is_some() {
+        Some("--ref-audio")
+    } else if options.image.is_some() {
+        Some("--image")
+    } else if options.mmproj.is_some() {
+        Some("--mmproj")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.dump_logits {
+        Some("--dump-logits")
+    } else if options.bench {
+        Some("--bench")
+    } else if options.profile {
+        Some("--profile")
+    } else if options.gpu {
+        Some("--gpu")
+    } else if options.thinking {
+        Some("--thinking")
+    } else if options.language.is_some() {
+        Some("--language")
+    } else if options.max_tokens.is_some() {
+        Some("--max-tokens")
+    } else if options.temperature.is_some() {
+        Some("--temp")
+    } else if options.embedding_output != EmbeddingOutput::Summary {
+        Some("--embedding-output")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("Z-Image cannot be used with {conflict}"));
+    }
+    if options.model.as_os_str().is_empty() {
+        return Err("Z-Image requires --model for the diffusion component".into());
+    }
+    options
+        .text_encoder
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --text-encoder")?;
+    options
+        .vae
+        .as_ref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --vae")?;
+    let out = options
+        .out
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Z-Image requires --out")?;
+    if options
+        .prompt
+        .as_deref()
+        .is_none_or(|prompt| prompt.trim().is_empty())
+    {
+        return Err("Z-Image requires a non-empty --prompt".into());
+    }
+    let steps = options.steps.unwrap_or(8);
+    let resolution = options.resolution.unwrap_or(512);
+    if steps == 0 || resolution == 0 || resolution % 16 != 0 {
+        return Err("Z-Image requires positive --steps and --resolution divisible by 16".into());
+    }
+    Ok(Some(ZImageCliOptions {
+        steps,
+        resolution,
+        seed: options.seed.unwrap_or(0),
+        out,
+    }))
+}
+
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    z_image_cli_options(options)?;
     if options.tts {
         if options.prompt.as_deref().is_none_or(|value| value.trim().is_empty()) {
             return Err("--tts requires a non-empty --prompt".into());
@@ -491,6 +605,154 @@ mod tests {
             model: "missing.gguf".into(),
             audio: Some("missing.wav".into()),
             ..CliOptions::default()
+        }
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn z_image_cli_requires_all_components_prompt_and_out() {
+        let complete = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+            "--seed",
+            "42",
+        ]))
+        .unwrap();
+        assert_eq!(z_image_cli_options(&complete).unwrap().unwrap().seed, 42);
+        for argv in [
+            ["rmi", "--model", "dit.gguf", "--text-encoder", "text.gguf"].as_slice(),
+            ["rmi", "--model", "dit.gguf", "--vae", "vae.gguf", "--prompt", "fox"].as_slice(),
+        ] {
+            assert!(
+                z_image_cli_options(&parse_cli_options(&args(argv)).unwrap()).is_err(),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn seed_requires_a_signed_i64_value() {
+        assert!(parse_cli_options(&args(&["rmi", "--seed"])).is_err());
+        assert!(parse_cli_options(&args(&["rmi", "--seed", "nan"])).is_err());
+    }
+
+    #[test]
+    fn validate_cli_options_enforces_z_image_contract() {
+        let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
+        assert!(validate_cli_options(&parse(&["rmi", "--seed", "42"])).is_err());
+        assert!(validate_cli_options(&parse(&["rmi", "--text-encoder", "text.gguf",])).is_err());
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ]))
+        .is_err());
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn z_image_rejects_other_modes_before_model_loading() {
+        let base = [
+            "rmi",
+            "--model",
+            "dit.gguf",
+            "--text-encoder",
+            "text.gguf",
+            "--vae",
+            "vae.gguf",
+            "--prompt",
+            "fox",
+            "--out",
+            "fox.png",
+        ];
+        for (extra, expected) in [
+            (vec!["--tts"], "--tts"),
+            (vec!["--audio", "speech.wav"], "--audio"),
+            (vec!["--ref-audio", "voice.wav"], "--ref-audio"),
+            (vec!["--image", "input.png"], "--image"),
+            (vec!["--mmproj", "mmproj.gguf"], "--mmproj"),
+            (vec!["--embedding"], "--embedding"),
+            (vec!["--dump-logits"], "--dump-logits"),
+            (vec!["--bench"], "--bench"),
+            (vec!["--profile"], "--profile"),
+            (vec!["--gpu"], "--gpu"),
+            (vec!["--thinking"], "--thinking"),
+            (vec!["--language", "en"], "--language"),
+            (vec!["--max-tokens", "1"], "--max-tokens"),
+            (vec!["--temp", "0"], "--temp"),
+            (vec!["--embedding-output", "raw"], "--embedding-output"),
+        ] {
+            let mut argv = base.to_vec();
+            argv.extend(extra);
+            let error =
+                validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+            assert!(error.contains(expected), "{argv:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn z_image_cli_rejects_malformed_steps_and_resolution() {
+        for flag in ["--steps", "--resolution"] {
+            assert!(
+                parse_cli_options(&args(&[
+                    "rmi",
+                    "--text-encoder",
+                    "text.gguf",
+                    "--vae",
+                    "vae.gguf",
+                    "--prompt",
+                    "fox",
+                    "--out",
+                    "fox.png",
+                    flag,
+                    "nope",
+                ]))
+                .is_err(),
+                "{flag}"
+            );
+            assert!(parse_cli_options(&args(&["rmi", flag])).is_err(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn z_image_component_flags_require_values() {
+        for flag in ["--text-encoder", "--vae"] {
+            assert!(parse_cli_options(&args(&["rmi", flag])).is_err(), "{flag}");
+            assert!(
+                parse_cli_options(&args(&["rmi", flag, ""])).is_err(),
+                "{flag}"
+            );
         }
     }
 
@@ -729,7 +991,7 @@ mod tests {
             ("--n-gen", |o| o.max_tokens.is_none()),
             ("--temp", |o| o.temperature.is_none()),
             ("--threads", |o| o.threads == 0),
-            ("--kv-cache", |o| o.kv_format == KvFormat::F16),
+            ("--kv-cache", |o| o.kv_format == KvFormat::F32),
             ("--mmproj", |o| o.mmproj.is_none()),
             ("--image", |o| o.image.is_none()),
         ];

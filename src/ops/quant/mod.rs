@@ -1061,7 +1061,7 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     crate::ops::hsum_ps(acc)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod avx2_parity {
     use super::*;
 

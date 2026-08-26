@@ -1667,15 +1667,20 @@ mod tests {
         let weights = (0..32)
             .map(|index| crate::ops::f32_to_f16(0.9 - index as f32 * 0.031))
             .collect::<Vec<_>>();
+        let weight_bytes = Box::leak(
+            weights
+                .iter()
+                .flat_map(|bits| bits.to_le_bytes())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
         let linear = AudioLinear {
-            weight: Box::leak(
-                weights
-                    .iter()
-                    .flat_map(|bits| bits.to_le_bytes())
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-            kind: GGMLType::F16,
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight_bytes,
+                GGMLType::F16,
+                32,
+                1,
+            )),
             input: 32,
             output: 1,
             bias: Vec::new(),
@@ -1744,8 +1749,12 @@ mod tests {
 
     fn q8_identity_linear(width: usize) -> AudioLinear {
         AudioLinear {
-            weight: q8_identity(width),
-            kind: GGMLType::Q8_0,
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                q8_identity(width),
+                GGMLType::Q8_0,
+                width,
+                width,
+            )),
             input: width,
             output: width,
             bias: vec![0.0; width],
@@ -1848,9 +1857,14 @@ mod tests {
 
     fn zero_q8_linear(input: usize, output: usize) -> AudioLinear {
         let bytes = output * (input / 32) * 34;
+        let weight = Box::leak(vec![0; bytes].into_boxed_slice());
         AudioLinear {
-            weight: Box::leak(vec![0; bytes].into_boxed_slice()),
-            kind: GGMLType::Q8_0,
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight,
+                GGMLType::Q8_0,
+                input,
+                output,
+            )),
             input,
             output,
             bias: vec![0.0; output],
@@ -1903,8 +1917,12 @@ mod tests {
                 zero_conv(480, 480, shared_conv),
             ],
             conv_out: AudioLinear {
-                weight: Box::leak(vec![0; 7680 * hidden * 2].into_boxed_slice()),
-                kind: GGMLType::F16,
+                weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    Box::leak(vec![0; 7680 * hidden * 2].into_boxed_slice()),
+                    GGMLType::F16,
+                    7680,
+                    hidden,
+                )),
                 input: 7680,
                 output: hidden,
                 bias: Vec::new(),
@@ -2629,8 +2647,12 @@ mod tests {
     fn zero_projection_clears_reused_result_buffer() {
         let weight: &'static [u8] = Box::leak(filled_f16(1, 2.0).into_boxed_slice());
         let linear = AudioLinear {
-            weight,
-            kind: GGMLType::F16,
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight,
+                GGMLType::F16,
+                1,
+                1,
+            )),
             input: 1,
             output: 1,
             bias: Vec::new(),

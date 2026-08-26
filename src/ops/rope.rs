@@ -1,20 +1,20 @@
 //! RoPE (Rotary Position Embedding) operations.
 
-#[cfg(all(feature = "parity-trace", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 extern "C" {
     fn __sincosf(value: f32, sin: *mut f32, cos: *mut f32);
 }
 
 #[inline]
-fn rope_sin_cos(theta: f32) -> (f32, f32) {
-    #[cfg(all(feature = "parity-trace", target_os = "macos"))]
+pub(crate) fn rope_sin_cos(theta: f32) -> (f32, f32) {
+    #[cfg(target_os = "macos")]
     {
         let mut sin = 0.0f32;
         let mut cos = 0.0f32;
         unsafe { __sincosf(theta, &mut sin, &mut cos) };
         return (cos, sin);
     }
-    #[cfg(not(all(feature = "parity-trace", target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     (theta.cos(), theta.sin())
 }
 

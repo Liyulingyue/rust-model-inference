@@ -20,7 +20,7 @@ pub fn silu_approx_inplace(values: &mut [f32]) {
         return;
     }
     #[cfg(target_arch = "aarch64")]
-    if super::has_neon() {
+    if crate::ops::has_neon() {
         unsafe { silu_approx_inplace_neon(values) };
         return;
     }
@@ -88,7 +88,7 @@ pub fn silu_mul_approx_inplace(gate: &[f32], up: &mut [f32]) {
         return;
     }
     #[cfg(target_arch = "aarch64")]
-    if super::has_neon() {
+    if crate::ops::has_neon() {
         unsafe { silu_mul_approx_inplace_neon(gate, up) };
         return;
     }

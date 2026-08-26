@@ -57,6 +57,19 @@ cargo run --release --bin rust-model-inference -- \
 
 参考音频必须是 PCM16 WAV；Base 模型不支持 `--ref-text`。输出固定为单声道 24 kHz PCM16 WAV。语言支持 `cn/en/ge/it/po/sp/ja/ko/fr/ru`、对应英文全名，以及 `zh/de/pt/es` 别名。
 
+### Z-Image Turbo
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/z-image-gguf/z-image-turbo-q8_0.gguf \
+  --text-encoder models/z-image-gguf/qwen3_4b_f32-q8_0.gguf \
+  --vae models/z-image-gguf/pig_flux_vae_fp32-f16.gguf \
+  --prompt "A red fox sleeping beneath a pine tree" \
+  --steps 8 --resolution 512 --seed 42 --threads 1 --out fox.png
+```
+
+当前范围是原生 Rust、CPU、512×512 的 Z-Image Turbo 文生图；暂不支持 Z-Image Base、GPU 或 img2img。
+
 ### Apple Silicon (ARM64)
 
 Apple Silicon 原生构建，自动选择稳定的 Rust NEON kernel；无需 Rosetta 或外部 C/C++ 库。无 ARM SIMD 路径的算子保留标量回退。

@@ -7,9 +7,9 @@ pub(crate) mod text;
 pub(crate) mod tts;
 
 pub use audio::run_asr_cli;
-pub use cli::{parse_cli_options, validate_cli_options, normalize_tts_language, resolve_cli_generation_options, transcription_options, resolve_thread_count, init_rayon_global_pool, validate_qwen3vl_decoder_mode, CliOptions, EmbeddingOutput, KvFormat, DEFAULT_THREAD_CAP, per_second, inference_step_budget};
+pub use cli::{parse_cli_options, validate_cli_options, normalize_tts_language, resolve_cli_generation_options, transcription_options, resolve_thread_count, init_rayon_global_pool, validate_qwen3vl_decoder_mode, z_image_cli_options, CliOptions, EmbeddingOutput, KvFormat, ZImageCliOptions, DEFAULT_THREAD_CAP, per_second, inference_step_budget};
 pub use embedding::run_embedding;
-pub use image::run_pig_image;
+pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
 pub use selftest::run_self_test;
 pub use text::{run_inference, run_interactive, run_shared_inference, run_multimodal};
 pub use tts::run_tts_cli;
@@ -17,6 +17,13 @@ pub use tts::run_tts_cli;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
 use std::path::Path;
+
+pub fn reject_incomplete_z_image_architecture(arch: &str) -> Result<(), String> {
+    if arch == "pig" {
+        return Err("Z-Image model requires --text-encoder, --vae, --prompt, and --out".into());
+    }
+    Ok(())
+}
 
 pub fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
     open_model_source(path, role).unwrap_or_else(|error| {
