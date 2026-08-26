@@ -388,7 +388,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig") {
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig" | "lfm2") {
         return Err(format!("Unsupported architecture: {arch}"));
     }
 
@@ -442,7 +442,15 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         n_embd,
         n_layer: as_usize(format!("{prefix}.block_count"))?,
         n_head,
-        n_head_kv: as_usize(format!("{prefix}.attention.head_count_kv"))?,
+        n_head_kv: if arch == "lfm2" {
+            // LFM2 stores head_count_kv as a per-layer array; the attention
+            // layers (kv=8) are the ones that matter for ModelConfig defaults.
+            // lfm2 skeleton reads its own head_count_kv_array for per-layer
+            // dispatch.
+            8
+        } else {
+            as_usize(format!("{prefix}.attention.head_count_kv"))?
+        },
         n_embd_head: n_embd / n_head,
         n_ff: as_usize(format!("{prefix}.feed_forward_length"))?,
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
@@ -548,12 +556,12 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         .to_string();
     if !matches!(
         arch.as_str(),
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense"
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "lfm2"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
     }
 
-    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense");
+    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense" | "lfm2");
 
     let rope_sections = if arch == "qwen3vl" {
         let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
