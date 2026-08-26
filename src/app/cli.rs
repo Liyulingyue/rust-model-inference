@@ -1,12 +1,7 @@
 ﻿use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum KvFormat {
-    #[default]
-    F16,
-    F32,
-}
+pub use crate::core::scratchpad::KvFormat;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EmbeddingOutput {

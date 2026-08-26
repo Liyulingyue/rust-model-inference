@@ -34,7 +34,7 @@ use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
-use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16};
+use crate::core::scratchpad::{ExecutionScratchpad, KvArch, KvCache, KvCacheF16, KvFormat, KvLifecycle, KvState};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 pub use crate::models::qwen3::static_weight;
@@ -253,7 +253,7 @@ pub struct Qwen3Model {
 
 pub struct Qwen3Session<'model> {
     model: &'model Qwen3Model,
-    kv_cache: KvCache,
+    kv_state: KvState,
     scratch: ExecutionScratchpad,
     capacity: usize,
 }
@@ -405,7 +405,25 @@ impl Qwen3Model {
 }
 
 impl<'model> Qwen3Session<'model> {
+    /// 创建新的会话（默认 F16 KV cache, Ephemeral 生命周期）。
     pub fn new(model: &'model Qwen3Model, capacity: usize) -> Result<Self, String> {
+        Self::new_with_kv_state(model, capacity, KvFormat::F16, KvLifecycle::Ephemeral)
+    }
+
+    /// 使用指定的 KV 格式和生命周期创建会话（推荐入口）。
+    ///
+    /// 这是统一 KV 缓存设计的标准入口，支持：
+    /// - `KvFormat::F16/F32`：选择 KV 精度
+    /// - `KvLifecycle::Ephemeral/Timed/Persistent`：选择生命周期策略
+    ///
+    /// 当前阶段 `base_multimodal` 主要需要 F16（与原代码一致）。
+    /// 未来可以无缝扩展到 F32 或其他格式。
+    pub fn new_with_kv_state(
+        model: &'model Qwen3Model,
+        capacity: usize,
+        kv_format: KvFormat,
+        lifecycle: KvLifecycle,
+    ) -> Result<Self, String> {
         if capacity == 0 || capacity > model.config.n_ctx {
             return Err(format!(
                 "Session capacity {capacity} must be within 1..={}",
@@ -427,7 +445,10 @@ impl<'model> Qwen3Session<'model> {
             checked_product("KV cache rows", config.n_layer, capacity)?,
             kv_stride,
         )?;
-        check_allocation("F16 KV cache", kv_size, std::mem::size_of::<u16>())?;
+        let kv_bytes = match kv_format {
+            KvFormat::F16 => check_allocation("KV cache", kv_size, std::mem::size_of::<u16>())?,
+            KvFormat::F32 => check_allocation("KV cache", kv_size, std::mem::size_of::<f32>())?,
+        };
 
         let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
         let score_stride = capacity
@@ -467,12 +488,34 @@ impl<'model> Qwen3Session<'model> {
             check_allocation(name, len, bytes)?;
         }
 
+        // 构造标准化的 KvState
+        let arch = Arc::new(KvArch::new(
+            config.n_layer,
+            config.n_head_kv,
+            config.n_embd_head_k,
+            config.n_embd_head_v,
+            model.config.n_ctx,
+        ));
+        let mut kv_state = KvState::new(arch, kv_format, capacity)
+            .with_lifecycle(lifecycle);
+        // KvState 自带的 KvCache 已分配好容量，但我们需要重新分配为正确的 stride
+        // （KvState::new 用的是 max(k,v) 而非实际的 kv_stride）
+        match (kv_format, &mut kv_state.cache) {
+            (KvFormat::F16, KvCache::F16(c)) => {
+                c.k = vec![0u16; kv_size];
+                c.v = vec![0u16; kv_size];
+            }
+            (KvFormat::F32, KvCache::F32(c)) => {
+                c.k = vec![0f32; kv_size];
+                c.v = vec![0f32; kv_size];
+            }
+            _ => unreachable!("format and cache variant mismatch"),
+        }
+        let _ = kv_bytes; // 当前未直接使用，保留用于将来分配校验
+
         Ok(Self {
             model,
-            kv_cache: KvCache::F16(KvCacheF16 {
-                k: vec![0; kv_size],
-                v: vec![0; kv_size],
-            }),
+            kv_state,
             scratch: ExecutionScratchpad {
                 x: vec![0.0; config.n_embd],
                 normed: vec![0.0; config.n_embd],
@@ -485,7 +528,7 @@ impl<'model> Qwen3Session<'model> {
                 gate_buf: vec![0.0; config.n_ff],
                 up_buf: vec![0.0; config.n_ff],
                 logits: vec![0.0; config.vocab],
-q8_buf: vec![0; max_n_in],
+                q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
                 // Q8_K pre-quantization buffer for K-quant kernels (Q4_K / Q6_K).
                 // See TODO in docs/TODO.md: "Q8_0 与 Q8_K 量化路径按需量化".
@@ -515,6 +558,16 @@ q8_buf: vec![0; max_n_in],
             },
             capacity,
         })
+    }
+
+    /// 获取对底层 KV state 的引用（只读），供外部监控或跨 session 共享。
+    pub fn kv_state(&self) -> &KvState {
+        &self.kv_state
+    }
+
+    /// 重置 KV 缓存（用于多轮对话中的上下文清理）。
+    pub fn reset_kv(&mut self) {
+        self.kv_state.reset();
     }
 
     pub fn generate(
@@ -574,10 +627,11 @@ q8_buf: vec![0; max_n_in],
         let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
         let group_size = config.n_head / config.n_head_kv;
         let kq_scale = 1.0 / (config.n_embd_head_k as f32).sqrt();
-        let (k_cache_ptr, v_cache_ptr) = match &mut self.kv_cache {
+        let (k_cache_ptr, v_cache_ptr) = match &mut self.kv_state.cache {
             KvCache::F16(cache) => (cache.k.as_mut_ptr(), cache.v.as_mut_ptr()),
             KvCache::F32(_) => return Err("Qwen3Session requires an F16 KV cache".into()),
         };
+        self.kv_state.update_access();
 
         #[cfg(feature = "parity-trace")]
         {

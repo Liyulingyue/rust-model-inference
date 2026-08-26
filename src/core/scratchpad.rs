@@ -1,3 +1,14 @@
+/// KV 缓存精度格式。
+///
+/// - `F16`：半精度，节省内存（推荐）
+/// - `F32`：单精度，更精确但内存翻倍
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum KvFormat {
+    #[default]
+    F16,
+    F32,
+}
+
 pub struct ExecutionScratchpad {
     pub x: Vec<f32>,
     pub normed: Vec<f32>,
@@ -93,9 +104,171 @@ impl KvCache {
     }
 }
 
+// =============================================================================
+// KvState: 标准化 KV 缓存抽象
+// =============================================================================
+//
+// 设计目标（参考 `docs/KV_CACHE_DESIGN.md`）：
+// - 让 KV 缓存成为**独立的一等公民**：可创建、传递、复用、共享
+// - 自描述架构信息，支持跨模型兼容性检查
+// - 显式生命周期策略：Ephemeral / Timed / Persistent
+// - 为未来多轮对话、KV 分页、KV 迁移等高级特性打基础
+//
+// 当前状态：基础类型已就位，迁移进行中。
+// 现有 `KvCache` 作为底层存储保留，`KvState` 负责生命周期和兼容性管理。
+
+/// KV 缓存依赖的架构参数（与权重无关）。
+///
+/// 仅包含影响 KV 布局的维度。两个不同模型若此结构相等，
+/// 则它们的 KV 缓存可以相互迁移或复用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvArch {
+    pub n_layer: usize,
+    pub n_head_kv: usize,
+    pub n_embd_head_k: usize,
+    pub n_embd_head_v: usize,
+    pub max_ctx: usize,
+}
+
+impl KvArch {
+    pub fn new(
+        n_layer: usize,
+        n_head_kv: usize,
+        n_embd_head_k: usize,
+        n_embd_head_v: usize,
+        max_ctx: usize,
+    ) -> Self {
+        Self {
+            n_layer,
+            n_head_kv,
+            n_embd_head_k,
+            n_embd_head_v,
+            max_ctx,
+        }
+    }
+
+    /// 单 token 占用字节数（K/V head 数量按 max(k,v) 对齐）。
+    pub fn bytes_per_token(&self, format: KvFormat) -> usize {
+        let stride = self.n_head_kv * self.n_embd_head_k.max(self.n_embd_head_v);
+        let elem_size = match format {
+            KvFormat::F16 => 2,
+            KvFormat::F32 => 4,
+        };
+        stride * elem_size
+    }
+
+    /// 完整缓存字节数（capacity 由调用方提供，因为 KvArch 本身不包含 capacity）。
+    pub fn total_bytes(&self, capacity: usize, format: KvFormat) -> usize {
+        self.n_layer * capacity * self.bytes_per_token(format)
+    }
+
+    /// 当前架构是否与 `other` 兼容（同架构 → KV 可共享）。
+    pub fn is_compatible_with(&self, other: &KvArch) -> bool {
+        self.n_layer == other.n_layer
+            && self.n_head_kv == other.n_head_kv
+            && self.n_embd_head_k == other.n_embd_head_k
+            && self.n_embd_head_v == other.n_embd_head_v
+    }
+}
+
+/// KV 缓存生命周期策略。
+///
+/// - `Ephemeral`：单会话生命周期，随 session 销毁（CLI 单轮对话）
+/// - `Timed`：空闲超时后自动销毁（长连接多轮对话）
+/// - `Persistent`：显式销毁，永不过期（需要长期上下文保持）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KvLifecycle {
+    Ephemeral,
+    Timed { ttl: std::time::Duration },
+    Persistent,
+}
+
+/// 标准化 KV 缓存状态。
+///
+/// 将 KV 缓存从「函数局部变量」提升为「可独立管理的一等公民」：
+/// - 自带架构信息，可独立校验兼容性
+/// - 显式生命周期，支持 Ephemeral/Timed/Persistent 三种策略
+/// - 当前后端使用现有 `KvCache` 存储数据
+///
+/// 未来扩展点（参考 `docs/KV_CACHE_DESIGN.md`）：
+/// - KV 分页（类似 vLLM）
+/// - KV 压缩（长时间未访问的 KV 压缩存储）
+/// - KV 迁移（跨进程/跨设备）
+pub struct KvState {
+    pub arch: std::sync::Arc<KvArch>,
+    pub format: KvFormat,
+    pub lifecycle: KvLifecycle,
+    pub cache: KvCache,
+    pub capacity: usize,
+    pub seq_len: usize,
+    pub last_access: std::time::Instant,
+}
+
+impl KvState {
+    /// 创建新的 KV 状态（默认 `Ephemeral` 生命周期）。
+    pub fn new(arch: std::sync::Arc<KvArch>, format: KvFormat, capacity: usize) -> Self {
+        let stride = arch.n_head_kv * arch.n_embd_head_k.max(arch.n_embd_head_v);
+        let cache = match format {
+            KvFormat::F16 => KvCache::new_f16(arch.n_layer, capacity, stride),
+            KvFormat::F32 => KvCache::new_f32(arch.n_layer, capacity, stride),
+        };
+        Self {
+            arch,
+            format,
+            lifecycle: KvLifecycle::Ephemeral,
+            cache,
+            capacity,
+            seq_len: 0,
+            last_access: std::time::Instant::now(),
+        }
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: KvLifecycle) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
+    /// 检查是否与给定架构兼容（同架构 → KV 可共享）。
+    pub fn is_compatible_with(&self, other_arch: &KvArch) -> bool {
+        self.arch.is_compatible_with(other_arch)
+    }
+
+    /// 更新最后访问时间（每次推理调用都应该更新）。
+    pub fn update_access(&mut self) {
+        self.last_access = std::time::Instant::now();
+    }
+
+    /// 检查 KV 缓存是否已过期（Timed 模式专属）。
+    pub fn is_expired(&self) -> bool {
+        match self.lifecycle {
+            KvLifecycle::Ephemeral => false,
+            KvLifecycle::Persistent => false,
+            KvLifecycle::Timed { ttl } => self.last_access.elapsed() > ttl,
+        }
+    }
+
+    /// 重置 KV 缓存内容（清零 seq_len 和 cache 数据），但保留 capacity 和 lifecycle。
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        match &mut self.cache {
+            KvCache::F16(c) => {
+                for x in c.k.iter_mut() { *x = 0; }
+                for x in c.v.iter_mut() { *x = 0; }
+            }
+            KvCache::F32(c) => {
+                for x in c.k.iter_mut() { *x = 0.0; }
+                for x in c.v.iter_mut() { *x = 0.0; }
+            }
+        }
+        self.update_access();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ExecutionScratchpad;
+    use super::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn scores_allocate_padded_non_overlapping_segments_per_thread() {
@@ -105,5 +278,77 @@ mod tests {
         let (first_thread, second_thread) = scratch.scores.split_at(512);
         assert_eq!(first_thread.len(), 512);
         assert_eq!(second_thread.len(), 512);
+    }
+
+    fn make_arch() -> Arc<KvArch> {
+        Arc::new(KvArch::new(4, 8, 128, 128, 1024))
+    }
+
+    #[test]
+    fn kv_state_basic_allocation() {
+        let arch = make_arch();
+        let state = KvState::new(arch.clone(), KvFormat::F16, 512);
+        assert_eq!(state.capacity, 512);
+        assert_eq!(state.seq_len, 0);
+        assert!(matches!(state.lifecycle, KvLifecycle::Ephemeral));
+        assert_eq!(state.arch.n_layer, 4);
+    }
+
+    #[test]
+    fn kv_arch_compatibility() {
+        let a = KvArch::new(4, 8, 128, 128, 1024);
+        let b = KvArch::new(4, 8, 128, 128, 2048);
+        let c = KvArch::new(4, 8, 64, 128, 1024); // n_embd_head_k 不同
+        let d = KvArch::new(2, 8, 128, 128, 1024); // n_layer 不同
+
+        assert!(a.is_compatible_with(&b)); // max_ctx 不同但兼容（不影响 KV 布局）
+        assert!(!a.is_compatible_with(&c)); // head_k 不同
+        assert!(!a.is_compatible_with(&d)); // 层数不同
+    }
+
+    #[test]
+    fn kv_lifecycle_ephemeral_never_expires() {
+        let arch = make_arch();
+        let mut state = KvState::new(arch, KvFormat::F16, 128);
+        state.last_access = std::time::Instant::now() - Duration::from_secs(3600);
+        assert!(!state.is_expired());
+    }
+
+    #[test]
+    fn kv_lifecycle_timed_can_expire() {
+        let arch = make_arch();
+        let mut state = KvState::new(arch, KvFormat::F16, 128)
+            .with_lifecycle(KvLifecycle::Timed { ttl: Duration::from_millis(50) });
+        assert!(!state.is_expired());
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(state.is_expired());
+        state.update_access();
+        assert!(!state.is_expired());
+    }
+
+    #[test]
+    fn kv_lifecycle_persistent_never_expires() {
+        let arch = make_arch();
+        let mut state = KvState::new(arch, KvFormat::F16, 128)
+            .with_lifecycle(KvLifecycle::Persistent);
+        state.last_access = std::time::Instant::now() - Duration::from_secs(3600);
+        assert!(!state.is_expired());
+    }
+
+    #[test]
+    fn kv_reset_clears_seq_len() {
+        let arch = make_arch();
+        let mut state = KvState::new(arch, KvFormat::F32, 64);
+        state.seq_len = 42;
+        state.reset();
+        assert_eq!(state.seq_len, 0);
+    }
+
+    #[test]
+    fn kv_bytes_per_token_format_differs() {
+        let arch = make_arch();
+        let f16_bytes = arch.bytes_per_token(KvFormat::F16);
+        let f32_bytes = arch.bytes_per_token(KvFormat::F32);
+        assert_eq!(f32_bytes, f16_bytes * 2);
     }
 }
