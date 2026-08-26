@@ -1,12 +1,15 @@
-﻿use crate::models::clip_config::Qwen35Config;
-use crate::core::tensor::{GGMLType, TensorSource};
+﻿use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{attention_value_f32, dot_f32, softmax_inplace, rope_neox, rope_mrope, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use crate::ops::quant::{self, BlockQ8K, QK_K};
 use crate::core::thread_pool::ComputePool;
-use crate::models::vision::VisionGrid;
+use crate::models::qwen35::clip_config::Qwen35Config;
+use crate::models::qwen35::vision::VisionGrid;
+
+pub mod clip_config;
+pub mod vision;
 
 
 

@@ -8,7 +8,7 @@
 //! - `audio_processor` depends only on `core::tensor`.
 //! - `model` depends on `core::*`, `ops::*`, and `super::audio_processor`
 //!   (uses `MelWindow`, `log_mel_windows`, `AsrAudioError`).
-//! - `runtime` depends on `core::*`, `format::*`, `models::qwen3::base_multimodal`,
+//! - `runtime` depends on `core::*`, `format::*`, `models::qwen3::base`,
 //!   and `super::audio_processor` and `super::model`.
 
 pub mod audio_processor;

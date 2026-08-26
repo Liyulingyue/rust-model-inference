@@ -4,7 +4,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::models::diffusion::pig;
 use crate::models::diffusion::z_image::{ZImageOptions, ZImagePipeline, ZImageRgb};
-use crate::models::qwen3::base_multimodal::Qwen3Model;
+use crate::models::qwen3::base::Qwen3Model;
 use image::ImageEncoder;
 use std::ffi::OsString;
 use std::fs::OpenOptions;

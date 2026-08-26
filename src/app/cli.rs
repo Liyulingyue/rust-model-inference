@@ -1,12 +1,7 @@
 ﻿use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum KvFormat {
-    #[default]
-    F16,
-    F32,
-}
+pub use crate::core::scratchpad::KvFormat;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EmbeddingOutput {
@@ -339,8 +334,6 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
         Some("--gpu")
     } else if options.thinking {
         Some("--thinking")
-    } else if options.kv_format == KvFormat::F32 {
-        Some("--kv-cache f32")
     } else if options.language.is_some() {
         Some("--language")
     } else if options.max_tokens.is_some() {
@@ -715,7 +708,6 @@ mod tests {
             (vec!["--profile"], "--profile"),
             (vec!["--gpu"], "--gpu"),
             (vec!["--thinking"], "--thinking"),
-            (vec!["--kv-cache", "f32"], "--kv-cache f32"),
             (vec!["--language", "en"], "--language"),
             (vec!["--max-tokens", "1"], "--max-tokens"),
             (vec!["--temp", "0"], "--temp"),
@@ -999,7 +991,7 @@ mod tests {
             ("--n-gen", |o| o.max_tokens.is_none()),
             ("--temp", |o| o.temperature.is_none()),
             ("--threads", |o| o.threads == 0),
-            ("--kv-cache", |o| o.kv_format == KvFormat::F16),
+            ("--kv-cache", |o| o.kv_format == KvFormat::F32),
             ("--mmproj", |o| o.mmproj.is_none()),
             ("--image", |o| o.image.is_none()),
         ];

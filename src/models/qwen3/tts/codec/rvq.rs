@@ -6,7 +6,7 @@
 //! vectors across all 16 levels.
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::base_multimodal::{checked_product, static_q8_matrix};
+use crate::models::qwen3::base::{checked_product, static_q8_matrix};
 #[cfg(target_arch = "aarch64")]
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 #[cfg(not(target_arch = "aarch64"))]

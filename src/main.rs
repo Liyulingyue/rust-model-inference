@@ -166,7 +166,7 @@ fn main() {
             ));
         } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
             app::run_or_exit(app::run_inference(
-                source.as_ref(),
+                source.clone(),
                 prompt,
                 max_tokens,
                 temperature,
@@ -178,7 +178,7 @@ fn main() {
             ));
         } else {
             app::run_or_exit(app::run_inference(
-                source.as_ref(),
+                source.clone(),
                 prompt,
                 max_tokens,
                 temperature,
@@ -199,7 +199,7 @@ fn main() {
             true,
         ));
         app::run_or_exit(app::run_interactive(
-            source.as_ref(),
+            source.clone(),
             max_tokens,
             temperature,
             options.threads,

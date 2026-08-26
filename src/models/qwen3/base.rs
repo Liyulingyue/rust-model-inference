@@ -1,648 +1,2041 @@
-//! # Qwen3 纯文本推理
+﻿//! # Qwen3Model: Qwen3 文本模型（VL/ASR/TTS 路径专用）
 //!
-//! 此模块包含 Qwen3 纯文本推理的完整实现，通过 `QuantizedTensor` 分派
-//! 量化 kernel，支持 Q4_K、Q6_K、Q8_0 等所有 GGUF 量化格式。
+//! **注意**：此模块**不是**普通 CLI Qwen3 文本推理的执行路径。
 //!
-//! ## 架构说明
+//! ## 代码路径说明
 //!
-//! Qwen3 推理存在两套代码路径：
+//! Qwen3 推理存在**两套**代码路径：
 //!
-//! | 路径 | 模块 | 量化支持 | 用途 |
-//! |------|------|----------|------|
-//! | 纯文本推理 | `models::qwen3` | 所有格式 | CLI 文本生成 |
-//! | VL/ASR/TTS | `models::qwen3::base_multimodal` | 多量化 | 多模态推理 |
+//! ### 路径 1：普通 CLI 文本推理（`app/text.rs`）
+//! ```text
+//! main.rs -> app::run_inference() -> app/text.rs
+//! ```
+//! - **推荐用于纯文本生成任务**
+//!
+//! ### 路径 2：Qwen3Model 路径（`models/qwen3.rs`）
+//! ```text
+//! main.rs -> app::run_qwen3vl / run_asr / run_tts
+//!   -> Qwen3Model::from_source()
+//!   -> Qwen3Model::text_encode()
+//! ```
+//! - 支持多量化格式（Q4_K、Q6_K、Q8_0 等）
+//! - 支持 RoPE：Neox 和 Interleaved (mrope)
+//! - 用于：Qwen3-VL 解码器、Qwen3-ASR、Qwen3-TTS、Z-Image 文本编码器
 
-use crate::app::cli::{per_second, inference_step_budget, resolve_thread_count, KvFormat};
-use crate::core::loader::model_config_from_source;
-use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::core::tensor::{GGMLType, TensorSource};
-use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::skeleton::{load_layers, Qwen3LayerWeights, get_f32_tensor};
-use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
-use crate::ops::embedding_lookup;
-use crate::ops::kernel::{Kernel, Weight};
-use crate::ops::{
-    attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace,
-    vec_mad_f16_f32, vec_scale_f32,
+use crate::app::cli::resolve_thread_count;
+use crate::core::loader::{
+    check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs,
 };
-
+use crate::core::tensor::{
+    GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource,
+};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::*;
+#[cfg(feature = "parity-trace")]
+use crate::parity_trace;
+use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
+use crate::core::scratchpad::{ExecutionScratchpad, KvArch, KvCache, KvCacheF16, KvFormat, KvLifecycle, KvState};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
+pub use crate::models::qwen3::static_weight;
+use crate::models::qwen3::{load_layers_static, Qwen3LayerWeights};
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-#[macro_export]
-macro_rules! slice_from_mut {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts_mut($ptr, $len) }
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Qwen3Rope {
+    Neox,
+    Interleaved { sections: [i32; 4], n_dims: usize },
 }
 
-#[macro_export]
-macro_rules! slice_from_ref {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts($ptr, $len) }
-    };
+pub struct Qwen3Config {
+    pub architecture: String,
+    pub n_embd: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_embd_head_k: usize,
+    pub n_embd_head_v: usize,
+    pub n_ff: usize,
+    pub vocab: usize,
+    pub n_ctx: usize,
+    pub eps: f32,
+    pub freq_base: f32,
+    pub has_qk_norm: bool,
+    pub rope: Qwen3Rope,
 }
 
-#[macro_export]
-macro_rules! raw_parts {
-    ($ptr:expr, $len:expr) => {
-        unsafe { std::slice::from_raw_parts($ptr, $len) }
-    };
+impl Qwen3Config {
+    /// Build a `Qwen3Config` from a GGUF tensor source.
+    ///
+    /// Phase 4c: architecture dispatch (which architectures are accepted, which
+    /// rope flavor they use, which dimensional configurations are allowed)
+    /// lives in [`crate::core::loader::qwen3_arch_knobs`]. This function now
+    /// only composes the per-arch knobs with the dimensional configuration
+    /// produced by [`model_config_from_source`].
+    pub(crate) fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+        let config = model_config_from_source(source)?;
+        let knobs = qwen3_arch_knobs(source)?;
+
+        // Per-arch head dimensions (Qwen3 / Qwen3-VL expose these explicitly;
+        // other architectures fall back to n_embd / n_head).
+        let n_embd_head_k = optional_usize(source, &format!("{}.attention.key_length", knobs.arch))?
+            .unwrap_or(config.n_embd_head);
+        let n_embd_head_v =
+            optional_usize(source, &format!("{}.attention.value_length", knobs.arch))?
+                .unwrap_or(config.n_embd_head);
+        if n_embd_head_k == 0 || n_embd_head_v == 0 {
+            return Err(format!(
+                "Invalid {} attention head lengths: key={n_embd_head_k}, value={n_embd_head_v}",
+                knobs.arch
+            ));
+        }
+
+        // Optional dimensional whitelist (e.g. Qwen3-VL).
+        if let Some(allowed) = knobs.allowed_dimensions {
+            check_qwen3_allowed_dimensions(allowed, &config, n_embd_head_k, n_embd_head_v)?;
+        }
+
+        let rope = match knobs.rope_sections {
+            Some(sections) => Qwen3Rope::Interleaved {
+                sections,
+                n_dims: n_embd_head_k,
+            },
+            None => Qwen3Rope::Neox,
+        };
+
+        Ok(Self {
+            architecture: knobs.arch,
+            n_embd: config.n_embd,
+            n_layer: config.n_layer,
+            n_head: config.n_head,
+            n_head_kv: config.n_head_kv,
+            n_embd_head_k,
+            n_embd_head_v,
+            n_ff: config.n_ff,
+            vocab: config.vocab_size,
+            n_ctx: config.n_ctx,
+            eps: config.norm_eps,
+            freq_base: config.rope_freq_base,
+            has_qk_norm: knobs.has_qk_norm,
+            rope,
+        })
+    }
 }
 
-pub fn run_inference(
-    source: &dyn TensorSource,
+fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>, String> {
+    let Some(value) = source.metadata(key) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_u64()
+        .ok_or_else(|| format!("Invalid metadata: {key}"))?;
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| format!("{key} does not fit usize"))
+}
+
+fn checked_session_capacity(
+    prompt: usize,
+    generation: usize,
+    context: usize,
+) -> Result<usize, String> {
+    let capacity = prompt
+        .checked_add(generation)
+        .ok_or_else(|| "Session capacity overflow".to_string())?;
+    if capacity > context {
+        return Err(format!(
+            "Session capacity {capacity} exceeds model context {context}"
+        ));
+    }
+    Ok(capacity)
+}
+
+fn checked_decoder_steps(
+    prompt: usize,
+    generation: usize,
+    context: usize,
+) -> Result<usize, String> {
+    checked_session_capacity(prompt, generation, context)?
+        .checked_sub(1)
+        .ok_or_else(|| "Decoder step count underflow".to_string())
+}
+
+fn checked_generated_position(
+    prompt_positions: &[[usize; 4]],
+    generated_index: usize,
+) -> Result<[usize; 4], String> {
+    let last_prompt_position = prompt_positions
+        .last()
+        .ok_or_else(|| "Cannot generate a position without prompt positions".to_string())?[0];
+    let position = last_prompt_position
+        .checked_add(1)
+        .and_then(|position| position.checked_add(generated_index))
+        .ok_or_else(|| "Generated position overflow".to_string())?;
+    Ok([position, position, position, 0])
+}
+
+fn validate_input_shapes(
+    token_count: usize,
+    embedding_dim: usize,
+    position_count: usize,
+    embedding_values: Option<usize>,
+) -> Result<(), String> {
+    if position_count != token_count {
+        return Err(format!(
+            "Position count {position_count} does not match token count {token_count}"
+        ));
+    }
+    if let Some(values) = embedding_values {
+        let expected = token_count
+            .checked_mul(embedding_dim)
+            .ok_or_else(|| "Input embedding shape overflow".to_string())?;
+        if values != expected {
+            return Err(format!(
+                "Embedding value count {values} does not match expected {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn greedy_token(logits: &[f32]) -> Result<u32, String> {
+    let (&first, rest) = logits
+        .split_first()
+        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
+    if !first.is_finite() {
+        return Err("Cannot sample non-finite logits".into());
+    }
+    let mut best_id = 0usize;
+    let mut best = first;
+    for (index, &logit) in rest.iter().enumerate() {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        if logit > best {
+            best = logit;
+            best_id = index + 1;
+        }
+    }
+    u32::try_from(best_id).map_err(|_| "Token ID does not fit u32".into())
+}
+
+pub struct Qwen3Input<'a> {
+    pub token_ids: &'a [u32],
+    pub positions: &'a [[usize; 4]],
+    pub embeddings: Option<&'a [f32]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen3GenerateOptions {
+    pub max_new_tokens: usize,
+    pub temperature: f32,
+}
+
+pub struct Qwen3Generation {
+    pub text: String,
+    pub rendered_tokens: Vec<String>,
+    pub token_ids: Vec<u32>,
+    pub prompt_tokens: usize,
+}
+
+pub struct Qwen3Model {
+    pub(crate) source: Arc<dyn TensorSource>,
+    pub(crate) tokenizer: Arc<BPETokenizer>,
+    pub(crate) pool: Arc<ComputePool>,
+    pub(crate) config: Qwen3Config,
+    pub(crate) layers: Vec<Qwen3LayerWeights<'static>>,
+    pub(crate) output_norm: Vec<f32>,
+    pub(crate) token_embedding: Weight<'static>,
+    pub(crate) output: Weight<'static>,
+}
+
+pub struct Qwen3Session<'model> {
+    model: &'model Qwen3Model,
+    kv_state: KvState,
+    scratch: ExecutionScratchpad,
+    capacity: usize,
+}
+
+/// 携带格式信息的 KV cache 指针。
+///
+/// 让 attention 循环可以根据格式选择对应的写入/读取路径。
+/// - `F16`: 高性能路径，使用 F16 特定的 dot/f32_to_f16 优化（生产路径）
+/// - `F32`: 通用路径，直接读写 f32（用于调试/精确推理）
+#[derive(Clone, Copy)]
+enum KvPtrs {
+    F16 { k: *mut u16, v: *mut u16 },
+    F32 { k: *mut f32, v: *mut f32 },
+}
+
+impl Qwen3Model {
+    pub fn from_source(
+        source: Arc<dyn TensorSource>,
+        tokenizer: Arc<BPETokenizer>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let config = Qwen3Config::from_source(source.as_ref())?;
+        if config.vocab != tokenizer.vocab_size() {
+            return Err(format!(
+                "{} vocabulary size {} does not match tokenizer vocab {}",
+                config.architecture,
+                config.vocab,
+                tokenizer.vocab_size()
+            ));
+        }
+        let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
+        let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
+        let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
+        let n_attn = checked_product(
+            "attention output width",
+            config.n_head,
+            config.n_embd_head_v,
+        )?;
+
+        let output_norm = load_f32_tensor(
+            source.as_ref(),
+            "output_norm.weight",
+            &[usize_to_u64(config.n_embd, "embedding width")?],
+        )?;
+        let token_embedding_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
+        let token_embedding_bytes = source.tensor_slice("token_embd.weight").expect("no embd");
+        let token_embedding_bytes_static: &'static [u8] = unsafe { std::mem::transmute(token_embedding_bytes) };
+        let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+            token_embedding_bytes_static,
+            token_embedding_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
+
+        let output_info = source.tensor_info("output.weight").unwrap_or(token_embedding_info);
+        let output_bytes = source.tensor_slice("output.weight").unwrap_or(token_embedding_bytes);
+        let output_bytes_static: &'static [u8] = unsafe { std::mem::transmute(output_bytes) };
+        let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+            output_bytes_static,
+            output_info.ggml_type,
+            config.n_embd,
+            config.vocab,
+        ));
+
+        let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
+            Arc::clone(&source),
+            config.n_layer,
+            config.n_embd,
+            n_embd_q,
+            n_embd_k,
+            config.n_ff,
+            config.n_embd_head_k,
+            config.has_qk_norm,
+        );
+
+        Ok(Self {
+            source,
+            tokenizer,
+            pool,
+            config,
+            layers,
+            output_norm,
+            token_embedding,
+            output,
+        })
+    }
+
+    pub fn config(&self) -> &Qwen3Config {
+        &self.config
+    }
+
+    pub fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
+
+    pub fn pool(&self) -> Arc<ComputePool> {
+        Arc::clone(&self.pool)
+    }
+
+    pub fn layers(&self) -> &Vec<Qwen3LayerWeights> {
+        &self.layers
+    }
+
+    pub fn output_norm(&self) -> &Vec<f32> {
+        &self.output_norm
+    }
+
+    pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
+        validate_token_ids(token_ids, self.config.vocab)?;
+        let len = checked_product(
+            "token embedding values",
+            token_ids.len(),
+            self.config.n_embd,
+        )?;
+        check_allocation("token embeddings", len, std::mem::size_of::<f32>())?;
+        let mut embeddings = vec![0.0; len];
+        for (row, &token_id) in embeddings
+            .chunks_exact_mut(self.config.n_embd)
+            .zip(token_ids)
+        {
+            self.token_embedding.embedding_lookup(token_id, row);
+        }
+        Ok(embeddings)
+    }
+
+    pub fn text_encode(&self, token_ids: &[u32], positions: &[[usize; 4]]) -> Result<Vec<f32>, String> {
+        text_encode(self, token_ids, positions)
+    }
+
+    pub fn generate(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_with_asr_trace(input, options, false)
+    }
+
+    pub(crate) fn generate_asr(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_with_asr_trace(input, options, true)
+    }
+
+    fn generate_with_asr_trace(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        asr_trace: bool,
+    ) -> Result<Qwen3Generation, String> {
+        validate_generation(self, &input, options)?;
+        let capacity = checked_session_capacity(
+            input.token_ids.len(),
+            options.max_new_tokens,
+            self.config.n_ctx,
+        )?;
+        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace)
+    }
+}
+
+impl<'model> Qwen3Session<'model> {
+    /// 创建新的会话（默认 F16 KV cache, Ephemeral 生命周期）。
+    pub fn new(model: &'model Qwen3Model, capacity: usize) -> Result<Self, String> {
+        Self::new_with_kv_state(model, capacity, KvFormat::F16, KvLifecycle::Ephemeral)
+    }
+
+    /// 使用指定的 KV 格式和生命周期创建会话（推荐入口）。
+    ///
+    /// 这是统一 KV 缓存设计的标准入口，支持：
+    /// - `KvFormat::F16/F32`：选择 KV 精度
+    /// - `KvLifecycle::Ephemeral/Timed/Persistent`：选择生命周期策略
+    ///
+    /// 当前阶段 `base` 主要需要 F16（与原代码一致）。
+    /// 未来可以无缝扩展到 F32 或其他格式。
+    pub fn new_with_kv_state(
+        model: &'model Qwen3Model,
+        capacity: usize,
+        kv_format: KvFormat,
+        lifecycle: KvLifecycle,
+    ) -> Result<Self, String> {
+        if capacity == 0 || capacity > model.config.n_ctx {
+            return Err(format!(
+                "Session capacity {capacity} must be within 1..={}",
+                model.config.n_ctx
+            ));
+        }
+        let config = &model.config;
+        let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
+        let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
+        let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
+        let n_attn = checked_product(
+            "attention output width",
+            config.n_head,
+            config.n_embd_head_v,
+        )?;
+        let kv_stride = n_embd_k.max(n_embd_v);
+        let kv_size = checked_product(
+            "KV cache values",
+            checked_product("KV cache rows", config.n_layer, capacity)?,
+            kv_stride,
+        )?;
+        let kv_bytes = match kv_format {
+            KvFormat::F16 => check_allocation("KV cache", kv_size, std::mem::size_of::<u16>())?,
+            KvFormat::F32 => check_allocation("KV cache", kv_size, std::mem::size_of::<f32>())?,
+        };
+
+        let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
+        let score_stride = capacity
+            .checked_add(255)
+            .map(|value| value / 256 * 256)
+            .ok_or_else(|| "Attention score stride overflow".to_string())?;
+        let score_values =
+            checked_product("attention scores", model.pool.n_threads(), score_stride)?;
+        for (name, len, bytes) in [
+            ("hidden state", config.n_embd, std::mem::size_of::<f32>()),
+            (
+                "normalized state",
+                config.n_embd,
+                std::mem::size_of::<f32>(),
+            ),
+            ("queries", n_embd_q, std::mem::size_of::<f32>()),
+            ("keys", kv_stride, std::mem::size_of::<f32>()),
+            ("values", kv_stride, std::mem::size_of::<f32>()),
+            ("attention output", n_attn, std::mem::size_of::<f32>()),
+            (
+                "attention projection",
+                config.n_embd,
+                std::mem::size_of::<f32>(),
+            ),
+            ("down projection", config.n_embd, std::mem::size_of::<f32>()),
+            ("gate projection", config.n_ff, std::mem::size_of::<f32>()),
+            ("up projection", config.n_ff, std::mem::size_of::<f32>()),
+            ("logits", config.vocab, std::mem::size_of::<f32>()),
+            ("quantized activations", max_n_in, std::mem::size_of::<u8>()),
+            (
+                "quantization scales",
+                max_n_in / 32,
+                std::mem::size_of::<f32>(),
+            ),
+            ("attention scores", score_values, std::mem::size_of::<f32>()),
+        ] {
+            check_allocation(name, len, bytes)?;
+        }
+
+        // 构造标准化的 KvState
+        let arch = Arc::new(KvArch::new(
+            config.n_layer,
+            config.n_head_kv,
+            config.n_embd_head_k,
+            config.n_embd_head_v,
+            model.config.n_ctx,
+        ));
+        let mut kv_state = KvState::new(arch, kv_format, capacity)
+            .with_lifecycle(lifecycle);
+        // KvState 自带的 KvCache 已分配好容量，但我们需要重新分配为正确的 stride
+        // （KvState::new 用的是 max(k,v) 而非实际的 kv_stride）
+        match (kv_format, &mut kv_state.cache) {
+            (KvFormat::F16, KvCache::F16(c)) => {
+                c.k = vec![0u16; kv_size];
+                c.v = vec![0u16; kv_size];
+            }
+            (KvFormat::F32, KvCache::F32(c)) => {
+                c.k = vec![0f32; kv_size];
+                c.v = vec![0f32; kv_size];
+            }
+            _ => unreachable!("format and cache variant mismatch"),
+        }
+        let _ = kv_bytes; // 当前未直接使用，保留用于将来分配校验
+
+        Ok(Self {
+            model,
+            kv_state,
+            scratch: ExecutionScratchpad {
+                x: vec![0.0; config.n_embd],
+                normed: vec![0.0; config.n_embd],
+                q: vec![0.0; n_embd_q],
+                k_new: vec![0.0; kv_stride],
+                v_new: vec![0.0; kv_stride],
+                attn_out: vec![0.0; n_attn],
+                attn_proj: vec![0.0; config.n_embd],
+                down_buf: vec![0.0; config.n_embd],
+                gate_buf: vec![0.0; config.n_ff],
+                up_buf: vec![0.0; config.n_ff],
+                logits: vec![0.0; config.vocab],
+                q8_buf: vec![0; max_n_in],
+                scale_buf: vec![0.0; max_n_in / 32],
+                // Q8_K pre-quantization buffer for K-quant kernels (Q4_K / Q6_K).
+                // See TODO in docs/TODO.md: "Q8_0 与 Q8_K 量化路径按需量化".
+                // - `q8_buf` + `scale_buf` (Q8_0): consumed by the default kernel
+                //   path (`forward_prequantized`, see ops/kernel/mod.rs:70) and by
+                //   kernels with Q8_0 / f16 weights.
+                // - `q8k_buf` (Q8_K): consumed by K-quant kernels
+                //   (q4_k.rs:90, q6_k.rs:73) via `forward_prepared(.., Some(q8_k), ..)`;
+                //   those overrides name the Q8_0 args `_input_q8` / `_input_scales`
+                //   and discard them.
+                // A single layer's kernel uses exactly one of the two paths, but the
+                // model as a whole can be heterogeneous (some layers Q8_0, others
+                // Q4_K/Q6_K) so both buffers must stay allocated. The waste today is
+                // that we re-quantize the same input into BOTH formats on every
+                // forward even when a given layer only needs one — fix is to dispatch
+                // per-layer on weight format and skip the unused quantize call.
+                q8k_buf: vec![
+                    crate::ops::quant::BlockQ8K {
+                        d: 0.0,
+                        qs: [0; 256],
+                        bsums: [0; 16],
+                    };
+                    max_n_in / 256
+                ],
+                score_stride,
+                scores: vec![0.0; score_values],
+            },
+            capacity,
+        })
+    }
+
+    /// 获取对底层 KV state 的引用（只读），供外部监控或跨 session 共享。
+    pub fn kv_state(&self) -> &KvState {
+        &self.kv_state
+    }
+
+    /// 重置 KV 缓存（用于多轮对话中的上下文清理）。
+    pub fn reset_kv(&mut self) {
+        self.kv_state.reset();
+    }
+
+    pub fn generate(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_with_asr_trace(input, options, false)
+    }
+
+    /// Streaming 生成版本：每个 token 渲染后立即回调 `on_token`。
+    ///
+    /// 这是 CLI 实时输出、多轮对话"打字机"效果的关键接口。
+    /// 与 `generate()` 的区别仅在 streaming callback；最终 `Qwen3Generation`
+    /// 内容一致。
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// session.generate_streaming(input, options, |text| print!("{text}"))?;
+    /// ```
+    pub fn generate_streaming(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<Qwen3Generation, String> {
+        validate_generation(self.model, &input, options)?;
+        let required = checked_session_capacity(
+            input.token_ids.len(),
+            options.max_new_tokens,
+            self.model.config.n_ctx,
+        )?;
+        if required > self.capacity {
+            return Err(format!(
+                "Generation requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        // 包装 callback 为 dyn FnMut（一次性，不需要 Box<dyn FnMut>）
+        let mut cb = |text: &str| on_token(text);
+        self.generate_inner(input, options, false, Some(&mut cb))
+    }
+
+    fn generate_with_asr_trace(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        asr_trace: bool,
+    ) -> Result<Qwen3Generation, String> {
+        validate_generation(self.model, &input, options)?;
+        let required = checked_session_capacity(
+            input.token_ids.len(),
+            options.max_new_tokens,
+            self.model.config.n_ctx,
+        )?;
+        if required > self.capacity {
+            return Err(format!(
+                "Generation requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        self.generate_inner(input, options, asr_trace, None)
+    }
+
+    fn generate_inner(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        asr_trace: bool,
+        mut on_token: Option<&mut dyn FnMut(&str)>,
+    ) -> Result<Qwen3Generation, String> {
+        let _source = &self.model.source;
+        let model = self.model;
+        let config = &model.config;
+        let capacity = self.capacity;
+        let n_prompt = input.token_ids.len();
+        let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
+        let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
+        let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
+        let n_attn = checked_product(
+            "attention output width",
+            config.n_head,
+            config.n_embd_head_v,
+        )?;
+        let kv_stride = n_embd_k.max(n_embd_v);
+        let kv_cache_size = checked_product(
+            "KV cache values",
+            checked_product("KV cache rows", config.n_layer, capacity)?,
+            kv_stride,
+        )?;
+        let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
+        let group_size = config.n_head / config.n_head_kv;
+        let kq_scale = 1.0 / (config.n_embd_head_k as f32).sqrt();
+        // 统一 KV cache 指针（同时支持 F16/F32），由 `KvPtrs` 携带格式信息
+        // 让 attention 循环可以根据格式选择对应的写入/读取路径。
+        let kv_ptrs = match &mut self.kv_state.cache {
+            KvCache::F16(cache) => KvPtrs::F16 {
+                k: cache.k.as_mut_ptr(),
+                v: cache.v.as_mut_ptr(),
+            },
+            KvCache::F32(cache) => KvPtrs::F32 {
+                k: cache.k.as_mut_ptr(),
+                v: cache.v.as_mut_ptr(),
+            },
+        };
+        self.kv_state.update_access();
+
+        #[cfg(feature = "parity-trace")]
+        {
+            if asr_trace {
+                parity_trace::report(parity_trace::token_ids("asr.prompt_ids", input.token_ids));
+                let position_values =
+                    checked_product("ASR position values", input.positions.len(), 4)?;
+                let mut positions = Vec::new();
+                positions
+                    .try_reserve_exact(position_values)
+                    .map_err(|error| format!("Failed to allocate ASR positions: {error}"))?;
+                for position in input.positions {
+                    positions.extend_from_slice(position);
+                }
+                parity_trace::report(parity_trace::usize_values(
+                    "asr.positions",
+                    &[input.positions.len(), 4],
+                    &positions,
+                ));
+            } else {
+                parity_trace::report(parity_trace::token_ids("prompt_ids", input.token_ids));
+                let text_positions: Vec<usize> =
+                    input.positions.iter().map(|value| value[0]).collect();
+                parity_trace::report(parity_trace::usize_values(
+                    "qwen3.positions",
+                    &[text_positions.len()],
+                    &text_positions,
+                ));
+            }
+        }
+        #[cfg(not(feature = "parity-trace"))]
+        let _ = asr_trace;
+
+        let mut generated_tokens = Vec::new();
+        generated_tokens
+            .try_reserve_exact(options.max_new_tokens)
+            .map_err(|error| format!("Failed to allocate generated tokens: {error}"))?;
+        let mut rendered_tokens = Vec::new();
+        rendered_tokens
+            .try_reserve_exact(options.max_new_tokens)
+            .map_err(|error| format!("Failed to allocate rendered tokens: {error}"))?;
+        let mut decoder = model.tokenizer.streaming_decoder(false);
+
+        let decoder_steps = checked_decoder_steps(n_prompt, options.max_new_tokens, config.n_ctx)?;
+        for step in 0..decoder_steps {
+            let position = if step < n_prompt {
+                input.positions[step]
+            } else {
+                checked_generated_position(input.positions, step - n_prompt)?
+            };
+            if step < n_prompt {
+                if let Some(embeddings) = input.embeddings {
+                    let start = step * config.n_embd;
+                    self.scratch
+                        .x
+                        .copy_from_slice(&embeddings[start..start + config.n_embd]);
+                } else {
+                    model
+                        .token_embedding
+                        .embedding_lookup(input.token_ids[step], &mut self.scratch.x);
+                }
+            } else {
+                let token_id = *generated_tokens
+                    .last()
+                    .ok_or_else(|| "Missing generated token for decoder step".to_string())?;
+                model
+                    .token_embedding
+                    .embedding_lookup(token_id, &mut self.scratch.x);
+            }
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint(
+                "model.input_embed",
+                None,
+                &[1, config.n_embd],
+                &self.scratch.x,
+            ));
+
+            for layer in 0..config.n_layer {
+                let weights = &model.layers[layer];
+                let x_ptr = self.scratch.x.as_mut_ptr();
+                let normed_ptr = self.scratch.normed.as_mut_ptr();
+                let q_ptr = self.scratch.q.as_mut_ptr();
+                let k_ptr = self.scratch.k_new.as_mut_ptr();
+                let v_ptr = self.scratch.v_new.as_mut_ptr();
+                let attn_out_ptr = self.scratch.attn_out.as_mut_ptr();
+                let attn_proj_ptr = self.scratch.attn_proj.as_mut_ptr();
+                let down_buf_ptr = self.scratch.down_buf.as_mut_ptr();
+                let gate_buf_ptr = self.scratch.gate_buf.as_mut_ptr();
+                let up_buf_ptr = self.scratch.up_buf.as_mut_ptr();
+                let q8_buf_ptr = self.scratch.q8_buf.as_mut_ptr();
+                let scale_buf_ptr = self.scratch.scale_buf.as_mut_ptr();
+
+                let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, config.n_embd) };
+                let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, config.n_embd) };
+                let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+                let scale_buf =
+                    unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+
+                rms_norm(x, &weights.attn_norm, normed, config.eps);
+                #[cfg(feature = "parity-trace")]
+                if layer == 0 {
+                    parity_trace::report(parity_trace::checkpoint(
+                        "attn_norm-0",
+                        Some(0),
+                        &[1, config.n_embd],
+                        normed,
+                    ));
+                }
+                quantize_q8_0_into(
+                    normed,
+                    config.n_embd,
+                    &mut q8_buf[..config.n_embd],
+                    &mut scale_buf[..config.n_embd / 32],
+                );
+                let q8 = q8_buf[..config.n_embd].as_ptr();
+                let scales = scale_buf[..config.n_embd / 32].as_ptr();
+                let pool = Arc::clone(&model.pool);
+                pool.compute(move |thread, threads| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
+                    let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                    let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                    let k = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_k) };
+                    let v = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_v) };
+                    weights.wq.kernel.forward_prepared(
+                        normed,
+                        q8,
+                        scales,
+                        None,
+                        q,
+                        config.n_embd,
+                        n_embd_q,
+                        thread,
+                        threads,
+                    );
+                    weights.wk.kernel.forward_prepared(
+                        normed,
+                        q8,
+                        scales,
+                        None,
+                        k,
+                        config.n_embd,
+                        n_embd_k,
+                        thread,
+                        threads,
+                    );
+                    weights.wv.kernel.forward_prepared(
+                        normed,
+                        q8,
+                        scales,
+                        None,
+                        v,
+                        config.n_embd,
+                        n_embd_v,
+                        thread,
+                        threads,
+                    );
+                });
+
+                {
+                    let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                    let k = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_k) };
+                    let v = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_v) };
+                    if let (Some(q_norm), Some(k_norm)) =
+                        (weights.q_norm.as_deref(), weights.k_norm.as_deref())
+                    {
+                        for head in q.chunks_exact_mut(config.n_embd_head_k) {
+                            rms_norm_inplace(head, q_norm, config.eps);
+                        }
+                        for head in k.chunks_exact_mut(config.n_embd_head_k) {
+                            rms_norm_inplace(head, k_norm, config.eps);
+                        }
+                    }
+                    #[cfg(feature = "parity-trace")]
+                    if layer == 0 {
+                        parity_trace::report(parity_trace::checkpoint(
+                            "Qcur_normed-0",
+                            Some(0),
+                            &[config.n_head, config.n_embd_head_k],
+                            q,
+                        ));
+                        parity_trace::report(parity_trace::checkpoint(
+                            "Kcur_normed-0",
+                            Some(0),
+                            &[config.n_head_kv, config.n_embd_head_k],
+                            k,
+                        ));
+                    }
+                    for head in q.chunks_exact_mut(config.n_embd_head_k) {
+                        match config.rope {
+                            Qwen3Rope::Neox => {
+                                rope_neox(head, position[0], config.n_embd_head_k, config.freq_base)
+                            }
+                            Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
+                                head,
+                                position,
+                                sections,
+                                config.n_embd_head_k,
+                                config.freq_base,
+                                n_dims,
+                            ),
+                        }
+                    }
+                    for head in k.chunks_exact_mut(config.n_embd_head_k) {
+                        match config.rope {
+                            Qwen3Rope::Neox => {
+                                rope_neox(head, position[0], config.n_embd_head_k, config.freq_base)
+                            }
+                            Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
+                                head,
+                                position,
+                                sections,
+                                config.n_embd_head_k,
+                                config.freq_base,
+                                n_dims,
+                            ),
+                        }
+                    }
+                    #[cfg(feature = "parity-trace")]
+                    if layer == 0 {
+                        parity_trace::report(parity_trace::checkpoint(
+                            "Qcur-0",
+                            Some(0),
+                            &[config.n_head, config.n_embd_head_k],
+                            q,
+                        ));
+                        parity_trace::report(parity_trace::checkpoint(
+                            "Kcur-0",
+                            Some(0),
+                            &[config.n_head_kv, config.n_embd_head_k],
+                            k,
+                        ));
+                    }
+
+                    let layer_base = layer * capacity * kv_stride;
+                    // 根据格式选择写入路径
+                    match kv_ptrs {
+                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe {
+                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                            };
+                            let v_cache = unsafe {
+                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                            };
+                            for head in 0..config.n_head_kv {
+                                let k_offset = head * config.n_embd_head_k;
+                                let v_offset = head * config.n_embd_head_v;
+                                let cache_row = layer_base + step * kv_stride;
+                                f32_slice_to_f16(
+                                    &k[k_offset..k_offset + config.n_embd_head_k],
+                                    &mut k_cache[cache_row + k_offset
+                                        ..cache_row + k_offset + config.n_embd_head_k],
+                                );
+                                f32_slice_to_f16(
+                                    &v[v_offset..v_offset + config.n_embd_head_v],
+                                    &mut v_cache[cache_row + v_offset
+                                        ..cache_row + v_offset + config.n_embd_head_v],
+                                );
+                            }
+                        }
+                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe {
+                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                            };
+                            let v_cache = unsafe {
+                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                            };
+                            for head in 0..config.n_head_kv {
+                                let k_offset = head * config.n_embd_head_k;
+                                let v_offset = head * config.n_embd_head_v;
+                                let cache_row = layer_base + step * kv_stride;
+                                k_cache[cache_row + k_offset
+                                    ..cache_row + k_offset + config.n_embd_head_k]
+                                    .copy_from_slice(&k[k_offset..k_offset + config.n_embd_head_k]);
+                                v_cache[cache_row + v_offset
+                                    ..cache_row + v_offset + config.n_embd_head_v]
+                                    .copy_from_slice(&v[v_offset..v_offset + config.n_embd_head_v]);
+                            }
+                        }
+                    }
+                }
+
+                let pool = Arc::clone(&model.pool);
+                let scores_ptr = self.scratch.scores.as_mut_ptr();
+                let score_stride = self.scratch.score_stride;
+                // 把 kv_ptrs (轻量 enum, 含 *mut) 移入闭包，避免在闭包中重复解引用
+                let kv_ptrs_inner = kv_ptrs;
+                pool.compute(move |thread, threads| {
+                    let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
+                    let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_attn) };
+                    let scores = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            scores_ptr.add(thread * score_stride),
+                            score_stride,
+                        )
+                    };
+                    let f16_scratch = scores.as_mut_ptr().cast::<u16>();
+                    let head_start = thread * config.n_head / threads;
+                    let head_end = (thread + 1) * config.n_head / threads;
+                    let layer_base = layer * capacity * kv_stride;
+                    let n_padded = (step + 1).div_ceil(256) * 256;
+                    match kv_ptrs_inner {
+                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            for head in head_start..head_end {
+                                let kv_head = head / group_size;
+                                let q_offset = head * config.n_embd_head_k;
+                                let output_offset = head * config.n_embd_head_v;
+                                let output =
+                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let query = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        output.as_mut_ptr().cast::<u16>(),
+                                        config.n_embd_head_k,
+                                    )
+                                };
+                                f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
+                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                for token in 0..=step {
+                                    let row = layer_base + token * kv_stride;
+                                    let key_offset = row + kv_head * config.n_embd_head_k;
+                                    scores[token] = dot_f16(
+                                        query,
+                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                        config.n_embd_head_k,
+                                    ) * kq_scale;
+                                }
+                                softmax_inplace(&mut scores[..n_padded]);
+                                for index in 0..n_padded {
+                                    unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
+                                }
+                                let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
+                                let values = unsafe {
+                                    std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
+                                };
+                                values[step + 1..].fill(0);
+                                for dimension in 0..config.n_embd_head_v {
+                                    for token in 0..=step {
+                                        let row = layer_base + token * kv_stride;
+                                        values[token] =
+                                            v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                    }
+                                    output[dimension] = dot_f16(values, weights, n_padded);
+                                }
+                            }
+                        }
+                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                            // F32 路径：直接用 f32 计算，无 F16 优化
+                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            for head in head_start..head_end {
+                                let kv_head = head / group_size;
+                                let q_offset = head * config.n_embd_head_k;
+                                let output_offset = head * config.n_embd_head_v;
+                                let output =
+                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let query = &q[q_offset..q_offset + config.n_embd_head_k];
+                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                for token in 0..=step {
+                                    let row = layer_base + token * kv_stride;
+                                    let key_offset = row + kv_head * config.n_embd_head_k;
+                                    scores[token] = dot_f32(
+                                        query,
+                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                        config.n_embd_head_k,
+                                    ) * kq_scale;
+                                }
+                                softmax_inplace(&mut scores[..n_padded]);
+                                // F32 路径：values 直接存 f32， weights 也存 f32
+                                // 用 scores 复用区（scores[..n_padded] 已经 softmax 过）
+                                let weights = &scores[..n_padded];
+                                for dimension in 0..config.n_embd_head_v {
+                                    let mut acc = 0.0f32;
+                                    for token in 0..=step {
+                                        let row = layer_base + token * kv_stride;
+                                        let v = v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                        acc += weights[token] * v;
+                                    }
+                                    output[dimension] = acc;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_attn) };
+                #[cfg(feature = "parity-trace")]
+                if layer == 0 {
+                    parity_trace::report(parity_trace::checkpoint(
+                        "kqv_out-0",
+                        Some(0),
+                        &[config.n_head, config.n_embd_head_v],
+                        attn_out,
+                    ));
+                }
+                let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+                let scale_buf =
+                    unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+                quantize_q8_0_into(
+                    attn_out,
+                    n_attn,
+                    &mut q8_buf[..n_attn],
+                    &mut scale_buf[..n_attn / 32],
+                );
+                let q8 = q8_buf[..n_attn].as_ptr();
+                let scales = scale_buf[..n_attn / 32].as_ptr();
+                let pool = Arc::clone(&model.pool);
+                pool.compute(move |thread, threads| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8, n_attn) };
+                    let scales = unsafe { std::slice::from_raw_parts(scales, n_attn / 32) };
+                    let output =
+                        unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, config.n_embd) };
+                    weights.wo.kernel.forward_prepared(
+                        &[],
+                        q8,
+                        scales,
+                        None,
+                        output,
+                        n_attn,
+                        config.n_embd,
+                        thread,
+                        threads,
+                    );
+                });
+
+                let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, config.n_embd) };
+                let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, config.n_embd) };
+                let attn_projection =
+                    unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, config.n_embd) };
+                for (hidden, projection) in x.iter_mut().zip(attn_projection) {
+                    *hidden += *projection;
+                }
+                rms_norm(x, &weights.ffn_norm, normed, config.eps);
+                quantize_q8_0_into(
+                    normed,
+                    config.n_embd,
+                    &mut q8_buf[..config.n_embd],
+                    &mut scale_buf[..config.n_embd / 32],
+                );
+                let q8 = q8_buf[..config.n_embd].as_ptr();
+                let scales = scale_buf[..config.n_embd / 32].as_ptr();
+                let pool = Arc::clone(&model.pool);
+                pool.compute(move |thread, threads| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
+                    let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                    let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
+                    let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
+                    weights
+                        .w_gate
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, up, config.n_embd, config.n_ff, thread, threads);
+                    weights
+                        .w_up
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
+                    let start = thread * config.n_ff / threads;
+                    let end = (thread + 1) * config.n_ff / threads;
+                    silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
+                });
+
+                let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
+                quantize_q8_0_into(
+                    gate,
+                    config.n_ff,
+                    &mut q8_buf[..config.n_ff],
+                    &mut scale_buf[..config.n_ff / 32],
+                );
+                let q8 = q8_buf[..config.n_ff].as_ptr();
+                let scales = scale_buf[..config.n_ff / 32].as_ptr();
+                let pool = Arc::clone(&model.pool);
+                pool.compute(move |thread, threads| {
+                    let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_ff) };
+                    let scales = unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
+                    let down =
+                        unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
+                    weights
+                        .w_down
+                        .kernel
+                        .forward_prepared(&[], q8, scales, None, down, config.n_ff, config.n_embd, thread, threads);
+                });
+
+                let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
+                #[cfg(feature = "parity-trace")]
+                if layer == 0 {
+                    parity_trace::report(parity_trace::checkpoint(
+                        "ffn_out-0",
+                        Some(0),
+                        &[1, config.n_embd],
+                        down,
+                    ));
+                }
+                let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, config.n_embd) };
+                for (hidden, projection) in x.iter_mut().zip(down) {
+                    *hidden += *projection;
+                }
+            }
+
+            rms_norm(
+                &self.scratch.x,
+                &model.output_norm,
+                &mut self.scratch.normed,
+                config.eps,
+            );
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint(
+                "result_norm",
+                None,
+                &[1, config.n_embd],
+                &self.scratch.normed,
+            ));
+            quantize_q8_0_into(
+                &self.scratch.normed,
+                config.n_embd,
+                &mut self.scratch.q8_buf[..config.n_embd],
+                &mut self.scratch.scale_buf[..config.n_embd / 32],
+            );
+            let q8 = self.scratch.q8_buf[..config.n_embd].as_ptr();
+            let scales = self.scratch.scale_buf[..config.n_embd / 32].as_ptr();
+            let logits_ptr = self.scratch.logits.as_mut_ptr();
+            let pool = Arc::clone(&model.pool);
+            pool.compute(move |thread, threads| {
+                let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
+                let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, config.vocab) };
+                model.output.kernel.forward_prepared(
+                    &[],
+                    q8,
+                    scales,
+                    None,
+                    logits,
+                    config.n_embd,
+                    config.vocab,
+                    thread,
+                    threads,
+                );
+            });
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint(
+                "result_output",
+                None,
+                &[config.vocab],
+                &self.scratch.logits,
+            ));
+
+            #[cfg(feature = "parity-trace")]
+            if asr_trace && step == n_prompt - 1 {
+                parity_trace::report(parity_trace::checkpoint(
+                    "asr.decoder_first_logits",
+                    None,
+                    &[config.vocab],
+                    &self.scratch.logits,
+                ));
+            }
+
+            if step < n_prompt - 1 {
+                continue;
+            }
+            let token_id = sample_token(&self.scratch.logits, options.temperature)?;
+            if model.tokenizer.eos_id() == Some(token_id)
+                || model.tokenizer.special_token_id("im_end") == Some(token_id)
+            {
+                break;
+            }
+            if generated_tokens.len() >= options.max_new_tokens {
+                break;
+            }
+            let text = decoder.push(token_id);
+            if !text.is_empty() {
+                if let Some(cb) = on_token.as_mut() {
+                    cb(&text);
+                }
+                rendered_tokens.push(text);
+            }
+            generated_tokens.push(token_id);
+        }
+
+        #[cfg(feature = "parity-trace")]
+        parity_trace::report(parity_trace::token_ids(
+            if asr_trace {
+                "asr.generated_ids"
+            } else {
+                "generated_ids"
+            },
+            &generated_tokens,
+        ));
+        let tail = decoder.finish();
+        if !tail.is_empty() {
+            rendered_tokens.push(tail);
+        }
+        Ok(Qwen3Generation {
+            text: rendered_tokens.concat(),
+            rendered_tokens,
+            token_ids: generated_tokens,
+            prompt_tokens: n_prompt,
+        })
+    }
+}
+
+fn text_encode(
+    model: &Qwen3Model,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+) -> Result<Vec<f32>, String> {
+    validate_token_ids(token_ids, model.config.vocab)?;
+    let n_tokens = token_ids.len();
+    if positions.len() != n_tokens {
+        return Err(format!(
+            "positions length {} != token_ids length {}",
+            positions.len(),
+            n_tokens
+        ));
+    }
+    if n_tokens == 0 {
+        return Ok(Vec::new());
+    }
+
+    let cfg = &model.config;
+    let n_embd_q = checked_product("query width", cfg.n_head, cfg.n_embd_head_k)?;
+    let n_embd_k = checked_product("key width", cfg.n_head_kv, cfg.n_embd_head_k)?;
+    let n_embd_v = checked_product("value width", cfg.n_head_kv, cfg.n_embd_head_v)?;
+    let n_attn = checked_product("attn width", cfg.n_head, cfg.n_embd_head_v)?;
+    let group_size = cfg.n_head / cfg.n_head_kv;
+    let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
+
+    let embeddings = model.embed_tokens(token_ids)?;
+    let mut hidden = embeddings;
+
+    for layer_idx in 0..cfg.n_layer {
+        let layer = &model.layers[layer_idx];
+
+        let mut normed = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            rms_norm(
+                &hidden[off..off + cfg.n_embd],
+                &layer.attn_norm,
+                &mut normed[off..off + cfg.n_embd],
+                cfg.eps,
+            );
+        }
+
+        let mut q_all = vec![0.0; n_tokens * n_embd_q];
+        let mut k_all = vec![0.0; n_tokens * n_embd_k];
+        let mut v_all = vec![0.0; n_tokens * n_embd_v];
+        for tok in 0..n_tokens {
+            let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+            let q_off = tok * n_embd_q;
+            let k_off = tok * n_embd_k;
+            let v_off = tok * n_embd_v;
+
+            let blocks = (cfg.n_embd + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_embd];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+
+            layer.wq.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut q_all[q_off..q_off + n_embd_q],
+                cfg.n_embd,
+                n_embd_q,
+                0,
+                1,
+            );
+            layer.wk.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut k_all[k_off..k_off + n_embd_k],
+                cfg.n_embd,
+                n_embd_k,
+                0,
+                1,
+            );
+            layer.wv.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut v_all[v_off..v_off + n_embd_v],
+                cfg.n_embd,
+                n_embd_v,
+                0,
+                1,
+            );
+        }
+
+        if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
+            for head in 0..cfg.n_head {
+                let off = head * cfg.n_embd_head_k;
+                rms_norm_inplace(&mut q_all[off..off + cfg.n_embd_head_k], q_norm, cfg.eps);
+            }
+            for head in 0..cfg.n_head_kv {
+                let off = head * cfg.n_embd_head_k;
+                rms_norm_inplace(&mut k_all[off..off + cfg.n_embd_head_k], k_norm, cfg.eps);
+            }
+        }
+
+        for tok in 0..n_tokens {
+            let pos = positions[tok];
+            for head in 0..cfg.n_head {
+                let off = head * cfg.n_embd_head_k;
+                let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
+                match cfg.rope {
+                    Qwen3Rope::Neox => {
+                        rope_neox(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                    }
+                    Qwen3Rope::Interleaved { sections, n_dims } => {
+                        rope_mrope_interleaved(
+                            q_slice,
+                            pos,
+                            sections,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            n_dims,
+                        );
+                    }
+                }
+            }
+            for head in 0..cfg.n_head_kv {
+                let off = head * cfg.n_embd_head_k;
+                let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
+                match cfg.rope {
+                    Qwen3Rope::Neox => {
+                        rope_neox(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                    }
+                    Qwen3Rope::Interleaved { sections, n_dims } => {
+                        rope_mrope_interleaved(
+                            k_slice,
+                            pos,
+                            sections,
+                            cfg.n_embd_head_k,
+                            cfg.freq_base,
+                            n_dims,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut attn_out = vec![0.0; n_tokens * n_attn];
+        for head in 0..cfg.n_head {
+            let kv_head = head / group_size;
+            let q_off = head * cfg.n_embd_head_k;
+            let k_off = kv_head * cfg.n_embd_head_k;
+            let v_off = kv_head * cfg.n_embd_head_v;
+            let attn_off = head * cfg.n_embd_head_v;
+
+            for i in 0..n_tokens {
+                let mut max_val = f32::NEG_INFINITY;
+                let mut scores = vec![0.0; n_tokens];
+                for j in 0..=i {
+                    let q_row = &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
+                    let k_row = &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
+                    scores[j] = dot_f32(q_row, k_row, cfg.n_embd_head_k) * kq_scale;
+                    if scores[j] > max_val {
+                        max_val = scores[j];
+                    }
+                }
+                let mut exp_sum = 0.0f32;
+                for j in 0..=i {
+                    scores[j] = (scores[j] - max_val).exp();
+                    exp_sum += scores[j];
+                }
+                for j in 0..=i {
+                    scores[j] /= exp_sum;
+                }
+                for dim in 0..cfg.n_embd_head_v {
+                    let mut sum = 0.0f32;
+                    for j in 0..=i {
+                        let v_row = &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
+                        sum += scores[j] * v_row[dim];
+                    }
+                    attn_out[i * n_attn + attn_off + dim] = sum;
+                }
+            }
+        }
+
+        let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
+            let blocks = (n_attn + 31) / 32;
+            let mut q8_buf = vec![0u8; n_attn];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
+            layer.wo.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                n_attn,
+                cfg.n_embd,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            for j in 0..cfg.n_embd {
+                hidden[off + j] += attn_proj_out[off + j];
+            }
+        }
+
+        let mut ffn_normed = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            rms_norm(
+                &hidden[off..off + cfg.n_embd],
+                &layer.ffn_norm,
+                &mut ffn_normed[off..off + cfg.n_embd],
+                cfg.eps,
+            );
+        }
+
+        let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
+        let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
+        for tok in 0..n_tokens {
+            let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+            let blocks = (cfg.n_embd + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_embd];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+            layer.w_gate.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_embd,
+                cfg.n_ff,
+                0,
+                1,
+            );
+            layer.w_up.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_embd,
+                cfg.n_ff,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_ff;
+            for i in 0..cfg.n_ff {
+                gate_buf[off + i] = silu(gate_buf[off + i]) * up_buf[off + i];
+            }
+        }
+
+        let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
+        for tok in 0..n_tokens {
+            let blocks = (cfg.n_ff + 31) / 32;
+            let mut q8_buf = vec![0u8; cfg.n_ff];
+            let mut scale_buf = vec![0.0f32; blocks];
+            quantize_q8_0_into(
+                &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                cfg.n_ff,
+                &mut q8_buf,
+                &mut scale_buf,
+            );
+            layer.w_down.kernel.forward_prepared(
+                &[],
+                &q8_buf,
+                &scale_buf,
+                None,
+                &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                cfg.n_ff,
+                cfg.n_embd,
+                0,
+                1,
+            );
+        }
+
+        for tok in 0..n_tokens {
+            let off = tok * cfg.n_embd;
+            for i in 0..cfg.n_embd {
+                hidden[off + i] += down_buf[off + i];
+            }
+        }
+    }
+
+    let mut output = vec![0.0; n_tokens * cfg.n_embd];
+    for tok in 0..n_tokens {
+        let off = tok * cfg.n_embd;
+        rms_norm(
+            &hidden[off..off + cfg.n_embd],
+            &model.output_norm,
+            &mut output[off..off + cfg.n_embd],
+            cfg.eps,
+        );
+    }
+
+    Ok(output)
+}
+
+pub fn run_shared_inference(
+    source: Arc<dyn TensorSource>,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
     thinking: bool,
-    bench: bool,
-    profile: bool,
-    kv_format: KvFormat,
 ) -> Result<(), String> {
-    let input_tokens = {
-        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-
-        if bench {
-            tokenizer.encode(
-                prompt,
-                EncodeOptions {
-                    add_special: true,
-                    parse_special: true,
-                },
-            )
-        } else {
-            build_qwen_chat_prompt(
-                &tokenizer,
-                &[QwenMessage {
-                    role: "user",
-                    content: prompt,
-                }],
-                thinking,
-            )?
-        }
-    };
-
-    run_inference_tokens(
-        source,
-        input_tokens,
-        max_tokens,
-        temperature,
+    let started = Instant::now();
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    let available_threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(4);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
         n_threads_arg,
-        bench,
-        profile,
-        kv_format,
-    )
-}
-
-pub fn run_inference_tokens(
-    source: &dyn TensorSource,
-    input_tokens: Vec<u32>,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    bench: bool,
-    profile: bool,
-    kv_format: KvFormat,
-) -> Result<(), String> {
-    let t0 = Instant::now();
-    let config = model_config_from_source(source)
-        .map_err(|error| format!("Failed to parse model config: {error}"))?;
-
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        .unwrap_or_default();
-
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-
-    let max_ctx = 512usize.min(config.n_ctx);
-    let n_embd = config.n_embd;
-    let n_layer = config.n_layer;
-    let n_head = config.n_head;
-    let n_head_kv = config.n_head_kv;
-    let n_embd_head = config.n_embd_head;
-    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch)) {
-        v.to_u64().unwrap_or(n_embd_head as u64) as usize
-    } else {
-        n_embd_head
-    };
-    let n_embd_head_v =
-        if let Some(v) = source.metadata(&format!("{}.attention.value_length", arch)) {
-            v.to_u64().unwrap_or(n_embd_head as u64) as usize
-        } else {
-            n_embd_head
-        };
-    let n_embd_q = n_head * n_embd_head_k;
-    let n_embd_gqa = n_head_kv * n_embd_head_v;
-    let n_ff = config.n_ff;
-    let eps = config.norm_eps;
-    let freq_base = config.rope_freq_base;
-
-    let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
-    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
-        panic!(
-            "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
-            embd_info.ggml_type
-        );
-    }
-    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
-    let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
-    let embd_type = embd_info.ggml_type;
-    let output_type = source.tensor_info("output.weight").unwrap_or(embd_info).ggml_type;
-
-    let layers: Vec<Qwen3LayerWeights> =
-        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, true);
-
-    let load_ms = t0.elapsed().as_millis();
+        available_threads,
+    )));
+    let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
+    let input_tokens = build_qwen_chat_prompt(
+        &tokenizer,
+        &[QwenMessage {
+            role: "user",
+            content: prompt,
+        }],
+        thinking,
+    )?;
+    let positions = qwen_text_positions(input_tokens.len());
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
-        arch, n_embd, n_layer, n_head, n_head_kv, n_ff, load_ms
+        model.config().architecture,
+        model.config().n_embd,
+        model.config().n_layer,
+        model.config().n_head,
+        model.config().n_head_kv,
+        model.config().n_ff,
+        started.elapsed().as_millis(),
     );
-
-    let kv_cache = match kv_format {
-        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
-        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
-    };
-
-    let vocab = tokenizer.vocab_size();
-
-    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-
-    let mut scratch = ExecutionScratchpad::new(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-    println!("Prompt: {} tokens", input_tokens.len());
-
-    let eos_id = tokenizer.eos_id();
-    let im_end_id = tokenizer.special_token_id("im_end");
-    let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
-    let mut decoder = tokenizer.streaming_decoder(false);
-
-    let group_size = n_head / n_head_kv;
-    let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
-
-    let mut t_norm: f64 = 0.0;
-    let _t_quant: f64 = 0.0;
-    let mut t_qkv: f64 = 0.0;
-    let mut t_wo: f64 = 0.0;
-    let mut t_ffn1: f64 = 0.0;
-    let _t_silu: f64 = 0.0;
-    let _t_down: f64 = 0.0;
-    let mut t_logits: f64 = 0.0;
-
+    eprintln!("compute pool: {} threads", model.pool().n_threads());
+    println!("Prompt: {} ({} tokens)", prompt, input_tokens.len());
     print!("Output: ");
-    io::stdout().flush().unwrap();
-
-    let t_infer = Instant::now();
-    let total_steps = inference_step_budget(input_tokens.len(), max_tokens, bench);
-    let mut prefill_evals = 0usize;
-    let mut prefill_time = Duration::ZERO;
-    let mut decode_evals = 0usize;
-    let mut decode_time = Duration::ZERO;
-
-    for step in 0..total_steps {
-        let eval_started = Instant::now();
-        let token_id = if step < input_tokens.len() {
-            input_tokens[step]
-        } else {
-            *generated_tokens.last().unwrap_or(&0)
-        };
-
-        let pos = step;
-
-        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
-
-        for layer in 0..n_layer {
-            let lw = &layers[layer];
-
-            let x_ptr = scratch.x.as_mut_ptr();
-            let normed_ptr = scratch.normed.as_mut_ptr();
-            let q_ptr = scratch.q.as_mut_ptr();
-            let k_ptr = scratch.k_new.as_mut_ptr();
-            let v_ptr = scratch.v_new.as_mut_ptr();
-            let attn_out_ptr = scratch.attn_out.as_mut_ptr();
-            let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
-            let down_buf_ptr = scratch.down_buf.as_mut_ptr();
-            let scores_ptr = scratch.scores.as_mut_ptr();
-            let score_stride = scratch.score_stride;
-            let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
-            let up_buf_ptr = scratch.up_buf.as_mut_ptr();
-            let q8_buf_ptr = scratch.q8_buf.as_mut_ptr();
-            let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
-            let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
-            let kv_cache_size = n_layer * max_ctx * n_embd_gqa;
-            let (k_cache_f16_ptr, v_cache_f16_ptr) = match &kv_cache {
-                KvCache::F16(c) => (c.k.as_ptr() as *mut u16, c.v.as_ptr() as *mut u16),
-                _ => (std::ptr::null_mut(), std::ptr::null_mut()),
-            };
-            let (k_cache_f32_ptr, v_cache_f32_ptr) = match &kv_cache {
-                KvCache::F32(c) => (c.k.as_ptr() as *mut f32, c.v.as_ptr() as *mut f32),
-                _ => (std::ptr::null_mut(), std::ptr::null_mut()),
-            };
-
-            let max_n_in = n_embd_q.max(n_ff);
-            let x = slice_from_mut!(x_ptr, n_embd);
-            let normed = slice_from_mut!(normed_ptr, n_embd);
-            let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-            let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
-
-            let t0 = Instant::now();
-            rms_norm(x, &lw.attn_norm, normed, eps);
-            quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
-            let q8 = q8_buf[..n_embd].as_ptr();
-            let sc = scale_buf[..n_embd / 32].as_ptr();
-            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
-            let q8k = q8k_buf[..n_embd / 256].as_ptr();
-
-            pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(normed_ptr, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let q = slice_from_mut!(q_ptr, n_embd_q);
-                let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
-                let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
-
-                lw.wq.kernel.forward_prepared(input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth);
-                lw.wk.kernel.forward_prepared(input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth);
-                lw.wv.kernel.forward_prepared(input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth);
-            });
-
-            {
-                let q = slice_from_mut!(q_ptr, n_embd_q);
-                let k_new = slice_from_mut!(k_ptr, n_embd_gqa);
-                let v_new = slice_from_mut!(v_ptr, n_embd_gqa);
-                let q_norm = lw.q_norm.as_deref();
-                let k_norm = lw.k_norm.as_deref();
-
-                if let (Some(qn), Some(kn)) = (q_norm, k_norm) {
-                    for h in 0..n_head {
-                        rms_norm_inplace(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], qn, eps);
-                    }
-                    for h in 0..n_head_kv {
-                        rms_norm_inplace(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], kn, eps);
-                    }
-                }
-
-                for h in 0..n_head {
-                    rope_neox(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_k, freq_base);
-                }
-                for h in 0..n_head_kv {
-                    rope_neox(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_v, freq_base);
-                }
-
-                let kb = layer * max_ctx * n_embd_gqa;
-
-                if kv_format == KvFormat::F16 {
-                    let k_cache = slice_from_mut!(k_cache_f16_ptr, kv_cache_size);
-                    let v_cache = slice_from_mut!(v_cache_f16_ptr, kv_cache_size);
-                    for h in 0..n_head_kv {
-                        let off = h * n_embd_head_k;
-                        f32_slice_to_f16(
-                            &k_new[off..off + n_embd_head_k],
-                            &mut k_cache[kb + pos * n_embd_gqa + off..kb + pos * n_embd_gqa + off + n_embd_head_k],
-                        );
-                        f32_slice_to_f16(
-                            &v_new[off..off + n_embd_head_v],
-                            &mut v_cache[kb + pos * n_embd_gqa + off..kb + pos * n_embd_gqa + off + n_embd_head_v],
-                        );
-                    }
-                } else {
-                    let k_cache = slice_from_mut!(k_cache_f32_ptr, kv_cache_size);
-                    let v_cache = slice_from_mut!(v_cache_f32_ptr, kv_cache_size);
-                    for h in 0..n_head_kv {
-                        let off = h * n_embd_head_k;
-                        k_cache[kb + pos * n_embd_gqa + off..kb + pos * n_embd_gqa + off + n_embd_head_k]
-                            .copy_from_slice(&k_new[off..off + n_embd_head_k]);
-                        v_cache[kb + pos * n_embd_gqa + off..kb + pos * n_embd_gqa + off + n_embd_head_v]
-                            .copy_from_slice(&v_new[off..off + n_embd_head_v]);
-                    }
-                }
-            }
-
-            pool.compute(move |ith: usize, nth: usize| {
-                let q = slice_from_ref!(q_ptr, n_embd_q);
-                let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
-                let h_start = ith * n_head / nth;
-                let h_end = (ith + 1) * n_head / nth;
-
-                let kb = layer * max_ctx * n_embd_gqa;
-
-                if kv_format == KvFormat::F16 {
-                    let k_cache = slice_from_ref!(k_cache_f16_ptr, kv_cache_size);
-                    let v_cache = slice_from_ref!(v_cache_f16_ptr, kv_cache_size);
-                    for h in h_start..h_end {
-                        let kv_h = h / group_size;
-                        let q_off = h * n_embd_head_k;
-                        let n_cached = pos + 1;
-                        let n_padded = (n_cached + 255) / 256 * 256;
-                        let out_base = h * n_embd_head_v;
-                        let mut ms = 0.0f32;
-                        let mut s_sum = 0.0f32;
-                        for d in 0..n_embd_head_v {
-                            attn_out[out_base + d] = 0.0;
-                        }
-                        for t in 0..n_cached {
-                            let score = dot_f16_f32(
-                                &q[q_off..q_off + n_embd_head_k],
-                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                n_embd_head_k,
-                            ) * kq_scale;
-                            if score > ms {
-                                let rescale = (ms - score).exp();
-                                vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], rescale);
-                                s_sum *= rescale;
-                                ms = score;
-                            }
-                            let vs = (score - ms).exp();
-                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                            vec_mad_f16_f32(&mut attn_out[out_base..out_base + n_embd_head_v], &v_cache[v_base..v_base + n_embd_head_v], vs);
-                            s_sum += vs;
-                        }
-                        let inv_sum = 1.0 / s_sum;
-                        vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
-                    }
-                } else {
-                    let k_cache = slice_from_ref!(k_cache_f32_ptr, kv_cache_size);
-                    let v_cache = slice_from_ref!(v_cache_f32_ptr, kv_cache_size);
-                    let scores = slice_from_mut!(scores_ptr, n_threads * score_stride);
-                    for h in h_start..h_end {
-                        let kv_h = h / group_size;
-                        let q_off = h * n_embd_head_k;
-                        let n_cached = pos + 1;
-                        let n_padded = (n_cached + 255) / 256 * 256;
-                        let out_base = h * n_embd_head_v;
-                        let s_off = ith * score_stride;
-                        for t in 0..n_cached {
-                            scores[s_off + t] = dot_f32(
-                                &q[q_off..q_off + n_embd_head_k],
-                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                n_embd_head_k,
-                            ) * kq_scale;
-                        }
-                        scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
-                        let mut values = [0.0f32; 512];
-                        for d in 0..n_embd_head_v {
-                            for t in 0..n_cached {
-                                values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
-                            }
-                            attn_out[out_base + d] = attention_value_f32(
-                                &values[..n_padded],
-                                &scores[s_off..s_off + n_padded],
-                                n_cached,
-                                n_padded,
-                            );
-                        }
-                    }
-                }
-            });
-            t_qkv += t0.elapsed().as_secs_f64();
-
-            let attn_out = slice_from_mut!(attn_out_ptr, n_embd_q);
-            let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-            let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-            let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
-            let t0 = Instant::now();
-            quantize_q8_0_into(attn_out, n_embd_q, &mut q8_buf[..n_embd_q], &mut scale_buf[..n_embd_q / 32]);
-            crate::ops::quantize_row_q8_k_into(attn_out, &mut q8k_buf[..n_embd_q / 256]);
-            let q8 = q8_buf[..n_embd_q].as_ptr();
-            let sc = scale_buf[..n_embd_q / 32].as_ptr();
-            let q8k = q8k_buf[..n_embd_q / 256].as_ptr();
-            pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(attn_out_ptr, n_embd_q);
-                let q8 = raw_parts!(q8, n_embd_q);
-                let sc = raw_parts!(sc, n_embd_q / 32);
-                let q8k = raw_parts!(q8k, n_embd_q / 256);
-                let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-                lw.wo.kernel.forward_prepared(input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth);
-            });
-            t_wo += t0.elapsed().as_secs_f64();
-
-            let attn_proj = slice_from_mut!(attn_proj_ptr, n_embd);
-            let x = slice_from_mut!(x_ptr, n_embd);
-            let normed = slice_from_mut!(normed_ptr, n_embd);
-            for i in 0..n_embd {
-                x[i] += attn_proj[i];
-            }
-
-            // FFN — uses `kernel.forward_prepared` with `ExecutionScratchpad`-managed
-            // buffers instead of `quantize_and_matmul_with_scratch`.  This enables
-            // two optimizations:
-            //
-            // 1. **Fused gate+up**: both projections share the same quantized input
-            //    and run inside a single `pool.compute` call, avoiding a second
-            //    round of quantization.
-            //
-            // 2. **Buffer reuse**: `gate_buf / up_buf / down_buf` are allocated once
-            //    in `ExecutionScratchpad` and reused across every token position.
-            //
-            // Contrast with embedding.rs which processes each token independently
-            // and uses `quantize_and_matmul_with_scratch` — a natural fit when there
-            // is no pre-allocated scratch context.
-            let t0 = Instant::now();
-            rms_norm(x, &lw.ffn_norm, normed, eps);
-            quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
-            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
-            let q8 = q8_buf[..n_embd].as_ptr();
-            let sc = scale_buf[..n_embd / 32].as_ptr();
-            let q8k = q8k_buf[..n_embd / 256].as_ptr();
-
-            pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(normed_ptr, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
-                let up_buf = slice_from_mut!(up_buf_ptr, n_ff);
-                lw.w_gate.kernel.forward_prepared(input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth);
-                lw.w_up.kernel.forward_prepared(input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth);
-
-                let rows_per = n_ff / nth;
-                let r_start = ith * rows_per;
-                let r_end = if ith == nth - 1 { n_ff } else { r_start + rows_per };
-                silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
-            });
-
-            {
-                let gate_buf = slice_from_mut!(gate_buf_ptr, n_ff);
-                let q8_buf = slice_from_mut!(q8_buf_ptr, max_n_in);
-                let scale_buf = slice_from_mut!(scale_buf_ptr, max_n_in / 32);
-                let q8k_buf = slice_from_mut!(q8k_buf_ptr, max_n_in / 256);
-                quantize_q8_0_into(gate_buf, n_ff, &mut q8_buf[..n_ff], &mut scale_buf[..n_ff / 32]);
-                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
-            }
-
-            let q8 = q8_buf[..n_ff].as_ptr();
-            let sc = scale_buf[..n_ff / 32].as_ptr();
-            let q8k = q8k_buf[..n_ff / 256].as_ptr();
-            pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(gate_buf_ptr, n_ff);
-                let q8 = raw_parts!(q8, n_ff);
-                let sc = raw_parts!(sc, n_ff / 32);
-                let q8k = raw_parts!(q8k, n_ff / 256);
-                let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-                lw.w_down.kernel.forward_prepared(input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth);
-            });
-            t_ffn1 += t0.elapsed().as_secs_f64();
-
-            let down_buf = slice_from_mut!(down_buf_ptr, n_embd);
-            let x = slice_from_mut!(x_ptr, n_embd);
-            for i in 0..n_embd {
-                x[i] += down_buf[i];
-            }
-        }
-
-        {
-            let x = &mut scratch.x;
-            let normed = &mut scratch.normed;
-            let logits_ptr = scratch.logits.as_mut_ptr();
-            let q8_buf = &mut scratch.q8_buf;
-            let scale_buf = &mut scratch.scale_buf;
-            let q8k_buf = &mut scratch.q8k_buf;
-
-            let t0 = Instant::now();
-            rms_norm(x, &output_norm, normed, eps);
-            t_norm += t0.elapsed().as_secs_f64();
-
-            let t0 = Instant::now();
-            quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
-            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
-            let q8 = q8_buf[..n_embd].as_ptr();
-            let sc = scale_buf[..n_embd / 32].as_ptr();
-            let q8k = q8k_buf[..n_embd / 256].as_ptr();
-            let input = normed.as_ptr();
-            let output_pw = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab));
-            pool.compute(move |ith: usize, nth: usize| {
-                let input = raw_parts!(input, n_embd);
-                let q8 = raw_parts!(q8, n_embd);
-                let sc = raw_parts!(sc, n_embd / 32);
-                let q8k = raw_parts!(q8k, n_embd / 256);
-                let logits = slice_from_mut!(logits_ptr, vocab);
-                output_pw.kernel.forward_prepared(input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth);
-            });
-            t_logits += t0.elapsed().as_secs_f64();
-        }
-
-        let eval_elapsed = eval_started.elapsed();
-        if step < input_tokens.len() {
-            prefill_evals += 1;
-            prefill_time += eval_elapsed;
-        } else {
-            decode_evals += 1;
-            decode_time += eval_elapsed;
-        }
-
-        if step < input_tokens.len() - 1 {
-            continue;
-        }
-
-        let logits = &mut scratch.logits;
-        let chosen = if temperature <= 0.0 {
-            logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0)
-        } else {
-            for l in logits.iter_mut() {
-                *l /= temperature;
-            }
-            let top = crate::ops::sample_top_k(logits, 40);
-            let mut rng = 0u64;
-            for &t in &all_tokens {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
-            }
-            let r = ((rng >> 33) as f32) / (1u64 << 31) as f32;
-            let mut cum = 0.0f32;
-            let mut chosen = top[0].0;
-            for &(idx, prob) in &top {
-                cum += prob;
-                if cum >= r {
-                    chosen = idx;
-                    break;
-                }
-            }
-            chosen
-        };
-
-        let chosen_id = chosen as u32;
-        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
-            break;
-        }
-        if generated_tokens.len() >= max_tokens {
-            break;
-        }
-
-        generated_tokens.push(chosen_id);
-        all_tokens.push(chosen_id);
-
-        let text = decoder.push(chosen_id);
-        print!("{}", text);
-        io::stdout().flush().unwrap();
-
-        if generated_tokens.len() == 1 {
-            eprintln!();
-        }
-    }
-
-    let tail = decoder.finish();
-    if !tail.is_empty() {
-        print!("{}", tail);
-        io::stdout().flush().unwrap();
-    }
-
-    let infer_ms = t_infer.elapsed().as_millis();
-    let tok_s = if infer_ms > 0 {
-        generated_tokens.len() as f64 / infer_ms as f64 * 1000.0
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let inference_started = Instant::now();
+    let generation = model.generate(
+        Qwen3Input {
+            token_ids: &input_tokens,
+            positions: &positions,
+            embeddings: None,
+        },
+        Qwen3GenerateOptions {
+            max_new_tokens: max_tokens,
+            temperature,
+        },
+    )?;
+    print!("{}", generation.text);
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let elapsed_ms = inference_started.elapsed().as_millis();
+    let tokens_per_second = if elapsed_ms > 0 {
+        generation.token_ids.len() as f64 / elapsed_ms as f64 * 1000.0
     } else {
         0.0
     };
-    let total = t_norm + _t_quant + t_qkv + t_wo + t_ffn1 + t_logits;
-    if bench || profile {
-        eprintln!();
-    }
-    if bench {
-        eprintln!(
-            "BENCH: pp {} evals in {:.3}s | {:.1} eval/s",
-            prefill_evals,
-            prefill_time.as_secs_f64(),
-            per_second(prefill_evals, prefill_time),
-        );
-        eprintln!(
-            "BENCH: tg {} evals in {:.3}s | {:.1} eval/s",
-            decode_evals,
-            decode_time.as_secs_f64(),
-            per_second(decode_evals, decode_time),
-        );
-    }
-    eprintln!(
-        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
-        per_second(prefill_evals, prefill_time),
-        per_second(decode_evals, decode_time),
-        tok_s
-    );
-    if profile {
-        eprintln!(
-            "PROFILE: norm={:.1}% quant={:.1}% qkv+attn={:.1}% wo={:.1}% ffn={:.1}% logits={:.1}%",
-            t_norm / total * 100.0,
-            _t_quant / total * 100.0,
-            t_qkv / total * 100.0,
-            t_wo / total * 100.0,
-            t_ffn1 / total * 100.0,
-            t_logits / total * 100.0
-        );
-    }
     println!();
-    println!("[{} output tokens in {}ms]", generated_tokens.len(), infer_ms);
+    println!(
+        "[end-to-end: {} output tokens in {}ms | {:.1} tok/s]",
+        generation.token_ids.len(),
+        elapsed_ms,
+        tokens_per_second,
+    );
     Ok(())
+}
+
+#[cfg(test)]
+struct TestTensorSource;
+
+#[cfg(test)]
+impl TensorSource for TestTensorSource {
+    fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+        None
+    }
+
+    fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+        None
+    }
+
+    fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usize) -> Qwen3Model {
+    assert!(n_embd > 0 && n_embd % 32 == 0);
+    let row_bytes = n_embd / 32 * 34;
+    let embd_box = vec![0u8; tokenizer.vocab_size() * row_bytes].into_boxed_slice();
+    let embd_bytes: &'static [u8] = Box::leak(embd_box);
+    let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
+    let output = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_bytes,
+        GGMLType::Q8_0,
+        n_embd,
+        tokenizer.vocab_size(),
+    ));
+    Qwen3Model {
+        source: Arc::new(TestTensorSource),
+        pool: Arc::new(ComputePool::new(1)),
+        config: Qwen3Config {
+            architecture: "qwen3".into(),
+            n_embd,
+            n_layer: 0,
+            n_head: 1,
+            n_head_kv: 1,
+            n_embd_head_k: n_embd,
+            n_embd_head_v: n_embd,
+            n_ff: n_embd,
+            vocab: tokenizer.vocab_size(),
+            n_ctx,
+            eps: 1e-6,
+            freq_base: 1_000_000.0,
+            has_qk_norm: false,
+            rope: Qwen3Rope::Neox,
+        },
+        tokenizer,
+        layers: Vec::new(),
+        output_norm: vec![1.0; n_embd],
+        token_embedding,
+        output,
+    }
+}
+
+pub fn qwen_text_positions(n_tokens: usize) -> Vec<[usize; 4]> {
+    (0..n_tokens).map(|position| [position; 4]).collect()
+}
+
+fn validate_generation(
+    model: &Qwen3Model,
+    input: &Qwen3Input<'_>,
+    options: Qwen3GenerateOptions,
+) -> Result<(), String> {
+    if input.token_ids.is_empty() {
+        return Err("Qwen3 prompt must contain at least one token".into());
+    }
+    if options.max_new_tokens == 0 {
+        return Err("Qwen3 generation must request at least one token".into());
+    }
+    if !options.temperature.is_finite() || options.temperature < 0.0 {
+        return Err(format!(
+            "Invalid generation temperature: {}",
+            options.temperature
+        ));
+    }
+    validate_input_shapes(
+        input.token_ids.len(),
+        model.config.n_embd,
+        input.positions.len(),
+        input.embeddings.map(<[f32]>::len),
+    )?;
+    validate_token_ids(input.token_ids, model.config.vocab)?;
+    if input
+        .embeddings
+        .is_some_and(|values| values.iter().any(|value| !value.is_finite()))
+    {
+        return Err("Input embeddings contain NaN or infinity".into());
+    }
+    checked_session_capacity(
+        input.token_ids.len(),
+        options.max_new_tokens,
+        model.config.n_ctx,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), String> {
+    for &token_id in token_ids {
+        let token =
+            usize::try_from(token_id).map_err(|_| format!("Invalid token ID {token_id}"))?;
+        if token >= vocab {
+            return Err(format!("Token ID {token_id} exceeds vocabulary {vocab}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
+    if temperature == 0.0 {
+        return greedy_token(logits);
+    }
+    let mut max_logit = f32::NEG_INFINITY;
+    for &logit in logits {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        max_logit = max_logit.max(logit);
+    }
+    if logits.is_empty() {
+        return Err("Cannot sample empty logits".into());
+    }
+    let sum: f32 = logits
+        .iter()
+        .map(|logit| ((logit - max_logit) / temperature).exp())
+        .sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("Sampling probability sum is not finite and positive".into());
+    }
+    let target = rand::random::<f32>() * sum;
+    let mut cumulative = 0.0;
+    for (index, &logit) in logits.iter().enumerate() {
+        cumulative += ((logit - max_logit) / temperature).exp();
+        if cumulative >= target {
+            return u32::try_from(index).map_err(|_| "Token ID does not fit u32".into());
+        }
+    }
+    u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
+}
+
+pub fn static_q8_matrix(
+    source: &dyn TensorSource,
+    name: &str,
+    columns: usize,
+    rows: usize,
+) -> Result<&'static [u8], String> {
+    static_q8_tensor(
+        source,
+        name,
+        &[
+            usize_to_u64(columns, "matrix columns")?,
+            usize_to_u64(rows, "matrix rows")?,
+        ],
+    )
+}
+
+pub fn static_q8_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+) -> Result<&'static [u8], String> {
+    let bytes = checked_tensor(source, name, dims, GGMLType::Q8_0)?;
+    // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
+    // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
+    Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
+}
+
+pub fn static_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+    ggml_type: GGMLType,
+) -> Result<&'static [u8], String> {
+    let bytes = checked_tensor(source, name, dims, ggml_type)?;
+    // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
+    // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
+    Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
+}
+
+pub fn load_f32_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+) -> Result<Vec<f32>, String> {
+    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let len = bytes.len() / std::mem::size_of::<f32>();
+    check_allocation(name, len, std::mem::size_of::<f32>())?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+        .collect())
+}
+
+pub fn checked_tensor<'a>(
+    source: &'a dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+    ggml_type: GGMLType,
+) -> Result<&'a [u8], String> {
+    let info: &TensorInfo = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || info.ggml_type != ggml_type {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
+            info.dims, info.ggml_type, dims, ggml_type
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+pub fn checked_product(name: &str, left: usize, right: usize) -> Result<usize, String> {
+    left.checked_mul(right)
+        .ok_or_else(|| format!("{name} overflows usize"))
+}
+
+pub fn check_allocation(name: &str, len: usize, element_bytes: usize) -> Result<(), String> {
+    let bytes = checked_product(name, len, element_bytes)?;
+    if bytes > isize::MAX as usize {
+        return Err(format!("{name} allocation is too large"));
+    }
+    Ok(())
+}
+
+pub fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
+    u64::try_from(value).map_err(|_| format!("{name} does not fit u64"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, MetaValueType, TensorInfo, TensorSource};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct MapTensorSource {
+        metadata: HashMap<String, MetaValue>,
+        tensors: HashMap<String, TensorInfo>,
+    }
+
+    impl TensorSource for MapTensorSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.tensors.get(name)
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    fn qwen3vl_metadata_source() -> MapTensorSource {
+        MapTensorSource {
+            metadata: HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen3vl".into()),
+                ),
+                ("qwen3vl.embedding_length".into(), MetaValue::Uint32(1024)),
+                ("qwen3vl.block_count".into(), MetaValue::Uint32(28)),
+                ("qwen3vl.attention.head_count".into(), MetaValue::Uint32(16)),
+                (
+                    "qwen3vl.attention.head_count_kv".into(),
+                    MetaValue::Uint32(8),
+                ),
+                (
+                    "qwen3vl.attention.key_length".into(),
+                    MetaValue::Uint32(128),
+                ),
+                (
+                    "qwen3vl.attention.value_length".into(),
+                    MetaValue::Uint32(128),
+                ),
+                (
+                    "qwen3vl.feed_forward_length".into(),
+                    MetaValue::Uint32(3072),
+                ),
+                ("qwen3vl.context_length".into(), MetaValue::Uint32(65_536)),
+                (
+                    "qwen3vl.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "qwen3vl.rope.dimension_sections".into(),
+                    MetaValue::Array(
+                        MetaValueType::Int32,
+                        [24, 20, 20, 0].map(MetaValue::Int32).to_vec(),
+                    ),
+                ),
+                (
+                    "qwen3vl.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                ("qwen3vl.vocab_size".into(), MetaValue::Uint32(151_936)),
+            ]),
+            tensors: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
+        let config = Qwen3Config::from_source(&qwen3vl_metadata_source()).unwrap();
+        assert!(config.has_qk_norm);
+        assert_eq!(
+            config.rope,
+            Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn session_capacity_is_prompt_plus_generation_not_model_context() {
+        assert_eq!(checked_session_capacity(23, 17, 65_536).unwrap(), 40);
+        assert!(checked_session_capacity(65_500, 37, 65_536).is_err());
+        assert!(checked_session_capacity(usize::MAX, 1, 65_536).is_err());
+    }
+
+    #[test]
+    fn decoder_does_not_evaluate_the_last_generated_token() {
+        assert_eq!(checked_decoder_steps(23, 17, 65_536).unwrap(), 39);
+    }
+
+    #[test]
+    fn generated_positions_continue_from_prompt_text_positions() {
+        let prompt = [[7, 8, 9, 10], [42, 100, 200, 300]];
+        assert_eq!(
+            checked_generated_position(&prompt, 0).unwrap(),
+            [43, 43, 43, 0]
+        );
+        assert_eq!(
+            checked_generated_position(&prompt, 1).unwrap(),
+            [44, 44, 44, 0]
+        );
+        assert!(checked_generated_position(&[[usize::MAX; 4]], 0).is_err());
+    }
+
+    #[test]
+    fn decoder_input_rejects_position_and_embedding_shape_mismatch() {
+        assert!(validate_input_shapes(3, 1024, 2, None).is_err());
+        assert!(validate_input_shapes(3, 1024, 3, Some(3 * 1024 - 1)).is_err());
+    }
+
+    #[test]
+    fn greedy_ties_choose_the_lowest_token_id() {
+        assert_eq!(greedy_token(&[1.0, 2.0, 2.0]).unwrap(), 1);
+        assert!(greedy_token(&[1.0, f32::NAN]).is_err());
+    }
 }
