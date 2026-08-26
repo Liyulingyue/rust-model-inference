@@ -3,7 +3,7 @@ use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::models::qwen3::qwen3_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen3::base_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -130,7 +130,7 @@ pub fn run_shared_inference(
     n_threads_arg: usize,
     thinking: bool,
 ) -> Result<(), String> {
-    crate::models::qwen3::qwen3_multimodal::run_shared_inference(
+    crate::models::qwen3::base_multimodal::run_shared_inference(
         source, prompt, max_tokens, temperature, n_threads_arg, thinking,
     )
 }

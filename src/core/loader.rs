@@ -485,7 +485,7 @@ impl TensorSource for GGUFLoader {
 /// Architecture-specific knobs derived from `general.architecture` for the
 /// Qwen3 model family (Qwen2/Qwen3/Qwen3-VL/Qwen3.5/LLaMA/Hunyuan-Dense).
 ///
-/// Phase 4c: extracted from `models::qwen3::qwen3_multimodal::Qwen3Config::from_source` so that
+/// Phase 4c: extracted from `models::qwen3::base_multimodal::Qwen3Config::from_source` so that
 /// architecture dispatch lives next to the GGUF metadata it interprets, rather
 /// than inside a model implementation that historically knew too much about
 /// other architectures.
@@ -542,7 +542,7 @@ const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions 
 /// Resolve the Qwen3-family knobs from `general.architecture`.
 ///
 /// This is the **single** place where architecture dispatch happens. It is
-/// called by `models::qwen3::qwen3_multimodal::Qwen3Config::from_source` after
+/// called by `models::qwen3::base_multimodal::Qwen3Config::from_source` after
 /// `model_config_from_source` has produced the dimension set; together they
 /// replace the older `Qwen3Config::from_source` that hardcoded the arch list
 /// inside the model file.

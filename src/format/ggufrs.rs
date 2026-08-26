@@ -3352,7 +3352,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
-    use crate::models::qwen3::qwen3_multimodal::Qwen3Model;
+    use crate::models::qwen3::base_multimodal::Qwen3Model;
     use crate::core::thread_pool::ComputePool;
     use crate::core::tokenizer::BPETokenizer;
 

@@ -103,7 +103,7 @@ pub fn load_layers<'a>(
         .collect()
 }
 
-fn static_weight(
+pub fn static_weight(
     source: &dyn TensorSource,
     name: &str,
     rows: usize,
