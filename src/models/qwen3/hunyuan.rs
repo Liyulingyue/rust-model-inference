@@ -28,7 +28,7 @@ pub fn run_inference(
         true,
     )?;
 
-    crate::models::qwen3::base::run_inference_tokens(
+    crate::models::qwen3::text::run_inference_tokens(
         source,
         input_tokens,
         max_tokens,

@@ -66,7 +66,7 @@ pub fn run_inference(
             kv_format,
         )
     } else {
-        crate::models::qwen3::base::run_inference(
+        crate::models::qwen3::text::run_inference(
             source.clone(),
             prompt,
             max_tokens,
