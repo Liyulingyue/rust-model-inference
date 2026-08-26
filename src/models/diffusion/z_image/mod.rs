@@ -462,6 +462,8 @@ fn validate_vae_block(
 
 pub(crate) struct Q8Scratch {
     scaled: Vec<f32>,
+    force_f32_row: Vec<f32>,
+    f16_input: Vec<u16>,
     values: Vec<u8>,
     scales: Vec<f32>,
 }
@@ -470,6 +472,8 @@ impl Q8Scratch {
     pub(crate) fn new(n_in: usize) -> Self {
         Self {
             scaled: Vec::new(),
+            force_f32_row: Vec::new(),
+            f16_input: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
         }
@@ -594,7 +598,14 @@ fn linear_into_scaled_impl(
         return Err(format!("Invalid {name} byte length"));
     }
     match info.ggml_type {
-        GGMLType::F16 => F16Kernel::new(bytes).forward_scaled(input, output, n_in, n_out, scale),
+        GGMLType::F16 => F16Kernel::new(bytes).forward_scaled(
+            input,
+            output,
+            n_in,
+            n_out,
+            scale,
+            &mut q8.f16_input,
+        ),
         GGMLType::Q8_0 => {
             if scale == 1.0 {
                 q8.prepare(input, n_in)?;
@@ -807,6 +818,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, [17.0, 39.0]);
+    }
+
+    #[test]
+    fn f16_linear_reuses_caller_owned_input_scratch() {
+        let source = TestSource::f16_matrix("w", &[2, 2], [1.0, 2.0, 3.0, 4.0]);
+        let mut scratch = Q8Scratch::new(2);
+        let mut output = [0.0; 2];
+
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &[5.0, 6.0],
+            &mut output,
+            &mut scratch,
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        let input_ptr = scratch.f16_input.as_ptr();
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &[5.0, 6.0],
+            &mut output,
+            &mut scratch,
+            &ComputePool::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(output, [17.0, 39.0]);
+        assert_eq!(scratch.f16_input.as_ptr(), input_ptr);
+        assert_eq!(scratch.f16_input.len(), 2);
     }
 
     #[test]

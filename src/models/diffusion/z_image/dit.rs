@@ -73,15 +73,12 @@ pub(crate) struct ZImageDit {
     x_bias: Vec<f32>,
     cap_pad_token: Vec<f32>,
     x_pad_token: Vec<f32>,
-    time_0_weight: Vec<f32>,
     time_0_bias: Vec<f32>,
-    time_2_weight: Vec<f32>,
     time_2_bias: Vec<f32>,
     context_refiners: Vec<BlockWeights>,
     noise_refiners: Vec<BlockWeights>,
     layers: Vec<BlockWeights>,
     final_modulation_bias: Vec<f32>,
-    final_weight: Vec<f32>,
     final_bias: Vec<f32>,
 }
 
@@ -247,17 +244,26 @@ fn load_f16_vector(source: &dyn TensorSource, name: &str, len: usize) -> Result<
         .collect())
 }
 
-fn load_force_f32_matrix(
+fn force_f32_linear_into(
     source: &dyn TensorSource,
     name: &str,
+    input: &[f32],
+    output: &mut [f32],
     n_in: usize,
     n_out: usize,
-) -> Result<Vec<f32>, String> {
+    scratch: &mut Q8Scratch,
+) -> Result<(), String> {
+    if input.len() != n_in || output.len() != n_out {
+        return Err("Invalid force-F32 linear buffers".into());
+    }
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
+    }
+    if info.ggml_type != GGMLType::F16 {
+        return Err(format!("Invalid {name} type for force-F32 linear"));
     }
     let bytes = source
         .tensor_slice(name)
@@ -265,53 +271,21 @@ fn load_force_f32_matrix(
     if bytes.len() != info.nbytes() {
         return Err(format!("Invalid {name} byte length"));
     }
-
-    match info.ggml_type {
-        GGMLType::F32 => Ok(bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect()),
-        GGMLType::F16 => Ok(bytes
-            .chunks_exact(2)
-            .map(|chunk| f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32())
-            .collect()),
-        GGMLType::Q8_0 => {
-            let mut values = Vec::with_capacity(n_in * n_out);
-            for block in bytes.chunks_exact(34) {
-                let scale =
-                    f16::from_bits(u16::from_le_bytes(block[..2].try_into().unwrap())).to_f32();
-                values.extend(block[2..].iter().map(|&value| scale * (value as i8) as f32));
-            }
-            Ok(values)
+    scratch.force_f32_row.resize(n_in, 0.0);
+    let row_bytes = n_in
+        .checked_mul(2)
+        .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+    for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+        for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
+            *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
         }
-        _ => Err(format!(
-            "Unsupported force-F32 matrix type {:?} for {name}",
-            info.ggml_type
-        )),
-    }
-}
-
-fn force_f32_linear_into(
-    weight: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-) -> Result<(), String> {
-    if weight.len() != checked_product(n_in, n_out, "force-F32 linear weight")?
-        || input.len() != n_in
-        || output.len() != n_out
-    {
-        return Err("Invalid force-F32 linear buffers".into());
-    }
-    for (row, output) in weight.chunks_exact(n_in).zip(output) {
         #[cfg(target_arch = "aarch64")]
         {
-            *output = unsafe { dot_f32_neon(row, input, n_in) };
+            *output = unsafe { dot_f32_neon(&scratch.force_f32_row, input, n_in) };
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
-            *output = dot_f32(row, input, n_in);
+            *output = dot_f32(&scratch.force_f32_row, input, n_in);
         }
     }
     Ok(())
@@ -681,19 +655,7 @@ impl ZImageDit {
             x_bias: load_f32_vector(source.as_ref(), "x_embedder.bias", HIDDEN)?,
             cap_pad_token: load_f16_vector(source.as_ref(), "cap_pad_token", HIDDEN)?,
             x_pad_token: load_f16_vector(source.as_ref(), "x_pad_token", HIDDEN)?,
-            time_0_weight: load_force_f32_matrix(
-                source.as_ref(),
-                "t_embedder.mlp.0.weight",
-                TIME_WIDTH,
-                TIME_HIDDEN,
-            )?,
             time_0_bias: load_f32_vector(source.as_ref(), "t_embedder.mlp.0.bias", TIME_HIDDEN)?,
-            time_2_weight: load_force_f32_matrix(
-                source.as_ref(),
-                "t_embedder.mlp.2.weight",
-                TIME_HIDDEN,
-                TIME_WIDTH,
-            )?,
             time_2_bias: load_f32_vector(source.as_ref(), "t_embedder.mlp.2.bias", TIME_WIDTH)?,
             context_refiners,
             noise_refiners,
@@ -702,12 +664,6 @@ impl ZImageDit {
                 source.as_ref(),
                 "final_layer.adaLN_modulation.1.bias",
                 HIDDEN,
-            )?,
-            final_weight: load_force_f32_matrix(
-                source.as_ref(),
-                "final_layer.linear.weight",
-                HIDDEN,
-                PATCH_WIDTH,
             )?,
             final_bias: load_f32_vector(source.as_ref(), "final_layer.linear.bias", PATCH_WIDTH)?,
             source,
@@ -760,22 +716,26 @@ impl ZImageDit {
 
         timestep_embedding(z_image_model_timestep(sigma), &mut scratch.time_frequency)?;
         force_f32_linear_into(
-            &self.time_0_weight,
+            self.source.as_ref(),
+            "t_embedder.mlp.0.weight",
             &scratch.time_frequency,
             &mut scratch.time_hidden,
             TIME_WIDTH,
             TIME_HIDDEN,
+            &mut scratch.q8,
         )?;
         for (value, bias) in scratch.time_hidden.iter_mut().zip(&self.time_0_bias) {
             *value += *bias;
         }
         silu_approx_inplace(&mut scratch.time_hidden);
         force_f32_linear_into(
-            &self.time_2_weight,
+            self.source.as_ref(),
+            "t_embedder.mlp.2.weight",
             &scratch.time_hidden,
             &mut scratch.time,
             TIME_HIDDEN,
             TIME_WIDTH,
+            &mut scratch.q8,
         )?;
         for (value, bias) in scratch.time.iter_mut().zip(&self.time_2_bias) {
             *value += *bias;
@@ -982,11 +942,13 @@ impl ZImageDit {
             )?;
             scale_modulated_branch(normalized, Some(&scratch.modulation[..HIDDEN]))?;
             force_f32_linear_into(
-                &self.final_weight,
+                self.source.as_ref(),
+                "final_layer.linear.weight",
                 normalized,
                 &mut scratch.patches[row * PATCH_WIDTH..(row + 1) * PATCH_WIDTH],
                 HIDDEN,
                 PATCH_WIDTH,
+                &mut scratch.q8,
             )?;
         }
         sign_and_unpatchify_image(
@@ -1655,18 +1617,48 @@ fn z_image_rope_into(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "parity-trace", target_os = "macos"))]
+    use super::super::Q8Scratch;
+    #[cfg(target_os = "macos")]
     use super::ROPE_HEAD_WIDTH;
     use super::{
-        add_modulated_residual, attention_into, euler_flow_step, layer_norm_no_affine,
-        pad_rows_to_32, patchify_latent, patchify_latent_into, real_image_row, require_finite,
-        rotate_interleaved_inplace, scale_modulated_branch, sign_and_unpatchify_image,
-        split_adaln_modulation, time_snr_shift, timestep_embedding, unpatchify_latent,
-        z_image_model_timestep, z_image_rope, z_image_sigmas, z_image_swiglu, TorchMt19937,
-        ZImageDit,
+        add_modulated_residual, attention_into, euler_flow_step, force_f32_linear_into,
+        layer_norm_no_affine, pad_rows_to_32, patchify_latent, patchify_latent_into,
+        real_image_row, require_finite, rotate_interleaved_inplace, scale_modulated_branch,
+        sign_and_unpatchify_image, split_adaln_modulation, time_snr_shift, timestep_embedding,
+        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas, z_image_swiglu,
+        TorchMt19937, ZImageDit,
     };
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
-    use std::sync::Arc;
+    use half::f16;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct CountingMatrixSource {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+        slice_calls: AtomicUsize,
+    }
+
+    impl TensorSource for CountingMatrixSource {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            if name != self.info.name {
+                return None;
+            }
+            self.slice_calls.fetch_add(1, Ordering::Relaxed);
+            Some(&self.bytes)
+        }
+    }
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
@@ -1691,6 +1683,34 @@ mod tests {
             0x3f4d_ac3c,
             0xbf1f_20e0,
         ]
+    }
+
+    #[test]
+    fn force_f32_linear_reads_mapped_rows_and_reuses_scratch() {
+        let source = CountingMatrixSource {
+            info: TensorInfo {
+                name: "w".into(),
+                dims: vec![2, 2],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+            bytes: [1.0, 2.0, 3.0, 4.0]
+                .into_iter()
+                .flat_map(|value| f16::from_f32(value).to_bits().to_le_bytes())
+                .collect(),
+            slice_calls: AtomicUsize::new(0),
+        };
+        let mut scratch = Q8Scratch::new(2);
+        let mut output = [0.0; 2];
+
+        force_f32_linear_into(&source, "w", &[5.0, 6.0], &mut output, 2, 2, &mut scratch).unwrap();
+        let row_ptr = scratch.force_f32_row.as_ptr();
+        force_f32_linear_into(&source, "w", &[5.0, 6.0], &mut output, 2, 2, &mut scratch).unwrap();
+
+        assert_eq!(output, [17.0, 39.0]);
+        assert_eq!(source.slice_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(scratch.force_f32_row.as_ptr(), row_ptr);
+        assert_eq!(scratch.force_f32_row.len(), 2);
     }
 
     #[test]
@@ -1783,9 +1803,9 @@ mod tests {
         assert_eq!(&rope[image_padding..image_padding + 2], &[1.0, 0.0]);
     }
 
-    #[cfg(all(feature = "parity-trace", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[test]
-    fn z_image_rope_uses_the_oracle_paired_sincos_rounding() {
+    fn default_z_image_rope_uses_the_oracle_paired_sincos_rounding() {
         let rope = z_image_rope(27, 2, 2).unwrap();
         let frequency_nine = 26 * ROPE_HEAD_WIDTH + 9 * 2;
 

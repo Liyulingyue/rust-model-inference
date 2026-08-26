@@ -125,7 +125,12 @@ pub fn report<T>(result: io::Result<T>) {
 
 pub fn token_ids(name: &str, values: &[u32]) -> io::Result<()> {
     if selected(name) {
-        append(&json!({ "name": name, "token_ids": values }))?;
+        append(&json!({
+            "name": name,
+            "shape": [values.len()],
+            "len": values.len(),
+            "token_ids": values,
+        }))?;
     }
     Ok(())
 }
@@ -180,6 +185,7 @@ mod tests {
             .unwrap();
         usize_values("qwen35.positions", &[1, 4], &[7, 7, 7, 0]).unwrap();
         bool_values("qwen35.is_recurrent", &[true, false]).unwrap();
+        token_ids("z_image.prompt_ids", &[10, 20]).unwrap();
         let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
             .unwrap()
             .lines()
@@ -195,6 +201,9 @@ mod tests {
         assert_eq!(records[1]["shape"], json!([1, 4]));
         assert_eq!(records[1]["usize_values"], json!([7, 7, 7, 0]));
         assert_eq!(records[2]["bool_values"], json!([true, false]));
+        assert_eq!(records[3]["shape"], json!([2]));
+        assert_eq!(records[3]["len"], 2);
+        assert_eq!(records[3]["token_ids"], json!([10, 20]));
         assert_eq!(std::fs::read(&binary).unwrap().len(), 8);
         std::fs::remove_file(binary).unwrap();
         std::fs::remove_file(path).unwrap();

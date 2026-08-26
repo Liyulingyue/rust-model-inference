@@ -922,7 +922,7 @@ fn one_head_spatial_attention_into(
             }
             scores[key_position] = score;
         }
-        softmax_inplace(scores);
+        vae_softmax_inplace(scores);
         if scores.iter().any(|value| !value.is_finite()) {
             return Err("Non-finite VAE attention probability".into());
         }
@@ -938,6 +938,11 @@ fn one_head_spatial_attention_into(
         }
     }
     Ok(())
+}
+
+#[inline]
+fn vae_softmax_inplace(values: &mut [f32]) {
+    softmax_inplace(values);
 }
 
 fn upsample_nearest_into(
@@ -1307,6 +1312,18 @@ mod tests {
     #[test]
     fn diffusion_latent_uses_flux_scale_and_shift() {
         assert_eq!(diffusion_to_vae(0.3611), 1.1159);
+    }
+
+    #[test]
+    fn default_vae_softmax_uses_the_oracle_f64_sum_order() {
+        let mut values = [0x40ff_22d2, 0xc075_0e57, 0x4098_49bb].map(f32::from_bits);
+
+        super::vae_softmax_inplace(&mut values);
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3f76_1b16, 0x36f1_9850, 0x3d1e_470c]
+        );
     }
 
     #[test]

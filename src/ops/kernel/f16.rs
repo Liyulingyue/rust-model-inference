@@ -35,15 +35,16 @@ impl<'a> F16Kernel<'a> {
         n_in: usize,
         n_out: usize,
         scale: f32,
+        input_f16: &mut Vec<u16>,
     ) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
         debug_assert!(input.len() >= n_in);
         debug_assert!(output.len() >= n_out);
         debug_assert!(scale.is_finite() && scale != 0.0);
 
-        let mut input_f16 = vec![0u16; n_in];
+        input_f16.resize(n_in, 0);
         if scale == 1.0 {
-            crate::ops::f32_slice_to_f16(&input[..n_in], &mut input_f16);
+            crate::ops::f32_slice_to_f16(&input[..n_in], input_f16);
         } else {
             for (converted, &value) in input_f16.iter_mut().zip(&input[..n_in]) {
                 *converted = crate::ops::f32_to_f16(value * scale);
@@ -54,7 +55,7 @@ impl<'a> F16Kernel<'a> {
         for (out_idx, row) in (0..n_out).enumerate() {
             let row_off = row * n_in * 2;
             output[out_idx] = crate::ops::dot_f16_f16_bytes(
-                &input_f16,
+                input_f16.as_slice(),
                 &self.weight[row_off..row_off + n_in * 2],
                 n_in,
             ) * inverse_scale;
@@ -86,7 +87,7 @@ impl<'a> Kernel for F16Kernel<'a> {
     /// F16 converts the input to F16 before the dot product, matching ggml's
     /// `vec_dot_type = GGML_TYPE_F16` contract.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
-        self.forward_scaled(input, output, n_in, n_out, 1.0);
+        self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
     /// F16's `forward_batched` goes through `forward` (f32 path) rather
@@ -285,7 +286,14 @@ mod tests {
         .collect::<Vec<_>>();
         let mut output = [0.0f32; 1];
 
-        F16Kernel::new(&weight).forward_scaled(&input, &mut output, 32, 1, 1.0 / 128.0);
+        F16Kernel::new(&weight).forward_scaled(
+            &input,
+            &mut output,
+            32,
+            1,
+            1.0 / 128.0,
+            &mut Vec::new(),
+        );
 
         assert_eq!(output[0].to_bits(), 0xc2c1_c587);
     }

@@ -5,30 +5,15 @@ pub fn softmax_inplace(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
-    #[cfg(feature = "parity-trace")]
-    {
-        let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f64;
-        for value in x.iter_mut() {
-            *value = (*value - max).exp();
-            sum += f64::from(*value);
-        }
-        let scale = (1.0 / sum) as f32;
-        for value in x {
-            *value *= scale;
-        }
-        return;
+    let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for value in x.iter_mut() {
+        *value = (*value - max).exp();
+        sum += f64::from(*value);
     }
-    let max_val = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    for v in x.iter_mut() {
-        *v = (*v - max_val).exp();
-        sum += *v;
-    }
-    if sum > 0.0 {
-        for v in x.iter_mut() {
-            *v /= sum;
-        }
+    let scale = (1.0 / sum) as f32;
+    for value in x {
+        *value *= scale;
     }
 }
 
@@ -53,8 +38,6 @@ pub fn softmax_approx_inplace(x: &mut [f32]) {
     }
     softmax_inplace(x);
 }
-
-
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
@@ -132,7 +115,10 @@ unsafe fn softmax_approx_inplace_neon(x: &mut [f32]) {
     let mut sum = 0.0f64;
     let mut i = 0;
     while i + 4 <= x.len() {
-        let values = super::math::exp::exp_approx_neon(vsubq_f32(vld1q_f32(x.as_ptr().add(i)), vdupq_n_f32(max)));
+        let values = super::math::exp::exp_approx_neon(vsubq_f32(
+            vld1q_f32(x.as_ptr().add(i)),
+            vdupq_n_f32(max),
+        ));
         vst1q_f32(x.as_mut_ptr().add(i), values);
         sum += f64::from(vaddvq_f32(values));
         i += 4;
@@ -164,8 +150,6 @@ unsafe fn vec_scale_f32_neon(x: &mut [f32], scale: f32) {
     }
 }
 
-
-
 pub(crate) fn softmax_exp_sum(x: &mut [f32], max: f32) -> f64 {
     #[cfg(target_arch = "aarch64")]
     if super::has_neon() {
@@ -187,7 +171,10 @@ unsafe fn softmax_exp_sum_approx_inplace_neon(x: &mut [f32], max: f32) -> f64 {
     let mut sum = 0.0f64;
     let mut i = 0;
     while i + 4 <= x.len() {
-        let values = super::math::exp::exp_approx_neon(vsubq_f32(vld1q_f32(x.as_ptr().add(i)), vdupq_n_f32(max)));
+        let values = super::math::exp::exp_approx_neon(vsubq_f32(
+            vld1q_f32(x.as_ptr().add(i)),
+            vdupq_n_f32(max),
+        ));
         vst1q_f32(x.as_mut_ptr().add(i), values);
         sum += f64::from(vaddvq_f32(values));
         i += 4;
@@ -311,10 +298,13 @@ mod tests {
             }
             let scalar_time = start.elapsed();
 
-            eprintln!("size={}, AVX2={:.2}ms, Scalar={:.2}ms, Speedup={:.2}x",
-                size, avx2_time.as_secs_f64()*1000.0/iterations as f64,
-                scalar_time.as_secs_f64()*1000.0/iterations as f64,
-                scalar_time.as_nanos() as f64 / avx2_time.as_nanos() as f64);
+            eprintln!(
+                "size={}, AVX2={:.2}ms, Scalar={:.2}ms, Speedup={:.2}x",
+                size,
+                avx2_time.as_secs_f64() * 1000.0 / iterations as f64,
+                scalar_time.as_secs_f64() * 1000.0 / iterations as f64,
+                scalar_time.as_nanos() as f64 / avx2_time.as_nanos() as f64
+            );
         }
     }
 }
