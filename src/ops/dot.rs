@@ -528,3 +528,75 @@ unsafe fn vec_mad_f32_avx2(y: &mut [f32], x: &[f32], v: f32) {
         i += 1;
     }
 }
+
+/// y[i] = y[i] + y[i] * x[i]  (fused self-mul-add).
+///
+/// 算子语义：`y += y * x`。两个操作数都是向量（y 既是累加器又是被乘数）。
+/// AVX2/FMA 走 `_mm256_fmadd_ps(y, x, y)`：累加器先读后写，FMA 硬件语义保证正确。
+/// NEON 走 `vfmaq_f32(y, y, x)`。
+/// 不走 `vec_mad_f32(y, x, v)`，因为 `v` 只能是标量 broadcast，无法表达向量被乘数。
+pub fn vec_mad_self_f32(y: &mut [f32], x: &[f32]) {
+    debug_assert_eq!(y.len(), x.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            unsafe {
+                vec_mad_self_f32_avx2(y, x);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            unsafe {
+                vec_mad_self_f32_neon(y, x);
+            }
+            return;
+        }
+    }
+    for i in 0..y.len() {
+        y[i] += y[i] * x[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn vec_mad_self_f32_avx2(y: &mut [f32], x: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = y.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let yi = _mm256_loadu_ps(y.as_ptr().add(i));
+        let xi = _mm256_loadu_ps(x.as_ptr().add(i));
+        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(yi, xi, yi));
+        i += 8;
+    }
+    if i + 4 <= n {
+        let yi = _mm_loadu_ps(y.as_ptr().add(i));
+        let xi = _mm_loadu_ps(x.as_ptr().add(i));
+        _mm_storeu_ps(y.as_mut_ptr().add(i), _mm_fmadd_ps(yi, xi, yi));
+        i += 4;
+    }
+    while i < n {
+        y[i] += y[i] * x[i];
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn vec_mad_self_f32_neon(y: &mut [f32], x: &[f32]) {
+    use std::arch::aarch64::*;
+    let mut i = 0;
+    while i + 4 <= y.len() {
+        let yi = vld1q_f32(y.as_ptr().add(i));
+        let xi = vld1q_f32(x.as_ptr().add(i));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(yi, yi, xi));
+        i += 4;
+    }
+    while i < y.len() {
+        y[i] += y[i] * x[i];
+        i += 1;
+    }
+}

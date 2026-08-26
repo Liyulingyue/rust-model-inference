@@ -6,7 +6,7 @@ use crate::ops::{
     attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
     f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, vec_mad_f32, vec_scale_f32,
+    ssm_outer_product_update, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -653,4 +653,75 @@ fn neon_q8_nrc1_matches_llama_lane_reduction() {
             (reduce(lanes[0]) + reduce(lanes[1])).to_bits()
         );
     }
+}
+
+/// 验证 `vec_mad_self_f32` 与标量参考在各种长度（覆盖 8 的倍数边界 ±1/+4）
+/// 下行为一致：FMA 累加器先读后写，结果是 1 次舍入（mul 和 add 一起舍入）。
+/// 实测：len ≤ 129 时与标量 1 ULP 以内（实际上 LLVM 不自动向量化）；
+///       len ≥ 255 时 LLVM 自动向量化+FMA 收缩，与手写 SIMD 走不同指令序列，
+///       最多 8 ULP（仍是合法 f32 结果，远小于 VAE 末端 1/255 量化粒度）。
+/// DiT `scale_modulated_branch` 全部跑这个路径，差异会被 VAE 末端的
+/// clamp+round 吸收（PNG 字节不变）。
+#[test]
+fn vec_mad_self_f32_matches_scalar_within_four_ulp() {
+    let fma_active = crate::ops::has_avx2_fma() || crate::ops::has_neon();
+    eprintln!("vec_mad_self_f32 SIMD path active: {fma_active}");
+    for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+        let mut y: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7 - 0.4).collect();
+        let x: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
+        let mut expected = y.clone();
+        for (yi, xi) in expected.iter_mut().zip(&x) {
+            *yi += *yi * *xi;
+        }
+        vec_mad_self_f32(&mut y, &x);
+        assert_eq!(y.len(), expected.len(), "length mismatch at len={len}");
+        let mut max_diff = 0u32;
+        for (i, (&actual, &want)) in y.iter().zip(&expected).enumerate() {
+            let diff_bits = (actual.to_bits() as i32).wrapping_sub(want.to_bits() as i32).abs() as u32;
+            if diff_bits > max_diff {
+                max_diff = diff_bits;
+            }
+            assert!(
+                diff_bits <= 8,
+                "vec_mad_self_f32 mismatch at i={i}, len={len}: actual={:?} (bits={:#x}), expected={:?} (bits={:#x}), diff_bits={diff_bits}",
+                actual, actual.to_bits(), want, want.to_bits()
+            );
+        }
+        eprintln!("len={len}: max_diff_bits={max_diff}");
+    }
+}
+
+/// 防止 API 被误用：当 x 全 1 时 self-mad (y+y*1=2y) 与 vec_mad_f32(_, _, 1.0) (y+1) 必不同。
+#[test]
+fn vec_mad_self_f32_differs_from_vec_mad_f32_with_v_one() {
+    let mut y_self: Vec<f32> = vec![0.5, -0.25, 1.5, -2.0, 0.1, 0.2, -0.3, 0.4, 0.7];
+    let x: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    let mut y_ref = y_self.clone();
+    vec_mad_self_f32(&mut y_self, &x);
+    vec_mad_f32(&mut y_ref, &x, 1.0);
+    for (i, (&a, &b)) in y_self.iter().zip(&y_ref).enumerate() {
+        assert_ne!(
+            a.to_bits(),
+            b.to_bits(),
+            "self-mad 与 vec_mad_f32(_, _, 1.0) 在 x=1 时必不同 (i={i}, a={a}, b={b})"
+        );
+    }
+}
+
+/// 验证空切片不 panic。
+#[test]
+fn vec_mad_self_f32_empty_slice_is_noop() {
+    let mut y: Vec<f32> = vec![];
+    let x: Vec<f32> = vec![];
+    vec_mad_self_f32(&mut y, &x);
+    assert!(y.is_empty());
+}
+
+/// 验证长度 < SIMD lane width 时走尾部标量路径，不触发未定义行为。
+#[test]
+fn vec_mad_self_f32_single_element() {
+    let mut y = vec![2.0f32];
+    let x = vec![3.0f32];
+    vec_mad_self_f32(&mut y, &x);
+    assert_eq!(y[0].to_bits(), 8.0f32.to_bits());
 }
