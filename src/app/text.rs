@@ -3,11 +3,11 @@ use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::core::tensor::TensorSource;
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::models::qwen3::base_multimodal::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen3::base::{qwen_text_positions, Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
+use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
 use std::io::{self, Write};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn run_inference(
-    source: &dyn TensorSource,
+    source: Arc<dyn TensorSource>,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
@@ -33,7 +33,7 @@ pub fn run_inference(
 
     if arch == "hunyuan-dense" {
         crate::models::qwen3::hunyuan::run_inference(
-            source,
+            source.clone(),
             prompt,
             max_tokens,
             temperature,
@@ -43,7 +43,7 @@ pub fn run_inference(
         )
     } else if arch == "lfm2" {
         crate::models::lfm2::run_inference(
-            source,
+            source.as_ref(),
             prompt,
             max_tokens,
             temperature,
@@ -54,9 +54,9 @@ pub fn run_inference(
                 _ => crate::models::lfm2::KvCacheFmt::F32,
             },
         )
-    } else if arch == "llama" {
+} else if arch == "llama" {
         crate::models::llama::run_inference(
-            source,
+            source.as_ref(),
             prompt,
             max_tokens,
             temperature,
@@ -66,8 +66,8 @@ pub fn run_inference(
             kv_format,
         )
     } else {
-        crate::models::qwen3::base::run_inference(
-            source,
+        crate::models::qwen3::text::run_inference(
+            source.clone(),
             prompt,
             max_tokens,
             temperature,
@@ -81,7 +81,7 @@ pub fn run_inference(
 }
 
 pub fn run_interactive(
-    source: &dyn TensorSource,
+    source: Arc<dyn TensorSource>,
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
@@ -107,7 +107,7 @@ pub fn run_interactive(
             continue;
         }
         run_inference(
-            source,
+            source.clone(),
             line,
             max_tokens,
             temperature,
@@ -130,7 +130,7 @@ pub fn run_shared_inference(
     n_threads_arg: usize,
     thinking: bool,
 ) -> Result<(), String> {
-    crate::models::qwen3::base_multimodal::run_shared_inference(
+    crate::models::qwen3::base::run_shared_inference(
         source, prompt, max_tokens, temperature, n_threads_arg, thinking,
     )
 }
@@ -414,7 +414,7 @@ pub fn run_multimodal(
     let mut prompt_ids = Vec::new();
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
-    let image_grids: Vec<crate::models::vision::VisionGrid> = image_grid.iter().copied().collect();
+    let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> = image_grid.iter().copied().collect();
     let (prompt_positions, mut next_text_position) =
         build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids

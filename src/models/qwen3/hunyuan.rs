@@ -5,9 +5,10 @@
 use crate::core::tokenizer::BPETokenizer;
 use crate::prompt::{build_hunyuan_chat_prompt, HunyuanMessage};
 use crate::core::tensor::TensorSource;
+use std::sync::Arc;
 
 pub fn run_inference(
-    source: &dyn TensorSource,
+    source: Arc<dyn TensorSource>,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
@@ -27,7 +28,7 @@ pub fn run_inference(
         true,
     )?;
 
-    crate::models::qwen3::base::run_inference_tokens(
+    crate::models::qwen3::text::run_inference_tokens(
         source,
         input_tokens,
         max_tokens,
