@@ -1713,6 +1713,34 @@ mod tests {
         assert_eq!(scratch.force_f32_row.len(), 2);
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
+    #[test]
+    fn non_aarch64_force_f32_projection_is_feature_independent() {
+        let weights = (0..128)
+            .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
+            .flat_map(|value| f16::from_f32(value).to_bits().to_le_bytes())
+            .collect();
+        let source = CountingMatrixSource {
+            info: TensorInfo {
+                name: "w".into(),
+                dims: vec![128, 1],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+            bytes: weights,
+            slice_calls: AtomicUsize::new(0),
+        };
+        let input = (0..128)
+            .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
+            .collect::<Vec<_>>();
+        let mut scratch = Q8Scratch::new(128);
+        let mut output = [0.0];
+
+        force_f32_linear_into(&source, "w", &input, &mut output, 128, 1, &mut scratch).unwrap();
+
+        assert_eq!(output[0].to_bits(), 0x41d3_f6d4);
+    }
+
     #[test]
     fn torch_mt19937_recomputes_the_final_sixteen_values() {
         let mut values = vec![0.0; 20];

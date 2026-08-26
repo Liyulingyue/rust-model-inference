@@ -347,30 +347,19 @@ unsafe fn vec_mad_f16_f32_avx2(y: &mut [f32], x_f16: &[u16], v: f32) {
 
 #[inline(always)]
 pub fn dot_f32(a: &[f32], b: &[f32], n: usize) -> f32 {
-    #[cfg(feature = "parity-trace")]
+    #[cfg(target_arch = "x86_64")]
     {
-        let mut sum = 0.0f64;
-        for i in 0..n {
-            sum += f64::from(a[i] * b[i]);
+        if has_avx2_fma() {
+            return unsafe { dot_f32_avx2(a, b, n) };
         }
-        return sum as f32;
     }
-    #[cfg(not(feature = "parity-trace"))]
+    #[cfg(target_arch = "aarch64")]
     {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if has_avx2_fma() {
-                return unsafe { dot_f32_avx2(a, b, n) };
-            }
+        if has_neon() {
+            return unsafe { dot_f32_neon(a, b, n) };
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            if has_neon() {
-                return unsafe { dot_f32_neon(a, b, n) };
-            }
-        }
-        dot_f32_scalar(a, b, n)
     }
+    dot_f32_scalar(a, b, n)
 }
 
 #[inline(always)]

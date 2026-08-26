@@ -128,6 +128,7 @@ struct DecoderStage {
 struct VaeScratch {
     first: Vec<f32>,
     second: Vec<f32>,
+    conv_patch: Vec<u16>,
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
@@ -139,6 +140,7 @@ impl VaeScratch {
         Self {
             first: Vec::new(),
             second: Vec::new(),
+            conv_patch: Vec::new(),
             q: Vec::new(),
             k: Vec::new(),
             v: Vec::new(),
@@ -275,6 +277,7 @@ impl FluxVae {
             &current,
             latent_side,
             &mut scratch.first,
+            &mut scratch.conv_patch,
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
         #[cfg(feature = "parity-trace")]
@@ -344,6 +347,7 @@ impl FluxVae {
                     &scratch.first,
                     next_side,
                     &mut scratch.second,
+                    &mut scratch.conv_patch,
                 )?;
                 std::mem::swap(&mut current, &mut scratch.second);
                 side = next_side;
@@ -379,6 +383,7 @@ impl FluxVae {
             &scratch.first,
             output_side,
             &mut scratch.second,
+            &mut scratch.conv_patch,
         )?;
         std::mem::swap(&mut current, &mut scratch.second);
         if current.len() != rgb_len || current.iter().any(|value| !value.is_finite()) {
@@ -436,6 +441,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            &mut scratch.conv_patch,
         )?;
         resize_f32(
             &mut scratch.first,
@@ -457,6 +463,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            &mut scratch.conv_patch,
         )?;
 
         if let Some(shortcut) = &block.shortcut {
@@ -474,6 +481,7 @@ impl FluxVae {
                 weights,
                 Some(&shortcut.bias),
                 &mut scratch.first,
+                &mut scratch.conv_patch,
             )?;
             std::mem::swap(current, &mut scratch.first);
         } else {
@@ -516,6 +524,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.q,
+            &mut scratch.conv_patch,
         )?;
         run_conv(
             self.source.as_ref(),
@@ -523,6 +532,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.k,
+            &mut scratch.conv_patch,
         )?;
         run_conv(
             self.source.as_ref(),
@@ -530,6 +540,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.v,
+            &mut scratch.conv_patch,
         )?;
         one_head_spatial_attention_into(
             &scratch.q,
@@ -546,6 +557,7 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            &mut scratch.conv_patch,
         )?;
         for (projected, residual) in scratch.second.iter_mut().zip(current.iter()) {
             *projected += residual;
@@ -626,6 +638,7 @@ fn run_conv(
     input: &[f32],
     side: usize,
     output: &mut [f32],
+    patch: &mut Vec<u16>,
 ) -> Result<(), String> {
     let weights = source
         .tensor_slice(&conv.weight)
@@ -639,6 +652,7 @@ fn run_conv(
         conv.kernel,
         Some(&conv.bias),
         output,
+        patch,
     )
 }
 
@@ -651,6 +665,7 @@ fn conv_f16_into(
     kernel: usize,
     bias: Option<&[f32]>,
     output: &mut [f32],
+    patch: &mut Vec<u16>,
 ) -> Result<(), String> {
     if side == 0 || !matches!(kernel, 1 | 3) {
         return Err("Invalid VAE convolution shape".into());
@@ -682,10 +697,14 @@ fn conv_f16_into(
         .checked_mul(kernel)
         .and_then(|value| value.checked_mul(input_channels))
         .ok_or_else(|| "VAE convolution patch size overflow".to_string())?;
-    let mut patch = Vec::new();
-    patch
-        .try_reserve_exact(patch_len)
-        .map_err(|error| format!("Failed to allocate VAE convolution patch: {error}"))?;
+    if patch.capacity() < patch_len {
+        let additional = patch_len
+            .checked_sub(patch.len())
+            .ok_or_else(|| "Invalid VAE convolution patch length".to_string())?;
+        patch
+            .try_reserve_exact(additional)
+            .map_err(|error| format!("Failed to allocate VAE convolution patch: {error}"))?;
+    }
     patch.resize(patch_len, 0);
     let padding = kernel / 2;
     for output_y in 0..side {
@@ -743,6 +762,7 @@ fn padded_conv_f16_into(
     output_channels: usize,
     bias: Option<&[f32]>,
     output: &mut [f32],
+    patch: &mut Vec<u16>,
 ) -> Result<(), String> {
     conv_f16_into(
         input,
@@ -753,6 +773,7 @@ fn padded_conv_f16_into(
         3,
         bias,
         output,
+        patch,
     )
 }
 
@@ -861,6 +882,7 @@ fn add_shortcut_residual_into(
     weights: &[u8],
     bias: Option<&[f32]>,
     output: &mut [f32],
+    patch: &mut Vec<u16>,
 ) -> Result<(), String> {
     conv_f16_into(
         input,
@@ -871,6 +893,7 @@ fn add_shortcut_residual_into(
         1,
         bias,
         output,
+        patch,
     )?;
     if residual_branch.len() != output.len() {
         return Err("Invalid VAE shortcut residual length".into());
@@ -993,6 +1016,7 @@ pub(crate) fn upsample_nearest_then_conv(
     let mut nearest = reserve_f32("VAE nearest upsample", output_len)?;
     upsample_nearest_into(input, channels, side, &mut nearest)?;
     let mut output = reserve_f32("VAE learned upsample", output_len)?;
+    let mut patch = Vec::new();
     padded_conv_f16_into(
         &nearest,
         channels,
@@ -1001,6 +1025,7 @@ pub(crate) fn upsample_nearest_then_conv(
         channels,
         bias,
         &mut output,
+        &mut patch,
     )?;
     Ok(output)
 }
@@ -1203,6 +1228,22 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn conv_f16_reuses_caller_owned_patch_buffer() {
+        let input = [1.0, 2.0, 3.0, 4.0];
+        let weights = f16_bytes(&[1.0]);
+        let mut output = [0.0; 4];
+        let mut patch = Vec::new();
+
+        conv_f16_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &mut patch).unwrap();
+        let patch_ptr = patch.as_ptr();
+
+        conv_f16_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &mut patch).unwrap();
+
+        assert_eq!(patch.len(), 1);
+        assert_eq!(patch.as_ptr(), patch_ptr);
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
     fn conv_f16_matches_pinned_ggml_im2col_dot_and_post_bias() {
@@ -1293,6 +1334,7 @@ mod tests {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
         let mut output = [0.0; 4];
+        let mut patch = Vec::new();
 
         conv_f16_into(
             &input,
@@ -1303,10 +1345,12 @@ mod tests {
             3,
             Some(&[f32::from_bits(0xbd69_17db)]),
             &mut output,
+            &mut patch,
         )
         .unwrap();
 
         assert_eq!(output[0].to_bits(), 0xbeb5_c582);
+        assert_eq!(output[1].to_bits(), 0x3e7d_324b);
     }
 
     #[test]
@@ -1480,6 +1524,7 @@ mod tests {
     #[test]
     fn residual_shortcut_projects_input_before_adding_branch() {
         let mut output = [0.0];
+        let mut patch = Vec::new();
         add_shortcut_residual_into(
             &[1.0, 2.0],
             &[7.0],
@@ -1489,6 +1534,7 @@ mod tests {
             &f16_bytes(&[2.0, 3.0]),
             Some(&[5.0]),
             &mut output,
+            &mut patch,
         )
         .unwrap();
         assert_eq!(output, [20.0]);
@@ -1564,6 +1610,7 @@ mod tests {
             }
         }
         let mut output = [0.0; 2];
+        let mut patch = Vec::new();
         padded_conv_f16_into(
             &[5.0, 6.0],
             2,
@@ -1572,6 +1619,7 @@ mod tests {
             2,
             None,
             &mut output,
+            &mut patch,
         )
         .unwrap();
         assert_eq!(output, [17.0, 39.0]);
@@ -1580,7 +1628,18 @@ mod tests {
     #[test]
     fn convolution_uses_zero_padding_at_image_edges() {
         let mut output = [0.0];
-        padded_conv_f16_into(&[2.0], 1, 1, &f16_bytes(&[1.0; 9]), 1, None, &mut output).unwrap();
+        let mut patch = Vec::new();
+        padded_conv_f16_into(
+            &[2.0],
+            1,
+            1,
+            &f16_bytes(&[1.0; 9]),
+            1,
+            None,
+            &mut output,
+            &mut patch,
+        )
+        .unwrap();
         assert_eq!(output, [2.0]);
     }
 
@@ -1589,10 +1648,18 @@ mod tests {
         let mut weights = vec![0.0; 9];
         weights[4] = f32::INFINITY;
         let mut output = [0.0];
-        assert!(
-            padded_conv_f16_into(&[1.0], 1, 1, &f16_bytes(&weights), 1, None, &mut output,)
-                .is_err()
-        );
+        let mut patch = Vec::new();
+        assert!(padded_conv_f16_into(
+            &[1.0],
+            1,
+            1,
+            &f16_bytes(&weights),
+            1,
+            None,
+            &mut output,
+            &mut patch,
+        )
+        .is_err());
     }
 
     #[test]

@@ -572,6 +572,19 @@ mod tests {
         assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
+    #[test]
+    fn non_aarch64_qwen_attention_is_feature_independent() {
+        let left = (0..super::HEAD_WIDTH)
+            .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
+            .collect::<Vec<_>>();
+        let right = (0..super::HEAD_WIDTH)
+            .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction() {
