@@ -33,6 +33,7 @@ pub use format::load_plan::{
 };
 pub use models::qwen3::asr::model::*;
 pub use models::clip_config::{ClipVisionConfig, Qwen35Config};
+pub use models::diffusion::pig::{PigConfig, PigModel, PigVAE};
 pub use models::qwen3::base_multimodal::*;
 pub use models::qwen35::{build_qwen35_positions, Qwen35Model};
 pub use models::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
