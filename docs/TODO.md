@@ -95,3 +95,33 @@
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
+
+## MiniCPM5-1B 输出对齐 Llama.cpp (2026-08)
+
+调试 MiniCPM5-1B-Q8_0 GGUF 模型时 Rust 与 llama.cpp 在 L23 step 0 logits 仍有 max ≈ 0.07 偏差（ffn_out 也偏离 dump 值）。已排除的嫌疑人：
+
+- [x] `silu_mul_approx_inplace` AVX2 vs scalar：logits 差 < 0.005，不是主因（`RUST_FORCE_SCALAR=1` 验证）
+- [x] `quantize_q8_0_into` AVX2 vs scalar：logits 差不大，不是主因
+- [x] `matmul_q8_0_quantized_range` AVX2 vs scalar：logits 差不大，不是主因
+- [x] `scale_mul_inplace`（rms_norm 内层）AVX2 vs scalar：不是主因
+- [x] `hsum_ps`：重写为更易读形式 + 加 TODO 注释（`src/ops/dot.rs:443-467`），数学等价，不是主因
+- [x] `ffn_inp` / `ffn_norm` / `ffn_norm_weight` / W_gate matmul / W_up matmul / silu_mul output：均与 llama dump 或 Python 解析匹配
+- [x] W_down matmul 数学逻辑：Rust down_buf 与 Python Q8×Q8 解析匹配（diff < 0.01）
+
+未定位（仍在排查）：
+- [ ] **Q8_0 AVX2 在合成 uniform 数据上仍有精度 drift（合成 max_diff=255，真实模型通过）**——可能仍是 SIMD 舍入顺序导致的小累积偏差，但在 MiniCPM5-1B 上不会翻转 argmax。参见下方 "Q8_0 AVX2 精度 drift 调查"。
+- [ ] **早期层（L0-L22）intermediate activations 只对比过 rmsnorm scale，未对比具体数值**——可能某层有微小 drift 累积到 L23。需要逐层 dump ffn_inp / attn_out 与 llama 对比。
+- [ ] **Llama dump 的 buffer reuse 问题**——`ffn_out_full_23`/`ffn_up` 等 `_full_23` tensor 共享 backend buffer，dump 读到的可能是被覆盖的数据。需要在 llama.cpp 加 `ggml_backend_tensor_get` 之外的直接读法才能拿到 ground truth。当前 PR 已加 `[LLAMACPP_L23_FFN_OUT_RAW]` 直接读 `t->data`，但需要 MSVC 工具链才能重编 llama-cli。
+- [ ] **W_down matmul 后 ffn_out 与 ffn_inp 的累加**——`base.rs:619-625` 是 `x[i] += down_buf[i]`（就地累加），但 llama.cpp 是 `cur = ggml_add(ctx0, ffn_out, ffn_inp)`（分配新 buffer）。理论上等价，但若 `x` 的 storage 与 ffn_out 共享则可能写入到 ffn_inp 之前的位置。需进一步对比 dump。
+
+临时调试代码（env-var guarded，已合入）：
+
+- `RUST_LLAMA_DEBUG_L23_DOWN=1`：dump L23 step 0 `down_buf` 前 16 值，标记 `[RUST_L23_DOWN_BUF_RAW]`，位置 `src/models/llama/base.rs`（W_down matmul 后）
+- `RUST_LLAMA_DEBUG_LOGITS=1`：dump step 0 logits 前 16 值，标记 `[RUST_LOGITS_RAW]`，位置 `src/models/llama/base.rs`（output.projection 后）
+- `LLAMACPP_DEBUG_L23_FFN_OUT_RAW=1`：dump L23 step 0 ffn_out tensor 前 16 值（不走 ggml_cont，直接读 cb 记录的 tensor），标记 `[LLAMACPP_L23_FFN_OUT_RAW]`，位置 `references/llama.cpp/src/llama-graph.cpp:drain_debug_tensors`
+- `RUST_FORCE_SCALAR=1`：把 silu_mul / scale_mul / Q8_0 quantize / Q8_0 matmul 都强制走 scalar 版本（已合并）
+
+下一步建议（按优先级）：
+1. 补上每个早期层（L0-L22）的 ffn_inp/attn_out 对比 dump，逐层 vs llama 对比
+2. 编译 llama.cpp（需要 MSVC 工具链）后用 `[LLAMACPP_L23_FFN_OUT_RAW]` 拿到 ground truth，与 Rust `[RUST_L23_DOWN_BUF_RAW]` 直接对比，确认 W_down matmul 是否真的有差异
+3. 如果上面两步都没找到差异，逐层 dump ffn_norm / Q8_0 量化后的 input，与 llama 对比舍入差异

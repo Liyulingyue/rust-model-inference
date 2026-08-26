@@ -26,6 +26,7 @@ enum PreTokenizer {
     Qwen35,
     HunyuanDense,
     Lfm2,
+    LlamaBpe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +85,16 @@ const HUNYUAN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<｜hy_place▁holder▁no▁2｜>", "hy_placeholder_2"),
     ("<｜hy_place▁holder▁no▁3｜>", "hy_placeholder_3"),
     ("<｜hy_place▁holder▁no▁8｜>", "hy_placeholder_8"),
+];
+
+const LLAMA_BPE_SEMANTIC_TOKENS: &[(&str, &str)] = &[
+    ("<s>", "bos_token"),
+    ("</s>", "eos_token"),
+    ("<|im_start|>", "im_start"),
+    ("<|im_end|>", "im_end"),
+    ("<|im_sep|>", "im_sep"),
+    ("<|thought_begin|>", "think_start"),
+    ("<|thought_end|>", "think_end"),
 ];
 
 fn string_array(value: Option<MetaValue>, key: &str) -> Result<Vec<String>, String> {
@@ -183,9 +194,10 @@ impl BPETokenizer {
             Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
             Some(MetaValue::String(value)) if value == "hunyuan-dense" => PreTokenizer::HunyuanDense,
             Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
+            Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
             Some(MetaValue::String(value)) => {
                 return Err(format!(
-                    "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2, qwen35, hunyuan-dense, or lfm2"
+                    "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2, qwen35, hunyuan-dense, lfm2, or llama-bpe"
                 ));
             }
             _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -280,6 +292,7 @@ impl BPETokenizer {
 
         let semantic_tokens = match pre {
             PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
+            PreTokenizer::LlamaBpe => LLAMA_BPE_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
         }
         .iter()
