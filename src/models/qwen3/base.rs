@@ -21,7 +21,7 @@ use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::qwen3::skeleton::{load_layers, Qwen3LayerWeights, get_f32_tensor};
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use crate::ops::embedding_lookup;
-use crate::ops::kernel::{Kernel, Weight};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
     rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace,
@@ -122,6 +122,8 @@ pub fn run_inference_tokens(
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
+    let vocab = tokenizer.vocab_size();
+
     let max_ctx = 512usize.min(config.n_ctx);
     let n_embd = config.n_embd;
     let n_layer = config.n_layer;
@@ -154,9 +156,22 @@ pub fn run_inference_tokens(
         );
     }
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
+    let embd_weight_static: &'static [u8] = unsafe { std::mem::transmute(embd_weight) };
+    let token_embedding = Weight::from_quantized(QuantizedTensor::from_bytes(
+        embd_weight_static,
+        embd_info.ggml_type,
+        n_embd,
+        vocab,
+    ));
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
-    let embd_type = embd_info.ggml_type;
+    let output_weight_static: &'static [u8] = unsafe { std::mem::transmute(output_weight) };
     let output_type = source.tensor_info("output.weight").unwrap_or(embd_info).ggml_type;
+    let output_weight_quantized = Weight::from_quantized(QuantizedTensor::from_bytes(
+        output_weight_static,
+        output_type,
+        n_embd,
+        vocab,
+    ));
 
     let layers: Vec<Qwen3LayerWeights> =
         load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, true);
@@ -171,8 +186,6 @@ pub fn run_inference_tokens(
         KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
         KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
     };
-
-    let vocab = tokenizer.vocab_size();
 
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
@@ -220,7 +233,7 @@ pub fn run_inference_tokens(
 
         let pos = step;
 
-        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        token_embedding.embedding_lookup(token_id, &mut scratch.x);
 
         for layer in 0..n_layer {
             let lw = &layers[layer];
