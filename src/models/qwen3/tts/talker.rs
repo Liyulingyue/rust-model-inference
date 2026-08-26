@@ -23,17 +23,17 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3_multimodal::{
-    check_allocation, checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor,
-    static_tensor, usize_to_u64, Qwen3Config,
+use crate::models::qwen3::base_multimodal::{
+    check_allocation, checked_product, load_f32_tensor, static_weight, usize_to_u64, Qwen3Config,
 };
-use crate::models::tts::AUDIO_CODEBOOK_SIZE;
+use crate::models::qwen3::tts::AUDIO_CODEBOOK_SIZE;
+use crate::ops::kernel::Weight;
 use crate::ops::{
-    dot_f16, embedding_lookup, f16_to_f32, f32_slice_to_f16, f32_to_f16,
-    matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    dot_f16, f16_to_f32, f32_slice_to_f16, f32_to_f16,
+    quantize_q8_0_into, rms_norm, rms_norm_inplace,
     rope_mrope_interleaved, rope_neox, silu_mul_approx_inplace, softmax_inplace, vec_scale_f32,
 };
 
@@ -248,13 +248,13 @@ pub(crate) struct TtsLayerWeights {
     pub(crate) ffn_norm: Vec<f32>,
     pub(crate) q_norm: Vec<f32>,
     pub(crate) k_norm: Vec<f32>,
-    pub(crate) wq: &'static [u8],
-    pub(crate) wk: &'static [u8],
-    pub(crate) wv: &'static [u8],
-    pub(crate) wo: &'static [u8],
-    pub(crate) w_gate: &'static [u8],
-    pub(crate) w_up: &'static [u8],
-    pub(crate) w_down: &'static [u8],
+    pub(crate) wq: Weight<'static>,
+    pub(crate) wk: Weight<'static>,
+    pub(crate) wv: Weight<'static>,
+    pub(crate) wo: Weight<'static>,
+    pub(crate) w_gate: Weight<'static>,
+    pub(crate) w_up: Weight<'static>,
+    pub(crate) w_down: Weight<'static>,
 }
 
 /// One generation result from the Talker.
@@ -280,9 +280,8 @@ pub struct Qwen3TtsTalker {
     config: Qwen3TtsTalkerConfig,
     layers: Vec<TtsLayerWeights>,
     output_norm: Vec<f32>,
-    token_embedding: &'static [u8],
-    audio_output_head: &'static [u8],
-    embedding_type: GGMLType,
+    token_embedding: Weight<'static>,
+    audio_output_head: Weight<'static>,
 }
 
 impl Qwen3TtsTalker {
@@ -318,35 +317,19 @@ impl Qwen3TtsTalker {
             &[usize_to_u64(config.n_embd, "embedding width")?],
         )?;
 
-        let embedding_dims = [
-            usize_to_u64(config.n_embd, "embedding width")?,
-            usize_to_u64(config.vocab_size, "vocabulary size")?,
-        ];
-        let embedding_type = source
-            .tensor_info("token_embd.weight")
-            .map(|info| info.ggml_type)
-            .unwrap_or(GGMLType::Q8_0);
-        if !matches!(
-            embedding_type,
-            GGMLType::Q8_0 | GGMLType::F16 | GGMLType::F32
-        ) {
-            return Err(format!(
-                "Unsupported TTS token embedding type {embedding_type:?}; expected Q8_0/F16/F32"
-            ));
-        }
-        let token_embedding = static_tensor(
+        let token_embedding = static_weight(
             source.as_ref(),
             "token_embd.weight",
-            &embedding_dims,
-            embedding_type,
-        )?;
+            config.vocab_size,
+            config.n_embd,
+        );
 
-        let audio_head_dims = [
-            usize_to_u64(config.n_embd, "embedding width")?,
-            usize_to_u64(config.audio_codebook_size, "audio codebook")?,
-        ];
-        let audio_output_head =
-            static_q8_tensor(source.as_ref(), "output.weight", &audio_head_dims)?;
+        let audio_output_head = static_weight(
+            source.as_ref(),
+            "output.weight",
+            config.audio_codebook_size,
+            config.n_embd,
+        );
 
         check_allocation(
             "Talker decoder layers",
@@ -370,48 +353,48 @@ impl Qwen3TtsTalker {
                 ffn_norm: load_f32_tensor(source.as_ref(), &name("ffn_norm.weight"), &n_embd_dim)?,
                 q_norm: load_f32_tensor(source.as_ref(), &name("attn_q_norm.weight"), &head_dim)?,
                 k_norm: load_f32_tensor(source.as_ref(), &name("attn_k_norm.weight"), &head_dim)?,
-                wq: static_q8_matrix(
+                wq: static_weight(
                     source.as_ref(),
                     &name("attn_q.weight"),
-                    config.n_embd,
                     n_embd_q,
-                )?,
-                wk: static_q8_matrix(
+                    config.n_embd,
+                ),
+                wk: static_weight(
                     source.as_ref(),
                     &name("attn_k.weight"),
-                    config.n_embd,
                     n_embd_k,
-                )?,
-                wv: static_q8_matrix(
+                    config.n_embd,
+                ),
+                wv: static_weight(
                     source.as_ref(),
                     &name("attn_v.weight"),
-                    config.n_embd,
                     n_embd_v,
-                )?,
-                wo: static_q8_matrix(
+                    config.n_embd,
+                ),
+                wo: static_weight(
                     source.as_ref(),
                     &name("attn_output.weight"),
-                    n_attn,
                     config.n_embd,
-                )?,
-                w_gate: static_q8_matrix(
+                    n_attn,
+                ),
+                w_gate: static_weight(
                     source.as_ref(),
                     &name("ffn_gate.weight"),
-                    config.n_embd,
                     config.n_ff,
-                )?,
-                w_up: static_q8_matrix(
+                    config.n_embd,
+                ),
+                w_up: static_weight(
                     source.as_ref(),
                     &name("ffn_up.weight"),
-                    config.n_embd,
                     config.n_ff,
-                )?,
-                w_down: static_q8_matrix(
+                    config.n_embd,
+                ),
+                w_down: static_weight(
                     source.as_ref(),
                     &name("ffn_down.weight"),
-                    config.n_ff,
                     config.n_embd,
-                )?,
+                    config.n_ff,
+                ),
             });
         }
 
@@ -424,7 +407,6 @@ impl Qwen3TtsTalker {
             output_norm,
             token_embedding,
             audio_output_head,
-            embedding_type,
         })
     }
 
@@ -491,48 +473,7 @@ impl Qwen3TtsTalker {
             ));
         }
         let mut row = vec![0.0; self.config.n_embd];
-        match self.embedding_type {
-            GGMLType::Q8_0 => embedding_lookup(
-                self.token_embedding,
-                token_id,
-                self.config.n_embd,
-                self.embedding_type,
-                &mut row,
-            ),
-            GGMLType::F16 => {
-                let row_bytes = self
-                    .config
-                    .n_embd
-                    .checked_mul(2)
-                    .ok_or_else(|| "TTS F16 embedding row byte size overflow".to_string())?;
-                let start = (token_id as usize)
-                    .checked_mul(row_bytes)
-                    .ok_or_else(|| "TTS F16 embedding offset overflow".to_string())?;
-                for (output, bytes) in row
-                    .iter_mut()
-                    .zip(self.token_embedding[start..start + row_bytes].chunks_exact(2))
-                {
-                    *output = crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-                }
-            }
-            GGMLType::F32 => {
-                let row_bytes = self
-                    .config
-                    .n_embd
-                    .checked_mul(4)
-                    .ok_or_else(|| "TTS F32 embedding row byte size overflow".to_string())?;
-                let start = (token_id as usize)
-                    .checked_mul(row_bytes)
-                    .ok_or_else(|| "TTS F32 embedding offset overflow".to_string())?;
-                for (output, bytes) in row
-                    .iter_mut()
-                    .zip(self.token_embedding[start..start + row_bytes].chunks_exact(4))
-                {
-                    *output = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
-                }
-            }
-            _ => unreachable!("validated TTS embedding type"),
-        }
+        self.token_embedding.embedding_lookup(token_id, &mut row);
         if row.iter().any(|value| !value.is_finite()) {
             return Err(format!(
                 "TTS embedding token {token_id} contains non-finite values"
@@ -770,13 +711,7 @@ impl TtsSession<'_> {
         // lookup or from a precomputed 2048-dim vector.
         match (token_id, precomputed_embedding) {
             (Some(tid), _) => {
-                embedding_lookup(
-                    model.token_embedding,
-                    tid,
-                    config.n_embd,
-                    model.embedding_type,
-                    &mut self.scratch.x,
-                );
+                model.token_embedding.embedding_lookup(tid, &mut self.scratch.x);
             }
             (None, Some(emb)) => {
                 if emb.len() != config.n_embd {
@@ -837,36 +772,42 @@ impl TtsSession<'_> {
             let q8 = q8_buf[..config.n_embd].as_ptr();
             let scales = scale_buf[..config.n_embd / 32].as_ptr();
             let pool = Arc::clone(&model.pool);
+            let wq = &weights.wq;
+            let wk = &weights.wk;
+            let wv = &weights.wv;
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
                 let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
                 let k = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_k) };
                 let v = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_v) };
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.wq,
+                wq.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     q,
                     config.n_embd,
                     n_embd_q,
                     thread,
                     threads,
                 );
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.wk,
+                wk.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     k,
                     config.n_embd,
                     n_embd_k,
                     thread,
                     threads,
                 );
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.wv,
+                wv.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     v,
                     config.n_embd,
                     n_embd_v,
@@ -1048,15 +989,17 @@ impl TtsSession<'_> {
             let q8 = q8_buf[..n_attn].as_ptr();
             let scales = scale_buf[..n_attn / 32].as_ptr();
             let pool = Arc::clone(&model.pool);
+            let wo = &weights.wo;
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, n_attn) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, n_attn / 32) };
                 let output =
                     unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, config.n_embd) };
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.wo,
+                wo.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     output,
                     n_attn,
                     config.n_embd,
@@ -1081,25 +1024,29 @@ impl TtsSession<'_> {
             let q8 = q8_buf[..config.n_embd].as_ptr();
             let scales = scale_buf[..config.n_embd / 32].as_ptr();
             let pool = Arc::clone(&model.pool);
+            let w_gate = &weights.w_gate;
+            let w_up = &weights.w_up;
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
                 let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
                 let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.w_gate,
+                w_gate.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     up,
                     config.n_embd,
                     config.n_ff,
                     thread,
                     threads,
                 );
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.w_up,
+                w_up.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     gate,
                     config.n_embd,
                     config.n_ff,
@@ -1121,14 +1068,16 @@ impl TtsSession<'_> {
             let q8 = q8_buf[..config.n_ff].as_ptr();
             let scales = scale_buf[..config.n_ff / 32].as_ptr();
             let pool = Arc::clone(&model.pool);
+            let w_down = &weights.w_down;
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_ff) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
                 let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
-                matmul_q8_0_quantized_parallel_rows(
-                    weights.w_down,
+                w_down.kernel.forward_prepared(
+                    &[],
                     q8,
                     scales,
+                    None,
                     down,
                     config.n_ff,
                     config.n_embd,
@@ -1169,10 +1118,11 @@ impl TtsSession<'_> {
             &mut self.scratch.scale_buf[..blocks],
         );
         let mut logits = vec![0.0f32; config.audio_codebook_size];
-        matmul_q8_0_quantized_parallel_rows(
-            model.audio_output_head,
+        model.audio_output_head.kernel.forward_prepared(
+            &[],
             &self.scratch.q8_buf[..n_embd],
             &self.scratch.scale_buf[..blocks],
+            None,
             &mut logits,
             n_embd,
             config.audio_codebook_size,
