@@ -32,11 +32,11 @@ pub use format::load_plan::{
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
 pub use models::qwen3::asr::model::*;
-pub use models::clip_config::{ClipVisionConfig, Qwen35Config};
+pub use models::qwen35::clip_config::{ClipVisionConfig, Qwen35Config};
 pub use models::diffusion::pig::{PigConfig, PigModel, PigVAE};
 
 pub use models::qwen35::{build_qwen35_positions, Qwen35Model};
-pub use models::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
+pub use models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
 
 pub use ops::*;
 pub use ops::quant::{dequant_weight_q4k, BlockQ8K, QK_K, dequantize_q4_k_weight};

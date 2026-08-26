@@ -7,7 +7,7 @@ use crate::models::qwen3::base::{qwen_text_positions, Qwen3GenerateOptions, Qwen
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
+use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
 use std::io::{self, Write};
@@ -414,7 +414,7 @@ pub fn run_multimodal(
     let mut prompt_ids = Vec::new();
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
-    let image_grids: Vec<crate::models::vision::VisionGrid> = image_grid.iter().copied().collect();
+    let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> = image_grid.iter().copied().collect();
     let (prompt_positions, mut next_text_position) =
         build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
