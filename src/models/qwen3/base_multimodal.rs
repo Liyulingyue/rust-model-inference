@@ -258,6 +258,17 @@ pub struct Qwen3Session<'model> {
     capacity: usize,
 }
 
+/// 携带格式信息的 KV cache 指针。
+///
+/// 让 attention 循环可以根据格式选择对应的写入/读取路径。
+/// - `F16`: 高性能路径，使用 F16 特定的 dot/f32_to_f16 优化（生产路径）
+/// - `F32`: 通用路径，直接读写 f32（用于调试/精确推理）
+#[derive(Clone, Copy)]
+enum KvPtrs {
+    F16 { k: *mut u16, v: *mut u16 },
+    F32 { k: *mut f32, v: *mut f32 },
+}
+
 impl Qwen3Model {
     pub fn from_source(
         source: Arc<dyn TensorSource>,
@@ -578,6 +589,40 @@ impl<'model> Qwen3Session<'model> {
         self.generate_with_asr_trace(input, options, false)
     }
 
+    /// Streaming 生成版本：每个 token 渲染后立即回调 `on_token`。
+    ///
+    /// 这是 CLI 实时输出、多轮对话"打字机"效果的关键接口。
+    /// 与 `generate()` 的区别仅在 streaming callback；最终 `Qwen3Generation`
+    /// 内容一致。
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// session.generate_streaming(input, options, |text| print!("{text}"))?;
+    /// ```
+    pub fn generate_streaming(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<Qwen3Generation, String> {
+        validate_generation(self.model, &input, options)?;
+        let required = checked_session_capacity(
+            input.token_ids.len(),
+            options.max_new_tokens,
+            self.model.config.n_ctx,
+        )?;
+        if required > self.capacity {
+            return Err(format!(
+                "Generation requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        // 包装 callback 为 dyn FnMut（一次性，不需要 Box<dyn FnMut>）
+        let mut cb = |text: &str| on_token(text);
+        self.generate_inner(input, options, false, Some(&mut cb))
+    }
+
     fn generate_with_asr_trace(
         &mut self,
         input: Qwen3Input<'_>,
@@ -596,7 +641,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, asr_trace)
+        self.generate_inner(input, options, asr_trace, None)
     }
 
     fn generate_inner(
@@ -604,6 +649,7 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
         asr_trace: bool,
+        mut on_token: Option<&mut dyn FnMut(&str)>,
     ) -> Result<Qwen3Generation, String> {
         let _source = &self.model.source;
         let model = self.model;
@@ -627,9 +673,17 @@ impl<'model> Qwen3Session<'model> {
         let max_n_in = n_embd_q.max(n_attn).max(config.n_ff);
         let group_size = config.n_head / config.n_head_kv;
         let kq_scale = 1.0 / (config.n_embd_head_k as f32).sqrt();
-        let (k_cache_ptr, v_cache_ptr) = match &mut self.kv_state.cache {
-            KvCache::F16(cache) => (cache.k.as_mut_ptr(), cache.v.as_mut_ptr()),
-            KvCache::F32(_) => return Err("Qwen3Session requires an F16 KV cache".into()),
+        // 统一 KV cache 指针（同时支持 F16/F32），由 `KvPtrs` 携带格式信息
+        // 让 attention 循环可以根据格式选择对应的写入/读取路径。
+        let kv_ptrs = match &mut self.kv_state.cache {
+            KvCache::F16(cache) => KvPtrs::F16 {
+                k: cache.k.as_mut_ptr(),
+                v: cache.v.as_mut_ptr(),
+            },
+            KvCache::F32(cache) => KvPtrs::F32 {
+                k: cache.k.as_mut_ptr(),
+                v: cache.v.as_mut_ptr(),
+            },
         };
         self.kv_state.update_access();
 
@@ -866,35 +920,61 @@ impl<'model> Qwen3Session<'model> {
                     }
 
                     let layer_base = layer * capacity * kv_stride;
-                    let k_cache =
-                        unsafe { std::slice::from_raw_parts_mut(k_cache_ptr, kv_cache_size) };
-                    let v_cache =
-                        unsafe { std::slice::from_raw_parts_mut(v_cache_ptr, kv_cache_size) };
-                    for head in 0..config.n_head_kv {
-                        let k_offset = head * config.n_embd_head_k;
-                        let v_offset = head * config.n_embd_head_v;
-                        let cache_row = layer_base + step * kv_stride;
-                        f32_slice_to_f16(
-                            &k[k_offset..k_offset + config.n_embd_head_k],
-                            &mut k_cache
-                                [cache_row + k_offset..cache_row + k_offset + config.n_embd_head_k],
-                        );
-                        f32_slice_to_f16(
-                            &v[v_offset..v_offset + config.n_embd_head_v],
-                            &mut v_cache
-                                [cache_row + v_offset..cache_row + v_offset + config.n_embd_head_v],
-                        );
+                    // 根据格式选择写入路径
+                    match kv_ptrs {
+                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe {
+                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                            };
+                            let v_cache = unsafe {
+                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                            };
+                            for head in 0..config.n_head_kv {
+                                let k_offset = head * config.n_embd_head_k;
+                                let v_offset = head * config.n_embd_head_v;
+                                let cache_row = layer_base + step * kv_stride;
+                                f32_slice_to_f16(
+                                    &k[k_offset..k_offset + config.n_embd_head_k],
+                                    &mut k_cache[cache_row + k_offset
+                                        ..cache_row + k_offset + config.n_embd_head_k],
+                                );
+                                f32_slice_to_f16(
+                                    &v[v_offset..v_offset + config.n_embd_head_v],
+                                    &mut v_cache[cache_row + v_offset
+                                        ..cache_row + v_offset + config.n_embd_head_v],
+                                );
+                            }
+                        }
+                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe {
+                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
+                            };
+                            let v_cache = unsafe {
+                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
+                            };
+                            for head in 0..config.n_head_kv {
+                                let k_offset = head * config.n_embd_head_k;
+                                let v_offset = head * config.n_embd_head_v;
+                                let cache_row = layer_base + step * kv_stride;
+                                k_cache[cache_row + k_offset
+                                    ..cache_row + k_offset + config.n_embd_head_k]
+                                    .copy_from_slice(&k[k_offset..k_offset + config.n_embd_head_k]);
+                                v_cache[cache_row + v_offset
+                                    ..cache_row + v_offset + config.n_embd_head_v]
+                                    .copy_from_slice(&v[v_offset..v_offset + config.n_embd_head_v]);
+                            }
+                        }
                     }
                 }
 
                 let pool = Arc::clone(&model.pool);
                 let scores_ptr = self.scratch.scores.as_mut_ptr();
                 let score_stride = self.scratch.score_stride;
+                // 把 kv_ptrs (轻量 enum, 含 *mut) 移入闭包，避免在闭包中重复解引用
+                let kv_ptrs_inner = kv_ptrs;
                 pool.compute(move |thread, threads| {
                     let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
                     let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_attn) };
-                    let k_cache = unsafe { std::slice::from_raw_parts(k_cache_ptr, kv_cache_size) };
-                    let v_cache = unsafe { std::slice::from_raw_parts(v_cache_ptr, kv_cache_size) };
                     let scores = unsafe {
                         std::slice::from_raw_parts_mut(
                             scores_ptr.add(thread * score_stride),
@@ -906,45 +986,87 @@ impl<'model> Qwen3Session<'model> {
                     let head_end = (thread + 1) * config.n_head / threads;
                     let layer_base = layer * capacity * kv_stride;
                     let n_padded = (step + 1).div_ceil(256) * 256;
-                    for head in head_start..head_end {
-                        let kv_head = head / group_size;
-                        let q_offset = head * config.n_embd_head_k;
-                        let output_offset = head * config.n_embd_head_v;
-                        let output =
-                            &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
-                        let query = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                output.as_mut_ptr().cast::<u16>(),
-                                config.n_embd_head_k,
-                            )
-                        };
-                        f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
-                        scores[..n_padded].fill(f32::NEG_INFINITY);
-                        for token in 0..=step {
-                            let row = layer_base + token * kv_stride;
-                            let key_offset = row + kv_head * config.n_embd_head_k;
-                            scores[token] = dot_f16(
-                                query,
-                                &k_cache[key_offset..key_offset + config.n_embd_head_k],
-                                config.n_embd_head_k,
-                            ) * kq_scale;
-                        }
-                        softmax_inplace(&mut scores[..n_padded]);
-                        for index in 0..n_padded {
-                            unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
-                        }
-                        let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
-                        let values = unsafe {
-                            std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
-                        };
-                        values[step + 1..].fill(0);
-                        for dimension in 0..config.n_embd_head_v {
-                            for token in 0..=step {
-                                let row = layer_base + token * kv_stride;
-                                values[token] =
-                                    v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                    match kv_ptrs_inner {
+                        KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
+                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            for head in head_start..head_end {
+                                let kv_head = head / group_size;
+                                let q_offset = head * config.n_embd_head_k;
+                                let output_offset = head * config.n_embd_head_v;
+                                let output =
+                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let query = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        output.as_mut_ptr().cast::<u16>(),
+                                        config.n_embd_head_k,
+                                    )
+                                };
+                                f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
+                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                for token in 0..=step {
+                                    let row = layer_base + token * kv_stride;
+                                    let key_offset = row + kv_head * config.n_embd_head_k;
+                                    scores[token] = dot_f16(
+                                        query,
+                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                        config.n_embd_head_k,
+                                    ) * kq_scale;
+                                }
+                                softmax_inplace(&mut scores[..n_padded]);
+                                for index in 0..n_padded {
+                                    unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
+                                }
+                                let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
+                                let values = unsafe {
+                                    std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
+                                };
+                                values[step + 1..].fill(0);
+                                for dimension in 0..config.n_embd_head_v {
+                                    for token in 0..=step {
+                                        let row = layer_base + token * kv_stride;
+                                        values[token] =
+                                            v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                    }
+                                    output[dimension] = dot_f16(values, weights, n_padded);
+                                }
                             }
-                            output[dimension] = dot_f16(values, weights, n_padded);
+                        }
+                        KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
+                            // F32 路径：直接用 f32 计算，无 F16 优化
+                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            for head in head_start..head_end {
+                                let kv_head = head / group_size;
+                                let q_offset = head * config.n_embd_head_k;
+                                let output_offset = head * config.n_embd_head_v;
+                                let output =
+                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let query = &q[q_offset..q_offset + config.n_embd_head_k];
+                                scores[..n_padded].fill(f32::NEG_INFINITY);
+                                for token in 0..=step {
+                                    let row = layer_base + token * kv_stride;
+                                    let key_offset = row + kv_head * config.n_embd_head_k;
+                                    scores[token] = dot_f32(
+                                        query,
+                                        &k_cache[key_offset..key_offset + config.n_embd_head_k],
+                                        config.n_embd_head_k,
+                                    ) * kq_scale;
+                                }
+                                softmax_inplace(&mut scores[..n_padded]);
+                                // F32 路径：values 直接存 f32， weights 也存 f32
+                                // 用 scores 复用区（scores[..n_padded] 已经 softmax 过）
+                                let weights = &scores[..n_padded];
+                                for dimension in 0..config.n_embd_head_v {
+                                    let mut acc = 0.0f32;
+                                    for token in 0..=step {
+                                        let row = layer_base + token * kv_stride;
+                                        let v = v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                        acc += weights[token] * v;
+                                    }
+                                    output[dimension] = acc;
+                                }
+                            }
                         }
                     }
                 });
@@ -1132,6 +1254,9 @@ impl<'model> Qwen3Session<'model> {
             }
             let text = decoder.push(token_id);
             if !text.is_empty() {
+                if let Some(cb) = on_token.as_mut() {
+                    cb(&text);
+                }
                 rendered_tokens.push(text);
             }
             generated_tokens.push(token_id);

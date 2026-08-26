@@ -1,12 +1,12 @@
 /// KV 缓存精度格式。
 ///
-/// - `F16`：半精度，节省内存（推荐）
-/// - `F32`：单精度，更精确但内存翻倍
+/// - `F32`：单精度，更精确（默认）
+/// - `F16`：半精度，节省内存
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum KvFormat {
     #[default]
-    F16,
     F32,
+    F16,
 }
 
 pub struct ExecutionScratchpad {

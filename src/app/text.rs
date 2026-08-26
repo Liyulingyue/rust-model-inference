@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn run_inference(
-    source: &dyn TensorSource,
+    source: Arc<dyn TensorSource>,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
@@ -33,7 +33,7 @@ pub fn run_inference(
 
     if arch == "hunyuan-dense" {
         crate::models::qwen3::hunyuan::run_inference(
-            source,
+            source.clone(),
             prompt,
             max_tokens,
             temperature,
@@ -43,7 +43,7 @@ pub fn run_inference(
         )
     } else if arch == "lfm2" {
         crate::models::lfm2::run_inference(
-            source,
+            source.as_ref(),
             prompt,
             max_tokens,
             temperature,
@@ -54,9 +54,9 @@ pub fn run_inference(
                 _ => crate::models::lfm2::KvCacheFmt::F32,
             },
         )
-    } else if arch == "llama" {
+} else if arch == "llama" {
         crate::models::llama::run_inference(
-            source,
+            source.as_ref(),
             prompt,
             max_tokens,
             temperature,
@@ -67,7 +67,7 @@ pub fn run_inference(
         )
     } else {
         crate::models::qwen3::base::run_inference(
-            source,
+            source.clone(),
             prompt,
             max_tokens,
             temperature,
@@ -81,7 +81,7 @@ pub fn run_inference(
 }
 
 pub fn run_interactive(
-    source: &dyn TensorSource,
+    source: Arc<dyn TensorSource>,
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
@@ -107,7 +107,7 @@ pub fn run_interactive(
             continue;
         }
         run_inference(
-            source,
+            source.clone(),
             line,
             max_tokens,
             temperature,
