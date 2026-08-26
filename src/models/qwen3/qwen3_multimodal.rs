@@ -440,7 +440,7 @@ impl Qwen3Model {
     }
 
     pub fn text_encode(&self, token_ids: &[u32], positions: &[[usize; 4]]) -> Result<Vec<f32>, String> {
-        crate::models::qwen3_multimodal_text_encode::text_encode(self, token_ids, positions)
+        crate::models::qwen3::qwen3_multimodal_text_encode::text_encode(self, token_ids, positions)
     }
 
     pub fn generate(

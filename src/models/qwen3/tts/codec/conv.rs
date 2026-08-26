@@ -7,7 +7,7 @@
 //!   convolution) used to upsample in DAC upsampling blocks.
 //!
 //! All buffers follow the same `[in_channels, length]` / `[out_channels, length]`
-//! row-major convention as [`snake1d_inplace`](crate::models::tts::codec::snake::snake1d_inplace).
+//! row-major convention as [`snake1d_inplace`](crate::models::qwen3::tts::codec::snake::snake1d_inplace).
 
 use rayon::prelude::*;
 

@@ -18,10 +18,10 @@
 use rand::Rng;
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3_multimodal::{
+use crate::models::qwen3::qwen3_multimodal::{
     checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor, usize_to_u64,
 };
-use crate::models::tts::talker::{mad_f16_inplace, scale_f16_inplace};
+use crate::models::qwen3::tts::talker::{mad_f16_inplace, scale_f16_inplace};
 #[cfg(target_arch = "aarch64")]
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 #[cfg(not(target_arch = "aarch64"))]

@@ -2,8 +2,8 @@
 //! noise. Skips Talker + Code Predictor and feeds a synthetic sine input
 //! through the codec decoder.
 
-use rust_model_inference::models::tts::codec::{DacDecoder, RvqDecoder};
-use rust_model_inference::models::tts::codec::write_wav_f32;
+use rust_model_inference::models::qwen3::tts::codec::{DacDecoder, RvqDecoder};
+use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
 use std::sync::Arc;
 use std::path::PathBuf;

@@ -26,11 +26,11 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3_multimodal::{
+use crate::models::qwen3::qwen3_multimodal::{
     check_allocation, checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor,
     static_tensor, usize_to_u64, Qwen3Config,
 };
-use crate::models::tts::AUDIO_CODEBOOK_SIZE;
+use crate::models::qwen3::tts::AUDIO_CODEBOOK_SIZE;
 use crate::ops::{
     dot_f16, embedding_lookup, f16_to_f32, f32_slice_to_f16, f32_to_f16,
     matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm, rms_norm_inplace,
