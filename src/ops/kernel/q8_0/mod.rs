@@ -7,9 +7,7 @@
 
 use super::Kernel;
 pub mod avx2;
-pub mod batch;
 pub mod dispatch;
-pub mod legacy;
 pub mod neon;
 pub mod parallel;
 pub mod scalar;

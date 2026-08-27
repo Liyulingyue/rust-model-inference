@@ -3,14 +3,10 @@
 // so existing callers (`bin/server.rs`, `bin/micro_bench.rs`,
 // `app/embedding.rs`, `app/text.rs`) keep working without rewrites.
 pub use super::kernel::q8_0::parallel::{
-    matmul_q8_0, matmul_q8_0_parallel, matmul_q8_0_quantized_dynamic,
-    matmul_q8_0_quantized_parallel, matmul_q8_0_quantized_parallel_rows,
+    matmul_q8_0_quantized_dynamic, matmul_q8_0_quantized_parallel,
+    matmul_q8_0_quantized_parallel_rows,
 };
 pub use super::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
-pub use super::kernel::q8_0::legacy::{
-    matmul_q8_0_via_q8, matmul_q8_0_via_q8_parallel,
-};
-pub use super::kernel::q8_0::batch::{matmul_q8_0_batch, MatmulTask};
 
 // Phase 2.7-final cleanup: `ProcessedWeight` enum has been retired.
 // Weight handling now flows entirely through the `Kernel` trait in
