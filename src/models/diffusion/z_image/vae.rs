@@ -1,6 +1,6 @@
 use super::{validate_component, Component, ZImageRgb};
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_approx_inplace, softmax_inplace};
+use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
 use std::sync::Arc;
 
 const LATENT_CHANNELS: usize = 16;
@@ -866,7 +866,7 @@ fn group_norm_32_into(
 }
 
 fn silu_inplace_checked(values: &mut [f32]) -> Result<(), String> {
-    silu_approx_inplace(values);
+    silu_inplace(values);
     if values.iter().any(|value| !value.is_finite()) {
         return Err("Non-finite VAE SiLU output".into());
     }

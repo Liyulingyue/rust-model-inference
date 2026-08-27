@@ -712,6 +712,8 @@ impl ZImageDit {
         require_finite(latent, "latent")?;
         require_finite(context, "context")?;
 
+        let t_total = std::time::Instant::now();
+        let t_setup = std::time::Instant::now();
         let (patch_height, patch_width, _) =
             patch_shape(LATENT_CHANNELS, latent_side, latent_side)?;
         let image_tokens = checked_product(patch_height, patch_width, "image tokens")?;
@@ -822,6 +824,7 @@ impl ZImageDit {
                 &scratch.image[..image_hidden],
             ));
         }
+        let t_setup_done = std::time::Instant::now();
         for (_index, block) in self.context_refiners.iter().enumerate() {
             run_block(
                 self.source.as_ref(),
@@ -897,6 +900,13 @@ impl ZImageDit {
                 &mut scratch.q8,
             )?;
         }
+        let t_layers_done = std::time::Instant::now();
+        eprintln!("[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
+            sigma,
+            t_setup_done.duration_since(t_setup).as_secs_f64() * 1000.0,
+            t_layers_done.duration_since(t_setup_done).as_secs_f64() * 1000.0,
+            t_total.elapsed().as_secs_f64() * 1000.0,
+        );
 
         for (output, input) in scratch.time_frequency.iter_mut().zip(&scratch.time) {
             *output = silu(*input);

@@ -4,7 +4,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 #[cfg(target_arch = "aarch64")]
-use crate::ops::{attention_value_f32, dot_f32_neon, silu_mul_approx_inplace};
+use crate::ops::{attention_value_f32, dot_f32_neon, silu_mul_inplace};
 #[cfg(not(target_arch = "aarch64"))]
 use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
 use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
@@ -373,7 +373,7 @@ fn qwen_attention_value(values: &[f32], weights: &[f32]) -> f32 {
 fn qwen_swiglu(gate: &[f32], up: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
     {
-        silu_mul_approx_inplace(gate, up);
+        silu_mul_inplace(gate, up);
     }
     #[cfg(not(target_arch = "aarch64"))]
     silu_mul_inplace(gate, up);
@@ -384,7 +384,7 @@ fn attention_softmax(scores: &mut [f32], position: usize, token_count: usize) {
     #[cfg(target_arch = "aarch64")]
     {
         scores[position + 1..token_count].fill(f32::NEG_INFINITY);
-        crate::ops::softmax_approx_inplace(&mut scores[..token_count]);
+        crate::ops::softmax_inplace(&mut scores[..token_count]);
     }
     #[cfg(not(target_arch = "aarch64"))]
     softmax_inplace(&mut scores[..=position]);
