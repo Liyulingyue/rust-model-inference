@@ -12,6 +12,9 @@
 //!   conv kernel itself has `l_cache` rows.
 //!
 //! FFN tensors (gate / up / down) exist for both layer types.
+//!
+//! Matmul weights are loaded via [`Weight::from_quantized`], which auto
+//! dispatches to the per-dtype kernel (`Q8Kernel` for Q8_0 weights, etc.).
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -29,25 +32,12 @@ pub struct Lfm2LayerWeights<'a> {
     pub wk: Option<Weight<'a>>,
     pub wv: Option<Weight<'a>>,
     pub wo: Option<Weight<'a>>,
-    /// F32 (dequantized) attention weights for high-precision matmul.
-    pub wq_f32: Weight<'static>,
-    pub wk_f32: Weight<'static>,
-    pub wv_f32: Weight<'static>,
-    pub wo_f32: Weight<'static>,
     pub w_gate: Weight<'a>,
     pub w_up: Weight<'a>,
     pub w_down: Weight<'a>,
-    /// F32 (dequantized) FFN weights for high-precision matmul.
-    pub w_gate_f32: Weight<'static>,
-    pub w_up_f32: Weight<'static>,
-    pub w_down_f32: Weight<'static>,
     pub shortconv_in: Option<Weight<'a>>,
     pub shortconv_out: Option<Weight<'a>>,
     pub shortconv_conv: Option<Vec<f32>>,
-    /// F32 (dequantized) version of `shortconv_in` for high-precision matmul.
-    pub shortconv_in_f32: Option<Weight<'static>>,
-    /// F32 (dequantized) version of `shortconv_out` for high-precision matmul.
-    pub shortconv_out_f32: Option<Weight<'static>>,
 }
 
 /// LFM2 model configuration derived from GGUF metadata.
@@ -217,29 +207,6 @@ fn quant_weight<'a>(
     )))
 }
 
-/// Dequantize a Q8_0 weight tensor into F32. Returns owned Vec<f32> with
-/// row-major layout `[n_out, n_in]`. Allocates ~`n_in * n_out * 4` bytes.
-fn dequant_q8_0_to_f32(bytes: &[u8], n_in: usize, n_out: usize) -> Vec<f32> {
-    let blocks_per_row = n_in / 32;
-    let bytes_per_row = blocks_per_row * 34;
-    let mut out = vec![0f32; n_out * n_in];
-    for row in 0..n_out {
-        let row_data = &bytes[row * bytes_per_row..(row + 1) * bytes_per_row];
-        for b in 0..blocks_per_row {
-            let block = &row_data[b * 34..(b + 1) * 34];
-            let sc = half::f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
-            for j in 0..32 {
-                out[row * n_in + b * 32 + j] = sc * (block[2 + j] as i8) as f32;
-            }
-        }
-    }
-    out
-}
-
-fn f32_weight(bytes: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
-    Weight::from_quantized(QuantizedTensor::F32(bytes))
-}
-
 pub fn load_layers<'a>(
     source: &'a dyn TensorSource,
     cfg: &Lfm2Config,
@@ -297,35 +264,7 @@ pub fn load_layers<'a>(
         } else {
             (None, None, None, None, None, None)
         };
-        // F32 (dequantized) versions of attention weights for high-precision matmul.
-        let (wq_f32_w, wk_f32_w, wv_f32_w, wo_f32_w) = if is_attn {
-            let n_embd_q = cfg.n_head * cfg.n_embd_head_k;
-            let n_embd_kv = cfg.n_head_kv_per_layer[l] * cfg.n_embd_head_k;
-            let wq_b = source.tensor_slice(&format!("blk.{l}.attn_q.weight")).unwrap();
-            let wk_b = source.tensor_slice(&format!("blk.{l}.attn_k.weight")).unwrap();
-            let wv_b = source.tensor_slice(&format!("blk.{l}.attn_v.weight")).unwrap();
-            let wo_b = source.tensor_slice(&format!("blk.{l}.attn_output.weight")).unwrap();
-            (
-                f32_weight(dequant_q8_0_to_f32(wq_b, cfg.n_embd, n_embd_q), cfg.n_embd, n_embd_q),
-                f32_weight(dequant_q8_0_to_f32(wk_b, cfg.n_embd, n_embd_kv), cfg.n_embd, n_embd_kv),
-                f32_weight(dequant_q8_0_to_f32(wv_b, cfg.n_embd, n_embd_kv), cfg.n_embd, n_embd_kv),
-                f32_weight(dequant_q8_0_to_f32(wo_b, n_embd_q, cfg.n_embd), n_embd_q, cfg.n_embd),
-            )
-        } else {
-            (
-                f32_weight(Vec::new(), 0, 0),
-                f32_weight(Vec::new(), 0, 0),
-                f32_weight(Vec::new(), 0, 0),
-                f32_weight(Vec::new(), 0, 0),
-            )
-        };
 
-        let w_gate_bytes = source.tensor_slice(&format!("blk.{l}.ffn_gate.weight")).unwrap();
-        let w_up_bytes = source.tensor_slice(&format!("blk.{l}.ffn_up.weight")).unwrap();
-        let w_down_bytes = source.tensor_slice(&format!("blk.{l}.ffn_down.weight")).unwrap();
-        let w_gate_f32 = dequant_q8_0_to_f32(w_gate_bytes, cfg.n_embd, cfg.n_ff);
-        let w_up_f32 = dequant_q8_0_to_f32(w_up_bytes, cfg.n_embd, cfg.n_ff);
-        let w_down_f32 = dequant_q8_0_to_f32(w_down_bytes, cfg.n_ff, cfg.n_embd);
         let w_gate = quant_weight(
             source,
             &format!("blk.{l}.ffn_gate.weight"),
@@ -334,24 +273,19 @@ pub fn load_layers<'a>(
         )?;
         let w_up =
             quant_weight(source, &format!("blk.{l}.ffn_up.weight"), cfg.n_embd, cfg.n_ff)?;
-        let w_down =
-            quant_weight(source, &format!("blk.{l}.ffn_down.weight"), cfg.n_ff, cfg.n_embd)?;
-        let w_gate_f32_w = f32_weight(w_gate_f32, cfg.n_embd, cfg.n_ff);
-        let w_up_f32_w = f32_weight(w_up_f32, cfg.n_embd, cfg.n_ff);
-        let w_down_f32_w = f32_weight(w_down_f32, cfg.n_ff, cfg.n_embd);
+        let w_down = quant_weight(
+            source,
+            &format!("blk.{l}.ffn_down.weight"),
+            cfg.n_ff,
+            cfg.n_embd,
+        )?;
 
         let shortconv_in: Option<Weight<'a>>;
         let shortconv_out: Option<Weight<'a>>;
         let shortconv_conv: Option<Vec<f32>>;
-        let shortconv_in_f32: Option<Weight<'static>>;
-        let shortconv_out_f32: Option<Weight<'static>>;
         if !is_attn {
             let in_name = format!("blk.{l}.shortconv.in_proj.weight");
             let out_name = format!("blk.{l}.shortconv.out_proj.weight");
-            let in_bytes = source.tensor_slice(&in_name).unwrap();
-            let out_bytes = source.tensor_slice(&out_name).unwrap();
-            let in_f32 = dequant_q8_0_to_f32(in_bytes, cfg.n_embd, 3 * cfg.n_embd);
-            let out_f32 = dequant_q8_0_to_f32(out_bytes, cfg.n_embd, cfg.n_embd);
             shortconv_in = Some(quant_weight(
                 source,
                 &in_name,
@@ -369,14 +303,10 @@ pub fn load_layers<'a>(
                 &format!("blk.{l}.shortconv.conv.weight"),
                 cfg.l_cache * cfg.n_embd,
             )?);
-            shortconv_in_f32 = Some(f32_weight(in_f32, cfg.n_embd, 3 * cfg.n_embd));
-            shortconv_out_f32 = Some(f32_weight(out_f32, cfg.n_embd, cfg.n_embd));
         } else {
             shortconv_in = None;
             shortconv_out = None;
             shortconv_conv = None;
-            shortconv_in_f32 = None;
-            shortconv_out_f32 = None;
         }
 
         layers.push(Lfm2LayerWeights {
@@ -389,21 +319,12 @@ pub fn load_layers<'a>(
             wk,
             wv,
             wo,
-            wq_f32: wq_f32_w,
-            wk_f32: wk_f32_w,
-            wv_f32: wv_f32_w,
-            wo_f32: wo_f32_w,
             w_gate,
             w_up,
             w_down,
-            w_gate_f32: w_gate_f32_w,
-            w_up_f32: w_up_f32_w,
-            w_down_f32: w_down_f32_w,
             shortconv_in,
             shortconv_out,
             shortconv_conv,
-            shortconv_in_f32,
-            shortconv_out_f32,
         });
     }
     Ok(layers)
@@ -416,7 +337,7 @@ fn get_f32_tensor_checked<S: TensorSource + ?Sized>(
 ) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
-        .ok_or_else(|| format!("tensor {name} not found"))?;
+        .unwrap_or_else(|| panic!("tensor {name} not found"));
     if info.ggml_type != GGMLType::F32 {
         return Err(format!(
             "tensor {name} expected F32, got {:?}",
@@ -425,7 +346,7 @@ fn get_f32_tensor_checked<S: TensorSource + ?Sized>(
     }
     let bytes = source
         .tensor_slice(name)
-        .ok_or_else(|| format!("slice {name} not found"))?;
+        .unwrap_or_else(|| panic!("slice {name} not found"));
     if bytes.len() < expected_len * 4 {
         return Err(format!(
             "tensor {name} too small: got {} bytes, need {}",
