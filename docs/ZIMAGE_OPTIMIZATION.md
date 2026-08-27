@@ -543,3 +543,105 @@ fn conv_f16_parallel_into(
 - ❌ im2col（已验证是反优化）
 - ❌ group_norm AVX2（占比太小）
 - ❌ 大型重构（除非有 profile 数据支持）
+
+### 9.9 Tile 优化实验（2026-08-27，已撤回）
+
+#### 思路
+
+实现 4×4 tile 共享输入区域：
+- 16 个输出像素共用 (4+K-1)² = 36 个输入位置（每 channel）
+- 把 36×IC = 18K f32 读到 contiguous buffer
+- AVX2 bulk f32→f16（替代逐元素 stdlib 调用）
+- 重组 patches，跑 16 × OC 个 dot products
+
+#### 实测结果（@64 分辨率，5 步，8 线程）
+
+| 配置 | VAE 总耗时 | 总耗时 |
+|------|-----------|--------|
+| per-pixel + pool（当前）| 575-663 ms | 73,069-83,870 ms |
+| **4×4 tile + AVX2 f32→f16** | **622 ms** | **76,373 ms** |
+
+**没有提速，反而略慢**。
+
+#### 为什么 tile 没收益
+
+**理论节省**（4×4 tile = 16 pixels）：
+- 输入 reads: 16 × 9 × IC = 144 × IC → tile: 36 × IC（**节省 75%**）
+- f32→f16 转换: 73,728 → 18,432（**节省 75%**）
+
+**但实际**：
+- f32→f16 本身不是瓶颈（VAE 中估 < 2 ms 总开销）
+- 输入 reads 在 NHWC layout 是 strided（ic * spatial 步长），cache miss 在 per-pixel 也部分 cache 友好
+- **真正瓶颈是 OC × 4608 个 dot products**（每个 conv ~12M FMA ops）
+
+**f32→f16 SIMD 节省 < 0.5%**，被以下 overhead 抵消：
+1. 每 tile copy input region 到 local buffer（额外 ~73 KB 写入）
+2. `Vec<Vec<u16>>` 数组的 heap allocation 和间接寻址
+3. 嵌套循环和 indexing 计算
+
+#### 教训
+
+#### D. 优化前要算 FLOPs/bytes 比例
+
+`f32→f16` 是个**轻量操作**（每元素 ~1ns AVX2 ~0.1ns）。在 18.9M 次转换中：
+- 总开销 ≈ 1.9 ms (scalar) → 0.2 ms (AVX2)
+- VAE 总耗时 622 ms
+- **优化 f32→f16 节省 1.7 ms = 0.27%**
+
+#### E. NHWC + cache 行为复杂
+
+即使有理论节省，实际 cache 行为取决于：
+- L1 size（通常 32 KB）
+- L2 size（256 KB - 1 MB）
+- L3 size（8-30 MB）
+- 内存预取策略
+
+NHWC layout 的输入 `input[ic*spatial + y*side + x]` 在不同 ic 间步进 spatial 字节，**L1 cache line (64 bytes) 只覆盖 ~16 个 ic 值**——比想象的 cache-friendly。
+
+#### F. 优化的真正方向
+
+**真正的瓶颈是 dot products**（OC × patch_len × pixels）：
+- 每个 conv: 512 × 4608 × pixels = **2.36M × pixels** 个 FMA ops
+- VAE 25 个 convs × avg 4096 pixels = **~240 GFLOPs total**
+- @30 GFLOPS/s AVX2 = 8 s theoretical @64；实测 622 ms = 12.8 GFLOPS/s achieved
+- **AVX2 dot kernel 已经接近峰值**（dot_f16_f16_bytes 用 _mm256_fmadd_ps）
+
+继续优化 conv 需要：**重写 dot kernel**（如 NR=4 tile + 共享 weight rows）或**完全避免 dot**（如量化中间结果到 int8）。
+
+#### G. 不要为"看起来更高效"的方案花时间
+
+本次 tile 实现代码量增加 **~120 行**，测试 + 调试 + 撤回耗时 ~30 分钟，**收益 = 0**。教训：**先做最小验证**（用 perf counter 单独测 f32→f16 开销）确认是真瓶颈再投入。
+
+---
+
+## 10. 最终建议（更新版）
+
+### 已确认可优化（实测量化）
+
+1. **`pool.compute` 用于 VAE conv per-pixel**（已实施，VAE -77%，保留）
+
+### 已确认不可优化或反优化
+
+1. ❌ **im2col + 大共享 buffer**（反优化 ~30%）
+2. ❌ **4×4 tile + AVX2 f32→f16**（持平，f32→f16 不是瓶颈）
+4. ❌ **VAE group_norm SIMD**（占比 3.5%，收益 < 22 ms）
+
+### 未来可能的方向（需 profile 数据支持再投入）
+
+1. **DiT 周边 kernel 优化**：
+   - `rms_norm` sum_sq（@1024 ~13s 预估）
+   - `silu_mul_inplace` → approx（@1024 ~2 min 预估，低风险）
+   - `add_modulated_residual` 无 gates → `vec_add_into`（@1024 ~77s 预估）
+   - `rotate_interleaved_inplace` AVX2 8-pair（@1024 ~10s 预估）
+2. **VAE conv kernel 重写**（高风险，高潜在）：
+   - 重写 `dot_f16_f16_bytes` 为 NR=4 multi-row（避免 weight reload）
+   - 中间结果量化到 int8（量化噪声风险）
+3. **VAE attention 重写**（小占比，3.5%，~32s @1024）
+
+### 优化方法论（从这次实验学到的）
+
+1. **profile 先于优化**：用最小化改动测量每个 op 的实际开销
+2. **算 FLOPs/bytes 比例**：高 arithmetic intensity 的 op 才适合 SIMD 优化
+3. **小改动验证**：先做最小版本（10-20 行）跑性能，再决定是否投入大改动
+4. **记录每次实验**：即使反优化也要记录（避免后续重蹈覆辙）
+5. **NHWC layout cache 行为难预测**：依赖 profile，不靠推理
