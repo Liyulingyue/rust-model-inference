@@ -8,11 +8,9 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::dot_f32;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::dot_f32_neon;
-#[cfg(not(target_arch = "aarch64"))]
-use crate::ops::silu_mul_inplace;
 use crate::ops::{
-    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_approx_inplace,
-    silu_mul_approx_inplace, softmax_approx_inplace, softmax_inplace, vec_mad_self_f32,
+    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu,
+    silu_inplace, silu_mul_inplace, softmax_inplace, vec_mad_self_f32,
 };
 
 use super::{
@@ -574,36 +572,8 @@ fn attention_into(
                     head_width,
                 );
                 scores[key] = dot * scale;
-                // DEBUG: 检查 dot
-                if !dot.is_finite() {
-                    eprintln!("[debug] Non-finite dot at query={} head={} key={} dot={}", query, head, key, dot);
-                    return Err(format!("[debug] Non-finite dot q={} h={} k={}", query, head, key));
-                }
-            }
-            // DEBUG: 检查 scores 范围
-            let (smin, smax) = scores[..tokens]
-                .iter()
-                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-            if !smax.is_finite() || !smin.is_finite() {
-                let n_inf = scores[..tokens].iter().filter(|v| !v.is_finite()).count();
-                let n_posinf = scores[..tokens].iter().filter(|v| v.is_finite() == false && v.is_sign_positive()).count();
-                let n_neginf = scores[..tokens].iter().filter(|v| v.is_finite() == false && v.is_sign_negative()).count();
-                eprintln!("[debug] scores non-finite before softmax q={} h={} n_nan={} +inf={} -inf={}",
-                    query, head, n_inf, n_posinf, n_neginf);
-                return Err(format!("[debug] Bad scores q={} h={}", query, head));
             }
             softmax_inplace(&mut scores[..tokens]);
-            // DEBUG: 检查 softmax 输出
-            if !scores[..tokens].iter().all(|v| v.is_finite()) {
-                let (sm_min, sm_max) = scores[..tokens]
-                    .iter()
-                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-                let n_nan = scores[..tokens].iter().filter(|v| v.is_nan()).count();
-                let n_inf = scores[..tokens].iter().filter(|v| v.is_infinite()).count();
-                eprintln!("[debug] Non-finite softmax q={} h={} pre=[{:.2},{:.2}] post=[{:.2},{:.2}] nan={} inf={}",
-                    query, head, smin, smax, sm_min, sm_max, n_nan, n_inf);
-                return Err(format!("[debug] Non-finite softmax q={} h={}", query, head));
-            }
             let output_start = query * hidden + head * head_width;
             for dimension in 0..head_width {
                 for key in 0..tokens {
@@ -620,11 +590,6 @@ fn attention_into(
 
 #[inline]
 fn z_image_swiglu(gate: &[f32], up: &mut [f32]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        silu_mul_approx_inplace(gate, up);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
     silu_mul_inplace(gate, up);
 }
 
@@ -767,7 +732,7 @@ impl ZImageDit {
         for (value, bias) in scratch.time_hidden.iter_mut().zip(&self.time_0_bias) {
             *value += *bias;
         }
-        silu_approx_inplace(&mut scratch.time_hidden);
+        silu_inplace(&mut scratch.time_hidden);
         force_f32_linear_into(
             self.source.as_ref(),
             "t_embedder.mlp.2.weight",
@@ -931,12 +896,6 @@ impl ZImageDit {
                 &mut scratch.modulation,
                 &mut scratch.q8,
             )?;
-            // DEBUG: 找出首次 NaN 出现的位置
-            if let Some(bad_idx) = scratch.tokens[..total_hidden].iter().position(|v| !v.is_finite()) {
-                let row = bad_idx / HIDDEN;
-                eprintln!("[debug] first NaN at layer {} row {} (after run_block)", _index, row);
-                return Err(format!("[debug] NaN at layer {} row {}", _index, row));
-            }
         }
 
         for (output, input) in scratch.time_frequency.iter_mut().zip(&scratch.time) {
@@ -978,12 +937,6 @@ impl ZImageDit {
                 FINAL_NORM_EPSILON,
             )?;
             scale_modulated_branch(normalized, Some(&scratch.modulation[..HIDDEN]))?;
-            // DEBUG: 检查 scale_modulated_branch 后
-            if !normalized.iter().all(|v| v.is_finite()) {
-                let n_nan = normalized.iter().filter(|v| !v.is_finite()).count();
-                eprintln!("[debug] NaN after scale_modulated at final row {}, n_nan={}", row, n_nan);
-                return Err(format!("[debug] NaN at final row {} after scale", row));
-            }
             force_f32_linear_into(
                 self.source.as_ref(),
                 "final_layer.linear.weight",
@@ -1128,11 +1081,6 @@ fn run_block(
         for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
             *value += *bias;
         }
-        // DEBUG: 检查 modulation
-        if !modulation[..HIDDEN * 4].iter().all(|v| v.is_finite()) {
-            eprintln!("[debug] Non-finite modulation in run_block");
-            return Err("[debug] Non-finite modulation".into());
-        }
         Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
     } else {
         if time.is_some() {
@@ -1140,19 +1088,6 @@ fn run_block(
         }
         None
     };
-
-    // DEBUG: 检查 modulation 切分后
-    if let Some(mods) = modulations.as_ref() {
-        for (name, scale) in [("scale_msa", mods.scale_msa),
-                              ("gate_msa", mods.gate_msa),
-                              ("scale_mlp", mods.scale_mlp),
-                              ("gate_mlp", mods.gate_mlp)] {
-            if !scale.iter().all(|v| v.is_finite()) {
-                eprintln!("[debug] Non-finite {}", name);
-                return Err(format!("[debug] Non-finite {}", name));
-            }
-        }
-    }
 
     for row in 0..rows {
         {
@@ -1198,11 +1133,6 @@ fn run_block(
         value_column,
         &mut attention[..hidden_len],
     )?;
-    // DEBUG: 检查 attention 输出
-    if !attention[..hidden_len].iter().all(|v| v.is_finite()) {
-        eprintln!("[debug] Non-finite attention output in run_block");
-        return Err("[debug] Non-finite attention".into());
-    }
     for row in 0..rows {
         linear_into(
             source,
