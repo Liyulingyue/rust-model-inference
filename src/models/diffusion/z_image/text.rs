@@ -3,11 +3,9 @@ use std::sync::Arc;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-#[cfg(target_arch = "aarch64")]
-use crate::ops::silu_mul_inplace;
 use crate::ops::dot_f32;
-#[cfg(not(target_arch = "aarch64"))]
-use crate::ops::{silu_mul_inplace, softmax_inplace};
+use crate::ops::silu_mul_inplace;
+use crate::ops::softmax_inplace;
 use crate::ops::{
     attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox,
 };
@@ -262,7 +260,7 @@ impl Qwen3TextEncoder {
                     &mut scratch.q8,
                     self.pool.as_ref(),
                 )?;
-                qwen_swiglu(&scratch.gate, &mut scratch.up);
+                silu_mul_inplace(&scratch.gate, &mut scratch.up);
                 linear_into(
                     self.source.as_ref(),
                     &layer.down_proj,
@@ -345,7 +343,7 @@ fn attention(
                 *score = dot_f32(query, &cache.k[key_start..key_start + HEAD_WIDTH], HEAD_WIDTH) * scale;
             }
         }
-        attention_softmax(scores, position, token_count);
+        softmax_inplace(&mut scores[..=position]);
         let output_head = &mut output[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
         #[cfg(target_arch = "aarch64")]
         for dimension in 0..HEAD_WIDTH {
@@ -370,27 +368,6 @@ fn attention(
             }
         }
     }
-}
-
-#[inline]
-fn qwen_swiglu(gate: &[f32], up: &mut [f32]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        silu_mul_inplace(gate, up);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    silu_mul_inplace(gate, up);
-}
-
-#[inline]
-fn attention_softmax(scores: &mut [f32], position: usize, token_count: usize) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        scores[position + 1..token_count].fill(f32::NEG_INFINITY);
-        crate::ops::softmax_inplace(&mut scores[..token_count]);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    softmax_inplace(&mut scores[..=position]);
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
@@ -438,13 +415,12 @@ pub(crate) fn z_image_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_arch = "aarch64")]
-    use super::qwen_swiglu;
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
     use crate::ops::attention_value_f32;
     use crate::ops::dot_f32;
+    use crate::ops::silu_mul_inplace;
     use std::sync::Arc;
 
     struct EmptySource;
@@ -494,11 +470,11 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_swiglu_uses_the_pinned_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_pinned_ggml_neon_activation() {
         let gate = [0x3f6c_76fc, 0x3fe2_6ebc, 0xbf66_8824, 0xc009_429b].map(f32::from_bits);
         let mut up = [0xbfa1_5cef, 0x4013_8811, 0x3f8f_08d4, 0xbfe4_c88a].map(f32::from_bits);
 
-        qwen_swiglu(&gate, &mut up);
+        silu_mul_inplace(&gate, &mut up);
 
         assert_eq!(
             up.map(f32::to_bits),
@@ -555,7 +531,7 @@ mod tests {
             .map(f32::from_bits),
         );
 
-        super::attention_softmax(&mut scores, 4, 16);
+        softmax_inplace(&mut scores[..=4]);
 
         assert_eq!(
             scores.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),

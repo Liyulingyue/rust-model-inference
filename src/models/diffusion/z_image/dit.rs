@@ -4,10 +4,7 @@ use half::f16;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-#[cfg(not(target_arch = "aarch64"))]
 use crate::ops::dot_f32;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::dot_f32_neon;
 use crate::ops::{
     attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu,
     silu_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
@@ -289,14 +286,7 @@ fn force_f32_linear_into(
         for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
             *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            *output = unsafe { dot_f32_neon(&scratch.force_f32_row, input, n_in) };
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            *output = dot_f32(&scratch.force_f32_row, input, n_in);
-        }
+        *output = dot_f32(&scratch.force_f32_row, input, n_in);
     }
     Ok(())
 }
@@ -556,15 +546,8 @@ fn attention_into(
             let query_values = &qkv[query_start..query_start + head_width];
             for key in 0..tokens {
                 let key_start = key * qkv_width + hidden + head * head_width;
-                #[cfg(target_arch = "aarch64")]
-                let dot = unsafe {
-                    dot_f32_neon(
-                        query_values,
-                        &qkv[key_start..key_start + head_width],
-                        head_width,
-                    )
-                };
-                #[cfg(not(target_arch = "aarch64"))]
+                // aarch64 上 `dot_f32` 内部 `has_neon()` 是 `const true`，
+                // 编译器会消除分支，等价于直接调 `dot_f32_neon`。
                 let dot = dot_f32(
                     query_values,
                     &qkv[key_start..key_start + head_width],
@@ -585,11 +568,6 @@ fn attention_into(
         }
     }
     Ok(())
-}
-
-#[inline]
-fn z_image_swiglu(gate: &[f32], up: &mut [f32]) {
-    silu_mul_inplace(gate, up);
 }
 
 fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
@@ -1244,7 +1222,7 @@ fn run_block(
             )?;
             t_linear_ffn += t.elapsed();
         }
-        z_image_swiglu(
+        silu_mul_inplace(
             &qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
             &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
         );
@@ -1713,7 +1691,7 @@ mod tests {
         layer_norm_no_affine, pad_rows_to_32, patchify_latent, patchify_latent_into,
         real_image_row, require_finite, rotate_interleaved_inplace, scale_modulated_branch,
         sign_and_unpatchify_image, split_adaln_modulation, time_snr_shift, timestep_embedding,
-        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas, z_image_swiglu,
+        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas,
         TorchMt19937, ZImageDit,
     };
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
@@ -2292,7 +2270,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn z_image_swiglu_matches_the_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_ggml_neon_activation_dit() {
         let gate = [
             0xbf68_5c00,
             0xbf56_7800,
@@ -2316,7 +2294,7 @@ mod tests {
         ]
         .map(f32::from_bits);
 
-        z_image_swiglu(&gate, &mut up);
+        silu_mul_inplace(&gate, &mut up);
 
         assert_eq!(
             up.map(f32::to_bits),
