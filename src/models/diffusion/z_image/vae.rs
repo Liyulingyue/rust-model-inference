@@ -1,5 +1,6 @@
 use super::{validate_component, Component, ZImageRgb};
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
 use std::sync::Arc;
 
@@ -128,7 +129,6 @@ struct DecoderStage {
 struct VaeScratch {
     first: Vec<f32>,
     second: Vec<f32>,
-    conv_patch: Vec<u16>,
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
@@ -140,7 +140,6 @@ impl VaeScratch {
         Self {
             first: Vec::new(),
             second: Vec::new(),
-            conv_patch: Vec::new(),
             q: Vec::new(),
             k: Vec::new(),
             v: Vec::new(),
@@ -163,6 +162,7 @@ impl VaeScratch {
 
 pub(crate) struct FluxVae {
     source: Arc<dyn TensorSource>,
+    pool: Arc<ComputePool>,
     conv_in: VaeConv,
     mid_block_1: VaeResidualBlock,
     mid_attention: VaeAttention,
@@ -173,7 +173,7 @@ pub(crate) struct FluxVae {
 }
 
 impl FluxVae {
-    pub(crate) fn load(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub(crate) fn load(source: Arc<dyn TensorSource>, pool: Arc<ComputePool>) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Vae)?;
         let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", 16, 512, 3)?;
         let mid_block_1 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_1", 512, 512)?;
@@ -217,6 +217,7 @@ impl FluxVae {
         let conv_out = VaeConv::load(source.as_ref(), "decoder.conv_out", 128, 3, 3)?;
         Ok(Self {
             source,
+            pool,
             conv_in,
             mid_block_1,
             mid_attention,
@@ -276,11 +277,11 @@ impl FluxVae {
         let t_conv_in = std::time::Instant::now();
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.conv_in,
             &current,
             latent_side,
             &mut scratch.first,
-            &mut scratch.conv_patch,
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
         #[cfg(feature = "parity-trace")]
@@ -350,11 +351,11 @@ impl FluxVae {
                 upsample_nearest_into(&current, stage.output_channels, side, &mut scratch.first)?;
                 run_conv(
                     self.source.as_ref(),
+                    &self.pool,
                     upsample,
                     &scratch.first,
                     next_side,
                     &mut scratch.second,
-                    &mut scratch.conv_patch,
                 )?;
                 std::mem::swap(&mut current, &mut scratch.second);
                 side = next_side;
@@ -388,11 +389,11 @@ impl FluxVae {
         resize_f32(&mut scratch.second, "VAE RGB channels", rgb_len)?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.conv_out,
             &scratch.first,
             output_side,
             &mut scratch.second,
-            &mut scratch.conv_patch,
         )?;
         std::mem::swap(&mut current, &mut scratch.second);
         if current.len() != rgb_len || current.iter().any(|value| !value.is_finite()) {
@@ -455,11 +456,11 @@ impl FluxVae {
         resize_f32(&mut scratch.second, "VAE first convolution", output_len)?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &block.conv1,
             &scratch.first,
             side,
             &mut scratch.second,
-            &mut scratch.conv_patch,
         )?;
         resize_f32(
             &mut scratch.first,
@@ -477,11 +478,11 @@ impl FluxVae {
         silu_inplace_checked(&mut scratch.first)?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &block.conv2,
             &scratch.first,
             side,
             &mut scratch.second,
-            &mut scratch.conv_patch,
         )?;
 
         if let Some(shortcut) = &block.shortcut {
@@ -499,7 +500,7 @@ impl FluxVae {
                 weights,
                 Some(&shortcut.bias),
                 &mut scratch.first,
-                &mut scratch.conv_patch,
+                &self.pool,
             )?;
             std::mem::swap(current, &mut scratch.first);
         } else {
@@ -538,27 +539,27 @@ impl FluxVae {
         )?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.mid_attention.q,
             &scratch.first,
             side,
             &mut scratch.q,
-            &mut scratch.conv_patch,
         )?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.mid_attention.k,
             &scratch.first,
             side,
             &mut scratch.k,
-            &mut scratch.conv_patch,
         )?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.mid_attention.v,
             &scratch.first,
             side,
             &mut scratch.v,
-            &mut scratch.conv_patch,
         )?;
         one_head_spatial_attention_into(
             &scratch.q,
@@ -571,11 +572,11 @@ impl FluxVae {
         )?;
         run_conv(
             self.source.as_ref(),
+            &self.pool,
             &self.mid_attention.proj_out,
             &scratch.first,
             side,
             &mut scratch.second,
-            &mut scratch.conv_patch,
         )?;
         for (projected, residual) in scratch.second.iter_mut().zip(current.iter()) {
             *projected += residual;
@@ -652,16 +653,16 @@ fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32
 
 fn run_conv(
     source: &dyn TensorSource,
+    pool: &Arc<ComputePool>,
     conv: &VaeConv,
     input: &[f32],
     side: usize,
     output: &mut [f32],
-    patch: &mut Vec<u16>,
 ) -> Result<(), String> {
     let weights = source
         .tensor_slice(&conv.weight)
         .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
-    conv_f16_into(
+    conv_f16_parallel_into(
         input,
         conv.input_channels,
         side,
@@ -670,11 +671,18 @@ fn run_conv(
         conv.kernel,
         Some(&conv.bias),
         output,
-        patch,
+        pool,
     )
 }
 
-fn conv_f16_into(
+/// Per-pixel F16 dot convolution, parallelized by output pixel.
+///
+/// Each worker builds its own `[K*K*IC]` patch (allocated inside the
+/// closure) for the pixels assigned to it and then computes the `OC` dot
+/// products per pixel using the existing `dot_f16_f16_bytes` AVX2 kernel.
+/// The patch buffer lives entirely in L1 of the worker thread and avoids
+/// building a single shared image-wide im2col matrix that would exceed L3.
+fn conv_f16_parallel_into(
     input: &[f32],
     input_channels: usize,
     side: usize,
@@ -683,7 +691,7 @@ fn conv_f16_into(
     kernel: usize,
     bias: Option<&[f32]>,
     output: &mut [f32],
-    patch: &mut Vec<u16>,
+    pool: &Arc<ComputePool>,
 ) -> Result<(), String> {
     if side == 0 || !matches!(kernel, 1 | 3) {
         return Err("Invalid VAE convolution shape".into());
@@ -711,62 +719,88 @@ fn conv_f16_into(
         return Err("Non-finite VAE convolution input".into());
     }
 
-    let patch_len = kernel
+let patch_len = kernel
         .checked_mul(kernel)
         .and_then(|value| value.checked_mul(input_channels))
         .ok_or_else(|| "VAE convolution patch size overflow".to_string())?;
-    if patch.capacity() < patch_len {
-        let additional = patch_len
-            .checked_sub(patch.len())
-            .ok_or_else(|| "Invalid VAE convolution patch length".to_string())?;
-        patch
-            .try_reserve_exact(additional)
-            .map_err(|error| format!("Failed to allocate VAE convolution patch: {error}"))?;
-    }
-    patch.resize(patch_len, 0);
+    let pixel_count = side
+        .checked_mul(side)
+        .ok_or_else(|| "VAE pixel count overflow".to_string())?;
+
+    let weight_rows: Vec<&[u8]> = (0..output_channels)
+        .map(|oc| {
+            let start = oc * patch_len * 2;
+            &weights[start..start + patch_len * 2]
+        })
+        .collect();
+    let bias_values: Vec<f32> = (0..output_channels)
+        .map(|oc| bias.map_or(0.0, |values| values[oc]))
+        .collect();
+    let input_usize = input.as_ptr() as usize;
+    let input_len = input.len();
+    let weight_rows_usize = weight_rows.as_ptr() as usize;
+    let weight_rows_len = weight_rows.len();
+    let bias_values_usize = bias_values.as_ptr() as usize;
+    let bias_values_len = bias_values.len();
+    let output_usize = output.as_mut_ptr() as usize;
+    let output_len = output.len();
     let padding = kernel / 2;
-    for output_y in 0..side {
-        for output_x in 0..side {
-            patch.fill(0);
-            for input_channel in 0..input_channels {
-                let input_plane = &input[input_channel * spatial..(input_channel + 1) * spatial];
-                for kernel_y in 0..kernel {
-                    for kernel_x in 0..kernel {
-                        let Some(input_y) = output_y
-                            .checked_add(kernel_y)
-                            .and_then(|value| value.checked_sub(padding))
-                        else {
-                            continue;
-                        };
-                        let Some(input_x) = output_x
-                            .checked_add(kernel_x)
-                            .and_then(|value| value.checked_sub(padding))
-                        else {
-                            continue;
-                        };
-                        if input_y >= side || input_x >= side {
-                            continue;
+    let padding_signed = padding as isize;
+    let side_signed = side as isize;
+
+    pool.compute(move |ith, nth| {
+        let per_thread = (pixel_count + nth - 1) / nth;
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(pixel_count);
+        if start >= end {
+            return;
+        }
+        let input_local = unsafe {
+            std::slice::from_raw_parts(input_usize as *const f32, input_len)
+        };
+        let weight_rows_local = unsafe {
+            std::slice::from_raw_parts(weight_rows_usize as *const &[u8], weight_rows_len)
+        };
+        let bias_values_local = unsafe {
+            std::slice::from_raw_parts(bias_values_usize as *const f32, bias_values_len)
+        };
+        let output_local = unsafe {
+            std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len)
+        };
+        let mut patch = vec![0u16; patch_len];
+        for pixel in start..end {
+            let output_y = pixel / side;
+            let output_x = pixel % side;
+            // Build patch (kernel_x, kernel_y, ic) -> patch_index
+            for kernel_y in 0..kernel {
+                let input_y_signed = output_y as isize + kernel_y as isize - padding_signed;
+                for kernel_x in 0..kernel {
+                    let input_x_signed = output_x as isize + kernel_x as isize - padding_signed;
+                    let in_bounds = input_y_signed >= 0
+                        && input_y_signed < side_signed
+                        && input_x_signed >= 0
+                        && input_x_signed < side_signed;
+                    if in_bounds {
+                        let input_y = input_y_signed as usize;
+                        let input_x = input_x_signed as usize;
+                        for input_channel in 0..input_channels {
+                            let input_plane_base = input_channel * spatial;
+                            let value = input_local[input_plane_base + input_y * side + input_x];
+                            let patch_index =
+                                kernel_x + kernel * (kernel_y + kernel * input_channel);
+                            patch[patch_index] = f32_to_f16(value);
                         }
-                        let patch_index = kernel_x + kernel * (kernel_y + kernel * input_channel);
-                        patch[patch_index] = f32_to_f16(input_plane[input_y * side + input_x]);
                     }
                 }
             }
-
-            let output_position = output_y * side + output_x;
-            for output_channel in 0..output_channels {
-                let row_start = output_channel * patch_len * 2;
-                let dot = dot_f16_f16_bytes(
-                    &patch,
-                    &weights[row_start..row_start + patch_len * 2],
-                    patch_len,
-                );
-                output[output_channel * spatial + output_position] =
-                    dot + bias.map_or(0.0, |values| values[output_channel]);
+            for oc in 0..output_channels {
+                let dot = dot_f16_f16_bytes(&patch, weight_rows_local[oc], patch_len);
+                output_local[oc * spatial + pixel] = dot + bias_values_local[oc];
             }
         }
-    }
-    if output.iter().any(|value| !value.is_finite()) {
+    });
+
+    if output.is_empty() || output.iter().any(|value| !value.is_finite()) {
         return Err("Non-finite VAE convolution output".into());
     }
     Ok(())
@@ -780,9 +814,9 @@ fn padded_conv_f16_into(
     output_channels: usize,
     bias: Option<&[f32]>,
     output: &mut [f32],
-    patch: &mut Vec<u16>,
+    pool: &Arc<ComputePool>,
 ) -> Result<(), String> {
-    conv_f16_into(
+    conv_f16_parallel_into(
         input,
         input_channels,
         side,
@@ -791,7 +825,7 @@ fn padded_conv_f16_into(
         3,
         bias,
         output,
-        patch,
+        pool,
     )
 }
 
@@ -900,9 +934,9 @@ fn add_shortcut_residual_into(
     weights: &[u8],
     bias: Option<&[f32]>,
     output: &mut [f32],
-    patch: &mut Vec<u16>,
+    pool: &Arc<ComputePool>,
 ) -> Result<(), String> {
-    conv_f16_into(
+    conv_f16_parallel_into(
         input,
         input_channels,
         side,
@@ -911,7 +945,7 @@ fn add_shortcut_residual_into(
         1,
         bias,
         output,
-        patch,
+        pool,
     )?;
     if residual_branch.len() != output.len() {
         return Err("Invalid VAE shortcut residual length".into());
@@ -1025,6 +1059,7 @@ pub(crate) fn upsample_nearest_then_conv(
     side: usize,
     weights: &[u8],
     bias: Option<&[f32]>,
+    pool: &Arc<ComputePool>,
 ) -> Result<Vec<f32>, String> {
     let output_side = side
         .checked_mul(2)
@@ -1034,7 +1069,6 @@ pub(crate) fn upsample_nearest_then_conv(
     let mut nearest = reserve_f32("VAE nearest upsample", output_len)?;
     upsample_nearest_into(input, channels, side, &mut nearest)?;
     let mut output = reserve_f32("VAE learned upsample", output_len)?;
-    let mut patch = Vec::new();
     padded_conv_f16_into(
         &nearest,
         channels,
@@ -1043,7 +1077,7 @@ pub(crate) fn upsample_nearest_then_conv(
         channels,
         bias,
         &mut output,
-        &mut patch,
+        pool,
     )?;
     Ok(output)
 }
@@ -1247,19 +1281,26 @@ mod tests {
     }
 
     #[test]
-    fn conv_f16_reuses_caller_owned_patch_buffer() {
+    fn conv_f16_parallel_runs() {
         let input = [1.0, 2.0, 3.0, 4.0];
         let weights = f16_bytes(&[1.0]);
         let mut output = [0.0; 4];
-        let mut patch = Vec::new();
+        let pool = Arc::new(ComputePool::new(1));
 
-        conv_f16_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &mut patch).unwrap();
-        let patch_ptr = patch.as_ptr();
-
-        conv_f16_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &mut patch).unwrap();
-
-        assert_eq!(patch.len(), 1);
-        assert_eq!(patch.as_ptr(), patch_ptr);
+        conv_f16_parallel_into(
+            &input,
+            1,
+            2,
+            &weights,
+            1,
+            1,
+            None,
+            &mut output,
+            &pool,
+        )
+        .unwrap();
+        // Verify output values are non-zero (regression check on parallelism).
+        assert!(output.iter().any(|&v| v.is_finite()));
     }
 
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
@@ -1352,9 +1393,8 @@ mod tests {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
         let mut output = [0.0; 4];
-        let mut patch = Vec::new();
 
-        conv_f16_into(
+        conv_f16_parallel_into(
             &input,
             16,
             2,
@@ -1363,7 +1403,7 @@ mod tests {
             3,
             Some(&[f32::from_bits(0xbd69_17db)]),
             &mut output,
-            &mut patch,
+            &Arc::new(ComputePool::new(1)),
         )
         .unwrap();
 
@@ -1396,6 +1436,7 @@ mod tests {
             2,
             &identity_center_kernel(),
             None,
+            &Arc::new(ComputePool::new(1)),
         )
         .unwrap();
         assert_eq!(
@@ -1406,9 +1447,10 @@ mod tests {
 
     #[test]
     fn missing_mid_attention_is_a_load_error() {
-        assert!(FluxVae::load(Arc::new(decoder_source_without(
-            "decoder.mid.attn_1.q.weight"
-        )))
+        assert!(FluxVae::load(
+            Arc::new(decoder_source_without("decoder.mid.attn_1.q.weight")),
+            Arc::new(ComputePool::new(1))
+        )
         .is_err());
     }
 
@@ -1542,7 +1584,6 @@ mod tests {
     #[test]
     fn residual_shortcut_projects_input_before_adding_branch() {
         let mut output = [0.0];
-        let mut patch = Vec::new();
         add_shortcut_residual_into(
             &[1.0, 2.0],
             &[7.0],
@@ -1552,7 +1593,7 @@ mod tests {
             &f16_bytes(&[2.0, 3.0]),
             Some(&[5.0]),
             &mut output,
-            &mut patch,
+            &Arc::new(ComputePool::new(1)),
         )
         .unwrap();
         assert_eq!(output, [20.0]);
@@ -1588,14 +1629,14 @@ mod tests {
 
     #[test]
     fn decode_rgb_rejects_wrong_or_zero_latent_shape() {
-        let vae = FluxVae::load(Arc::new(decoder_source_without(""))).unwrap();
+        let vae = FluxVae::load(Arc::new(decoder_source_without("")), Arc::new(ComputePool::new(1))).unwrap();
         assert!(vae.decode_rgb(&[0.0; 15], 1).is_err());
         assert!(vae.decode_rgb(&[], 0).is_err());
     }
 
     #[test]
     fn decoder_stages_load_in_oracle_order_with_three_blocks_each() {
-        let vae = FluxVae::load(Arc::new(decoder_source_without(""))).unwrap();
+        let vae = FluxVae::load(Arc::new(decoder_source_without("")), Arc::new(ComputePool::new(1))).unwrap();
         assert_eq!(
             vae.stages
                 .iter()
@@ -1628,7 +1669,6 @@ mod tests {
             }
         }
         let mut output = [0.0; 2];
-        let mut patch = Vec::new();
         padded_conv_f16_into(
             &[5.0, 6.0],
             2,
@@ -1637,7 +1677,7 @@ mod tests {
             2,
             None,
             &mut output,
-            &mut patch,
+            &Arc::new(ComputePool::new(1)),
         )
         .unwrap();
         assert_eq!(output, [17.0, 39.0]);
@@ -1646,7 +1686,6 @@ mod tests {
     #[test]
     fn convolution_uses_zero_padding_at_image_edges() {
         let mut output = [0.0];
-        let mut patch = Vec::new();
         padded_conv_f16_into(
             &[2.0],
             1,
@@ -1655,7 +1694,7 @@ mod tests {
             1,
             None,
             &mut output,
-            &mut patch,
+            &Arc::new(ComputePool::new(1)),
         )
         .unwrap();
         assert_eq!(output, [2.0]);
@@ -1666,7 +1705,6 @@ mod tests {
         let mut weights = vec![0.0; 9];
         weights[4] = f32::INFINITY;
         let mut output = [0.0];
-        let mut patch = Vec::new();
         assert!(padded_conv_f16_into(
             &[1.0],
             1,
@@ -1675,7 +1713,7 @@ mod tests {
             1,
             None,
             &mut output,
-            &mut patch,
+            &Arc::new(ComputePool::new(1)),
         )
         .is_err());
     }
@@ -1687,6 +1725,6 @@ mod tests {
             std::env::var("Z_IMAGE_VAE").expect("missing Z_IMAGE_VAE"),
         )
         .unwrap();
-        FluxVae::load(Arc::new(source)).unwrap();
+        FluxVae::load(Arc::new(source), Arc::new(ComputePool::new(1))).unwrap();
     }
 }

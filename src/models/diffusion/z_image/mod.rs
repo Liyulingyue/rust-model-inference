@@ -40,8 +40,8 @@ impl ZImagePipeline {
         let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         Ok(Self {
             dit: dit::ZImageDit::load(diffusion, Arc::clone(&pool))?,
-            text: text::Qwen3TextEncoder::load(text, pool)?,
-            vae: vae::FluxVae::load(vae)?,
+            text: text::Qwen3TextEncoder::load(text, Arc::clone(&pool))?,
+            vae: vae::FluxVae::load(vae, pool)?,
         })
     }
 
