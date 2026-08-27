@@ -4,15 +4,10 @@ use half::f16;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-#[cfg(not(target_arch = "aarch64"))]
 use crate::ops::dot_f32;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::dot_f32_neon;
-#[cfg(not(target_arch = "aarch64"))]
-use crate::ops::silu_mul_inplace;
 use crate::ops::{
-    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_approx_inplace,
-    silu_mul_approx_inplace, softmax_approx_inplace,
+    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu,
+    silu_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
 };
 
 use super::{
@@ -192,7 +187,19 @@ fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
-        Err(format!("Non-finite Z-Image {name}"))
+        let n_nan = values.iter().filter(|v| v.is_nan()).count();
+        let n_inf = values.iter().filter(|v| v.is_infinite()).count();
+        let n_neg = values.iter().filter(|v| v.is_finite() == false && v.is_sign_negative()).count();
+        let n_pos = values.iter().filter(|v| v.is_finite() == false && v.is_sign_positive()).count();
+        let (min, max) = values
+            .iter()
+            .filter(|v| v.is_finite())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        let first_bad = values.iter().position(|v| !v.is_finite()).unwrap_or(0);
+        Err(format!(
+            "Non-finite Z-Image {name}: len={}, nan={}, inf={} (+inf={}, -inf={}), finite_range=[{:.3},{:.3}], first_bad_idx={}",
+            values.len(), n_nan, n_inf, n_pos, n_neg, min, max, first_bad
+        ))
     }
 }
 
@@ -279,14 +286,7 @@ fn force_f32_linear_into(
         for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
             *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            *output = unsafe { dot_f32_neon(&scratch.force_f32_row, input, n_in) };
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            *output = dot_f32(&scratch.force_f32_row, input, n_in);
-        }
+        *output = dot_f32(&scratch.force_f32_row, input, n_in);
     }
     Ok(())
 }
@@ -398,9 +398,9 @@ fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<
     if values.len() != scales.len() {
         return Err("Invalid Z-Image AdaLN scale buffers".into());
     }
-    for (value, scale) in values.iter_mut().zip(scales) {
-        *value += *value * *scale;
-    }
+    // y += y * x  (AdaLN scale: `value = value + value * scale`)
+    // 用 vec_mad_self_f32 做 SIMD 优化（FMA 一条指令完成乘加）
+    vec_mad_self_f32(values, scales);
     Ok(())
 }
 
@@ -419,9 +419,8 @@ fn add_modulated_residual(
             }
         }
         None => {
-            for (token, residual) in tokens.iter_mut().zip(residual) {
-                *token += *residual;
-            }
+            // tokens[i] += residual[i]  (无门控残差加，无 tanh，AVX2/NEON SIMD)
+            vec_add_into(residual, tokens);
         }
     }
     Ok(())
@@ -547,15 +546,8 @@ fn attention_into(
             let query_values = &qkv[query_start..query_start + head_width];
             for key in 0..tokens {
                 let key_start = key * qkv_width + hidden + head * head_width;
-                #[cfg(target_arch = "aarch64")]
-                let dot = unsafe {
-                    dot_f32_neon(
-                        query_values,
-                        &qkv[key_start..key_start + head_width],
-                        head_width,
-                    )
-                };
-                #[cfg(not(target_arch = "aarch64"))]
+                // aarch64 上 `dot_f32` 内部 `has_neon()` 是 `const true`，
+                // 编译器会消除分支，等价于直接调 `dot_f32_neon`。
                 let dot = dot_f32(
                     query_values,
                     &qkv[key_start..key_start + head_width],
@@ -563,7 +555,7 @@ fn attention_into(
                 );
                 scores[key] = dot * scale;
             }
-            softmax_approx_inplace(&mut scores[..tokens]);
+            softmax_inplace(&mut scores[..tokens]);
             let output_start = query * hidden + head * head_width;
             for dimension in 0..head_width {
                 for key in 0..tokens {
@@ -576,16 +568,6 @@ fn attention_into(
         }
     }
     Ok(())
-}
-
-#[inline]
-fn z_image_swiglu(gate: &[f32], up: &mut [f32]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        silu_mul_approx_inplace(gate, up);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    silu_mul_inplace(gate, up);
 }
 
 fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
@@ -707,6 +689,8 @@ impl ZImageDit {
         require_finite(latent, "latent")?;
         require_finite(context, "context")?;
 
+        let t_total = std::time::Instant::now();
+        let t_setup = std::time::Instant::now();
         let (patch_height, patch_width, _) =
             patch_shape(LATENT_CHANNELS, latent_side, latent_side)?;
         let image_tokens = checked_product(patch_height, patch_width, "image tokens")?;
@@ -727,7 +711,7 @@ impl ZImageDit {
         for (value, bias) in scratch.time_hidden.iter_mut().zip(&self.time_0_bias) {
             *value += *bias;
         }
-        silu_approx_inplace(&mut scratch.time_hidden);
+        silu_inplace(&mut scratch.time_hidden);
         force_f32_linear_into(
             self.source.as_ref(),
             "t_embedder.mlp.2.weight",
@@ -817,6 +801,7 @@ impl ZImageDit {
                 &scratch.image[..image_hidden],
             ));
         }
+        let t_setup_done = std::time::Instant::now();
         for (_index, block) in self.context_refiners.iter().enumerate() {
             run_block(
                 self.source.as_ref(),
@@ -891,16 +876,14 @@ impl ZImageDit {
                 &mut scratch.modulation,
                 &mut scratch.q8,
             )?;
-            #[cfg(feature = "parity-trace")]
-            if matches!(_index, 0 | 29) {
-                crate::parity_trace::report(crate::parity_trace::checkpoint(
-                    &format!("z_image.dit.layer.{_index}"),
-                    Some(_index),
-                    &[HIDDEN, total_tokens],
-                    &scratch.tokens[..total_hidden],
-                ));
-            }
         }
+        let t_layers_done = std::time::Instant::now();
+        eprintln!("[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
+            sigma,
+            t_setup_done.duration_since(t_setup).as_secs_f64() * 1000.0,
+            t_layers_done.duration_since(t_setup_done).as_secs_f64() * 1000.0,
+            t_total.elapsed().as_secs_f64() * 1000.0,
+        );
 
         for (output, input) in scratch.time_frequency.iter_mut().zip(&scratch.time) {
             *output = silu(*input);
@@ -1013,6 +996,10 @@ impl ZImageDit {
             ));
         }
         let mut scratch = DitScratch::new();
+        // 重置 profile 计时器（首次 predict_flow 后会报告累计）
+        PROFILE_TIMERS.with(|cell| {
+            *cell.borrow_mut() = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        });
         for pair in sigmas.windows(2) {
             let sigma = pair[0];
             let sigma_next = pair[1];
@@ -1027,6 +1014,20 @@ impl ZImageDit {
             euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next)?;
             require_finite(&latent, "Euler latent")?;
         }
+        // 输出累计的 profile
+        let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
+        let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
+        let pct = |x: f64| if total > 0.0 { x / total * 100.0 } else { 0.0 };
+        eprintln!("\n[block-profile over {} denoise steps] total={:.1}ms", sigmas.len() - 1, total);
+        eprintln!("  modulation:           {:8.1}ms ({:5.1}%)", t.0, pct(t.0));
+        eprintln!("  rms_norm:              {:8.1}ms ({:5.1}%)", t.1, pct(t.1));
+        eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
+        eprintln!("  linear qkv:           {:8.1}ms ({:5.1}%)", t.3, pct(t.3));
+        eprintln!("  rope_neox:            {:8.1}ms ({:5.1}%)", t.4, pct(t.4));
+        eprintln!("  attention_into:       {:8.1}ms ({:5.1}%)", t.5, pct(t.5));
+        eprintln!("  linear out:           {:8.1}ms ({:5.1}%)", t.6, pct(t.6));
+        eprintln!("  linear ffn (w1+w3+w2): {:8.1}ms ({:5.1}%)", t.7, pct(t.7));
+        eprintln!("  other (zero-cost in for row): {:8.1}ms ({:5.1}%)", t.8, pct(t.8));
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.final_latent",
@@ -1070,8 +1071,22 @@ fn run_block(
         return Err("Invalid Z-Image transformer scratch".into());
     }
 
+    // DEBUG profile: 累计各阶段耗时
+    let mut t_modulation = std::time::Duration::ZERO;
+    let mut t_rms_norm = std::time::Duration::ZERO;
+    let mut t_scale_mod = std::time::Duration::ZERO;
+    let mut t_linear_qkv = std::time::Duration::ZERO;
+    let mut t_rope = std::time::Duration::ZERO;
+    let mut t_attention = std::time::Duration::ZERO;
+    let mut t_linear_out = std::time::Duration::ZERO;
+    let mut t_linear_ffn = std::time::Duration::ZERO;
+    let mut t_residual = std::time::Duration::ZERO;
+    let mut t_other = std::time::Duration::ZERO;
+    let block_start = std::time::Instant::now();
+
     let modulations = if let Some(weights) = &block.modulation {
         let time = time.ok_or("Missing Z-Image AdaLN input")?;
+        let t_mod = std::time::Instant::now();
         linear_into_ggml(
             source,
             &weights.matrix,
@@ -1085,7 +1100,9 @@ fn run_block(
         for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
             *value += *bias;
         }
-        Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
+        let split = split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?;
+        t_modulation += t_mod.elapsed();
+        Some(split)
     } else {
         if time.is_some() {
             return Err("Unexpected Z-Image AdaLN input".into());
@@ -1097,8 +1114,13 @@ fn run_block(
         {
             let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
             let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            let t = std::time::Instant::now();
             rms_norm(token, &block.attention_norm1, normalized, RMS_EPSILON);
+            t_rms_norm += t.elapsed();
+            let t = std::time::Instant::now();
             scale_modulated_branch(normalized, modulations.map(|values| values.scale_msa))?;
+            t_scale_mod += t.elapsed();
+            let t = std::time::Instant::now();
             linear_into(
                 source,
                 &block.qkv,
@@ -1109,9 +1131,11 @@ fn run_block(
                 q8,
                 pool,
             )?;
+            t_linear_qkv += t.elapsed();
         }
     }
 
+    let t = std::time::Instant::now();
     for row in 0..rows {
         let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
         let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
@@ -1127,7 +1151,9 @@ fn run_block(
             rotate_interleaved_inplace(key, rotation)?;
         }
     }
+    t_rope = t.elapsed();
 
+    let t = std::time::Instant::now();
     attention_into(
         &qkv[..qkv_len],
         rows,
@@ -1137,7 +1163,10 @@ fn run_block(
         value_column,
         &mut attention[..hidden_len],
     )?;
+    t_attention = t.elapsed();
+
     for row in 0..rows {
+        let t = std::time::Instant::now();
         linear_into(
             source,
             &block.out,
@@ -1148,6 +1177,7 @@ fn run_block(
             q8,
             pool,
         )?;
+        t_linear_out += t.elapsed();
         let projected = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm_inplace(projected, &block.attention_norm2, RMS_EPSILON);
         add_modulated_residual(
@@ -1161,8 +1191,13 @@ fn run_block(
         {
             let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
             let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            let t = std::time::Instant::now();
             rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
+            t_rms_norm += t.elapsed();
+            let t = std::time::Instant::now();
             scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
+            t_scale_mod += t.elapsed();
+            let t = std::time::Instant::now();
             linear_into(
                 source,
                 &block.w1,
@@ -1173,6 +1208,8 @@ fn run_block(
                 q8,
                 pool,
             )?;
+            t_linear_ffn += t.elapsed();
+            let t = std::time::Instant::now();
             linear_into(
                 source,
                 &block.w3,
@@ -1183,13 +1220,15 @@ fn run_block(
                 q8,
                 pool,
             )?;
+            t_linear_ffn += t.elapsed();
         }
-        z_image_swiglu(
+        silu_mul_inplace(
             &qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
             &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
         );
         {
             let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            let t = std::time::Instant::now();
             linear_into_scaled(
                 source,
                 &block.w2,
@@ -1201,16 +1240,43 @@ fn run_block(
                 pool,
                 1.0 / 128.0,
             )?;
+            t_linear_ffn += t.elapsed();
         }
         let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm_inplace(normalized, &block.ffn_norm2, RMS_EPSILON);
+        let t = std::time::Instant::now();
         add_modulated_residual(
             &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
             normalized,
             modulations.map(|values| values.gate_mlp),
         )?;
+        t_residual += t.elapsed();
     }
+
+// 累计到 thread_local
+    let block_total = block_start.elapsed();
+    let accounted = t_modulation + t_rms_norm + t_scale_mod + t_linear_qkv + t_rope
+        + t_attention + t_linear_out + t_linear_ffn + t_residual;
+    let other = block_total.saturating_sub(accounted);
+    PROFILE_TIMERS.with(|cell| {
+        let mut t = cell.borrow_mut();
+        t.0 += t_modulation.as_secs_f64() * 1000.0;
+        t.1 += t_rms_norm.as_secs_f64() * 1000.0;
+        t.2 += t_scale_mod.as_secs_f64() * 1000.0;
+        t.3 += t_linear_qkv.as_secs_f64() * 1000.0;
+        t.4 += t_rope.as_secs_f64() * 1000.0;
+        t.5 += t_attention.as_secs_f64() * 1000.0;
+        t.6 += t_linear_out.as_secs_f64() * 1000.0;
+        t.7 += t_linear_ffn.as_secs_f64() * 1000.0;
+        t.8 += other.as_secs_f64() * 1000.0;
+    });
+
     Ok(())
+}
+
+thread_local! {
+    static PROFILE_TIMERS: std::cell::RefCell<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> =
+        std::cell::RefCell::new((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 }
 
 pub(crate) struct TorchMt19937 {
@@ -1625,7 +1691,7 @@ mod tests {
         layer_norm_no_affine, pad_rows_to_32, patchify_latent, patchify_latent_into,
         real_image_row, require_finite, rotate_interleaved_inplace, scale_modulated_branch,
         sign_and_unpatchify_image, split_adaln_modulation, time_snr_shift, timestep_embedding,
-        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas, z_image_swiglu,
+        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas,
         TorchMt19937, ZImageDit,
     };
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
@@ -2057,6 +2123,48 @@ mod tests {
         assert!(add_modulated_residual(&mut [1.0, 2.0], &[1.0], Some(&[0.0, 0.0])).is_err());
     }
 
+    /// `add_modulated_residual` 无 gates 路径走 `vec_add_into`（AVX2/NEON SIMD），
+    /// 行为：tokens[i] += residual[i]。覆盖 8-lane SIMD 边界 + DiT 真实宽度 (HIDDEN=3840)。
+    #[test]
+    fn add_modulated_residual_no_gates_adds_residual() {
+        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+            let mut tokens: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7).collect();
+            let residual: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
+            let mut expected = tokens.clone();
+            for (t, r) in expected.iter_mut().zip(&residual) {
+                *t += *r;
+            }
+            add_modulated_residual(&mut tokens, &residual, None).unwrap();
+            assert_eq!(tokens.len(), expected.len(), "length mismatch at len={len}");
+            for (i, (&actual, &want)) in tokens.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    want.to_bits(),
+                    "add_modulated_residual None-branch mismatch at i={i}, len={len}: \
+                     actual={actual:?} (bits={:#x}), expected={want:?} (bits={:#x})",
+                    actual.to_bits(),
+                    want.to_bits()
+                );
+            }
+        }
+    }
+
+    /// 无 gates 路径的长度校验：tokens.len() != residual.len() 应报错。
+    #[test]
+    fn add_modulated_residual_no_gates_rejects_mismatched_length() {
+        assert!(add_modulated_residual(&mut [1.0, 2.0], &[1.0], None).is_err());
+        assert!(add_modulated_residual(&mut [1.0], &[1.0, 2.0], None).is_err());
+    }
+
+    /// 空切片路径不 panic。
+    #[test]
+    fn add_modulated_residual_no_gates_empty_is_noop() {
+        let mut tokens: Vec<f32> = vec![];
+        let residual: Vec<f32> = vec![];
+        add_modulated_residual(&mut tokens, &residual, None).unwrap();
+        assert!(tokens.is_empty());
+    }
+
     #[test]
     fn adaln_scale_preserves_the_oracle_add_then_multiply_order() {
         let mut values = [0.1f32];
@@ -2162,7 +2270,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn z_image_swiglu_matches_the_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_ggml_neon_activation_dit() {
         let gate = [
             0xbf68_5c00,
             0xbf56_7800,
@@ -2186,7 +2294,7 @@ mod tests {
         ]
         .map(f32::from_bits);
 
-        z_image_swiglu(&gate, &mut up);
+        silu_mul_inplace(&gate, &mut up);
 
         assert_eq!(
             up.map(f32::to_bits),

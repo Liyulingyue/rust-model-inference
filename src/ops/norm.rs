@@ -1,8 +1,11 @@
 //! RMS normalization + scale helpers.
+//!
+//! `sum_sq_f32`（通用 reduce Σ x² → f64）和它的 AVX2/NEON 内核放在
+//! `ops/dot.rs`，与 `hsum_ps` 等横向归约工具同处。本文件只调用之。
 
 pub fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
     let n = input.len().min(weight.len()).min(output.len());
-    let sum_sq: f64 = input[..n].iter().map(|&x| f64::from(x * x)).sum();
+    let sum_sq = super::sum_sq_f32(&input[..n]);
     let mean_sq = (sum_sq / n as f64) as f32;
     let scale = 1.0f32 / (mean_sq + eps).sqrt();
     for i in 0..n {
@@ -12,7 +15,7 @@ pub fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
 
 pub fn rms_norm_inplace(x: &mut [f32], weight: &[f32], eps: f32) {
     let n = x.len().min(weight.len());
-    let sum_sq: f64 = x[..n].iter().map(|&value| f64::from(value * value)).sum();
+    let sum_sq = super::sum_sq_f32(&x[..n]);
     let mean_sq = (sum_sq / n as f64) as f32;
     let scale = 1.0f32 / (mean_sq + eps).sqrt();
     scale_mul_inplace(scale, &weight[..n], &mut x[..n]);

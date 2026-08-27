@@ -1,6 +1,7 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::f16::F16Kernel;
+use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
@@ -39,8 +40,8 @@ impl ZImagePipeline {
         let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         Ok(Self {
             dit: dit::ZImageDit::load(diffusion, Arc::clone(&pool))?,
-            text: text::Qwen3TextEncoder::load(text, pool)?,
-            vae: vae::FluxVae::load(vae)?,
+            text: text::Qwen3TextEncoder::load(text, Arc::clone(&pool))?,
+            vae: vae::FluxVae::load(vae, pool)?,
         })
     }
 
@@ -50,13 +51,27 @@ impl ZImagePipeline {
         options: &ZImageOptions,
     ) -> Result<ZImageRgb, String> {
         validate_generate_request(prompt, options)?;
+        let total_start = std::time::Instant::now();
+        let t = std::time::Instant::now();
         let context = self.text.encode_layer_35(prompt)?;
         let context_tokens = context_token_count(&context)?;
+        let t_text = t.elapsed();
+        let t = std::time::Instant::now();
         let latent = self.dit.denoise(&context, context_tokens, options)?;
+        let t_denoise = t.elapsed();
         drop(context);
+        let t = std::time::Instant::now();
         let latent_side = validate_latent_shape(&latent, options.resolution)?;
         let rgb = self.vae.decode_rgb(&latent, latent_side)?;
+        let t_vae = t.elapsed();
         validate_decoded_rgb(&rgb, options.resolution)?;
+        eprintln!(
+            "[stage-profile] text_encode={:.1}ms  denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
+            t_text.as_secs_f64() * 1000.0,
+            t_denoise.as_secs_f64() * 1000.0,
+            t_vae.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(rgb)
     }
 }
@@ -615,9 +630,27 @@ fn linear_into_scaled_impl(
             if ggml_reduction {
                 matmul_q8_0_ggml(bytes, &q8.values, &q8.scales, output, n_in, n_out, pool);
             } else {
-                crate::ops::matmul_q8_0_quantized_dynamic(
-                    bytes, &q8.values, &q8.scales, output, n_in, n_out, pool,
-                );
+                let weight_ptr = bytes.as_ptr() as usize;
+                let weight_len = bytes.len();
+                let input_ptr = q8.values.as_ptr() as usize;
+                let input_len = q8.values.len();
+                let scale_ptr = q8.scales.as_ptr() as usize;
+                let scale_len = q8.scales.len();
+                let output_ptr = output.as_mut_ptr() as usize;
+                pool.compute(move |ith, nth| {
+                    let weight =
+                        unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+                    let input =
+                        unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
+                    let scales =
+                        unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
+                    let out = unsafe {
+                        std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out)
+                    };
+                    matmul_q8_0_quantized_parallel_rows(
+                        weight, input, scales, out, n_in, n_out, ith, nth,
+                    );
+                });
             }
             if scale != 1.0 {
                 let inverse_scale = scale.recip();
@@ -681,15 +714,29 @@ fn matmul_q8_0_ggml(
         });
     }
     #[cfg(not(target_arch = "aarch64"))]
-    crate::ops::matmul_q8_0_quantized_dynamic(
-        weight,
-        input_q8,
-        input_scales,
-        output,
-        n_in,
-        n_out,
-        pool,
-    );
+    {
+        let weight_ptr = weight.as_ptr() as usize;
+        let weight_len = weight.len();
+        let input_ptr = input_q8.as_ptr() as usize;
+        let input_len = input_q8.len();
+        let scale_ptr = input_scales.as_ptr() as usize;
+        let scale_len = input_scales.len();
+        let output_ptr = output.as_mut_ptr() as usize;
+        pool.compute(move |ith, nth| {
+            let weight =
+                unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+            let input =
+                unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
+            let scales =
+                unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out)
+            };
+            matmul_q8_0_quantized_parallel_rows(
+                weight, input, scales, out, n_in, n_out, ith, nth,
+            );
+        });
+    }
 }
 
 #[cfg(test)]
