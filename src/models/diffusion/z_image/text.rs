@@ -4,9 +4,10 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 #[cfg(target_arch = "aarch64")]
-use crate::ops::{dot_f32_neon, silu_mul_inplace};
+use crate::ops::silu_mul_inplace;
+use crate::ops::dot_f32;
 #[cfg(not(target_arch = "aarch64"))]
-use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
+use crate::ops::{silu_mul_inplace, softmax_inplace};
 use crate::ops::{
     attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox,
 };
@@ -341,7 +342,7 @@ fn attention(
             for (key_position, score) in active_scores.iter_mut().enumerate() {
                 let key_start =
                     (layer * token_count + key_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-                *score = attention_dot(query, &cache.k[key_start..key_start + HEAD_WIDTH]) * scale;
+                *score = dot_f32(query, &cache.k[key_start..key_start + HEAD_WIDTH], HEAD_WIDTH) * scale;
             }
         }
         attention_softmax(scores, position, token_count);
@@ -390,16 +391,6 @@ fn attention_softmax(scores: &mut [f32], position: usize, token_count: usize) {
     }
     #[cfg(not(target_arch = "aarch64"))]
     softmax_inplace(&mut scores[..=position]);
-}
-
-#[inline]
-fn attention_dot(query: &[f32], key: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        return unsafe { dot_f32_neon(query, key, HEAD_WIDTH) };
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    dot_f32(query, key, HEAD_WIDTH)
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
@@ -453,6 +444,7 @@ mod tests {
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
     use crate::ops::attention_value_f32;
+    use crate::ops::dot_f32;
     use std::sync::Arc;
 
     struct EmptySource;
@@ -516,7 +508,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_attention_uses_the_pinned_ggml_neon_reduction() {
+    fn qwen_attention_dot_matches_pinned_ggml_neon_reduction() {
         let left = (0..super::HEAD_WIDTH)
             .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
             .collect::<Vec<_>>();
@@ -524,12 +516,17 @@ mod tests {
             .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
             .collect::<Vec<_>>();
 
-        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+        assert_eq!(
+            dot_f32(&left, &right, super::HEAD_WIDTH).to_bits(),
+            0x41d3_f2b4
+        );
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     #[test]
-    fn non_aarch64_qwen_attention_is_feature_independent() {
+    fn x86_dot_f32_matches_pinned_ggml_neon_reduction() {
+        // 这是仓库里**唯一** x86 dot_f32 跨 AVX2/no-AVX2 的 bit-pinned 测试。
+        // 关键正确性保证：两 arch 都产出 0x41d3_f2b4（与 ggml NEON 参考完全一致）。
         let left = (0..super::HEAD_WIDTH)
             .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
             .collect::<Vec<_>>();
@@ -537,7 +534,10 @@ mod tests {
             .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
             .collect::<Vec<_>>();
 
-        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+        assert_eq!(
+            dot_f32(&left, &right, super::HEAD_WIDTH).to_bits(),
+            0x41d3_f2b4
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
