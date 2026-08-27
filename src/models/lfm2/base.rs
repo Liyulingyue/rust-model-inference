@@ -27,7 +27,8 @@ use crate::ops::kernel::Kernel;
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, embedding_lookup, quantize_q8_0_into,
     quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox, sample_top_k,
-    silu_mul_inplace, softmax_inplace, vec_mad_f16_f32, vec_scale_f32,
+    silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mul_inplace,
+    vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 
@@ -435,9 +436,7 @@ let cur_after_block = if lw.is_attn {
         );
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-        for i in 0..n_embd {
-            x[i] += attn_proj[i];
-        }
+        vec_add_into(attn_proj, x);
         unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     } else {
         let (cur, bx) = forward_shortconv(
@@ -452,9 +451,7 @@ let cur_after_block = if lw.is_attn {
             is_prefill,
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-        for i in 0..n_embd {
-            x[i] += cur[i];
-        }
+        vec_add_into(&cur, x);
         unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     };
     let _ = cur_after_block;
@@ -535,9 +532,7 @@ let gate_buf =
 
 let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-    for i in 0..n_embd {
-        x[i] += down_buf[i];
-    }
+    vec_add_into(down_buf, x);
     let _ = cur_after_block;
 }
 
@@ -662,10 +657,12 @@ fn forward_attention(
                 *v_cache_f16_ptr.add(off + i) = crate::ops::f32_to_f16(v_new[i]);
             }
         } else {
-            for i in 0..n_embd_gqa {
-                *k_cache_f32_ptr.add(off + i) = k_new[i];
-                *v_cache_f32_ptr.add(off + i) = v_new[i];
-            }
+            let k_dst =
+                std::slice::from_raw_parts_mut(k_cache_f32_ptr.add(off), n_embd_gqa);
+            let v_dst =
+                std::slice::from_raw_parts_mut(v_cache_f32_ptr.add(off), n_embd_gqa);
+            k_dst.copy_from_slice(k_new);
+            v_dst.copy_from_slice(v_new);
         }
     }
 
@@ -890,11 +887,9 @@ fn forward_shortconv(
     let c = &bcx[n_embd..2 * n_embd];
     let x = &bcx[2 * n_embd..3 * n_embd];
 
-    // bx = b * x
-    let mut bx: Vec<f32> = vec![0.0; n_embd];
-    for i in 0..n_embd {
-        bx[i] = b[i] * x[i];
-    }
+    // bx = b * x. SIMD: copy b → bx (memcpy), then bx *= x (vec_mul_inplace).
+    let mut bx: Vec<f32> = b.to_vec();
+    vec_mul_inplace(x, bx.as_mut_slice());
 
     // Accumulate b*x so the main loop can build the next token's state.
     // The main loop sets state = [b*x_{step-d_conv}, ..., b*x_{step-1}] before
@@ -911,7 +906,7 @@ fn forward_shortconv(
 
     // bx_buf is the SSM conv input. For single-token decode (n_seq_tokens=1):
     // GGML shape [d_conv + n_seq_tokens, n_embd] = [3, 2048].
-    // Memory layout: [c=0, t=0..2, c=1, t=0..2, ...] = bx_buf[c * 3 + t].
+    // Memory layout: [c=0, t=0..2, c=1, t=0..2, ...] = bx_buf[c * l_buf + t].
     // Rows 0..d_conv-1 are OLD state, row d_conv is b*x (from in_proj).
     let l_buf = d_conv + 1; // 3 for d_conv=2
     let mut bx_buf: Vec<f32> = vec![0.0f32; n_embd * l_buf];
@@ -920,15 +915,13 @@ fn forward_shortconv(
     }
     // state is stored row-major [s_0_c_0, s_0_c_1, ..., s_(d_conv-1)_c_(n_embd-1)].
     // Reorganize to GGML layout: bx_buf[c * l_buf + k] where k < d_conv is state time.
-    for c in 0..n_embd {
-        for k in 0..d_conv {
-            bx_buf[c * l_buf + k] = state[k * n_embd + c];
+    // For d_conv=2 this is two row-per-channel copies; the outer-loop transpose is
+    // preserved (the inner SIMD-friendly copy lives in copy_from_slice → memcpy).
+    for k in 0..d_conv {
+        let row = &state[k * n_embd..(k + 1) * n_embd];
+        for c in 0..n_embd {
+            bx_buf[c * l_buf + k] = row[c];
         }
-    }
-    // bx = b * x (element-wise)
-    let mut bx: Vec<f32> = vec![0.0; n_embd];
-    for i in 0..n_embd {
-        bx[i] = b[i] * x[i];
     }
 
     // Row d_conv is b*x.
@@ -942,9 +935,7 @@ fn forward_shortconv(
     // batched prefill semantics.
     if !is_prefill {
         for k in 0..d_conv {
-            for ci in 0..n_embd {
-                state[k * n_embd + ci] = bx[ci];
-            }
+            state[k * n_embd..(k + 1) * n_embd].copy_from_slice(&bx);
         }
     }
 
@@ -965,10 +956,8 @@ fn forward_shortconv(
         conv_out[c_idx] = acc;
     }
 
-    // y = c * conv_out (per-channel gating).
-    for c_idx in 0..n_embd {
-        conv_out[c_idx] *= c[c_idx];
-    }
+    // y = c * conv_out (per-channel gating, SIMD via vec_mul_inplace).
+    vec_mul_inplace(c, conv_out.as_mut_slice());
 
     // out_proj: weight [n_embd, n_embd] @ conv_out [n_embd] = [n_embd]. Q8 scalar.
     quantize_q8_0_into(
