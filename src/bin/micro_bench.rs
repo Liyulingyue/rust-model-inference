@@ -110,7 +110,7 @@ fn compare_backends(
     let mut scalar_output = vec![0.0f32; n_out];
     let mut auto_output = vec![0.0f32; n_out];
     scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out);
-    matmul_q8_0_quantized(weight, input_q8, input_scales, &mut auto_output, n_in, n_out);
+    matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out);
     for i in 0..n_out {
         let tolerance = 1e-4 + 1e-4 * scalar_output[i].abs();
         if (auto_output[i] - scalar_output[i]).abs() > tolerance {
@@ -121,7 +121,7 @@ fn compare_backends(
 
     for _ in 0..WARMUP {
         scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out);
-        matmul_q8_0_quantized(weight, input_q8, input_scales, &mut auto_output, n_in, n_out);
+        matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out);
     }
 
     let mut scalar_times = Vec::with_capacity(SAMPLES);
@@ -133,12 +133,12 @@ fn compare_backends(
                 iterations,
             ));
             auto_times.push(measure_once(
-                || matmul_q8_0_quantized(weight, input_q8, input_scales, &mut auto_output, n_in, n_out),
+                || matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out),
                 iterations,
             ));
         } else {
             auto_times.push(measure_once(
-                || matmul_q8_0_quantized(weight, input_q8, input_scales, &mut auto_output, n_in, n_out),
+                || matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out),
                 iterations,
             ));
             scalar_times.push(measure_once(
@@ -159,11 +159,11 @@ fn bench(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
     let mut output = vec![0.0f32; n_out];
 
     for _ in 0..3 {
-        matmul_q8_0_quantized(&weight, &input_q8, &input_scales, &mut output, n_in, n_out);
+        matmul_q8_0_quantized_range(&weight, &input_q8, &input_scales, &mut output, n_in, 0, n_out);
     }
 
     let elapsed = measure_once(
-        || matmul_q8_0_quantized(&weight, &input_q8, &input_scales, &mut output, n_in, n_out),
+        || matmul_q8_0_quantized_range(&weight, &input_q8, &input_scales, &mut output, n_in, 0, n_out),
         iterations,
     );
     std::hint::black_box(&output);

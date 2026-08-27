@@ -102,7 +102,7 @@ pub fn fuse_vstack_q6_k(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::{matmul_q8_0_quantized, quantize_q8_0_into};
+    use crate::ops::{matmul_q8_0_quantized_range, quantize_q8_0_into};
 
     /// Build a deterministic Q8_0 weight with `n_rows` rows and `n_cols` input
     /// columns. Row `r` and block `b` quantizes the value `r + b` (clamped to
@@ -160,13 +160,13 @@ mod tests {
         // Separate
         let mut out_gate = vec![0.0f32; n_out];
         let mut out_up = vec![0.0f32; n_out];
-        matmul_q8_0_quantized(&gate, &input_q8, &input_scales, &mut out_gate, n_in, n_out);
-        matmul_q8_0_quantized(&up, &input_q8, &input_scales, &mut out_up, n_in, n_out);
+        matmul_q8_0_quantized_range(&gate, &input_q8, &input_scales, &mut out_gate, n_in, 0, n_out);
+        matmul_q8_0_quantized_range(&up, &input_q8, &input_scales, &mut out_up, n_in, 0, n_out);
 
         // Fused
         let (fused, fused_rows) = fuse_vstack_q8_0(&gate, &up, n_out, n_out).expect("fuse");
         let mut out_fused = vec![0.0f32; fused_rows];
-        matmul_q8_0_quantized(&fused, &input_q8, &input_scales, &mut out_fused, n_in, fused_rows);
+        matmul_q8_0_quantized_range(&fused, &input_q8, &input_scales, &mut out_fused, n_in, 0, fused_rows);
 
         // First n_out rows == gate output; last n_out rows == up output.
         for i in 0..n_out {
