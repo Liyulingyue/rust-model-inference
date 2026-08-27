@@ -129,3 +129,90 @@ pub unsafe fn matmul_q8_0_vs_q8_0_neon_nrc1(
         output[out_idx] = sum;
     }
 }
+
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn dot_i8x16_dotprod(
+    a: std::arch::aarch64::int8x16_t,
+    b: std::arch::aarch64::int8x16_t,
+) -> std::arch::aarch64::int32x4_t {
+    use std::arch::aarch64::*;
+    let mut sum = vdupq_n_s32(0);
+    std::arch::asm!(
+        "sdot {sum:v}.4s, {a:v}.16b, {b:v}.16b",
+        sum = inout(vreg) sum,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(nomem, nostack, pure),
+    );
+    sum
+}
+
+/// Dot-product Q8_0 × Q8_0 matmul with four output rows in flight.
+///
+/// `dotprod` is optional on aarch64, so callers must select this only after
+/// `is_aarch64_feature_detected!("dotprod")` succeeds.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn matmul_q8_0_vs_q8_0_dotprod_nrc4(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    use std::arch::aarch64::*;
+
+    let blocks = n_in / 32;
+    let stride = blocks * 34;
+    let full4 = (row_end - row_start) / 4;
+    for tile in 0..full4 {
+        let row = row_start + tile * 4;
+        let offsets = [
+            row * stride,
+            (row + 1) * stride,
+            (row + 2) * stride,
+            (row + 3) * stride,
+        ];
+        let mut sums = [
+            vdupq_n_f32(0.0),
+            vdupq_n_f32(0.0),
+            vdupq_n_f32(0.0),
+            vdupq_n_f32(0.0),
+        ];
+        for block in 0..blocks {
+            let input = input_q8.as_ptr().add(block * 32);
+            let input_lo = vld1q_s8(input as *const i8);
+            let input_hi = vld1q_s8(input.add(16) as *const i8);
+            for (offset, sum) in offsets.iter().zip(sums.iter_mut()) {
+                let weight = weight.as_ptr().add(*offset + block * 34);
+                let dot = vaddq_s32(
+                    dot_i8x16_dotprod(vld1q_s8(weight.add(2) as *const i8), input_lo),
+                    dot_i8x16_dotprod(vld1q_s8(weight.add(18) as *const i8), input_hi),
+                );
+                let scale =
+                    f16_to_f32(u16::from_le_bytes([*weight, *weight.add(1)])) * input_scales[block];
+                *sum = vfmaq_n_f32(*sum, vcvtq_f32_s32(dot), scale);
+            }
+        }
+        let out = tile * 4;
+        output[out] = vaddvq_f32(sums[0]);
+        output[out + 1] = vaddvq_f32(sums[1]);
+        output[out + 2] = vaddvq_f32(sums[2]);
+        output[out + 3] = vaddvq_f32(sums[3]);
+    }
+
+    let tail_start = row_start + full4 * 4;
+    if tail_start < row_end {
+        matmul_q8_0_vs_q8_0_neon(
+            weight,
+            input_q8,
+            input_scales,
+            &mut output[full4 * 4..],
+            n_in,
+            tail_start,
+            row_end,
+        );
+    }
+}

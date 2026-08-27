@@ -217,7 +217,9 @@ fn sum_sq_f32_matches_scalar_when_below_simd_threshold() {
 #[test]
 fn sum_sq_f32_simd_matches_scalar_within_relative_epsilon() {
     let mut max_relative = 0.0f64;
-    for &len in &[8usize, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+    for &len in &[
+        8usize, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840,
+    ] {
         let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
         let expected: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
         let actual = sum_sq_f32(&values);
@@ -249,7 +251,10 @@ fn sum_sq_f32_empty_slice_is_zero() {
 /// 长度覆盖包括 len < SIMD lane width（scalar fallback）和 SIMD 路径。
 #[test]
 fn sum_f32_matches_scalar_reference() {
-    for &len in &[0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+    for &len in &[
+        0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024,
+        3840,
+    ] {
         let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
         // 跳过 len=0：空切片的 f64 `sum()` 是 -0.0（IEEE 754 规则），
         // sum_f32 直接返回 +0.0，两者 sign bit 不同。
@@ -285,11 +290,17 @@ fn sum_f32_propagates_nan_and_inf() {
 /// 覆盖各种长度 + mean² >> Var 的极端场景（避免灾难性 cancellation）。
 #[test]
 fn sum_sq_centered_f32_matches_scalar_reference() {
-    for &len in &[0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 576, 1024, 3840] {
+    for &len in &[
+        0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 576,
+        1024, 3840,
+    ] {
         let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
         // 跳过 len=0：f64 fold 空切片为 -0.0，sum_sq_centered 直接返回 +0.0
         if len == 0 {
-            assert_eq!(sum_sq_centered_f32(&values, 0.0).to_bits(), 0.0f64.to_bits());
+            assert_eq!(
+                sum_sq_centered_f32(&values, 0.0).to_bits(),
+                0.0f64.to_bits()
+            );
             continue;
         }
         // 测多种 mean：含 mean=0（无 cancellation）和 mean² >> Var 的极端场景
@@ -820,6 +831,44 @@ fn neon_q8_nrc1_matches_llama_lane_reduction() {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_q8_dotprod_nrc4_matches_scalar_with_tail_row() {
+    if !std::arch::is_aarch64_feature_detected!("dotprod") {
+        return;
+    }
+    let n_in = 96;
+    let weights = valid_q8_weights(n_in, 5);
+    let input: Vec<f32> = (0..n_in).map(|i| (i as f32 * 0.11).sin()).collect();
+    let mut q8 = vec![0u8; n_in];
+    let mut scales = vec![0.0f32; n_in / 32];
+    quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
+    let mut scalar = vec![0.0f32; 5];
+    let mut actual = vec![0.0f32; 5];
+    crate::ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
+        &weights,
+        &q8,
+        &scales,
+        &mut scalar,
+        n_in,
+        0,
+        5,
+    );
+    unsafe {
+        crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_dotprod_nrc4(
+            &weights,
+            &q8,
+            &scales,
+            &mut actual,
+            n_in,
+            0,
+            5,
+        )
+    };
+    for row in 0..5 {
+        assert_close(actual[row], scalar[row]);
+    }
+}
 /// 验证 `vec_mad_self_f32` 与标量参考在各种长度（覆盖 8 的倍数边界 ±1/+4）
 /// 下行为一致：FMA 累加器先读后写，结果是 1 次舍入（mul 和 add 一起舍入）。
 /// 实测：len ≤ 129 时与标量 1 ULP 以内（实际上 LLVM 不自动向量化）；
@@ -831,7 +880,10 @@ fn neon_q8_nrc1_matches_llama_lane_reduction() {
 fn vec_mad_self_f32_matches_scalar_within_four_ulp() {
     let fma_active = crate::ops::has_avx2_fma() || crate::ops::has_neon();
     eprintln!("vec_mad_self_f32 SIMD path active: {fma_active}");
-    for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+    for &len in &[
+        0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+        1024, 3840,
+    ] {
         let mut y: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7 - 0.4).collect();
         let x: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
         let mut expected = y.clone();
@@ -842,7 +894,9 @@ fn vec_mad_self_f32_matches_scalar_within_four_ulp() {
         assert_eq!(y.len(), expected.len(), "length mismatch at len={len}");
         let mut max_diff = 0u32;
         for (i, (&actual, &want)) in y.iter().zip(&expected).enumerate() {
-            let diff_bits = (actual.to_bits() as i32).wrapping_sub(want.to_bits() as i32).abs() as u32;
+            let diff_bits = (actual.to_bits() as i32)
+                .wrapping_sub(want.to_bits() as i32)
+                .abs() as u32;
             if diff_bits > max_diff {
                 max_diff = diff_bits;
             }

@@ -4,19 +4,21 @@
 //! `matmul_q8_0_quantized_range`; called by `parallel::matmul_q8_0_quantized_parallel_rows`
 //! and by external callers (`bin/server.rs`, `bin/micro_bench.rs`).
 
-#[cfg(target_arch = "x86_64")]
-use crate::ops::has_avx2_fma;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::has_neon;
 #[cfg(feature = "vulkan")]
 use crate::ops::get_vulkan_context;
 #[cfg(feature = "wgpu")]
 use crate::ops::get_wgpu_context;
+#[cfg(target_arch = "x86_64")]
+use crate::ops::has_avx2_fma;
+#[cfg(target_arch = "aarch64")]
+use crate::ops::has_neon;
 
 #[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
 #[cfg(target_arch = "aarch64")]
-use super::neon::{matmul_q8_0_vs_q8_0_neon, matmul_q8_0_vs_q8_0_neon_nrc1};
+use super::neon::{
+    matmul_q8_0_vs_q8_0_dotprod_nrc4, matmul_q8_0_vs_q8_0_neon, matmul_q8_0_vs_q8_0_neon_nrc1,
+};
 use super::scalar::matmul_q8_0_quantized_scalar_range;
 
 /// Per-row dispatch: GPU → AVX2 → NEON → scalar.
@@ -84,15 +86,27 @@ pub fn matmul_q8_0_quantized_range(
     #[cfg(target_arch = "aarch64")]
     if has_neon() {
         unsafe {
-            matmul_q8_0_vs_q8_0_neon(
-                weight,
-                input_q8,
-                input_scales,
-                output,
-                n_in,
-                row_start,
-                row_end,
-            );
+            if std::arch::is_aarch64_feature_detected!("dotprod") {
+                matmul_q8_0_vs_q8_0_dotprod_nrc4(
+                    weight,
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    row_start,
+                    row_end,
+                );
+            } else {
+                matmul_q8_0_vs_q8_0_neon(
+                    weight,
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    row_start,
+                    row_end,
+                );
+            }
         }
         return;
     }

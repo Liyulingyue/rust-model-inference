@@ -6,20 +6,17 @@
 //! different parallelization strategies (dynamic chunking, recursive split,
 //! rayon chunks).
 
-use crate::ops::has_avx2_fma;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::has_neon;
 #[cfg(feature = "vulkan")]
 use crate::ops::get_vulkan_context;
 #[cfg(feature = "wgpu")]
 use crate::ops::get_wgpu_context;
+#[cfg(target_arch = "x86_64")]
+use crate::ops::has_avx2_fma;
 
 #[cfg(target_arch = "x86_64")]
-use super::avx2::{matmul_q8_0_avx2_range, matmul_q8_0_vs_q8_0_avx2};
-#[cfg(target_arch = "aarch64")]
-use super::neon::matmul_q8_0_vs_q8_0_neon;
-use super::scalar::{matmul_q8_0_fallback_range, matmul_q8_0_quantized_scalar_range};
+use super::avx2::matmul_q8_0_avx2_range;
 use super::dispatch::matmul_q8_0_quantized_range;
+use super::scalar::matmul_q8_0_fallback_range;
 
 /// Single-thread entry: GPU → AVX2 → NEON → scalar, on the full output.
 pub fn matmul_q8_0_quantized(
@@ -30,69 +27,7 @@ pub fn matmul_q8_0_quantized(
     n_in: usize,
     n_out: usize,
 ) {
-    #[cfg(feature = "vulkan")]
-    {
-        if let Some(ctx) = get_vulkan_context() {
-            unsafe {
-                ctx.matmul_q8_0(weight, input_q8, input_scales, output, n_in, n_out)
-                    .expect("GPU matmul failed");
-            }
-            return;
-        }
-    }
-    #[cfg(feature = "wgpu")]
-    {
-        if let Some(ctx) = get_wgpu_context() {
-            unsafe {
-                ctx.matmul_q8_0(weight, input_q8, input_scales, output, n_in, n_out)
-                    .expect("WGPU matmul failed");
-            }
-            return;
-        }
-    }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if has_avx2_fma() {
-            unsafe {
-                matmul_q8_0_vs_q8_0_avx2(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    0,
-                    n_out,
-                );
-            }
-            return;
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if has_neon() {
-            unsafe {
-                matmul_q8_0_vs_q8_0_neon(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    0,
-                    n_out,
-                );
-            }
-            return;
-        }
-    }
-    matmul_q8_0_quantized_scalar_range(
-        weight,
-        input_q8,
-        input_scales,
-        output,
-        n_in,
-        0,
-        n_out,
-    );
+    matmul_q8_0_quantized_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
 }
 
 /// Row-partitioned parallel entry: the production hot path.
@@ -110,15 +45,7 @@ pub fn matmul_q8_0_quantized_parallel_rows(
     nth: usize,
 ) {
     if nth <= 1 || n_out == 0 {
-        matmul_q8_0_quantized_range(
-            weight,
-            input_q8,
-            input_scales,
-            output,
-            n_in,
-            0,
-            n_out,
-        );
+        matmul_q8_0_quantized_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
         return;
     }
     let per_thread = (n_out + nth - 1) / nth;
@@ -211,7 +138,6 @@ pub fn matmul_q8_0_quantized_parallel(
     n_in: usize,
     n_out: usize,
 ) {
-    let use_avx2 = has_avx2_fma();
     let min_rows = 64;
     parallel_range(
         weight,
@@ -221,7 +147,6 @@ pub fn matmul_q8_0_quantized_parallel(
         n_in,
         0,
         n_out,
-        use_avx2,
         min_rows,
     );
 }
@@ -234,42 +159,11 @@ fn parallel_range(
     n_in: usize,
     row_start: usize,
     row_end: usize,
-    use_avx2: bool,
     min_rows: usize,
 ) {
     let n = row_end - row_start;
     if n <= min_rows {
-        #[cfg(target_arch = "x86_64")]
-        if use_avx2 {
-            unsafe {
-                matmul_q8_0_vs_q8_0_avx2(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    row_start,
-                    row_end,
-                );
-            }
-            return;
-        }
-        #[cfg(target_arch = "aarch64")]
-        if has_neon() {
-            unsafe {
-                matmul_q8_0_vs_q8_0_neon(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    row_start,
-                    row_end,
-                );
-            }
-            return;
-        }
-        matmul_q8_0_quantized_scalar_range(
+        matmul_q8_0_quantized_range(
             weight,
             input_q8,
             input_scales,
@@ -293,7 +187,6 @@ fn parallel_range(
                 n_in,
                 row_start,
                 mid_row,
-                use_avx2,
                 min_rows,
             )
         },
@@ -306,7 +199,6 @@ fn parallel_range(
                 n_in,
                 mid_row,
                 row_end,
-                use_avx2,
                 min_rows,
             )
         },
@@ -314,25 +206,12 @@ fn parallel_range(
 }
 
 /// Legacy f32-input matmul: AVX2 → scalar, single-thread.
-pub fn matmul_q8_0(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-) {
+pub fn matmul_q8_0(weight: &[u8], input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
             unsafe {
-                matmul_q8_0_avx2_range(
-                    weight,
-                    input,
-                    output,
-                    n_in,
-                    0,
-                    n_out,
-                );
+                matmul_q8_0_avx2_range(weight, input, output, n_in, 0, n_out);
             }
             return;
         }
