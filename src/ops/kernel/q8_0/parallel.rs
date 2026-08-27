@@ -6,29 +6,7 @@
 //! different parallelization strategies (dynamic chunking, recursive split,
 //! rayon chunks).
 
-#[cfg(feature = "vulkan")]
-use crate::ops::get_vulkan_context;
-#[cfg(feature = "wgpu")]
-use crate::ops::get_wgpu_context;
-#[cfg(target_arch = "x86_64")]
-use crate::ops::has_avx2_fma;
-
-#[cfg(target_arch = "x86_64")]
-use super::avx2::matmul_q8_0_avx2_range;
 use super::dispatch::matmul_q8_0_quantized_range;
-use super::scalar::matmul_q8_0_fallback_range;
-
-/// Single-thread entry: GPU → AVX2 → NEON → scalar, on the full output.
-pub fn matmul_q8_0_quantized(
-    weight: &[u8],
-    input_q8: &[u8],
-    input_scales: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-) {
-    matmul_q8_0_quantized_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
-}
 
 /// Row-partitioned parallel entry: the production hot path.
 ///
@@ -203,48 +181,4 @@ fn parallel_range(
             )
         },
     );
-}
-
-/// Legacy f32-input matmul: AVX2 → scalar, single-thread.
-pub fn matmul_q8_0(weight: &[u8], input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if has_avx2_fma() {
-            unsafe {
-                matmul_q8_0_avx2_range(weight, input, output, n_in, 0, n_out);
-            }
-            return;
-        }
-    }
-    matmul_q8_0_fallback_range(weight, input, output, n_in, 0, n_out);
-}
-
-/// Legacy f32-input matmul, parallel via rayon chunks.
-pub fn matmul_q8_0_parallel(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-    _n_threads: usize,
-) {
-    use rayon::prelude::*;
-    #[cfg(target_arch = "x86_64")]
-    let use_avx2 = has_avx2_fma();
-    let chunk = 128;
-    output
-        .par_chunks_mut(chunk)
-        .enumerate()
-        .for_each(|(i, out_slice)| {
-            let rs = i * chunk;
-            let re = (rs + chunk).min(n_out);
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                unsafe {
-                    matmul_q8_0_avx2_range(weight, input, out_slice, n_in, rs, re);
-                }
-                return;
-            }
-            matmul_q8_0_fallback_range(weight, input, out_slice, n_in, rs, re);
-        });
 }
