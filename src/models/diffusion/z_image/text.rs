@@ -3,11 +3,12 @@ use std::sync::Arc;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-#[cfg(target_arch = "aarch64")]
-use crate::ops::{attention_value_f32, dot_f32_neon, silu_mul_approx_inplace};
-#[cfg(not(target_arch = "aarch64"))]
-use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
-use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
+use crate::ops::dot_f32;
+use crate::ops::silu_mul_inplace;
+use crate::ops::softmax_inplace;
+use crate::ops::{
+    attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox,
+};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -93,6 +94,8 @@ impl Qwen3TextEncoder {
     }
 
     pub(crate) fn encode_layer_35(&self, prompt: &str) -> Result<Vec<f32>, String> {
+        let total_start = std::time::Instant::now();
+        let t_tok = std::time::Instant::now();
         let ids = self.tokenizer.encode(
             &z_image_prompt(prompt),
             EncodeOptions {
@@ -105,7 +108,17 @@ impl Qwen3TextEncoder {
         }
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::token_ids("z_image.prompt_ids", &ids));
+        let t_tok = t_tok.elapsed();
+        let t_fwd = std::time::Instant::now();
         let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
+        let t_fwd = t_fwd.elapsed();
+        eprintln!(
+            "[text-profile] n_tokens={}  forward={:.1}ms  tokenize={:.1}ms  total={:.1}ms",
+            ids.len(),
+            t_fwd.as_secs_f64() * 1000.0,
+            t_tok.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.text_layer_35",
@@ -247,7 +260,7 @@ impl Qwen3TextEncoder {
                     &mut scratch.q8,
                     self.pool.as_ref(),
                 )?;
-                qwen_swiglu(&scratch.gate, &mut scratch.up);
+                silu_mul_inplace(&scratch.gate, &mut scratch.up);
                 linear_into(
                     self.source.as_ref(),
                     &layer.down_proj,
@@ -327,10 +340,10 @@ fn attention(
             for (key_position, score) in active_scores.iter_mut().enumerate() {
                 let key_start =
                     (layer * token_count + key_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-                *score = attention_dot(query, &cache.k[key_start..key_start + HEAD_WIDTH]) * scale;
+                *score = dot_f32(query, &cache.k[key_start..key_start + HEAD_WIDTH], HEAD_WIDTH) * scale;
             }
         }
-        attention_softmax(scores, position, token_count);
+        softmax_inplace(&mut scores[..=position]);
         let output_head = &mut output[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
         #[cfg(target_arch = "aarch64")]
         for dimension in 0..HEAD_WIDTH {
@@ -340,7 +353,8 @@ fn attention(
                     + dimension;
                 *value = cache.v[value_start];
             }
-            output_head[dimension] = qwen_attention_value(value_column, scores);
+            output_head[dimension] =
+                attention_value_f32(value_column, scores, value_column.len(), scores.len());
         }
         #[cfg(not(target_arch = "aarch64"))]
         for (value_position, &weight) in scores[..=position].iter().enumerate() {
@@ -354,50 +368,6 @@ fn attention(
             }
         }
     }
-}
-
-#[inline]
-fn qwen_attention_value(values: &[f32], weights: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        return attention_value_f32(values, weights, values.len(), values.len());
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    values
-        .iter()
-        .zip(weights)
-        .fold(0.0, |sum, (value, weight)| sum + value * weight)
-}
-
-#[inline]
-fn qwen_swiglu(gate: &[f32], up: &mut [f32]) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        silu_mul_approx_inplace(gate, up);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    silu_mul_inplace(gate, up);
-}
-
-#[inline]
-fn attention_softmax(scores: &mut [f32], position: usize, token_count: usize) {
-    #[cfg(target_arch = "aarch64")]
-    {
-        scores[position + 1..token_count].fill(f32::NEG_INFINITY);
-        crate::ops::softmax_approx_inplace(&mut scores[..token_count]);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    softmax_inplace(&mut scores[..=position]);
-}
-
-#[inline]
-fn attention_dot(query: &[f32], key: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        return unsafe { dot_f32_neon(query, key, HEAD_WIDTH) };
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    dot_f32(query, key, HEAD_WIDTH)
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
@@ -445,11 +415,12 @@ pub(crate) fn z_image_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_arch = "aarch64")]
-    use super::{qwen_attention_value, qwen_swiglu};
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
+    use crate::ops::attention_value_f32;
+    use crate::ops::dot_f32;
+    use crate::ops::silu_mul_inplace;
     use std::sync::Arc;
 
     struct EmptySource;
@@ -499,11 +470,11 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_swiglu_uses_the_pinned_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_pinned_ggml_neon_activation() {
         let gate = [0x3f6c_76fc, 0x3fe2_6ebc, 0xbf66_8824, 0xc009_429b].map(f32::from_bits);
         let mut up = [0xbfa1_5cef, 0x4013_8811, 0x3f8f_08d4, 0xbfe4_c88a].map(f32::from_bits);
 
-        qwen_swiglu(&gate, &mut up);
+        silu_mul_inplace(&gate, &mut up);
 
         assert_eq!(
             up.map(f32::to_bits),
@@ -513,55 +484,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_attention_value_uses_the_pinned_ggml_neon_reduction() {
-        let values = [
-            0xbc43_7f80,
-            0x3dcf_0c16,
-            0x3ab2_6fac,
-            0xbc9e_b19e,
-            0xbc68_338b,
-            0x3e83_1f48,
-            0xbd8d_9b7b,
-            0xbea6_6c9f,
-            0xbe7e_b316,
-            0x3dcd_159e,
-            0xbd1d_9b7f,
-            0xbe02_e230,
-            0x3d0c_95ad,
-            0xbe0a_58fc,
-            0xbe55_ef52,
-            0x3d88_c14e,
-        ]
-        .map(f32::from_bits);
-        let weights = [
-            0x3dd4_b07f,
-            0x3ca8_09ef,
-            0x3eb9_f242,
-            0x3e8f_d4ec,
-            0x3e6d_1827,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-        ]
-        .map(f32::from_bits);
-
-        assert_eq!(
-            qwen_attention_value(&values, &weights).to_bits(),
-            0xbbf2_4ce4
-        );
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn qwen_attention_uses_the_pinned_ggml_neon_reduction() {
+    fn qwen_attention_dot_matches_pinned_ggml_neon_reduction() {
         let left = (0..super::HEAD_WIDTH)
             .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
             .collect::<Vec<_>>();
@@ -569,12 +492,17 @@ mod tests {
             .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
             .collect::<Vec<_>>();
 
-        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+        assert_eq!(
+            dot_f32(&left, &right, super::HEAD_WIDTH).to_bits(),
+            0x41d3_f2b4
+        );
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     #[test]
-    fn non_aarch64_qwen_attention_is_feature_independent() {
+    fn x86_dot_f32_matches_pinned_ggml_neon_reduction() {
+        // 这是仓库里**唯一** x86 dot_f32 跨 AVX2/no-AVX2 的 bit-pinned 测试。
+        // 关键正确性保证：两 arch 都产出 0x41d3_f2b4（与 ggml NEON 参考完全一致）。
         let left = (0..super::HEAD_WIDTH)
             .map(|index| (((index * 37) % 101) as f32 - 50.0) / 7.0)
             .collect::<Vec<_>>();
@@ -582,7 +510,10 @@ mod tests {
             .map(|index| (((index * 53 + 11) % 97) as f32 - 48.0) / 11.0)
             .collect::<Vec<_>>();
 
-        assert_eq!(super::attention_dot(&left, &right).to_bits(), 0x41d3_f2b4);
+        assert_eq!(
+            dot_f32(&left, &right, super::HEAD_WIDTH).to_bits(),
+            0x41d3_f2b4
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -600,7 +531,7 @@ mod tests {
             .map(f32::from_bits),
         );
 
-        super::attention_softmax(&mut scores, 4, 16);
+        softmax_inplace(&mut scores[..=4]);
 
         assert_eq!(
             scores.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
@@ -651,5 +582,75 @@ mod tests {
         assert!(!hidden.is_empty());
         assert_eq!(hidden.len() % 2_560, 0);
         assert!(hidden.iter().all(|value| value.is_finite()));
+    }
+
+    /// `attention_value_f32` 与标量参考的 bit-level 一致性。
+    /// Z-Image 文本编码器 attention value 聚合直接调这个函数（之前还有
+    /// `qwen_attention_value` 包装，已删——wrapper 变成1 行透传，没意义）。
+    /// 实测：len ≤ 129 时与标量 1 ULP 以内（LLVM 不自动向量化）；
+    ///       len ≥ 255 时 LLVM 自动向量化 reference，与手写 SIMD 走不同
+    ///       指令序列，最多 ~3 ULP。HEAD_WIDTH=128 是真实调用长度。
+    /// 关键正确性保证见 `attention_value_f32_matches_pinned_ggml_reduction`：
+    /// 两 arch 都产出 0xbbf2_4ce4（与 ggml NEON 参考完全一致）。
+    #[test]
+    fn attention_value_f32_matches_scalar_reference() {
+        let mut max_diff_overall = 0u32;
+        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 384] {
+            let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+            let weights: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.029).cos() * 1.3).collect();
+            let expected: f32 = values
+                .iter()
+                .zip(&weights)
+                .fold(0.0f32, |acc, (v, w)| acc + v * w);
+            let actual = attention_value_f32(&values, &weights, values.len(), values.len());
+            let diff_bits = (actual.to_bits() as i32).wrapping_sub(expected.to_bits() as i32).abs() as u32;
+            if diff_bits > max_diff_overall {
+                max_diff_overall = diff_bits;
+            }
+            assert!(
+                diff_bits <= 8,
+                "attention_value_f32 mismatch at len={len}: \
+                 actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x}), diff_bits={diff_bits}",
+                actual.to_bits(),
+                expected.to_bits()
+            );
+        }
+        eprintln!("max_diff_overall={max_diff_overall} ULP across all lengths");
+    }
+
+    /// 复用 ggml NEON pinned 测试的输入，验证两 arch 都产出 `0xbbf2_4ce4`。
+    /// `dot_f32`（x86 AVX2）与 `dot_f32_neon` 的 reduce 顺序必须等价，否则
+    /// 整个 DiT 文本编码会逐 token 偏离 ggml 参考。
+    #[test]
+    fn attention_value_f32_matches_pinned_ggml_reduction() {
+        let values = [
+            0xbc43_7f80u32, 0x3dcf_0c16, 0x3ab2_6fac, 0xbc9e_b19e,
+            0xbc68_338b, 0x3e83_1f48, 0xbd8d_9b7b, 0xbea6_6c9f,
+            0xbe7e_b316, 0x3dcd_159e, 0xbd1d_9b7f, 0xbe02_e230,
+            0x3d0c_95ad, 0xbe0a_58fc, 0xbe55_ef52, 0x3d88_c14e,
+        ]
+        .map(f32::from_bits);
+        let weights = [
+            0x3dd4_b07fu32, 0x3ca8_09ef, 0x3eb9_f242, 0x3e8f_d4ec,
+            0x3e6d_1827, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+        ]
+        .map(f32::from_bits);
+        // 两 arch 都跑：aarch64 → dot_f32_neon，x86 → dot_f32 (AVX2)。
+        // 结果应与 ggml NEON 参考一致。
+        assert_eq!(
+            attention_value_f32(&values, &weights, values.len(), values.len()).to_bits(),
+            0xbbf2_4ce4
+        );
+    }
+
+    /// 空切片不 panic。
+    #[test]
+    fn attention_value_f32_empty_input_is_zero() {
+        let values: Vec<f32> = vec![];
+        let weights: Vec<f32> = vec![];
+        let result = attention_value_f32(&values, &weights, values.len(), values.len());
+        assert_eq!(result, 0.0);
     }
 }

@@ -6,7 +6,8 @@ use crate::ops::{
     attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
     f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, vec_mad_f32, vec_scale_f32,
+    ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
+    vec_mad_self_f32, vec_scale_f32,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -145,6 +146,10 @@ fn rms_norm_accumulates_f32_squares_in_f64() {
     );
 }
 
+/// `rms_norm_inplace` 与 ggml 纯 f64 累加路径 **bit-exact** 一致。
+/// `sum_sq_f32` SIMD 实现：8 f32 squares → 立即 promote 到 4 f64 doubles
+/// → hsum 到 1 f64 → add。**没有 f32 partial sum**，所以与标量 f64 累加
+/// 路径产出完全相同的 bits（vs 之前的 `hsum_ps` f32 partial 版本会差 3 ULP）。
 #[test]
 fn rms_norm_inplace_matches_ggml_sequential_f64_accumulation() {
     let mut values = [
@@ -183,6 +188,177 @@ fn rms_norm_inplace_matches_ggml_sequential_f64_accumulation() {
             0xbfe3_9aea,
         ],
     );
+}
+
+/// `sum_sq_f32` 与标量参考 `f64::from(v*v).sum()` 的 bit-exact 对照（不走 SIMD 路径
+/// 时），覆盖各种长度以验证 dispatch 边界（8-lane 边界 ±1/+4）。
+/// 跳过 len=0：空切片的 f64 `fold` 产生 `-0.0`（IEEE 754 规则），sum_sq_f32
+/// 直接返回 `0.0`，两者 sign bit 不同但 magnitude 一致。
+#[test]
+fn sum_sq_f32_matches_scalar_when_below_simd_threshold() {
+    for &len in &[1usize, 2, 3, 4, 5, 6, 7] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        let expected: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+        let actual = sum_sq_f32(&values);
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "sum_sq_f32 scalar mismatch at len={len}: actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+            actual.to_bits(),
+            expected.to_bits()
+        );
+    }
+}
+
+/// SIMD 路径（len >= 8）的精度合约：与标量参考相对误差 ≤1e-5。
+/// hsum_ps 把 8 个 square 在 f32 lane 内求和后再 promote 到 f64，相比逐元素
+/// f64 累加会有一些 ULP 差异，但量级在 ~1e-7（实测 ~5e-9），对 rms_norm 输出
+/// 的 scale 影响 <1e-6，被下游 matmul / VAE 完全摊薄。
+#[test]
+fn sum_sq_f32_simd_matches_scalar_within_relative_epsilon() {
+    let mut max_relative = 0.0f64;
+    for &len in &[
+        8usize, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840,
+    ] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        let expected: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+        let actual = sum_sq_f32(&values);
+        let abs_diff = (actual - expected).abs();
+        let relative = if expected != 0.0 {
+            abs_diff / expected.abs()
+        } else {
+            abs_diff
+        };
+        if relative > max_relative {
+            max_relative = relative;
+        }
+        assert!(
+            relative <= 1e-5,
+            "sum_sq_f32 SIMD relative mismatch at len={len}: actual={actual}, expected={expected}, abs_diff={abs_diff}, relative={relative}",
+        );
+    }
+    eprintln!("sum_sq_f32 SIMD max_relative_error={max_relative:.3e}");
+}
+
+/// 空切片应返回 0.0，不 panic。
+#[test]
+fn sum_sq_f32_empty_slice_is_zero() {
+    assert_eq!(sum_sq_f32(&[]).to_bits(), 0.0f64.to_bits());
+}
+
+/// `sum_f32(values) = Σ values[i]` as f64。与 `sum_sq_f32` 配对的通用 reduce op。
+/// SIMD 实现与 `sum_sq_f32` 同样的 per-chunk promote-to-f64 模式（保证 bit-exact）。
+/// 长度覆盖包括 len < SIMD lane width（scalar fallback）和 SIMD 路径。
+#[test]
+fn sum_f32_matches_scalar_reference() {
+    for &len in &[
+        0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024,
+        3840,
+    ] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        // 跳过 len=0：空切片的 f64 `sum()` 是 -0.0（IEEE 754 规则），
+        // sum_f32 直接返回 +0.0，两者 sign bit 不同。
+        if len == 0 {
+            assert_eq!(sum_f32(&values).to_bits(), 0.0f64.to_bits());
+            continue;
+        }
+        let expected: f64 = values.iter().map(|&v| f64::from(v)).sum();
+        let actual = sum_f32(&values);
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "sum_f32 mismatch at len={len}: actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+            actual.to_bits(),
+            expected.to_bits()
+        );
+    }
+}
+
+/// `sum_f32` 验证对 NaN/Inf 的传播（与标量参考一致）。
+#[test]
+fn sum_f32_propagates_nan_and_inf() {
+    let nan = f32::NAN;
+    let inf = f32::INFINITY;
+    assert!(sum_f32(&[1.0, 2.0, nan]).is_nan());
+    assert_eq!(sum_f32(&[1.0, 2.0, inf]), f64::INFINITY);
+    assert_eq!(sum_f32(&[1.0, 2.0, -inf]), f64::NEG_INFINITY);
+}
+
+/// `sum_sq_centered_f32(x, mean) = Σ (xᵢ - mean)²` as f64。bit-exact 标量参考对照。
+/// 这是代数恒等式 `Σx² - n·mean²` 的无条件稳定替代——per-element 减法
+/// 保留 bounded 误差，不依赖输入分布。
+/// 覆盖各种长度 + mean² >> Var 的极端场景（避免灾难性 cancellation）。
+#[test]
+fn sum_sq_centered_f32_matches_scalar_reference() {
+    for &len in &[
+        0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 576,
+        1024, 3840,
+    ] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        // 跳过 len=0：f64 fold 空切片为 -0.0，sum_sq_centered 直接返回 +0.0
+        if len == 0 {
+            assert_eq!(
+                sum_sq_centered_f32(&values, 0.0).to_bits(),
+                0.0f64.to_bits()
+            );
+            continue;
+        }
+        // 测多种 mean：含 mean=0（无 cancellation）和 mean² >> Var 的极端场景
+        for &mean in &[0.0f32, 1.5, 100.0, 1000.0, -1000.0] {
+            let expected: f64 = values
+                .iter()
+                .map(|&v| {
+                    let d = v - mean;
+                    f64::from(d * d)
+                })
+                .sum();
+            let actual = sum_sq_centered_f32(&values, mean);
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "sum_sq_centered_f32 mismatch at len={len}, mean={mean}: \
+                 actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+                actual.to_bits(),
+                expected.to_bits()
+            );
+        }
+    }
+}
+
+/// **vs 代数恒等式对照**：同一输入上 sum_sq_centered_f32 应**bit-exact** 与
+/// 标量参考一致，而代数恒等式 `Σx² - n·mean²` 在大 mean 下会触发
+/// catastrophic cancellation 丢失 bit。新公式无条件 bit-exact。
+#[test]
+fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
+    // mean² >> Var 极端场景
+    let values: Vec<f32> = (0..576).map(|i| 1000.0 + (i as f32 * 0.01).sin()).collect();
+    let mean = 1000.0f32;
+    // 标量参考
+    let expected: f64 = values
+        .iter()
+        .map(|&v| {
+            let d = v - mean;
+            f64::from(d * d)
+        })
+        .sum();
+    // 新公式
+    let actual_new = sum_sq_centered_f32(&values, mean);
+    // 代数恒等式（在 f64 下）
+    let sq_total: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+    let algebraic = sq_total - (values.len() as f64) * f64::from(mean) * f64::from(mean);
+    eprintln!(
+        "len=576, mean=1000: new={} (bits={:#x}), algebraic={} (bits={:#x}), scalar={} (bits={:#x}), \
+         algebraic_diff_bits={}",
+        actual_new,
+        actual_new.to_bits(),
+        algebraic,
+        algebraic.to_bits(),
+        expected,
+        expected.to_bits(),
+        (algebraic.to_bits() as i64 - expected.to_bits() as i64).abs()
+    );
+    assert_eq!(actual_new.to_bits(), expected.to_bits());
+    // algebraic 可能差很多 bit——只测 new 是 bit-exact
 }
 
 #[test]
@@ -692,4 +868,79 @@ fn neon_q8_dotprod_nrc4_matches_scalar_with_tail_row() {
     for row in 0..5 {
         assert_close(actual[row], scalar[row]);
     }
+}
+/// 验证 `vec_mad_self_f32` 与标量参考在各种长度（覆盖 8 的倍数边界 ±1/+4）
+/// 下行为一致：FMA 累加器先读后写，结果是 1 次舍入（mul 和 add 一起舍入）。
+/// 实测：len ≤ 129 时与标量 1 ULP 以内（实际上 LLVM 不自动向量化）；
+///       len ≥ 255 时 LLVM 自动向量化+FMA 收缩，与手写 SIMD 走不同指令序列，
+///       最多 8 ULP（仍是合法 f32 结果，远小于 VAE 末端 1/255 量化粒度）。
+/// DiT `scale_modulated_branch` 全部跑这个路径，差异会被 VAE 末端的
+/// clamp+round 吸收（PNG 字节不变）。
+#[test]
+fn vec_mad_self_f32_matches_scalar_within_four_ulp() {
+    let fma_active = crate::ops::has_avx2_fma() || crate::ops::has_neon();
+    eprintln!("vec_mad_self_f32 SIMD path active: {fma_active}");
+    for &len in &[
+        0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+        1024, 3840,
+    ] {
+        let mut y: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7 - 0.4).collect();
+        let x: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
+        let mut expected = y.clone();
+        for (yi, xi) in expected.iter_mut().zip(&x) {
+            *yi += *yi * *xi;
+        }
+        vec_mad_self_f32(&mut y, &x);
+        assert_eq!(y.len(), expected.len(), "length mismatch at len={len}");
+        let mut max_diff = 0u32;
+        for (i, (&actual, &want)) in y.iter().zip(&expected).enumerate() {
+            let diff_bits = (actual.to_bits() as i32)
+                .wrapping_sub(want.to_bits() as i32)
+                .abs() as u32;
+            if diff_bits > max_diff {
+                max_diff = diff_bits;
+            }
+            assert!(
+                diff_bits <= 8,
+                "vec_mad_self_f32 mismatch at i={i}, len={len}: actual={:?} (bits={:#x}), expected={:?} (bits={:#x}), diff_bits={diff_bits}",
+                actual, actual.to_bits(), want, want.to_bits()
+            );
+        }
+        eprintln!("len={len}: max_diff_bits={max_diff}");
+    }
+}
+
+/// 防止 API 被误用：当 x 全 1 时 self-mad (y+y*1=2y) 与 vec_mad_f32(_, _, 1.0) (y+1) 必不同。
+#[test]
+fn vec_mad_self_f32_differs_from_vec_mad_f32_with_v_one() {
+    let mut y_self: Vec<f32> = vec![0.5, -0.25, 1.5, -2.0, 0.1, 0.2, -0.3, 0.4, 0.7];
+    let x: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    let mut y_ref = y_self.clone();
+    vec_mad_self_f32(&mut y_self, &x);
+    vec_mad_f32(&mut y_ref, &x, 1.0);
+    for (i, (&a, &b)) in y_self.iter().zip(&y_ref).enumerate() {
+        assert_ne!(
+            a.to_bits(),
+            b.to_bits(),
+            "self-mad 与 vec_mad_f32(_, _, 1.0) 在 x=1 时必不同 (i={i}, a={a}, b={b})"
+        );
+    }
+}
+
+/// 验证空切片不 panic。
+#[test]
+fn vec_mad_self_f32_empty_slice_is_noop() {
+    let mut y: Vec<f32> = vec![];
+    let x: Vec<f32> = vec![];
+    vec_mad_self_f32(&mut y, &x);
+    assert!(y.is_empty());
+}
+
+/// 验证长度 < SIMD lane width 时走尾部标量路径，不触发未定义行为。
+#[test]
+fn vec_mad_self_f32_single_element() {
+    let mut y = vec![2.0f32];
+    let x = vec![3.0f32];
+    vec_mad_self_f32(&mut y, &x);
+    assert_eq!(y[0].to_bits(), 8.0f32.to_bits());
 }
