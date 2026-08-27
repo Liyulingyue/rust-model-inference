@@ -20,6 +20,11 @@ const PLAIN_TEXT: EncodeOptions = EncodeOptions {
     parse_special: false,
 };
 
+const WITH_SPECIAL: EncodeOptions = EncodeOptions {
+    add_special: false,
+    parse_special: true,
+};
+
 pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
     let mut tokens = Vec::new();
     if let Some(bos_id) = tokenizer.bos_id() {
@@ -98,6 +103,26 @@ pub fn build_lfm2_chat_prompt(
     // Generation prompt: append "assistant\n".
     out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
     Ok(out)
+}
+
+pub fn build_lfm25_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+) -> Result<Vec<u32>, String> {
+    let mut prompt_text = String::new();
+    for message in messages {
+        prompt_text.push_str("<|im_start|>");
+        prompt_text.push_str(message.role);
+        prompt_text.push('\n');
+        prompt_text.push_str(message.content);
+        prompt_text.push('\n');
+    }
+    prompt_text.push_str("<|im_start|>assistant\n");
+    let mut tokens = tokenizer.encode(&prompt_text, WITH_SPECIAL);
+    if let Some(bos) = tokenizer.bos_id() {
+        tokens.insert(0, bos);
+    }
+    Ok(tokens)
 }
 
 pub fn build_qwen_chat_prompt(

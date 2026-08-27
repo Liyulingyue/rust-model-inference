@@ -42,18 +42,39 @@ pub fn run_inference(
             kv_format,
         )
     } else if arch == "lfm2" {
-        crate::models::lfm2::run_inference(
-            source.as_ref(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            profile,
-            match kv_format {
-                KvFormat::F16 => crate::models::lfm2::KvCacheFmt::F16,
-                _ => crate::models::lfm2::KvCacheFmt::F32,
-            },
-        )
+        let is_lfm25 = source
+            .metadata("general.basename")
+            .and_then(|v| v.to_string_val())
+            .map(|v| v.contains("2.5"))
+            .unwrap_or(false);
+
+        if is_lfm25 {
+            crate::models::lfm25::run_inference(
+                source.as_ref(),
+                prompt,
+                max_tokens,
+                temperature,
+                n_threads_arg,
+                profile,
+                match kv_format {
+                    KvFormat::F16 => crate::models::lfm25::KvCacheFmt::F16,
+                    _ => crate::models::lfm25::KvCacheFmt::F32,
+                },
+            )
+        } else {
+            crate::models::lfm2::run_inference(
+                source.as_ref(),
+                prompt,
+                max_tokens,
+                temperature,
+                n_threads_arg,
+                profile,
+                match kv_format {
+                    KvFormat::F16 => crate::models::lfm2::KvCacheFmt::F16,
+                    _ => crate::models::lfm2::KvCacheFmt::F32,
+                },
+            )
+        }
 } else if arch == "llama" {
         crate::models::llama::run_inference(
             source.as_ref(),
