@@ -654,3 +654,42 @@ fn neon_q8_nrc1_matches_llama_lane_reduction() {
         );
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_q8_dotprod_nrc4_matches_scalar_with_tail_row() {
+    if !std::arch::is_aarch64_feature_detected!("dotprod") {
+        return;
+    }
+    let n_in = 96;
+    let weights = valid_q8_weights(n_in, 5);
+    let input: Vec<f32> = (0..n_in).map(|i| (i as f32 * 0.11).sin()).collect();
+    let mut q8 = vec![0u8; n_in];
+    let mut scales = vec![0.0f32; n_in / 32];
+    quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
+    let mut scalar = vec![0.0f32; 5];
+    let mut actual = vec![0.0f32; 5];
+    crate::ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scalar_range(
+        &weights,
+        &q8,
+        &scales,
+        &mut scalar,
+        n_in,
+        0,
+        5,
+    );
+    unsafe {
+        crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_dotprod_nrc4(
+            &weights,
+            &q8,
+            &scales,
+            &mut actual,
+            n_in,
+            0,
+            5,
+        )
+    };
+    for row in 0..5 {
+        assert_close(actual[row], scalar[row]);
+    }
+}
