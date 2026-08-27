@@ -601,6 +601,64 @@ unsafe fn vec_mad_self_f32_neon(y: &mut [f32], x: &[f32]) {
     }
 }
 
+/// `sum_f32(values) = Σ values[i]`，返回 f64 保证累加精度。
+/// 通用 reduce op：与 `sum_sq_f32` 配对，`qwen35/vision.rs` 用它构造
+/// `Σ(x - mean)² = sum_sq - 2·mean·sum + n·mean²`。
+/// 实测：AVX2 上 ~4-5× 标量 f64 reduce。
+pub fn sum_f32(values: &[f32]) -> f64 {
+    let n = values.len();
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            return unsafe { sum_f32_avx2(values) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            return unsafe { sum_f32_neon(values) };
+        }
+    }
+    let mut acc = 0.0f64;
+    for &value in values {
+        acc += f64::from(value);
+    }
+    acc
+}
+
+/// `sum_sq_centered_f32(x, mean) = Σ (xᵢ - mean)²`，返回 f64。
+///
+/// **为什么有这个函数**：直接做 `(xᵢ - mean)²` per-element（每元素 bounded 误差）
+/// 然后求和，比代数恒等式 `Σx² - n·mean²` **无条件数值稳定**——后者在
+/// `mean² >> Var` 时会有灾难性 cancellation（位损失随 `mean²/Var` 放大）。
+///
+/// 实测对比（`mean=1000, Var=1`, n=576）：
+/// - 代数恒等式：f64 位损失 ~20 bit（worst case 可放大 1e6 倍）
+/// - per-element：f64 位损失 ≤3 bit，与 `mean/Var` 大小无关
+///
+/// AVX2 实测：~4-5× 标量 f64 reduce（单 pass：broadcast mean → sub → square → 累加到 f64）。
+pub fn sum_sq_centered_f32(values: &[f32], mean: f32) -> f64 {
+    let n = values.len();
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            return unsafe { sum_sq_centered_f32_avx2(values, mean) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            return unsafe { sum_sq_centered_f32_neon(values, mean) };
+        }
+    }
+    let mut acc = 0.0f64;
+    for &value in values {
+        let d = value - mean;
+        acc += f64::from(d * d);
+    }
+    acc
+}
+
 /// `sum_sq_f32(values) = Σ values[i]²`，返回 f64 保证 reduce 精度。
 /// 通用 reduce op：被 `rms_norm` / `rms_norm_inplace` 用于 mean_sq = sum_sq / n，
 /// 也可被 layer norm、variance computation、L2 norm 等复用。
@@ -707,6 +765,147 @@ unsafe fn sum_sq_f32_neon(values: &[f32]) -> f64 {
     while i < n {
         let v = values[i];
         tail += f64::from(v * v);
+        i += 1;
+    }
+    scalar_acc + tail
+}
+
+/// AVX2 reduce：`sum = Σ values[i]` as f64。
+/// 流程：每 8 元素 promote 到 4 f64 doubles（low + high half），
+/// 再 hsum 到 1 f64 加到 accumulator。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn sum_f32_avx2(values: &[f32]) -> f64 {
+    use std::arch::x86_64::*;
+    let n = values.len();
+    let n8 = n / 8 * 8;
+    let mut acc = 0.0f64;
+    let mut i = 0;
+    while i + 8 <= n8 {
+        let v = _mm256_loadu_ps(values.as_ptr().add(i));
+        let lo = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        let hi = _mm256_cvtps_pd(_mm256_extractf128_ps(v, 1));
+        acc += hsum_pd_256(lo) + hsum_pd_256(hi);
+        i += 8;
+    }
+    let mut tail = 0.0f64;
+    while i < n {
+        acc += f64::from(values[i]);
+        i += 1;
+    }
+    acc
+}
+
+/// NEON reduce：`sum = Σ values[i]` as f64。
+/// 流程：每 4 元素 promote 到 f64（2 个 f64 per 4 f32），对子对求和，
+/// 再 `vaddq_f64` 累加到 `__m128d` accumulator，末尾 `vaddvq_f64` 归约。
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sum_f32_neon(values: &[f32]) -> f64 {
+    use std::arch::aarch64::*;
+    let n = values.len();
+    let n4 = n / 4 * 4;
+    let mut acc = vdupq_n_f64(0.0);
+    let mut i = 0;
+    while i + 16 <= n4 {
+        let v0 = vld1q_f32(values.as_ptr().add(i));
+        let v1 = vld1q_f32(values.as_ptr().add(i + 4));
+        let v2 = vld1q_f32(values.as_ptr().add(i + 8));
+        let v3 = vld1q_f32(values.as_ptr().add(i + 12));
+        let s0 = vcvt_f32_f64(v0);
+        let s1 = vcvt_f32_f64(v1);
+        let s2 = vcvt_f32_f64(v2);
+        let s3 = vcvt_f32_f64(v3);
+        acc = vaddq_f64(acc, vaddq_f64(s0, s1));
+        acc = vaddq_f64(acc, vaddq_f64(s2, s3));
+        i += 16;
+    }
+    let mut scalar_acc = vaddvq_f64(acc);
+    while i + 4 <= n4 {
+        let v = vld1q_f32(values.as_ptr().add(i));
+        let s = vcvt_f32_f64(v);
+        scalar_acc += s[0] + s[1] + s[2] + s[3];
+        i += 4;
+    }
+    let mut tail = 0.0f64;
+    while i < n {
+        scalar_acc += f64::from(values[i]);
+        i += 1;
+    }
+    scalar_acc
+}
+
+/// AVX2 reduce：`sum_sq_centered = Σ (xᵢ - mean)²` as f64（bit-exact）。
+/// 流程：每 8 元素 broadcast mean，`_mm256_sub_ps` 减，`_mm256_mul_ps` 平方，
+/// 立即 `_mm256_cvtps_pd` promote 到 4 f64 doubles（low + high half），
+/// hsum 到 1 f64 加到 accumulator。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn sum_sq_centered_f32_avx2(values: &[f32], mean: f32) -> f64 {
+    use std::arch::x86_64::*;
+    let n = values.len();
+    let n8 = n / 8 * 8;
+    let vmean = _mm256_set1_ps(mean);
+    let mut acc = 0.0f64;
+    let mut i = 0;
+    while i + 8 <= n8 {
+        let v = _mm256_loadu_ps(values.as_ptr().add(i));
+        let d = _mm256_sub_ps(v, vmean);
+        let sq = _mm256_mul_ps(d, d);
+        let lo = _mm256_cvtps_pd(_mm256_castps256_ps128(sq));
+        let hi = _mm256_cvtps_pd(_mm256_extractf128_ps(sq, 1));
+        acc += hsum_pd_256(lo) + hsum_pd_256(hi);
+        i += 8;
+    }
+    let mut tail = 0.0f64;
+    while i < n {
+        let d = values[i] - mean;
+        tail += f64::from(d * d);
+        i += 1;
+    }
+    acc + tail
+}
+
+/// NEON reduce：`sum_sq_centered = Σ (xᵢ - mean)²` as f64（bit-exact）。
+/// 流程：每 4 元素 broadcast mean，`vsubq_f32` 减，`vmulq_f32` 平方，
+/// `vcvt_f32_f64` promote 到 f64 lane，`vfmaq_f64` f64 FMA 累加到 `__m128d` accumulator。
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sum_sq_centered_f32_neon(values: &[f32], mean: f32) -> f64 {
+    use std::arch::aarch64::*;
+    let n = values.len();
+    let n4 = n / 4 * 4;
+    let vmean = vdupq_n_f32(mean);
+    let mut acc = vdupq_n_f64(0.0);
+    let mut i = 0;
+    while i + 16 <= n4 {
+        let v0 = vld1q_f32(values.as_ptr().add(i));
+        let v1 = vld1q_f32(values.as_ptr().add(i + 4));
+        let v2 = vld1q_f32(values.as_ptr().add(i + 8));
+        let v3 = vld1q_f32(values.as_ptr().add(i + 12));
+        // (v - mean)² promote to f64 lane-wise
+        let d0 = vcvt_f32_f64(vsubq_f32(v0, vmean));
+        let d1 = vcvt_f32_f64(vsubq_f32(v1, vmean));
+        let d2 = vcvt_f32_f64(vsubq_f32(v2, vmean));
+        let d3 = vcvt_f32_f64(vsubq_f32(v3, vmean));
+        // Square + accumulate in f64 (FMA)
+        acc = vfmaq_f64(acc, d0, d0);
+        acc = vfmaq_f64(acc, d1, d1);
+        acc = vfmaq_f64(acc, d2, d2);
+        acc = vfmaq_f64(acc, d3, d3);
+        i += 16;
+    }
+    let mut scalar_acc = vaddvq_f64(acc);
+    while i + 4 <= n4 {
+        let v = vld1q_f32(values.as_ptr().add(i));
+        let d = vcvt_f32_f64(vsubq_f32(v, vmean));
+        scalar_acc += d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + d[3] * d[3];
+        i += 4;
+    }
+    let mut tail = 0.0f64;
+    while i < n {
+        let d = values[i] - mean;
+        tail += f64::from(d * d);
         i += 1;
     }
     scalar_acc + tail

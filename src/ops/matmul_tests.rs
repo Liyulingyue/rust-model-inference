@@ -6,7 +6,8 @@ use crate::ops::{
     attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
     f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, sum_sq_f32, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
+    ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
+    vec_mad_self_f32, vec_scale_f32,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -241,6 +242,112 @@ fn sum_sq_f32_simd_matches_scalar_within_relative_epsilon() {
 #[test]
 fn sum_sq_f32_empty_slice_is_zero() {
     assert_eq!(sum_sq_f32(&[]).to_bits(), 0.0f64.to_bits());
+}
+
+/// `sum_f32(values) = Σ values[i]` as f64。与 `sum_sq_f32` 配对的通用 reduce op。
+/// SIMD 实现与 `sum_sq_f32` 同样的 per-chunk promote-to-f64 模式（保证 bit-exact）。
+/// 长度覆盖包括 len < SIMD lane width（scalar fallback）和 SIMD 路径。
+#[test]
+fn sum_f32_matches_scalar_reference() {
+    for &len in &[0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        // 跳过 len=0：空切片的 f64 `sum()` 是 -0.0（IEEE 754 规则），
+        // sum_f32 直接返回 +0.0，两者 sign bit 不同。
+        if len == 0 {
+            assert_eq!(sum_f32(&values).to_bits(), 0.0f64.to_bits());
+            continue;
+        }
+        let expected: f64 = values.iter().map(|&v| f64::from(v)).sum();
+        let actual = sum_f32(&values);
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "sum_f32 mismatch at len={len}: actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+            actual.to_bits(),
+            expected.to_bits()
+        );
+    }
+}
+
+/// `sum_f32` 验证对 NaN/Inf 的传播（与标量参考一致）。
+#[test]
+fn sum_f32_propagates_nan_and_inf() {
+    let nan = f32::NAN;
+    let inf = f32::INFINITY;
+    assert!(sum_f32(&[1.0, 2.0, nan]).is_nan());
+    assert_eq!(sum_f32(&[1.0, 2.0, inf]), f64::INFINITY);
+    assert_eq!(sum_f32(&[1.0, 2.0, -inf]), f64::NEG_INFINITY);
+}
+
+/// `sum_sq_centered_f32(x, mean) = Σ (xᵢ - mean)²` as f64。bit-exact 标量参考对照。
+/// 这是代数恒等式 `Σx² - n·mean²` 的无条件稳定替代——per-element 减法
+/// 保留 bounded 误差，不依赖输入分布。
+/// 覆盖各种长度 + mean² >> Var 的极端场景（避免灾难性 cancellation）。
+#[test]
+fn sum_sq_centered_f32_matches_scalar_reference() {
+    for &len in &[0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 576, 1024, 3840] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        // 跳过 len=0：f64 fold 空切片为 -0.0，sum_sq_centered 直接返回 +0.0
+        if len == 0 {
+            assert_eq!(sum_sq_centered_f32(&values, 0.0).to_bits(), 0.0f64.to_bits());
+            continue;
+        }
+        // 测多种 mean：含 mean=0（无 cancellation）和 mean² >> Var 的极端场景
+        for &mean in &[0.0f32, 1.5, 100.0, 1000.0, -1000.0] {
+            let expected: f64 = values
+                .iter()
+                .map(|&v| {
+                    let d = v - mean;
+                    f64::from(d * d)
+                })
+                .sum();
+            let actual = sum_sq_centered_f32(&values, mean);
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "sum_sq_centered_f32 mismatch at len={len}, mean={mean}: \
+                 actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+                actual.to_bits(),
+                expected.to_bits()
+            );
+        }
+    }
+}
+
+/// **vs 代数恒等式对照**：同一输入上 sum_sq_centered_f32 应**bit-exact** 与
+/// 标量参考一致，而代数恒等式 `Σx² - n·mean²` 在大 mean 下会触发
+/// catastrophic cancellation 丢失 bit。新公式无条件 bit-exact。
+#[test]
+fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
+    // mean² >> Var 极端场景
+    let values: Vec<f32> = (0..576).map(|i| 1000.0 + (i as f32 * 0.01).sin()).collect();
+    let mean = 1000.0f32;
+    // 标量参考
+    let expected: f64 = values
+        .iter()
+        .map(|&v| {
+            let d = v - mean;
+            f64::from(d * d)
+        })
+        .sum();
+    // 新公式
+    let actual_new = sum_sq_centered_f32(&values, mean);
+    // 代数恒等式（在 f64 下）
+    let sq_total: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+    let algebraic = sq_total - (values.len() as f64) * f64::from(mean) * f64::from(mean);
+    eprintln!(
+        "len=576, mean=1000: new={} (bits={:#x}), algebraic={} (bits={:#x}), scalar={} (bits={:#x}), \
+         algebraic_diff_bits={}",
+        actual_new,
+        actual_new.to_bits(),
+        algebraic,
+        algebraic.to_bits(),
+        expected,
+        expected.to_bits(),
+        (algebraic.to_bits() as i64 - expected.to_bits() as i64).abs()
+    );
+    assert_eq!(actual_new.to_bits(), expected.to_bits());
+    // algebraic 可能差很多 bit——只测 new 是 bit-exact
 }
 
 #[test]

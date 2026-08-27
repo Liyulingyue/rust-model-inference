@@ -14,7 +14,7 @@ use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm, rope_neox, silu_mul_approx_inplace, softmax_inplace,
+    rms_norm, rope_neox, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
     vec_mad_f16_f32, vec_scale_f32,
 };
 
@@ -548,7 +548,7 @@ pub fn run_inference_tokens(
 
             let t0 = Instant::now();
             {
-                let sum_sq: f64 = x[..n_embd].iter().map(|&v| f64::from(v * v)).sum();
+                let sum_sq = sum_sq_f32(&x[..n_embd]);
                 let mean_sq = (sum_sq / n_embd as f64) as f32;
                 let scale = 1.0f32 / (mean_sq + eps).sqrt();
                 dbg_scalar(step, "ffn_norm_scale", layer, scale);

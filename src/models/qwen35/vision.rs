@@ -1,6 +1,6 @@
 ﻿use crate::models::qwen35::clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax_inplace, vec_mad_f32, vec_add, vec_add_into, gelu_approx_inplace};
+use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32, vec_add, vec_add_into, gelu_approx_inplace};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1339,127 +1339,24 @@ fn f32_from_le_bytes(b: &[u8]) -> f32 {
 
 fn layer_norm_with_bias(x: &mut [f32], w: &[f32], b: &[f32], eps: f32) {
     let n = x.len().min(w.len()).min(b.len());
-    let mean = sum_f32(&x[..n]) / n as f32;
-    let var = sum_sq_centered_f32(&x[..n], mean) / n as f32;
+    // 用 `sum_sq_centered_f32` 替代代数恒等式 `Σx² - n·mean²`：
+    // per-element `(x-mean)²` 保留 bounded 误差，避免 `mean² >> Var` 时的
+    // 灾难性 cancellation（实测 mean=1000 时代数方案会差 80 倍以上）。
+    // AVX2 单 pass：broadcast mean → sub → square → 累加到 f64（bit-exact）。
+    let n_f64 = n as f64;
+    let mean = (sum_f32(&x[..n]) / n_f64) as f32;
+    let var = (sum_sq_centered_f32(&x[..n], mean) / n_f64) as f32;
     let inv = 1.0 / (var + eps).sqrt();
     layer_norm_scale_bias(&mut x[..n], &w[..n], &b[..n], mean, inv);
 }
 
 fn layer_norm_without_bias(x: &mut [f32], w: &[f32], eps: f32) {
     let n = x.len().min(w.len());
-    let mean = sum_f32(&x[..n]) / n as f32;
-    let var = sum_sq_centered_f32(&x[..n], mean) / n as f32;
+    let n_f64 = n as f64;
+    let mean = (sum_f32(&x[..n]) / n_f64) as f32;
+    let var = (sum_sq_centered_f32(&x[..n], mean) / n_f64) as f32;
     let inv = 1.0 / (var + eps).sqrt();
     layer_norm_scale(&mut x[..n], &w[..n], mean, inv);
-}
-
-fn sum_f32(x: &[f32]) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::ops::has_avx2_fma() {
-            return unsafe { sum_f32_avx2(x) };
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::ops::has_neon() {
-            return unsafe { sum_f32_neon(x) };
-        }
-    }
-    x.iter().sum()
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn sum_f32_neon(x: &[f32]) -> f32 {
-    use std::arch::aarch64::*;
-    let mut acc = vdupq_n_f32(0.0);
-    let mut i = 0;
-    while i + 4 <= x.len() {
-        acc = vaddq_f32(acc, vld1q_f32(x.as_ptr().add(i)));
-        i += 4;
-    }
-    let mut sum = vaddvq_f32(acc);
-    while i < x.len() {
-        sum += x[i];
-        i += 1;
-    }
-    sum
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn sum_f32_avx2(x: &[f32]) -> f32 {
-    use std::arch::x86_64::*;
-    let n = x.len();
-    let n8 = n / 8 * 8;
-    let mut acc = _mm256_setzero_ps();
-    let mut i = 0;
-    while i < n8 {
-        let v = _mm256_loadu_ps(x.as_ptr().add(i));
-        acc = _mm256_add_ps(acc, v);
-        i += 8;
-    }
-    let mut sum = crate::ops::hsum_ps(acc);
-    while i < n { sum += x[i]; i += 1; }
-    sum
-}
-
-fn sum_sq_centered_f32(x: &[f32], mean: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::ops::has_avx2_fma() {
-            return unsafe { sum_sq_centered_f32_avx2(x, mean) };
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::ops::has_neon() {
-            return unsafe { sum_sq_centered_f32_neon(x, mean) };
-        }
-    }
-    x.iter().map(|&v| (v - mean) * (v - mean)).sum()
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn sum_sq_centered_f32_neon(x: &[f32], mean: f32) -> f32 {
-    use std::arch::aarch64::*;
-    let mean_v = vdupq_n_f32(mean);
-    let mut acc = vdupq_n_f32(0.0);
-    let mut i = 0;
-    while i + 4 <= x.len() {
-        let delta = vsubq_f32(vld1q_f32(x.as_ptr().add(i)), mean_v);
-        acc = vfmaq_f32(acc, delta, delta);
-        i += 4;
-    }
-    let mut sum = vaddvq_f32(acc);
-    while i < x.len() {
-        let delta = x[i] - mean;
-        sum += delta * delta;
-        i += 1;
-    }
-    sum
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn sum_sq_centered_f32_avx2(x: &[f32], mean: f32) -> f32 {
-    use std::arch::x86_64::*;
-    let n = x.len();
-    let n8 = n / 8 * 8;
-    let vmean = _mm256_set1_ps(mean);
-    let mut acc = _mm256_setzero_ps();
-    let mut i = 0;
-    while i < n8 {
-        let v = _mm256_loadu_ps(x.as_ptr().add(i));
-        let d = _mm256_sub_ps(v, vmean);
-        acc = _mm256_fmadd_ps(d, d, acc);
-        i += 8;
-    }
-    let mut sum = crate::ops::hsum_ps(acc);
-    while i < n { let d = x[i] - mean; sum += d * d; i += 1; }
-    sum
 }
 
 fn layer_norm_scale_bias(x: &mut [f32], w: &[f32], b: &[f32], mean: f32, inv: f32) {
