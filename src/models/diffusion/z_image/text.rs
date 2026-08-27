@@ -4,10 +4,12 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 #[cfg(target_arch = "aarch64")]
-use crate::ops::{attention_value_f32, dot_f32_neon, silu_mul_inplace};
+use crate::ops::{dot_f32_neon, silu_mul_inplace};
 #[cfg(not(target_arch = "aarch64"))]
 use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
-use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
+use crate::ops::{
+    attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox,
+};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -352,7 +354,8 @@ fn attention(
                     + dimension;
                 *value = cache.v[value_start];
             }
-            output_head[dimension] = qwen_attention_value(value_column, scores);
+            output_head[dimension] =
+                attention_value_f32(value_column, scores, value_column.len(), scores.len());
         }
         #[cfg(not(target_arch = "aarch64"))]
         for (value_position, &weight) in scores[..=position].iter().enumerate() {
@@ -366,19 +369,6 @@ fn attention(
             }
         }
     }
-}
-
-#[inline]
-fn qwen_attention_value(values: &[f32], weights: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        return attention_value_f32(values, weights, values.len(), values.len());
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    values
-        .iter()
-        .zip(weights)
-        .fold(0.0, |sum, (value, weight)| sum + value * weight)
 }
 
 #[inline]
@@ -458,10 +448,11 @@ pub(crate) fn z_image_prompt(prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "aarch64")]
-    use super::{qwen_attention_value, qwen_swiglu};
+    use super::qwen_swiglu;
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
+    use crate::ops::attention_value_f32;
     use std::sync::Arc;
 
     struct EmptySource;
@@ -520,54 +511,6 @@ mod tests {
         assert_eq!(
             up.map(f32::to_bits),
             [0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95],
-        );
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn qwen_attention_value_uses_the_pinned_ggml_neon_reduction() {
-        let values = [
-            0xbc43_7f80,
-            0x3dcf_0c16,
-            0x3ab2_6fac,
-            0xbc9e_b19e,
-            0xbc68_338b,
-            0x3e83_1f48,
-            0xbd8d_9b7b,
-            0xbea6_6c9f,
-            0xbe7e_b316,
-            0x3dcd_159e,
-            0xbd1d_9b7f,
-            0xbe02_e230,
-            0x3d0c_95ad,
-            0xbe0a_58fc,
-            0xbe55_ef52,
-            0x3d88_c14e,
-        ]
-        .map(f32::from_bits);
-        let weights = [
-            0x3dd4_b07f,
-            0x3ca8_09ef,
-            0x3eb9_f242,
-            0x3e8f_d4ec,
-            0x3e6d_1827,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-        ]
-        .map(f32::from_bits);
-
-        assert_eq!(
-            qwen_attention_value(&values, &weights).to_bits(),
-            0xbbf2_4ce4
         );
     }
 
@@ -663,5 +606,75 @@ mod tests {
         assert!(!hidden.is_empty());
         assert_eq!(hidden.len() % 2_560, 0);
         assert!(hidden.iter().all(|value| value.is_finite()));
+    }
+
+    /// `attention_value_f32` 与标量参考的 bit-level 一致性。
+    /// Z-Image 文本编码器 attention value 聚合直接调这个函数（之前还有
+    /// `qwen_attention_value` 包装，已删——wrapper 变成1 行透传，没意义）。
+    /// 实测：len ≤ 129 时与标量 1 ULP 以内（LLVM 不自动向量化）；
+    ///       len ≥ 255 时 LLVM 自动向量化 reference，与手写 SIMD 走不同
+    ///       指令序列，最多 ~3 ULP。HEAD_WIDTH=128 是真实调用长度。
+    /// 关键正确性保证见 `attention_value_f32_matches_pinned_ggml_reduction`：
+    /// 两 arch 都产出 0xbbf2_4ce4（与 ggml NEON 参考完全一致）。
+    #[test]
+    fn attention_value_f32_matches_scalar_reference() {
+        let mut max_diff_overall = 0u32;
+        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 384] {
+            let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+            let weights: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.029).cos() * 1.3).collect();
+            let expected: f32 = values
+                .iter()
+                .zip(&weights)
+                .fold(0.0f32, |acc, (v, w)| acc + v * w);
+            let actual = attention_value_f32(&values, &weights, values.len(), values.len());
+            let diff_bits = (actual.to_bits() as i32).wrapping_sub(expected.to_bits() as i32).abs() as u32;
+            if diff_bits > max_diff_overall {
+                max_diff_overall = diff_bits;
+            }
+            assert!(
+                diff_bits <= 8,
+                "attention_value_f32 mismatch at len={len}: \
+                 actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x}), diff_bits={diff_bits}",
+                actual.to_bits(),
+                expected.to_bits()
+            );
+        }
+        eprintln!("max_diff_overall={max_diff_overall} ULP across all lengths");
+    }
+
+    /// 复用 ggml NEON pinned 测试的输入，验证两 arch 都产出 `0xbbf2_4ce4`。
+    /// `dot_f32`（x86 AVX2）与 `dot_f32_neon` 的 reduce 顺序必须等价，否则
+    /// 整个 DiT 文本编码会逐 token 偏离 ggml 参考。
+    #[test]
+    fn attention_value_f32_matches_pinned_ggml_reduction() {
+        let values = [
+            0xbc43_7f80u32, 0x3dcf_0c16, 0x3ab2_6fac, 0xbc9e_b19e,
+            0xbc68_338b, 0x3e83_1f48, 0xbd8d_9b7b, 0xbea6_6c9f,
+            0xbe7e_b316, 0x3dcd_159e, 0xbd1d_9b7f, 0xbe02_e230,
+            0x3d0c_95ad, 0xbe0a_58fc, 0xbe55_ef52, 0x3d88_c14e,
+        ]
+        .map(f32::from_bits);
+        let weights = [
+            0x3dd4_b07fu32, 0x3ca8_09ef, 0x3eb9_f242, 0x3e8f_d4ec,
+            0x3e6d_1827, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+        ]
+        .map(f32::from_bits);
+        // 两 arch 都跑：aarch64 → dot_f32_neon，x86 → dot_f32 (AVX2)。
+        // 结果应与 ggml NEON 参考一致。
+        assert_eq!(
+            attention_value_f32(&values, &weights, values.len(), values.len()).to_bits(),
+            0xbbf2_4ce4
+        );
+    }
+
+    /// 空切片不 panic。
+    #[test]
+    fn attention_value_f32_empty_input_is_zero() {
+        let values: Vec<f32> = vec![];
+        let weights: Vec<f32> = vec![];
+        let result = attention_value_f32(&values, &weights, values.len(), values.len());
+        assert_eq!(result, 0.0);
     }
 }

@@ -10,7 +10,7 @@ use crate::ops::dot_f32;
 use crate::ops::dot_f32_neon;
 use crate::ops::{
     attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu,
-    silu_inplace, silu_mul_inplace, softmax_inplace, vec_mad_self_f32,
+    silu_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
 };
 
 use super::{
@@ -429,9 +429,8 @@ fn add_modulated_residual(
             }
         }
         None => {
-            for (token, residual) in tokens.iter_mut().zip(residual) {
-                *token += *residual;
-            }
+            // tokens[i] += residual[i]  (无门控残差加，无 tanh，AVX2/NEON SIMD)
+            vec_add_into(residual, tokens);
         }
     }
     Ok(())
@@ -2144,6 +2143,48 @@ mod tests {
         assert!(split_adaln_modulation(&[0.0; 7], 2).is_err());
         assert!(scale_modulated_branch(&mut [1.0, 2.0], Some(&[1.0])).is_err());
         assert!(add_modulated_residual(&mut [1.0, 2.0], &[1.0], Some(&[0.0, 0.0])).is_err());
+    }
+
+    /// `add_modulated_residual` 无 gates 路径走 `vec_add_into`（AVX2/NEON SIMD），
+    /// 行为：tokens[i] += residual[i]。覆盖 8-lane SIMD 边界 + DiT 真实宽度 (HIDDEN=3840)。
+    #[test]
+    fn add_modulated_residual_no_gates_adds_residual() {
+        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+            let mut tokens: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7).collect();
+            let residual: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
+            let mut expected = tokens.clone();
+            for (t, r) in expected.iter_mut().zip(&residual) {
+                *t += *r;
+            }
+            add_modulated_residual(&mut tokens, &residual, None).unwrap();
+            assert_eq!(tokens.len(), expected.len(), "length mismatch at len={len}");
+            for (i, (&actual, &want)) in tokens.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    want.to_bits(),
+                    "add_modulated_residual None-branch mismatch at i={i}, len={len}: \
+                     actual={actual:?} (bits={:#x}), expected={want:?} (bits={:#x})",
+                    actual.to_bits(),
+                    want.to_bits()
+                );
+            }
+        }
+    }
+
+    /// 无 gates 路径的长度校验：tokens.len() != residual.len() 应报错。
+    #[test]
+    fn add_modulated_residual_no_gates_rejects_mismatched_length() {
+        assert!(add_modulated_residual(&mut [1.0, 2.0], &[1.0], None).is_err());
+        assert!(add_modulated_residual(&mut [1.0], &[1.0, 2.0], None).is_err());
+    }
+
+    /// 空切片路径不 panic。
+    #[test]
+    fn add_modulated_residual_no_gates_empty_is_noop() {
+        let mut tokens: Vec<f32> = vec![];
+        let residual: Vec<f32> = vec![];
+        add_modulated_residual(&mut tokens, &residual, None).unwrap();
+        assert!(tokens.is_empty());
     }
 
     #[test]
