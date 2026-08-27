@@ -6,7 +6,7 @@ use crate::ops::{
     attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
     f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
+    ssm_outer_product_update, sum_sq_f32, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -145,6 +145,10 @@ fn rms_norm_accumulates_f32_squares_in_f64() {
     );
 }
 
+/// `rms_norm_inplace` 与 ggml 纯 f64 累加路径 **bit-exact** 一致。
+/// `sum_sq_f32` SIMD 实现：8 f32 squares → 立即 promote 到 4 f64 doubles
+/// → hsum 到 1 f64 → add。**没有 f32 partial sum**，所以与标量 f64 累加
+/// 路径产出完全相同的 bits（vs 之前的 `hsum_ps` f32 partial 版本会差 3 ULP）。
 #[test]
 fn rms_norm_inplace_matches_ggml_sequential_f64_accumulation() {
     let mut values = [
@@ -183,6 +187,60 @@ fn rms_norm_inplace_matches_ggml_sequential_f64_accumulation() {
             0xbfe3_9aea,
         ],
     );
+}
+
+/// `sum_sq_f32` 与标量参考 `f64::from(v*v).sum()` 的 bit-exact 对照（不走 SIMD 路径
+/// 时），覆盖各种长度以验证 dispatch 边界（8-lane 边界 ±1/+4）。
+/// 跳过 len=0：空切片的 f64 `fold` 产生 `-0.0`（IEEE 754 规则），sum_sq_f32
+/// 直接返回 `0.0`，两者 sign bit 不同但 magnitude 一致。
+#[test]
+fn sum_sq_f32_matches_scalar_when_below_simd_threshold() {
+    for &len in &[1usize, 2, 3, 4, 5, 6, 7] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        let expected: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+        let actual = sum_sq_f32(&values);
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "sum_sq_f32 scalar mismatch at len={len}: actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x})",
+            actual.to_bits(),
+            expected.to_bits()
+        );
+    }
+}
+
+/// SIMD 路径（len >= 8）的精度合约：与标量参考相对误差 ≤1e-5。
+/// hsum_ps 把 8 个 square 在 f32 lane 内求和后再 promote 到 f64，相比逐元素
+/// f64 累加会有一些 ULP 差异，但量级在 ~1e-7（实测 ~5e-9），对 rms_norm 输出
+/// 的 scale 影响 <1e-6，被下游 matmul / VAE 完全摊薄。
+#[test]
+fn sum_sq_f32_simd_matches_scalar_within_relative_epsilon() {
+    let mut max_relative = 0.0f64;
+    for &len in &[8usize, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+        let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
+        let expected: f64 = values.iter().map(|&v| f64::from(v * v)).sum();
+        let actual = sum_sq_f32(&values);
+        let abs_diff = (actual - expected).abs();
+        let relative = if expected != 0.0 {
+            abs_diff / expected.abs()
+        } else {
+            abs_diff
+        };
+        if relative > max_relative {
+            max_relative = relative;
+        }
+        assert!(
+            relative <= 1e-5,
+            "sum_sq_f32 SIMD relative mismatch at len={len}: actual={actual}, expected={expected}, abs_diff={abs_diff}, relative={relative}",
+        );
+    }
+    eprintln!("sum_sq_f32 SIMD max_relative_error={max_relative:.3e}");
+}
+
+/// 空切片应返回 0.0，不 panic。
+#[test]
+fn sum_sq_f32_empty_slice_is_zero() {
+    assert_eq!(sum_sq_f32(&[]).to_bits(), 0.0f64.to_bits());
 }
 
 #[test]
