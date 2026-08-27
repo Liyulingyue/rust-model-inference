@@ -93,6 +93,8 @@ impl Qwen3TextEncoder {
     }
 
     pub(crate) fn encode_layer_35(&self, prompt: &str) -> Result<Vec<f32>, String> {
+        let total_start = std::time::Instant::now();
+        let t_tok = std::time::Instant::now();
         let ids = self.tokenizer.encode(
             &z_image_prompt(prompt),
             EncodeOptions {
@@ -105,7 +107,17 @@ impl Qwen3TextEncoder {
         }
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::token_ids("z_image.prompt_ids", &ids));
+        let t_tok = t_tok.elapsed();
+        let t_fwd = std::time::Instant::now();
         let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
+        let t_fwd = t_fwd.elapsed();
+        eprintln!(
+            "[text-profile] n_tokens={}  forward={:.1}ms  tokenize={:.1}ms  total={:.1}ms",
+            ids.len(),
+            t_fwd.as_secs_f64() * 1000.0,
+            t_tok.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.text_layer_35",

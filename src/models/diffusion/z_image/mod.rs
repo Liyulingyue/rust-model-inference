@@ -51,13 +51,27 @@ impl ZImagePipeline {
         options: &ZImageOptions,
     ) -> Result<ZImageRgb, String> {
         validate_generate_request(prompt, options)?;
+        let total_start = std::time::Instant::now();
+        let t = std::time::Instant::now();
         let context = self.text.encode_layer_35(prompt)?;
         let context_tokens = context_token_count(&context)?;
+        let t_text = t.elapsed();
+        let t = std::time::Instant::now();
         let latent = self.dit.denoise(&context, context_tokens, options)?;
+        let t_denoise = t.elapsed();
         drop(context);
+        let t = std::time::Instant::now();
         let latent_side = validate_latent_shape(&latent, options.resolution)?;
         let rgb = self.vae.decode_rgb(&latent, latent_side)?;
+        let t_vae = t.elapsed();
         validate_decoded_rgb(&rgb, options.resolution)?;
+        eprintln!(
+            "[stage-profile] text_encode={:.1}ms  denoise={:.1}ms  vae_decode={:.1}ms  total={:.1}ms",
+            t_text.as_secs_f64() * 1000.0,
+            t_denoise.as_secs_f64() * 1000.0,
+            t_vae.as_secs_f64() * 1000.0,
+            total_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(rgb)
     }
 }

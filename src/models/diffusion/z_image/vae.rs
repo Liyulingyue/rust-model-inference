@@ -269,8 +269,11 @@ impl FluxVae {
             &current,
         ));
         let mut scratch = VaeScratch::new();
+        let t_vae_total = std::time::Instant::now();
+        let t_vae_map = std::time::Instant::now().elapsed();
         let mid_len = checked_feature_len(512, latent_spatial, "VAE middle feature")?;
         resize_f32(&mut scratch.first, "VAE convolution input output", mid_len)?;
+        let t_conv_in = std::time::Instant::now();
         run_conv(
             self.source.as_ref(),
             &self.conv_in,
@@ -287,7 +290,9 @@ impl FluxVae {
             &[latent_side, latent_side, 512],
             &current,
         ));
+        let t_conv_in = t_conv_in.elapsed();
 
+        let t_mid = std::time::Instant::now();
         scratch.prepare_features(mid_len)?;
         self.run_residual_block(&self.mid_block_1, &mut current, latent_side, &mut scratch)?;
         #[cfg(feature = "parity-trace")]
@@ -314,7 +319,9 @@ impl FluxVae {
             &[latent_side, latent_side, 512],
             &current,
         ));
+        let t_mid = t_mid.elapsed();
 
+        let t_up = std::time::Instant::now();
         let mut side = latent_side;
         for stage in &self.stages {
             if stage.upsample.is_some() != (stage.index != 0) {
@@ -360,10 +367,12 @@ impl FluxVae {
                 &current,
             ));
         }
+        let t_up = t_up.elapsed();
         if side != output_side {
             return Err("Invalid Z-Image VAE spatial factor".into());
         }
 
+        let t_out = std::time::Instant::now();
         let final_len = checked_feature_len(128, output_spatial, "VAE final feature")?;
         scratch.prepare_features(final_len)?;
         group_norm_32_into(
@@ -403,6 +412,15 @@ impl FluxVae {
         if bytes.len() != expected_bytes {
             return Err("Invalid Z-Image VAE RGB byte length".into());
         }
+        let t_out = t_out.elapsed();
+        eprintln!(
+            "[vae-profile] conv_in={:.1}ms mid={:.1}ms up={:.1}ms out={:.1}ms total={:.1}ms",
+            t_conv_in.as_secs_f64() * 1000.0,
+            t_mid.as_secs_f64() * 1000.0,
+            t_up.as_secs_f64() * 1000.0,
+            t_out.as_secs_f64() * 1000.0,
+            t_vae_total.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(ZImageRgb {
             width,
             height: width,
