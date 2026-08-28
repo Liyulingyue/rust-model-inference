@@ -1,31 +1,85 @@
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::__m256i;
+#[inline]
+unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let lo = _mm256_castps256_ps128(v);
+    let hi = _mm256_extractf128_ps(v, 1);
+    let s = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehl_ps(s, s);
+    let s2 = _mm_add_ps(s, shuf);
+    let shuf2 = _mm_shuffle_ps::<0b11_10_11_10>(s2, s2);
+    let s3 = _mm_add_ps(s2, shuf2);
+    _mm_cvtss_f32(s3)
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn q2k_q3k_scale_shuffle(index: usize) -> __m256i {
+pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(
+    q4xs_data: &[u8],
+    q8k: &[super::BlockQ8K],
+) -> f32 {
     use std::arch::x86_64::*;
 
-    let tables: [[u8; 32]; 4] = [
-        [
-            0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
-            2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
-        ],
-        [
-            4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5,
-            6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7,
-        ],
-        [
-            8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9,
-            10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11,
-            10, 11, 10, 11,
-        ],
-        [
-            12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13,
-            14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15,
-        ],
-    ];
-    _mm256_loadu_si256(tables[index].as_ptr() as *const __m256i)
+    let nb = q8k.len();
+    let m0f = _mm256_set1_epi8(0x0f);
+    let lut128 = _mm_loadu_si128(super::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let mut acc_sum = 0.0f32;
+
+    for i in 0..nb {
+        let boff = i * super::BLOCK_IQ4_XS_SIZE;
+        if boff + super::BLOCK_IQ4_XS_SIZE > q4xs_data.len() {
+            break;
+        }
+        let d_raw = u16::from_le_bytes([q4xs_data[boff], q4xs_data[boff + 1]]);
+        let d = super::f16_to_f32(d_raw) * q8k[i].d;
+        let scales_h = u16::from_le_bytes([q4xs_data[boff + 2], q4xs_data[boff + 3]]);
+        let scales_l = &q4xs_data[boff + 4..boff + 8];
+        let qs = &q4xs_data[boff + 8..boff + 8 + 128];
+        let q8 = &q8k[i].qs;
+        let mut h = scales_h;
+        let mut qs_off = 0usize;
+        let mut q8_off = 0usize;
+        for pair in 0..4usize {
+            let scale_byte = scales_l[pair] as u16;
+            let ls1 = ((scale_byte & 0x0f) | ((h << 4) & 0x30)) as i32;
+            let ls2 = (((scale_byte >> 4) as u16) | ((h << 2) & 0x30)) as i32;
+            h >>= 4;
+            let qs_base = pair * 32;
+            let q8_base = pair * 64;
+            let qb = _mm_loadu_si128(qs.as_ptr().add(qs_base) as *const __m128i);
+            let q8_a = _mm_loadu_si128(q8.as_ptr().add(q8_base) as *const __m128i);
+            let q8_b = _mm_loadu_si128(q8.as_ptr().add(q8_base + 16) as *const __m128i);
+            let q8_c = _mm_loadu_si128(q8.as_ptr().add(q8_base + 32) as *const __m128i);
+            let q8_d = _mm_loadu_si128(q8.as_ptr().add(q8_base + 48) as *const __m128i);
+            let m0f128 = _mm256_castsi256_si128(m0f);
+            let lo_nib = _mm_and_si128(qb, m0f128);
+            let hi_nib = _mm_and_si128(_mm_srli_epi16(qb, 4), m0f128);
+            let lo_lut = _mm_shuffle_epi8(lut128, lo_nib);
+            let hi_lut = _mm_shuffle_epi8(lut128, hi_nib);
+            let lo_i16 = _mm256_cvtepi8_epi16(lo_lut);
+            let hi_i16 = _mm256_cvtepi8_epi16(hi_lut);
+            let q8_a_i16 = _mm256_cvtepi8_epi16(q8_a);
+            let q8_b_i16 = _mm256_cvtepi8_epi16(q8_b);
+            let q8_c_i16 = _mm256_cvtepi8_epi16(q8_c);
+            let q8_d_i16 = _mm256_cvtepi8_epi16(q8_d);
+            let p_lo1 = _mm256_madd_epi16(lo_i16, q8_a_i16);
+            let p_hi1 = _mm256_madd_epi16(hi_i16, q8_b_i16);
+            let p_lo2 = _mm256_madd_epi16(lo_i16, q8_c_i16);
+            let p_hi2 = _mm256_madd_epi16(hi_i16, q8_d_i16);
+            let p1 = _mm256_add_epi32(p_lo1, p_hi1);
+            let p2 = _mm256_add_epi32(p_lo2, p_hi2);
+            let sumi1_ps = _mm256_cvtepi32_ps(p1);
+            let sumi2_ps = _mm256_cvtepi32_ps(p2);
+            let prod1 = _mm256_mul_ps(sumi1_ps, _mm256_set1_ps(d * (ls1 as f32 - 32.0f32)));
+            let prod2 = _mm256_mul_ps(sumi2_ps, _mm256_set1_ps(d * (ls2 as f32 - 32.0f32)));
+            let sum1 = hsum256_ps(prod1);
+            let sum2 = hsum256_ps(prod2);
+            acc_sum += sum1;
+            acc_sum += sum2;
+        }
+    }
+
+    acc_sum
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -39,13 +93,7 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
     let nb = q8k.len();
     let m3 = _mm256_set1_epi8(3);
     let m4 = _mm_set1_epi8(0x0f);
-    let mut acc = _mm256_setzero_ps();
-    let scale_shuffles = [
-        q2k_q3k_scale_shuffle(0),
-        q2k_q3k_scale_shuffle(1),
-        q2k_q3k_scale_shuffle(2),
-        q2k_q3k_scale_shuffle(3),
-    ];
+    let mut acc_sum = 0.0f32;
 
     for i in 0..nb {
         let boff = i * super::BLOCK_Q2K_SIZE;
@@ -54,16 +102,17 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
         }
         let d_raw = u16::from_le_bytes([q2k_data[boff + 80], q2k_data[boff + 81]]);
         let dmin_raw = u16::from_le_bytes([q2k_data[boff + 82], q2k_data[boff + 83]]);
-        let d = super::f16_to_f32(d_raw) * q8k[i].d;
-        let dmin = -super::f16_to_f32(dmin_raw) * q8k[i].d;
+        let d_total = super::f16_to_f32(d_raw) * q8k[i].d;
+        let dmin_total = -super::f16_to_f32(dmin_raw) * q8k[i].d;
 
         let mins_and_scales = _mm_loadu_si128(q2k_data.as_ptr().add(boff) as *const __m128i);
         let scales8 = _mm_and_si128(mins_and_scales, m4);
         let mins8 = _mm_and_si128(_mm_srli_epi16(mins_and_scales, 4), m4);
         let mins = _mm256_cvtepi8_epi16(mins8);
         let bsums = _mm256_loadu_si256(q8k[i].bsums.as_ptr() as *const __m256i);
-        let min_sums = _mm256_cvtepi32_ps(_mm256_madd_epi16(mins, bsums));
-        acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_set1_ps(dmin), min_sums));
+        let min_prod = _mm256_madd_epi16(mins, bsums);
+        let min_total = hsum256_ps(_mm256_cvtepi32_ps(min_prod));
+        acc_sum += dmin_total * min_total;
 
         let all_scales = _mm256_cvtepi8_epi16(scales8);
         let low_scales = _mm256_extracti128_si256(all_scales, 0);
@@ -73,7 +122,17 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
             _mm256_set_m128i(high_scales, high_scales),
         ];
 
-        let mut sumi = _mm256_setzero_si256();
+        let scale_shuffles = [
+            _mm256_setr_epi8(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+                              2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3),
+            _mm256_setr_epi8(4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5,
+                              6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7),
+            _mm256_setr_epi8(8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9,
+                              10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11),
+            _mm256_setr_epi8(12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13,
+                              14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15),
+        ];
+
         let mut q2_ptr = q2k_data.as_ptr().add(boff + 16);
         let mut q8_ptr = q8k[i].qs.as_ptr();
         for outer in 0..2usize {
@@ -88,35 +147,35 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
             let q8_3 = _mm256_loadu_si256(q8_ptr as *const __m256i);
             q8_ptr = q8_ptr.add(32);
 
-            let q2_0 = _mm256_and_si256(q2bits, m3);
-            let q2_1 = _mm256_and_si256(_mm256_srli_epi16(q2bits, 2), m3);
-            let q2_2 = _mm256_and_si256(_mm256_srli_epi16(q2bits, 4), m3);
-            let q2_3 = _mm256_and_si256(_mm256_srli_epi16(q2bits, 6), m3);
-
-            let p0 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[0]),
-                _mm256_maddubs_epi16(q2_0, q8_0),
-            );
-            let p1 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[1]),
-                _mm256_maddubs_epi16(q2_1, q8_1),
-            );
-            let p2 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[2]),
-                _mm256_maddubs_epi16(q2_2, q8_2),
-            );
-            let p3 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[3]),
-                _mm256_maddubs_epi16(q2_3, q8_3),
-            );
-            sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(_mm256_add_epi32(p0, p1), _mm256_add_epi32(p2, p3)));
+            // Mirror the scalar accumulation order: for each sub-block (0..8),
+            // compute dot of q2 * q8, multiply by scale, add to accumulator in
+            // the exact sequence the scalar version uses (aux32[n] * scale_n).
+            for j in 0..4usize {
+                let q2_vec = match j {
+                    0 => _mm256_and_si256(q2bits, m3),
+                    1 => _mm256_and_si256(_mm256_srli_epi16(q2bits, 2), m3),
+                    2 => _mm256_and_si256(_mm256_srli_epi16(q2bits, 4), m3),
+                    _ => _mm256_and_si256(_mm256_srli_epi16(q2bits, 6), m3),
+                };
+                let q8_vec = match j {
+                    0 => q8_0,
+                    1 => q8_1,
+                    2 => q8_2,
+                    _ => q8_3,
+                };
+                let p = _mm256_maddubs_epi16(q2_vec, q8_vec);
+                let scaled = _mm256_madd_epi16(
+                    _mm256_shuffle_epi8(scales[outer], scale_shuffles[j]),
+                    p,
+                );
+                let scaled_ps = _mm256_cvtepi32_ps(scaled);
+                let prod = _mm256_mul_ps(scaled_ps, _mm256_set1_ps(d_total));
+                acc_sum += hsum256_ps(prod);
+            }
         }
-        acc = _mm256_add_ps(
-            acc,
-            _mm256_mul_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi)),
-        );
     }
-    crate::ops::hsum_ps(acc)
+
+    acc_sum
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -129,15 +188,7 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
 
     let nb = q8k.len();
     let m3 = _mm256_set1_epi8(3);
-    let mone = _mm256_set1_epi8(1);
-    let m32 = _mm_set1_epi8(32);
-    let mut acc = _mm256_setzero_ps();
-    let scale_shuffles = [
-        q2k_q3k_scale_shuffle(0),
-        q2k_q3k_scale_shuffle(1),
-        q2k_q3k_scale_shuffle(2),
-        q2k_q3k_scale_shuffle(3),
-    ];
+    let mut acc_sum = 0.0f32;
 
     for i in 0..nb {
         let boff = i * super::BLOCK_Q3K_SIZE;
@@ -146,6 +197,7 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
         }
         let d_raw = u16::from_le_bytes([q3k_data[boff + 108], q3k_data[boff + 109]]);
         let d = super::f16_to_f32(d_raw) * q8k[i].d;
+
         let aux0 = u32::from_le_bytes([
             q3k_data[boff + 96],
             q3k_data[boff + 97],
@@ -173,46 +225,33 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
         let scale3 = ((aux1 >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
         let scales_unsigned: [u8; 16] = bytemuck::cast([scale0, scale1, scale2, scale3]);
         let scales128 = _mm_loadu_si128(scales_unsigned.as_ptr() as *const __m128i);
-        let all_scales = _mm256_cvtepi8_epi16(_mm_sub_epi8(scales128, m32));
+        let m32 = _mm_set1_epi8(32);
+        let scales_signed128 = _mm_sub_epi8(scales128, m32);
+        let all_scales = _mm256_cvtepi8_epi16(scales_signed128);
         let low_scales = _mm256_extracti128_si256(all_scales, 0);
         let high_scales = _mm256_extracti128_si256(all_scales, 1);
         let scales = [
             _mm256_set_m128i(low_scales, low_scales),
             _mm256_set_m128i(high_scales, high_scales),
         ];
+
+        let scale_shuffles = [
+            _mm256_setr_epi8(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+                              2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3),
+            _mm256_setr_epi8(4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5,
+                              6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7),
+            _mm256_setr_epi8(8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9,
+                              10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11),
+            _mm256_setr_epi8(12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13, 12, 13,
+                              14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15, 14, 15),
+        ];
+
         let hbits = _mm256_loadu_si256(q3k_data.as_ptr().add(boff) as *const __m256i);
-        let mut sumi = _mm256_setzero_si256();
         let mut q3_ptr = q3k_data.as_ptr().add(boff + 32);
         let mut q8_ptr = q8k[i].qs.as_ptr();
-
         for outer in 0..2usize {
             let q3bits = _mm256_loadu_si256(q3_ptr as *const __m256i);
             q3_ptr = q3_ptr.add(32);
-            let (mask0, mask1, mask2, mask3) = if outer == 0 {
-                (
-                    _mm256_set1_epi8(1),
-                    _mm256_set1_epi8(2),
-                    _mm256_set1_epi8(4),
-                    _mm256_set1_epi8(8),
-                )
-            } else {
-                (
-                    _mm256_set1_epi8(16),
-                    _mm256_set1_epi8(32),
-                    _mm256_set1_epi8(64),
-                    _mm256_set1_epi8(-128),
-                )
-            };
-            let high0 = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask0), _mm256_set1_epi8(4));
-            let high1 = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask1), _mm256_set1_epi8(4));
-            let high2 = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask2), _mm256_set1_epi8(4));
-            let high3 = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask3), _mm256_set1_epi8(4));
-
-            let q3l_0 = _mm256_and_si256(q3bits, m3);
-            let q3l_1 = _mm256_and_si256(_mm256_srli_epi16(q3bits, 2), m3);
-            let q3l_2 = _mm256_and_si256(_mm256_srli_epi16(q3bits, 4), m3);
-            let q3l_3 = _mm256_and_si256(_mm256_srli_epi16(q3bits, 6), m3);
-
             let q8_0 = _mm256_loadu_si256(q8_ptr as *const __m256i);
             q8_ptr = q8_ptr.add(32);
             let q8_1 = _mm256_loadu_si256(q8_ptr as *const __m256i);
@@ -221,41 +260,36 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
             q8_ptr = q8_ptr.add(32);
             let q8_3 = _mm256_loadu_si256(q8_ptr as *const __m256i);
             q8_ptr = q8_ptr.add(32);
+            let q8_v = [q8_0, q8_1, q8_2, q8_3];
+            let base_shift: u32 = if outer == 0 { 0 } else { 4 };
 
-            let p0 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[0]),
-                _mm256_sub_epi16(
-                    _mm256_maddubs_epi16(q3l_0, q8_0),
-                    _mm256_maddubs_epi16(high0, q8_0),
-                ),
-            );
-            let p1 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[1]),
-                _mm256_sub_epi16(
-                    _mm256_maddubs_epi16(q3l_1, q8_1),
-                    _mm256_maddubs_epi16(high1, q8_1),
-                ),
-            );
-            let p2 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[2]),
-                _mm256_sub_epi16(
-                    _mm256_maddubs_epi16(q3l_2, q8_2),
-                    _mm256_maddubs_epi16(high2, q8_2),
-                ),
-            );
-            let p3 = _mm256_madd_epi16(
-                _mm256_shuffle_epi8(scales[outer], scale_shuffles[3]),
-                _mm256_sub_epi16(
-                    _mm256_maddubs_epi16(q3l_3, q8_3),
-                    _mm256_maddubs_epi16(high3, q8_3),
-                ),
-            );
-            sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(_mm256_add_epi32(p0, p1), _mm256_add_epi32(p2, p3)));
+            for j in 0..4usize {
+                let total_shift = base_shift + (j as u32) * 2;
+                let q2_vec = match total_shift {
+                    0 => _mm256_and_si256(q3bits, m3),
+                    2 => _mm256_and_si256(_mm256_srli_epi16::<2>(q3bits), m3),
+                    4 => _mm256_and_si256(_mm256_srli_epi16::<4>(q3bits), m3),
+                    6 => _mm256_and_si256(_mm256_srli_epi16::<6>(q3bits), m3),
+                    8 => _mm256_and_si256(_mm256_srli_epi16::<8>(q3bits), m3),
+                    _ => _mm256_and_si256(_mm256_srli_epi16::<10>(q3bits), m3),
+                };
+                let mask_byte: i8 = 1 << (total_shift as i8);
+                let mask_v = _mm256_set1_epi8(mask_byte);
+                let high_v = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask_v), _mm256_set1_epi8(4));
+                let q8_vec = q8_v[j];
+                let p = _mm256_maddubs_epi16(q2_vec, q8_vec);
+                let high_p = _mm256_maddubs_epi16(high_v, q8_vec);
+                let net = _mm256_sub_epi16(p, high_p);
+                let scaled = _mm256_madd_epi16(
+                    _mm256_shuffle_epi8(scales[outer], scale_shuffles[j]),
+                    net,
+                );
+                let scaled_ps = _mm256_cvtepi32_ps(scaled);
+                let prod = _mm256_mul_ps(scaled_ps, _mm256_set1_ps(d));
+                acc_sum += hsum256_ps(prod);
+            }
         }
-        acc = _mm256_add_ps(
-            acc,
-            _mm256_mul_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi)),
-        );
     }
-    crate::ops::hsum_ps(acc)
+
+    acc_sum
 }

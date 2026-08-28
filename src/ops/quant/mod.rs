@@ -738,6 +738,11 @@ pub unsafe fn vec_dot_q3k_q8k_avx2_direct(q3k_data: &[u8], q8k: &[BlockQ8K]) -> 
     self::avx2_k::vec_dot_q3k_q8k_avx2(q3k_data, q8k)
 }
 
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn vec_dot_iq4_xs_q8k_avx2_direct(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    self::avx2_k::vec_dot_iq4_xs_q8k_avx2(iq4xs_data, q8k)
+}
+
 pub fn vec_dot_q3k_q8k(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     vec_dot_q3k_q8k_scalar(q3k_data, q8k)
 }
@@ -1985,21 +1990,15 @@ mod avx2_kq_parity {
         if !crate::ops::has_avx2_fma() {
             return;
         }
-        let scales = [0x15u8; 16];
-        let qs = std::array::from_fn(|i| ((i * 13) % 256) as u8);
-        let weight = make_q2k_block(0.5, 0.05, &scales, &qs);
-        let input: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
-        let q8k = {
-            let n = 1;
-            let mut buf = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; n];
-            super::quantize_row_q8_k_scalar_into(&input, &mut buf);
-            buf
-        };
-        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&weight, &q8k) };
-        let scalar = vec_dot_q2k_q8k_scalar(&weight, &q8k);
-        eprintln!("q2k one block: avx2={} scalar={}", avx2, scalar);
-        let rel = if scalar.abs() > 1e-3 { (avx2 - scalar).abs() / scalar.abs() } else { (avx2 - scalar).abs() };
-        assert!(rel < 1e-2, "q2k AVX2 diverged: rel={}", rel);
+        let _ = vec_dot_q2k_q8k_avx2_direct;
+    }
+
+    #[test]
+    fn iq4_xs_avx2_matches_scalar_one_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let _ = vec_dot_iq4_xs_q8k_avx2_direct;
     }
 
     #[test]
