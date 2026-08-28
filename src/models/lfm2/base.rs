@@ -20,7 +20,7 @@
 //! write the trailing `d_conv - 1` columns back to the state.
 
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Kernel;
@@ -67,15 +67,7 @@ pub fn run_inference(
     let embd_info = source
         .tensor_info("token_embd.weight")
         .expect("no token_embd.weight");
-    if !matches!(
-        embd_info.ggml_type,
-        GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K
-    ) {
-        panic!(
-            "token_embd.weight has unsupported type {:?}; only F16, BF16, Q8_0, Q4_0, and Q6K are supported",
-            embd_info.ggml_type
-        );
-    }
+    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
     let embd_type = embd_info.ggml_type;
