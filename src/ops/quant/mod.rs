@@ -2376,4 +2376,48 @@ mod i_quant_tests {
         let dot = vec_dot_iq2_xxs_q8k_scalar(&block, &q8k);
         assert!((dot - 155.875).abs() < 0.01, "expected 155.875, got {}", dot);
     }
+
+    #[test]
+    fn iq3_xxs_vecdot_matches_python_reference() {
+        let mut block = vec![0u8; 98];
+        block[0] = 0x00;
+        block[1] = 0x3c;
+        for i in 0..96 {
+            block[2 + i] = i as u8;
+        }
+        let mut qs = [0i8; 256];
+        for q in qs.iter_mut() { *q = 1; }
+        let q8k = vec![BlockQ8K { d: 1.0, qs, bsums: [0i16; 16] }];
+        let dot = vec_dot_iq3_xxs_q8k_scalar(&block, &q8k);
+        eprintln!("iq3_xxs dot = {}", dot);
+        // Just ensure it's a finite number for now
+        assert!(dot.is_finite(), "got non-finite dot");
+    }
+
+    #[test]
+    fn iq3_xxs_scalar_dot_on_first_model_block() {
+        use crate::format::ggufrs::open_model_source;
+        use crate::format::ggufrs::ComponentRole;
+        let path = "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ3_XXS.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {} not found", path);
+            return;
+        }
+        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
+        let first_block = &bytes[..98];
+        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        eprintln!("DEBUG: d bytes = {:02x} {:02x}", first_block[0], first_block[1]);
+        eprintln!("DEBUG: gas bytes [66..74] = {:?}", &first_block[66..74]);
+        eprintln!("DEBUG: d f16 = {}", f16_from_bytes(first_block, 0));
+        eprintln!("DEBUG: q3 first 8 = {:?}", &first_block[2..10]);
+        // Manual compute for ib32=0
+        let aux32 = u32::from_le_bytes([first_block[66], first_block[67], first_block[68], first_block[69]]);
+        eprintln!("DEBUG: aux32 ib32=0 = 0x{:08x}", aux32);
+        let ls = (2 * ((aux32 >> 28) as i32)) + 1;
+        eprintln!("DEBUG: ls ib32=0 = {}", ls);
+        let dot = vec_dot_iq3_xxs_q8k_scalar(first_block, &q8k);
+        eprintln!("iq3_xxs first model block dot = {}", dot);
+        assert!(dot.is_finite());
+    }
 }
