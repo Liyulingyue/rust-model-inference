@@ -593,6 +593,83 @@ pub fn vec_dot_q3k_q8k(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     vec_dot_q3k_q8k_scalar(q3k_data, q8k)
 }
 
+/// Non-linear lookup table for IQ4_NL: maps 4-bit nibble to quantized value.
+// Mirrors llama.cpp's `kvalues_iq4nl`.
+pub const IQ4_NL_LUT: [i8; 16] = [
+    -127, -104, -80, -65, -55, -47, -41, -36,
+    -32, -28, -25, -22, -19, -17, -14, -10,
+];
+
+pub fn dequantize_row_iq4_nl(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / 32;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * 18;
+        if boff + 18 > block_bytes.len() { break; }
+
+        let d = f16_from_bytes(block_bytes, boff);
+        let qs = &block_bytes[boff + 2..boff + 18];
+        let out_base = block_idx * 32;
+
+        for j in 0..16 {
+            let q_byte = qs[j];
+            let q_lo = IQ4_NL_LUT[(q_byte & 0xF) as usize];
+            let q_hi = IQ4_NL_LUT[((q_byte >> 4) & 0xF) as usize];
+            output[out_base + j] = d * q_lo as f32;
+            output[out_base + j + 16] = d * q_hi as f32;
+        }
+    }
+}
+
+pub fn vec_dot_iq4_nl_q8k_scalar(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    let nb = q8k.len();
+    let blocks_per_super = 8;
+    let mut sumf = 0.0f32;
+
+    for i in 0..nb {
+        let super_off = i * blocks_per_super * 18;
+        if super_off + blocks_per_super * 18 > iq4nl_data.len() { break; }
+
+        let mut sum_block = 0.0f32;
+        for sb in 0..blocks_per_super {
+            let boff = super_off + sb * 18;
+            let d = f16_from_bytes(iq4nl_data, boff);
+            let qs = &iq4nl_data[boff + 2..boff + 18];
+
+            let q8_block = &q8k[i].qs[sb * 32..(sb + 1) * 32];
+            let mut dot = 0i32;
+            for j in 0..16 {
+                let q_byte = qs[j];
+                let q_lo = IQ4_NL_LUT[(q_byte & 0xF) as usize] as i32;
+                let q_hi = IQ4_NL_LUT[((q_byte >> 4) & 0xF) as usize] as i32;
+                dot += q_lo * q8_block[j] as i32;
+                dot += q_hi * q8_block[j + 16] as i32;
+            }
+            sum_block += d * q8k[i].d * dot as f32;
+        }
+        sumf += sum_block;
+    }
+
+    sumf
+}
+
+pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    vec_dot_iq4_nl_q8k_scalar(iq4nl_data, q8k)
+}
+
+/// IQ4_XS super-block (256 elements, 136 bytes):
+/// Layout from llama.cpp ggml-quants.c — TODO: implement correctly.
+pub fn dequantize_row_iq4_xs(_block_bytes: &[u8], _output: &mut [f32]) {
+    panic!("dequantize_row_iq4_xs not implemented; IQ4_XS inference unsupported");
+}
+
+pub fn vec_dot_iq4_xs_q8k_scalar(_iq4xs_data: &[u8], _q8k: &[BlockQ8K]) -> f32 {
+    panic!("vec_dot_iq4_xs_q8k_scalar not implemented; IQ4_XS inference unsupported");
+}
+
+pub fn vec_dot_iq4_xs_q8k(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    vec_dot_iq4_xs_q8k_scalar(iq4xs_data, q8k)
+}
+
 pub fn dequantize_row_q4_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {

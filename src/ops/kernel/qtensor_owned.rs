@@ -130,6 +130,9 @@ impl QTensorOwned {
             QuantizedTensor::Q2_K { .. } | QuantizedTensor::Q3_K { .. } => {
                 panic!("Q2_K / Q3_K not yet supported in QTensorOwned (only used in Qwen3.0.6B matmul, no fuse needed)")
             }
+            QuantizedTensor::IQ4NL { .. } | QuantizedTensor::IQ4XS { .. } => {
+                panic!("IQ4_NL / IQ4_XS not yet supported in QTensorOwned")
+            }
             // Q4_0 / Q4_1 are not modeled in QTensorOwned yet (Qwen3.5 doesn't
             // use them and qwen3 uses QuantizedTensor directly).
             QuantizedTensor::Q4_0 { .. } | QuantizedTensor::Q4_1 { .. } => {

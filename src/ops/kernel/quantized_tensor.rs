@@ -44,6 +44,8 @@ pub enum QuantizedTensor<'a> {
     Q6_K { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q2_K { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q3_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ4NL { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ4XS { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_1 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_K { data: &'a [u8], n_cols: usize, n_rows: usize },
@@ -99,7 +101,7 @@ impl<'a> QuantizedTensor<'a> {
     /// `Box<dyn Kernel>` view of self. This is intentionally a separate
     /// method rather than inline because `into_kernel` consumes `self`.
     pub(crate) fn clone_to_kernel(&self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{bf16, f16, f32, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
@@ -113,6 +115,12 @@ impl<'a> QuantizedTensor<'a> {
             }
             Self::Q3_K { data, n_cols, n_rows } => {
                 Box::new(q3_k::Q3_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ4NL { data, n_cols, n_rows } => {
+                Box::new(iq4_nl::IQ4NLKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ4XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ4XSKernel::new(data, *n_cols, *n_rows))
             }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, *n_cols, *n_rows))
@@ -149,6 +157,8 @@ impl<'a> QuantizedTensor<'a> {
             GGMLType::Q6K => Self::Q6_K { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q2K => Self::Q2_K { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q3K => Self::Q3_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ4_NL => Self::IQ4NL { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ4_XS => Self::IQ4XS { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_1 => Self::Q4_1 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4K => Self::Q4_K { data, n_cols: n_in, n_rows: n_out },
@@ -166,6 +176,8 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q6_K { .. } => GGMLType::Q6K,
             Self::Q2_K { .. } => GGMLType::Q2K,
             Self::Q3_K { .. } => GGMLType::Q3K,
+            Self::IQ4NL { .. } => GGMLType::IQ4_NL,
+            Self::IQ4XS { .. } => GGMLType::IQ4_XS,
             Self::Q4_0 { .. } => GGMLType::Q4_0,
             Self::Q4_1 { .. } => GGMLType::Q4_1,
             Self::Q4_K { .. } => GGMLType::Q4K,
@@ -182,6 +194,8 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q6_K { n_cols, .. } => *n_cols,
             Self::Q2_K { n_cols, .. } => *n_cols,
             Self::Q3_K { n_cols, .. } => *n_cols,
+            Self::IQ4NL { n_cols, .. } => *n_cols,
+            Self::IQ4XS { n_cols, .. } => *n_cols,
             Self::Q4_0 { n_cols, .. } => *n_cols,
             Self::Q4_1 { n_cols, .. } => *n_cols,
             Self::Q4_K { n_cols, .. } => *n_cols,
@@ -191,7 +205,7 @@ impl<'a> QuantizedTensor<'a> {
 
     /// Build a `Box<dyn Kernel>` from this weight tensor.
     pub fn into_kernel(self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{bf16, f16, f32, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
@@ -205,6 +219,12 @@ impl<'a> QuantizedTensor<'a> {
             }
             Self::Q3_K { data, n_cols, n_rows } => {
                 Box::new(q3_k::Q3_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ4NL { data, n_cols, n_rows } => {
+                Box::new(iq4_nl::IQ4NLKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ4XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ4XSKernel::new(data, n_cols, n_rows))
             }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, n_cols, n_rows))
@@ -230,6 +250,8 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q6_K { n_rows, .. }
             | Self::Q2_K { n_rows, .. }
             | Self::Q3_K { n_rows, .. }
+            | Self::IQ4NL { n_rows, .. }
+            | Self::IQ4XS { n_rows, .. }
             | Self::Q4_0 { n_rows, .. }
             | Self::Q4_1 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }

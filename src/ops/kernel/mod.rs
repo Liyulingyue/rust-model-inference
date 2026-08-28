@@ -22,6 +22,8 @@
 pub mod bf16;
 pub mod f16;
 pub mod f32;
+pub mod iq4_nl;
+pub mod iq4_xs;
 pub mod q2_k;
 pub mod q3_k;
 pub mod q4_0;

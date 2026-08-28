@@ -8,6 +8,7 @@ pub const SUPPORTED_EMBEDDING_TYPES: &[GGMLType] = &[
     GGMLType::Q8_0,
     GGMLType::Q4_0,
     GGMLType::Q6K,
+    GGMLType::IQ4_NL,
 ];
 
 pub fn is_supported_embedding(ggml_type: GGMLType) -> bool {
@@ -30,6 +31,7 @@ pub fn embedding_lookup(weight: &[u8], token_id: u32, n_embd: usize, embd_type: 
         GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
         GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
         GGMLType::BF16 => embedding_lookup_bf16(weight, token_id, n_embd, out),
+        GGMLType::IQ4_NL => embedding_lookup_iq4_nl(weight, token_id, n_embd, out),
         _ => panic!(
             "unsupported embedding type {embd_type:?}; supported: {:?}",
             SUPPORTED_EMBEDDING_TYPES
@@ -89,5 +91,21 @@ pub fn embedding_lookup_bf16(weight: &[u8], token_id: u32, n_embd: usize, out: &
         let offset = row_start + index * 2;
         let bits = u16::from_le_bytes([weight[offset], weight[offset + 1]]);
         out[index] = crate::ops::bf16_to_f32(bits);
+    }
+}
+
+pub fn embedding_lookup_iq4_nl(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let blocks_per_row = n_embd / 32;
+    let row_off = token_id as usize * blocks_per_row * 18;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * 18;
+        let d = super::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        for j in 0..16usize {
+            let q = weight[off + 2 + j];
+            let ql = crate::ops::quant::IQ4_NL_LUT[(q & 0xF) as usize] as f32;
+            let qh = crate::ops::quant::IQ4_NL_LUT[((q >> 4) & 0xF) as usize] as f32;
+            out[b * 32 + j] = d * ql;
+            out[b * 32 + j + 16] = d * qh;
+        }
     }
 }
