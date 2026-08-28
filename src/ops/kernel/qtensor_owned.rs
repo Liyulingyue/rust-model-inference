@@ -135,8 +135,11 @@ impl QTensorOwned {
             }
             // Q4_0 / Q4_1 are not modeled in QTensorOwned yet (Qwen3.5 doesn't
             // use them and qwen3 uses QuantizedTensor directly).
-            QuantizedTensor::Q4_0 { .. } | QuantizedTensor::Q4_1 { .. } => {
-                panic!("Q4_0 / Q4_1 not yet supported in QTensorOwned")
+            QuantizedTensor::Q4_0 { .. }
+            | QuantizedTensor::Q4_1 { .. }
+            | QuantizedTensor::IQ2XS { .. }
+            | QuantizedTensor::IQ3S { .. } => {
+                panic!("Q4_0 / Q4_1 / IQ2_XS / IQ3_S not yet supported in QTensorOwned")
             }
         }
     }
