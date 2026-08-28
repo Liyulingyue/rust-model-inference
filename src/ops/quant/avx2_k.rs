@@ -37,8 +37,6 @@ pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(
         let qs = &q4xs_data[boff + 8..boff + 8 + 128];
         let q8 = &q8k[i].qs;
         let mut h = scales_h;
-        let mut qs_off = 0usize;
-        let mut q8_off = 0usize;
         for pair in 0..4usize {
             let scale_byte = scales_l[pair] as u16;
             let ls1 = ((scale_byte & 0x0f) | ((h << 4) & 0x30)) as i32;
@@ -173,7 +171,7 @@ unsafe fn hsum_i32(v: std::arch::x86_64::__m256i) -> i32 {
     let lo = _mm256_castsi256_si128(v);
     let hi = _mm256_extracti128_si256(v, 1);
     let s = _mm_add_epi32(lo, hi);
-    let shuf = _mm_shuffle_epi32::<0b01_00_01_00>(s);
+    let shuf = _mm_shuffle_epi32::<0b10_11_00_01>(s);
     let s_ab = _mm_add_epi32(s, shuf);
     let shuf2 = _mm_shuffle_epi32::<0b11_10_11_10>(s_ab);
     let s_sum = _mm_add_epi32(s_ab, shuf2);

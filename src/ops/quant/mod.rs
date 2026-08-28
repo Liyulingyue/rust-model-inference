@@ -1075,6 +1075,10 @@ pub fn vec_dot_iq4_xs_q8k_scalar(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq4_xs_q8k(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq4_xs_q8k_avx2(iq4xs_data, q8k) };
+    }
     vec_dot_iq4_xs_q8k_scalar(iq4xs_data, q8k)
 }
 
@@ -1998,7 +2002,35 @@ mod avx2_kq_parity {
         if !crate::ops::has_avx2_fma() {
             return;
         }
-        let _ = vec_dot_iq4_xs_q8k_avx2_direct;
+        let scales_h: u16 = 0xaaaa;
+        let scales_l = [0x55u8, 0x33, 0x77, 0x11];
+        let qs: [u8; 128] = std::array::from_fn(|i| ((i * 19 + 5) % 256) as u8);
+        let weight = {
+            let mut v = vec![0u8; 136];
+            let d_bytes = crate::ops::f32_to_f16(0.5).to_le_bytes();
+            v[0] = d_bytes[0];
+            v[1] = d_bytes[1];
+            let sh_bytes = scales_h.to_le_bytes();
+            v[2] = sh_bytes[0];
+            v[3] = sh_bytes[1];
+            v[4] = scales_l[0];
+            v[5] = scales_l[1];
+            v[6] = scales_l[2];
+            v[7] = scales_l[3];
+            for i in 0..128 {
+                v[8 + i] = qs[i];
+            }
+            v
+        };
+        let input: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
+        let q8k = {
+            let mut buf = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; 1];
+            super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+            buf
+        };
+        let avx2 = unsafe { vec_dot_iq4_xs_q8k_avx2_direct(&weight, &q8k) };
+        let scalar = vec_dot_iq4_xs_q8k_scalar(&weight, &q8k);
+        assert_eq!(avx2.to_bits(), scalar.to_bits(), "iq4_xs AVX2 not bit-exact");
     }
 
     #[test]
