@@ -96,4 +96,13 @@ impl<'a> Kernel for Q5_KKernel<'a> {
             );
         }
     }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        let row_bytes = n_embd / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q5K_SIZE;
+        let offset = token_id as usize * row_bytes;
+        crate::ops::quant::dequantize_row_q5_k(
+            &self.weight[offset..offset + row_bytes],
+            out,
+        );
+    }
 }

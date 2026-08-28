@@ -137,9 +137,12 @@ impl QTensorOwned {
             // use them and qwen3 uses QuantizedTensor directly).
             QuantizedTensor::Q4_0 { .. }
             | QuantizedTensor::Q4_1 { .. }
+            | QuantizedTensor::IQ2XXS { .. }
+            | QuantizedTensor::IQ2S { .. }
             | QuantizedTensor::IQ2XS { .. }
+            | QuantizedTensor::IQ3XXS { .. }
             | QuantizedTensor::IQ3S { .. } => {
-                panic!("Q4_0 / Q4_1 / IQ2_XS / IQ3_S not yet supported in QTensorOwned")
+                panic!("Q4_0 / Q4_1 / I-quant not yet supported in QTensorOwned")
             }
         }
     }

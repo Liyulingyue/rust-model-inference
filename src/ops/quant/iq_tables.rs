@@ -60,3 +60,18 @@ pub fn iq2_xs_mask() -> &'static [u8] {
     static MASK: OnceLock<Vec<u8>> = OnceLock::new();
     MASK.get_or_init(|| parse_table("uint8_t", "kmask_iq2xs", 8))
 }
+
+pub fn iq2_xxs_grid() -> &'static [u64] {
+    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
+    GRID.get_or_init(|| parse_table("uint64_t", "iq2xxs_grid", 256))
+}
+
+pub fn iq2_s_grid() -> &'static [u64] {
+    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
+    GRID.get_or_init(|| parse_table("uint64_t", "iq2s_grid", 1024))
+}
+
+pub fn iq3_xxs_grid() -> &'static [u32] {
+    static GRID: OnceLock<Vec<u32>> = OnceLock::new();
+    GRID.get_or_init(|| parse_table("uint32_t", "iq3xxs_grid", 256))
+}
