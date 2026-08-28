@@ -96,10 +96,10 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
     use std::arch::x86_64::*;
 
     let nb = q8k.len();
-    let m3 = _mm_set1_epi8(3);
     let m4 = _mm_set1_epi8(0x0f);
     let ones_i16 = _mm256_set1_epi16(1);
     let mut acc_sum = 0.0f32;
+    let mut qs_buf = [0i16; 16];
 
     for i in 0..nb {
         let boff = i * super::BLOCK_Q2K_SIZE;
@@ -126,36 +126,28 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
 
         for outer in 0..2usize {
             for j in 0..4usize {
-                let qs_off = outer * 32 + j * 8;
-                let q8_off = outer * 128 + j * 32;
-                let q2_raw = _mm_loadl_epi64(q2_ptr.add(qs_off) as *const __m128i);
-                let q2_shifted = match j {
-                    0 => q2_raw,
-                    1 => _mm_srli_epi16::<2>(q2_raw),
-                    2 => _mm_srli_epi16::<4>(q2_raw),
-                    _ => _mm_srli_epi16::<6>(q2_raw),
-                };
-                let q2_u16 = _mm_and_si128(q2_shifted, m3);
-                let q2_vec = _mm256_zextsi128_si256(q2_u16);
-
-                let q8_a = _mm_loadu_si128(q8_base_ptr.add(q8_off) as *const __m128i);
-                let q8_b = _mm_loadu_si128(q8_base_ptr.add(q8_off + 16) as *const __m128i);
-                let q8_a_vec = _mm256_zextsi128_si256(q8_a);
-                let q8_b_vec = _mm256_zextsi128_si256(q8_b);
-
-                let p_a = _mm256_maddubs_epi16(q2_vec, q8_a_vec);
-                let p_b = _mm256_maddubs_epi16(q2_vec, q8_b_vec);
-
-                let dot_a_vec = _mm256_madd_epi16(ones_i16, p_a);
-                let dot_b_vec = _mm256_madd_epi16(ones_i16, p_b);
-                let dot_a = hsum_i32(dot_a_vec);
-                let dot_b = hsum_i32(dot_b_vec);
-
+                let shift = (j as i32) * 2;
+                let qs_base = outer * 32 + j * 16;
+                let q8_base = outer * 128 + j * 32;
                 let scale_byte = *scales_ptr.add(outer * 8 + j * 2);
                 let scale_lo = (scale_byte & 0x0f) as i32;
                 let scale_hi = ((scale_byte >> 4) & 0x0f) as i32;
-                let contrib_i32 = dot_a * scale_lo + dot_b * scale_hi;
-                acc_sum += (contrib_i32 as f32) * d_total;
+                for sub in 0..2usize {
+                    let qs_off = qs_base + sub * 16;
+                    let q8_off = q8_base + sub * 16;
+                    let qs_bytes = std::slice::from_raw_parts(q2_ptr.add(qs_off), 16);
+                    for l in 0..16 {
+                        qs_buf[l] = ((qs_bytes[l] as i16) >> shift) & 3;
+                    }
+                    let qs_v = _mm256_loadu_si256(qs_buf.as_ptr() as *const __m256i);
+                    let q8_128 = _mm_loadu_si128(q8_base_ptr.add(q8_off) as *const __m128i);
+                    let q8_v = _mm256_cvtepi8_epi16(q8_128);
+                    let prods = _mm256_mullo_epi16(qs_v, q8_v);
+                    let dot_v = _mm256_madd_epi16(ones_i16, prods);
+                    let dot = hsum_i32(dot_v);
+                    let scale = if sub == 0 { scale_lo } else { scale_hi };
+                    acc_sum += (dot as f32 * scale as f32) * d_total;
+                }
             }
         }
     }
