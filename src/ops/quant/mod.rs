@@ -2361,4 +2361,19 @@ mod i_quant_tests {
         let dot3 = vec_dot_iq3_s_q8k_scalar(&block3, &q8k);
         assert!(dot3.abs() < 1e-6);
     }
+
+    #[test]
+    fn iq2_xxs_vecdot_matches_python_reference() {
+        let mut block = vec![0u8; 66];
+        block[0] = 0x00;
+        block[1] = 0x3c;
+        for i in 0..32 {
+            block[2 + i] = i as u8;
+        }
+        let mut qs = [0i8; 256];
+        for q in qs.iter_mut() { *q = 1; }
+        let q8k = vec![BlockQ8K { d: 1.0, qs, bsums: [0i16; 16] }];
+        let dot = vec_dot_iq2_xxs_q8k_scalar(&block, &q8k);
+        assert!((dot - 155.875).abs() < 0.01, "expected 155.875, got {}", dot);
+    }
 }

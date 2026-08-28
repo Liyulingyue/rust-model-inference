@@ -341,14 +341,18 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 | Q3_K_S | 308 | 6.0 | ✅ | Q3K × Q8K scalar (fixed; Lyon noise) |
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K scalar (fixed) |
 | Q2_K_L | 283 | 5.5 | ✅ | Q2K × Q8K scalar (fixed) |
-| ❌ IQ4_NL.gguf | 364 | — | panic | IQ2_XS kernel 未实现 |
-| ❌ IQ4_XS.gguf | 351 | — | panic | IQ3_XS kernel 未实现 |
+| IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2 (bit-exact, b8d6b7c) |
+| IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar |
+| IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 输出 token 错 | IQ2_XXS × Q8K scalar |
 
 **关键加速对比**：
 - Q4_1: scalar 11.6 → AVX2 54.5 t/s （**4.7×**）
 - BF16: scalar 7.4 → AVX2 27.5 t/s （**3.7×**）
 - Q5_K: was 0 output → 40 t/s （修复）
 - Q2_K/Q3_K: was 乱码 → 5-9 t/s （修复）
+- IQ4_XS: was panic → AVX2 4.8 t/s（修复 + 打开 dispatch）
+- IQ3_XXS (UD): was panic → scalar 4.3 t/s（修复 grid byte unpacking）
+- IQ2_XXS (UD): was panic → scalar 4.4 t/s（**输出 token 错位，疑似 grid unpack / ls 标量有 bug，待查**）
 
 **Q2_K/Q3_K 下一步是写 SIMD 路径**（仿 q4k AVX2）。当前 5-9 t/s 提不上 30-40 t/s 是 scalar matmul 的吞吐瓶颈——这一档 kernel 复用 Q8K activation 而非 Q8_0，所以可以直接仿照 `vec_dot_q4k_q8k_avx2` 写一个 `vec_dot_q2k_q8k_avx2`/`vec_dot_q3k_q8k_avx2`。预期 5-10× 加速。
 
