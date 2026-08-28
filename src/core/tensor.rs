@@ -249,6 +249,59 @@ pub trait TensorSource: Send + Sync {
     }
 }
 
+/// Load a 1-D tensor as `Vec<f32>`, accepting both F32 and BF16 storage.
+///
+/// This is the canonical helper for "norm weights" which ship as either F32
+/// or BF16 across GGUF model variants. Models should call this instead of
+/// reimplementing the byte-to-f32 conversion. See
+/// `docs/MODEL_ORGANIZATION.md` §6 for the rationale.
+pub fn load_f32_tensor<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    dims: &[u64],
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F32 or BF16",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    match info.ggml_type {
+        GGMLType::F32 => Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        GGMLType::BF16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect()),
+        other => Err(format!("{name}: unsupported tensor type {other:?}")),
+    }
+}
+
+/// Bit-level BF16 → F32 conversion (zero-extend the 16 high bits).
+#[inline]
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

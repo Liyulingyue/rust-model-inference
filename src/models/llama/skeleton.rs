@@ -4,7 +4,7 @@
 //! llama.cpp convention: `blk.{i}.attn_norm`, `blk.{i}.attn_q`, etc.
 //! LLaMA does NOT use Q/K per-head RMSNorm.
 
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
@@ -21,19 +21,8 @@ pub struct LlamaLayerWeights<'a> {
 }
 
 pub fn get_f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected_len: usize) -> Vec<f32> {
-    let info = source.tensor_info(name).unwrap_or_else(|| panic!("tensor {name} not found"));
-    let bytes = source.tensor_slice(name).unwrap_or_else(|| panic!("slice {name} not found"));
-    let mut output = vec![0.0; expected_len];
-    if info.ggml_type == GGMLType::F32 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-            *value = f32::from_le_bytes(chunk.try_into().unwrap());
-        }
-    } else if info.ggml_type == GGMLType::BF16 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
-            *value = crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
-        }
-    }
-    output
+    crate::core::tensor::load_f32_tensor(source, name, &[expected_len as u64])
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 #[allow(clippy::too_many_arguments)]

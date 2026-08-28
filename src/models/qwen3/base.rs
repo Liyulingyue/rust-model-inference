@@ -1859,55 +1859,7 @@ pub fn static_tensor(
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
-pub fn load_f32_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-) -> Result<Vec<f32>, String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims
-        || !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16)
-    {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F32 or BF16",
-            info.dims, info.ggml_type, dims
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    let element_bytes = match info.ggml_type {
-        GGMLType::F32 => 4,
-        GGMLType::BF16 => 2,
-        _ => unreachable!(),
-    };
-    let len = bytes.len() / element_bytes;
-    check_allocation(name, len, std::mem::size_of::<f32>())?;
-    Ok(match info.ggml_type {
-        GGMLType::F32 => bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
-            .collect(),
-        GGMLType::BF16 => bytes
-            .chunks_exact(2)
-            .map(|chunk| crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
-            .collect(),
-        _ => unreachable!(),
-    })
-}
+pub use crate::core::tensor::load_f32_tensor;
 
 pub fn checked_tensor<'a>(
     source: &'a dyn TensorSource,

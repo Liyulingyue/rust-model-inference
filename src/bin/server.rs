@@ -909,31 +909,8 @@ fn get_f32_tensor_from_source(
     name: &str,
     expected_len: usize,
 ) -> Vec<f32> {
-    let ti = source
-        .tensor_info(name)
-        .unwrap_or_else(|| panic!("tensor {} not found", name));
-    let slice = source
-        .tensor_slice(name)
-        .unwrap_or_else(|| panic!("slice {} not found", name));
-    let mut out = vec![0.0f32; expected_len];
-    if ti.ggml_type == GGMLType::F32 {
-        let n = expected_len.min(slice.len() / 4);
-        for i in 0..n {
-            let bytes = [
-                slice[i * 4],
-                slice[i * 4 + 1],
-                slice[i * 4 + 2],
-                slice[i * 4 + 3],
-            ];
-            out[i] = f32::from_le_bytes(bytes);
-        }
-    } else if ti.ggml_type == GGMLType::BF16 {
-        let n = expected_len.min(slice.len() / 2);
-        for i in 0..n {
-            out[i] = crate::ops::bf16_to_f32(u16::from_le_bytes([slice[i * 2], slice[i * 2 + 1]]));
-        }
-    }
-    out
+    crate::core::tensor::load_f32_tensor(source, name, &[expected_len as u64])
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 #[tokio::main]

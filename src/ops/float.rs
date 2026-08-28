@@ -208,7 +208,7 @@ pub fn f32_to_f16(v: f32) -> u16 {
 
 #[inline]
 pub fn bf16_to_f32(bits: u16) -> f32 {
-    f32::from_bits((bits as u32) << 16)
+    crate::core::tensor::bf16_to_f32(bits)
 }
 
 #[inline]
