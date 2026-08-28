@@ -231,9 +231,9 @@ pub fn run_inference_tokens(
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
+    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
         panic!(
-            "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
+            "token_embd.weight has unsupported type {:?}; only F16, BF16, Q8_0, Q4_0, and Q6K are supported",
             embd_info.ggml_type
         );
     }

@@ -77,6 +77,10 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
             *value = f32::from_le_bytes(chunk.try_into().unwrap());
         }
+    } else if info.ggml_type == GGMLType::BF16 {
+        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+            *value = crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
     }
     output
 }
@@ -338,25 +342,40 @@ fn get_f32_tensor_checked<S: TensorSource + ?Sized>(
     let info = source
         .tensor_info(name)
         .unwrap_or_else(|| panic!("tensor {name} not found"));
-    if info.ggml_type != GGMLType::F32 {
+    if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
         return Err(format!(
-            "tensor {name} expected F32, got {:?}",
+            "tensor {name} expected F32 or BF16, got {:?}",
             info.ggml_type
         ));
     }
+    let element_bytes = match info.ggml_type {
+        GGMLType::F32 => 4,
+        GGMLType::BF16 => 2,
+        _ => unreachable!(),
+    };
     let bytes = source
         .tensor_slice(name)
         .unwrap_or_else(|| panic!("slice {name} not found"));
-    if bytes.len() < expected_len * 4 {
+    if bytes.len() < expected_len * element_bytes {
         return Err(format!(
             "tensor {name} too small: got {} bytes, need {}",
             bytes.len(),
-            expected_len * 4
+            expected_len * element_bytes
         ));
     }
     let mut output = vec![0.0f32; expected_len];
-    for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-        *value = f32::from_le_bytes(chunk.try_into().unwrap());
+    for (index, value) in output.iter_mut().enumerate() {
+        let offset = index * element_bytes;
+        if info.ggml_type == GGMLType::F32 {
+            *value = f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
+        } else {
+            *value = crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]));
+        }
     }
     Ok(output)
 }

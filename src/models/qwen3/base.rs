@@ -1072,6 +1072,7 @@ impl<'model> Qwen3Session<'model> {
                 });
 
                 let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_attn) };
+                let attn_input_ptr = attn_out.as_ptr();
                 #[cfg(feature = "parity-trace")]
                 if layer == 0 {
                     parity_trace::report(parity_trace::checkpoint(
@@ -1096,10 +1097,11 @@ impl<'model> Qwen3Session<'model> {
                 pool.compute(move |thread, threads| {
                     let q8 = unsafe { std::slice::from_raw_parts(q8, n_attn) };
                     let scales = unsafe { std::slice::from_raw_parts(scales, n_attn / 32) };
+                    let attn_input = unsafe { std::slice::from_raw_parts(attn_input_ptr, n_attn) };
                     let output =
                         unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, config.n_embd) };
                     weights.wo.kernel.forward_prepared(
-                        &[],
+                        attn_input,
                         q8,
                         scales,
                         None,
@@ -1119,6 +1121,7 @@ impl<'model> Qwen3Session<'model> {
                     *hidden += *projection;
                 }
                 rms_norm(x, &weights.ffn_norm, normed, config.eps);
+                let norm_input_ptr = normed.as_ptr();
                 quantize_q8_0_into(
                     normed,
                     config.n_embd,
@@ -1131,22 +1134,24 @@ impl<'model> Qwen3Session<'model> {
                 pool.compute(move |thread, threads| {
                     let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                     let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                    let norm_input = unsafe { std::slice::from_raw_parts(norm_input_ptr, config.n_embd) };
                     let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
                     let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
                     weights
                         .w_gate
                         .kernel
-                        .forward_prepared(&[], q8, scales, None, up, config.n_embd, config.n_ff, thread, threads);
+                        .forward_prepared(norm_input, q8, scales, None, up, config.n_embd, config.n_ff, thread, threads);
                     weights
                         .w_up
                         .kernel
-                        .forward_prepared(&[], q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
+                        .forward_prepared(norm_input, q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
                     let start = thread * config.n_ff / threads;
                     let end = (thread + 1) * config.n_ff / threads;
                     silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
                 });
 
                 let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
+                let gate_input_ptr = gate.as_ptr();
                 quantize_q8_0_into(
                     gate,
                     config.n_ff,
@@ -1159,12 +1164,13 @@ impl<'model> Qwen3Session<'model> {
                 pool.compute(move |thread, threads| {
                     let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_ff) };
                     let scales = unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
+                    let gate_input = unsafe { std::slice::from_raw_parts(gate_input_ptr, config.n_ff) };
                     let down =
                         unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
                     weights
                         .w_down
                         .kernel
-                        .forward_prepared(&[], q8, scales, None, down, config.n_ff, config.n_embd, thread, threads);
+                        .forward_prepared(gate_input, q8, scales, None, down, config.n_ff, config.n_embd, thread, threads);
                 });
 
                 let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
@@ -1189,6 +1195,7 @@ impl<'model> Qwen3Session<'model> {
                 &mut self.scratch.normed,
                 config.eps,
             );
+            let output_input_ptr = self.scratch.normed.as_ptr();
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
                 "result_norm",
@@ -1209,9 +1216,10 @@ impl<'model> Qwen3Session<'model> {
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                let output_input = unsafe { std::slice::from_raw_parts(output_input_ptr, config.n_embd) };
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, config.vocab) };
                 model.output.kernel.forward_prepared(
-                    &[],
+                    output_input,
                     q8,
                     scales,
                     None,
@@ -1342,7 +1350,7 @@ fn text_encode(
             quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
 
             layer.wq.kernel.forward_prepared(
-                &[],
+                norm_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1353,7 +1361,7 @@ fn text_encode(
                 1,
             );
             layer.wk.kernel.forward_prepared(
-                &[],
+                norm_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1364,7 +1372,7 @@ fn text_encode(
                 1,
             );
             layer.wv.kernel.forward_prepared(
-                &[],
+                norm_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1475,7 +1483,7 @@ fn text_encode(
             let mut scale_buf = vec![0.0f32; blocks];
             quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
             layer.wo.kernel.forward_prepared(
-                &[],
+                attn_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1514,7 +1522,7 @@ fn text_encode(
             let mut scale_buf = vec![0.0f32; blocks];
             quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
             layer.w_gate.kernel.forward_prepared(
-                &[],
+                ffn_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1525,7 +1533,7 @@ fn text_encode(
                 1,
             );
             layer.w_up.kernel.forward_prepared(
-                &[],
+                ffn_row,
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1556,7 +1564,7 @@ fn text_encode(
                 &mut scale_buf,
             );
             layer.w_down.kernel.forward_prepared(
-                &[],
+                &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
                 &q8_buf,
                 &scale_buf,
                 None,
@@ -1856,13 +1864,49 @@ pub fn load_f32_tensor(
     name: &str,
     dims: &[u64],
 ) -> Result<Vec<f32>, String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
-    let len = bytes.len() / std::mem::size_of::<f32>();
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims
+        || !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16)
+    {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F32 or BF16",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    let element_bytes = match info.ggml_type {
+        GGMLType::F32 => 4,
+        GGMLType::BF16 => 2,
+        _ => unreachable!(),
+    };
+    let len = bytes.len() / element_bytes;
     check_allocation(name, len, std::mem::size_of::<f32>())?;
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
-        .collect())
+    Ok(match info.ggml_type {
+        GGMLType::F32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+            .collect(),
+        GGMLType::BF16 => bytes
+            .chunks_exact(2)
+            .map(|chunk| crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+            .collect(),
+        _ => unreachable!(),
+    })
 }
 
 pub fn checked_tensor<'a>(

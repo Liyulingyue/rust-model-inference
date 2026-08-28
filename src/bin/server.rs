@@ -927,6 +927,11 @@ fn get_f32_tensor_from_source(
             ];
             out[i] = f32::from_le_bytes(bytes);
         }
+    } else if ti.ggml_type == GGMLType::BF16 {
+        let n = expected_len.min(slice.len() / 2);
+        for i in 0..n {
+            out[i] = crate::ops::bf16_to_f32(u16::from_le_bytes([slice[i * 2], slice[i * 2 + 1]]));
+        }
     }
     out
 }

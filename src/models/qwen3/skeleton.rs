@@ -28,6 +28,10 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected
         for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
             *value = f32::from_le_bytes(chunk.try_into().unwrap());
         }
+    } else if info.ggml_type == GGMLType::BF16 {
+        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+            *value = crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
     }
     output
 }

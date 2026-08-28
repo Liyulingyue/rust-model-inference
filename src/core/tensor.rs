@@ -32,6 +32,7 @@ pub enum GGMLType {
     I8 = 16,
     I16 = 17,
     I32 = 18,
+    BF16 = 30,
 }
 
 impl GGMLType {
@@ -54,6 +55,7 @@ impl GGMLType {
             16 => Some(Self::I8),
             17 => Some(Self::I16),
             18 => Some(Self::I32),
+            30 => Some(Self::BF16),
             _ => None,
         }
     }
@@ -77,6 +79,7 @@ impl GGMLType {
             Self::I8 => (1, 1),
             Self::I16 => (1, 2),
             Self::I32 => (1, 4),
+            Self::BF16 => (1, 2),
         }
     }
 
@@ -254,6 +257,7 @@ mod tests {
     fn test_ggml_type_nbytes() {
         assert_eq!(GGMLType::F32.nbytes(256), 1024);
         assert_eq!(GGMLType::F16.nbytes(256), 512);
+        assert_eq!(GGMLType::BF16.nbytes(256), 512);
         assert_eq!(GGMLType::Q4K.nbytes(256), 144);
         assert_eq!(GGMLType::Q4K.nbytes(512), 288);
         assert_eq!(GGMLType::Q4_0.nbytes(32), 18);

@@ -5,6 +5,7 @@ pub fn embedding_lookup(weight: &[u8], token_id: u32, n_embd: usize, embd_type: 
         crate::core::tensor::GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
         crate::core::tensor::GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
         crate::core::tensor::GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
+        crate::core::tensor::GGMLType::BF16 => embedding_lookup_bf16(weight, token_id, n_embd, out),
         _ => panic!("unsupported embedding type {:?}", embd_type),
     }
 }
@@ -44,4 +45,13 @@ pub fn embedding_lookup_q6_k(weight: &[u8], token_id: u32, n_embd: usize, out: &
         &weight[row_start..row_start + row_bytes],
         &mut out[..n_embd],
     );
+}
+
+pub fn embedding_lookup_bf16(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let row_start = token_id as usize * n_embd * 2;
+    for index in 0..n_embd {
+        let offset = row_start + index * 2;
+        let bits = u16::from_le_bytes([weight[offset], weight[offset + 1]]);
+        out[index] = crate::ops::bf16_to_f32(bits);
+    }
 }

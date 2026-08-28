@@ -19,6 +19,7 @@
 //! `Sharded` variant to `QuantizedTensor<'a>` rather than introduce a new
 //! top-level type.
 
+pub mod bf16;
 pub mod f16;
 pub mod f32;
 pub mod q4_0;

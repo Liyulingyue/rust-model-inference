@@ -22,6 +22,13 @@ pub struct F16Weight<'a> {
     pub n_out: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct BF16Weight<'a> {
+    pub bytes: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 /// Unified enum of supported quantized weight formats. Produces a
 /// `Box<dyn Kernel>` via [`QuantizedTensor::into_kernel`].
 ///
@@ -32,6 +39,7 @@ pub struct F16Weight<'a> {
 pub enum QuantizedTensor<'a> {
     F32(Vec<f32>),
     F16(F16Weight<'a>),
+    BF16(BF16Weight<'a>),
     Q8_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q6_K { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
@@ -89,10 +97,11 @@ impl<'a> QuantizedTensor<'a> {
     /// `Box<dyn Kernel>` view of self. This is intentionally a separate
     /// method rather than inline because `into_kernel` consumes `self`.
     pub(crate) fn clone_to_kernel(&self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
+            Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, *n_cols, *n_rows))
@@ -127,6 +136,7 @@ impl<'a> QuantizedTensor<'a> {
                 Self::F32(f32_data)
             }
             GGMLType::F16 => Self::F16(F16Weight { bytes: data, n_in, n_out }),
+            GGMLType::BF16 => Self::BF16(BF16Weight { bytes: data, n_in, n_out }),
             GGMLType::Q8_0 => Self::Q8_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q6K => Self::Q6_K { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
@@ -141,6 +151,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(_) => GGMLType::F32,
             Self::F16(_) => GGMLType::F16,
+            Self::BF16(_) => GGMLType::BF16,
             Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q6_K { .. } => GGMLType::Q6K,
             Self::Q4_0 { .. } => GGMLType::Q4_0,
@@ -154,6 +165,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(slice) => slice.len(),
             Self::F16(w) => w.n_in,
+            Self::BF16(w) => w.n_in,
             Self::Q8_0 { n_cols, .. } => *n_cols,
             Self::Q6_K { n_cols, .. } => *n_cols,
             Self::Q4_0 { n_cols, .. } => *n_cols,
@@ -165,10 +177,11 @@ impl<'a> QuantizedTensor<'a> {
 
     /// Build a `Box<dyn Kernel>` from this weight tensor.
     pub fn into_kernel(self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
+            Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, n_cols, n_rows))
@@ -192,6 +205,7 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(values) => usize::from(!values.is_empty()),
             Self::F16(weight) => weight.n_out,
+            Self::BF16(weight) => weight.n_out,
             Self::Q8_0 { n_rows, .. } => *n_rows,
             Self::Q6_K { n_rows, .. }
             | Self::Q4_0 { n_rows, .. }
