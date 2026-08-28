@@ -17,6 +17,8 @@
   - [x] 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
   - [x] qwen3.rs、main.rs 已使用统一函数
   - [x] 保留 token embedding 的类型信息；模型各组件的量化类型应独立管理
+- [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2`（q4k/avx2.rs）写 `vec_dot_q2k_q8k_avx2` / `vec_dot_q3k_q8k_avx2`。复用 Q8K activation + AVX2 `_mm256_madd_epi16`。预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
+- [ ] **IQ4_XS / IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册（commit `402bc3d`）但 kernel panic with TODO。IQ4_NL scalar 已实现（kvalues_iq4nl LUT）。IQ2/3 需要查 llama.cpp 参考实现，I-quant 网格 LUT + bit-packed scales 复杂。qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS，所以实现 IQ2/3 后这两个 model 就能加载。
 
 ## Medium Priority
 

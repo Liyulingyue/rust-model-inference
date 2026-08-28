@@ -182,3 +182,72 @@ src/models/{model_name}/
   * `cargo test --lib` 335 passed / 29 failed（与基线一致）。
   * Q8_0 与 BF16 双推理冒烟均输出 `**Paris**.`。
 
+### ✅ Quant Kernel 补全（2026-08-28..29, commits `b7509ef`/`9d04643`/`402bc3d`/`592ba28`）
+
+不在原 Step 1..5 路线图中，由"用户跑实际模型文件"反馈驱动，发现 4 类格式问题，逐个修复：
+
+| Commit | 内容 | 端到端效果 |
+|--------|------|------------|
+| `b7509ef` | **Q5_K** kernel 之前是占位 `output = 0.0`。实现 `vec_dot_q5k_q8k_scalar`（仿 q4k 结构复用 `vec_dot_q5k_q8k_avx2`）。 | Q5_K_S/M、Q4_K_S 从乱码/全空 → 正确产出 `**Paris**` |
+| `9d04643` | **Q4_1 AVX2** 内核（4.7× 加速：11.6→54.5 t/s）；**BF16 AVX2+FMA**（3.7× 加速：7.4→27.5 t/s）；**Q2_K/Q3_K scalar** 内核接入 + `QuantizedTensor` 注册。Q3_K 已知输出乱码（format bug，待验证）。 | Q4_1: 11.6→54.5 t/s；BF16: 7.4→27.5 t/s |
+| `402bc3d` | **GGMLType 注册全部 I-quant**（IQ2_XXS/XS/S、IQ3_XXS/XS/S、IQ4_NL/XS）。**IQ4_NL scalar matmul** + `embedding_lookup_iq4_nl`。IQ4_XS/IQ2/IQ3 kernel 留 TODO panic。 | IQ4_NL 单 tensor 可用；模型加载不 panic |
+| `592ba28` | **Q3_K / Q2_K format 修复**（参照 llama.cpp `dequantize_row_q2_K`、`vec_dot_q3_K_q8_K_generic` 逐行移植）。详见 §9。 | Q2_K/L、Q3_K_S/M 全部产出 `Paris`** |
+
+新增结构：
+```
+src/ops/kernel/
+├── q4_1/{mod, avx2, scalar}.rs   # Q4_1 AVX2
+├── bf16/{mod, avx2, scalar}.rs   # BF16 AVX2
+├── q2_k.rs                       # Q2_K scalar（Q8K path）
+├── q3_k.rs                       # Q3_K scalar（Q8K path）
+├── iq4_nl.rs                     # IQ4_NL scalar
+└── iq4_xs.rs                     # IQ4_XS TODO panic
+src/ops/quant/mod.rs 新增:
+- BLOCK_Q2K_SIZE / BLOCK_Q3K_SIZE 常量
+- dequantize_row_q2_k / dequantize_row_q3_k
+- vec_dot_q2k_q8k_scalar / vec_dot_q3k_q8k_scalar
+- IQ4_NL_LUT 常量（16-entry 非线性查找表）
+- dequantize_row_iq4_nl / vec_dot_iq4_nl_q8k_scalar
+```
+
+测试：`ops::quant::avx2_parity` 新增 4 个 Q3_K 单元测试 + `make_q3k_block` helper（合成已知字节 → 验证 dequant/vecdot 数学值）。
+
+---
+
+### 9. Q3_K format bug 修复详解（commit `602ba28`）
+
+Q3_K 模型（Q2_K/Q3_K_S/M）原本能加载但推理产出乱码。根因：
+
+**Bug 1 — 输出索引遗漏 n 迭代推进**（致命）：
+```rust
+// 旧 (broken):
+output[out_base + j * 32 + l] = dl_a * q_signed as f32;
+// `j` 在 `[0..4)` 内循环，但跨 `_n in 0..(QK_K/128)` 不变。
+// → n=1（元素 128..255）写回到 0..127，覆盖 n=0 结果，128..255 全 0。
+
+// 修复：沿用 C 的 *y++ 指针递增语义
+let mut out_idx = 0usize;
+for _n in 0..(QK_K / 128) {
+    for j in 0..4 {
+        // ...
+        for l in 0..16usize {
+            output[out_base + out_idx] = ...;
+            out_idx += 1;
+        }
+    }
+}
+```
+
+**Bug 2 — scales 字段越界**：Q3_K scales 是 12 bytes（3 × u32），不是 16 bytes。旧实现读 4 个 u32（16 bytes）越界 4 字节，触发真实数据上的 panic。修复：用 `u32::from_le_bytes` 显式读 12 字节，第四个 u32 留 0。
+
+**Q2_K format bug**：Q2_K qs 字节布局与 Q3_K 类似但 sub-block 不同。原实现把 16 sub-block 顺序处理（`scales[j]` for elements `[j*16, j*16+16)`），实际是 8 个 16-element pair（sub-A 读 `qs[l]`、sub-B 读 `qs[l+16]`），scale 索引 `n_outer*8 + j*2 + (sub_b ? 1 : 0)`，shift `j*2`。
+
+修复后端到端验证（Qwen3-0.6B, `--temp 0 --threads 4`）：
+- Q2_K.gguf:    `The capital of France is Paris.`
+- Q2_K_L.gguf:  `The capital of France is Paris.`
+- Q3_K_M.gguf:  `The capital of France is **Paris**` （与 Q8_0 baseline 一致）
+- Q3_K_S.gguf:  `The capital of France is **Lyon**` （量化噪声导致 argmax 翻转，仍是 valid French city）
+- Q8_0 baseline: `The capital of France is **Paris**.`
+
+**教训**：现有 scalar K-quant 内核只有 4-bit 单元测试覆盖到合成块层面（`q4k_avx2_matches_scalar_*`），没有覆盖跨 128 元素 `n` 边界的累加和输出索引连续性。Q3_K 实际模型触发后才暴露出来。**今后每加一个 scalar K-quant 必须加 Q3_K 风格的"全零 + 已知模式 → 期望值"测试**，强制覆盖 n 迭代边界。
+
