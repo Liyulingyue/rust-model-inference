@@ -166,3 +166,19 @@ src/models/{model_name}/
    - Q8_0：`cargo run --release --bin rust-model-inference -- --model models/qwen3-0.6b-gguf/Qwen3-0.6B-Q8_0.gguf --prompt "The capital of France is" --max-tokens 12 --temp 0 --threads 4` → 期望 `**Paris**.`
    - BF16：同上但用 `Qwen3-0.6B-BF16.gguf`。
 4. 本文件末尾"已完成"清单追加本次 step。
+
+---
+
+## 8. 已完成步骤
+
+### ✅ Step 1 — 抽 `load_f32_tensor` 到 `core::tensor`（2026-08-28, commit `fa93bac`）
+
+* 新增 `core::tensor::load_f32_tensor<S>(source, name, dims) -> Result<Vec<f32>, String>`，含完整 type/dims/byte-length 校验。
+* `bf16_to_f32` 规范到 `core::tensor`，`ops::float` 通过 `use` 转发保持向后兼容。
+* 5 处重复调用方改为委派：`llama/skeleton.rs`、`lfm2/skeleton.rs`、`lfm25/skeleton.rs`、`qwen3/base.rs`、`bin/server.rs`。
+* 删除 ~135 行重复 F32/BF16 norm 加载代码。
+* 验收：
+  * `cargo build --lib` 零 error。
+  * `cargo test --lib` 335 passed / 29 failed（与基线一致）。
+  * Q8_0 与 BF16 双推理冒烟均输出 `**Paris**.`。
+
