@@ -1,4 +1,18 @@
+//! BF16 matmul kernel implementation.
+//!
+//! BF16 weight layout: 2 bytes per element, F32-compatible (upper 16 bits
+//! of an F32 representation). Conversion BF16 → F32 is a zero-cost u16→u32
+//! shift-and-reinterpret.
+//!
+//! Module structure:
+//! - `scalar.rs` — scalar fallback for both F32-input and Q8-input paths.
+//! - `avx2.rs`    — AVX2+FMA SIMD for the F32-input hot path (used by
+//!   Qwen3 BF16 inference). Q8-input path remains scalar (rarely hot).
+
 use super::Kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
+pub mod scalar;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BF16Kernel<'a> {
@@ -14,7 +28,7 @@ impl<'a> BF16Kernel<'a> {
         self.weight.len() / 2
     }
 
-    fn row_range(n_out: usize, ith: usize, nth: usize) -> (usize, usize) {
+    pub(crate) fn row_range(n_out: usize, ith: usize, nth: usize) -> (usize, usize) {
         let nth = nth.max(1);
         let start = n_out.saturating_mul(ith) / nth;
         let end = n_out.saturating_mul(ith.saturating_add(1)) / nth;
@@ -30,25 +44,35 @@ impl<'a> BF16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        let (start, end) = Self::row_range(n_out, ith, nth);
-        for out_idx in start..end {
-            let row_start = out_idx * n_in * 2;
-            let mut sum = 0.0f32;
-            for in_idx in 0..n_in {
-                let weight_offset = row_start + in_idx * 2;
-                let bits = u16::from_le_bytes([
-                    self.weight[weight_offset],
-                    self.weight[weight_offset + 1],
-                ]);
-                sum += crate::ops::bf16_to_f32(bits) * input[in_idx];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                let (start, end) = Self::row_range(n_out, ith, nth);
+                if end > start {
+                    let my_out = &mut output[start..end];
+                    unsafe {
+                        avx2::matmul_bf16_vs_f32_avx2(
+                            self.weight,
+                            input,
+                            my_out,
+                            n_in,
+                            start,
+                            end,
+                        );
+                        return;
+                    }
+                }
             }
-            let output_index = if output.len() >= n_out {
-                out_idx
-            } else {
-                out_idx - start
-            };
-            output[output_index] = sum;
         }
+        scalar::forward_f32_rows_scalar(
+            self.weight,
+            input,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
     }
 
     fn forward_q8_rows(
@@ -61,33 +85,16 @@ impl<'a> BF16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        let (start, end) = Self::row_range(n_out, ith, nth);
-        let blocks_per_row = n_in.div_ceil(32);
-        for out_idx in start..end {
-            let row_start = out_idx * n_in * 2;
-            let mut sum = 0.0f32;
-            for block in 0..blocks_per_row {
-                let input_start = block * 32;
-                let input_end = (input_start + 32).min(n_in);
-                let input_scale = input_scales[block];
-                for in_idx in input_start..input_end {
-                    let weight_offset = row_start + in_idx * 2;
-                    let bits = u16::from_le_bytes([
-                        self.weight[weight_offset],
-                        self.weight[weight_offset + 1],
-                    ]);
-                    sum += crate::ops::bf16_to_f32(bits)
-                        * (input_q8[in_idx] as i8 as f32)
-                        * input_scale;
-                }
-            }
-            let output_index = if output.len() >= n_out {
-                out_idx
-            } else {
-                out_idx - start
-            };
-            output[output_index] = sum;
-        }
+        scalar::forward_q8_rows_scalar(
+            self.weight,
+            input_q8,
+            input_scales,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
     }
 }
 
@@ -105,7 +112,6 @@ impl<'a> Kernel for BF16Kernel<'a> {
         debug_assert!(input_q8.len() >= n_in);
         debug_assert!(input_scales.len() >= n_in.div_ceil(32));
         debug_assert!(self.weight.len() >= n_in * n_out * 2);
-        debug_assert!(output.len() >= if output.len() < n_out { n_out.div_ceil(nth.max(1)) } else { n_out });
         self.forward_q8_rows(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 

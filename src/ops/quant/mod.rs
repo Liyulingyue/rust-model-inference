@@ -9,6 +9,8 @@ pub const BLOCK_Q4K_SIZE: usize = 144;
 pub const BLOCK_Q5K_SIZE: usize = 176;
 pub const BLOCK_Q6K_SIZE: usize = 210;
 pub const BLOCK_Q8K_SIZE: usize = 292;
+pub const BLOCK_Q2K_SIZE: usize = 84;
+pub const BLOCK_Q3K_SIZE: usize = 110;
 
 fn f16_from_bytes(data: &[u8], byte_idx: usize) -> f32 {
     if byte_idx + 2 > data.len() { return 0.0; }
@@ -451,6 +453,144 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
         }
     }
     Some(out)
+}
+
+pub fn dequantize_row_q2_k(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / QK_K;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * BLOCK_Q2K_SIZE;
+        if boff + BLOCK_Q2K_SIZE > block_bytes.len() { break; }
+
+        let d = f16_from_bytes(block_bytes, boff + 80);
+        let dmin = f16_from_bytes(block_bytes, boff + 82);
+        let scales = &block_bytes[boff..boff + 16];
+        let qs = &block_bytes[boff + 16..boff + 80];
+        let out_base = block_idx * QK_K;
+
+        for j in 0..16 {
+            let sc_byte = scales[j];
+            let dl = d * (sc_byte & 0xF) as f32;
+            let ml = dmin * (sc_byte >> 4) as f32;
+            let base = j * 16;
+            for l in 0..16 {
+                let q_byte = qs[(base + l) / 4];
+                let q_shift = ((base + l) % 4) * 2;
+                let q = ((q_byte >> q_shift) & 0x3) as f32;
+                output[out_base + base + l] = dl * q - ml;
+            }
+        }
+    }
+}
+
+pub fn vec_dot_q2k_q8k_scalar(q2k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    let nb = q8k.len();
+    let mut sumf = 0.0f32;
+
+    for i in 0..nb {
+        let boff = i * BLOCK_Q2K_SIZE;
+        if boff + BLOCK_Q2K_SIZE > q2k_data.len() { break; }
+
+        let d = f16_from_bytes(q2k_data, boff + 80);
+        let dmin = f16_from_bytes(q2k_data, boff + 82);
+        let scales = &q2k_data[boff..boff + 16];
+        let qs = &q2k_data[boff + 16..boff + 80];
+
+        let mut sum_dot = 0i32;
+        let mut sum_min = 0i32;
+        for j in 0..16 {
+            let sc_byte = scales[j];
+            let sc = (sc_byte & 0xF) as i32;
+            let m = (sc_byte >> 4) as i32;
+            let base = j * 16;
+            for l in 0..16 {
+                let q_byte = qs[(base + l) / 4];
+                let q_shift = ((base + l) % 4) * 2;
+                let q = ((q_byte >> q_shift) & 0x3) as i32;
+                sum_dot += q * q8k[i].qs[base + l] as i32;
+            }
+            sum_min += m * q8k[i].bsums[j] as i32;
+        }
+
+        sumf += d * q8k[i].d * sum_dot as f32 - dmin * q8k[i].d * sum_min as f32;
+    }
+
+    sumf
+}
+
+pub fn vec_dot_q2k_q8k(q2k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    vec_dot_q2k_q8k_scalar(q2k_data, q8k)
+}
+
+pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / QK_K;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * BLOCK_Q3K_SIZE;
+        if boff + BLOCK_Q3K_SIZE > block_bytes.len() { break; }
+
+        let d = f16_from_bytes(block_bytes, boff + 108);
+        let hmask = &block_bytes[boff..boff + 32];
+        let qs = &block_bytes[boff + 32..boff + 96];
+        let scales_packed = &block_bytes[boff + 96..boff + 108];
+        let out_base = block_idx * QK_K;
+
+        for j in 0..256 {
+            let qs_byte_idx = j / 4;
+            let qs_shift = (j % 4) * 2;
+            let ql = ((qs[qs_byte_idx] >> qs_shift) & 0x3) as i32;
+            let h_byte_idx = j / 8;
+            let h_bit_idx = j % 8;
+            let qh = ((hmask[h_byte_idx] >> h_bit_idx) & 0x1) as i32;
+            let q = (ql | (qh << 2)) - 4;
+
+            let sub = j / 32;
+            let sc_lo = (scales_packed[sub] & 0xF) as i32;
+            let sc_hi = ((scales_packed[8 + sub / 4] >> (2 * (sub % 4))) & 0x3) as i32;
+            let sc = sc_lo | (sc_hi << 4);
+
+            output[out_base + j] = d * (q * sc) as f32;
+        }
+    }
+}
+
+pub fn vec_dot_q3k_q8k_scalar(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    let nb = q8k.len();
+    let mut sumf = 0.0f32;
+
+    for i in 0..nb {
+        let boff = i * BLOCK_Q3K_SIZE;
+        if boff + BLOCK_Q3K_SIZE > q3k_data.len() { break; }
+
+        let d = f16_from_bytes(q3k_data, boff + 108);
+        let hmask = &q3k_data[boff..boff + 32];
+        let qs = &q3k_data[boff + 32..boff + 96];
+        let scales_packed = &q3k_data[boff + 96..boff + 108];
+
+        let mut sum = 0i32;
+        for j in 0..256 {
+            let qs_byte_idx = j / 4;
+            let qs_shift = (j % 4) * 2;
+            let ql = ((qs[qs_byte_idx] >> qs_shift) & 0x3) as i32;
+            let h_byte_idx = j / 8;
+            let h_bit_idx = j % 8;
+            let qh = ((hmask[h_byte_idx] >> h_bit_idx) & 0x1) as i32;
+            let q = (ql | (qh << 2)) - 4;
+
+            let sub = j / 32;
+            let sc_lo = (scales_packed[sub] & 0xF) as i32;
+            let sc_hi = ((scales_packed[8 + sub / 4] >> (2 * (sub % 4))) & 0x3) as i32;
+            let sc = sc_lo | (sc_hi << 4);
+
+            sum += q * sc * q8k[i].qs[j] as i32;
+        }
+
+        sumf += d * q8k[i].d * sum as f32;
+    }
+
+    sumf
+}
+
+pub fn vec_dot_q3k_q8k(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    vec_dot_q3k_q8k_scalar(q3k_data, q8k)
 }
 
 pub fn dequantize_row_q4_k(block_bytes: &[u8], output: &mut [f32]) {
