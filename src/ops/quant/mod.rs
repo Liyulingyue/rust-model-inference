@@ -854,7 +854,7 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let grid = self::iq_tables::iq2_xs_grid();
     let signs = self::iq_tables::iq2_xs_signs();
     let nb = q8k.len();
-    let mut sumf = 0.0f32;
+    let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ2_XS_SIZE;
         if boff + BLOCK_IQ2_XS_SIZE > iq2xs_data.len() {
@@ -864,12 +864,12 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let qs_bytes = &iq2xs_data[boff + 2..boff + 2 + 64];
         let sc = &iq2xs_data[boff + 66..boff + 74];
         let q8 = &q8k[i].qs;
-        let mut bsum: i32 = 0;
+        let mut bsum: i64 = 0;
         let mut qs_idx = 0usize;
         let mut q8_idx = 0usize;
         for ib32 in 0..8usize {
-            let ls1 = 2 * ((sc[ib32] & 0x0f) as i32) + 1;
-            let ls2 = 2 * ((sc[ib32] >> 4) as i32) + 1;
+            let ls1: i64 = 2 * ((sc[ib32] & 0x0f) as i64) + 1;
+            let ls2: i64 = 2 * ((sc[ib32] >> 4) as i64) + 1;
             for inner in 0..2usize {
                 let q = u16::from_le_bytes([qs_bytes[qs_idx], qs_bytes[qs_idx + 1]]);
                 qs_idx += 2;
@@ -877,18 +877,18 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                 let signs_idx = (q >> 9) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
                 let sgn = signs[signs_idx];
-                let mut sumi: i32 = 0;
+                let mut sumi: i64 = 0;
                 for j in 0..8usize {
-                    let sign = if sgn & mask[j] != 0 { -1i32 } else { 1i32 };
-                    sumi += (grid_bytes[j] as i8 as i32) * (q8[q8_idx + j] as i32) * sign;
+                    let sign: i64 = if sgn & mask[j] != 0 { -1 } else { 1 };
+                    sumi += (grid_bytes[j] as i8 as i64) * (q8[q8_idx + j] as i64) * sign;
                 }
                 q8_idx += 8;
                 bsum += sumi * if inner == 0 { ls1 } else { ls2 };
             }
         }
-        sumf += d * bsum as f32;
+        sumf += (d as f64) * (bsum as f64);
     }
-    sumf * 0.125f32
+    (sumf * 0.125) as f32
 }
 
 pub fn vec_dot_iq2_xs_q8k(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
@@ -946,7 +946,7 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mask = self::iq_tables::iq2_xs_mask();
     let grid = self::iq_tables::iq3_s_grid();
     let nb = q8k.len();
-    let mut sumf = 0.0f32;
+    let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ3_S_SIZE;
         if boff + BLOCK_IQ3_S_SIZE > iq3s_data.len() {
@@ -958,16 +958,16 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let signs = &iq3s_data[boff + 74..boff + 74 + 32];
         let sc = &iq3s_data[boff + 106..boff + 110];
         let q8 = &q8k[i].qs;
-        let mut bsum: i32 = 0;
+        let mut bsum: i64 = 0;
         let mut qs_off = 0usize;
         let mut sign_off = 0usize;
         let mut q8_idx = 0usize;
         for ib32 in (0..8usize).step_by(2) {
-            let ls1 = 2 * ((sc[ib32 / 2] & 0x0f) as i32) + 1;
-            let ls2 = 2 * ((sc[ib32 / 2] >> 4) as i32) + 1;
+            let ls1: i64 = 2 * ((sc[ib32 / 2] & 0x0f) as i64) + 1;
+            let ls2: i64 = 2 * ((sc[ib32 / 2] >> 4) as i64) + 1;
             for pair in 0..2usize {
                 let qh_byte = qh[ib32 + pair];
-                let mut sumi: i32 = 0;
+                let mut sumi: i64 = 0;
                 for l in 0..4usize {
                     let g1 = grid[qs[qs_off + 2 * l] as usize
                         | ((((qh_byte as u16) << (8 - 2 * l)) & 256) as usize)];
@@ -977,10 +977,10 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                     let g2_bytes = g2.to_le_bytes();
                     let sgn = signs[sign_off + l];
                     for j in 0..4usize {
-                        let s1 = if sgn & mask[j] != 0 { -1i32 } else { 1i32 };
-                        let s2 = if sgn & mask[j + 4] != 0 { -1i32 } else { 1i32 };
-                        sumi += g1_bytes[j] as i32 * q8[q8_idx + j] as i32 * s1;
-                        sumi += g2_bytes[j] as i32 * q8[q8_idx + j + 4] as i32 * s2;
+                        let s1: i64 = if sgn & mask[j] != 0 { -1 } else { 1 };
+                        let s2: i64 = if sgn & mask[j + 4] != 0 { -1 } else { 1 };
+                        sumi += (g1_bytes[j] as i8 as i64) * (q8[q8_idx + j] as i64) * s1;
+                        sumi += (g2_bytes[j] as i8 as i64) * (q8[q8_idx + j + 4] as i64) * s2;
                     }
                     q8_idx += 8;
                 }
@@ -989,9 +989,9 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                 bsum += sumi * if pair == 0 { ls1 } else { ls2 };
             }
         }
-        sumf += d * bsum as f32;
+        sumf += (d as f64) * (bsum as f64);
     }
-    sumf
+    sumf as f32
 }
 
 pub fn vec_dot_iq3_s_q8k(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
@@ -1134,14 +1134,14 @@ pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let grid = self::iq_tables::iq2_xxs_grid();
     let signs_tbl = self::iq_tables::iq2_xs_signs();
     let nb = q8k.len();
-    let mut sumf = 0.0f32;
+    let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ2_XXS_SIZE;
         if boff + BLOCK_IQ2_XXS_SIZE > iq2xxs_data.len() { break; }
         let d = f16_from_bytes(iq2xxs_data, boff) * q8k[i].d;
         let q2 = &iq2xxs_data[boff + 2..boff + 2 + 64];
         let q8 = &q8k[i].qs;
-        let mut bsum: i32 = 0;
+        let mut bsum: i64 = 0;
         let mut q2_idx = 0;
         let mut q8_idx = 0;
         for _ib32 in 0..8 {
@@ -1150,22 +1150,22 @@ pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             aux32[1] = u32::from_le_bytes([q2[q2_idx+4], q2[q2_idx+5], q2[q2_idx+6], q2[q2_idx+7]]);
             q2_idx += 8;
             let aux8 = aux32[0].to_le_bytes();
-            let ls = (2 * ((aux32[1] >> 28) as i32)) + 1;
-            let mut sumi: i32 = 0;
+            let ls = (2 * ((aux32[1] >> 28) as i64)) + 1;
+            let mut sumi: i64 = 0;
             for l in 0..4 {
                 let grid_bytes = grid[aux8[l] as usize].to_le_bytes();
                 let signs = signs_tbl[((aux32[1] >> (7 * l as u32)) & 127) as usize];
                 for j in 0..8 {
-                    let sign = if signs & mask[j] != 0 { -1 } else { 1 };
-                    sumi += (grid_bytes[j] as i8 as i32) * (q8[q8_idx + j] as i32) * sign;
+                    let sign: i64 = if signs & mask[j] != 0 { -1 } else { 1 };
+                    sumi += (grid_bytes[j] as i8 as i64) * (q8[q8_idx + j] as i64) * sign;
                 }
                 q8_idx += 8;
             }
             bsum += sumi * ls;
         }
-        sumf += d * (bsum as f32) * 0.125;
+        sumf += (d as f64) * (bsum as f64) * 0.125;
     }
-    sumf
+    sumf as f32
 }
 
 pub fn dequantize_row_iq2_s(block_bytes: &[u8], output: &mut [f32]) {
@@ -1204,7 +1204,7 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mask = self::iq_tables::iq2_xs_mask();
     let grid = self::iq_tables::iq2_s_grid();
     let nb = q8k.len();
-    let mut sumf = 0.0f32;
+    let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ2_S_SIZE;
         if boff + BLOCK_IQ2_S_SIZE > iq2s_data.len() { break; }
@@ -1214,35 +1214,35 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let scales = &iq2s_data[boff + 74..boff + 74 + 8];
         let signs_base = boff + 2 + 32;
         let q8 = &q8k[i].qs;
-        let mut bsum: i32 = 0;
+        let mut bsum: i64 = 0;
         let mut qs_idx = 0;
         let mut q8_idx = 0;
         let mut signs_idx = signs_base;
         for ib32 in 0..8usize {
-            let ls1 = 1 + 2 * (scales[ib32] & 0x0f) as i32;
-            let ls2 = 1 + 2 * (scales[ib32] >> 4) as i32;
+            let ls1: i64 = 1 + 2 * (scales[ib32] & 0x0f) as i64;
+            let ls2: i64 = 1 + 2 * (scales[ib32] >> 4) as i64;
             let qh_byte = qh[ib32];
-            let mut sumi1: i32 = 0;
+            let mut sumi1: i64 = 0;
             for l in 0..2 {
                 let qh_shift = 8 - 2 * l;
                 let grid_idx = (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
                 let s = iq2s_data[signs_idx + l];
                 for j in 0..8 {
-                    let sign = if s & mask[j] != 0 { -1 } else { 1 };
-                    sumi1 += q8[q8_idx + j] as i32 * (grid_bytes[j] as i8 as i32) * sign;
+                    let sign: i64 = if s & mask[j] != 0 { -1 } else { 1 };
+                    sumi1 += (q8[q8_idx + j] as i64) * (grid_bytes[j] as i8 as i64) * sign;
                 }
                 q8_idx += 8;
             }
-            let mut sumi2: i32 = 0;
+            let mut sumi2: i64 = 0;
             for l in 2..4 {
                 let qh_shift = 8 - 2 * l;
                 let grid_idx = (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
                 let s = iq2s_data[signs_idx + l];
                 for j in 0..8 {
-                    let sign = if s & mask[j] != 0 { -1 } else { 1 };
-                    sumi2 += q8[q8_idx + j] as i32 * (grid_bytes[j] as i8 as i32) * sign;
+                    let sign: i64 = if s & mask[j] != 0 { -1 } else { 1 };
+                    sumi2 += (q8[q8_idx + j] as i64) * (grid_bytes[j] as i8 as i64) * sign;
                 }
                 q8_idx += 8;
             }
@@ -1250,9 +1250,9 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             qs_idx += 4;
             signs_idx += 4;
         }
-        sumf += d * (bsum as f32) * 0.125;
+        sumf += (d as f64) * (bsum as f64) * 0.125;
     }
-    sumf
+    sumf as f32
 }
 
 pub fn dequantize_row_iq3_xxs(block_bytes: &[u8], output: &mut [f32]) {
@@ -1294,7 +1294,7 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let grid = self::iq_tables::iq3_xxs_grid();
     let signs_tbl = self::iq_tables::iq2_xs_signs();
     let nb = q8k.len();
-    let mut sumf = 0.0f32;
+    let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ3_XXS_SIZE;
         if boff + BLOCK_IQ3_XXS_SIZE > iq3xxs_data.len() { break; }
@@ -1302,7 +1302,7 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let q3 = &iq3xxs_data[boff + 2..boff + 2 + 96];
         let gas = &iq3xxs_data[boff + 2 + 64..boff + 2 + 64 + 32];
         let q8 = &q8k[i].qs;
-        let mut bsum: i32 = 0;
+        let mut bsum: i64 = 0;
         let mut q3_idx = 0;
         let mut q8_idx = 0;
         let mut gas_idx = 0;
@@ -1311,26 +1311,26 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                 gas[gas_idx], gas[gas_idx+1], gas[gas_idx+2], gas[gas_idx+3],
             ]);
             gas_idx += 4;
-            let ls = (2 * ((aux32 >> 28) as i32)) + 1;
-            let mut sumi: i32 = 0;
+            let ls = (2 * ((aux32 >> 28) as i64)) + 1;
+            let mut sumi: i64 = 0;
             for l in 0..4 {
                 let signs = signs_tbl[((aux32 >> (7 * l as u32)) & 127) as usize];
                 let g1 = grid[q3[q3_idx + 2 * l] as usize].to_le_bytes();
                 let g2 = grid[q3[q3_idx + 2 * l + 1] as usize].to_le_bytes();
                 for j in 0..4 {
-                    let s1 = if signs & mask[j] != 0 { -1 } else { 1 };
-                    let s2 = if signs & mask[j + 4] != 0 { -1 } else { 1 };
-                    sumi += g1[j] as i8 as i32 * q8[q8_idx + j] as i32 * s1;
-                    sumi += g2[j] as i8 as i32 * q8[q8_idx + j + 4] as i32 * s2;
+                    let s1: i64 = if signs & mask[j] != 0 { -1 } else { 1 };
+                    let s2: i64 = if signs & mask[j + 4] != 0 { -1 } else { 1 };
+                    sumi += (g1[j] as i8 as i64) * (q8[q8_idx + j] as i64) * s1;
+                    sumi += (g2[j] as i8 as i64) * (q8[q8_idx + j + 4] as i64) * s2;
                 }
                 q8_idx += 8;
             }
             q3_idx += 8;
             bsum += sumi * ls;
         }
-        sumf += d * (bsum as f32) * 0.25;
+        sumf += (d as f64) * (bsum as f64) * 0.25;
     }
-    sumf
+    sumf as f32
 }
 
 pub fn dequantize_row_q4_k(block_bytes: &[u8], output: &mut [f32]) {
