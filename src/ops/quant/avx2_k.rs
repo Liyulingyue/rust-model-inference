@@ -46,36 +46,43 @@ pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(
             h >>= 4;
             let qs_base = pair * 32;
             let q8_base = pair * 64;
-            let qb = _mm_loadu_si128(qs.as_ptr().add(qs_base) as *const __m128i);
+            let qb0 = _mm_loadu_si128(qs.as_ptr().add(qs_base) as *const __m128i);
+            let qb1 = _mm_loadu_si128(qs.as_ptr().add(qs_base + 16) as *const __m128i);
             let q8_a = _mm_loadu_si128(q8.as_ptr().add(q8_base) as *const __m128i);
             let q8_b = _mm_loadu_si128(q8.as_ptr().add(q8_base + 16) as *const __m128i);
             let q8_c = _mm_loadu_si128(q8.as_ptr().add(q8_base + 32) as *const __m128i);
             let q8_d = _mm_loadu_si128(q8.as_ptr().add(q8_base + 48) as *const __m128i);
             let m0f128 = _mm256_castsi256_si128(m0f);
-            let lo_nib = _mm_and_si128(qb, m0f128);
-            let hi_nib = _mm_and_si128(_mm_srli_epi16(qb, 4), m0f128);
-            let lo_lut = _mm_shuffle_epi8(lut128, lo_nib);
-            let hi_lut = _mm_shuffle_epi8(lut128, hi_nib);
-            let lo_i16 = _mm256_cvtepi8_epi16(lo_lut);
-            let hi_i16 = _mm256_cvtepi8_epi16(hi_lut);
+
+            let lo_nib0 = _mm_and_si128(qb0, m0f128);
+            let hi_nib0 = _mm_and_si128(_mm_srli_epi16(qb0, 4), m0f128);
+            let lo_lut0 = _mm_shuffle_epi8(lut128, lo_nib0);
+            let hi_lut0 = _mm_shuffle_epi8(lut128, hi_nib0);
+            let lo_i16_0 = _mm256_cvtepi8_epi16(lo_lut0);
+            let hi_i16_0 = _mm256_cvtepi8_epi16(hi_lut0);
             let q8_a_i16 = _mm256_cvtepi8_epi16(q8_a);
             let q8_b_i16 = _mm256_cvtepi8_epi16(q8_b);
+            let p_lo1 = _mm256_madd_epi16(lo_i16_0, q8_a_i16);
+            let p_hi1 = _mm256_madd_epi16(hi_i16_0, q8_b_i16);
+            let p1 = _mm256_add_epi32(p_lo1, p_hi1);
+            let dot1 = hsum_i32(p1);
+            let dl1 = d * (ls1 as f32 - 32.0f32);
+            acc_sum += dl1 * (dot1 as f32);
+
+            let lo_nib1 = _mm_and_si128(qb1, m0f128);
+            let hi_nib1 = _mm_and_si128(_mm_srli_epi16(qb1, 4), m0f128);
+            let lo_lut1 = _mm_shuffle_epi8(lut128, lo_nib1);
+            let hi_lut1 = _mm_shuffle_epi8(lut128, hi_nib1);
+            let lo_i16_1 = _mm256_cvtepi8_epi16(lo_lut1);
+            let hi_i16_1 = _mm256_cvtepi8_epi16(hi_lut1);
             let q8_c_i16 = _mm256_cvtepi8_epi16(q8_c);
             let q8_d_i16 = _mm256_cvtepi8_epi16(q8_d);
-            let p_lo1 = _mm256_madd_epi16(lo_i16, q8_a_i16);
-            let p_hi1 = _mm256_madd_epi16(hi_i16, q8_b_i16);
-            let p_lo2 = _mm256_madd_epi16(lo_i16, q8_c_i16);
-            let p_hi2 = _mm256_madd_epi16(hi_i16, q8_d_i16);
-            let p1 = _mm256_add_epi32(p_lo1, p_hi1);
+            let p_lo2 = _mm256_madd_epi16(lo_i16_1, q8_c_i16);
+            let p_hi2 = _mm256_madd_epi16(hi_i16_1, q8_d_i16);
             let p2 = _mm256_add_epi32(p_lo2, p_hi2);
-            let sumi1_ps = _mm256_cvtepi32_ps(p1);
-            let sumi2_ps = _mm256_cvtepi32_ps(p2);
-            let prod1 = _mm256_mul_ps(sumi1_ps, _mm256_set1_ps(d * (ls1 as f32 - 32.0f32)));
-            let prod2 = _mm256_mul_ps(sumi2_ps, _mm256_set1_ps(d * (ls2 as f32 - 32.0f32)));
-            let sum1 = hsum256_ps(prod1);
-            let sum2 = hsum256_ps(prod2);
-            acc_sum += sum1;
-            acc_sum += sum2;
+            let dot2 = hsum_i32(p2);
+            let dl2 = d * (ls2 as f32 - 32.0f32);
+            acc_sum += dl2 * (dot2 as f32);
         }
     }
 
