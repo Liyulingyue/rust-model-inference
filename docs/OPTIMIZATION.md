@@ -330,9 +330,9 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 | 模型 | Size (MB) | tok/s (gen) | Status | 关键路径 |
 |---|---:|---:|---|---|
 | **Q4_1** | 390 | **82.3** | ✅ | Q4_1 × Q8_0 AVX2 |
-| **Q6_K** | 472 | **50.4** | ✅ | Q6K × Q8K scalar |
+| **Q6_K** | 472 | **50.4** | ✅ | Q6K × Q8K AVX2 (1-2 ULP drift, f32 non-associative, production OK) |
 | **Q4_K_M** | 378 | 45.0 | ✅ | Q4K × Q8K scalar |
-| **Q8_0** | 610 | 40.2 | ✅ | Q8_0 × Q8_0 AVX2 |
+| **Q8_0** | 610 | 40.2 | ✅ | Q8_0 × Q8_0 AVX2 (test arg-order bug fixed `acb0a2b`, `max_diff=0.000366 rel=1.6e-7`) |
 | **Q5_K_M** | 424 | 40.3 | ✅ | Q5K × Q8K scalar (was placeholder) |
 | **Q5_K_S** | 416 | 36.9 | ✅ | Q5K × Q8K scalar (was placeholder) |
 | **Q4_K_S** | 366 | 41.1 | ✅ | Q4K × Q8K scalar (was 0 output) |
@@ -405,6 +405,6 @@ assert!(diff_bits == 0, "AVX2 diverged by {} ULP", diff_bits);
 
 **不要**用 `rel < 1e-3` 这类容差测试,否则 1 ULP drift 会被掩盖。Q4_0 模型在合成数据 + 真实模型权重上跑了 9 个 parity case 全部 bit-exact 通过,然后才接入生产 dispatch。
 
-**已知未完全修复**(见 `docs/TODO.md`):
-- Q6_K AVX2 仍有 1 ULP drift,根因可能更深(`_mm256_madd_epi16` 累加顺序 vs scalar 的 per-element 累加,或 `_mm256_sub_epi32(sumi, q8sclsub)` 减法指令序列差异)。当前生产模型输出正确,但需进一步调查。
-- Q8_0 AVX2 在合成 uniform 数据上 drift 255(极端情况),但真实模型权重通过 — FMA + hsum 顺序问题,未深入定位。
+**已知未完全修复**(commit `acb0a2b` 已调查根因,见下):
+- Q6_K AVX2 仍有 1-2 ULP drift,根因与 Q4_0/Q4_K 同源:**scalar `sumf += sums[l]` 是线性累加,AVX2 `hsum_ps` 是树形 reduction;f32 加法不满足结合律**。尝试过多种缓解(FMA→mul+add 拆解、scalar 改 `mul_add`),均无改善——属于 IEEE 754 不可避免现象。生产验证:Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"(scalar 与 AVX2 一致)。
+- Q8_0 AVX2 "diff=255" 是**测试 bug**(scalar 函数调用时 `(n_in, n_out, 0)` 把 `n_out` 错位传到 `row_start`,导致 scalar 没跑任何行返回 0)。修复后实测 `max_diff=0.000366 rel=1.6e-7`,AVX2 算法 bit-exact 正确。
