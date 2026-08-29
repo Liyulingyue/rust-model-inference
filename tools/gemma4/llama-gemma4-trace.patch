@@ -1,0 +1,13 @@
+diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
+index 9a0be2da6..b308d686d 100644
+--- a/tools/mtmd/CMakeLists.txt
++++ b/tools/mtmd/CMakeLists.txt
+@@ -119,4 +119,8 @@ if (LLAMA_BUILD_TOOLS)
+     set_target_properties(llama-mtmd-debug PROPERTIES OUTPUT_NAME llama-mtmd-debug)
+     target_link_libraries(llama-mtmd-debug PRIVATE llama-common mtmd Threads::Threads)
+     target_compile_features(llama-mtmd-debug PRIVATE cxx_std_17)
++
++    add_executable(llama-gemma4-trace mtmd-cli.cpp)
++    target_link_libraries(llama-gemma4-trace PRIVATE llama-common mtmd Threads::Threads)
++    target_compile_features(llama-gemma4-trace PRIVATE cxx_std_17)
+ endif()
