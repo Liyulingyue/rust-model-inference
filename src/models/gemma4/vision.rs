@@ -2,7 +2,7 @@ use super::Gemma4VisionConfig;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_approx_inplace,
+    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_ggml_inplace,
 };
 use std::path::Path;
 
@@ -658,7 +658,7 @@ fn attention(
                 let k_row = &k[key * EMBED + head * HEAD_DIM..key * EMBED + (head + 1) * HEAD_DIM];
                 score[key] = dot_f32(q_row, k_row, HEAD_DIM);
             }
-            softmax_approx_inplace(score);
+            softmax_ggml_inplace(score);
             for dimension in 0..HEAD_DIM {
                 let values = &v_transposed[(head * HEAD_DIM + dimension) * tokens
                     ..(head * HEAD_DIM + dimension + 1) * tokens];
@@ -1094,7 +1094,7 @@ mod tests {
         .unwrap();
 
         let mut probabilities = logits;
-        crate::ops::softmax_approx_inplace(&mut probabilities);
+        crate::ops::softmax_ggml_inplace(&mut probabilities);
         assert_eq!(
             scores[..tokens]
                 .iter()
