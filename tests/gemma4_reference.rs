@@ -1,3 +1,4 @@
+use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -119,4 +120,35 @@ fn gemma4_matches_pinned_cpu_oracle() {
         GGMLType::F16,
     );
     assert!(ensure_gemma4_oracle().unwrap().is_file());
+}
+
+#[test]
+#[ignore = "requires the Gemma4 mmproj"]
+fn gemma4_image_smoke() {
+    let mmproj = gemma4_mmproj_path();
+    require_gemma4_gguf(
+        &mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "v.patch_embd.weight",
+        GGMLType::F16,
+    );
+    let loader = GGUFLoader::from_file(&mmproj).unwrap();
+    let model = Gemma4VisionModel::from_source(&loader, 4).unwrap();
+    let fixture =
+        std::env::temp_dir().join(format!("rmi-gemma4-image-smoke-{}.png", std::process::id()));
+    image::RgbImage::from_fn(64, 48, |x, y| {
+        image::Rgb([
+            (x.wrapping_mul(3).wrapping_add(y)) as u8,
+            (y.wrapping_mul(5).wrapping_add(x)) as u8,
+            (x ^ y) as u8,
+        ])
+    })
+    .save(&fixture)
+    .unwrap();
+    let projected = model.encode_path(&fixture).unwrap();
+    let _ = std::fs::remove_file(&fixture);
+    assert!(!projected.is_empty());
+    assert_eq!(projected.len() % 1536, 0);
+    assert!(projected.iter().all(|value| value.is_finite()));
 }
