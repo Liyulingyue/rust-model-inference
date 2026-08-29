@@ -229,7 +229,18 @@ impl<'model> Gemma4Session<'model> {
         }
 
         for row in &rows {
-            self.forward_row(row)?;
+            let kv_lengths = self
+                .kv
+                .iter()
+                .map(|layer| (layer.keys.len(), layer.values.len()))
+                .collect::<Vec<_>>();
+            if let Err(error) = self.forward_row(row) {
+                for (layer, (key_len, value_len)) in self.kv.iter_mut().zip(kv_lengths) {
+                    layer.keys.truncate(key_len);
+                    layer.values.truncate(value_len);
+                }
+                return Err(error);
+            }
             self.seq_len += 1;
         }
         Ok(self.scratch.logits.clone())
@@ -985,10 +996,121 @@ fn trace(_name: &str, _layer: Option<usize>, _values: &[f32]) {}
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_input_rows, kv_source_layer, load_weight, require_f32_kv, softcap, Gemma4InputRow,
+        assemble_input_rows, head_dim, kv_source_layer, load_weight, require_f32_kv, softcap,
+        Gemma4InputRow, Gemma4Layer, Gemma4Model, BASE_FFN_LAYERS, EMBED, FULL_HEAD_DIM, HEADS,
+        LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL, SWA_HEAD_DIM, VOCAB,
     };
     use crate::core::scratchpad::KvFormat;
     use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
+    use crate::core::thread_pool::ComputePool;
+    use crate::models::gemma4::Gemma4Config;
+    use crate::ops::kernel::{Kernel, Weight};
+    use std::sync::Arc;
+
+    struct EmptySource;
+
+    impl TensorSource for EmptySource {
+        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    struct ZeroKernel;
+
+    impl Kernel for ZeroKernel {
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            output: &mut [f32],
+            _n_in: usize,
+            n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            output[..n_out].fill(0.0);
+        }
+
+        fn embedding_lookup(&self, _token_id: u32, n_embd: usize, output: &mut [f32]) {
+            assert_eq!(output.len(), n_embd);
+            output.fill(0.0);
+        }
+    }
+
+    fn zero_weight(n_in: usize, n_out: usize) -> Weight<'static> {
+        Weight {
+            kernel: Box::new(ZeroKernel),
+            ggml_type: GGMLType::F32,
+            n_in,
+            n_out,
+        }
+    }
+
+    fn zero_layer(layer: usize) -> Gemma4Layer {
+        let dim = head_dim(layer);
+        let ffn = if layer < BASE_FFN_LAYERS {
+            6144
+        } else {
+            MAX_FFN
+        };
+        Gemma4Layer {
+            head_dim: dim,
+            attn_norm: vec![1.0; EMBED],
+            attn_q: zero_weight(EMBED, HEADS * dim),
+            attn_k: zero_weight(EMBED, dim),
+            attn_v: zero_weight(EMBED, dim),
+            attn_output: zero_weight(HEADS * dim, EMBED),
+            attn_q_norm: vec![1.0; dim],
+            attn_k_norm: vec![1.0; dim],
+            post_attention_norm: vec![1.0; EMBED],
+            ffn_norm: vec![1.0; EMBED],
+            ffn_gate: zero_weight(EMBED, ffn),
+            ffn_up: zero_weight(EMBED, ffn),
+            ffn_down: zero_weight(ffn, EMBED),
+            post_ffw_norm: vec![1.0; EMBED],
+            inp_gate: zero_weight(EMBED, PER_LAYER),
+            proj: zero_weight(PER_LAYER, EMBED),
+            post_norm: vec![1.0; EMBED],
+            output_scale: 1.0,
+        }
+    }
+
+    fn post_kv_failure_model() -> Gemma4Model {
+        let mut layers = (0..LAYERS).map(zero_layer).collect::<Vec<_>>();
+        layers[0].attn_output.n_in += 1;
+        Gemma4Model {
+            _source: Arc::new(EmptySource),
+            config: Gemma4Config {
+                layers: LAYERS,
+                embd: EMBED,
+                heads: HEADS,
+                kv_heads: 1,
+                vocab: VOCAB,
+                full_head_dim: FULL_HEAD_DIM,
+                swa_head_dim: SWA_HEAD_DIM,
+                shared_kv_layers: 20,
+                per_layer_width: PER_LAYER,
+                sliding_window: 512,
+                logit_softcap: 30.0,
+            },
+            pool: Arc::new(ComputePool::new(1)),
+            token_embedding: zero_weight(EMBED, VOCAB),
+            per_layer_token_embedding: zero_weight(PER_LAYER_ALL, VOCAB),
+            per_layer_model_proj: zero_weight(EMBED, PER_LAYER_ALL),
+            per_layer_proj_norm: vec![1.0; PER_LAYER],
+            output_norm: vec![1.0; EMBED],
+            rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
+            layers,
+        }
+    }
 
     #[test]
     fn raw_rows_are_not_embedding_scaled_and_use_padding_layer_id() {
@@ -1050,6 +1172,26 @@ mod tests {
     fn incremental_session_is_f32_only() {
         assert!(require_f32_kv(KvFormat::F32).is_ok());
         assert!(require_f32_kv(KvFormat::F16).unwrap_err().contains("F32"));
+    }
+
+    #[test]
+    fn post_kv_failure_leaves_session_state_unchanged() {
+        let model = post_kv_failure_model();
+        let mut session = super::Gemma4Session::new(&model, KvFormat::F32).unwrap();
+        let rows = [Gemma4InputRow::Raw {
+            values: vec![0.0; EMBED],
+            per_layer_token: 0,
+        }];
+
+        for _ in 0..2 {
+            let error = session.forward_rows(&rows).unwrap_err();
+            assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+            assert_eq!(session.len(), 0);
+            assert!(session
+                .kv
+                .iter()
+                .all(|layer| layer.keys.is_empty() && layer.values.is_empty()));
+        }
     }
 
     #[test]
