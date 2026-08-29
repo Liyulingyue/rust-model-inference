@@ -176,13 +176,22 @@ impl ExecutionScratchpad {
 - Run: `LD_LIBRARY_PATH=references/llama.cpp/build/bin references/llama.cpp/build/bin/llama-cli`
 
 ### Key Files
-- `src/main.rs`: inference loop, `run_inference` (7-step BSP), `run_dump_logits`, CLI flags
-- `src/ops.rs`: SIMD ops — `matmul_q8_0_vs_q8_0_avx2`, `dot_f16_f32`, `vec_mad_f16_f32`, `f32_slice_to_f16`, `rms_norm`, `softmax`, `quantize_q8_0_into`, `rope_neox`, `silu`
-- `src/model.rs`: GGUF parser, `QuantizedLinear`
-- `src/tokenizer.rs`: BPETokenizer
-- `src/thread_pool.rs`: `ComputePool` (BSP model, epoch-based dispatch, `fence(SeqCst)`)
-- `src/traits.rs`: Layer trait, ModelConfig
-- `src/memory.rs`: BlockAllocator, MemoryArena
+- `src/bin/rust-model-inference.rs`: CLI entry, model dispatch (qwen3 / llama / lfm2 / lfm25)
+- `src/app/text.rs`: text inference entry (chat template, token streaming)
+- `src/ops/quant/mod.rs`: GGUF quantization layer (F32/F16/BF16/Q4_0/Q4_1/Q8_0/Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/Q8_K/IQ4_NL scalar matmuls + SIMD vec_dot where available)
+- `src/ops/kernel/`: per-dtype SIMD/scalar matmul kernels; `q4_0/{mod,avx2,scalar}.rs`, `q4_1/{mod,avx2,scalar}.rs`, `q8_0/{mod,avx2,neon,dispatch,parallel,scalar}.rs`, `bf16/{mod,avx2,scalar}.rs`, `q2_k.rs`, `q3_k.rs`, `q4_k.rs`, `q5_k.rs`, `q6_k.rs`, `iq4_nl.rs`, `iq4_xs.rs`
+- `src/ops/embedding.rs`: unified `embedding_lookup(weight, token_id, n_embd, embd_type, out)` + `SUPPORTED_EMBEDDING_TYPES` whitelist
+- `src/core/tensor.rs`: GGMLType enum (40+ types), `TensorSource` trait, `load_f32_tensor` extractor, `bf16_to_f32` canonical location
+- `src/core/loader.rs`: GGUF parser
+- `src/core/thread_pool.rs`: `ComputePool` (BSP model, epoch-based dispatch, `fence(SeqCst)`)
+- `src/core/scratchpad.rs`: `ExecutionScratchpad` for KV cache + Q8_0/Q8K activation scratch buffers
+- `src/models/qwen3/`: text + ASR + TTS multi-modal architecture
+- `src/models/llama/`, `src/models/lfm2/`, `src/models/lfm25/`, `src/models/qwen35/`: text inference skeletons
+- `src/models/diffusion/`: diffusion model skeletons (PIG, Z-Image)
+- `docs/MODEL_ORGANIZATION.md`: directory structure convention (`trunk/{config,weights,forward,session,tests}.rs`)
+- `docs/OPTIMIZATION.md`: benchmark history, AVX2 SIMD contract, kernel parity test recipe, full quant kernel matrix
+
+> Note: this ARCHITECTURE.md predates the multi-model refactor. Current `src/main.rs` no longer exists; entry is `src/bin/rust-model-inference.rs`.
 
 ### CLI Flags
 - `--model <path.gguf>`: model file
@@ -255,6 +264,8 @@ fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
 3. **Q8_0 matmul 内核优化：** 研究 llama.cpp 的 `ggml` 内核实现差异
 4. **多模态扩展：** 实现 `VisionEncoder` trait + `.ggufrs` 统一打包格式
 5. **混合量化支持：** 扩展 `QuantizedLayer` 枚举支持 Q4_K/Q3_K/Q5_K/Q6_K
+6. **Q2_K/Q3_K SIMD** — 当前 scalar 5-9 t/s，预期 5-10× 加速到 30-50 t/s（详见 OPTIMIZATION.md § "Quant Kernel 补全"）
+7. **IQ2/3/4-XS kernels** — 完整 I-quant 支持，让 qwen3-0.6b 的 IQ4_NL.gguf/IQ4_XS.gguf 文件能加载
 
 ### 性能差距分析（88% of llama.cpp at 8 threads）
 - **Pool barrier overhead (~5-10%)**：7 `pool.compute()` calls per layer × 28 layers = ~196 barriers/token

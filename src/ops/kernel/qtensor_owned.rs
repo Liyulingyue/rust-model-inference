@@ -33,6 +33,7 @@ use crate::core::tensor::GGMLType;
 pub enum QTensorOwned {
     F32 { data: Vec<f32>, n_cols: usize, n_rows: usize },
     F16 { data: Vec<u8>, n_cols: usize, n_rows: usize },
+    BF16 { data: Vec<u8>, n_cols: usize, n_rows: usize },
     Q8_0 { data: Vec<u8>, n_cols: usize, n_rows: usize },
     Q4_K { data: Vec<u8>, n_cols: usize, n_rows: usize },
     Q5_K { data: Vec<u8>, n_cols: usize, n_rows: usize },
@@ -45,6 +46,7 @@ impl QTensorOwned {
         match self {
             Self::F32 { n_cols, .. }
             | Self::F16 { n_cols, .. }
+            | Self::BF16 { n_cols, .. }
             | Self::Q8_0 { n_cols, .. }
             | Self::Q4_K { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
@@ -60,6 +62,7 @@ impl QTensorOwned {
         match self {
             Self::F32 { n_rows, .. }
             | Self::F16 { n_rows, .. }
+            | Self::BF16 { n_rows, .. }
             | Self::Q8_0 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
             | Self::Q5_K { n_rows, .. }
@@ -72,6 +75,7 @@ impl QTensorOwned {
         match self {
             Self::F32 { .. } => GGMLType::F32,
             Self::F16 { .. } => GGMLType::F16,
+            Self::BF16 { .. } => GGMLType::BF16,
             Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q4_K { .. } => GGMLType::Q4K,
             Self::Q5_K { .. } => GGMLType::Q5K,
@@ -95,6 +99,7 @@ impl QTensorOwned {
                 Self::F32 { data: f32_data, n_cols, n_rows }
             }
             GGMLType::F16 => Self::F16 { data: data.to_vec(), n_cols, n_rows },
+            GGMLType::BF16 => Self::BF16 { data: data.to_vec(), n_cols, n_rows },
             GGMLType::Q8_0 => Self::Q8_0 { data: data.to_vec(), n_cols, n_rows },
             GGMLType::Q4K => Self::Q4_K { data: data.to_vec(), n_cols, n_rows },
             GGMLType::Q5K => Self::Q5_K { data: data.to_vec(), n_cols, n_rows },
@@ -109,6 +114,7 @@ impl QTensorOwned {
         match q {
             QuantizedTensor::F32(v) => Self::F32 { data: v.clone(), n_cols: v.len(), n_rows: 1 },
             QuantizedTensor::F16(w) => Self::F16 { data: w.bytes.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
+            QuantizedTensor::BF16(w) => Self::BF16 { data: w.bytes.to_vec(), n_cols: w.n_in, n_rows: w.n_out },
             QuantizedTensor::Q8_0 { data: b, n_cols, n_rows } => {
                 Self::Q8_0 { data: b.to_vec(), n_cols, n_rows }
             }
@@ -121,10 +127,24 @@ impl QTensorOwned {
             QuantizedTensor::Q6_K { data, n_cols, n_rows } => {
                 Self::Q6_K { data: data.to_vec(), n_cols, n_rows }
             }
+            QuantizedTensor::Q2_K { .. } | QuantizedTensor::Q3_K { .. } => {
+                panic!("Q2_K / Q3_K not yet supported in QTensorOwned (only used in Qwen3.0.6B matmul, no fuse needed)")
+            }
+            QuantizedTensor::IQ4NL { .. } | QuantizedTensor::IQ4XS { .. } => {
+                panic!("IQ4_NL / IQ4_XS not yet supported in QTensorOwned")
+            }
             // Q4_0 / Q4_1 are not modeled in QTensorOwned yet (Qwen3.5 doesn't
             // use them and qwen3 uses QuantizedTensor directly).
-            QuantizedTensor::Q4_0 { .. } | QuantizedTensor::Q4_1 { .. } => {
-                panic!("Q4_0 / Q4_1 not yet supported in QTensorOwned")
+            QuantizedTensor::Q4_0 { .. }
+            | QuantizedTensor::Q4_1 { .. }
+            | QuantizedTensor::IQ2XXS { .. }
+            | QuantizedTensor::IQ2S { .. }
+            | QuantizedTensor::IQ2XS { .. }
+            | QuantizedTensor::IQ3XXS { .. }
+            | QuantizedTensor::IQ3S { .. }
+            | QuantizedTensor::IQ1M { .. }
+            | QuantizedTensor::IQ1S { .. } => {
+                panic!("Q4_0 / Q4_1 / I-quant not yet supported in QTensorOwned")
             }
         }
     }
@@ -144,6 +164,7 @@ impl QTensorOwned {
             (Self::F32 { .. }, _) | (Self::F16 { .. }, _) => {
                 panic!("F32 / F16 fuse_vstack not implemented yet")
             }
+            (Self::BF16 { data: ad, .. }, Self::BF16 { data: bd, .. }) => (ad.clone(), bd.clone()),
             (Self::Q8_0 { data: ad, .. }, Self::Q8_0 { data: bd, .. }) => (ad.clone(), bd.clone()),
             (Self::Q4_K { data: ad, .. }, Self::Q4_K { data: bd, .. }) => (ad.clone(), bd.clone()),
             (Self::Q5_K { data: ad, .. }, Self::Q5_K { data: bd, .. }) => (ad.clone(), bd.clone()),
@@ -156,6 +177,7 @@ impl QTensorOwned {
         let n_rows = a.n_rows() + b.n_rows();
         Some(match a {
             Self::Q8_0 { .. } => Self::Q8_0 { data: fused, n_cols, n_rows },
+            Self::BF16 { .. } => Self::BF16 { data: fused, n_cols, n_rows },
             Self::Q4_K { .. } => Self::Q4_K { data: fused, n_cols, n_rows },
             Self::Q5_K { .. } => Self::Q5_K { data: fused, n_cols, n_rows },
             Self::Q6_K { .. } => Self::Q6_K { data: fused, n_cols, n_rows },
@@ -178,12 +200,15 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         // Same SIMD dispatch as `QuantizedTensor<'a>` (which routes through
         // `clone_to_kernel`). The data is `.as_slice()` from a Vec, identical
         // SIMD function as borrowed bytes.
-        use crate::ops::kernel::{f16, f32, q4_k, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
             Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone())).forward_prequantized(
                 input_q8, input_scales, output, n_in, n_out, ith, nth,
             ),
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice())).forward_prequantized(
+                input_q8, input_scales, output, n_in, n_out, ith, nth,
+            ),
+            Self::BF16 { data, .. } => Box::new(bf16::BF16Kernel::new(data.as_slice())).forward_prequantized(
                 input_q8, input_scales, output, n_in, n_out, ith, nth,
             ),
             Self::Q8_0 { data, .. } => {
@@ -219,12 +244,15 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         ith: usize,
         nth: usize,
     ) {
-        use crate::ops::kernel::{f16, f32, q4_k, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
             Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone())).forward_prepared(
                 input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth,
             ),
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice())).forward_prepared(
+                input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth,
+            ),
+            Self::BF16 { data, .. } => Box::new(bf16::BF16Kernel::new(data.as_slice())).forward_prepared(
                 input_f32, input_q8, input_scales, q8_k, output, n_in, n_out, ith, nth,
             ),
             Self::Q8_0 { data, .. } => {
@@ -285,7 +313,7 @@ impl QTensorOwned {
             vec_dot_q4k_q8k, vec_dot_q5k_q8k, vec_dot_q6k_q8k,
             BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K,
         };
-        use crate::ops::{dot_f32, f16_to_f32, quantize_row_q8_k};
+        use crate::ops::{bf16_to_f32, dot_f32, f16_to_f32, quantize_row_q8_k};
 
         match self {
             Self::F32 { data, .. } => {
@@ -302,6 +330,17 @@ impl QTensorOwned {
                     for j in 0..in_dim {
                         let bits = u16::from_le_bytes([data[(o * in_dim + j) * 2], data[(o * in_dim + j) * 2 + 1]]);
                         row[j] = f16_to_f32(bits);
+                    }
+                    output[o - row_start] = dot_f32(&row, input, in_dim);
+                }
+            }
+            Self::BF16 { data, .. } => {
+                let in_dim = input.len();
+                let mut row = vec![0.0f32; in_dim];
+                for o in row_start..row_end {
+                    for j in 0..in_dim {
+                        let bits = u16::from_le_bytes([data[(o * in_dim + j) * 2], data[(o * in_dim + j) * 2 + 1]]);
+                        row[j] = bf16_to_f32(bits);
                     }
                     output[o - row_start] = dot_f32(&row, input, in_dim);
                 }
@@ -534,7 +573,7 @@ impl QTensorOwned {
                     );
                 });
             }
-            Self::F32 { .. } | Self::F16 { .. } => {
+            Self::F32 { .. } | Self::F16 { .. } | Self::BF16 { .. } => {
                 let n_rows = self.n_rows();
                 if pool.n_threads() <= 1 || n_rows < 256 {
                     self.matmul_into(input, &mut buf[..n_rows], 0, n_rows);
@@ -568,6 +607,13 @@ impl QTensorOwned {
         match self {
             Self::F32 { .. } => self,
             Self::F16 { .. } => panic!("F16 -> F32 dequant not yet implemented in QTensorOwned"),
+            Self::BF16 { data, n_cols, n_rows } => {
+                let mut out = vec![0.0f32; n_cols * n_rows];
+                for (value, chunk) in out.iter_mut().zip(data.chunks_exact(2)) {
+                    *value = crate::ops::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+                Self::F32 { data: out, n_cols, n_rows }
+            }
             Self::Q8_0 { data, n_cols, n_rows } => {
                 let dequant = dequant_q80_weight(&data, n_cols, n_rows);
                 Self::F32 { data: dequant, n_cols, n_rows }
@@ -630,6 +676,27 @@ mod qtensor_owned_tests {
         assert_eq!(owned.ggml_type(), GGMLType::Q8_0);
         assert_eq!(owned.n_in(), 64);
         assert_eq!(owned.n_rows(), 4);
+    }
+
+    #[test]
+    fn qtensor_owned_bf16_round_trip() {
+        let bytes: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .iter()
+            .flat_map(|value| crate::ops::f32_to_bf16(*value).to_le_bytes())
+            .collect();
+        let borrowed = QuantizedTensor::from_bytes(
+            &bytes,
+            GGMLType::BF16,
+            3,
+            2,
+        );
+        let owned = QTensorOwned::from_quantized(borrowed);
+        assert_eq!(owned.ggml_type(), GGMLType::BF16);
+        assert_eq!(owned.n_in(), 3);
+        assert_eq!(owned.n_rows(), 2);
+        let mut output = [0.0f32; 2];
+        owned.matmul_into(&[1.0, 2.0, 3.0], &mut output, 0, 2);
+        assert_eq!(output, [14.0, 32.0]);
     }
 
     #[test]

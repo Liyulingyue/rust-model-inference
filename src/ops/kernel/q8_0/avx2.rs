@@ -157,7 +157,7 @@ mod tests {
         unsafe {
             matmul_q8_0_vs_q8_0_avx2(weight, q8, scales, &mut avx2_out, n_in, 0, n_out);
         }
-        matmul_q8_0_quantized_scalar_range(weight, q8, scales, &mut scalar_out, n_in, n_out, 0);
+        matmul_q8_0_quantized_scalar_range(weight, q8, scales, &mut scalar_out, n_in, 0, n_out);
         let max_diff = avx2_out
             .iter()
             .zip(scalar_out.iter())
@@ -165,10 +165,27 @@ mod tests {
             .fold(0.0f32, f32::max);
         let max_scalar = scalar_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let rel = if max_scalar > 1e-3 { max_diff / max_scalar } else { max_diff };
+        // Find worst diff index
+        let mut worst_idx = 0;
+        let mut worst_diff = 0.0f32;
+        for (i, (a, b)) in avx2_out.iter().zip(scalar_out.iter()).enumerate() {
+            let d = (a - b).abs();
+            if d > worst_diff {
+                worst_diff = d;
+                worst_idx = i;
+            }
+        }
         eprintln!(
-            "[{}] {}x{} max_diff={} rel={}",
-            label, n_out, n_in, max_diff, rel
+            "[{}] {}x{} max_diff={} rel={} worst_idx={} avx2={} scalar={}",
+            label, n_out, n_in, max_diff, rel, worst_idx,
+            avx2_out[worst_idx], scalar_out[worst_idx]
         );
+        if n_out >= 4 {
+            eprintln!(
+                "[{}] avx2[0..4]={:?} scalar[0..4]={:?}",
+                label, &avx2_out[0..4], &scalar_out[0..4]
+            );
+        }
         assert!(
             rel < 1e-3,
             "{} AVX2 diverged: max_diff={} rel={}",
@@ -181,15 +198,22 @@ mod tests {
         if !crate::ops::has_avx2_fma() {
             return;
         }
+        // 8 rows × 16 blocks/row = 8 rows × 512 input = 4096 weights / 4096 in
+        let n_rows = 8;
+        let n_blocks = 16;
         let mut weight = Vec::new();
-        for _ in 0..128 {
-            weight.extend(q8_uniform_block(1, 0.5));
+        for r in 0..n_rows {
+            for b in 0..n_blocks {
+                // weight value varies per block, scale fixed
+                let val: i8 = ((r * n_blocks + b) % 127) as i8 + 1;
+                weight.extend(q8_uniform_block(val, 0.5));
+            }
         }
-        let q8: Vec<u8> = (0..(128 * 32))
-            .map(|i| (i as i8) as u8)
+        let q8: Vec<u8> = (0..(n_blocks * 32))
+            .map(|i| ((i as i8).wrapping_rem(127) + 1) as u8)
             .collect();
-        let scales: Vec<f32> = (0..128).map(|i| 0.01 + (i as f32) * 0.001).collect();
-        assert_avx2_matches_scalar("q8_0-uniform-128", &weight, &q8, &scales);
+        let scales: Vec<f32> = (0..n_blocks).map(|i| 0.01 + (i as f32) * 0.001).collect();
+        assert_avx2_matches_scalar("q8_0-uniform-8x16", &weight, &q8, &scales);
     }
 
     #[test]

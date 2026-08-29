@@ -26,7 +26,7 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(source: &'a S, name: &st
     let n_rows = if ti.dims.len() >= 2 { ti.dims[1] as usize } else { 1 };
 
     match ti.ggml_type {
-        GGMLType::F32 | GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0
+        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0 | GGMLType::Q4_0
         | GGMLType::Q4_1 | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K => {
             Some(Weight::from_quantized(QuantizedTensor::from_bytes(data, ti.ggml_type, n_cols, n_rows)))
         }
@@ -59,6 +59,18 @@ pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) 
             for i in 0..n_el { out.push(f16_at(data, i)); }
             Some(out)
         }
+        GGMLType::BF16 => {
+            let mut out = Vec::with_capacity(n_el);
+            for i in 0..n_el {
+                let off = i * 2;
+                if off + 2 <= data.len() {
+                    out.push(crate::ops::bf16_to_f32(u16::from_le_bytes([data[off], data[off + 1]])));
+                } else {
+                    out.push(0.0);
+                }
+            }
+            Some(out)
+        }
         _ => None,
     }
 }
@@ -74,6 +86,9 @@ impl<'a> crate::models::qwen35::Qwen35Model<'a> {
             let n_rows = ti.dims[1] as usize;
             match ti.ggml_type {
                 GGMLType::F16 => (0..n_cols * n_rows).map(|i| f16_at(data, i)).collect(),
+                GGMLType::BF16 => (0..n_cols * n_rows)
+                    .map(|i| crate::ops::bf16_to_f32(u16::from_le_bytes([data[i * 2], data[i * 2 + 1]])))
+                    .collect(),
                 GGMLType::Q8_0 => quant::dequant_q80_weight(data, n_cols, n_rows),
                 GGMLType::Q6K => quant::dequant_q6k_weight(data, n_cols, n_rows),
                 _ => return Err("Unsupported token_embd type".into()),

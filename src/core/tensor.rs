@@ -29,9 +29,21 @@ pub enum GGMLType {
     Q5K = 13,
     Q6K = 14,
     Q8K = 15,
-    I8 = 16,
-    I16 = 17,
-    I32 = 18,
+    IQ2_XXS = 16,
+    IQ2_XS = 17,
+    IQ3_XXS = 18,
+    IQ1_S = 19,
+    IQ4_NL = 20,
+    IQ3_S = 21,
+    IQ2_S = 22,
+    IQ4_XS = 23,
+    I8 = 24,
+    I16 = 25,
+    I32 = 26,
+    I64 = 27,
+    F64 = 28,
+    IQ1_M = 29,
+    BF16 = 30,
 }
 
 impl GGMLType {
@@ -51,9 +63,21 @@ impl GGMLType {
             13 => Some(Self::Q5K),
             14 => Some(Self::Q6K),
             15 => Some(Self::Q8K),
-            16 => Some(Self::I8),
-            17 => Some(Self::I16),
-            18 => Some(Self::I32),
+            16 => Some(Self::IQ2_XXS),
+            17 => Some(Self::IQ2_XS),
+            18 => Some(Self::IQ3_XXS),
+            19 => Some(Self::IQ1_S),
+            20 => Some(Self::IQ4_NL),
+            21 => Some(Self::IQ3_S),
+            22 => Some(Self::IQ2_S),
+            23 => Some(Self::IQ4_XS),
+            24 => Some(Self::I8),
+            25 => Some(Self::I16),
+            26 => Some(Self::I32),
+            27 => Some(Self::I64),
+            28 => Some(Self::F64),
+            29 => Some(Self::IQ1_M),
+            30 => Some(Self::BF16),
             _ => None,
         }
     }
@@ -74,9 +98,21 @@ impl GGMLType {
             Self::Q5K => (256, 176),
             Self::Q6K => (256, 210),
             Self::Q8K => (256, 292),
+            Self::IQ2_XXS => (256, 66),
+            Self::IQ2_XS => (256, 74),
+            Self::IQ2_S => (256, 82),
+            Self::IQ3_XXS => (256, 98),
+            Self::IQ3_S => (256, 110),
+            Self::IQ1_S => (256, 50),
+            Self::IQ1_M => (256, 56),
+            Self::IQ4_NL => (32, 18),
+            Self::IQ4_XS => (256, 136),
             Self::I8 => (1, 1),
             Self::I16 => (1, 2),
             Self::I32 => (1, 4),
+            Self::I64 => (1, 8),
+            Self::F64 => (1, 8),
+            Self::BF16 => (1, 2),
         }
     }
 
@@ -246,6 +282,59 @@ pub trait TensorSource: Send + Sync {
     }
 }
 
+/// Load a 1-D tensor as `Vec<f32>`, accepting both F32 and BF16 storage.
+///
+/// This is the canonical helper for "norm weights" which ship as either F32
+/// or BF16 across GGUF model variants. Models should call this instead of
+/// reimplementing the byte-to-f32 conversion. See
+/// `docs/MODEL_ORGANIZATION.md` §6 for the rationale.
+pub fn load_f32_tensor<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    dims: &[u64],
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} F32 or BF16",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    match info.ggml_type {
+        GGMLType::F32 => Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        GGMLType::BF16 => Ok(bytes
+            .chunks_exact(2)
+            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect()),
+        other => Err(format!("{name}: unsupported tensor type {other:?}")),
+    }
+}
+
+/// Bit-level BF16 → F32 conversion (zero-extend the 16 high bits).
+#[inline]
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +343,7 @@ mod tests {
     fn test_ggml_type_nbytes() {
         assert_eq!(GGMLType::F32.nbytes(256), 1024);
         assert_eq!(GGMLType::F16.nbytes(256), 512);
+        assert_eq!(GGMLType::BF16.nbytes(256), 512);
         assert_eq!(GGMLType::Q4K.nbytes(256), 144);
         assert_eq!(GGMLType::Q4K.nbytes(512), 288);
         assert_eq!(GGMLType::Q4_0.nbytes(32), 18);

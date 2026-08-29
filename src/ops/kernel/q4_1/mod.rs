@@ -1,9 +1,18 @@
 //! Q4_1 block matmul kernel implementation.
 //!
-//! Phase 2.5 + 2.7-final: Q4_1 uses 32-element blocks with 20-byte layout
+//! Q4_1 uses 32-element blocks with 20-byte layout
 //! (2-byte F16 scale + 2-byte F16 min + 16-byte nibbles).
+//!
+//! Module structure:
+//! - `scalar.rs` — scalar fallback (`matmul_q4_1_scalar_range`)
+//! - `avx2.rs`    — AVX2 SIMD kernel (mirrors `q4_0::avx2` strategy)
 
 use super::Kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
+pub mod scalar;
+
+pub use scalar::matmul_q4_1_scalar_range;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q4_1Kernel<'a> {
@@ -30,6 +39,31 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                let per_thread = (n_out + nth - 1) / nth;
+                let my_start = ith * per_thread;
+                let my_end = (my_start + per_thread).min(n_out);
+                if my_start >= my_end {
+                    return;
+                }
+                let my_out = &mut output[my_start..my_end];
+                unsafe {
+                    avx2::matmul_q4_1_vs_q8_0_avx2(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        None,
+                        my_out,
+                        n_in,
+                        my_start,
+                        my_end,
+                    );
+                    return;
+                }
+            }
+        }
         matmul_q4_1_scalar_range(
             self.weight,
             input_q8,
@@ -70,6 +104,32 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
                 crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * scale))
             })
             .collect();
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                let per_thread = (n_out + nth - 1) / nth;
+                let my_start = ith * per_thread;
+                let my_end = (my_start + per_thread).min(n_out);
+                if my_start >= my_end {
+                    return;
+                }
+                let my_out = &mut output[my_start..my_end];
+                unsafe {
+                    avx2::matmul_q4_1_vs_q8_0_avx2(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        Some(&input_sums),
+                        my_out,
+                        n_in,
+                        my_start,
+                        my_end,
+                    );
+                    return;
+                }
+            }
+        }
         matmul_q4_1_scalar_range(
             self.weight,
             input_q8,
@@ -81,55 +141,6 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             ith,
             nth,
         );
-    }
-}
-
-/// Q4_1 scalar matmul kernel. Phase 2.7-final: moved from `ops::matmul`.
-/// Each Q4_1 block holds 32 elements (20 bytes: F16 scale + F16 min +
-/// 16-byte nibbles). Scalar baseline; AVX2/NEON can be added here.
-pub fn matmul_q4_1_scalar_range(
-    weight: &[u8],
-    input_q8: &[u8],
-    input_scales: &[f32],
-    input_sums: Option<&[f32]>,
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-    ith: usize,
-    nth: usize,
-) {
-    let n_blocks = n_in / Q4_1Kernel::BLOCK_ELEMENTS;
-    let row_stride = n_blocks * Q4_1Kernel::BLOCK_BYTES;
-    let per_thread = (n_out + nth - 1) / nth;
-    let my_start = ith * per_thread;
-    let my_end = (my_start + per_thread).min(n_out);
-    if my_start >= my_end {
-        return;
-    }
-    for out_idx in my_start..my_end {
-        let row_off = out_idx * row_stride;
-        let mut sum = 0.0f32;
-        for block in 0..n_blocks {
-            let off = row_off + block * Q4_1Kernel::BLOCK_BYTES;
-            let d = crate::ops::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
-            let m = crate::ops::f16_to_f32(u16::from_le_bytes([weight[off + 2], weight[off + 3]]));
-            let qx = &weight[off + 4..off + Q4_1Kernel::BLOCK_BYTES];
-            let base_y = block * Q4_1Kernel::BLOCK_ELEMENTS;
-            let scale = input_scales[block];
-            let mut dot: i32 = 0;
-            let mut y_sum: i32 = 0;
-            for l in 0..16 {
-                let x0 = (qx[l] & 0x0F) as i32;
-                let x1 = (qx[l] >> 4) as i32;
-                let y0 = input_q8[base_y + l] as i8 as i32;
-                let y1 = input_q8[base_y + 16 + l] as i8 as i32;
-                dot += x0 * y0 + x1 * y1;
-                y_sum += y0 + y1;
-            }
-            let input_sum = input_sums.map_or(scale * y_sum as f32, |sums| sums[block]);
-            sum += (d * scale) * dot as f32 + m * input_sum;
-        }
-        output[out_idx] = sum;
     }
 }
 

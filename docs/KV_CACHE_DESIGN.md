@@ -290,6 +290,86 @@ session.generate(input, options)?;
 └──────────────────────────────────────────────────┘
 ```
 
+## 实现状态
+
+> 本节记录设计文档与当前代码实现的差距。
+> 截至当前，**类型骨架已就位但迁移未完成**：只有 Qwen3 文本路径真正使用 `KvState`，
+> 其余 5 个推理路径仍直接使用旧 `KvCache` 枚举，多项 API 尚未落地。
+
+### 已落地
+
+| 设计项 | 状态 | 位置 |
+|--------|------|------|
+| `KvState` / `KvArch` / `KvFormat` / `KvLifecycle` 类型 | ✅ 已定义 | `src/core/scratchpad.rs` |
+| `KvArch::is_compatible_with` | ✅ 已定义 + 单测 | `scratchpad.rs:166` |
+| `KvState::new` / `with_lifecycle` / `update_access` / `reset` | ✅ 已定义 | `scratchpad.rs:207-264` |
+| Session-based 使用模式 | ✅ 仅 Qwen3 | `src/models/qwen3/base.rs:432` (`new_with_kv_state`) |
+| 内存计算公式 `bytes_per_token` / `total_bytes` | ✅ 已定义 + 单测 | `scratchpad.rs:151-163` |
+| `KvState::is_compatible_with` 调用 | ✅ 调用方存在 | `qwen3/base.rs` 中 `KvArch` 构造路径 |
+
+### 尚未落地
+
+#### 1. 类型迁移未完成（5/6 路径仍用旧 `KvCache`）
+
+| 路径 | 现状 | 位置 |
+|------|------|------|
+| `llama/base.rs` | ❌ `KvCache::new_f16` | `models/llama/base.rs:277` |
+| `lfm2/base.rs` | ❌ `KvCache::new_f16` | `models/lfm2/base.rs:148` |
+| `lfm25/base.rs` | ❌ `KvCache::new_f16` | `models/lfm25/base.rs:117` |
+| `qwen35/session.rs` | ❌ `KvCache::new_f32` | `models/qwen35/session.rs:55,85` |
+| `bin/server.rs` | ❌ `KvCache::new_f16/f32` 每次请求新建 | `bin/server.rs:433,814` |
+| `qwen3/base.rs` | ✅ `KvState` | — |
+
+**影响**：只有 Qwen3 文本生成获得了 `KvState` 带来的兼容性检查、生命周期管理能力；
+其余路径（特别是 server 多租户场景）的 KV 仍是裸 `Vec`。
+
+#### 2. 类型重复
+
+`lfm2/base.rs:362` 与 `lfm25/base.rs:321` 分别定义了本地枚举：
+
+```rust
+pub enum KvCacheFmt { F16, F32 }
+```
+
+与 `core::scratchpad::KvFormat` 功能完全重复，`app/text.rs:60-75` 不得不在两层之间手动转换。
+建议合并到 `KvFormat`，删除 `KvCacheFmt`。
+
+#### 3. 生命周期策略形同虚设
+
+- `Timed { ttl }`：**仅在 `scratchpad.rs:321` 的单测中构造**；生产代码 0 处使用。
+- `Persistent`：**仅在 `scratchpad.rs:333` 的单测中构造**；生产代码 0 处使用。
+- `Ephemeral`：唯一在生产路径使用的策略（`qwen3/text.rs:142`、`qwen3/base.rs:421`）。
+- `is_expired()`：**从未被任何生产代码调用**。没有任何后台 reaper / 定时器回收超时的 KV。
+
+#### 4. `TenantContext` 未实现
+
+文档中描述的「租户」维度（身份 / 配额 / KV 与模型自由组合）**完全没有对应类型**。
+grep 全仓 `TenantContext` 0 命中。
+
+#### 5. 文档承诺的 API 不存在
+
+| 文档承诺的 API | 实际状态 |
+|----------------|----------|
+| `Model::new_session(capacity, kv_format)` | ❌ 仅 `Qwen3Model::generate` 内部创建 session，无公开入口 |
+| `Model::new_session_with_kv(&mut kv)` | ❌ 「模式 3 外部 KV 注入」无对应 API |
+| 模式 2 Stateless API（`fn generate(model, input)`） | ❌ 不存在独立函数，每次都包装在 model 路径 |
+
+#### 6. 跨请求 KV 共享未实现
+
+`bin/server.rs` 每次 `generate_*` 都 `KvCache::new_f16(n_layer, max_ctx, n_embd_gqa)` 全新分配，
+无会话池、无跨请求复用、无租户隔离。这与文档「多租户设计」「组合矩阵」的预期严重不符。
+
+### 落地优先级建议
+
+1. **P0**：将 `KvCacheFmt` 合并到 `KvFormat`，消除重复。
+2. **P0**：`server.rs` 改造为 `KvState` + 会话池，否则多租户无从谈起。
+3. **P1**：`llama` / `lfm2` / `lfm25` / `qwen35` 迁移到 `KvState`。
+4. **P1**：提供公开 `Model::new_session` / `Model::new_session_with_kv` 入口。
+5. **P2**：实现 `TenantContext` 及组合矩阵。
+6. **P2**：实现 `Timed` KV 的 reaper 线程，使 `is_expired()` 在生产路径生效。
+
+---
+
 ## 未来优化
 
 1. **KV 压缩**: 对长时间未访问的 KV 进行压缩

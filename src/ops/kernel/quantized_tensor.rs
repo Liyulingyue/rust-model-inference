@@ -22,6 +22,13 @@ pub struct F16Weight<'a> {
     pub n_out: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct BF16Weight<'a> {
+    pub bytes: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 /// Unified enum of supported quantized weight formats. Produces a
 /// `Box<dyn Kernel>` via [`QuantizedTensor::into_kernel`].
 ///
@@ -32,8 +39,20 @@ pub struct F16Weight<'a> {
 pub enum QuantizedTensor<'a> {
     F32(Vec<f32>),
     F16(F16Weight<'a>),
+    BF16(BF16Weight<'a>),
     Q8_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q6_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q2_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    Q3_K { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ4NL { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ2XXS { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ2S { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ2XS { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ3XXS { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ3S { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ4XS { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ1M { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ1S { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_1 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_K { data: &'a [u8], n_cols: usize, n_rows: usize },
@@ -89,13 +108,47 @@ impl<'a> QuantizedTensor<'a> {
     /// `Box<dyn Kernel>` view of self. This is intentionally a separate
     /// method rather than inline because `into_kernel` consumes `self`.
     pub(crate) fn clone_to_kernel(&self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
+            Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q2_K { data, n_cols, n_rows } => {
+                Box::new(q2_k::Q2_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::Q3_K { data, n_cols, n_rows } => {
+                Box::new(q3_k::Q3_KKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ4NL { data, n_cols, n_rows } => {
+                Box::new(iq4_nl::IQ4NLKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ2XXS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2XXSKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ2S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2SKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ2XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2XSKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ3XXS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ3XXSKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ3S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ3SKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ4XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ4XSKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ1M { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1MKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ1S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1SKernel::new(data, *n_cols, *n_rows))
             }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, *n_cols, *n_rows))
@@ -127,8 +180,20 @@ impl<'a> QuantizedTensor<'a> {
                 Self::F32(f32_data)
             }
             GGMLType::F16 => Self::F16(F16Weight { bytes: data, n_in, n_out }),
+            GGMLType::BF16 => Self::BF16(BF16Weight { bytes: data, n_in, n_out }),
             GGMLType::Q8_0 => Self::Q8_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q6K => Self::Q6_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q2K => Self::Q2_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::Q3K => Self::Q3_K { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ4_NL => Self::IQ4NL { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ2_XXS => Self::IQ2XXS { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ2_S => Self::IQ2S { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ2_XS => Self::IQ2XS { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ3_XXS => Self::IQ3XXS { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ3_S => Self::IQ3S { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ4_XS => Self::IQ4XS { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ1_M => Self::IQ1M { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ1_S => Self::IQ1S { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_1 => Self::Q4_1 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4K => Self::Q4_K { data, n_cols: n_in, n_rows: n_out },
@@ -141,8 +206,20 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(_) => GGMLType::F32,
             Self::F16(_) => GGMLType::F16,
+            Self::BF16(_) => GGMLType::BF16,
             Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q6_K { .. } => GGMLType::Q6K,
+            Self::Q2_K { .. } => GGMLType::Q2K,
+            Self::Q3_K { .. } => GGMLType::Q3K,
+            Self::IQ4NL { .. } => GGMLType::IQ4_NL,
+            Self::IQ2XXS { .. } => GGMLType::IQ2_XXS,
+            Self::IQ2S { .. } => GGMLType::IQ2_S,
+            Self::IQ2XS { .. } => GGMLType::IQ2_XS,
+            Self::IQ3XXS { .. } => GGMLType::IQ3_XXS,
+            Self::IQ3S { .. } => GGMLType::IQ3_S,
+            Self::IQ4XS { .. } => GGMLType::IQ4_XS,
+            Self::IQ1M { .. } => GGMLType::IQ1_M,
+            Self::IQ1S { .. } => GGMLType::IQ1_S,
             Self::Q4_0 { .. } => GGMLType::Q4_0,
             Self::Q4_1 { .. } => GGMLType::Q4_1,
             Self::Q4_K { .. } => GGMLType::Q4K,
@@ -154,8 +231,20 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(slice) => slice.len(),
             Self::F16(w) => w.n_in,
+            Self::BF16(w) => w.n_in,
             Self::Q8_0 { n_cols, .. } => *n_cols,
             Self::Q6_K { n_cols, .. } => *n_cols,
+            Self::Q2_K { n_cols, .. } => *n_cols,
+            Self::Q3_K { n_cols, .. } => *n_cols,
+            Self::IQ4NL { n_cols, .. } => *n_cols,
+            Self::IQ2XXS { n_cols, .. } => *n_cols,
+            Self::IQ2S { n_cols, .. } => *n_cols,
+            Self::IQ2XS { n_cols, .. } => *n_cols,
+            Self::IQ3XXS { n_cols, .. } => *n_cols,
+            Self::IQ3S { n_cols, .. } => *n_cols,
+            Self::IQ4XS { n_cols, .. } => *n_cols,
+            Self::IQ1M { n_cols, .. } => *n_cols,
+            Self::IQ1S { n_cols, .. } => *n_cols,
             Self::Q4_0 { n_cols, .. } => *n_cols,
             Self::Q4_1 { n_cols, .. } => *n_cols,
             Self::Q4_K { n_cols, .. } => *n_cols,
@@ -165,13 +254,47 @@ impl<'a> QuantizedTensor<'a> {
 
     /// Build a `Box<dyn Kernel>` from this weight tensor.
     pub fn into_kernel(self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-        use crate::ops::kernel::{f16, f32, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
+        use crate::ops::kernel::{bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0};
         match self {
             Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
+            Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
             Self::Q6_K { data, n_cols, n_rows } => {
                 Box::new(q6_k::Q6_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::Q2_K { data, n_cols, n_rows } => {
+                Box::new(q2_k::Q2_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::Q3_K { data, n_cols, n_rows } => {
+                Box::new(q3_k::Q3_KKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ4NL { data, n_cols, n_rows } => {
+                Box::new(iq4_nl::IQ4NLKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ2XXS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2XXSKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ2S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2SKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ2XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ2XSKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ3XXS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ3XXSKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ3S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ3SKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ4XS { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ4XSKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ1M { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1MKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ1S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1SKernel::new(data, n_cols, n_rows))
             }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, n_cols, n_rows))
@@ -192,8 +315,20 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::F32(values) => usize::from(!values.is_empty()),
             Self::F16(weight) => weight.n_out,
+            Self::BF16(weight) => weight.n_out,
             Self::Q8_0 { n_rows, .. } => *n_rows,
             Self::Q6_K { n_rows, .. }
+            | Self::Q2_K { n_rows, .. }
+            | Self::Q3_K { n_rows, .. }
+            | Self::IQ4NL { n_rows, .. }
+            | Self::IQ2XXS { n_rows, .. }
+            | Self::IQ2S { n_rows, .. }
+            | Self::IQ2XS { n_rows, .. }
+            | Self::IQ3XXS { n_rows, .. }
+            | Self::IQ3S { n_rows, .. }
+            | Self::IQ4XS { n_rows, .. }
+            | Self::IQ1M { n_rows, .. }
+            | Self::IQ1S { n_rows, .. }
             | Self::Q4_0 { n_rows, .. }
             | Self::Q4_1 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
@@ -259,7 +394,18 @@ impl<'a> QuantizedTensor<'a> {
         match self {
             Self::Q4_K { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
-            | Self::Q6_K { n_cols, .. } => {
+            | Self::Q6_K { n_cols, .. }
+            | Self::Q2_K { n_cols, .. }
+            | Self::Q3_K { n_cols, .. }
+            | Self::IQ2XXS { n_cols, .. }
+            | Self::IQ2S { n_cols, .. }
+            | Self::IQ2XS { n_cols, .. }
+            | Self::IQ3XXS { n_cols, .. }
+            | Self::IQ3S { n_cols, .. }
+            | Self::IQ4NL { n_cols, .. }
+            | Self::IQ4XS { n_cols, .. }
+            | Self::IQ1M { n_cols, .. }
+            | Self::IQ1S { n_cols, .. } => {
                 let blocks = *n_cols / crate::ops::quant::QK_K;
                 crate::ops::quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
                 pool.compute(|ith, nth| {
@@ -348,7 +494,8 @@ mod tests {
     #[test]
     fn k_quant_variants_construct_and_dispatch() {
         use crate::ops::quant::{
-            BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, BLOCK_Q80_SIZE,
+            BLOCK_Q2K_SIZE, BLOCK_Q3K_SIZE, BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
+            BLOCK_Q80_SIZE,
         };
         // Q4_1 block = 20 bytes (F16 scale + F16 min + 16 nibbles).
         const BLOCK_Q4_1_SIZE: usize = 20;
@@ -356,6 +503,8 @@ mod tests {
         let cases: &[(GGMLType, usize, usize, usize)] = &[
             (GGMLType::Q4_0, 32, 4, BLOCK_Q80_SIZE),
             (GGMLType::Q4_1, 32, 4, BLOCK_Q4_1_SIZE),
+            (GGMLType::Q2K, 256, 2, BLOCK_Q2K_SIZE),
+            (GGMLType::Q3K, 256, 2, BLOCK_Q3K_SIZE),
             (GGMLType::Q4K, 256, 2, BLOCK_Q4K_SIZE),
             (GGMLType::Q5K, 256, 2, BLOCK_Q5K_SIZE),
             (GGMLType::Q6K, 256, 2, BLOCK_Q6K_SIZE),

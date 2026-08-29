@@ -6,7 +6,7 @@
 use crate::app::cli::{inference_step_budget, resolve_thread_count, KvFormat};
 use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::llama::skeleton::{get_f32_tensor, load_layers, LlamaLayerWeights};
@@ -231,12 +231,7 @@ pub fn run_inference_tokens(
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    if !matches!(embd_info.ggml_type, GGMLType::F16 | GGMLType::Q8_0 | GGMLType::Q4_0 | GGMLType::Q6K) {
-        panic!(
-            "token_embd.weight has unsupported type {:?}; only F16, Q8_0, Q4_0, and Q6K are supported",
-            embd_info.ggml_type
-        );
-    }
+    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
     let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
     let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
     let embd_type = embd_info.ggml_type;

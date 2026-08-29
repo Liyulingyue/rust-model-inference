@@ -24,6 +24,7 @@ fn type_bits(t: GGMLType) -> u32 {
     match t {
         GGMLType::F32 => 32,
         GGMLType::F16 => 16,
+        GGMLType::BF16 => 16,
         _ => 0,
     }
 }

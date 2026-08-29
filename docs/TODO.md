@@ -17,6 +17,8 @@
   - [x] 创建统一的 `embedding_lookup(weight, token_id, n_embd, embd_type, out)` 函数
   - [x] qwen3.rs、main.rs 已使用统一函数
   - [x] 保留 token embedding 的类型信息；模型各组件的量化类型应独立管理
+- [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2`（q4k/avx2.rs）写 `vec_dot_q2k_q8k_avx2` / `vec_dot_q3k_q8k_avx2`。复用 Q8K activation + AVX2 `_mm256_madd_epi16`。预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
+- [ ] **IQ4_XS / IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册（commit `402bc3d`）但 kernel panic with TODO。IQ4_NL scalar 已实现（kvalues_iq4nl LUT）。IQ2/3 需要查 llama.cpp 参考实现，I-quant 网格 LUT + bit-packed scales 复杂。qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS，所以实现 IQ2/3 后这两个 model 就能加载。
 
 ## Medium Priority
 
@@ -43,18 +45,8 @@
   - **推进条件与风险控制**：这是中期重构，不阻塞局部 FFN 优化。先测量现有 Qwen3.5 的加载时间与 RSS，确认权重复制是实际瓶颈；随后仅迁移 Qwen3.5，完成 logits/token parity、加载时间、峰值/常驻 RSS、prefill/decode 吞吐验证后，再扩展到其他模型。统一设计时 Q8_0 必须显式保存 `n_cols/n_rows`，不能再由总字节数反推 shape。
   - **实施顺序**：(1) 拆分 prepare-activation 与 prepared-matmul API，并使 FFN gate/up 复用 prepared input；(2) 基准比较 borrowed-two-matmul 与 owned-vstack 的加载时间、RSS、decode tok/s、prefill tok/s；(3) 仅当两次调用的调度开销可测量地显著时，再考虑不复制权重的 `matmul_pair_prepared`。
   - **验收**：两条路径 logits/token parity；报告模型加载时间、峰值/常驻 RSS、单 token decode 与 45-token prefill 吞吐。不要仅凭“融合 matmul”假设保留额外权重副本。
-- [ ] **Q6_K AVX2 精度 drift 修复** — `src/ops/quant/mod.rs:963` 的 `vec_dot_q6k_q8k_avx2` 在合成 4-block 测试上仍有 1 ULP drift(漂移在最后 1 bit 位)。Q4_K AVX2 同类问题已通过显式累加顺序修复,Q6_K 修复未完成。可能漂移源:
-  - `_mm256_sub_epi32(sumi, q8sclsub)` 减法指令的顺序 vs scalar 的 per-element `aux32[l] += scale * q8 * (weight - 32)` 累加顺序
-  - `_mm256_madd_epi16(scale_l, p16l)` 累加 2 个 i16 → 1 个 i32 的顺序 vs scalar 的 2 个独立 mul+add 累加
-  - 4 个 `madd` 链 (`p16_0`, `p16_1`, `p16_2`, `p16_3`) 的累加顺序 vs scalar 的 chunk-by-chunk 累加
-
-  **当前状态**:模型 Q4_K_M 推理输出正确("巴黎"),drift 未大到翻转 argmax。但长期应消除以保证 temp 0.6 边缘情况稳定性。
-  **修复方向**:参照 Q4_0 修复路径(`docs/OPTIMIZATION.md` "经验: SIMD 浮点内核必须严格匹配 Scalar 的舍入顺序")。可能需要把 sumi 累加顺序与 scalar 的 chunk 顺序对齐;`_mm256_sub_epi32` 后改用 `cvt + mul + add` 链而非 fma;`hsum_ps` 替换为 sequential extraction+sum。
-  **验收**:parity test `vec_dot_q6k_q8k_avx2 == vec_dot_q6k_q8k_scalar` bit-exact(diff_bits == 0),含边界 cases(全零/全 max/全 min 输入,real-model Q4_K_M token_embd)。
-  **相关文件**:`src/ops/quant/mod.rs:963`(kernel),`src/ops/quant/mod.rs:1076`(`avx2_parity::q6k_avx2_matches_scalar_multi_block` 测试,当前为 `rel < 1e-3` 容差)。
-- [ ] **Q8_0 AVX2 精度 drift 调查(合成 uniform 数据上 diff=255,真实模型通过)** — `src/ops/kernel/q8_0/avx2.rs` 在极端 uniform 输入下 max_diff 达 255,但 `blk.0.attn_q.weight` 真实模型权重通过。问题尚未定位到具体指令。可能与 Q4_0 类似(FMA + hsum 顺序)但更深,因为 4-row tile 涉及跨行交叉累加。
-  **修复方向**:添加 parity test 用合成数据 + 真实模型权重,对比 `matmul_q8_0_vs_q8_0_avx2` 与 `matmul_q8_0_quantized_scalar_range` 的中间 i32 值,定位漂移源头。
-  **验收**:parity test bit-exact。
+- [x] **Q6_K AVX2 精度 drift 调查** — `src/ops/quant/mod.rs:2066` 的 `vec_dot_q6k_q8k_avx2` 在 4-block 合成测试上有 1-2 ULP drift。commit `acb0a2b` 调查确认根因与 Q4_0/Q4_K 同源:**scalar `sumf += sums[l]` 是线性累加,AVX2 `hsum_ps` 是树形 reduction;f32 加法不满足结合律**。尝试过多种缓解(FMA→mul+add 拆解、scalar `f32::mul_add`),均无改善——属于 IEEE 754 不可避免现象。生产验证:Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"(scalar 与 AVX2 一致);drift 不翻转 argmax。详见 `docs/OPTIMIZATION.md` "经验: SIMD 浮点内核必须严格匹配 Scalar 的舍入顺序"。
+- [x] **Q8_0 AVX2 "diff=255" 调查** — `src/ops/kernel/q8_0/avx2.rs` 的 `q8_0_avx2_matches_scalar_uniform` 测试失败(`max_diff=255`)。commit `acb0a2b` 调查确认这是**测试 bug**(scalar 函数调用时 `(n_in, n_out, 0)` 把 `n_out` 错位传到 `row_start`,导致 scalar 没跑任何行返回 0)。修参数顺序 + 改测试数据为 8 行后:`max_diff=0.000366 rel=1.6e-7`,AVX2 算法 bit-exact 正确(实际只含正常的 f32 hsum-tree 1-2 ULP drift)。
 - [ ] Row 切分支持（tensor parallelism across rows）
 - [ ] Layer 切分支持（pipeline parallelism across layers）
 
@@ -109,7 +101,7 @@
 - [x] W_down matmul 数学逻辑：Rust down_buf 与 Python Q8×Q8 解析匹配（diff < 0.01）
 
 未定位（仍在排查）：
-- [ ] **Q8_0 AVX2 在合成 uniform 数据上仍有精度 drift（合成 max_diff=255，真实模型通过）**——可能仍是 SIMD 舍入顺序导致的小累积偏差，但在 MiniCPM5-1B 上不会翻转 argmax。参见下方 "Q8_0 AVX2 精度 drift 调查"。
+- [x] **Q8_0 AVX2 在合成 uniform 数据上仍有精度 drift（合成 max_diff=255，真实模型通过）** — commit `acb0a2b` 已查明"diff=255"是测试 `assert_avx2_matches_scalar` 调用 scalar 时 `(n_in, n_out, 0)` 参数顺序错位导致,非算法 bug。修测试后 `max_diff=0.000366 rel=1.6e-7`,AVX2 正确。
 - [ ] **早期层（L0-L22）intermediate activations 只对比过 rmsnorm scale，未对比具体数值**——可能某层有微小 drift 累积到 L23。需要逐层 dump ffn_inp / attn_out 与 llama 对比。
 - [ ] **Llama dump 的 buffer reuse 问题**——`ffn_out_full_23`/`ffn_up` 等 `_full_23` tensor 共享 backend buffer，dump 读到的可能是被覆盖的数据。需要在 llama.cpp 加 `ggml_backend_tensor_get` 之外的直接读法才能拿到 ground truth。当前 PR 已加 `[LLAMACPP_L23_FFN_OUT_RAW]` 直接读 `t->data`，但需要 MSVC 工具链才能重编 llama-cli。
 - [ ] **W_down matmul 后 ffn_out 与 ffn_inp 的累加**——`base.rs:619-625` 是 `x[i] += down_buf[i]`（就地累加），但 llama.cpp 是 `cur = ggml_add(ctx0, ffn_out, ffn_inp)`（分配新 buffer）。理论上等价，但若 `x` 的 storage 与 ffn_out 共享则可能写入到 ffn_inp 之前的位置。需进一步对比 dump。

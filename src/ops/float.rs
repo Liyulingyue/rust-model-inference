@@ -206,6 +206,18 @@ pub fn f32_to_f16(v: f32) -> u16 {
     }
 }
 
+#[inline]
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    crate::core::tensor::bf16_to_f32(bits)
+}
+
+#[inline]
+pub fn f32_to_bf16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let rounding = 0x7fff + ((bits >> 16) & 1);
+    (bits.wrapping_add(rounding) >> 16) as u16
+}
+
 pub fn f32_slice_to_f16(src: &[f32], dst: &mut [u16]) {
     debug_assert_eq!(src.len(), dst.len());
     #[cfg(target_arch = "x86_64")]
@@ -261,5 +273,18 @@ unsafe fn f32_slice_to_f16_avx2(src: &[f32], dst: &mut [u16]) {
     while i < n {
         dst[i] = f32_to_f16(src[i]);
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bf16_conversion_round_trip() {
+        assert_eq!(bf16_to_f32(0x3f80), 1.0);
+        assert_eq!(bf16_to_f32(0xc000), -2.0);
+        assert_eq!(f32_to_bf16(1.0), 0x3f80);
+        assert_eq!(f32_to_bf16(-2.0), 0xc000);
     }
 }
