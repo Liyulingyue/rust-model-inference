@@ -3,6 +3,7 @@ use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 pub mod audio;
 pub mod text;
 pub mod vision;
+pub use audio::Gemma4AudioModel;
 pub use text::{Gemma4InputRow, Gemma4Model, Gemma4Session};
 
 const GEMMA4_TOKEN_ANCHORS: &[(usize, &str)] = &[

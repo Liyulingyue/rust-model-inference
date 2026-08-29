@@ -1,3 +1,4 @@
+use rust_model_inference::models::gemma4::audio::Gemma4AudioModel;
 use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use std::path::{Path, PathBuf};
@@ -171,6 +172,69 @@ fn gemma4_image_smoke() {
         );
         assert_eq!(
             shape("gemma4.vision.projected"),
+            serde_json::json!([1536, projected.len() / 1536, 1, 1])
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the Gemma4 mmproj"]
+fn gemma4_audio_smoke() {
+    let mmproj = gemma4_mmproj_path();
+    require_gemma4_gguf(
+        &mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "a.pre_encode.out.weight",
+        GGMLType::F16,
+    );
+    let loader = GGUFLoader::from_file(&mmproj).unwrap();
+    let model = Gemma4AudioModel::from_source(&loader, 4).unwrap();
+    let fixture =
+        std::env::temp_dir().join(format!("rmi-gemma4-audio-smoke-{}.wav", std::process::id()));
+    let samples: Vec<i16> = (0..320)
+        .map(|index| ((index as f32 * 0.03125).sin() * 16_384.0) as i16)
+        .collect();
+    let data_len = u32::try_from(samples.len() * 2).unwrap();
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16_000u32.to_le_bytes());
+    wav.extend_from_slice(&32_000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&fixture, wav).unwrap();
+    let projected = model.encode_wav_path(&fixture).unwrap();
+    let _ = std::fs::remove_file(&fixture);
+    assert!(!projected.is_empty());
+    assert_eq!(projected.len() % 1536, 0);
+    assert!(projected.iter().all(|value| value.is_finite()));
+    #[cfg(feature = "parity-trace")]
+    if let Some(trace) = std::env::var_os("RMI_PARITY_TRACE") {
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let shape = |name: &str| {
+            records
+                .iter()
+                .find(|record| record["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} trace checkpoint"))["shape"]
+                .clone()
+        };
+        assert_eq!(shape("gemma4.audio.mel"), serde_json::json!([128, 1]));
+        assert_eq!(
+            shape("gemma4.audio.projected"),
             serde_json::json!([1536, projected.len() / 1536, 1, 1])
         );
     }
