@@ -1696,6 +1696,7 @@ mod tests {
     };
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
+    use crate::ops::silu_mul_inplace;
     use half::f16;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},

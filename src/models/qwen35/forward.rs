@@ -173,7 +173,7 @@ impl<'a> crate::models::qwen35::Qwen35Model<'a> {
         Ok(result)
     }
 
-    fn forward_dense_attn_layer(
+    pub(super) fn forward_dense_attn_layer(
         &self, il: usize, input: &[f32], n_tokens: usize,
         kv_cache: &mut KvCache, scratch: &mut crate::models::qwen35::Qwen35Scratchpad,
         pool: &ComputePool, mrope_positions: &[[usize; 4]],
