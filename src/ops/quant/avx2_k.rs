@@ -7,9 +7,8 @@ unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
     let s = _mm_add_ps(lo, hi);
     let shuf = _mm_movehl_ps(s, s);
     let s2 = _mm_add_ps(s, shuf);
-    let shuf2 = _mm_shuffle_ps::<0b11_10_11_10>(s2, s2);
-    let s3 = _mm_add_ps(s2, shuf2);
-    _mm_cvtss_f32(s3)
+    let s2_arr: [f32; 4] = std::mem::transmute(s2);
+    s2_arr[0] + s2_arr[1]
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -125,13 +124,15 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
         let q8_base_ptr = q8k[i].qs.as_ptr();
 
         for outer in 0..2usize {
+            let qs_base_outer = outer * 32;
             for j in 0..4usize {
                 let shift = (j as i32) * 2;
-                let qs_base = outer * 32 + j * 16;
+                let qs_base = qs_base_outer;
                 let q8_base = outer * 128 + j * 32;
-                let scale_byte = *scales_ptr.add(outer * 8 + j * 2);
-                let scale_lo = (scale_byte & 0x0f) as i32;
-                let scale_hi = ((scale_byte >> 4) & 0x0f) as i32;
+                let scale_byte_a = *scales_ptr.add(outer * 8 + j * 2);
+                let scale_byte_b = *scales_ptr.add(outer * 8 + j * 2 + 1);
+                let scale_a = (scale_byte_a & 0x0f) as i32;
+                let scale_b = (scale_byte_b & 0x0f) as i32;
                 for sub in 0..2usize {
                     let qs_off = qs_base + sub * 16;
                     let q8_off = q8_base + sub * 16;
@@ -145,7 +146,7 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
                     let prods = _mm256_mullo_epi16(qs_v, q8_v);
                     let dot_v = _mm256_madd_epi16(ones_i16, prods);
                     let dot = hsum_i32(dot_v);
-                    let scale = if sub == 0 { scale_lo } else { scale_hi };
+                    let scale = if sub == 0 { scale_a } else { scale_b };
                     acc_sum += (dot as f32 * scale as f32) * d_total;
                 }
             }
@@ -267,7 +268,9 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
                 };
                 let mask_byte: i8 = 1 << (total_shift as i8);
                 let mask_v = _mm256_set1_epi8(mask_byte);
-                let high_v = _mm256_and_si256(_mm256_cmpeq_epi8(hbits, mask_v), _mm256_set1_epi8(4));
+                let has_high = _mm256_and_si256(hbits, mask_v);
+                let cmp_zero = _mm256_cmpeq_epi8(has_high, _mm256_setzero_si256());
+                let high_v = _mm256_and_si256(cmp_zero, _mm256_set1_epi8(4));
                 let q8_vec = q8_v[j];
                 let p = _mm256_maddubs_epi16(q2_vec, q8_vec);
                 let high_p = _mm256_maddubs_epi16(high_v, q8_vec);

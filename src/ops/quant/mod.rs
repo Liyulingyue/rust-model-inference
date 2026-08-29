@@ -580,6 +580,10 @@ pub unsafe fn vec_dot_q2k_q8k_avx2_direct(q2k_data: &[u8], q8k: &[BlockQ8K]) -> 
 }
 
 pub fn vec_dot_q2k_q8k(q2k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_q2k_q8k_avx2(q2k_data, q8k) };
+    }
     vec_dot_q2k_q8k_scalar(q2k_data, q8k)
 }
 
@@ -2459,7 +2463,37 @@ mod avx2_kq_parity {
         if !crate::ops::has_avx2_fma() {
             return;
         }
-        let _ = vec_dot_q2k_q8k_avx2_direct;
+        let mut block = vec![0u8; BLOCK_Q2K_SIZE];
+        block[80] = 0x00; block[81] = 0x3c;
+        block[82] = 0x00; block[83] = 0x3c;
+        for i in 0..16 { block[i] = 0x11; }
+        for i in 0..64 { block[16 + i] = 0xff; }
+        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let scalar = vec_dot_q2k_q8k_scalar(&block, &q8k);
+        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&block, &q8k) };
+        eprintln!("scalar = {}, avx2 = {}", scalar, avx2);
+        assert!((scalar - avx2).abs() < 1.0, "scalar={}, avx2={}", scalar, avx2);
+    }
+
+    #[test]
+    fn q2k_avx2_matches_scalar_real_block() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        use crate::format::ggufrs::open_model_source;
+        use crate::format::ggufrs::ComponentRole;
+        let path = "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q2_K.gguf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
+        let block = &bytes[..BLOCK_Q2K_SIZE];
+        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let scalar = vec_dot_q2k_q8k_scalar(block, &q8k);
+        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(block, &q8k) };
+        eprintln!("real Q2K: scalar = {}, avx2 = {}, diff = {}", scalar, avx2, (scalar - avx2).abs());
+        assert!((scalar - avx2).abs() < 1.0, "scalar={}, avx2={}", scalar, avx2);
     }
 
     #[test]
