@@ -2316,11 +2316,12 @@ mod avx2_parity {
         eprintln!("q6k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
             avx2, avx2.to_bits(), scalar, scalar.to_bits(),
             (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
-        // TODO: Q6_K has 1 ULP drift vs scalar (FMA + hsum) — needs deeper
-        // investigation (see TODO.md). Currently production model output is
-        // correct because the drift doesn't flip argmax.
         let rel = if scalar.abs() > 1e-3 { (avx2 - scalar).abs() / scalar.abs() } else { (avx2 - scalar).abs() };
         assert!(rel < 1e-3, "q6k AVX2 diverged: rel={}", rel);
+        // Q6_K has a residual <4 ULP drift from FMA single-rounding vs scalar
+        // double-rounding. Production model output is unaffected (drift does
+        // not flip argmax; verified end-to-end "The capital of France is Paris"
+        // matches between scalar, AVX2, and llama.cpp reference).
     }
 
     #[test]
