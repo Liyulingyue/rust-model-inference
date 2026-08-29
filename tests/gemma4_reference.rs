@@ -1,16 +1,58 @@
-use std::path::PathBuf;
+use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const GEMMA4_MODEL_NAME: &str = "gemma-4-E2B-it-Q8_0.gguf";
+const GEMMA4_MMPROJ_NAME: &str = "mmproj-F16.gguf";
 
 fn gemma4_model_path() -> PathBuf {
     std::env::var_os("RMI_GEMMA4_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf"))
+        .unwrap_or_else(|| PathBuf::from("models/gemma-4-e2b").join(GEMMA4_MODEL_NAME))
 }
 
 fn gemma4_mmproj_path() -> PathBuf {
     std::env::var_os("RMI_GEMMA4_MMPROJ")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("models/gemma-4-e2b/mmproj-F16.gguf"))
+        .unwrap_or_else(|| PathBuf::from("models/gemma-4-e2b").join(GEMMA4_MMPROJ_NAME))
+}
+
+fn require_gemma4_gguf(
+    path: &Path,
+    expected_name: &str,
+    architecture: &str,
+    tensor: &str,
+    ggml_type: GGMLType,
+) {
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(expected_name)
+    );
+    let loader = GGUFLoader::from_file(path).unwrap();
+    assert!(
+        matches!(loader.metadata("general.architecture"), Some(MetaValue::String(value)) if value == architecture)
+    );
+    assert_eq!(
+        loader.tensor_info(tensor).map(|info| info.ggml_type),
+        Some(ggml_type),
+        "invalid {tensor}"
+    );
+}
+
+#[test]
+fn gemma4_preflight_rejects_arbitrary_files() {
+    assert_ne!(
+        Path::new("/etc/passwd")
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some(GEMMA4_MODEL_NAME)
+    );
+    assert_ne!(
+        Path::new("/etc/passwd")
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some(GEMMA4_MMPROJ_NAME)
+    );
 }
 
 fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
@@ -62,7 +104,19 @@ fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
 #[test]
 #[ignore = "requires Gemma4 GGUFs and pinned llama.cpp trace binary"]
 fn gemma4_matches_pinned_cpu_oracle() {
-    assert!(gemma4_model_path().is_file());
-    assert!(gemma4_mmproj_path().is_file());
+    require_gemma4_gguf(
+        &gemma4_model_path(),
+        GEMMA4_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    );
+    require_gemma4_gguf(
+        &gemma4_mmproj_path(),
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "v.patch_embd.weight",
+        GGMLType::F16,
+    );
     assert!(ensure_gemma4_oracle().unwrap().is_file());
 }

@@ -1,13 +1,123 @@
 diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
-index 9a0be2da6..b308d686d 100644
+index e60c9c878..ae5d35be7 100644
 --- a/tools/mtmd/CMakeLists.txt
 +++ b/tools/mtmd/CMakeLists.txt
-@@ -119,4 +119,8 @@ if (LLAMA_BUILD_TOOLS)
-     set_target_properties(llama-mtmd-debug PROPERTIES OUTPUT_NAME llama-mtmd-debug)
-     target_link_libraries(llama-mtmd-debug PRIVATE llama-common mtmd Threads::Threads)
-     target_compile_features(llama-mtmd-debug PRIVATE cxx_std_17)
+@@ -162,0 +163,5 @@ if (LLAMA_BUILD_TOOLS)
 +
 +    add_executable(llama-gemma4-trace mtmd-cli.cpp)
++    target_compile_definitions(llama-gemma4-trace PRIVATE LLAMA_GEMMA4_TRACE)
 +    target_link_libraries(llama-gemma4-trace PRIVATE llama-common mtmd Threads::Threads)
 +    target_compile_features(llama-gemma4-trace PRIVATE cxx_std_17)
- endif()
+diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
+index 97678c6b2..5424c96dd 100644
+--- a/tools/mtmd/mtmd-cli.cpp
++++ b/tools/mtmd/mtmd-cli.cpp
+@@ -15,0 +16,6 @@
++#ifdef LLAMA_GEMMA4_TRACE
++#include <cstring>
++#include <fstream>
++#include <map>
++#include <mutex>
++#endif
+@@ -33,0 +40,73 @@ static volatile bool g_is_interrupted = false;
++#ifdef LLAMA_GEMMA4_TRACE
++class gemma4_trace {
++public:
++    explicit gemma4_trace(const char * path) : path_(path ? path : "") {
++        if (!path_.empty()) manifest_.open(path_, std::ios::trunc);
++    }
++
++    bool enabled() const { return manifest_.is_open() && !failed_; }
++
++    static bool callback(ggml_tensor * tensor, bool ask, void * user_data) {
++        return static_cast<gemma4_trace *>(user_data)->capture(tensor, ask);
++    }
++
++private:
++    static std::string json_escape(const std::string & value) {
++        std::string escaped;
++        for (char ch : value) {
++            if (ch == '\\' || ch == '"') escaped.push_back('\\');
++            escaped.push_back(ch);
++        }
++        return escaped;
++    }
++
++    bool capture(ggml_tensor * tensor, bool ask) {
++        if (ask) return enabled() && tensor->type == GGML_TYPE_F32 && tensor->name[0] != '\0';
++        if (!enabled()) return true;
++
++        std::lock_guard<std::mutex> lock(mutex_);
++        std::vector<uint8_t> bytes(ggml_nbytes(tensor));
++        ggml_backend_tensor_get(tensor, bytes.data(), 0, bytes.size());
++        std::vector<float> values;
++        values.reserve(ggml_nelements(tensor));
++        for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
++            for (int64_t i2 = 0; i2 < tensor->ne[2]; ++i2) {
++                for (int64_t i1 = 0; i1 < tensor->ne[1]; ++i1) {
++                    for (int64_t i0 = 0; i0 < tensor->ne[0]; ++i0) {
++                        const size_t offset = i3 * tensor->nb[3] + i2 * tensor->nb[2]
++                            + i1 * tensor->nb[1] + i0 * tensor->nb[0];
++                        float value;
++                        std::memcpy(&value, bytes.data() + offset, sizeof(value));
++                        values.push_back(value);
++                    }
++                }
++            }
++        }
++
++        const std::string name = "gemma4.tensor." + std::string(tensor->name);
++        const size_t occurrence = occurrences_[name]++;
++        const std::string binary_path = path_ + "." + name + "." + std::to_string(occurrence) + ".f32";
++        std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++        binary.write(reinterpret_cast<const char *>(values.data()),
++            static_cast<std::streamsize>(values.size() * sizeof(float)));
++        if (!binary) return failed_ = true, false;
++
++        manifest_ << "{\"name\":\"" << json_escape(name) << "\",\"layer\":null,\"step\":0,\"shape\":[";
++        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
++            if (i) manifest_ << ',';
++            manifest_ << tensor->ne[i];
++        }
++        manifest_ << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence
++                  << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        manifest_.flush();
++        return !(failed_ = !manifest_);
++    }
++
++    std::string path_;
++    std::ofstream manifest_;
++    std::map<std::string, size_t> occurrences_;
++    std::mutex mutex_;
++    bool failed_ = false;
++};
++#endif
++
+@@ -99,0 +179,3 @@ struct mtmd_cli_context {
++#ifdef LLAMA_GEMMA4_TRACE
++    gemma4_trace * trace;
++#endif
+@@ -108,0 +191,3 @@ struct mtmd_cli_context {
++#ifdef LLAMA_GEMMA4_TRACE
++    mtmd_cli_context(common_params & params, gemma4_trace * trace) : llama_init(common_init_from_params(params)), trace(trace) {
++#else
+@@ -109,0 +195 @@ struct mtmd_cli_context {
++#endif
+@@ -166,0 +253,6 @@ struct mtmd_cli_context {
++#ifdef LLAMA_GEMMA4_TRACE
++        if (trace && trace->enabled()) {
++            mparams.cb_eval_user_data = trace;
++            mparams.cb_eval = gemma4_trace::callback;
++        } else
++#endif
+@@ -408,0 +501,8 @@ int main(int argc, char ** argv) {
++#ifdef LLAMA_GEMMA4_TRACE
++    gemma4_trace trace(std::getenv("RMI_PARITY_TRACE"));
++    if (trace.enabled()) {
++        params.cb_eval = gemma4_trace::callback;
++        params.cb_eval_user_data = &trace;
++    }
++    mtmd_cli_context ctx(params, &trace);
++#else
+@@ -409,0 +510 @@ int main(int argc, char ** argv) {
++#endif
