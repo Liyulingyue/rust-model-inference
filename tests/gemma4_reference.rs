@@ -151,4 +151,27 @@ fn gemma4_image_smoke() {
     assert!(!projected.is_empty());
     assert_eq!(projected.len() % 1536, 0);
     assert!(projected.iter().all(|value| value.is_finite()));
+    #[cfg(feature = "parity-trace")]
+    if let Some(trace) = std::env::var_os("RMI_PARITY_TRACE") {
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let shape = |name: &str| {
+            records
+                .iter()
+                .find(|record| record["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} trace checkpoint"))["shape"]
+                .clone()
+        };
+        assert_eq!(
+            shape("gemma4.vision.preprocessed"),
+            serde_json::json!([384, 288, 3, 1])
+        );
+        assert_eq!(
+            shape("gemma4.vision.projected"),
+            serde_json::json!([1536, projected.len() / 1536, 1, 1])
+        );
+    }
 }

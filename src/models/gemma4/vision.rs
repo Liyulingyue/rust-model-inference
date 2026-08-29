@@ -1,7 +1,9 @@
 use super::Gemma4VisionConfig;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::{dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_inplace};
+use crate::ops::{
+    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_approx_inplace,
+};
 use std::path::Path;
 
 const EMBED: usize = 768;
@@ -172,7 +174,7 @@ impl<'a> Gemma4VisionModel<'a> {
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "gemma4.vision.preprocessed",
             None,
-            &[3, image.height, image.width],
+            &[image.width, image.height, 3, 1],
             &image.values,
         ));
         self.encode_preprocessed(&image)
@@ -321,7 +323,7 @@ impl<'a> Gemma4VisionModel<'a> {
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "gemma4.vision.projected",
             None,
-            &[output_rows, PROJECTION],
+            &[PROJECTION, output_rows, 1, 1],
             &output,
         ));
         Ok(output)
@@ -449,8 +451,7 @@ fn gemma4v_resize_grid(width: usize, height: usize) -> Result<ResizeGrid, String
     }
     aligned_width
         .checked_mul(aligned_height)
-        .filter(|pixels| *pixels <= MAX_PIXELS)
-        .ok_or_else(|| "Gemma4 resized image exceeds the pixel limit".to_string())?;
+        .ok_or("Gemma4 resized image dimensions overflow")?;
     Ok(ResizeGrid {
         width: aligned_width,
         height: aligned_height,
@@ -657,7 +658,7 @@ fn attention(
                 let k_row = &k[key * EMBED + head * HEAD_DIM..key * EMBED + (head + 1) * HEAD_DIM];
                 score[key] = dot_f32(q_row, k_row, HEAD_DIM);
             }
-            softmax_inplace(score);
+            softmax_approx_inplace(score);
             for dimension in 0..HEAD_DIM {
                 let values = &v_transposed[(head * HEAD_DIM + dimension) * tokens
                     ..(head * HEAD_DIM + dimension + 1) * tokens];
@@ -727,7 +728,7 @@ fn rms_row_inplace(row: &mut [f32], weight: Option<&[f32]>) -> Result<(), String
     if row.is_empty() || weight.is_some_and(|weight| weight.len() != row.len()) {
         return Err("Invalid Gemma4 RMS row".into());
     }
-    let sum = crate::ops::sum_sq_f32(row);
+    let sum = ggml_sequential_sum_sq(row);
     let mean = (sum / row.len() as f64) as f32;
     let scale = 1.0 / (mean + EPS).sqrt();
     match weight {
@@ -743,6 +744,14 @@ fn rms_row_inplace(row: &mut [f32], weight: Option<&[f32]>) -> Result<(), String
         }
     }
     validate_finite("Gemma4 RMS row", row)
+}
+
+fn ggml_sequential_sum_sq(values: &[f32]) -> f64 {
+    let mut sum = 0.0f64;
+    for &value in values {
+        sum += f64::from(value * value);
+    }
+    sum
 }
 
 fn gelu_quick(value: f32) -> f32 {
@@ -1045,6 +1054,93 @@ mod tests {
         assert_eq!(grid.height % 16, 0);
         assert_eq!((grid.width / 16) % 3, 0);
         assert_eq!((grid.height / 16) % 3, 0);
+    }
+
+    #[test]
+    fn gemma4v_accepts_extreme_aspect_ratio_oracle_grid() {
+        let grid = gemma4v_resize_grid(1, 100_000).unwrap();
+        assert_eq!(grid.width, ALIGN);
+        assert!(grid.height > MAX_PIXELS / ALIGN);
+    }
+
+    #[test]
+    fn attention_uses_llama_style_softmax() {
+        let tokens = 4;
+        let hidden_len = tokens * EMBED;
+        let mut q = vec![0.0; hidden_len];
+        let mut k = vec![0.0; hidden_len];
+        let mut v = vec![0.0; hidden_len];
+        q[0] = 1.0;
+        let logits = [0.5, -1.0, 2.0, 0.25];
+        let values = [1.0, -2.0, 0.75, 4.0];
+        for token in 0..tokens {
+            k[token * EMBED] = logits[token];
+            v[token * EMBED] = values[token];
+        }
+        let mut v_transposed = vec![0.0; hidden_len];
+        let mut scores = vec![0.0; HEADS * tokens * tokens];
+        let mut output = vec![0.0; hidden_len];
+
+        attention(
+            &ComputePool::new(1),
+            &q,
+            &k,
+            &v,
+            tokens,
+            &mut v_transposed,
+            &mut scores,
+            &mut output,
+        )
+        .unwrap();
+
+        let mut probabilities = logits;
+        crate::ops::softmax_approx_inplace(&mut probabilities);
+        assert_eq!(
+            scores[..tokens]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            probabilities
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let expected = dot_f32(&values, &probabilities, tokens);
+        assert_eq!(output[0].to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn rms_matches_llama_sequential_f64_accumulation() {
+        let mut actual: Vec<f32> = (0..EMBED)
+            .map(|index| {
+                let index = index as f32;
+                (index * 0.013).sin() * 2.5 + (index * 0.007).cos() * 0.125
+            })
+            .collect();
+        let mut expected = actual.clone();
+        let mut sum = 0.0f64;
+        for &value in &expected {
+            sum += f64::from(value * value);
+        }
+        assert_eq!(ggml_sequential_sum_sq(&expected).to_bits(), sum.to_bits());
+        let mean = (sum / expected.len() as f64) as f32;
+        let scale = 1.0f32 / (mean + EPS).sqrt();
+        for value in &mut expected {
+            *value *= scale;
+        }
+
+        rms_row_inplace(&mut actual, None).unwrap();
+
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
