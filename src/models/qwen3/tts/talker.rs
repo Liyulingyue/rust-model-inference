@@ -26,9 +26,11 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::base::{
-    check_allocation, checked_product, load_f32_tensor, static_weight, usize_to_u64, Qwen3Config,
+use crate::models::qwen3::base::{Qwen3Config};
+use crate::models::qwen3::util::{
+    check_allocation, checked_product, load_f32_tensor, usize_to_u64,
 };
+use crate::models::qwen3::static_weight;
 use crate::models::qwen3::tts::AUDIO_CODEBOOK_SIZE;
 use crate::ops::kernel::Weight;
 use crate::ops::{
