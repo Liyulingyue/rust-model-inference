@@ -1,5 +1,8 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
+pub mod text;
+pub use text::{Gemma4InputRow, Gemma4Model, Gemma4Session};
+
 const GEMMA4_TOKEN_ANCHORS: &[(usize, &str)] = &[
     (0, "<pad>"),
     (1, "<eos>"),
@@ -44,7 +47,11 @@ impl Gemma4Config {
             source,
             "gemma4.feed_forward_length",
             MetaValueType::Int32,
-            &vec![MetaValue::Int32(6144); 35],
+            &[
+                vec![MetaValue::Int32(6144); 15],
+                vec![MetaValue::Int32(12_288); 20],
+            ]
+            .concat(),
         )?;
         require_u32(source, "gemma4.attention.head_count", 8)?;
         require_u32(source, "gemma4.attention.head_count_kv", 1)?;
@@ -92,6 +99,7 @@ impl Gemma4Config {
         }
         for layer in 0..35 {
             let head_dim = if layer % 5 == 4 { 512 } else { 256 };
+            let ffn = if layer < 15 { 6144 } else { 12_288 };
             let prefix = format!("blk.{layer}");
             for (name, dims, ty) in [
                 ("attn_k.weight", vec![1536, head_dim], GGMLType::Q8_0),
@@ -105,10 +113,10 @@ impl Gemma4Config {
                 ("attn_q.weight", vec![1536, head_dim * 8], GGMLType::Q8_0),
                 ("attn_q_norm.weight", vec![head_dim], GGMLType::F32),
                 ("attn_v.weight", vec![1536, head_dim], GGMLType::Q8_0),
-                ("ffn_down.weight", vec![6144, 1536], GGMLType::Q8_0),
-                ("ffn_gate.weight", vec![1536, 6144], GGMLType::Q8_0),
+                ("ffn_down.weight", vec![ffn, 1536], GGMLType::Q8_0),
+                ("ffn_gate.weight", vec![1536, ffn], GGMLType::Q8_0),
                 ("ffn_norm.weight", vec![1536], GGMLType::F32),
-                ("ffn_up.weight", vec![1536, 6144], GGMLType::Q8_0),
+                ("ffn_up.weight", vec![1536, ffn], GGMLType::Q8_0),
                 ("inp_gate.weight", vec![1536, 256], GGMLType::F32),
                 ("layer_output_scale.weight", vec![1], GGMLType::F32),
                 ("post_attention_norm.weight", vec![1536], GGMLType::F32),
@@ -548,7 +556,14 @@ mod tests {
                 ("gemma4.embedding_length".into(), MetaValue::Uint32(1536)),
                 (
                     "gemma4.feed_forward_length".into(),
-                    array(MetaValueType::Int32, vec![MetaValue::Int32(6144); 35]),
+                    array(
+                        MetaValueType::Int32,
+                        [
+                            vec![MetaValue::Int32(6144); 15],
+                            vec![MetaValue::Int32(12_288); 20],
+                        ]
+                        .concat(),
+                    ),
                 ),
                 ("gemma4.attention.head_count".into(), MetaValue::Uint32(8)),
                 (
@@ -639,6 +654,7 @@ mod tests {
         }
         for layer in 0..35 {
             let head_dim = if layer % 5 == 4 { 512 } else { 256 };
+            let ffn = if layer < 15 { 6144 } else { 12_288 };
             let prefix = format!("blk.{layer}");
             for (name, dims, ty) in [
                 ("attn_k.weight", vec![1536, head_dim], GGMLType::Q8_0),
@@ -652,10 +668,10 @@ mod tests {
                 ("attn_q.weight", vec![1536, head_dim * 8], GGMLType::Q8_0),
                 ("attn_q_norm.weight", vec![head_dim], GGMLType::F32),
                 ("attn_v.weight", vec![1536, head_dim], GGMLType::Q8_0),
-                ("ffn_down.weight", vec![6144, 1536], GGMLType::Q8_0),
-                ("ffn_gate.weight", vec![1536, 6144], GGMLType::Q8_0),
+                ("ffn_down.weight", vec![ffn, 1536], GGMLType::Q8_0),
+                ("ffn_gate.weight", vec![1536, ffn], GGMLType::Q8_0),
                 ("ffn_norm.weight", vec![1536], GGMLType::F32),
-                ("ffn_up.weight", vec![1536, 6144], GGMLType::Q8_0),
+                ("ffn_up.weight", vec![1536, ffn], GGMLType::Q8_0),
                 ("inp_gate.weight", vec![1536, 256], GGMLType::F32),
                 ("layer_output_scale.weight", vec![1], GGMLType::F32),
                 ("post_attention_norm.weight", vec![1536], GGMLType::F32),
