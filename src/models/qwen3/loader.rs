@@ -12,8 +12,9 @@
 //! depend on `self.token_embedding` / `self.config` and never touch the
 //! scratchpad or KV cache.
 
-use super::base::{text_encode, Qwen3Config, Qwen3Model};
+use super::base::{Qwen3Config, Qwen3Model};
 use super::skeleton::{load_layers_static, Qwen3LayerWeights};
+use super::text_encode::text_encode;
 use super::util::{
     check_allocation, checked_product, load_f32_tensor, usize_to_u64, validate_token_ids,
 };

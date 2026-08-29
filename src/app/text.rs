@@ -152,7 +152,7 @@ pub fn run_shared_inference(
     n_threads_arg: usize,
     thinking: bool,
 ) -> Result<(), String> {
-    crate::models::qwen3::base::run_shared_inference(
+    crate::models::qwen3::text_encode::run_shared_inference(
         source, prompt, max_tokens, temperature, n_threads_arg, thinking,
     )
 }

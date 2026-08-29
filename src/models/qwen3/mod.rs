@@ -8,8 +8,9 @@ pub mod positions;
 pub mod session;
 pub mod skeleton;
 pub mod tests;
-pub mod tts;
 pub mod text;
+pub mod text_encode;
+pub mod tts;
 pub mod util;
 
 pub use text::{run_inference, run_inference_tokens};
