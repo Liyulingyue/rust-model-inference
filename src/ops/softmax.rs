@@ -622,8 +622,27 @@ mod ggml_tests {
         assert_eq!(values.map(f32::to_bits), EXPECTED);
     }
 
+    #[cfg(target_arch = "aarch64")]
     #[test]
-    fn softmax_matches_pinned_ggml_simd_and_expf_tail() {
+    fn softmax_matches_pinned_ggml_neon_and_expf_tail() {
+        let mut values = INPUT;
+        softmax_ggml_inplace(&mut values);
+        assert_pinned_fixture(values);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn selected_x86_dispatch() -> &'static str {
+        if crate::ops::has_avx2_fma() {
+            "AVX2/FMA"
+        } else {
+            "SSE2"
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn softmax_x86_dispatch_matches_pinned_ggml_on_selected_path() {
+        eprintln!("x86 softmax dispatch selected {}", selected_x86_dispatch());
         let mut values = INPUT;
         softmax_ggml_inplace(&mut values);
         assert_pinned_fixture(values);
@@ -635,6 +654,19 @@ mod ggml_tests {
         let mut values = INPUT;
         let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         unsafe { softmax_ggml_inplace_sse2(&mut values, max) };
+        assert_pinned_fixture(values);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn softmax_matches_pinned_ggml_avx2_fma_when_available() {
+        if !crate::ops::has_avx2_fma() {
+            eprintln!("SKIPPED: direct AVX2/FMA softmax requires a real AVX2/FMA CPU");
+            return;
+        }
+        let mut values = INPUT;
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        unsafe { softmax_ggml_inplace_avx2(&mut values, max) };
         assert_pinned_fixture(values);
     }
 }
