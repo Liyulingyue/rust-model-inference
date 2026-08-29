@@ -9,12 +9,9 @@
 //! The 877-line `impl` block was lifted out of `base.rs` verbatim during
 //! the architectural split; behaviour is unchanged.
 
-use super::base::{
-    Qwen3GenerateOptions, Qwen3Generation, Qwen3Input, Qwen3Model, Qwen3Rope,
-    KvPtrs,
-};
-
-pub use super::base::Qwen3Session;
+use super::config::Qwen3Rope;
+use super::forward::{Qwen3Generation, Qwen3GenerateOptions, Qwen3Input};
+use super::weights::Qwen3Model;
 use super::util::{
     check_allocation, checked_decoder_steps, checked_generated_position, checked_product,
     checked_session_capacity, sample_token, validate_generation, validate_input_shapes,
@@ -28,6 +25,28 @@ use crate::ops::kernel::Kernel;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
+
+// =============================================================================
+// Qwen3Session struct (per-request decode state)
+// =============================================================================
+
+pub struct Qwen3Session<'model> {
+    pub(crate) model: &'model Qwen3Model,
+    pub(crate) kv_state: KvState,
+    pub(crate) scratch: ExecutionScratchpad,
+    pub(crate) capacity: usize,
+}
+
+/// 携带格式信息的 KV cache 指针。
+///
+/// 让 attention 循环可以根据格式选择对应的写入/读取路径。
+/// - `F16`: 高性能路径，使用 F16 特定的 dot/f32_to_f16 优化（生产路径）
+/// - `F32`: 通用路径，直接读写 f32（用于调试/精确推理）
+#[derive(Clone, Copy)]
+pub(crate) enum KvPtrs {
+    F16 { k: *mut u16, v: *mut u16 },
+    F32 { k: *mut f32, v: *mut f32 },
+}
 
 impl<'model> Qwen3Session<'model> {
     /// 创建新的会话（默认 F16 KV cache, Ephemeral 生命周期）。
@@ -220,7 +239,7 @@ impl<'model> Qwen3Session<'model> {
         options: Qwen3GenerateOptions,
         mut on_token: impl FnMut(&str),
     ) -> Result<Qwen3Generation, String> {
-        validate_generation(self.model, &input, options)?;
+        validate_generation(self.model, &input, &options)?;
         let required = checked_session_capacity(
             input.token_ids.len(),
             options.max_new_tokens,
@@ -243,7 +262,7 @@ impl<'model> Qwen3Session<'model> {
         options: Qwen3GenerateOptions,
         asr_trace: bool,
     ) -> Result<Qwen3Generation, String> {
-        validate_generation(self.model, &input, options)?;
+        validate_generation(self.model, &input, &options)?;
         let required = checked_session_capacity(
             input.token_ids.len(),
             options.max_new_tokens,
@@ -905,4 +924,3 @@ impl<'model> Qwen3Session<'model> {
         })
     }
 }
-

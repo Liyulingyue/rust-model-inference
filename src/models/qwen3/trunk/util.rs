@@ -1,10 +1,9 @@
-//! Helpers shared by [`Qwen3Config`](super::base::Qwen3Config),
-//! [`Qwen3Model`](super::base::Qwen3Model), and
+//! Helpers shared by [`Qwen3Config`](super::config::Qwen3Config),
+//! [`Qwen3Model`](super::weights::Qwen3Model), and
 //! [`Qwen3Session`](super::session::Qwen3Session).
 //!
 //! All functions here are pure: they do not mutate model state and have no
-//! hidden dependencies. They are extracted from the legacy `base.rs` to
-//! keep that file focused on the model struct + config types.
+//! hidden dependencies.
 
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 pub use crate::core::tensor::load_f32_tensor;
@@ -107,9 +106,9 @@ pub fn greedy_token(logits: &[f32]) -> Result<u32, String> {
 }
 
 pub fn validate_generation(
-    model: &super::base::Qwen3Model,
-    input: &super::base::Qwen3Input<'_>,
-    options: super::base::Qwen3GenerateOptions,
+    model: &super::weights::Qwen3Model,
+    input: &super::forward::Qwen3Input<'_>,
+    options: &super::forward::Qwen3GenerateOptions,
 ) -> Result<(), String> {
     if input.token_ids.is_empty() {
         return Err("Qwen3 prompt must contain at least one token".into());
@@ -209,8 +208,6 @@ pub fn static_q8_tensor(
     dims: &[u64],
 ) -> Result<&'static [u8], String> {
     let bytes = checked_tensor(source, name, dims, GGMLType::Q8_0)?;
-    // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
-    // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
@@ -221,8 +218,6 @@ pub fn static_tensor(
     ggml_type: GGMLType,
 ) -> Result<&'static [u8], String> {
     let bytes = checked_tensor(source, name, dims, ggml_type)?;
-    // SAFETY: Qwen3Model stores a strong Arc to this immutable TensorSource and never exposes
-    // unloading. Every lifetime-extended weight slice is therefore valid until the model drops.
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
@@ -278,8 +273,8 @@ pub fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3::base::{Qwen3Config, Qwen3Rope};
-    use crate::models::qwen3::tests::qwen3vl_metadata_source;
+    use crate::models::qwen3::trunk::config::{Qwen3Config, Qwen3Rope};
+    use crate::models::qwen3::trunk::tests::qwen3vl_metadata_source;
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {

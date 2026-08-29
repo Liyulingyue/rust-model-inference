@@ -8,12 +8,14 @@
 //!   ASR / TTS entry points. Builds the prompt, loads the model, runs
 //!   `Qwen3Model::generate`, prints timings.
 //!
-//! Both were lifted out of `base.rs` verbatim during the architectural
-//! split; behaviour is unchanged.
+//! Also defines the forward-loop input/output structs (`Qwen3Input`,
+//! `Qwen3GenerateOptions`, `Qwen3Generation`) and the `Qwen3Model::generate` /
+//! `Qwen3Model::text_encode` method wrappers.
 
-use super::base::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Rope};
+use super::config::Qwen3Rope;
+use super::weights::{Qwen3Model, Qwen3LayerWeights};
 use super::positions::qwen_text_positions;
-use super::skeleton::Qwen3LayerWeights;
+use super::session::Qwen3Session;
 use super::util::{
     check_allocation, checked_product, checked_session_capacity, validate_generation,
     validate_input_shapes, validate_token_ids,
@@ -28,7 +30,82 @@ use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;pub fn text_encode(
+use std::time::Instant;
+
+// =============================================================================
+// Forward-loop input/output types
+// =============================================================================
+
+#[derive(Clone)]
+pub struct Qwen3Input<'a> {
+    pub token_ids: &'a [u32],
+    pub positions: &'a [[usize; 4]],
+    pub embeddings: Option<&'a [f32]>,
+}
+
+#[derive(Clone)]
+pub struct Qwen3GenerateOptions {
+    pub max_new_tokens: usize,
+    pub temperature: f32,
+}
+
+#[derive(Clone)]
+pub struct Qwen3Generation {
+    pub text: String,
+    pub rendered_tokens: Vec<String>,
+    pub token_ids: Vec<u32>,
+    pub prompt_tokens: usize,
+}
+
+// =============================================================================
+// Qwen3Model generate / text_encode method wrappers
+// =============================================================================
+
+impl Qwen3Model {
+    pub fn generate(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_with_asr_trace(input, options, false)
+    }
+
+    pub(crate) fn generate_asr(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_with_asr_trace(input, options, true)
+    }
+
+    fn generate_with_asr_trace(
+        &self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        asr_trace: bool,
+    ) -> Result<Qwen3Generation, String> {
+        validate_generation(self, &input, &options)?;
+        let capacity = checked_session_capacity(
+            input.token_ids.len(),
+            options.max_new_tokens,
+            self.config.n_ctx,
+        )?;
+        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace)
+    }
+
+    /// Hidden-state extraction entry point. Used by VL/ASR/TTS/Z-Image
+    /// encoder paths that need token-sequence embeddings rather than
+    /// generated text.
+    pub fn text_encode(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        text_encode(self, token_ids, positions)
+    }
+}
+
+pub fn text_encode(
     model: &Qwen3Model,
     token_ids: &[u32],
     positions: &[[usize; 4]],
@@ -333,6 +410,7 @@ use std::time::Instant;pub fn text_encode(
 
     Ok(output)
 }
+
 pub fn run_shared_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -406,4 +484,3 @@ pub fn run_shared_inference(
     );
     Ok(())
 }
-

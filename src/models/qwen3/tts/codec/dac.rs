@@ -14,7 +14,7 @@
 //! Clamping is deferred to PCM serialization.
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::util::{load_f32_tensor, static_q8_matrix, usize_to_u64};
+use crate::models::qwen3::trunk::util::{load_f32_tensor, static_q8_matrix, usize_to_u64};
 use crate::models::qwen3::tts::codec::conv::{
     conv1d_causal, conv1d_causal_depthwise, conv_transpose1d_causal, CausalConv1dState,
     ConvTranspose1dState,

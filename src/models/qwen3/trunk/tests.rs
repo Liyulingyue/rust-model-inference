@@ -7,7 +7,8 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::models::qwen3::base::{Qwen3Config, Qwen3Model, Qwen3Rope};
+use crate::models::qwen3::trunk::config::{Qwen3Config, Qwen3Rope};
+use crate::models::qwen3::trunk::weights::Qwen3Model;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::collections::HashMap;
 use std::sync::Arc;

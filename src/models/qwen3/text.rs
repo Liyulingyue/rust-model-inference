@@ -15,7 +15,7 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::base::{
+use crate::models::qwen3::{
     Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
 };
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
