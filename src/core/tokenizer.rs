@@ -647,6 +647,9 @@ impl BPETokenizer {
         if let Some(byte) = hex_byte(token) {
             return vec![byte];
         }
+        if self.pre == PreTokenizer::Gemma4 && kind == TokenType::Normal {
+            return token.as_bytes().to_vec();
+        }
 
         let mut bytes = Vec::new();
         for value in token.chars() {
@@ -1174,6 +1177,7 @@ use crate::core::tensor::{MetaValue, MetaValueType};
             (7, "w", 1),
             (8, "r", 1),
             (9, "d", 1),
+            (10, "Ā", 1),
             (255_999, "<|image>", 3),
             (256_000, "<audio>", 3),
             (258_882, "</image>", 3),
@@ -1247,6 +1251,12 @@ use crate::core::tensor::{MetaValue, MetaValueType};
             ),
             vec![tokenizer.bos_id().unwrap(), 258_883]
         );
+    }
+
+    #[test]
+    fn gemma4_raw_utf8_token_piece_does_not_use_gpt2_byte_decoder() {
+        let tokenizer = gemma4_test_tokenizer();
+        assert_eq!(tokenizer.decode_bytes(&[10], true), "Ā".as_bytes());
     }
 
     #[test]
