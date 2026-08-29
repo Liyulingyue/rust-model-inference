@@ -27,6 +27,7 @@ enum PreTokenizer {
     HunyuanDense,
     Lfm2,
     LlamaBpe,
+    Gemma4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,28 +317,33 @@ impl BPETokenizer {
     pub fn from_gguf_metadata(
         get_meta: impl Fn(&str) -> Option<MetaValue>,
     ) -> Result<Self, String> {
-        match get_meta("tokenizer.ggml.model") {
-            Some(MetaValue::String(value)) if value == "gpt2" => {}
+        let gemma4 = match get_meta("tokenizer.ggml.model") {
+            Some(MetaValue::String(value)) if value == "gpt2" => false,
+            Some(MetaValue::String(value)) if value == "gemma4" => true,
             Some(MetaValue::String(value)) => {
                 return Err(format!(
-                    "Unsupported tokenizer.ggml.model {value:?}; expected gpt2"
+                    "Unsupported tokenizer.ggml.model {value:?}; expected gpt2 or gemma4"
                 ));
             }
             _ => return Err("Missing or invalid tokenizer.ggml.model".into()),
-        }
+        };
 
-        let pre = match get_meta("tokenizer.ggml.pre") {
-            Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
-            Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
-            Some(MetaValue::String(value)) if value == "hunyuan-dense" => PreTokenizer::HunyuanDense,
-            Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
-            Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
-            Some(MetaValue::String(value)) => {
-                return Err(format!(
-                    "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2, qwen35, hunyuan-dense, lfm2, or llama-bpe"
-                ));
+        let pre = if gemma4 {
+            PreTokenizer::Gemma4
+        } else {
+            match get_meta("tokenizer.ggml.pre") {
+                Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
+                Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
+                Some(MetaValue::String(value)) if value == "hunyuan-dense" => PreTokenizer::HunyuanDense,
+                Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
+                Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) => {
+                    return Err(format!(
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, or llama-bpe"
+                    ));
+                }
+                _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
             }
-            _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
         };
 
         let tokens = string_array(get_meta("tokenizer.ggml.tokens"), "tokenizer.ggml.tokens")?;
@@ -393,6 +399,9 @@ impl BPETokenizer {
         )?;
         validate_token_id(bos_id, tokens.len(), "tokenizer.ggml.bos_token_id")?;
         validate_token_id(eos_id, tokens.len(), "tokenizer.ggml.eos_token_id")?;
+        if pre == PreTokenizer::Gemma4 && bos_id.is_none() {
+            return Err("tokenizer.ggml.model gemma4 requires tokenizer.ggml.bos_token_id".into());
+        }
 
         let add_bos = bool_meta(
             get_meta("tokenizer.ggml.add_bos_token"),
@@ -501,6 +510,18 @@ impl BPETokenizer {
 
     fn encode_ordinary(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
+        if self.pre == PreTokenizer::Gemma4 {
+            for fragment in text.split_inclusive('\n') {
+                let (ordinary, newline) = fragment
+                    .strip_suffix('\n')
+                    .map_or((fragment, false), |ordinary| (ordinary, true));
+                ids.extend(self.encode_bpe_segment(&ordinary.replace(' ', "▁")));
+                if newline {
+                    ids.extend(self.encode_bpe_segment("\n"));
+                }
+            }
+            return ids;
+        }
         for range in scan_qwen_ranges(text, self.pre) {
             ids.extend(self.encode_bpe_segment(&text[range]));
         }
@@ -509,7 +530,9 @@ impl BPETokenizer {
 
     pub fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
         let mut ids = self.encode_partitioned(text, options.parse_special);
-        if options.add_special && self.add_bos {
+        if self.pre == PreTokenizer::Gemma4 {
+            ids.insert(0, self.bos_id.expect("Gemma4 requires bos_id"));
+        } else if options.add_special && self.add_bos {
             ids.insert(0, self.bos_id.expect("validated add_bos requires bos_id"));
         }
         if options.add_special && self.add_eos {
@@ -519,21 +542,26 @@ impl BPETokenizer {
     }
 
     fn encode_bpe_segment(&self, text: &str) -> Vec<u32> {
-        let bytes = text.as_bytes();
-        let mut symbols: Vec<Symbol> = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            let token_str = if (b as usize) < self.byte_encoder.len() {
-                self.byte_encoder[b as usize].clone()
-            } else {
-                format!("<0x{:02X}>", b)
-            };
-            symbols.push(Symbol {
-                text: token_str,
-                prev: 0,
-                next: 0,
-                n: 1,
-            });
-        }
+        let mut symbols: Vec<Symbol> = if self.pre == PreTokenizer::Gemma4 {
+            text.chars()
+                .map(|value| Symbol {
+                    text: value.to_string(),
+                    prev: 0,
+                    next: 0,
+                    n: 1,
+                })
+                .collect()
+        } else {
+            text.as_bytes()
+                .iter()
+                .map(|&byte| Symbol {
+                    text: self.byte_encoder[byte as usize].clone(),
+                    prev: 0,
+                    next: 0,
+                    n: 1,
+                })
+                .collect()
+        };
 
         for i in 0..symbols.len() {
             symbols[i].prev = if i > 0 { i - 1 } else { usize::MAX };
@@ -1130,6 +1158,95 @@ use crate::core::tensor::{MetaValue, MetaValueType};
 
     fn normal_control_literal_test_tokenizer() -> BPETokenizer {
         tokenizer_from_parts(&["a", "<|im_start|>"], &[1, 1], None, None, false, false).unwrap()
+    }
+
+    fn gemma4_test_tokenizer() -> BPETokenizer {
+        let mut tokens = vec!["<unused>".to_string(); 258_884];
+        let mut token_types = vec![MetaValue::Uint32(5); tokens.len()];
+        for (id, token, kind) in [
+            (0, "<bos>", 3),
+            (1, "▁", 1),
+            (2, "h", 1),
+            (3, "e", 1),
+            (4, "l", 1),
+            (5, "o", 1),
+            (6, "\n", 1),
+            (7, "w", 1),
+            (8, "r", 1),
+            (9, "d", 1),
+            (255_999, "<|image>", 3),
+            (256_000, "<audio>", 3),
+            (258_882, "</image>", 3),
+            (258_883, "<audio|>", 3),
+        ] {
+            tokens[id] = token.into();
+            token_types[id] = MetaValue::Uint32(kind);
+        }
+        let metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".into(),
+                MetaValue::String("gemma4".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".into(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    tokens.into_iter().map(MetaValue::String).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".into(),
+                MetaValue::Array(MetaValueType::Uint32, token_types),
+            ),
+            (
+                "tokenizer.ggml.merges".into(),
+                MetaValue::Array(MetaValueType::String, Vec::new()),
+            ),
+            ("tokenizer.ggml.bos_token_id".into(), MetaValue::Uint32(0)),
+        ]);
+        BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned()).unwrap()
+    }
+
+    #[test]
+    fn gemma4_bpe_normalizes_spaces_splits_newlines_and_forces_bos() {
+        let tokenizer = gemma4_test_tokenizer();
+        let ids = tokenizer.encode(
+            " hello\nworld",
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        assert_eq!(ids[0], tokenizer.bos_id().unwrap());
+        assert_eq!(
+            tokenizer.decode_bytes(&ids[1..], true),
+            "▁hello\nworld".as_bytes()
+        );
+    }
+
+    #[test]
+    fn gemma4_media_controls_are_single_controls_after_bos() {
+        let tokenizer = gemma4_test_tokenizer();
+        assert_eq!(
+            tokenizer.encode(
+                "<|image>",
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            ),
+            vec![tokenizer.bos_id().unwrap(), 255_999]
+        );
+        assert_eq!(
+            tokenizer.encode(
+                "<audio|>",
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            ),
+            vec![tokenizer.bos_id().unwrap(), 258_883]
+        );
     }
 
     #[test]
