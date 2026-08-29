@@ -1,5 +1,23 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
+const GEMMA4_TOKEN_ANCHORS: &[(usize, &str)] = &[
+    (0, "<pad>"),
+    (1, "<eos>"),
+    (2, "<bos>"),
+    (3, "<unk>"),
+    (4, "<mask>"),
+    (1_024, "▁over"),
+    (4_096, "दा"),
+    (65_536, "DIST"),
+    (131_072, "▁Leh"),
+    (196_608, "▁dipilih"),
+    (255_999, "<|image>"),
+    (256_000, "<|audio>"),
+    (258_882, "<image|>"),
+    (258_883, "<audio|>"),
+    (262_143, "<unused6226>"),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Gemma4Config {
     pub layers: usize,
@@ -52,12 +70,7 @@ impl Gemma4Config {
         require_u32(source, "gemma4.rope.dimension_count", 512)?;
         require_u32(source, "gemma4.rope.dimension_count_swa", 256)?;
         require_string(source, "tokenizer.ggml.model", "gemma4")?;
-        require_array_len(
-            source,
-            "tokenizer.ggml.tokens",
-            MetaValueType::String,
-            262_144,
-        )?;
+        require_gemma4_token_anchors(source)?;
 
         for (name, dims, ty) in [
             ("output_norm.weight", &[1536][..], GGMLType::F32),
@@ -402,17 +415,26 @@ fn require_array(
     }
 }
 
-fn require_array_len(
-    source: &dyn TensorSource,
-    key: &str,
-    expected_type: MetaValueType,
-    expected_len: usize,
-) -> Result<(), String> {
-    match source.metadata(key) {
-        Some(MetaValue::Array(value_type, values))
-            if *value_type == expected_type && values.len() == expected_len => Ok(()),
-        Some(value) => Err(format!("Invalid metadata {key}: expected {expected_type:?} array length {expected_len}, got {value:?}")),
-        None => Err(format!("Missing metadata: {key}")),
+fn require_gemma4_token_anchors(source: &dyn TensorSource) -> Result<(), String> {
+    match source.metadata("tokenizer.ggml.tokens") {
+        Some(MetaValue::Array(MetaValueType::String, tokens)) if tokens.len() == 262_144 => {
+            for &(id, expected) in GEMMA4_TOKEN_ANCHORS {
+                match tokens.get(id) {
+                    Some(MetaValue::String(actual)) if actual == expected => {}
+                    Some(actual) => {
+                        return Err(format!(
+                            "Invalid metadata tokenizer.ggml.tokens[{id}]: expected {expected:?}, got {actual:?}"
+                        ));
+                    }
+                    None => return Err(format!("Missing metadata tokenizer.ggml.tokens[{id}]")),
+                }
+            }
+            Ok(())
+        }
+        Some(value) => Err(format!(
+            "Invalid metadata tokenizer.ggml.tokens: expected String array length 262144, got {value:?}"
+        )),
+        None => Err("Missing metadata: tokenizer.ggml.tokens".into()),
     }
 }
 
@@ -487,6 +509,30 @@ mod tests {
 
     fn array(ty: MetaValueType, values: Vec<MetaValue>) -> MetaValue {
         MetaValue::Array(ty, values)
+    }
+
+    fn gemma4_token_values() -> Vec<MetaValue> {
+        let mut tokens = vec![MetaValue::String(String::new()); 262_144];
+        for (id, token) in [
+            (0, "<pad>"),
+            (1, "<eos>"),
+            (2, "<bos>"),
+            (3, "<unk>"),
+            (4, "<mask>"),
+            (1_024, "▁over"),
+            (4_096, "दा"),
+            (65_536, "DIST"),
+            (131_072, "▁Leh"),
+            (196_608, "▁dipilih"),
+            (255_999, "<|image>"),
+            (256_000, "<|audio>"),
+            (258_882, "<image|>"),
+            (258_883, "<audio|>"),
+            (262_143, "<unused6226>"),
+        ] {
+            tokens[id] = MetaValue::String(token.into());
+        }
+        tokens
     }
 
     fn valid_gemma4_source() -> MapTensorSource {
@@ -568,10 +614,7 @@ mod tests {
                 ),
                 (
                     "tokenizer.ggml.tokens".into(),
-                    array(
-                        MetaValueType::String,
-                        vec![MetaValue::String(String::new()); 262_144],
-                    ),
+                    array(MetaValueType::String, gemma4_token_values()),
                 ),
             ]),
             tensors: HashMap::new(),
@@ -943,5 +986,19 @@ mod tests {
         assert!(Gemma4AudioConfig::from_source(&audio)
             .unwrap_err()
             .contains("a.blk.0.conv_dw.weight"));
+    }
+
+    #[test]
+    fn gemma4_e2b_contract_rejects_token_id_content_drift() {
+        let mut wrong_token = valid_gemma4_source();
+        let Some(MetaValue::Array(_, tokens)) =
+            wrong_token.metadata.get_mut("tokenizer.ggml.tokens")
+        else {
+            panic!("valid source has a token array");
+        };
+        tokens[4_096] = MetaValue::String("token-id-drift".into());
+        assert!(Gemma4Config::from_source(&wrong_token)
+            .unwrap_err()
+            .contains("tokenizer.ggml.tokens[4096]"));
     }
 }
