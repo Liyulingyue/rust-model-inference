@@ -1,5 +1,6 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
+pub mod audio;
 pub mod text;
 pub use text::{Gemma4InputRow, Gemma4Model, Gemma4Session};
 
