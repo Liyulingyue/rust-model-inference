@@ -2,24 +2,37 @@ diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
 index e60c9c878..ae5d35be7 100644
 --- a/tools/mtmd/CMakeLists.txt
 +++ b/tools/mtmd/CMakeLists.txt
-@@ -162,0 +163,5 @@ if (LLAMA_BUILD_TOOLS)
+@@ -160,4 +160,9 @@ if (LLAMA_BUILD_TOOLS)
+     set_target_properties(llama-mtmd-debug PROPERTIES OUTPUT_NAME llama-mtmd-debug)
+     target_link_libraries(llama-mtmd-debug PRIVATE llama-common mtmd Threads::Threads)
+     target_compile_features(llama-mtmd-debug PRIVATE cxx_std_17)
 +
 +    add_executable(llama-gemma4-trace mtmd-cli.cpp)
 +    target_compile_definitions(llama-gemma4-trace PRIVATE LLAMA_GEMMA4_TRACE)
 +    target_link_libraries(llama-gemma4-trace PRIVATE llama-common mtmd Threads::Threads)
 +    target_compile_features(llama-gemma4-trace PRIVATE cxx_std_17)
+ endif()
 diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
-index 97678c6b2..5424c96dd 100644
+index 97678c6b2..658d5ac66 100644
 --- a/tools/mtmd/mtmd-cli.cpp
 +++ b/tools/mtmd/mtmd-cli.cpp
-@@ -15,0 +16,6 @@
+@@ -13,6 +13,11 @@
+ #include <vector>
+ #include <limits.h>
+ #include <cinttypes>
+ #include <clocale>
 +#ifdef LLAMA_GEMMA4_TRACE
 +#include <cstring>
 +#include <fstream>
 +#include <map>
 +#include <mutex>
 +#endif
-@@ -33,0 +40,73 @@ static volatile bool g_is_interrupted = false;
+-
+ #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
+@@ -31,8 +36,79 @@
+ static volatile bool g_is_generating = false;
+ static volatile bool g_is_interrupted = false;
+-
 +#ifdef LLAMA_GEMMA4_TRACE
 +class gemma4_trace {
 +public:
@@ -92,25 +105,50 @@ index 97678c6b2..5424c96dd 100644
 +    bool failed_ = false;
 +};
 +#endif
-+
-@@ -99,0 +179,3 @@ struct mtmd_cli_context {
+ /**
+  * Please note that this is NOT a production-ready binary.
+  * It is a playground for trying multimodal support in llama.cpp.
+  * For contributors: please keep this code simple and easy to understand. Do not add unnecessary complexity. The goal is to have a simple CLI for testing multimodal support.
+  */
+@@ -95,8 +171,10 @@ struct mtmd_cli_context {
+     // chat template
+     common_chat_templates_ptr tmpls;
+     std::vector<common_chat_msg> chat_history;
+     bool use_jinja = false;
+     // TODO: support for --system-prompt with /clear command
 +#ifdef LLAMA_GEMMA4_TRACE
 +    gemma4_trace * trace;
 +#endif
-@@ -108,0 +191,3 @@ struct mtmd_cli_context {
+-
+     // support for legacy templates (models not having EOT token)
+     llama_tokens antiprompt_tokens;
+@@ -107,5 +185,9 @@ struct mtmd_cli_context {
+     common_debug_cb_user_data cb_data;
+-
 +#ifdef LLAMA_GEMMA4_TRACE
-+    mtmd_cli_context(common_params & params, gemma4_trace * trace) : llama_init(common_init_from_params(params)), trace(trace) {
++    mtmd_cli_context(common_params & params, gemma4_trace * trace)
++        : llama_init(common_init_from_params(params)), trace(trace) {
 +#else
-@@ -109,0 +195 @@ struct mtmd_cli_context {
+     mtmd_cli_context(common_params & params) : llama_init(common_init_from_params(params)) {
 +#endif
-@@ -166,0 +253,6 @@ struct mtmd_cli_context {
+         model = llama_init->model();
+         lctx = llama_init->context();
+@@ -163,6 +245,12 @@ struct mtmd_cli_context {
+         mparams.flash_attn_type  = params.flash_attn_type;
+         mparams.warmup           = params.warmup;
+         mparams.image_min_tokens = params.image_min_tokens;
+         mparams.image_max_tokens = params.image_max_tokens;
 +#ifdef LLAMA_GEMMA4_TRACE
 +        if (trace && trace->enabled()) {
 +            mparams.cb_eval_user_data = trace;
 +            mparams.cb_eval = gemma4_trace::callback;
 +        } else
 +#endif
-@@ -408,0 +501,8 @@ int main(int argc, char ** argv) {
+         if (std::getenv("MTMD_DEBUG_GRAPH") != nullptr) {
+             mparams.cb_eval_user_data = &cb_data;
+@@ -407,4 +494,12 @@ int main(int argc, char ** argv) {
+     ggml_backend_load_all();
+-
 +#ifdef LLAMA_GEMMA4_TRACE
 +    gemma4_trace trace(std::getenv("RMI_PARITY_TRACE"));
 +    if (trace.enabled()) {
@@ -119,5 +157,6 @@ index 97678c6b2..5424c96dd 100644
 +    }
 +    mtmd_cli_context ctx(params, &trace);
 +#else
-@@ -409,0 +510 @@ int main(int argc, char ** argv) {
+     mtmd_cli_context ctx(params);
 +#endif
+     LOG_INF("%s: loading model: %s\n", __func__, params.model.path.c_str());
