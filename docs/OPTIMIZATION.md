@@ -342,8 +342,10 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K scalar (fixed) |
 | Q2_K_L | 283 | 5.5 | ✅ | Q2K × Q8K scalar (fixed) |
 | IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2 (bit-exact, b8d6b7c) |
-| IQ3_XXS (UD) | ~280 | 4.3 | ⚠️ 精度漂移 | IQ3_XXS × Q8K scalar (Python bit-exact, f32 order mismatch with reference C) |
-| IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 精度漂移 | IQ2_XXS × Q8K scalar (同上) |
+| IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar (f64 block acc, "The capital of France is Paris.") |
+| IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 输出偏 | IQ2_XXS × Q8K scalar (单 block bit-exact, 模型输出与 IQ3_XXS 略不同) |
+| IQ1_M (UD) | ~170 | 4.3 | ⚠️ 输出乱 | IQ1_M × Q8K scalar (1.75 bpw 本就精度极低) |
+| IQ1_S (UD) | ~150 | 4.7 | ⚠️ 输出乱 | IQ1_S × Q8K scalar (1.5 bpw, 同上) |
 
 **关键加速对比**：
 - Q4_1: scalar 11.6 → AVX2 54.5 t/s （**4.7×**）
@@ -351,10 +353,11 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 - Q5_K: was 0 output → 40 t/s （修复）
 - Q2_K/Q3_K: was 乱码 → 5-9 t/s （修复）
 - IQ4_XS: was panic → AVX2 4.8 t/s（修复 + 打开 dispatch）
-- IQ3_XXS (UD): was panic → scalar 4.3 t/s（新增，Python bit-exact，单 block dot 与 llama.cpp 公式逐项匹配）
-- IQ2_XXS (UD): was panic → scalar 4.4 t/s（同上，unit test 验证 bit-exact）
+- IQ3_XXS (UD): was panic → scalar 4.3 t/s（修复 + f64 acc → 给出 "The capital of France is Paris."）
+- IQ2_XXS (UD): was panic → scalar 4.4 t/s（修复）
+- IQ1_M / IQ1_S (UD): was panic → scalar 4.3 / 4.7 t/s（修复）
 
-**I-quant 精度漂移说明**：IQ3_XXS / IQ2_XXS scalar 输出与 IQ4_XS AVX2 输出不完全一致——前两者给出 "The capital of france is paris."，后者给出 "The capital of France is **Paris**."。Python 单 block dot 与 Rust 单 block dot 完全相等（`-0.097571254`），证明算法正确。差异来源于：`0.25 * sum(d_i*b_i)`（C 末尾乘）与 `sum(0.25 * d_i*b_i)`（Rust 每 block 乘）的 IEEE 754 f32 累加顺序不同，256 block 累积后导致个别 logit 翻转。这是已知 f32 顺序敏感问题，不是算法 bug。修复方向：把 block-level `bsum` 累积到 f64，末尾再 cast 回 f32，能消除顺序敏感性（但会增加指令开销）。
+**I-quant 精度漂移说明**：IQ3_XXS / IQ2_XXS scalar 输出与 IQ4_XS AVX2 输出不完全一致。IQ3_XXS 现在能正确生成 "The capital of France is Paris."，IQ2_XXS 在 "The capital of France is" 上给出 "*The capital of France*"，在 "Once upon a time" 上给出 "(trigger"。Python 单 block dot 与 Rust 单 block dot 完全相等（IQ3_XXS `-0.097571254`，IQ1_M `-65.112305`），证明算法 bit-exact。剩余差异来源于：`0.25 * sum(d_i*b_i)`（C 末尾乘）与 `sum(0.25 * d_i*b_i)`（Rust 每 block 乘）的 IEEE 754 f32 累加顺序不同。已用 f64 block accumulator 修复大部分情况（IQ3_XXS 完全恢复），IQ2_XXS 仍残留偏差——可能与 2-bit 量化精度边界有关，待查。
 
 **Q2_K/Q3_K 下一步是写 SIMD 路径**（仿 q4k AVX2）。当前 5-9 t/s 提不上 30-40 t/s 是 scalar matmul 的吞吐瓶颈——这一档 kernel 复用 Q8K activation 而非 Q8_0，所以可以直接仿照 `vec_dot_q4k_q8k_avx2` 写一个 `vec_dot_q2k_q8k_avx2`/`vec_dot_q3k_q8k_avx2`。预期 5-10× 加速。
 

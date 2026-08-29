@@ -51,6 +51,8 @@ pub enum QuantizedTensor<'a> {
     IQ3XXS { data: &'a [u8], n_cols: usize, n_rows: usize },
     IQ3S { data: &'a [u8], n_cols: usize, n_rows: usize },
     IQ4XS { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ1M { data: &'a [u8], n_cols: usize, n_rows: usize },
+    IQ1S { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_0 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_1 { data: &'a [u8], n_cols: usize, n_rows: usize },
     Q4_K { data: &'a [u8], n_cols: usize, n_rows: usize },
@@ -142,6 +144,12 @@ impl<'a> QuantizedTensor<'a> {
             Self::IQ4XS { data, n_cols, n_rows } => {
                 Box::new(iq4_xs::IQ4XSKernel::new(data, *n_cols, *n_rows))
             }
+            Self::IQ1M { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1MKernel::new(data, *n_cols, *n_rows))
+            }
+            Self::IQ1S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1SKernel::new(data, *n_cols, *n_rows))
+            }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, *n_cols, *n_rows))
             }
@@ -184,6 +192,8 @@ impl<'a> QuantizedTensor<'a> {
             GGMLType::IQ3_XXS => Self::IQ3XXS { data, n_cols: n_in, n_rows: n_out },
             GGMLType::IQ3_S => Self::IQ3S { data, n_cols: n_in, n_rows: n_out },
             GGMLType::IQ4_XS => Self::IQ4XS { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ1_M => Self::IQ1M { data, n_cols: n_in, n_rows: n_out },
+            GGMLType::IQ1_S => Self::IQ1S { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_0 => Self::Q4_0 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4_1 => Self::Q4_1 { data, n_cols: n_in, n_rows: n_out },
             GGMLType::Q4K => Self::Q4_K { data, n_cols: n_in, n_rows: n_out },
@@ -208,6 +218,8 @@ impl<'a> QuantizedTensor<'a> {
             Self::IQ3XXS { .. } => GGMLType::IQ3_XXS,
             Self::IQ3S { .. } => GGMLType::IQ3_S,
             Self::IQ4XS { .. } => GGMLType::IQ4_XS,
+            Self::IQ1M { .. } => GGMLType::IQ1_M,
+            Self::IQ1S { .. } => GGMLType::IQ1_S,
             Self::Q4_0 { .. } => GGMLType::Q4_0,
             Self::Q4_1 { .. } => GGMLType::Q4_1,
             Self::Q4_K { .. } => GGMLType::Q4K,
@@ -231,6 +243,8 @@ impl<'a> QuantizedTensor<'a> {
             Self::IQ3XXS { n_cols, .. } => *n_cols,
             Self::IQ3S { n_cols, .. } => *n_cols,
             Self::IQ4XS { n_cols, .. } => *n_cols,
+            Self::IQ1M { n_cols, .. } => *n_cols,
+            Self::IQ1S { n_cols, .. } => *n_cols,
             Self::Q4_0 { n_cols, .. } => *n_cols,
             Self::Q4_1 { n_cols, .. } => *n_cols,
             Self::Q4_K { n_cols, .. } => *n_cols,
@@ -276,6 +290,12 @@ impl<'a> QuantizedTensor<'a> {
             Self::IQ4XS { data, n_cols, n_rows } => {
                 Box::new(iq4_xs::IQ4XSKernel::new(data, n_cols, n_rows))
             }
+            Self::IQ1M { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1MKernel::new(data, n_cols, n_rows))
+            }
+            Self::IQ1S { data, n_cols, n_rows } => {
+                Box::new(iq4_xs::IQ1SKernel::new(data, n_cols, n_rows))
+            }
             Self::Q4_0 { data, n_cols, n_rows } => {
                 Box::new(q4_0::Q4_0Kernel::new(data, n_cols, n_rows))
             }
@@ -307,6 +327,8 @@ impl<'a> QuantizedTensor<'a> {
             | Self::IQ3XXS { n_rows, .. }
             | Self::IQ3S { n_rows, .. }
             | Self::IQ4XS { n_rows, .. }
+            | Self::IQ1M { n_rows, .. }
+            | Self::IQ1S { n_rows, .. }
             | Self::Q4_0 { n_rows, .. }
             | Self::Q4_1 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
@@ -381,7 +403,9 @@ impl<'a> QuantizedTensor<'a> {
             | Self::IQ3XXS { n_cols, .. }
             | Self::IQ3S { n_cols, .. }
             | Self::IQ4NL { n_cols, .. }
-            | Self::IQ4XS { n_cols, .. } => {
+            | Self::IQ4XS { n_cols, .. }
+            | Self::IQ1M { n_cols, .. }
+            | Self::IQ1S { n_cols, .. } => {
                 let blocks = *n_cols / crate::ops::quant::QK_K;
                 crate::ops::quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
                 pool.compute(|ith, nth| {

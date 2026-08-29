@@ -57,6 +57,34 @@ impl<'a> IQ3XXSKernel<'a> {
     }
 }
 
+pub struct IQ1MKernel<'a> {
+    pub weight: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+impl<'a> IQ1MKernel<'a> {
+    pub const BLOCK_ELEMENTS: usize = 256;
+    pub const BLOCK_BYTES: usize = 56;
+    pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
+        Self { weight: data, n_in, n_out }
+    }
+}
+
+pub struct IQ1SKernel<'a> {
+    pub weight: &'a [u8],
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
+impl<'a> IQ1SKernel<'a> {
+    pub const BLOCK_ELEMENTS: usize = 256;
+    pub const BLOCK_BYTES: usize = 50;
+    pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
+        Self { weight: data, n_in, n_out }
+    }
+}
+
 impl<'a> Kernel for IQ4XSKernel<'a> {
     fn forward_prequantized(
         &self,
@@ -193,6 +221,8 @@ iq_kernel_impl!(IQ2XXSKernel, 66, vec_dot_iq2_xxs_q8k, dequantize_row_iq2_xxs);
 iq_kernel_impl!(IQ2SKernel, 82, vec_dot_iq2_s_q8k, dequantize_row_iq2_s);
 iq_kernel_impl!(IQ3XXSKernel, 98, vec_dot_iq3_xxs_q8k, dequantize_row_iq3_xxs);
 iq_kernel_impl!(IQ3SKernel, 110, vec_dot_iq3_s_q8k, dequantize_row_iq3_s);
+iq_kernel_impl!(IQ1MKernel, 56, vec_dot_iq1_m_q8k, dequantize_row_iq1_m);
+iq_kernel_impl!(IQ1SKernel, 50, vec_dot_iq1_s_q8k, dequantize_row_iq1_s);
 
 pub struct IQ2XSKernel<'a> {
     pub weight: &'a [u8],

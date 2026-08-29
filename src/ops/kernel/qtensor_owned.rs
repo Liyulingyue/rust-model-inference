@@ -141,7 +141,9 @@ impl QTensorOwned {
             | QuantizedTensor::IQ2S { .. }
             | QuantizedTensor::IQ2XS { .. }
             | QuantizedTensor::IQ3XXS { .. }
-            | QuantizedTensor::IQ3S { .. } => {
+            | QuantizedTensor::IQ3S { .. }
+            | QuantizedTensor::IQ1M { .. }
+            | QuantizedTensor::IQ1S { .. } => {
                 panic!("Q4_0 / Q4_1 / I-quant not yet supported in QTensorOwned")
             }
         }

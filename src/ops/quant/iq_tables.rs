@@ -75,3 +75,8 @@ pub fn iq3_xxs_grid() -> &'static [u32] {
     static GRID: OnceLock<Vec<u32>> = OnceLock::new();
     GRID.get_or_init(|| parse_table("uint32_t", "iq3xxs_grid", 256))
 }
+
+pub fn iq1s_grid() -> &'static [u64] {
+    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
+    GRID.get_or_init(|| parse_table("uint64_t", "iq1s_grid", 2048))
+}
