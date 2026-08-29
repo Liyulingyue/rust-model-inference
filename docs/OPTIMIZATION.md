@@ -342,6 +342,8 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K scalar (fixed) |
 | Q2_K_L | 283 | 4.9 | ✅ | Q2K × Q8K AVX2 (3 个 bug 修复: qs_base, scale_b, hsum256_ps) |
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K AVX2 |
+| Q3_K_M | 419 | 7.3 | ✅ | Q3K × Q8K AVX2 (重写: 配对距离-8 sum, hsum 修复) |
+| Q3_K_S | 396 | 4.7 | ✅ | Q3K × Q8K AVX2 |
 | IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2 (bit-exact, b8d6b7c) |
 | IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar (f64 block acc, "The capital of France is Paris.") |
 | IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 输出偏 | IQ2_XXS × Q8K scalar (单 block bit-exact, 模型输出与 IQ3_XXS 略不同) |
@@ -357,7 +359,7 @@ Metal JSON 记录 `n_gpu_layers: 99`，`samples_ts` 为 `[274.077, 273.657, 273.
 - IQ2_XXS (UD): was panic → scalar 4.4 t/s（修复）
 - IQ1_M / IQ1_S (UD): was panic → scalar 4.3 / 4.7 t/s（修复）
 - Q2_K / Q2_K_L: was 乱码 (scalar 4.9 t/s) → AVX2 4.9 t/s (启用 dispatch, 3 bugs 修复: qs_base, scale_b, hsum256_ps)
-- Q3_K / Q3_K_M: scalar 5-9 t/s（AVX2 仍有 bug, scale_shuffles 错误, 暂时保持 scalar）
+- Q3_K / Q3_K_M / Q3_K_S / UD-Q3_K_XL: scalar 5-9 t/s → AVX2 4.7-7.3 t/s (重写: 修 scale_shuffles + hsum256ps 双 shuffle imm; scalar 配对距离-8 sum 改用 _mm_extract + _mm_add_epi16; Q3_K_M 现在输出 "The capital of France is **Paris**" 与 IQ4_XS 完全一致)
 
 **I-quant 精度漂移说明**：IQ3_XXS / IQ2_XXS scalar 输出与 IQ4_XS AVX2 输出不完全一致。IQ3_XXS 现在能正确生成 "The capital of France is Paris."，IQ2_XXS 在 "The capital of France is" 上给出 "*The capital of France*"，在 "Once upon a time" 上给出 "(trigger"。Python 单 block dot 与 Rust 单 block dot 完全相等（IQ3_XXS `-0.097571254`，IQ1_M `-65.112305`），证明算法 bit-exact。剩余差异来源于：`0.25 * sum(d_i*b_i)`（C 末尾乘）与 `sum(0.25 * d_i*b_i)`（Rust 每 block 乘）的 IEEE 754 f32 累加顺序不同。已用 f64 block accumulator 修复大部分情况（IQ3_XXS 完全恢复），IQ2_XXS 仍残留偏差——可能与 2-bit 量化精度边界有关，待查。
 
