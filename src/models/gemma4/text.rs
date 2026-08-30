@@ -5,7 +5,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     attention_value_f32, bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_inplace,
+    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_ggml_inplace,
 };
 use std::sync::Arc;
 
@@ -1026,7 +1026,7 @@ fn attend(
             let offset = token * dim;
             *score = dot_f32(query, &cache.keys[offset..offset + dim], dim);
         }
-        softmax_inplace(scores);
+        softmax_ggml_inplace(scores);
         for dimension in 0..dim {
             values.fill(0.0);
             for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
@@ -1099,9 +1099,10 @@ fn trace(_name: &str, _layer: Option<usize>, _values: &[f32]) {}
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_input_rows, head_dim, kv_source_layer, load_weight, matmul, require_f32_kv,
-        softcap, Gemma4InputRow, Gemma4Layer, Gemma4Model, BASE_FFN_LAYERS, EMBED, FULL_HEAD_DIM,
-        HEADS, LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL, SWA_HEAD_DIM, VOCAB,
+        assemble_input_rows, attend, head_dim, kv_source_layer, load_weight, matmul,
+        require_f32_kv, softcap, Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer,
+        BASE_FFN_LAYERS, EMBED, FULL_HEAD_DIM, HEADS, LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL,
+        SWA_HEAD_DIM, VOCAB,
     };
     use crate::core::scratchpad::KvFormat;
     use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
@@ -1278,6 +1279,43 @@ mod tests {
         // Pinned llama.cpp 3173a56471c, first text raw logit at index 1.
         let raw = f32::from_bits(0x417c_38d8);
         assert_eq!(softcap(raw, 30.0).to_bits(), 0x4167_507f);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn layer_12_attention_softmax_matches_pinned_neon_bits() {
+        // Occurrence 7 head-0 KQ words and output are independently pinned from llama.cpp 3173a56471c.
+        let keys = [
+            0x40b4_85b2,
+            0x3ffc_c0c2,
+            0x4079_1edf,
+            0x4027_f5cc,
+            0x407c_44ba,
+            0x4078_0503,
+            0xbec0_388c,
+            0x405a_25f4,
+        ]
+        .map(f32::from_bits);
+        let cache = KvLayer {
+            head_dim: 1,
+            keys: keys.to_vec(),
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0].to_vec(),
+        };
+        let mut output = [0.0; HEADS];
+
+        attend(
+            12,
+            7,
+            &[1.0; HEADS],
+            &cache,
+            true,
+            &mut output,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(output.map(f32::to_bits), [0x3f15_89fe; HEADS]);
     }
 
     #[test]
