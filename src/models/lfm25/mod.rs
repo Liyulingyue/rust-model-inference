@@ -1,13 +1,10 @@
 //! LFM2.5 (Liquid Foundation Model 2.5) hybrid architecture support.
 //!
-//! Each layer is either an attention layer (with Q/K norm, RoPE, and KV
-//! cache) or a recurrent layer using a short convolution over a
-//! persistent per-channel state. FFN tensors exist on every layer.
+//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
+//! the trunk lives in `trunk/`; `lfm25` has no sibling modules.
 
-pub mod base;
-pub mod skeleton;
+pub mod trunk;
 
-pub use base::{run_inference, KvCacheFmt};
-pub use skeleton::{
-    get_f32_tensor, load_layers, Lfm25Config, Lfm25LayerWeights,
+pub use trunk::{
+    get_f32_tensor, load_layers, run_inference, KvCacheFmt, Lfm25Config, Lfm25LayerWeights,
 };

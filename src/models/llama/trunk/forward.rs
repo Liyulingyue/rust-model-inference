@@ -9,7 +9,7 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::llama::skeleton::{get_f32_tensor, load_layers, LlamaLayerWeights};
+use super::weights::{get_f32_tensor, load_layers, LlamaLayerWeights};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{

@@ -1,7 +1,28 @@
+//! # LFM2 Inference Loop
+//!
+//! Text autoregressive inference for LFM2 hybrid (attention + shortconv)
+//! models. The attention path mirrors qwen3 (Q/K norm → RoPE → standard
+//! attention with KV cache). The recurrent path uses a per-layer
+//! `shortconv_state` tensor of shape `[d_conv, n_embd]` and the operator
+//!
+//! ```text
+//!   in_proj(x) -> (b, c, x_chunked)
+//!   bx = b * x              // gating
+//!   bx = concat(state, bx)  // prepend conv state
+//!   state_new = bx[-d_conv..]
+//!   y = c * conv1d(bx, kernel)
+//!   out = out_proj(y) + x   // residual
+//! ```
+//!
+//! For decode (one new token per step), `n_tokens == 1` and `bx` is the
+//! single new element; the conv state shifts left and a new column is
+//! appended. For prefill (n_tokens > 1) we process them all at once and
+//! write the trailing `d_conv - 1` columns back to the state.
+
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::BPETokenizer;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Kernel;
 use crate::ops::{
     attention_value_f32, dot_f32, dot_f16_f32, embedding_lookup, quantize_q8_0_into,
@@ -15,7 +36,9 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::skeleton::{get_f32_tensor, load_layers, Lfm25Config, Lfm25LayerWeights};
+use super::config::Lfm2Config;
+use super::session::KvCacheFmt;
+use super::weights::{get_f32_tensor, load_layers, Lfm2LayerWeights};
 
 pub fn run_inference(
     source: &dyn TensorSource,
@@ -27,13 +50,13 @@ pub fn run_inference(
     kv_format: KvCacheFmt,
 ) -> Result<(), String> {
     let t0 = Instant::now();
-    let cfg = Lfm25Config::from_source(source)?;
+    let cfg = Lfm2Config::from_source(source)?;
     let n_embd = cfg.n_embd;
     let n_layer = cfg.n_layer;
     let n_head = cfg.n_head;
     let n_ff = cfg.n_ff;
 
-    let arch = "lfm2.5";
+    let arch = "lfm2";
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -71,6 +94,7 @@ pub fn run_inference(
         }],
     )?;
 
+    // Determine max n_embd_q across attention layers for scratchpad sizing.
     let n_embd_q = n_head * cfg.n_embd_head_k;
     let n_embd_gqa = cfg
         .n_head_kv_per_layer
@@ -93,18 +117,27 @@ pub fn run_inference(
     println!("Prompt: {} tokens", input_tokens.len());
 
     let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
+    // Accumulated b*x from prompt tokens (for batch-prefill simulation).
+    // Each element is the b*x output for one token at one layer.
+    // We keep the last d_conv tokens' b*x for the decode state.
     let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
     for (l, lw) in layers.iter().enumerate() {
         if lw.is_attn {
             shortconv_states.push(Vec::new());
             accumulated_bx.push(Vec::new());
         } else {
+            // [d_conv, n_embd], padded in time dimension (row major: time is fast).
+            // The llama.cpp convention is [n_embd, d_conv] (channels x time). We use
+            // the same: state[l][c * d_conv + t].
             shortconv_states.push(vec![0.0f32; n_embd * cfg.d_conv]);
             accumulated_bx.push(Vec::new());
             let _ = l;
         }
     }
 
+    // KV cache: only used by attention layers. To keep allocations simple,
+    // we allocate a single cache keyed by layer; non-attention layers just
+    // never touch their slot.
     let kv_cache = match kv_format {
         KvCacheFmt::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
         KvCacheFmt::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
@@ -139,12 +172,20 @@ pub fn run_inference(
         let is_prefill = step < input_tokens.len();
         for layer in 0..n_layer {
             let lw = &layers[layer];
+            // During prefill, before processing token k, set state to the last
+            // d_conv accumulated b*x values (with zero padding for early tokens).
+            // This makes each prefill token's step-by-step computation match the
+            // batched prefill semantics in llama.cpp (where the SSM conv kernel
+            // spans d_conv-1 previous tokens' b*x with all-zero state).
             if !lw.is_attn && is_prefill {
                 let d_conv = cfg.d_conv;
                 let n_embd = cfg.n_embd;
                 let state = &mut shortconv_states[layer];
                 state.resize(d_conv * n_embd, 0.0);
                 let hist = &accumulated_bx[layer];
+                // hist contains the most recent min(step, d_conv) b*x values
+                // from earlier tokens, with hist[0] = b*x_{max(0, step-d_conv)}.
+                // state[k_p] = hist[k_p] (when available), else 0.
                 for k_p in 0..d_conv {
                     if k_p < hist.len() {
                         let src = &hist[k_p];
@@ -172,6 +213,7 @@ pub fn run_inference(
             );
         }
 
+        // Output norm + LM head.
         let x_ptr = scratch.x.as_mut_ptr();
         let normed_ptr = scratch.normed.as_mut_ptr();
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
@@ -194,6 +236,7 @@ pub fn run_inference(
         let sc = &scale_buf[..n_embd / 32];
         let q8k = &q8k_buf[..n_embd / 256];
 
+        // Build the output weight lazily once.
         let output_pw = crate::ops::kernel::Weight::from_quantized(
             crate::ops::kernel::QuantizedTensor::from_bytes(
                 output_weight,
@@ -309,18 +352,12 @@ pub fn run_inference(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvCacheFmt {
-    F16,
-    F32,
-}
-
 fn forward_layer(
     pool: &Arc<ComputePool>,
-    lw: &Lfm25LayerWeights<'_>,
+    lw: &Lfm2LayerWeights<'_>,
     layer: usize,
     n_layer: usize,
-    cfg: &Lfm25Config,
+    cfg: &Lfm2Config,
     mut scratch: &mut ExecutionScratchpad,
     kv_cache: &KvCache,
     max_ctx: usize,
@@ -354,6 +391,7 @@ fn forward_layer(
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
     unsafe {
+        // ---- Pre-attention / pre-conv norm ----
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.attn_norm, normed, eps);
@@ -370,7 +408,7 @@ fn forward_layer(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    let _cur_after_block = if lw.is_attn {
+let cur_after_block = if lw.is_attn {
         forward_attention(
             &pool,
             lw,
@@ -404,7 +442,9 @@ fn forward_layer(
         vec_add_into(&cur, x);
         unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     };
+    let _ = cur_after_block;
 
+    // ---- FFN (always present) ----
     unsafe {
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
@@ -423,6 +463,7 @@ fn forward_layer(
     let q8k = &q8k_buf[..n_embd / 256];
     let n_ff = cfg.n_ff;
 
+    // Q8 matmul (gate + up + scalar silu_mul) inside one parallel pass.
     pool.compute({
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
@@ -450,7 +491,7 @@ fn forward_layer(
         }
     });
 
-    let gate_buf =
+let gate_buf =
         unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
     quantize_q8_0_into(
         gate_buf, n_ff, &mut q8_buf[..n_ff], &mut scale_buf[..n_ff / 32],
@@ -477,15 +518,16 @@ fn forward_layer(
         }
     });
 
-    let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
+    let _ = cur_after_block;
 }
 
 fn forward_attention(
     pool: &Arc<ComputePool>,
-    lw: &Lfm25LayerWeights<'_>,
-    cfg: &Lfm25Config,
+    lw: &Lfm2LayerWeights<'_>,
+    cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     kv_cache: &KvCache,
     max_ctx: usize,
@@ -519,10 +561,12 @@ fn forward_attention(
         unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
+    // QKV matmul.
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
+    // Q8 matmul (Q/K/V) — parallel scalar path.
     pool.compute({
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
@@ -551,6 +595,7 @@ fn forward_attention(
         }
     });
 
+    // Q/K norm + RoPE.
     unsafe {
         let q = std::slice::from_raw_parts_mut(q_ptr, n_embd_q);
         let k_new = std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa);
@@ -580,6 +625,7 @@ fn forward_attention(
         }
     }
 
+    // KV cache write.
     let kb = layer * max_ctx * n_embd_gqa;
     let (k_cache_f16_ptr, v_cache_f16_ptr) = match kv_cache {
         KvCache::F16(c) => (c.k.as_ptr() as *mut u16, c.v.as_ptr() as *mut u16),
@@ -608,6 +654,7 @@ fn forward_attention(
         }
     }
 
+    // Attention compute (single-token decode path).
     let group_size = n_head / n_head_kv;
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
 
@@ -724,6 +771,7 @@ fn forward_attention(
         }
     }
 
+    // Output projection.
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
     quantize_q8_0_into(
         attn_out,
@@ -736,6 +784,7 @@ fn forward_attention(
     let sc = &scale_buf[..n_embd_q / 32];
     let q8k = &q8k_buf[..n_embd_q / 256];
 
+// Q8 matmul (output projection) — parallel scalar path.
     pool.compute({
         let attn_out_ptr = attn_out_ptr;
         let q8_ptr = q8.as_ptr();
@@ -757,9 +806,9 @@ fn forward_attention(
 
 fn forward_shortconv(
     pool: &Arc<ComputePool>,
-    lw: &Lfm25LayerWeights<'_>,
+    lw: &Lfm2LayerWeights<'_>,
     layer_idx: usize,
-    cfg: &Lfm25Config,
+    cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     pos: usize,
     state: &mut Vec<f32>,
@@ -795,11 +844,13 @@ fn forward_shortconv(
         quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
     }
 
+    // Step 1: in_proj -> 3 chunks of size n_embd: b, c, x.
     let three_n = 3 * n_embd;
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
+    // Q8 matmul (in_proj) — parallel scalar path.
     pool.compute({
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
@@ -818,16 +869,22 @@ fn forward_shortconv(
         }
     });
 
+    // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
     let bcx = unsafe { std::slice::from_raw_parts(gate_buf_ptr, three_n) };
     let b = &bcx[..n_embd];
     let c = &bcx[n_embd..2 * n_embd];
     let x = &bcx[2 * n_embd..3 * n_embd];
 
+    // bx = b * x. SIMD: copy b → bx (memcpy), then bx *= x (vec_mul_inplace).
     let mut bx: Vec<f32> = b.to_vec();
     vec_mul_inplace(x, bx.as_mut_slice());
 
+    // Accumulate b*x so the main loop can build the next token's state.
+    // The main loop sets state = [b*x_{step-d_conv}, ..., b*x_{step-1}] before
+    // calling forward_shortconv, matching llama.cpp's batched prefill semantics.
     if is_prefill {
         accumulated_bx.push(bx.clone());
+        // Trim history to last d_conv entries so memory stays bounded.
         let keep = cfg.d_conv;
         if accumulated_bx.len() > keep {
             let drop_n = accumulated_bx.len() - keep;
@@ -835,11 +892,19 @@ fn forward_shortconv(
         }
     }
 
-    let l_buf = d_conv + 1;
+    // bx_buf is the SSM conv input. For single-token decode (n_seq_tokens=1):
+    // GGML shape [d_conv + n_seq_tokens, n_embd] = [3, 2048].
+    // Memory layout: [c=0, t=0..2, c=1, t=0..2, ...] = bx_buf[c * l_buf + t].
+    // Rows 0..d_conv-1 are OLD state, row d_conv is b*x (from in_proj).
+    let l_buf = d_conv + 1; // 3 for d_conv=2
     let mut bx_buf: Vec<f32> = vec![0.0f32; n_embd * l_buf];
     if state.len() != d_conv * n_embd {
         state.resize(d_conv * n_embd, 0.0);
     }
+    // state is stored row-major [s_0_c_0, s_0_c_1, ..., s_(d_conv-1)_c_(n_embd-1)].
+    // Reorganize to GGML layout: bx_buf[c * l_buf + k] where k < d_conv is state time.
+    // For d_conv=2 this is two row-per-channel copies; the outer-loop transpose is
+    // preserved (the inner SIMD-friendly copy lives in copy_from_slice → memcpy).
     for k in 0..d_conv {
         let row = &state[k * n_embd..(k + 1) * n_embd];
         for c in 0..n_embd {
@@ -847,18 +912,27 @@ fn forward_shortconv(
         }
     }
 
+    // Row d_conv is b*x.
     for ci in 0..n_embd {
         bx_buf[ci * l_buf + d_conv] = bx[ci];
     }
 
+    // Update state: the new state is b*x (copy to all d_conv rows).
+    // During prefill, the post-state will be reconstructed by the caller from
+    // the accumulated b*x history (last d_conv tokens) to match llama.cpp's
+    // batched prefill semantics.
     if !is_prefill {
         for k in 0..d_conv {
             state[k * n_embd..(k + 1) * n_embd].copy_from_slice(&bx);
         }
     }
 
+    // SSM conv: input bx_buf [l_buf, n_embd], kernel [l_cache, n_embd].
+    // For single token: l_buf=3, l_cache=3, output has 1 position (3-3+1=1).
     let kernel = lw.shortconv_conv.as_ref().unwrap();
     debug_assert_eq!(kernel.len(), l_cache * n_embd);
+    // GGML layout: kernel[k, c] at offset c * l_cache + k.
+    // bx_buf[t, c] at offset c * l_buf + t.
     let mut conv_out: Vec<f32> = vec![0.0; n_embd];
     for c_idx in 0..n_embd {
         let k_off = c_idx * l_cache;
@@ -870,8 +944,10 @@ fn forward_shortconv(
         conv_out[c_idx] = acc;
     }
 
+    // y = c * conv_out (per-channel gating, SIMD via vec_mul_inplace).
     vec_mul_inplace(c, conv_out.as_mut_slice());
 
+    // out_proj: weight [n_embd, n_embd] @ conv_out [n_embd] = [n_embd]. Q8 scalar.
     quantize_q8_0_into(
         &conv_out,
         n_embd,
