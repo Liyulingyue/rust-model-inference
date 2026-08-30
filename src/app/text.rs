@@ -1,16 +1,19 @@
-﻿use crate::app::cli::{resolve_thread_count, KvFormat};
-use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::core::tensor::TensorSource;
-use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt, build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage};
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::models::qwen3::qwen_text_positions;
+use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::models::qwen3::qwen_text_positions;
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
+use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
+use crate::prompt::{
+    append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
+    build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage,
+};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -57,10 +60,7 @@ pub fn run_inference(
                 temperature,
                 n_threads_arg,
                 profile,
-                match kv_format {
-                    KvFormat::F16 => crate::models::lfm25::KvCacheFmt::F16,
-                    _ => crate::models::lfm25::KvCacheFmt::F32,
-                },
+                kv_format,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -70,13 +70,20 @@ pub fn run_inference(
                 temperature,
                 n_threads_arg,
                 profile,
-                match kv_format {
-                    KvFormat::F16 => crate::models::lfm2::KvCacheFmt::F16,
-                    _ => crate::models::lfm2::KvCacheFmt::F32,
-                },
+                kv_format,
             )
         }
-} else if arch == "llama" {
+    } else if arch == "lfm2moe" {
+        crate::models::lfm2moe::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+        )
+    } else if arch == "llama" {
         crate::models::llama::run_inference(
             source.as_ref(),
             prompt,
@@ -153,7 +160,12 @@ pub fn run_shared_inference(
     thinking: bool,
 ) -> Result<(), String> {
     crate::models::qwen3::run_shared_inference(
-        source, prompt, max_tokens, temperature, n_threads_arg, thinking,
+        source,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        thinking,
     )
 }
 
@@ -436,7 +448,8 @@ pub fn run_multimodal(
     let mut prompt_ids = Vec::new();
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
-    let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> = image_grid.iter().copied().collect();
+    let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> =
+        image_grid.iter().copied().collect();
     let (prompt_positions, mut next_text_position) =
         build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
@@ -470,15 +483,22 @@ pub fn run_multimodal(
         prompt_tokens.len(),
         n_vis_tokens
     );
+    eprintln!(
+        "[RUST_TOKENS] n={} ids={:?}",
+        prompt_tokens.len(),
+        prompt_tokens
+    );
 
-    let max_seq = llm.config.n_ctx;
+    let max_seq = (prompt_tokens.len() + max_tokens).min(llm.config.n_ctx);
     let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(
-        llm.config.n_layer,
+        llm.config.n_layer_impl(),
         max_seq,
         llm.config.n_embd_head() * llm.config.n_head_kv,
     );
-    let mut llm_scratch =
-        crate::models::qwen35::Qwen35Scratchpad::new(&llm.config, prompt_tokens.len().max(max_tokens));
+    let mut llm_scratch = crate::models::qwen35::Qwen35Scratchpad::new(
+        &llm.config,
+        prompt_tokens.len().max(max_tokens),
+    );
 
     let prompt_embd = inject_vision_embeddings(
         &llm,
@@ -542,6 +562,25 @@ pub fn run_multimodal(
             &decode_position[..]
         };
         let logits = llm.forward(n_tok, &mut kv_cache, &mut llm_scratch, &pool, positions)?;
+        // Parity debugging: top-10 logits per step when RUST_QWEN35_DEBUG_LOGITS
+        // is set (mirrors the other trunks).
+        if std::env::var("RUST_QWEN35_DEBUG_LOGITS").is_ok() {
+            let mut idxs: Vec<(usize, f32)> =
+                logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let tag = if step == 0 {
+                prompt_tokens.len() - 1
+            } else {
+                prompt_tokens.len() - 1 + step
+            };
+            let mut line = format!("RUST_LOGITS step={} top10:", tag);
+            for k in 0..10 {
+                line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
+            }
+            line.push('\n');
+            let _ = io::stderr().write_all(line.as_bytes());
+            let _ = io::stderr().flush();
+        }
         let t_step = t0.elapsed().as_secs_f64();
         if step == 0 {
             t_prompt += t_step;

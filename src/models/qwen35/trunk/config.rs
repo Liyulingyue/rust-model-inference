@@ -6,6 +6,9 @@ use crate::core::tensor::{MetaValue, MetaValueType, TensorSource};
 pub struct Qwen35Config {
     pub n_embd: usize,
     pub n_layer: usize,
+    /// MTP (nextn) predict layers appended beyond the main stack — excluded
+    /// from standard inference (llama.cpp: n_layer_all - n_layer_nextn).
+    pub n_nextn: usize,
     pub n_head: usize,
     pub n_head_kv: usize,
     pub n_ff: usize,
@@ -26,6 +29,14 @@ pub struct Qwen35Config {
     pub value_length: usize,
 }
 
+impl Qwen35Config {
+    /// Layers actually executed by the trunk: the main stack without the
+    /// appended MTP (nextn) predict blocks.
+    pub fn n_layer_impl(&self) -> usize {
+        self.n_layer - self.n_nextn
+    }
+}
+
 fn unsigned_u64(value: &MetaValue) -> Option<u64> {
     match value {
         MetaValue::Uint8(value) => Some(*value as u64),
@@ -39,16 +50,16 @@ fn unsigned_u64(value: &MetaValue) -> Option<u64> {
 fn full_attention_interval(value: Option<&MetaValue>) -> Result<Option<u64>, String> {
     value
         .map(|value| {
-            unsigned_u64(value)
-                .ok_or_else(|| {
-                    "Invalid qwen35.full_attention_interval: expected unsigned integer".into()
-                })
+            unsigned_u64(value).ok_or_else(|| {
+                "Invalid qwen35.full_attention_interval: expected unsigned integer".into()
+            })
         })
         .transpose()
 }
 
 fn recurrent_layer_mask(
     n_layer: usize,
+    n_nextn: usize,
     recurrent_layers: Option<&MetaValue>,
     full_attention_interval: Option<u64>,
 ) -> Result<Vec<bool>, String> {
@@ -82,8 +93,10 @@ fn recurrent_layer_mask(
     if interval == 0 {
         return Err("qwen35.full_attention_interval must be greater than zero".into());
     }
+    // MTP (nextn) blocks are dense attention-only and never recurrent.
+    let n_layer_impl = n_layer.saturating_sub(n_nextn);
     Ok((0..n_layer)
-        .map(|layer| ((layer as u64 + 1) % interval) != 0)
+        .map(|layer| layer < n_layer_impl && ((layer as u64 + 1) % interval) != 0)
         .collect())
 }
 
@@ -140,8 +153,13 @@ impl Qwen35Config {
         let ssm_d_inner = get_u32("qwen35.ssm.inner_size")? as usize;
         let full_attention_interval_raw =
             full_attention_interval(source.metadata("qwen35.full_attention_interval"))?;
+        let n_nextn = source
+            .metadata("qwen35.nextn_predict_layers")
+            .and_then(unsigned_u64)
+            .unwrap_or(0) as usize;
         let is_recurrent = recurrent_layer_mask(
             base.n_layer,
+            n_nextn,
             source.metadata("qwen35.attention.recurrent_layers"),
             full_attention_interval_raw,
         )?;
@@ -151,6 +169,7 @@ impl Qwen35Config {
         Ok(Self {
             n_embd: base.n_embd,
             n_layer: base.n_layer,
+            n_nextn,
             n_head: base.n_head,
             n_head_kv: base.n_head_kv,
             n_ff: base.n_ff,
@@ -206,30 +225,24 @@ mod tests {
     fn qwen35_recurrent_layers_metadata_is_authoritative() {
         let values = MetaValue::Array(
             MetaValueType::Uint32,
-            [1, 0, 1, 0]
-                .into_iter()
-                .map(MetaValue::Uint32)
-                .collect(),
+            [1, 0, 1, 0].into_iter().map(MetaValue::Uint32).collect(),
         );
         assert_eq!(
-            recurrent_layer_mask(4, Some(&values), Some(3)).unwrap(),
+            recurrent_layer_mask(4, 0, Some(&values), Some(3)).unwrap(),
             vec![true, false, true, false],
         );
     }
 
     #[test]
     fn qwen35_recurrent_layers_reject_malformed_arrays() {
-        let wrong_length = MetaValue::Array(
-            MetaValueType::Uint32,
-            vec![MetaValue::Uint32(1)],
-        );
-        assert!(recurrent_layer_mask(2, Some(&wrong_length), Some(4)).is_err());
+        let wrong_length = MetaValue::Array(MetaValueType::Uint32, vec![MetaValue::Uint32(1)]);
+        assert!(recurrent_layer_mask(2, 0, Some(&wrong_length), Some(4)).is_err());
 
         let invalid_selector = MetaValue::Array(
             MetaValueType::Uint32,
             vec![MetaValue::Uint32(1), MetaValue::Uint32(2)],
         );
-        assert!(recurrent_layer_mask(2, Some(&invalid_selector), Some(4)).is_err());
+        assert!(recurrent_layer_mask(2, 0, Some(&invalid_selector), Some(4)).is_err());
     }
 
     #[test]
@@ -238,7 +251,7 @@ mod tests {
             MetaValueType::Float32,
             vec![MetaValue::Float32(0.5), MetaValue::Uint32(1)],
         );
-        assert!(recurrent_layer_mask(2, Some(&float_selector), Some(4)).is_err());
+        assert!(recurrent_layer_mask(2, 0, Some(&float_selector), Some(4)).is_err());
     }
 
     #[test]
@@ -249,19 +262,19 @@ mod tests {
         );
         let float_interval = MetaValue::Float32(4.0);
         assert!(full_attention_interval(Some(&float_interval))
-            .and_then(|interval| recurrent_layer_mask(2, Some(&recurrent_layers), interval))
+            .and_then(|interval| recurrent_layer_mask(2, 0, Some(&recurrent_layers), interval))
             .is_err());
     }
 
     #[test]
     fn qwen35_zero_interval_is_an_error_not_a_panic() {
-        assert!(recurrent_layer_mask(4, None, Some(0)).is_err());
+        assert!(recurrent_layer_mask(4, 0, None, Some(0)).is_err());
     }
 
     #[test]
     fn qwen35_interval_fallback_matches_llama() {
         assert_eq!(
-            recurrent_layer_mask(8, None, Some(4)).unwrap(),
+            recurrent_layer_mask(8, 0, None, Some(4)).unwrap(),
             vec![true, true, true, false, true, true, true, false],
         );
     }
@@ -270,14 +283,13 @@ mod tests {
     #[ignore = "requires RMI_QWEN35_MODEL"]
     fn qwen35_config_uses_real_layer_selection_metadata() {
         let path = std::env::var("RMI_QWEN35_MODEL").unwrap();
-        let source = crate::open_model_source(
-            std::path::Path::new(&path),
-            crate::ComponentRole::Llm,
-        )
-        .unwrap();
+        let source =
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap();
         let config = Qwen35Config::from_source(source.as_ref()).unwrap();
         let expected = recurrent_layer_mask(
             config.n_layer,
+            config.n_nextn,
             source.metadata("qwen35.attention.recurrent_layers"),
             full_attention_interval(source.metadata("qwen35.full_attention_interval")).unwrap(),
         )

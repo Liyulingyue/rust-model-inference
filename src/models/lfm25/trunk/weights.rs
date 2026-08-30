@@ -70,11 +70,8 @@ pub fn load_layers<'a>(
     let mut layers = Vec::with_capacity(cfg.n_layer);
     for l in 0..cfg.n_layer {
         let is_attn = cfg.n_head_kv_per_layer[l] > 0;
-        let attn_norm = get_f32_tensor_checked(
-            source,
-            &format!("blk.{l}.attn_norm.weight"),
-            cfg.n_embd,
-        )?;
+        let attn_norm =
+            get_f32_tensor_checked(source, &format!("blk.{l}.attn_norm.weight"), cfg.n_embd)?;
         let ffn_norm =
             get_f32_tensor_checked(source, &format!("blk.{l}.ffn_norm.weight"), cfg.n_embd)?;
 
@@ -127,8 +124,12 @@ pub fn load_layers<'a>(
             cfg.n_embd,
             cfg.n_ff,
         )?;
-        let w_up =
-            quant_weight(source, &format!("blk.{l}.ffn_up.weight"), cfg.n_embd, cfg.n_ff)?;
+        let w_up = quant_weight(
+            source,
+            &format!("blk.{l}.ffn_up.weight"),
+            cfg.n_embd,
+            cfg.n_ff,
+        )?;
         let w_down = quant_weight(
             source,
             &format!("blk.{l}.ffn_down.weight"),
@@ -142,23 +143,20 @@ pub fn load_layers<'a>(
         if !is_attn {
             let in_name = format!("blk.{l}.shortconv.in_proj.weight");
             let out_name = format!("blk.{l}.shortconv.out_proj.weight");
-            shortconv_in = Some(quant_weight(
-                source,
-                &in_name,
-                cfg.n_embd,
-                3 * cfg.n_embd,
-            )?);
-            shortconv_out = Some(quant_weight(
-                source,
-                &out_name,
-                cfg.n_embd,
-                cfg.n_embd,
-            )?);
-            shortconv_conv = Some(get_f32_tensor_checked(
-                source,
-                &format!("blk.{l}.shortconv.conv.weight"),
-                cfg.l_cache * cfg.n_embd,
-            )?);
+            shortconv_in = Some(quant_weight(source, &in_name, cfg.n_embd, 3 * cfg.n_embd)?);
+            shortconv_out = Some(quant_weight(source, &out_name, cfg.n_embd, cfg.n_embd)?);
+            // The conv kernel ships either 1-D [l_cache * n_embd] or 2-D
+            // [l_cache, n_embd]; both flatten to the same c*l_cache + k order.
+            let conv_name = format!("blk.{l}.shortconv.conv.weight");
+            let conv = match get_f32_tensor_checked(source, &conv_name, cfg.l_cache * cfg.n_embd) {
+                Ok(v) => v,
+                Err(_) => crate::core::tensor::load_f32_tensor(
+                    source,
+                    &conv_name,
+                    &[cfg.l_cache as u64, cfg.n_embd as u64],
+                )?,
+            };
+            shortconv_conv = Some(conv);
         } else {
             shortconv_in = None;
             shortconv_out = None;

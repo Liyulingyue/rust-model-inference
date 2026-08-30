@@ -810,9 +810,9 @@ fn generate_qwen35(
         .collect::<Result<_, _>>()?;
 
     let n_prompt = prompt_tokens.len();
-    let max_seq = state.model.config.n_ctx;
+    let max_seq = (n_prompt + max_tokens).min(state.model.config.n_ctx);
     let mut kv_cache = KvCache::new_f32(
-        state.model.config.n_layer,
+        state.model.config.n_layer_impl(),
         max_seq,
         state.model.config.n_embd_head() * state.model.config.n_head_kv,
     );

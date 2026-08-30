@@ -19,7 +19,7 @@
 //! appended. For prefill (n_tokens > 1) we process them all at once and
 //! write the trailing `d_conv - 1` columns back to the state.
 
-use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
+use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -37,7 +37,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Lfm2Config;
-use super::session::KvCacheFmt;
 use super::weights::{get_f32_tensor, load_layers, Lfm2LayerWeights};
 
 pub fn run_inference(
@@ -47,7 +46,7 @@ pub fn run_inference(
     temperature: f32,
     n_threads_arg: usize,
     profile: bool,
-    kv_format: KvCacheFmt,
+    kv_format: KvFormat,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
@@ -139,8 +138,8 @@ pub fn run_inference(
     // we allocate a single cache keyed by layer; non-attention layers just
     // never touch their slot.
     let kv_cache = match kv_format {
-        KvCacheFmt::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
-        KvCacheFmt::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
+        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
+        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
     };
 
     let eos_id = tokenizer.eos_id();
@@ -186,9 +185,15 @@ pub fn run_inference(
                 // hist contains the most recent min(step, d_conv) b*x values
                 // from earlier tokens, with hist[0] = b*x_{max(0, step-d_conv)}.
                 // state[k_p] = hist[k_p] (when available), else 0.
+                // The conv window for token t is [bx_{t-d}, ..., bx_{t-1}, bx_t]
+                // with zero left-padding for t < d (ggml_ssm_conv taps K[0] on
+                // the oldest entry). hist holds the last <= d b*x values in
+                // oldest-first order; right-align it so missing early entries
+                // pad the FRONT of the window.
                 for k_p in 0..d_conv {
-                    if k_p < hist.len() {
-                        let src = &hist[k_p];
+                    let idx = k_p as isize - (d_conv - hist.len()) as isize;
+                    if idx >= 0 {
+                        let src = &hist[idx as usize];
                         for ci in 0..n_embd {
                             state[k_p * n_embd + ci] = src[ci];
                         }
@@ -484,9 +489,12 @@ let cur_after_block = if lw.is_attn {
             lw.w_up.kernel.forward_prepared(
                 input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth,
             );
-            let rows_per = n_ff / nth;
-            let r_start = ith * rows_per;
-            let r_end = if ith == nth - 1 { n_ff } else { r_start + rows_per };
+            // Must match the matmul kernel's ceil row partition exactly: a floor
+            // split races with the kernel when n_ff % nth != 0 (silu would
+            // read rows the matmul hasn't written yet).
+            let per_thread = (n_ff + nth - 1) / nth;
+            let r_start = ith * per_thread;
+            let r_end = (r_start + per_thread).min(n_ff);
             silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
         }
     });
@@ -917,14 +925,13 @@ fn forward_shortconv(
         bx_buf[ci * l_buf + d_conv] = bx[ci];
     }
 
-    // Update state: the new state is b*x (copy to all d_conv rows).
-    // During prefill, the post-state will be reconstructed by the caller from
-    // the accumulated b*x history (last d_conv tokens) to match llama.cpp's
-    // batched prefill semantics.
+    // Update state: sliding window — shift left one row, append b*x as the
+    // newest entry (matches llama.cpp's new_conv = last d_conv columns of
+    // (state ‖ bx)). During prefill, the post-state is reconstructed by the
+    // caller from the accumulated b*x history.
     if !is_prefill {
-        for k in 0..d_conv {
-            state[k * n_embd..(k + 1) * n_embd].copy_from_slice(&bx);
-        }
+        state.copy_within(n_embd..d_conv * n_embd, 0);
+        state[(d_conv - 1) * n_embd..d_conv * n_embd].copy_from_slice(&bx);
     }
 
     // SSM conv: input bx_buf [l_buf, n_embd], kernel [l_cache, n_embd].

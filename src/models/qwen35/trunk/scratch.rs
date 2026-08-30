@@ -9,8 +9,8 @@
 //! All buffers are sized for `max_tokens` (used for the largest per-call
 //! token batch) plus `n_ctx` (used for padded attention buffers).
 
-use crate::core::scratchpad::KvCache;
 use super::config::Qwen35Config;
+use crate::core::scratchpad::KvCache;
 use crate::ops::quant;
 
 pub struct Qwen35Scratchpad {
@@ -46,7 +46,7 @@ impl Qwen35Scratchpad {
         let n_head_kv = config.n_head_kv;
         let n_embd_head = config.n_embd_head();
         let n_ff = config.n_ff;
-        let n_layer = config.n_layer;
+        let n_layer = config.n_layer_impl();
         let d_inner = config.ssm_d_inner;
         let key_dim = config.key_dim();
         let value_dim = config.value_dim();
@@ -76,10 +76,19 @@ impl Qwen35Scratchpad {
             ffn_up_buf: vec![0.0; max_tokens * n_ff],
             ffn_gate_buf: vec![0.0; max_tokens * n_ff],
             conv_states: (0..n_layer).map(|_| vec![0.0; d_conv * conv_dim]).collect(),
-            ssm_states: (0..n_layer).map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim]).collect(),
+            ssm_states: (0..n_layer)
+                .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])
+                .collect(),
             matmul_out: vec![0.0; (2 * n_ff).max(conv_dim).max(n_embd).max(config.vocab_size)],
             normed_buf: vec![0.0; max_tokens * n_embd],
-            q8k_buf: vec![quant::BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; (max_matmul_input + 255) / 256],
+            q8k_buf: vec![
+                quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0i8; 256],
+                    bsums: [0i16; 16]
+                };
+                (max_matmul_input + 255) / 256
+            ],
             q8_buf: vec![0u8; max_matmul_input],
             scale_buf: vec![0.0; (max_matmul_input + 31) / 32],
         }
@@ -98,17 +107,31 @@ pub(crate) fn kv_cache_pos(cache: &KvCache, il: usize, k_dim: usize, n_layer: us
         let k_len = c.k.len() / n_layer;
         let mut pos = 0;
         for p in 0..k_len / k_dim {
-            if c.k[il * k_len + p * k_dim..il * k_len + (p + 1) * k_dim].iter().all(|v| *v == 0.0) { pos = p; break; }
+            if c.k[il * k_len + p * k_dim..il * k_len + (p + 1) * k_dim]
+                .iter()
+                .all(|v| *v == 0.0)
+            {
+                pos = p;
+                break;
+            }
             pos = p + 1;
         }
         pos
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 /// Append `n_tokens` rows of K/V data starting at `pos` for layer `il`.
 pub(crate) fn kv_cache_store(
-    cache: &mut KvCache, il: usize, n_layer: usize,
-    k_data: &[f32], v_data: &[f32], k_dim: usize, v_dim: usize, pos: usize,
+    cache: &mut KvCache,
+    il: usize,
+    n_layer: usize,
+    k_data: &[f32],
+    v_data: &[f32],
+    k_dim: usize,
+    v_dim: usize,
+    pos: usize,
 ) {
     if let KvCache::F32(c) = cache {
         let k_len = c.k.len() / n_layer;

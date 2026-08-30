@@ -9,13 +9,16 @@
 //! post-attention tensor that the outer `forward` loop post-norms and feeds
 //! to FFN.
 
-use crate::core::scratchpad::KvCache;
-use crate::core::thread_pool::ComputePool;
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
 use super::util::{l2_norm, sigmoid_f32, softplus_f32};
 use super::weights::Qwen35LayerWeights;
-use crate::ops::{dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace, vec_mad_f32};
+use crate::core::scratchpad::KvCache;
+use crate::core::thread_pool::ComputePool;
+use crate::ops::{
+    dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
+    vec_mad_f32,
+};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 
@@ -36,7 +39,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
-        let n_layer = cfg.n_layer;
+        let n_layer = cfg.n_layer_impl();
         let eps = cfg.norm_eps;
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
         let mut t_attn: f64 = 0.0;
@@ -52,8 +55,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
-                scratch.normed_buf[off..off + n_embd].copy_from_slice(&scratch.x[off..off + n_embd]);
-                crate::ops::rms_norm_inplace(&mut scratch.normed_buf[off..off + n_embd], &layer.attn_norm, eps);
+                scratch.normed_buf[off..off + n_embd]
+                    .copy_from_slice(&scratch.x[off..off + n_embd]);
+                crate::ops::rms_norm_inplace(
+                    &mut scratch.normed_buf[off..off + n_embd],
+                    &layer.attn_norm,
+                    eps,
+                );
             }
             #[cfg(feature = "parity-trace")]
             if first_dense_layer == Some(il) {
@@ -117,13 +125,20 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
-                crate::ops::vec_add_into(&attn_out[off..off + n_embd], &mut scratch.x[off..off + n_embd]);
+                crate::ops::vec_add_into(
+                    &attn_out[off..off + n_embd],
+                    &mut scratch.x[off..off + n_embd],
+                );
             }
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
                 scratch.buf[off..off + n_embd].copy_from_slice(&scratch.x[off..off + n_embd]);
-                crate::ops::rms_norm_inplace(&mut scratch.buf[off..off + n_embd], &layer.attn_post_norm, eps);
+                crate::ops::rms_norm_inplace(
+                    &mut scratch.buf[off..off + n_embd],
+                    &layer.attn_post_norm,
+                    eps,
+                );
             }
 
             let t0 = std::time::Instant::now();
@@ -135,13 +150,22 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
             for t in 0..n_tokens {
                 let off = t * n_embd;
-                crate::ops::vec_add_into(&scratch.buf[off..off + n_embd], &mut scratch.x[off..off + n_embd]);
+                crate::ops::vec_add_into(
+                    &scratch.buf[off..off + n_embd],
+                    &mut scratch.x[off..off + n_embd],
+                );
             }
         }
 
         if profile {
             let total = t_attn + t_ffn;
-            eprintln!("PROFILE: attn={:.1}% ({:.3}s) ffn={:.1}% ({:.3}s)", t_attn/total*100.0, t_attn, t_ffn/total*100.0, t_ffn);
+            eprintln!(
+                "PROFILE: attn={:.1}% ({:.3}s) ffn={:.1}% ({:.3}s)",
+                t_attn / total * 100.0,
+                t_attn,
+                t_ffn / total * 100.0,
+                t_ffn
+            );
         }
 
         let mut normed = vec![0.0f32; n_tokens * n_embd];
@@ -174,9 +198,14 @@ impl<'a> super::weights::Qwen35Model<'a> {
     }
 
     fn forward_dense_attn_layer(
-        &self, il: usize, input: &[f32], n_tokens: usize,
-        kv_cache: &mut KvCache, scratch: &mut super::scratch::Qwen35Scratchpad,
-        pool: &ComputePool, mrope_positions: &[[usize; 4]],
+        &self,
+        il: usize,
+        input: &[f32],
+        n_tokens: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -207,21 +236,55 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let inp_off = t * n_embd;
             let t0 = std::time::Instant::now();
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wq.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.q_buf[t * q_dim..t * q_dim + q_dim].copy_from_slice(&scratch.matmul_out[..q_dim]);
-            wk.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.k_buf[t * k_dim..t * k_dim + k_dim].copy_from_slice(&scratch.matmul_out[..k_dim]);
-            wv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.v_buf[t * v_dim..t * v_dim + v_dim].copy_from_slice(&scratch.matmul_out[..v_dim]);
+            wq.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.q_buf[t * q_dim..t * q_dim + q_dim]
+                .copy_from_slice(&scratch.matmul_out[..q_dim]);
+            wk.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.k_buf[t * k_dim..t * k_dim + k_dim]
+                .copy_from_slice(&scratch.matmul_out[..k_dim]);
+            wv.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.v_buf[t * v_dim..t * v_dim + v_dim]
+                .copy_from_slice(&scratch.matmul_out[..v_dim]);
             t_qkv += t0.elapsed().as_secs_f64();
         }
 
         for t in 0..n_tokens {
             for h in 0..n_head {
                 let q_off = t * q_dim + h * n_embd_head * 2;
-                crate::ops::rms_norm_inplace(&mut scratch.q_buf[q_off..q_off + n_embd_head], q_norm_w, eps);
+                crate::ops::rms_norm_inplace(
+                    &mut scratch.q_buf[q_off..q_off + n_embd_head],
+                    q_norm_w,
+                    eps,
+                );
             }
-            for h in 0..n_head_kv { crate::ops::rms_norm_inplace(&mut scratch.k_buf[t * k_dim + h * n_embd_head..][..n_embd_head], k_norm_w, eps); }
+            for h in 0..n_head_kv {
+                crate::ops::rms_norm_inplace(
+                    &mut scratch.k_buf[t * k_dim + h * n_embd_head..][..n_embd_head],
+                    k_norm_w,
+                    eps,
+                );
+            }
         }
         #[cfg(feature = "parity-trace")]
         let mut q_trace = Vec::with_capacity(n_tokens * n_head * n_embd_head);
@@ -247,7 +310,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             ));
         }
 
-        let kv_pos = kv_cache_pos(kv_cache, il, k_dim, cfg.n_layer);
+        let kv_pos = kv_cache_pos(kv_cache, il, k_dim, cfg.n_layer_impl());
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
         for t in 0..n_tokens {
@@ -255,17 +318,39 @@ impl<'a> super::weights::Qwen35Model<'a> {
             for h in 0..n_head {
                 let q_off = t * q_dim + h * n_embd_head * 2;
                 if use_mrope {
-                    rope_mrope(&mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count], positions, sections, cfg.rope_dimension_count, cfg.rope_freq_base);
+                    rope_mrope(
+                        &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
+                        positions,
+                        sections,
+                        cfg.rope_dimension_count,
+                        cfg.rope_freq_base,
+                    );
                 } else {
-                    rope_neox(&mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count], positions[0], cfg.rope_dimension_count, cfg.rope_freq_base);
+                    rope_neox(
+                        &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
+                        positions[0],
+                        cfg.rope_dimension_count,
+                        cfg.rope_freq_base,
+                    );
                 }
             }
             for h in 0..n_head_kv {
                 let k_off = t * k_dim + h * n_embd_head;
                 if use_mrope {
-                    rope_mrope(&mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count], positions, sections, cfg.rope_dimension_count, cfg.rope_freq_base);
+                    rope_mrope(
+                        &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
+                        positions,
+                        sections,
+                        cfg.rope_dimension_count,
+                        cfg.rope_freq_base,
+                    );
                 } else {
-                    rope_neox(&mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count], positions[0], cfg.rope_dimension_count, cfg.rope_freq_base);
+                    rope_neox(
+                        &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
+                        positions[0],
+                        cfg.rope_dimension_count,
+                        cfg.rope_freq_base,
+                    );
                 }
             }
         }
@@ -293,7 +378,16 @@ impl<'a> super::weights::Qwen35Model<'a> {
             ));
         }
 
-        kv_cache_store(kv_cache, il, cfg.n_layer, &scratch.k_buf[..n_tokens * k_dim], &scratch.v_buf[..n_tokens * v_dim], k_dim, v_dim, kv_pos);
+        kv_cache_store(
+            kv_cache,
+            il,
+            cfg.n_layer_impl(),
+            &scratch.k_buf[..n_tokens * k_dim],
+            &scratch.v_buf[..n_tokens * v_dim],
+            k_dim,
+            v_dim,
+            kv_pos,
+        );
         let _n_kv = kv_pos + n_tokens;
         let scale = 1.0 / (n_embd_head as f32).sqrt();
 
@@ -301,8 +395,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
             KvCache::F32(c) => (&c.k, &c.v),
             _ => return vec![0.0; n_tokens * n_embd],
         };
-        let k_len = k_cache.len() / cfg.n_layer;
-        let v_len = v_cache.len() / cfg.n_layer;
+        let k_len = k_cache.len() / cfg.n_layer_impl();
+        let v_len = v_cache.len() / cfg.n_layer_impl();
 
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
@@ -313,7 +407,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let n_padded = n_attend.div_ceil(256) * 256;
                 for s in 0..n_attend {
                     let k_off = il * k_len + s * k_dim + kv_h * n_embd_head;
-                    let dot = dot_f32(&scratch.q_buf[q_off..q_off + n_embd_head], &k_cache[k_off..k_off + n_embd_head], n_embd_head);
+                    let dot = dot_f32(
+                        &scratch.q_buf[q_off..q_off + n_embd_head],
+                        &k_cache[k_off..k_off + n_embd_head],
+                        n_embd_head,
+                    );
                     scratch.score_buf[s] = dot * scale;
                 }
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
@@ -347,12 +445,24 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let mut result = vec![0.0f32; n_tokens * n_embd];
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
-            let wo_input = &scratch.attn_out_buf[t * n_embd_heads_total..t * n_embd_heads_total + n_embd_heads_total];
-            wo.quantize_and_matmul_with_scratch(wo_input, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            let wo_input = &scratch.attn_out_buf
+                [t * n_embd_heads_total..t * n_embd_heads_total + n_embd_heads_total];
+            wo.quantize_and_matmul_with_scratch(
+                wo_input,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
-        }        t_wo += t0.elapsed().as_secs_f64();
+        }
+        t_wo += t0.elapsed().as_secs_f64();
         if profile {
-            eprintln!("  dense_attn[{}]: qkv={:.3}s score={:.3}s wo={:.3}s", il, t_qkv, t_score, t_wo);
+            eprintln!(
+                "  dense_attn[{}]: qkv={:.3}s score={:.3}s wo={:.3}s",
+                il, t_qkv, t_score, t_wo
+            );
         }
         result
     }
@@ -395,20 +505,56 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             let inp_off = t * n_embd;
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wqkv.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.qkv_buf[t * conv_dim..t * conv_dim + conv_dim].copy_from_slice(&scratch.matmul_out[..conv_dim]);
-            wqkv_gate.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.z_buf[t * value_dim..t * value_dim + value_dim].copy_from_slice(&scratch.matmul_out[..value_dim]);
-            ssm_beta.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            wqkv.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.qkv_buf[t * conv_dim..t * conv_dim + conv_dim]
+                .copy_from_slice(&scratch.matmul_out[..conv_dim]);
+            wqkv_gate.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.z_buf[t * value_dim..t * value_dim + value_dim]
+                .copy_from_slice(&scratch.matmul_out[..value_dim]);
+            ssm_beta.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
             let n_beta = num_v_heads;
-            scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta].copy_from_slice(&scratch.matmul_out[..n_beta]);
-            for v in 0..num_v_heads { scratch.beta_buf[t * num_v_heads + v] = sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]); }
-            ssm_alpha.quantize_and_matmul_with_scratch(inp_slice, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]
+                .copy_from_slice(&scratch.matmul_out[..n_beta]);
+            for v in 0..num_v_heads {
+                scratch.beta_buf[t * num_v_heads + v] =
+                    sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]);
+            }
+            ssm_alpha.quantize_and_matmul_with_scratch(
+                inp_slice,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
             let n_alpha = num_v_heads;
-            scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha].copy_from_slice(&scratch.matmul_out[..n_alpha]);
+            scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha]
+                .copy_from_slice(&scratch.matmul_out[..n_alpha]);
             for v in 0..num_v_heads {
                 let a_biased = scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
-                scratch.alpha_buf[t * num_v_heads + v] = softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
+                scratch.alpha_buf[t * num_v_heads + v] =
+                    softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
             }
         }
         let t_matmul = t0.elapsed().as_secs_f64();
@@ -424,12 +570,16 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             let qkv_off = t * conv_dim;
             for c in 0..conv_dim {
-                for k in 0..d_conv - 1 { conv_state[k * conv_dim + c] = conv_state[(k + 1) * conv_dim + c]; }
+                for k in 0..d_conv - 1 {
+                    conv_state[k * conv_dim + c] = conv_state[(k + 1) * conv_dim + c];
+                }
                 conv_state[(d_conv - 1) * conv_dim + c] = scratch.qkv_buf[qkv_off + c];
             }
             for c in 0..conv_dim {
                 let mut conv_val = 0.0f32;
-                for k in 0..d_conv { conv_val += ssm_conv1d[c * d_conv + k] * conv_state[k * conv_dim + c]; }
+                for k in 0..d_conv {
+                    conv_val += ssm_conv1d[c * d_conv + k] * conv_state[k * conv_dim + c];
+                }
                 #[cfg(feature = "parity-trace")]
                 if trace_layer {
                     conv_raw[t * conv_dim + c] = conv_val;
@@ -451,15 +601,30 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             let qkv_off = t * conv_dim;
             for h in 0..num_k_heads {
-                for d in 0..head_k_dim { scratch.q_buf[t * key_dim + h * head_k_dim + d] = scratch.qkv_buf[qkv_off + h * head_k_dim + d]; }
-                for d in 0..head_k_dim { scratch.k_buf2[t * key_dim + h * head_k_dim + d] = scratch.qkv_buf[qkv_off + key_dim + h * head_k_dim + d]; }
+                for d in 0..head_k_dim {
+                    scratch.q_buf[t * key_dim + h * head_k_dim + d] =
+                        scratch.qkv_buf[qkv_off + h * head_k_dim + d];
+                }
+                for d in 0..head_k_dim {
+                    scratch.k_buf2[t * key_dim + h * head_k_dim + d] =
+                        scratch.qkv_buf[qkv_off + key_dim + h * head_k_dim + d];
+                }
             }
             for h in 0..num_v_heads {
-                for d in 0..head_v_dim { scratch.v_buf2[t * value_dim + h * head_v_dim + d] = scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d]; }
+                for d in 0..head_v_dim {
+                    scratch.v_buf2[t * value_dim + h * head_v_dim + d] =
+                        scratch.qkv_buf[qkv_off + 2 * key_dim + h * head_v_dim + d];
+                }
             }
             for h in 0..num_k_heads {
-                l2_norm(&mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim], eps);
-                l2_norm(&mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim], eps);
+                l2_norm(
+                    &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim],
+                    eps,
+                );
+                l2_norm(
+                    &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim],
+                    eps,
+                );
             }
         }
         #[cfg(feature = "parity-trace")]
@@ -508,17 +673,40 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let state_off = v_h * head_v_dim * head_v_dim;
                 let k_h = v_h % num_k_heads;
                 let decay = gate_val.exp();
-                crate::ops::ssm_state_decay(&mut ssm_state[state_off..state_off + head_v_dim * head_v_dim], decay);
+                crate::ops::ssm_state_decay(
+                    &mut ssm_state[state_off..state_off + head_v_dim * head_v_dim],
+                    decay,
+                );
                 let k_slice = &scratch.k_buf2[k2_off + k_h * head_k_dim..][..head_v_dim];
                 let mut sk = [0.0f32; 128];
-                crate::ops::ssm_matvec(&ssm_state[state_off..][..head_v_dim * head_v_dim], k_slice, head_v_dim, head_v_dim, &mut sk[..head_v_dim]);
+                crate::ops::ssm_matvec(
+                    &ssm_state[state_off..][..head_v_dim * head_v_dim],
+                    k_slice,
+                    head_v_dim,
+                    head_v_dim,
+                    &mut sk[..head_v_dim],
+                );
                 let v_slice = &scratch.v_buf2[v2_off + v_h * head_v_dim..][..head_v_dim];
                 let mut d_vec = [0.0f32; 128];
-                for d in 0..head_v_dim { d_vec[d] = (v_slice[d] - sk[d]) * beta_val; }
-                crate::ops::ssm_outer_product_update(&mut ssm_state[state_off..][..head_v_dim * head_v_dim], k_slice, &d_vec[..head_v_dim], head_v_dim);
+                for d in 0..head_v_dim {
+                    d_vec[d] = (v_slice[d] - sk[d]) * beta_val;
+                }
+                crate::ops::ssm_outer_product_update(
+                    &mut ssm_state[state_off..][..head_v_dim * head_v_dim],
+                    k_slice,
+                    &d_vec[..head_v_dim],
+                    head_v_dim,
+                );
                 let q_slice = &scratch.q_buf[q_off + k_h * head_k_dim..][..head_v_dim];
                 let out_off = t * value_dim + v_h * head_v_dim;
-                crate::ops::ssm_matvec_scaled(&ssm_state[state_off..][..head_v_dim * head_v_dim], q_slice, head_v_dim, head_v_dim, &mut scratch.attn_out_buf[out_off..out_off + head_v_dim], q_scale);
+                crate::ops::ssm_matvec_scaled(
+                    &ssm_state[state_off..][..head_v_dim * head_v_dim],
+                    q_slice,
+                    head_v_dim,
+                    head_v_dim,
+                    &mut scratch.attn_out_buf[out_off..out_off + head_v_dim],
+                    q_scale,
+                );
             }
         }
         #[cfg(feature = "parity-trace")]
@@ -536,10 +724,17 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             for h in 0..num_v_heads {
                 let off = t * value_dim + h * head_v_dim;
-                crate::ops::rms_norm_inplace(&mut scratch.attn_out_buf[off..off + head_v_dim], ssm_norm_w, eps);
+                crate::ops::rms_norm_inplace(
+                    &mut scratch.attn_out_buf[off..off + head_v_dim],
+                    ssm_norm_w,
+                    eps,
+                );
             }
             let z_off = t * value_dim;
-            crate::ops::silu_mul_approx_inplace(&scratch.z_buf[z_off..z_off + value_dim], &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim]);
+            crate::ops::silu_mul_approx_inplace(
+                &scratch.z_buf[z_off..z_off + value_dim],
+                &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim],
+            );
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -556,35 +751,79 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
             let inp = &scratch.attn_out_buf[t * value_dim..][..value_dim];
-            ssm_out.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
+            ssm_out.quantize_and_matmul_with_scratch(
+                inp,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
             result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
         let t_out_matmul = t0.elapsed().as_secs_f64();
         if profile {
-            eprintln!("  recr[{}]: matmul={:.3}s conv={:.3}s ssm={:.3}s norm={:.3}s out={:.3}s", il, t_matmul, tc, tssm, tnorm, t_out_matmul);
+            eprintln!(
+                "  recr[{}]: matmul={:.3}s conv={:.3}s ssm={:.3}s norm={:.3}s out={:.3}s",
+                il, t_matmul, tc, tssm, tnorm, t_out_matmul
+            );
         }
         result
     }
 
-    fn forward_ffn_parallel(&self, layer: &Qwen35LayerWeights, hidden: &[f32], n_tokens: usize, scratch: &mut super::scratch::Qwen35Scratchpad, pool: &ComputePool) {
+    fn forward_ffn_parallel(
+        &self,
+        layer: &Qwen35LayerWeights,
+        hidden: &[f32],
+        n_tokens: usize,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+    ) {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
 
         for t in 0..n_tokens {
             let off = t * n_embd;
             let inp = &hidden[off..off + n_embd];
-            layer.ffn_gate.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
-            layer.ffn_up.quantize_and_matmul_with_scratch(inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff].copy_from_slice(&scratch.matmul_out[..n_ff]);
+            layer.ffn_gate.quantize_and_matmul_with_scratch(
+                inp,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff]
+                .copy_from_slice(&scratch.matmul_out[..n_ff]);
+            layer.ffn_up.quantize_and_matmul_with_scratch(
+                inp,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff]
+                .copy_from_slice(&scratch.matmul_out[..n_ff]);
         }
 
-        silu_mul_approx_inplace(&scratch.ffn_gate_buf[..n_tokens * n_ff], &mut scratch.ffn_up_buf[..n_tokens * n_ff]);
+        silu_mul_approx_inplace(
+            &scratch.ffn_gate_buf[..n_tokens * n_ff],
+            &mut scratch.ffn_up_buf[..n_tokens * n_ff],
+        );
 
         for t in 0..n_tokens {
             let down_inp = &scratch.ffn_up_buf[t * n_ff..][..n_ff];
-            layer.ffn_down.quantize_and_matmul_with_scratch(down_inp, &mut scratch.q8k_buf, &mut scratch.q8_buf, &mut scratch.scale_buf, &mut scratch.matmul_out, pool);
-            scratch.buf[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
+            layer.ffn_down.quantize_and_matmul_with_scratch(
+                down_inp,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            scratch.buf[t * n_embd..t * n_embd + n_embd]
+                .copy_from_slice(&scratch.matmul_out[..n_embd]);
         }
     }
 }

@@ -4,7 +4,7 @@ use crate::ops::dot::dot_f32_neon;
 use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 use crate::ops::{
     attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
-    f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox,
+    f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox, rope_norm,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
     ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
     vec_mad_self_f32, vec_scale_f32,
@@ -943,4 +943,22 @@ fn vec_mad_self_f32_single_element() {
     let x = vec![3.0f32];
     vec_mad_self_f32(&mut y, &x);
     assert_eq!(y[0].to_bits(), 8.0f32.to_bits());
+}
+
+#[test]
+fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
+    // Interleaved ("normal"-style) rotation: pair (x[2i], x[2i+1]) rotates by
+    // theta_i = pos * base^(-2i/head_dim), matching ggml ROPE_TYPE_NORM.
+    let mut values = [0.0f32; 128];
+    values[0] = f32::from_bits(0x402a_4f21);
+    values[1] = f32::from_bits(0x3fad_b711);
+    values[2] = f32::from_bits(0xbe0e_7273);
+    values[3] = f32::from_bits(0x3ef5_b8f9);
+
+    rope_norm(&mut values, 1, 128, 1_000_000.0);
+
+    assert_eq!(
+        [values[0], values[1], values[2], values[3]].map(f32::to_bits),
+        [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
+    );
 }
