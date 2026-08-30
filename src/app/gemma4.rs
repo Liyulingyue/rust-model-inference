@@ -1,9 +1,10 @@
-use super::vision::Gemma4VisionModel;
-use super::{Gemma4AudioModel, Gemma4InputRow, Gemma4Model, Gemma4Session};
 use crate::core::loader::GGUFLoader;
 use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::models::gemma4::asr::Gemma4AudioModel;
+use crate::models::gemma4::vision::Gemma4VisionModel;
+use crate::models::gemma4::{Gemma4InputRow, Gemma4Model, Gemma4Session};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -48,7 +49,7 @@ pub fn build_turn_rows(
     Ok(rows)
 }
 
-pub fn run_multimodal(request: Gemma4Request<'_>) -> Result<(), String> {
+pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
     if (request.image.is_some() || request.audio.is_some()) && request.mmproj.is_none() {
         return Err("Gemma4 media requires an mmproj".into());
     }
@@ -232,7 +233,7 @@ fn trace_tokens(_rows: &[Gemma4InputRow]) {}
 #[cfg(test)]
 mod tests {
     use super::{
-        build_turn_rows, check_context, construct_then_encode, greedy_token, run_multimodal,
+        build_turn_rows, check_context, construct_then_encode, greedy_token, run_gemma4,
         Gemma4Request,
     };
     use crate::core::scratchpad::KvFormat;
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn image_request_without_mmproj_is_rejected_before_model_io() {
-        let error = run_multimodal(Gemma4Request {
+        let error = run_gemma4(Gemma4Request {
             model: Path::new("missing-model.gguf"),
             mmproj: None,
             image: Some(Path::new("missing-image.png")),
@@ -448,7 +449,7 @@ mod tests {
 
     #[test]
     fn audio_request_without_mmproj_is_rejected_before_model_io() {
-        let error = run_multimodal(Gemma4Request {
+        let error = run_gemma4(Gemma4Request {
             model: Path::new("missing-model.gguf"),
             mmproj: None,
             image: None,

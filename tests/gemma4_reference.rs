@@ -1,6 +1,6 @@
+use rust_model_inference::app::{run_gemma4, Gemma4Request};
 use rust_model_inference::core::scratchpad::KvFormat;
-use rust_model_inference::models::gemma4::audio::Gemma4AudioModel;
-use rust_model_inference::models::gemma4::multimodal::{run_multimodal, Gemma4Request};
+use rust_model_inference::models::gemma4::asr::Gemma4AudioModel;
 use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use serde_json::Value;
@@ -492,7 +492,7 @@ fn run_rust_case(
         .join(",");
     std::env::set_var("RMI_PARITY_TRACE", trace);
     std::env::set_var("RMI_PARITY_FILTER", filter);
-    let result = run_multimodal(Gemma4Request {
+    let result = run_gemma4(Gemma4Request {
         model,
         mmproj: (case.image || case.audio).then_some(mmproj),
         image: case.image.then_some(image),
@@ -853,7 +853,7 @@ fn gemma4_text_smoke() {
         GGMLType::Q8_0,
     )
     .unwrap();
-    run_multimodal(Gemma4Request {
+    run_gemma4(Gemma4Request {
         model: &model,
         mmproj: None,
         image: None,
@@ -995,7 +995,7 @@ fn gemma4_image_audio_smoke() {
     let audio_path = std::env::temp_dir().join(format!("rmi-gemma4-turn-{suffix}.wav"));
     write_audio_fixture(&audio_path).unwrap();
 
-    let result = run_multimodal(Gemma4Request {
+    let result = run_gemma4(Gemma4Request {
         model: &model,
         mmproj: Some(&mmproj),
         image: Some(&image_path),

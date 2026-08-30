@@ -1,9 +1,10 @@
-use super::Gemma4VisionConfig;
+pub mod config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_ggml_inplace,
 };
+pub use config::Gemma4VisionConfig;
 use std::path::Path;
 
 const EMBED: usize = 768;

@@ -306,7 +306,7 @@ pub fn run_multimodal(
         .unwrap_or_default();
     validate_gemma4_temperature(arch, temperature)?;
     if arch == "gemma4" {
-        return crate::models::gemma4::run_multimodal(crate::models::gemma4::Gemma4Request {
+        return super::gemma4::run_gemma4(super::gemma4::Gemma4Request {
             model: model_path,
             mmproj: mmproj_path,
             image: image_path,

@@ -1,4 +1,4 @@
-use super::Gemma4AudioConfig;
+pub mod config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
@@ -6,6 +6,7 @@ use crate::ops::{
     dot_f16, dot_f16_f16_bytes, dot_f32, f32_to_f16, rms_norm_inplace, silu_approx_inplace,
     softmax_ggml_inplace, sum_sq_f32,
 };
+pub use config::Gemma4AudioConfig;
 use std::path::Path;
 
 const SAMPLE_RATE: u32 = 16_000;

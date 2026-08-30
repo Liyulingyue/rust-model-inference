@@ -306,3 +306,13 @@ for _n in 0..(QK_K / 128) {
 * qwen35-specific 测试：30 passed / 0 failed（不变）。
 * Q8_0 端到端冒烟（qwen3 路径）：`The capital of France is **Paris**`。
 
+### ✅ Gemma4 — trunk 与多模态 sibling 对齐（2026-08-30）
+
+* `gemma4/text.rs` 拆为 `trunk/{config,weights,forward,session,scratch,tests}.rs`，`trunk/mod.rs` 统一 re-export `Gemma4Config`、`Gemma4Model`、`Gemma4Session` 与 `Gemma4InputRow`。
+* `gemma4/audio.rs` → `gemma4/asr/mod.rs`，`Gemma4AudioConfig` 单独放入 `asr/config.rs`；保留 `gemma4::audio` re-export 兼容旧调用路径。
+* `gemma4/vision.rs` → `gemma4/vision/mod.rs`，`Gemma4VisionConfig` 单独放入 `vision/config.rs`。
+* 模型加载、媒体编码编排、tokenizer、生成循环与 stdout 输出从 `models/gemma4/multimodal.rs` 移到 `app/gemma4.rs`；模型 trunk 不依赖 `asr` 或 `vision`。
+* 验收：
+  * `cargo test --lib gemma4`：49 passed / 0 failed / 1 ignored。
+  * `cargo test --test gemma4_reference`：6 passed / 0 failed / 5 ignored。
+  * llama.cpp `3173a56471c` 严格 parity：text、image、audio、image+audio 四组输入的 checkpoint shape、F32 `u32` bits 与 greedy token IDs 全部一致。
