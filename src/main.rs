@@ -11,18 +11,38 @@ use rust_model_inference::TensorSource;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenericDispatchMode {
     Tts,
-    Asr,
     Model,
 }
 
 fn generic_dispatch_mode(options: &app::CliOptions) -> GenericDispatchMode {
     if options.tts {
         GenericDispatchMode::Tts
-    } else if options.audio.is_some() {
-        GenericDispatchMode::Asr
     } else {
         GenericDispatchMode::Model
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioRoute {
+    Asr,
+    Gemma4,
+}
+
+fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
+    match arch {
+        "qwen3vl" => Ok(AudioRoute::Asr),
+        "gemma4" => Ok(AudioRoute::Gemma4),
+        _ => Err(format!(
+            "--audio is not supported for architecture {arch:?}"
+        )),
+    }
+}
+
+fn validate_audio_route(route: AudioRoute, has_image: bool) -> Result<(), String> {
+    if route == AudioRoute::Asr && has_image {
+        return Err("Qwen3-ASR --audio cannot be used with --image".into());
+    }
+    Ok(())
 }
 
 fn main() {
@@ -82,10 +102,6 @@ fn main() {
             app::run_or_exit(app::run_tts_cli(&options));
             return;
         }
-        GenericDispatchMode::Asr => {
-            app::run_or_exit(app::run_asr_cli(&options));
-            return;
-        }
         GenericDispatchMode::Model => {}
     }
 
@@ -115,13 +131,42 @@ fn main() {
         .image
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    let audio = options
+        .audio
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
 
-    if explicit_mmproj.is_some() || image.is_some() {
+    if audio.is_some() {
+        let route = dispatch_audio_arch(&arch).unwrap_or_else(|error| {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        });
+        app::run_or_exit(validate_audio_route(route, image.is_some()));
+        if route == AudioRoute::Asr {
+            app::run_or_exit(app::run_asr_cli(&options));
+            return;
+        }
+    }
+
+    if arch == "gemma4" {
         app::run_or_exit(app::run_multimodal(
             source.as_ref(),
             model_path,
             explicit_mmproj,
             image,
+            audio,
+            prompt,
+            max_tokens,
+            options.temperature.unwrap_or(0.0),
+            n_threads,
+        ));
+    } else if explicit_mmproj.is_some() || image.is_some() {
+        app::run_or_exit(app::run_multimodal(
+            source.as_ref(),
+            model_path,
+            explicit_mmproj,
+            image,
+            None,
             prompt,
             max_tokens,
             temperature,
@@ -132,6 +177,7 @@ fn main() {
             app::run_or_exit(app::run_multimodal(
                 source.as_ref(),
                 model_path,
+                None,
                 None,
                 None,
                 prompt,
@@ -234,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_tts_and_asr_dispatch_before_main_model_open() {
+    fn only_tts_dispatches_before_main_model_open() {
         assert_eq!(
             generic_dispatch_mode(&app::CliOptions {
                 tts: true,
@@ -247,8 +293,22 @@ mod tests {
                 audio: Some("speech.wav".into()),
                 ..app::CliOptions::default()
             }),
-            GenericDispatchMode::Asr
+            GenericDispatchMode::Model
         );
+    }
+
+    #[test]
+    fn architecture_aware_audio_dispatch_preserves_asr() {
+        assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(dispatch_audio_arch("gemma4").unwrap(), AudioRoute::Gemma4);
+        assert!(dispatch_audio_arch("llama").is_err());
+    }
+
+    #[test]
+    fn qwen_asr_audio_route_rejects_images() {
+        assert!(validate_audio_route(AudioRoute::Asr, true).is_err());
+        assert!(validate_audio_route(AudioRoute::Asr, false).is_ok());
+        assert!(validate_audio_route(AudioRoute::Gemma4, true).is_ok());
     }
 
     #[test]

@@ -15,6 +15,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Result<(), String> {
+    if arch == "gemma4" && temperature != 0.0 {
+        return Err("Gemma4 requires greedy decoding; --temp must be 0".into());
+    }
+    Ok(())
+}
+
 pub fn run_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -274,6 +281,7 @@ pub fn run_multimodal(
     model_path: &Path,
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
+    audio_path: Option<&Path>,
     prompt: &str,
     max_tokens: usize,
     temperature: f32,
@@ -283,6 +291,24 @@ pub fn run_multimodal(
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
+    validate_gemma4_temperature(arch, temperature)?;
+    if arch == "gemma4" {
+        return crate::models::gemma4::run_multimodal(crate::models::gemma4::Gemma4Request {
+            model: model_path,
+            mmproj: mmproj_path,
+            image: image_path,
+            audio: audio_path,
+            prompt,
+            max_tokens,
+            threads: n_threads_arg,
+            kv_format: KvFormat::F32,
+        });
+    }
+    if audio_path.is_some() {
+        return Err(format!(
+            "Only gemma4 architecture is supported for multimodal audio, got: {arch}"
+        ));
+    }
     println!("LLM arch: {}", arch);
     if arch != "qwen35" {
         return Err(format!(
@@ -608,4 +634,45 @@ pub fn run_multimodal(
         tok_s
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_multimodal;
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    use std::path::Path;
+
+    struct ArchSource(MetaValue);
+
+    impl TensorSource for ArchSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            (key == "general.architecture").then_some(&self.0)
+        }
+
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn gemma4_cli_rejects_nonzero_temperature() {
+        let source = ArchSource(MetaValue::String("gemma4".into()));
+        let error = run_multimodal(
+            &source,
+            Path::new("missing.gguf"),
+            None,
+            None,
+            None,
+            "hello",
+            1,
+            0.1,
+            1,
+        )
+        .unwrap_err();
+        assert!(error.contains("--temp"), "{error}");
+    }
 }
