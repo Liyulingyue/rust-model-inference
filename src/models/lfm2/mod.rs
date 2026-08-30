@@ -6,5 +6,5 @@
 pub mod trunk;
 
 pub use trunk::{
-    get_f32_tensor, load_layers, run_inference, KvCacheFmt, Lfm2Config, Lfm2LayerWeights,
+    get_f32_tensor, load_layers, run_inference, Lfm2Config, Lfm2LayerWeights,
 };

@@ -15,11 +15,11 @@
 
 use std::sync::Arc;
 
-use crate::core::scratchpad::KvCache;
-use crate::core::thread_pool::ComputePool;
 use super::config::Qwen35Config;
 use super::scratch::Qwen35Scratchpad;
 use super::weights::Qwen35Model;
+use crate::core::scratchpad::KvCache;
+use crate::core::thread_pool::ComputePool;
 
 /// Per-request inference state for a `Qwen35Model`.
 ///
@@ -48,13 +48,10 @@ impl<'a> Qwen35Session<'a> {
     /// Build a session with cache and scratch sized for `model.config.n_ctx`.
     /// `pool` is shared across sessions (typical) so a single `Arc<ComputePool>`
     /// is sufficient.
-    pub fn new(
-        model: &'a Qwen35Model<'a>,
-        pool: Arc<ComputePool>,
-    ) -> Result<Self, String> {
+    pub fn new(model: &'a Qwen35Model<'a>, pool: Arc<ComputePool>) -> Result<Self, String> {
         let cfg = &model.config;
         let kv_cache = KvCache::new_f32(
-            cfg.n_layer,
+            cfg.n_layer_impl(),
             cfg.n_ctx,
             cfg.n_embd_head() * cfg.n_head_kv,
         );
@@ -68,15 +65,33 @@ impl<'a> Qwen35Session<'a> {
         })
     }
 
-    pub fn config(&self) -> &Qwen35Config { &self.model.config }
-    pub fn model(&self) -> &Qwen35Model<'a> { self.model }
-    pub fn kv_cache(&self) -> &KvCache { &self.kv_cache }
-    pub fn kv_cache_mut(&mut self) -> &mut KvCache { &mut self.kv_cache }
-    pub fn scratch(&self) -> &Qwen35Scratchpad { &self.scratch }
-    pub fn scratch_mut(&mut self) -> &mut Qwen35Scratchpad { &mut self.scratch }
-    pub fn pool(&self) -> &ComputePool { &self.pool }
-    pub fn next_position(&self) -> usize { self.next_position }
-    pub fn set_next_position(&mut self, position: usize) { self.next_position = position; }
+    pub fn config(&self) -> &Qwen35Config {
+        &self.model.config
+    }
+    pub fn model(&self) -> &Qwen35Model<'a> {
+        self.model
+    }
+    pub fn kv_cache(&self) -> &KvCache {
+        &self.kv_cache
+    }
+    pub fn kv_cache_mut(&mut self) -> &mut KvCache {
+        &mut self.kv_cache
+    }
+    pub fn scratch(&self) -> &Qwen35Scratchpad {
+        &self.scratch
+    }
+    pub fn scratch_mut(&mut self) -> &mut Qwen35Scratchpad {
+        &mut self.scratch
+    }
+    pub fn pool(&self) -> &ComputePool {
+        &self.pool
+    }
+    pub fn next_position(&self) -> usize {
+        self.next_position
+    }
+    pub fn set_next_position(&mut self, position: usize) {
+        self.next_position = position;
+    }
 
     /// Clear KV cache and scratch state. Use this between unrelated requests
     /// to free the previous prompt's attention state. Does NOT reallocate
@@ -84,7 +99,7 @@ impl<'a> Qwen35Session<'a> {
     pub fn reset(&mut self) {
         let cfg = &self.model.config;
         self.kv_cache = KvCache::new_f32(
-            cfg.n_layer,
+            cfg.n_layer_impl(),
             cfg.n_ctx,
             cfg.n_embd_head() * cfg.n_head_kv,
         );
@@ -157,8 +172,7 @@ impl<'a> Qwen35Session<'a> {
         }
         for t in 0..n_tokens {
             let off = t * n_embd;
-            self.scratch.x[off..off + n_embd]
-                .copy_from_slice(&embeddings[off..off + n_embd]);
+            self.scratch.x[off..off + n_embd].copy_from_slice(&embeddings[off..off + n_embd]);
         }
         let logits = self.model.forward(
             n_tokens,

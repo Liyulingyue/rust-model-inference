@@ -10,3 +10,5 @@
 references/
 reference/
 /models/
+
+__pycache__/

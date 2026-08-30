@@ -36,6 +36,29 @@ pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     }
 }
 
+/// RoPE in GGML "normal" (interleaved-pair) style, as used by the classic
+/// `llama` GGUF architecture: rotates adjacent `(x[2i], x[2i+1])` pairs.
+/// HF `rotate_half`-style weights are permuted to this layout by the
+/// llama.cpp llama-arch converter, so a `llama`-arch GGUF must use this
+/// variant, not [`rope_neox`].
+pub fn rope_norm(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+    let half = head_dim / 2;
+    let n_heads = x.len() / head_dim;
+    let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        let mut theta = pos as f32;
+        for i in 0..half {
+            let (cos_a, sin_a) = rope_sin_cos(theta);
+            let x0 = x[base + 2 * i];
+            let x1 = x[base + 2 * i + 1];
+            x[base + 2 * i] = x0.mul_add(cos_a, x1 * -sin_a);
+            x[base + 2 * i + 1] = x0.mul_add(sin_a, x1 * cos_a);
+            theta *= theta_scale;
+        }
+    }
+}
+
 pub fn rope_mrope(
     x: &mut [f32],
     positions: [usize; 4],
