@@ -949,14 +949,11 @@ mod tests {
     #[test]
     fn f64_reductions_cover_vector_and_tail_lengths() {
         let values = [
-            -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0,
-            3.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0,
+            -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, -2.0,
+            -1.0, 0.0, 1.0, 2.0, 3.0,
         ];
         let expected_sum: f64 = values.iter().map(|&value| f64::from(value)).sum();
-        let expected_sq: f64 = values
-            .iter()
-            .map(|&value| f64::from(value * value))
-            .sum();
+        let expected_sq: f64 = values.iter().map(|&value| f64::from(value * value)).sum();
         let expected_centered: f64 = values
             .iter()
             .map(|&value| {
