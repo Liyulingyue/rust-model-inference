@@ -1039,7 +1039,7 @@ fn attend(
 }
 
 fn softcap(value: f32, cap: f32) -> f32 {
-    cap * (value / cap).tanh()
+    cap * (value * (1.0 / cap)).tanh()
 }
 
 fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
@@ -1274,11 +1274,10 @@ mod tests {
     }
 
     #[test]
-    fn softcap_uses_the_declared_f32_formula() {
-        assert_eq!(
-            softcap(60.0, 30.0).to_bits(),
-            (30.0_f32 * 2.0_f32.tanh()).to_bits()
-        );
+    fn softcap_matches_pinned_reciprocal_scale_bits() {
+        // Pinned llama.cpp 3173a56471c, first text raw logit at index 1.
+        let raw = f32::from_bits(0x417c_38d8);
+        assert_eq!(softcap(raw, 30.0).to_bits(), 0x4167_507f);
     }
 
     #[test]
