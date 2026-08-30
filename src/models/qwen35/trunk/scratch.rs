@@ -10,7 +10,7 @@
 //! token batch) plus `n_ctx` (used for padded attention buffers).
 
 use crate::core::scratchpad::KvCache;
-use crate::models::qwen35::clip_config::Qwen35Config;
+use super::config::Qwen35Config;
 use crate::ops::quant;
 
 pub struct Qwen35Scratchpad {

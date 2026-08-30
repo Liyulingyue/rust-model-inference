@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
-use crate::models::qwen35::clip_config::Qwen35Config;
-use crate::models::qwen35::{Qwen35Model, Qwen35Scratchpad};
+use super::config::Qwen35Config;
+use super::scratch::Qwen35Scratchpad;
+use super::weights::Qwen35Model;
 
 /// Per-request inference state for a `Qwen35Model`.
 ///

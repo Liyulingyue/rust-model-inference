@@ -11,20 +11,20 @@
 
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
-use crate::models::qwen35::clip_config::Qwen35Config;
-use crate::models::qwen35::scratchpad::{kv_cache_pos, kv_cache_store};
-use crate::models::qwen35::util::{l2_norm, sigmoid_f32, softplus_f32};
-use crate::models::qwen35::Qwen35LayerWeights;
+use super::config::Qwen35Config;
+use super::scratch::{kv_cache_pos, kv_cache_store};
+use super::util::{l2_norm, sigmoid_f32, softplus_f32};
+use super::weights::Qwen35LayerWeights;
 use crate::ops::{dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace, vec_mad_f32};
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 
-impl<'a> crate::models::qwen35::Qwen35Model<'a> {
+impl<'a> super::weights::Qwen35Model<'a> {
     pub fn forward(
         &self,
         n_tokens: usize,
         kv_cache: &mut KvCache,
-        scratch: &mut crate::models::qwen35::Qwen35Scratchpad,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
@@ -175,7 +175,7 @@ impl<'a> crate::models::qwen35::Qwen35Model<'a> {
 
     pub(super) fn forward_dense_attn_layer(
         &self, il: usize, input: &[f32], n_tokens: usize,
-        kv_cache: &mut KvCache, scratch: &mut crate::models::qwen35::Qwen35Scratchpad,
+        kv_cache: &mut KvCache, scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool, mrope_positions: &[[usize; 4]],
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
@@ -362,7 +362,7 @@ impl<'a> crate::models::qwen35::Qwen35Model<'a> {
         il: usize,
         input: &[f32],
         n_tokens: usize,
-        scratch: &mut crate::models::qwen35::Qwen35Scratchpad,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
@@ -566,7 +566,7 @@ impl<'a> crate::models::qwen35::Qwen35Model<'a> {
         result
     }
 
-    fn forward_ffn_parallel(&self, layer: &Qwen35LayerWeights, hidden: &[f32], n_tokens: usize, scratch: &mut crate::models::qwen35::Qwen35Scratchpad, pool: &ComputePool) {
+    fn forward_ffn_parallel(&self, layer: &Qwen35LayerWeights, hidden: &[f32], n_tokens: usize, scratch: &mut super::scratch::Qwen35Scratchpad, pool: &ComputePool) {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
 

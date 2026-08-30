@@ -161,9 +161,9 @@ src/models/{model_name}/
 每个 step 完成后必须满足：
 
 1. `cargo build --lib` 零 error、warning 数不增。
-2. `cargo test --lib` 通过数不减少（基线 335 passed / 29 failed；29 个 failed 均为与本规范无关的预存在失败）。
+2. `cargo test --lib` 通过数不减少（基线 383 passed / 7 failed；7 个 failed 均为与本规范无关的预存在失败）。
 3. 至少 1 个模型推理冒烟测试：
-   - Q8_0：`cargo run --release --bin rust-model-inference -- --model models/qwen3-0.6b-gguf/Qwen3-0.6B-Q8_0.gguf --prompt "The capital of France is" --max-tokens 12 --temp 0 --threads 4` → 期望 `**Paris**.`
+   - Q8_0：`cargo run --release --bin rust-model-inference -- --model models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --prompt "The capital of France is" --max-tokens 12 --temp 0 --threads 4` → 期望 `**Paris**.`
    - BF16：同上但用 `Qwen3-0.6B-BF16.gguf`。
 4. 本文件末尾"已完成"清单追加本次 step。
 
@@ -250,4 +250,59 @@ for _n in 0..(QK_K / 128) {
 - Q8_0 baseline: `The capital of France is **Paris**.`
 
 **教训**：现有 scalar K-quant 内核只有 4-bit 单元测试覆盖到合成块层面（`q4k_avx2_matches_scalar_*`），没有覆盖跨 128 元素 `n` 边界的累加和输出索引连续性。Q3_K 实际模型触发后才暴露出来。**今后每加一个 scalar K-quant 必须加 Q3_K 风格的"全零 + 已知模式 → 期望值"测试**，强制覆盖 n 迭代边界。
+
+---
+
+### ✅ Step 2 — 重命名 llama/lfm2/lfm25 到 `trunk/`（2026-08-30, commit `aad89bd`）
+
+* `llama/{base,skeleton}.rs` → `llama/trunk/{forward,weights}.rs`。llama 无 `Config`/`Session` 结构，公开 API 只有 `run_inference` + `run_inference_tokens`，不引入空文件。
+* `lfm2/{base,skeleton}.rs` → `lfm2/trunk/{forward,weights,session,config}.rs`。`Lfm2Config` 拆到 `config.rs`；`KvCacheFmt` enum 拆到 `session.rs`。
+* `lfm25/{base,skeleton}.rs` → `lfm25/trunk/{forward,weights,session,config}.rs`。verbatim 复制 `lfm2/trunk/` 后做 `Lfm2→Lfm25` 重命名；GGUF metadata keys 保持 `lfm2.*`（现有 lfm25 GGUF 文件就是用这组键）。
+* 公开 API 通过 `models::<name>::*` 暴露：`models::llama::{run_inference, run_inference_tokens}`、`models::lfm2::{run_inference, Lfm2Config, Lfm2LayerWeights, KvCacheFmt, ...}`、`models::lfm25::{...}` 同上。
+* 验收：
+  * `cargo build --lib` 零 error。
+  * `cargo test --lib` 383 passed / 7 failed（与基线一致）。
+  * 3 个模型均编译通过（不验证精度，按用户要求：llama/lfm2/lfm25 本来精度就对不齐，能编译即可）。
+
+### ✅ Step 3 — 拆分 qwen3/base.rs 到 `trunk/`（2026-08-30, commits `f153a80` + `95d37f8`（其中 Step 3 含 `f153a80` qwen3 部分；Step 4 commit `95d37f8` 含 vision/clip_config 拆分））
+
+合并提交 `4c89ed4` → `1c16990` → `f153a80` 完成 §5 Step 3。`qwen3/base.rs` (1971 行) 拆为：
+
+* `trunk/config.rs` — `Qwen3Config` + `Qwen3Rope`
+* `trunk/weights.rs` — `Qwen3Model` struct + `Qwen3LayerWeights` + load helpers + `impl Qwen3Model { from_source, accessors, embed_tokens }`
+* `trunk/forward.rs` — `Qwen3Input` / `Qwen3GenerateOptions` / `Qwen3Generation` structs + `text_encode` free fn + `run_shared_inference` + `impl Qwen3Model { generate, generate_asr, text_encode_wrapper }`
+* `trunk/session.rs` — `Qwen3Session` struct + `impl Qwen3Session { new, new_with_kv_state, generate_with_asr_trace, generate_streaming, ... }` (877 行)
+* `trunk/util.rs` — helpers + 单元测试
+* `trunk/positions.rs` — `qwen_text_positions`
+* `trunk/tests.rs` — `TestTensorSource` + `MapTensorSource` + `test_model`
+
+删除 `qwen3/base.rs`（per §2.1 禁止 base.rs）。`qwen3/mod.rs` 改为 pure re-export layer。所有 `qwen3::base::*` 调用方改为 `qwen3::*`（7 个外部 import 站点更新：`app/audio.rs`、`app/text.rs`、`app/image.rs`、`asr/model.rs`、`tts/talker.rs`、`format/ggufrs.rs`、`src/lib.rs`）。
+
+修复一个 `Qwen3GenerateOptions` 的 `Copy` 问题（原代码靠隐式 `Copy` 行为，但派生只写了 `Clone`；改为 `validate_generation(&options, ...)` 改签名收引用）。
+
+验收：
+* `cargo build --lib` 零 error。
+* `cargo test --lib` 383 passed / 7 failed（与基线一致）。
+* Q8_0 端到端冒烟：Qwen3-0.6B-Q8_0 输出 `**Paris**`（46.9 t/s gen）。
+* micro-bench：4608×1536 79.69 GFLOPS（与重构前一致）。
+
+### ✅ Step 4 — qwen35 命名对齐（2026-08-30, commit `95d37f8`）
+
+* `qwen35/forward.rs` → `trunk/forward.rs`
+* `qwen35/loader.rs` → `trunk/weights.rs`（`Qwen35Model` + `Qwen35LayerWeights` structs 也移入此）
+* `qwen35/session.rs` → `trunk/session.rs`
+* `qwen35/scratchpad.rs` → `trunk/scratch.rs`
+* `qwen35/positions.rs` → `trunk/positions.rs`
+* `qwen35/util.rs` → `trunk/util.rs`
+* `qwen35/tests.rs` → `trunk/tests.rs`
+* `qwen35/vision.rs` → `vision/mod.rs`
+* `qwen35/clip_config.rs` 拆分：`Qwen35Config` → `trunk/config.rs`（LLM 配置）；`ClipVisionConfig` → `vision/clip_config.rs`（vision encoder 配置）
+* `qwen35/mod.rs` 改为 `pub use trunk::*; pub use vision::*;` 形式的纯 re-export 层
+* `src/lib.rs` 更新：`models::qwen35::clip_config::{ClipVisionConfig, Qwen35Config}` → 拆成 `vision::clip_config::ClipVisionConfig` 和 `qwen35::Qwen35Config`（后者通过 trunk re-export）
+
+验收：
+* `cargo build --lib` 零 error。
+* `cargo test --lib` 383 passed / 7 failed（与基线一致）。
+* qwen35-specific 测试：30 passed / 0 failed（不变）。
+* Q8_0 端到端冒烟（qwen3 路径）：`The capital of France is **Paris**`。
 

@@ -7,7 +7,7 @@
 //! the DAC upsampler.
 
 use crate::core::tensor::TensorSource;
-use crate::models::qwen3::base::{
+use crate::models::qwen3::trunk::util::{
     check_allocation, checked_product, load_f32_tensor, static_q8_matrix, static_q8_tensor,
     usize_to_u64,
 };

@@ -9,12 +9,64 @@
 //! by `from_source`. They are `pub(crate)` because they are only useful
 //! inside this module's loading path.
 
-use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen35::clip_config::Qwen35Config;
-use crate::models::qwen35::util::f16_at;
+use crate::core::tensor::TensorSource;
+use super::config::Qwen35Config;
+use super::util::f16_at;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant;
-use crate::models::qwen35::Qwen35LayerWeights;
+use crate::core::tensor::GGMLType;
+
+// =============================================================================
+// Model + Layer-weight structs
+// =============================================================================
+
+/// All weights for a single Qwen3.5 layer.
+///
+/// The `Option` fields distinguish dense-attention layers (which fill
+/// `wq`/`wk`/`wv`/`wo`/`attn_q_norm`/`attn_k_norm`) from recurrent (Mamba
+/// SSM) layers (which fill `wqkv`/`wqkv_gate`/`ssm_*`). `config.is_recurrent`
+/// selects which group is active.
+pub struct Qwen35LayerWeights<'a> {
+    pub attn_norm: Vec<f32>,
+    pub attn_post_norm: Vec<f32>,
+    pub wq: Option<Weight<'a>>,
+    pub wk: Option<Weight<'a>>,
+    pub wv: Option<Weight<'a>>,
+    pub wo: Option<Weight<'a>>,
+    pub attn_q_norm: Option<Vec<f32>>,
+    pub attn_k_norm: Option<Vec<f32>>,
+    pub wqkv: Option<Weight<'a>>,
+    pub wqkv_gate: Option<Weight<'a>>,
+    pub ssm_conv1d: Option<Vec<f32>>,
+    pub ssm_dt: Option<Vec<f32>>,
+    pub ssm_a: Option<Vec<f32>>,
+    pub ssm_beta: Option<Weight<'a>>,
+    pub ssm_alpha: Option<Weight<'a>>,
+    pub ssm_norm: Option<Vec<f32>>,
+    pub ssm_out: Option<Weight<'a>>,
+    pub ffn_gate: Weight<'a>,
+    pub ffn_up: Weight<'a>,
+    pub ffn_down: Weight<'a>,
+}
+
+/// Loaded Qwen3.5 model weights + parsed config.
+///
+/// `from_source` is defined in `weights.rs`. `forward` and friends are
+/// defined in `forward.rs`. This struct is the source of truth shared by
+/// `Qwen35Session` and the existing `app/text.rs` / `bin/server.rs`
+/// call sites.
+pub struct Qwen35Model<'a> {
+    pub config: Qwen35Config,
+    pub tok_embd: Vec<f32>,
+    pub output_norm: Vec<f32>,
+    pub output_weight: Weight<'a>,
+    pub layers: Vec<Qwen35LayerWeights<'a>>,
+}
+
+// Convenience alias so that `impl Qwen35Model { fn from_source(...) }` in
+// `weights.rs` and `impl Qwen35Model { fn forward(...) }` in `forward.rs`
+// can refer to a common TensorSource without redundant imports.
+pub(crate) type Source<'a> = &'a dyn TensorSource;
 
 /// Load a quantized weight (F32/F16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K) into a
 /// `Weight` borrowing the GGUF bytes. Returns `None` if the tensor is
@@ -75,7 +127,7 @@ pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(source: &S, name: &str) 
     }
 }
 
-impl<'a> crate::models::qwen35::Qwen35Model<'a> {
+impl<'a> Qwen35Model<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let config = Qwen35Config::from_source(source)?;
 

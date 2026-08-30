@@ -1,4 +1,3 @@
-pub mod base;
-pub mod skeleton;
+pub mod trunk;
 
-pub use base::run_inference;
+pub use trunk::{run_inference, run_inference_tokens};

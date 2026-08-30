@@ -1,4 +1,6 @@
-﻿use crate::models::qwen35::clip_config::ClipVisionConfig;
+﻿pub mod clip_config;
+
+use clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
 use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
 use rayon::prelude::*;
