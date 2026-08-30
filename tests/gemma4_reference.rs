@@ -668,6 +668,19 @@ fn gemma4_preflight_rejects_arbitrary_files() {
     );
 }
 
+#[test]
+fn readme_lists_gemma4_model_projector_and_media_flags() {
+    let readme = std::fs::read_to_string("README.md").unwrap();
+    for value in [
+        "gemma-4-E2B-it-Q8_0.gguf",
+        "mmproj-F16.gguf",
+        "--image",
+        "--audio",
+    ] {
+        assert!(readme.contains(value), "README missing {value}");
+    }
+}
+
 fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("LLAMA_GEMMA4_TRACE_BIN").map(PathBuf::from) {
         if path.is_file() {
