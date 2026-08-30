@@ -4,8 +4,8 @@ use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    attention_value_f32, dot_f32, f16_to_f32, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_neox, softmax_inplace,
+    attention_value_f32, bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
+    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_inplace,
 };
 use std::sync::Arc;
 
@@ -799,7 +799,13 @@ fn matmul(
             weight.n_out
         ));
     }
-    if weight.ggml_type == GGMLType::F32 {
+    if name == "per_layer_model_proj.weight" && weight.ggml_type == GGMLType::BF16 {
+        let bytes = weight
+            .kernel
+            .bf16_bytes()
+            .ok_or_else(|| format!("Invalid {name} BF16 kernel"))?;
+        gemma4_bf16_projection_matmul(bytes, input, output, pool, q8)?;
+    } else if weight.ggml_type == GGMLType::F32 {
         weight
             .kernel
             .forward(input, output, weight.n_in, weight.n_out);
@@ -833,6 +839,58 @@ fn matmul(
         });
     }
     ensure_finite(name, output)
+}
+
+fn gemma4_bf16_projection_matmul(
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    pool: &ComputePool,
+    input_bf16: &mut [u8],
+) -> Result<(), String> {
+    let input_bytes = input
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| "Gemma4 BF16 projection input byte size overflow".to_owned())?;
+    let weight_bytes = input_bytes
+        .checked_mul(output.len())
+        .ok_or_else(|| "Gemma4 BF16 projection weight byte size overflow".to_owned())?;
+    if input_bf16.len() < input_bytes || weight.len() < weight_bytes {
+        return Err("Invalid Gemma4 BF16 projection storage length".to_owned());
+    }
+
+    for (bytes, value) in input_bf16[..input_bytes].chunks_exact_mut(2).zip(input) {
+        bytes.copy_from_slice(&f32_to_bf16(*value).to_le_bytes());
+    }
+
+    let n_in = input.len();
+    let n_out = output.len();
+    let weight_ptr = weight.as_ptr();
+    let input_ptr = input_bf16.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(|thread, threads| unsafe {
+        let start = n_out * thread / threads;
+        let end = n_out * (thread + 1) / threads;
+        for row in start..end {
+            let mut sum = 0.0f64;
+            for column in 0..n_in {
+                let weight_offset = (row * n_in + column) * 2;
+                let input_offset = column * 2;
+                let weight_bits = u16::from_le_bytes([
+                    *weight_ptr.add(weight_offset),
+                    *weight_ptr.add(weight_offset + 1),
+                ]);
+                let input_bits = u16::from_le_bytes([
+                    *input_ptr.add(input_offset),
+                    *input_ptr.add(input_offset + 1),
+                ]);
+                let product = bf16_to_f32(weight_bits) * bf16_to_f32(input_bits);
+                sum += f64::from(product);
+            }
+            *output_ptr.add(row) = sum as f32;
+        }
+    });
+    Ok(())
 }
 
 fn checked_rms_norm(
@@ -1009,15 +1067,15 @@ fn trace(_name: &str, _layer: Option<usize>, _values: &[f32]) {}
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_input_rows, head_dim, kv_source_layer, load_weight, require_f32_kv, softcap,
-        Gemma4InputRow, Gemma4Layer, Gemma4Model, BASE_FFN_LAYERS, EMBED, FULL_HEAD_DIM, HEADS,
-        LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL, SWA_HEAD_DIM, VOCAB,
+        assemble_input_rows, head_dim, kv_source_layer, load_weight, matmul, require_f32_kv,
+        softcap, Gemma4InputRow, Gemma4Layer, Gemma4Model, BASE_FFN_LAYERS, EMBED, FULL_HEAD_DIM,
+        HEADS, LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL, SWA_HEAD_DIM, VOCAB,
     };
     use crate::core::scratchpad::KvFormat;
     use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
     use crate::models::gemma4::Gemma4Config;
-    use crate::ops::kernel::{Kernel, Weight};
+    use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
     use std::sync::Arc;
 
     struct EmptySource;
@@ -1160,6 +1218,61 @@ mod tests {
 
         assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
         assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
+    }
+
+    #[test]
+    fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
+        // Pinned llama.cpp 3173a56471c, Gemma4 text row 0, projection row 0,
+        // first 16 operands. Its arm64 BF16 dot rounds the activation to BF16,
+        // forms F32 products, accumulates them in ggml_float (F64), then casts once.
+        let input = [
+            0xbfd0_8482,
+            0xbfc2_eb2b,
+            0x3e47_739e,
+            0xbfbe_62b9,
+            0xbf7d_d8f7,
+            0xbd11_0e44,
+            0xbee2_a64a,
+            0x3e87_fd60,
+            0xbfa9_fcb8,
+            0x3f7d_d8f7,
+            0xbf1a_1f28,
+            0xbfa9_fcb8,
+            0xbeeb_b72f,
+            0x3ee2_a64a,
+            0xbf8a_4199,
+            0xbebe_62b9,
+        ]
+        .map(f32::from_bits);
+        let weight = [
+            0x3d37_u16, 0x3d04, 0xbc50, 0x3d77, 0x3bc7, 0x3cd1, 0xbcdb, 0xbdae, 0xbbe5, 0x3b39,
+            0xbbcd, 0x3c9e, 0x3cde, 0x3d16, 0xbd82, 0x3c63,
+        ]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &weight,
+            GGMLType::BF16,
+            input.len(),
+            1,
+        ));
+        let mut output = [0.0];
+        let mut q8 = vec![0; input.len() * 2];
+        let mut scales = vec![0.0; input.len().div_ceil(32)];
+
+        matmul(
+            "per_layer_model_proj.weight",
+            &weight,
+            &input,
+            &mut output,
+            &ComputePool::new(1),
+            &mut q8,
+            &mut scales,
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0xbe32_95aa);
     }
 
     #[test]

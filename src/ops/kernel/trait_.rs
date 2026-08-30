@@ -13,6 +13,12 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Returns the backing BF16 bytes for callers that deliberately need a
+    /// model-local BF16 execution contract instead of the generic F32-input path.
+    fn bf16_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Hot-path matmul: pre-quantized Q8_0 input, partitioned by row.
     ///
     /// Each call computes `output[i] = sum_k weight[i, k] * dequant(input_q8[k], input_scales[k/32])`
