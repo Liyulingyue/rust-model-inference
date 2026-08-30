@@ -1,4 +1,6 @@
+use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::models::gemma4::audio::Gemma4AudioModel;
+use rust_model_inference::models::gemma4::multimodal::{run_multimodal, Gemma4Request};
 use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use std::path::{Path, PathBuf};
@@ -124,6 +126,30 @@ fn gemma4_matches_pinned_cpu_oracle() {
 }
 
 #[test]
+#[ignore = "requires the Gemma4 model"]
+fn gemma4_text_smoke() {
+    let model = gemma4_model_path();
+    require_gemma4_gguf(
+        &model,
+        GEMMA4_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    );
+    run_multimodal(Gemma4Request {
+        model: &model,
+        mmproj: None,
+        image: None,
+        audio: None,
+        prompt: "hello",
+        max_tokens: 1,
+        threads: 4,
+        kv_format: KvFormat::F32,
+    })
+    .unwrap();
+}
+
+#[test]
 #[ignore = "requires the Gemma4 mmproj"]
 fn gemma4_image_smoke() {
     let mmproj = gemma4_mmproj_path();
@@ -238,4 +264,70 @@ fn gemma4_audio_smoke() {
             serde_json::json!([1536, projected.len() / 1536, 1, 1])
         );
     }
+}
+
+#[test]
+#[ignore = "requires the Gemma4 model and mmproj"]
+fn gemma4_image_audio_smoke() {
+    let model = gemma4_model_path();
+    let mmproj = gemma4_mmproj_path();
+    require_gemma4_gguf(
+        &model,
+        GEMMA4_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    );
+    require_gemma4_gguf(
+        &mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "v.patch_embd.weight",
+        GGMLType::F16,
+    );
+
+    let suffix = std::process::id();
+    let image_path = std::env::temp_dir().join(format!("rmi-gemma4-turn-{suffix}.png"));
+    image::RgbImage::from_fn(64, 48, |x, y| {
+        image::Rgb([(x * 3 + y) as u8, (y * 5 + x) as u8, (x ^ y) as u8])
+    })
+    .save(&image_path)
+    .unwrap();
+
+    let audio_path = std::env::temp_dir().join(format!("rmi-gemma4-turn-{suffix}.wav"));
+    let samples: Vec<i16> = (0..320)
+        .map(|index| ((index as f32 * 0.03125).sin() * 16_384.0) as i16)
+        .collect();
+    let data_len = u32::try_from(samples.len() * 2).unwrap();
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16_000u32.to_le_bytes());
+    wav.extend_from_slice(&32_000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&audio_path, wav).unwrap();
+
+    let result = run_multimodal(Gemma4Request {
+        model: &model,
+        mmproj: Some(&mmproj),
+        image: Some(&image_path),
+        audio: Some(&audio_path),
+        prompt: "describe",
+        max_tokens: 1,
+        threads: 4,
+        kv_format: KvFormat::F32,
+    });
+    let _ = std::fs::remove_file(image_path);
+    let _ = std::fs::remove_file(audio_path);
+    result.unwrap();
 }
