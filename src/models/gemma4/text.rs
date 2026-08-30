@@ -956,7 +956,7 @@ fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     const GELU_COEF_A: f32 = 0.044715;
     const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
 
-    debug_assert_eq!(gate.len(), up.len());
+    assert_eq!(gate.len(), up.len());
     for (gate, up) in gate.iter_mut().zip(up) {
         let x = *gate;
         *gate = if x <= -10.0 {
@@ -965,7 +965,8 @@ fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
             x * up
         } else {
             let x = f16_to_f32(f32_to_f16(x));
-            let gelu = 0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh());
+            let gelu =
+                0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * x.mul_add(GELU_COEF_A * x, 1.0)).tanh());
             f16_to_f32(f32_to_f16(gelu)) * up
         };
     }
@@ -1153,10 +1154,12 @@ mod tests {
         let mut up = [1.0; 8];
         gate[0] = f32::from_bits(0x3f12_598e);
         up[0] = f32::from_bits(0xbed7_8765);
+        gate[1] = f32::from_bits(0xbfff_e000);
 
         super::ggml_geglu_fp16_inplace(&mut gate, &up);
 
         assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
+        assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
     }
 
     #[test]
