@@ -799,7 +799,10 @@ fn matmul(
             weight.n_out
         ));
     }
-    if name == "per_layer_model_proj.weight" && weight.ggml_type == GGMLType::BF16 {
+    if name == "per_layer_model_proj.weight" {
+        if weight.ggml_type != GGMLType::BF16 {
+            return Err(format!("{name} requires BF16 weight"));
+        }
         let bytes = weight
             .kernel
             .bf16_bytes()
@@ -855,8 +858,14 @@ fn gemma4_bf16_projection_matmul(
     let weight_bytes = input_bytes
         .checked_mul(output.len())
         .ok_or_else(|| "Gemma4 BF16 projection weight byte size overflow".to_owned())?;
-    if input_bf16.len() < input_bytes || weight.len() < weight_bytes {
+    if input_bf16.len() < input_bytes {
         return Err("Invalid Gemma4 BF16 projection storage length".to_owned());
+    }
+    if weight.len() != weight_bytes {
+        return Err(format!(
+            "Invalid Gemma4 BF16 projection weight storage length: expected {weight_bytes} bytes, got {}",
+            weight.len()
+        ));
     }
 
     for (bytes, value) in input_bf16[..input_bytes].chunks_exact_mut(2).zip(input) {
@@ -1116,10 +1125,44 @@ mod tests {
         }
     }
 
+    struct ZeroBf16Kernel {
+        bytes: Vec<u8>,
+    }
+
+    impl Kernel for ZeroBf16Kernel {
+        fn bf16_bytes(&self) -> Option<&[u8]> {
+            Some(&self.bytes)
+        }
+
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            output: &mut [f32],
+            _n_in: usize,
+            n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            output[..n_out].fill(0.0);
+        }
+    }
+
     fn zero_weight(n_in: usize, n_out: usize) -> Weight<'static> {
         Weight {
             kernel: Box::new(ZeroKernel),
             ggml_type: GGMLType::F32,
+            n_in,
+            n_out,
+        }
+    }
+
+    fn zero_bf16_weight(n_in: usize, n_out: usize) -> Weight<'static> {
+        Weight {
+            kernel: Box::new(ZeroBf16Kernel {
+                bytes: vec![0; n_in * n_out * 2],
+            }),
+            ggml_type: GGMLType::BF16,
             n_in,
             n_out,
         }
@@ -1175,7 +1218,7 @@ mod tests {
             pool: Arc::new(ComputePool::new(1)),
             token_embedding: zero_weight(EMBED, VOCAB),
             per_layer_token_embedding: zero_weight(PER_LAYER_ALL, VOCAB),
-            per_layer_model_proj: zero_weight(EMBED, PER_LAYER_ALL),
+            per_layer_model_proj: zero_bf16_weight(EMBED, PER_LAYER_ALL),
             per_layer_proj_norm: vec![1.0; PER_LAYER],
             output_norm: vec![1.0; EMBED],
             rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
@@ -1222,9 +1265,12 @@ mod tests {
 
     #[test]
     fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
-        // Pinned llama.cpp 3173a56471c, Gemma4 text row 0, projection row 0,
-        // first 16 operands. Its arm64 BF16 dot rounds the activation to BF16,
-        // forms F32 products, accumulates them in ggml_float (F64), then casts once.
+        // Pinned llama.cpp 3173a56471c, Gemma4 text projection, first 16
+        // operands from real rows 0, 1, 2, 3, and 5. Its arm64 BF16 dot rounds
+        // the activation to BF16, forms F32 products, accumulates them in
+        // ggml_float (F64), then casts once. The pinned row-3 and row-5 F32
+        // accumulator words are respectively 0x3daed280 and 0xbdef03c0, so
+        // those rows make an F32-accumulation mutation observable.
         let input = [
             0xbfd0_8482,
             0xbfc2_eb2b,
@@ -1244,20 +1290,41 @@ mod tests {
             0xbebe_62b9,
         ]
         .map(f32::from_bits);
-        let weight = [
-            0x3d37_u16, 0x3d04, 0xbc50, 0x3d77, 0x3bc7, 0x3cd1, 0xbcdb, 0xbdae, 0xbbe5, 0x3b39,
-            0xbbcd, 0x3c9e, 0x3cde, 0x3d16, 0xbd82, 0x3c63,
-        ]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
+        let weight_rows = [
+            [
+                0x3d37_u16, 0x3d04, 0xbc50, 0x3d77, 0x3bc7, 0x3cd1, 0xbcdb, 0xbdae, 0xbbe5, 0x3b39,
+                0xbbcd, 0x3c9e, 0x3cde, 0x3d16, 0xbd82, 0x3c63,
+            ],
+            [
+                0x3c47, 0x3b92, 0x3ca0, 0xbd46, 0xbd80, 0x3d89, 0x3ce9, 0xbcef, 0xbc48, 0xbcbf,
+                0xbd18, 0x3ce0, 0x3d43, 0xbd9e, 0x3c35, 0xbcae,
+            ],
+            [
+                0x3ca8, 0xbc5d, 0x3d50, 0xbd1e, 0xbc40, 0x3da4, 0x3ba4, 0xbc8f, 0x3d2c, 0x3cac,
+                0xbd3c, 0x3b94, 0x3d03, 0x3c49, 0x3d79, 0x3c83,
+            ],
+            [
+                0xbb1e, 0xbd4b, 0xbac3, 0xbd35, 0x3cc6, 0x3c9b, 0x3c2c, 0x3d72, 0xbd09, 0xbcf5,
+                0xbcb6, 0xbbdb, 0xbc6d, 0xbcea, 0x3d91, 0x3a98,
+            ],
+            [
+                0x3cd0, 0x3d18, 0x3bf3, 0xbb41, 0xbbea, 0xbb32, 0x3c12, 0xbd5e, 0x3afa, 0xbc7c,
+                0x39ab, 0x3d39, 0xbc9d, 0x3d0e, 0xbd33, 0x3c94,
+            ],
+        ];
+        let rows = weight_rows.len();
+        let weight = weight_rows
+            .into_iter()
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
         let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
             &weight,
             GGMLType::BF16,
             input.len(),
-            1,
+            rows,
         ));
-        let mut output = [0.0];
+        let mut output = [0.0; 5];
         let mut q8 = vec![0; input.len() * 2];
         let mut scales = vec![0.0; input.len().div_ceil(32)];
 
@@ -1266,13 +1333,71 @@ mod tests {
             &weight,
             &input,
             &mut output,
-            &ComputePool::new(1),
+            &ComputePool::new(3),
             &mut q8,
             &mut scales,
         )
         .unwrap();
 
-        assert_eq!(output[0].to_bits(), 0xbe32_95aa);
+        assert_eq!(
+            output.map(f32::to_bits),
+            [
+                0xbe32_95aa,
+                0x3be9_7100,
+                0xbd1b_8ce0,
+                0x3dae_d27f,
+                0xbdef_03c1
+            ]
+        );
+    }
+
+    #[test]
+    fn per_layer_projection_rejects_non_bf16_weight() {
+        let weight = zero_weight(2, 1);
+        let mut output = [7.0];
+        let mut input_bf16 = [0; 4];
+        let mut scales = [0.0];
+
+        let error = matmul(
+            "per_layer_model_proj.weight",
+            &weight,
+            &[1.0, 2.0],
+            &mut output,
+            &ComputePool::new(1),
+            &mut input_bf16,
+            &mut scales,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("requires BF16"), "{error}");
+        assert_eq!(output, [7.0]);
+    }
+
+    #[test]
+    fn per_layer_projection_rejects_wrong_bf16_storage_length() {
+        for byte_len in [6, 2] {
+            let bytes = vec![0; byte_len];
+            let weight =
+                Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::BF16, 2, 1));
+            let mut output = [7.0];
+            let mut input_bf16 = [0; 4];
+            let mut scales = [0.0];
+
+            let error = matmul(
+                "per_layer_model_proj.weight",
+                &weight,
+                &[1.0, 2.0],
+                &mut output,
+                &ComputePool::new(1),
+                &mut input_bf16,
+                &mut scales,
+            )
+            .unwrap_err();
+
+            assert!(error.contains("expected 4 bytes"), "{error}");
+            assert!(error.contains(&format!("got {byte_len}")), "{error}");
+            assert_eq!(output, [7.0]);
+        }
     }
 
     #[test]
