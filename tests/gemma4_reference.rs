@@ -781,6 +781,9 @@ fn gemma4_matches_pinned_cpu_oracle() {
 #[test]
 #[ignore = "requires the Gemma4 model"]
 fn gemma4_text_smoke() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let model = gemma4_model_path();
     require_gemma4_gguf(
         &model,
@@ -805,6 +808,9 @@ fn gemma4_text_smoke() {
 #[test]
 #[ignore = "requires the Gemma4 mmproj"]
 fn gemma4_image_smoke() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mmproj = gemma4_mmproj_path();
     require_gemma4_gguf(
         &mmproj,
@@ -851,6 +857,9 @@ fn gemma4_image_smoke() {
 #[test]
 #[ignore = "requires the Gemma4 mmproj"]
 fn gemma4_audio_smoke() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let mmproj = gemma4_mmproj_path();
     require_gemma4_gguf(
         &mmproj,
@@ -894,6 +903,9 @@ fn gemma4_audio_smoke() {
 #[test]
 #[ignore = "requires the Gemma4 model and mmproj"]
 fn gemma4_image_audio_smoke() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let model = gemma4_model_path();
     let mmproj = gemma4_mmproj_path();
     require_gemma4_gguf(
