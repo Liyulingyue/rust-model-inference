@@ -1192,12 +1192,13 @@ fn gemma4_chunk_mel(samples: &[f32]) -> Result<(Vec<f32>, usize), String> {
             let mut sum = 0.0f64;
             let mut bin = 0usize;
             while bin + 3 < fft_bins {
-                sum += f64::from(
-                    magnitude[bin] * filter[bin]
-                        + magnitude[bin + 1] * filter[bin + 1]
-                        + magnitude[bin + 2] * filter[bin + 2]
-                        + magnitude[bin + 3] * filter[bin + 3],
-                );
+                sum += f64::from(magnitude[bin + 3].mul_add(
+                    filter[bin + 3],
+                    magnitude[bin + 2].mul_add(
+                        filter[bin + 2],
+                        magnitude[bin].mul_add(filter[bin], magnitude[bin + 1] * filter[bin + 1]),
+                    ),
+                ));
                 bin += 4;
             }
             while bin < fft_bins {
@@ -1496,5 +1497,16 @@ mod tests {
     fn projected_audio_requires_complete_1536_rows() {
         assert!(validate_projected_rows(&vec![0.0; 1535]).is_err());
         assert!(validate_projected_rows(&vec![0.0; 1536]).is_ok());
+    }
+
+    #[test]
+    fn gemma4_frontend_matches_oracle_mel_fma_contract() {
+        let pcm = (0..320)
+            .map(|index| ((index as f32 * 0.03125).sin() * 16_384.0) as i16)
+            .collect::<Vec<_>>();
+        let features = gemma4_audio_features(&pcm16_wav(SAMPLE_RATE, 1, &pcm)).unwrap();
+
+        assert_eq!(features.frames, 1);
+        assert_eq!(features.values[23].to_bits(), 0xbf84_134c);
     }
 }
