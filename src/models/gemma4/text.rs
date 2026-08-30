@@ -4,8 +4,8 @@ use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    attention_value_f32, dot_f32, gelu_inplace, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox, softmax_inplace,
+    attention_value_f32, dot_f32, f16_to_f32, f32_to_f16, quantize_q8_0_into, rms_norm,
+    rms_norm_inplace, rope_neox, softmax_inplace,
 };
 use std::sync::Arc;
 
@@ -420,10 +420,7 @@ impl<'model> Gemma4Session<'model> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            gelu_inplace(&mut scratch.gate[..ffn]);
-            for (gate, up) in scratch.gate[..ffn].iter_mut().zip(&scratch.up[..ffn]) {
-                *gate *= *up;
-            }
+            ggml_geglu_fp16_inplace(&mut scratch.gate[..ffn], &scratch.up[..ffn]);
             matmul(
                 &format!("blk.{layer_index}.ffn_down.weight"),
                 &layer.ffn_down,
@@ -454,15 +451,11 @@ impl<'model> Gemma4Session<'model> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            gelu_inplace(&mut scratch.per_layer_gate);
             let per_start = layer_index * PER_LAYER;
-            for (gate, input) in scratch
-                .per_layer_gate
-                .iter_mut()
-                .zip(&scratch.per_layer[per_start..per_start + PER_LAYER])
-            {
-                *gate *= *input;
-            }
+            ggml_geglu_fp16_inplace(
+                &mut scratch.per_layer_gate,
+                &scratch.per_layer[per_start..per_start + PER_LAYER],
+            );
             matmul(
                 &format!("blk.{layer_index}.proj.weight"),
                 &layer.proj,
@@ -959,6 +952,25 @@ fn softcap(value: f32, cap: f32) -> f32 {
     cap * (value / cap).tanh()
 }
 
+fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
+    const GELU_COEF_A: f32 = 0.044715;
+    const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
+
+    debug_assert_eq!(gate.len(), up.len());
+    for (gate, up) in gate.iter_mut().zip(up) {
+        let x = *gate;
+        *gate = if x <= -10.0 {
+            0.0
+        } else if x >= 10.0 {
+            x * up
+        } else {
+            let x = f16_to_f32(f32_to_f16(x));
+            let gelu = 0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh());
+            f16_to_f32(f32_to_f16(gelu)) * up
+        };
+    }
+}
+
 fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     if let Some((index, value)) = values
         .iter()
@@ -1133,6 +1145,18 @@ mod tests {
             softcap(60.0, 30.0).to_bits(),
             (30.0_f32 * 2.0_f32.tanh()).to_bits()
         );
+    }
+
+    #[test]
+    fn ggml_geglu_rounds_gate_and_gelu_through_f16() {
+        let mut gate = [0.0; 8];
+        let mut up = [1.0; 8];
+        gate[0] = f32::from_bits(0x3f12_598e);
+        up[0] = f32::from_bits(0xbed7_8765);
+
+        super::ggml_geglu_fp16_inplace(&mut gate, &up);
+
+        assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
     }
 
     #[test]
