@@ -22,6 +22,8 @@ use crate::core::scratchpad::{
 use crate::core::thread_pool::ComputePool;
 use crate::ops::*;
 use crate::ops::kernel::Kernel;
+#[cfg(feature = "parity-trace")]
+use crate::parity_trace;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
