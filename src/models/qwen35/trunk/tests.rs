@@ -13,7 +13,7 @@ use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
-use crate::models::qwen35::session::Qwen35Session;
+use super::session::Qwen35Session;
 use crate::ops::kernel::QuantizedTensor;
 use crate::ops::kernel::Weight;
 use crate::ops::quant::{self, BlockQ8K};
@@ -140,7 +140,7 @@ fn qwen35_l2_norm_matches_pinned_llama_cpp_bits() {
     ];
 
     let mut actual = INPUT_BITS.map(f32::from_bits);
-    crate::models::qwen35::util::l2_norm(&mut actual, 1e-6);
+    super::util::l2_norm(&mut actual, 1e-6);
 
     assert_eq!(actual.map(f32::to_bits), EXPECTED_BITS);
 }
