@@ -12,6 +12,39 @@ pub fn enable_gpu() {
     GPU_ENABLED.store(true, Ordering::Relaxed);
 }
 
+/// Set when a GPU matmul fails at runtime: all subsequent calls fall back to
+/// CPU without retrying the broken path.
+#[cfg(feature = "vulkan")]
+static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// True when a GPU backend is active and healthy, i.e. matmul outputs are
+/// produced by a fenced GPU dispatch owned by pool thread 0. Trunks use this
+/// to route *element-wise post-matmul work* (silu, gating) to thread 0 over
+/// the whole buffer instead of per-thread row slices — on the GPU path there
+/// are no per-thread row owners, so per-thread post-op slices would read the
+/// buffer before the dispatch completes.
+#[cfg(feature = "vulkan")]
+pub fn gpu_matmul_active() -> bool {
+    !GPU_BROKEN.load(Ordering::Relaxed) && get_vulkan_context().is_some()
+}
+
+#[cfg(not(feature = "vulkan"))]
+pub fn gpu_matmul_active() -> bool {
+    false
+}
+
+#[cfg(feature = "vulkan")]
+pub fn gpu_broken() -> bool {
+    GPU_BROKEN.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "vulkan")]
+pub fn mark_gpu_broken(reason: &str) {
+    if !GPU_BROKEN.swap(true, Ordering::Relaxed) {
+        eprintln!("[GPU] Vulkan disabled after error: {reason}. Falling back to CPU.");
+    }
+}
+
 #[cfg(feature = "vulkan")]
 use std::sync::OnceLock;
 
@@ -45,9 +78,29 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
     if !GPU_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
-    let result = VULKAN_CONTEXT.get_or_init(|| {
-        VulkanContext::new().map_err(|e| e.to_string())
-    });
+    // Warmup runs INSIDE the init closure: the driver JITs the compute
+    // pipeline on first dispatch (seconds on Meteor Lake), and any thread
+    // reaching a dispatch before that completes wedges the watchdog. The
+    // OnceLock serializes context creation + warmup across all callers.
+    let result =
+        VULKAN_CONTEXT.get_or_init(|| match VulkanContext::new().map_err(|e| e.to_string()) {
+            Ok(ctx) => {
+                eprintln!("[GPU] Warming up Vulkan pipeline (driver JIT)...");
+                let t0 = std::time::Instant::now();
+                match unsafe { ctx.warmup() } {
+                    Ok(()) => {
+                        eprintln!("[GPU] Warmup done in {:.1}s", t0.elapsed().as_secs_f64());
+                        Ok(ctx)
+                    }
+                    Err(e) => {
+                        eprintln!("[GPU] Warmup failed: {e}. Falling back to CPU.");
+                        GPU_BROKEN.store(true, Ordering::Relaxed);
+                        Err(format!("warmup failed: {e}"))
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        });
     match result {
         Ok(ctx) => Some(ctx),
         Err(e) => {
@@ -61,7 +114,8 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
 static WGPU_CONTEXT: OnceLock<Result<WgpuContext, String>> = OnceLock::new();
 
 #[cfg(feature = "wgpu")]
-static WGPU_INIT_THREAD: std::sync::OnceLock<std::sync::Mutex<Option<WgpuContext>>> = std::sync::OnceLock::new();
+static WGPU_INIT_THREAD: std::sync::OnceLock<std::sync::Mutex<Option<WgpuContext>>> =
+    std::sync::OnceLock::new();
 
 #[cfg(feature = "wgpu")]
 pub fn get_wgpu_context() -> Option<&'static WgpuContext> {
@@ -114,9 +168,9 @@ pub fn get_wgpu_context() -> Option<&'static WgpuContext> {
         }
     }
 
-    guard.as_ref().map(|ctx| {
-        unsafe { std::mem::transmute(ctx) }
-    })
+    guard
+        .as_ref()
+        .map(|ctx| unsafe { std::mem::transmute(ctx) })
 }
 
 #[cfg(target_arch = "x86_64")]

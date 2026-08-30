@@ -1,0 +1,91 @@
+#version 450
+// Q8_0 matmul: one workgroup (64 invocations) per output row.
+//   weight layout: rows of [f16 scale][32 x int8] blocks, 34 bytes per block,
+//   byte-addressed through a u32 array (matches the GGUF Q8_0 byte layout).
+//   input layout: 32 x int8 per block + f32 scale per block.
+// dims: x = n_in (unused), y = n_out, z = blocks_per_row, w = row stride bytes.
+// The per-row input is cooperatively staged into shared memory once.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer W  { uint w_data[]; };
+layout(std430, binding = 1) readonly buffer IQ { uint i_data[]; };
+layout(std430, binding = 2) readonly buffer SC { float i_scales[]; };
+layout(std430, binding = 3) writeonly buffer OU { float o_data[]; };
+
+layout(push_constant) uniform PC { uvec4 dims; };
+
+shared uint s_input[4096];  // up to 512 blocks -> n_in <= 16384
+shared float s_red[64];
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int  expo = int((bits >> 10u) & 0x1Fu);
+    uint man  = bits & 0x3FFu;
+    float v;
+    if (expo == 0) {
+        v = (float(man) / 1024.0) * exp2(-14.0);
+    } else if (expo == 31) {
+        return 0.0;  // inf/nan: caller guarantees valid f16 scales
+    } else {
+        v = (1.0 + float(man) / 1024.0) * exp2(float(expo - 15));
+    }
+    return sign != 0u ? -v : v;
+}
+
+int i8_of(uint word, uint byte_idx) {
+    uint b = (word >> (byte_idx * 8u)) & 0xFFu;
+    return b >= 128u ? int(b) - 256 : int(b);
+}
+
+void main() {
+    uint bpr = dims.z;
+    uint lid = gl_LocalInvocationID.x;
+    uint in_words = bpr * 8u;
+
+    // cooperative input staging (bpr*8 words <= 1024 guarded by the host)
+    for (uint w = lid; w < in_words; w += 64u) {
+        s_input[w] = i_data[w];
+    }
+    barrier();
+
+    uint row = gl_WorkGroupID.x;  // one row per 64-thread workgroup
+    if (row >= dims.y) return;
+
+    uint row_off = row * dims.w;
+    float acc = 0.0;
+
+    for (uint block = lid; block < bpr; block += 64u) {
+        uint w_off = row_off + block * 34u;
+        uint s_word = w_data[w_off >> 2u];
+        uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
+        float w_scale = f16_decode(s_bits);
+
+        int dot = 0;
+        uint w_body = w_off + 2u;
+        uint in_base = block * 32u;
+        for (uint g = 0u; g < 8u; g++) {
+            uint g_off = w_body + g * 4u;
+            uint w0 = w_data[g_off >> 2u];
+            uint w1 = w_data[(g_off >> 2u) + 1u];
+            uint sh = (g_off & 3u) * 8u;
+            uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
+            uint i_word = s_input[(in_base + g * 4u) >> 2u];
+            dot += i8_of(packed, 0u)        * i8_of(i_word, 0u)
+                 + i8_of(packed, 1u)        * i8_of(i_word, 1u)
+                 + i8_of(packed, 2u)        * i8_of(i_word, 2u)
+                 + i8_of(packed, 3u)        * i8_of(i_word, 3u);
+        }
+        acc += w_scale * i_scales[block] * float(dot);
+    }
+
+    s_red[lid] = acc;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lid < s) { s_red[lid] += s_red[lid + s]; }
+        barrier();
+    }
+    if (lid == 0u) {
+        o_data[row] = s_red[0];
+    }
+}

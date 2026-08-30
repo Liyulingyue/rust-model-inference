@@ -1,13 +1,14 @@
-//! Q8_0 per-row dispatch: GPU (vulkan/wgpu) → AVX2 → NEON → scalar fallback.
+//! Q8_0 per-row dispatch: AVX2 → NEON → scalar fallback.
+//!
+//! GPU (vulkan/wgpu) dispatch lives in `parallel.rs`, which routes the
+//! whole-matmul call to a single full-range dispatch instead of per-row-range
+//! GPU calls (the old per-range path re-uploaded weights per call and
+//! serialized 18 threads through the context mutex).
 //!
 //! Phase 2.7-final: split from `ops::matmul`. Entry point is
 //! `matmul_q8_0_quantized_range`; called by `parallel::matmul_q8_0_quantized_parallel_rows`
 //! and by external callers (`bin/server.rs`, `bin/micro_bench.rs`).
 
-#[cfg(feature = "vulkan")]
-use crate::ops::get_vulkan_context;
-#[cfg(feature = "wgpu")]
-use crate::ops::get_wgpu_context;
 #[cfg(target_arch = "x86_64")]
 use crate::ops::has_avx2_fma;
 #[cfg(target_arch = "aarch64")]
@@ -36,38 +37,6 @@ pub fn matmul_q8_0_quantized_range(
     row_end: usize,
 ) {
     debug_assert_eq!(output.len(), row_end - row_start);
-    #[cfg(feature = "vulkan")]
-    if let Some(ctx) = get_vulkan_context() {
-        let n_out = row_end - row_start;
-        let blocks_per_row = n_in / 32;
-        let weight_row_stride = blocks_per_row * 34;
-        let weight_offset = row_start * weight_row_stride;
-        let expected_weight_size = (row_end - row_start) * weight_row_stride;
-        let adjusted_weight = &weight[weight_offset..weight_offset + expected_weight_size];
-
-        unsafe {
-            ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
-                .expect("GPU matmul failed");
-        }
-
-        return;
-    }
-    #[cfg(feature = "wgpu")]
-    if let Some(ctx) = get_wgpu_context() {
-        let n_out = row_end - row_start;
-        let blocks_per_row = n_in / 32;
-        let weight_row_stride = blocks_per_row * 34;
-        let weight_offset = row_start * weight_row_stride;
-        let expected_weight_size = (row_end - row_start) * weight_row_stride;
-        let adjusted_weight = &weight[weight_offset..weight_offset + expected_weight_size];
-
-        unsafe {
-            ctx.matmul_q8_0(adjusted_weight, input_q8, input_scales, output, n_in, n_out)
-                .expect("WGPU matmul failed");
-        }
-
-        return;
-    }
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
         unsafe {

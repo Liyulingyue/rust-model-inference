@@ -36,7 +36,8 @@ sha2 = "0.10"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-strip = true
+strip = "debuginfo"
+debug = true
 
 [[bin]]
 name = "micro-bench"
