@@ -88,32 +88,23 @@
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
 
-## MiniCPM5-1B 输出对齐 Llama.cpp (2026-08)
+## MiniCPM5-1B 输出对齐 Llama.cpp (2026-08) — ✅ 已解决
 
-调试 MiniCPM5-1B-Q8_0 GGUF 模型时 Rust 与 llama.cpp 在 L23 step 0 logits 仍有 max ≈ 0.07 偏差（ffn_out 也偏离 dump 值）。已排除的嫌疑人：
+**根因：RoPE 风格用错。** `llama` GGUF 架构（含 MiniCPM5）使用 GGML `ROPE_TYPE_NORM`（**interleaved 相邻对**旋转），HF `rotate_half` 权重由 llama.cpp 转换器 permute 成该布局；而 Rust trunk 之前调用了 `rope_neox`（halves 风格）。
 
-- [x] `silu_mul_approx_inplace` AVX2 vs scalar：logits 差 < 0.005，不是主因（`RUST_FORCE_SCALAR=1` 验证）
-- [x] `quantize_q8_0_into` AVX2 vs scalar：logits 差不大，不是主因
-- [x] `matmul_q8_0_quantized_range` AVX2 vs scalar：logits 差不大，不是主因
-- [x] `scale_mul_inplace`（rms_norm 内层）AVX2 vs scalar：不是主因
-- [x] `hsum_ps`：重写为更易读形式 + 加 TODO 注释（`src/ops/dot.rs:443-467`），数学等价，不是主因
-- [x] `ffn_inp` / `ffn_norm` / `ffn_norm_weight` / W_gate matmul / W_up matmul / silu_mul output：均与 llama dump 或 Python 解析匹配
-- [x] W_down matmul 数学逻辑：Rust down_buf 与 Python Q8×Q8 解析匹配（diff < 0.01）
+**为什么之前一直没找到**：历史调试全部对比 "L23 step 0"，而 `pos=0` 时两种 RoPE 都是恒等变换——step 0 的逐层 dump 永远一致（残余 0.07 只是量化噪声），差异只在 `pos>0` 出现，且随位置增长（step 16 时 logits 最大差 17+，top-10 排名完全不同）。
 
-未定位（仍在排查）：
-- [x] **Q8_0 AVX2 在合成 uniform 数据上仍有精度 drift（合成 max_diff=255，真实模型通过）** — commit `acb0a2b` 已查明"diff=255"是测试 `assert_avx2_matches_scalar` 调用 scalar 时 `(n_in, n_out, 0)` 参数顺序错位导致,非算法 bug。修测试后 `max_diff=0.000366 rel=1.6e-7`,AVX2 正确。
-- [ ] **早期层（L0-L22）intermediate activations 只对比过 rmsnorm scale，未对比具体数值**——可能某层有微小 drift 累积到 L23。需要逐层 dump ffn_inp / attn_out 与 llama 对比。
-- [ ] **Llama dump 的 buffer reuse 问题**——`ffn_out_full_23`/`ffn_up` 等 `_full_23` tensor 共享 backend buffer，dump 读到的可能是被覆盖的数据。需要在 llama.cpp 加 `ggml_backend_tensor_get` 之外的直接读法才能拿到 ground truth。当前 PR 已加 `[LLAMACPP_L23_FFN_OUT_RAW]` 直接读 `t->data`，但需要 MSVC 工具链才能重编 llama-cli。
-- [ ] **W_down matmul 后 ffn_out 与 ffn_inp 的累加**——`base.rs:619-625` 是 `x[i] += down_buf[i]`（就地累加），但 llama.cpp 是 `cur = ggml_add(ctx0, ffn_out, ffn_inp)`（分配新 buffer）。理论上等价，但若 `x` 的 storage 与 ffn_out 共享则可能写入到 ffn_inp 之前的位置。需进一步对比 dump。
+**定位过程**（工具已沉淀到 `tools/parity/`）：
+1. `minicpm5_reference.py`（models/.venv，gguf+numpy f64 逐层真值）复算整个前向，与 Rust `RUST_LLAMA_DEBUG_OUTFILE` 逐层 trace 对比——误差随层数平滑放大，无单层跳变，指向位置编码。
+2. `dump_tokens_oracle.cpp`（按显式 token id 驱动 llama.cpp 逐步 dump logits）：llama.cpp 与 halves-rope numpy 偏差随位置增长到 12+，与 interleaved-rope numpy 贴合（≤1.1，纯量化噪声）→ 确认 RoPE 风格假设。
 
-临时调试代码（env-var guarded，已合入）：
+**修复**：
+- `src/ops/rope.rs` 新增 `rope_norm`（interleaved 相邻对旋转，GGML ROPE_TYPE_NORM 风格），带 pinned-bits 单元测试。
+- `src/models/llama/trunk/forward.rs` Q/K RoPE 改用 `rope_norm`。
 
-- `RUST_LLAMA_DEBUG_L23_DOWN=1`：dump L23 step 0 `down_buf` 前 16 值，标记 `[RUST_L23_DOWN_BUF_RAW]`，位置 `src/models/llama/base.rs`（W_down matmul 后）
-- `RUST_LLAMA_DEBUG_LOGITS=1`：dump step 0 logits 前 16 值，标记 `[RUST_LOGITS_RAW]`，位置 `src/models/llama/base.rs`（output.projection 后）
-- `LLAMACPP_DEBUG_L23_FFN_OUT_RAW=1`：dump L23 step 0 ffn_out tensor 前 16 值（不走 ggml_cont，直接读 cb 记录的 tensor），标记 `[LLAMACPP_L23_FFN_OUT_RAW]`，位置 `references/llama.cpp/src/llama-graph.cpp:drain_debug_tensors`
-- `RUST_FORCE_SCALAR=1`：把 silu_mul / scale_mul / Q8_0 quantize / Q8_0 matmul 都强制走 scalar 版本（已合并）
+**验证结果**（MiniCPM5-1B-Q8_0，17 token prompt）：
+- Rust 逐层激活 vs f64 numpy 真值：相对差从 5–12% 降到 1–3%，逐层 argmax 全部一致。
+- Rust vs llama.cpp oracle：8 步贪心生成序列完全一致（122895, 33, 285, 5390, 34609, 559, 316, 2925），top-10 logits 差 ≤ ~1.0（两个 Q8_0 引擎相对 f64 真值各自的量化噪声包络即为 0.5–1.1）。
+- 生成质量：think 段中文推理连贯，正确自述"我是 MiniCPM 系列模型，由面壁智能（ModelBest）和 OpenBMB 开发"。
 
-下一步建议（按优先级）：
-1. 补上每个早期层（L0-L22）的 ffn_inp/attn_out 对比 dump，逐层 vs llama 对比
-2. 编译 llama.cpp（需要 MSVC 工具链）后用 `[LLAMACPP_L23_FFN_OUT_RAW]` 拿到 ground truth，与 Rust `[RUST_L23_DOWN_BUF_RAW]` 直接对比，确认 W_down matmul 是否真的有差异
-3. 如果上面两步都没找到差异，逐层 dump ffn_norm / Q8_0 量化后的 input，与 llama 对比舍入差异
+历史排查记录（当时已排除的嫌疑，结论仍有效）：silu 近似 / Q8_0 量化 / rms_norm / matmul 均非主因；step-0 的 0.07 偏差即量化噪声底，无需再追。

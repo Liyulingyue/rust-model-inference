@@ -13,9 +13,9 @@ use super::weights::{get_f32_tensor, load_layers, LlamaLayerWeights};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    attention_value_f32, dot_f32, dot_f16_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm, rope_neox, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
-    vec_mad_f16_f32, vec_scale_f32,
+    attention_value_f32, dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm,
+    rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
+    vec_scale_f32,
 };
 
 use std::io::{self, Write};
@@ -387,12 +387,14 @@ pub fn run_inference_tokens(
                 let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
 
                 // LLaMA does not have QK norm.
-
+                // The `llama` GGUF arch uses interleaved ("normal"-style)
+                // RoPE — the converter permutes HF rotate_half weights into
+                // adjacent-pair layout (MiniCPM5 ships this arch too).
                 for h in 0..n_head {
-                    rope_neox(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_k, freq_base);
+                    rope_norm(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_k, freq_base);
                 }
                 for h in 0..n_head_kv {
-                    rope_neox(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_v, freq_base);
+                    rope_norm(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], pos, n_embd_head_k, freq_base);
                 }
                 dbg_tensor(step, "Qcur", layer, q);
                 dbg_tensor(step, "Kcur", layer, k_new);
