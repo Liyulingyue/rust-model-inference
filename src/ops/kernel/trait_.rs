@@ -13,6 +13,11 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Returns the backing F32 values for model-local native-F32 contracts.
+    fn f32_slice(&self) -> Option<&[f32]> {
+        None
+    }
+
     /// Returns the backing BF16 bytes for callers that deliberately need a
     /// model-local BF16 execution contract instead of the generic F32-input path.
     fn bf16_bytes(&self) -> Option<&[u8]> {
@@ -81,13 +86,7 @@ pub trait Kernel: Send + Sync {
 
     /// Batched matmul: `input[n_tokens * n_in] → output[n_tokens * n_out]`.
     /// Default impl quantizes the whole batch up front then loops over tokens.
-    fn forward_batched(
-        &self,
-        input: &[f32],
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-    ) {
+    fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);

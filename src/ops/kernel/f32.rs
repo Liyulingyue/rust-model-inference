@@ -19,6 +19,10 @@ impl F32Kernel {
 }
 
 impl Kernel for F32Kernel {
+    fn f32_slice(&self) -> Option<&[f32]> {
+        Some(&self.weight)
+    }
+
     fn forward_prequantized(
         &self,
         _input_q8: &[u8],
@@ -29,14 +33,7 @@ impl Kernel for F32Kernel {
         ith: usize,
         nth: usize,
     ) {
-        matmul_f32_scalar_range(
-            &self.weight,
-            output,
-            n_in,
-            n_out,
-            ith,
-            nth,
-        );
+        matmul_f32_scalar_range(&self.weight, output, n_in, n_out, ith, nth);
     }
 
     /// F32 has a native f32-input path. The trait default impl quantizes
@@ -58,13 +55,7 @@ impl Kernel for F32Kernel {
         }
     }
 
-    fn forward_batched(
-        &self,
-        input: &[f32],
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-    ) {
+    fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         for t in 0..n_tokens {
             self.forward(

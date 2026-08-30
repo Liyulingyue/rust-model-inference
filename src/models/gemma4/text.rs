@@ -809,9 +809,25 @@ fn matmul(
             .ok_or_else(|| format!("Invalid {name} BF16 kernel"))?;
         gemma4_bf16_projection_matmul(bytes, input, output, pool, q8)?;
     } else if weight.ggml_type == GGMLType::F32 {
-        weight
-            .kernel
-            .forward(input, output, weight.n_in, weight.n_out);
+        if let Some(values) = weight.kernel.f32_slice() {
+            let expected = weight
+                .n_in
+                .checked_mul(weight.n_out)
+                .ok_or_else(|| format!("Invalid {name} F32 weight size"))?;
+            if values.len() != expected {
+                return Err(format!(
+                    "Invalid {name} F32 weight length: expected {expected}, got {}",
+                    values.len()
+                ));
+            }
+            for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
+                *result = dot_f32(row, input, weight.n_in);
+            }
+        } else {
+            weight
+                .kernel
+                .forward(input, output, weight.n_in, weight.n_out);
+        }
     } else {
         let blocks = weight.n_in.div_ceil(32);
         if q8.len() < weight.n_in || scales.len() < blocks {
@@ -1261,6 +1277,74 @@ mod tests {
 
         assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
         assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn per_layer_f32_projection_matches_pinned_neon_dot_bits() {
+        // Pinned llama.cpp 3173a56471c, blk.0.inp_gate.weight row 0 and
+        // layer-0 FFN output occurrence 0. The first 16 real operands already
+        // distinguish its four FMA accumulators from sequential F32 addition.
+        let weights = [
+            0x3a89_0000,
+            0x39fb_0000,
+            0xb7e5_0000,
+            0xb7a2_0000,
+            0x39f0_0000,
+            0x3a16_0000,
+            0xba2b_0000,
+            0xba3c_0000,
+            0xb906_0000,
+            0x3748_0000,
+            0xba28_0000,
+            0xb9c4_0000,
+            0x377b_0000,
+            0xba2a_0000,
+            0xb983_0000,
+            0xb987_0000,
+        ]
+        .map(f32::from_bits);
+        let input = [
+            0xc116_ef77,
+            0x413c_c829,
+            0x3e4c_d214,
+            0xc180_6c96,
+            0x400b_f0a2,
+            0xc03c_6f04,
+            0xbe76_9592,
+            0x3cec_5d40,
+            0x3f80_3150,
+            0x401d_94ed,
+            0x3e9a_5ed4,
+            0x4093_33e6,
+            0x3f1c_0cfe,
+            0xc0af_a2b5,
+            0xc026_7f9c,
+            0xbf27_ece8,
+        ]
+        .map(f32::from_bits);
+        let weight = Weight {
+            kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights.to_vec())),
+            ggml_type: GGMLType::F32,
+            n_in: input.len(),
+            n_out: 1,
+        };
+        let mut output = [0.0];
+        let mut q8 = [0; 16];
+        let mut scales = [0.0];
+
+        matmul(
+            "blk.0.inp_gate.weight",
+            &weight,
+            &input,
+            &mut output,
+            &ComputePool::new(1),
+            &mut q8,
+            &mut scales,
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0xbb08_36fd);
     }
 
     #[test]
