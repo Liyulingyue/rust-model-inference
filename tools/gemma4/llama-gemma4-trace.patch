@@ -66,7 +66,7 @@ index 97678c6b2..4680ef1f3 100644
  #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
  #include <signal.h>
  #include <unistd.h>
-@@ -30,7 +37,185 @@
+@@ -30,7 +37,186 @@
  // volatile, because of signal being an interrupt
  static volatile bool g_is_generating = false;
  static volatile bool g_is_interrupted = false;
@@ -168,6 +168,7 @@ index 97678c6b2..4680ef1f3 100644
 +            output.output = section::text;
 +            return true;
 +        }
++        if (tensor->ne[0] != 1536 || tensor->ne[1] != 1 || tensor->ne[2] != 1 || tensor->ne[3] != 1) return false;
 +        return layer_checkpoint(name, "attn_out-", "attn_out", output)
 +            || layer_checkpoint(name, "pe_in-", "ffn_out", output)
 +            || layer_checkpoint(name, "l_out-", "per_layer_out", output);
