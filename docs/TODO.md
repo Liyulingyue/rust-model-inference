@@ -139,3 +139,22 @@
 - Rust vs llama.cpp oracle：**8/8 步贪心 top-1 完全一致**（1098, 5706, 803, 4481, 856, 5242, 523, EOS=7），EOS 时机一致。
 - logit 数值差 0.1~4.8；step 13（首个 decode 步）top-1 值差 11.9（排名不受影响），成因未深挖——如需 bit 级对齐可用 `tools/parity/` 的 layer oracle 逐层排查。
 - 架构映射备注：`LFM2-8B-A1B-GGUF` → arch `lfm2moe` → `models::lfm2moe`；`LFM2.5-1.2B-Instruct-GGUF` → arch `lfm2` + basename 2.5 → `models::lfm25`；`models::lfm2`（dense LFM2 v2）当前模型库中没有对应 GGUF，仅为该架构保留的分发路径。
+
+## Ornith-1.5-9B (qwen35 架构, 9B hybrid) 适配 (2026-08) — ✅ 已完成
+
+`models/Ornith-1.5-9B-GGUF`（arch=`qwen35`，33 blocks = 32 主层 + 1 MTP nextn 层；SSM 线性注意力
+`full_attention_interval=4`，GQA 16/4 头，head_dim 256 + partial mrope 64/[11,11,10,0]，freq 1e7，
+vocab 248320）。现有 qwen35 trunk 逻辑全部适用，适配点有三：
+
+1. **KV cache 按请求预算分配（原为 OOM 根因）**：`app/text.rs` 与 `bin/server.rs` 的 qwen35 路径原来按
+   `config.n_ctx`（262144）分配 F32 KV cache——9B 模型 = 33×262144×1024×4B = 35.4GB 直接分配失败。
+   改为 `(prompt_len + max_tokens).min(n_ctx)`。
+2. **nextn/MTP 层排除**：新增 `config.n_nextn`（读 `qwen35.nextn_predict_layers`，默认 0）与
+   `n_layer_impl()`；权重加载与前向只遍历主栈层，MTP 块不参与推理（对齐 llama.cpp
+   `n_layer_impl = n_layer_all - n_layer_nextn`，MTP 层 dense attention-only 非 recurrent）。
+   recurrent 掩码同步修正：`i < n_layer_impl && (i+1) % interval != 0`。
+3. 上述封顶同时惠及 Qwen3.5-2B（原每次运行 KV cache 固定分配 12.9GB）。
+
+验证：llama.cpp token-id oracle 贪心序列 **8/8 步一致**（760→6511→314→9338→369→11751→13→10838），
+top-1 logit 差 0.3~0.8；生成 `"The capital of France is Paris. 🇫🇷 …"` 与中文自我介绍均连贯；
+Qwen3.5-2B / MiniCPM5 冒烟回归通过。
