@@ -108,3 +108,34 @@
 - 生成质量：think 段中文推理连贯，正确自述"我是 MiniCPM 系列模型，由面壁智能（ModelBest）和 OpenBMB 开发"。
 
 历史排查记录（当时已排除的嫌疑，结论仍有效）：silu 近似 / Q8_0 量化 / rms_norm / matmul 均非主因；step-0 的 0.07 偏差即量化噪声底，无需再追。
+## LFM2-8B-A1B (lfm2moe) MoE 支持 (2026-08) — ✅ 已完成
+
+新增 `src/models/lfm2moe/`（对齐 `lfm2` trunk 结构），实现 `lfm2moe` 架构的 Mixture-of-Experts FFN：
+
+- **模型结构**：24 blocks；前 `leading_dense_block_count=2` 个为 dense SwiGLU FFN（n_ff=7168，shortconv 注意力），其余 22 个为 MoE（32 选 4，expert_ffn=1792）；注意力在 shortconv 与 GQA（32 q头/8 kv头，head_dim 64）间交替。GGUF 权重 Q8_0，3-D expert 张量 `[n_in, n_ff_exp, n_expert]` 按 expert 切片为连续 2-D 权重。
+- **MoE 数学**（对齐 llama.cpp `build_moe_ffn(gating_op=sigmoid, norm_w=true)`）：`logits = router@x`（F32）→ `probs = sigmoid(logits)` → `select = probs + exp_probs_b`（bias 仅影响 top-k 选择）→ top-4 → `weights = probs[top4] / clamp(sum, 6.1e-5, ∞)`（用无偏 probs 归一化）→ 加权求和 `Σ w_e · down_e(silu(gate_e@x) · up_e@x)`。
+
+### 排查过程中发现并修复的既有 bug
+
+1. **silu 与 matmul 的行分区竞争（全 trunk 模式性 bug）**：闭包内 `rows_per = n_ff / nth`（地板除）与 Q8_0 kernel 的 `(n_out + nth - 1) / nth`（天花板除）分区边界错位——当 `n_ff % nth != 0` 时（本机 nproc=18、n_ff=7168 触发），silu 会读到 matmul 尚未写入/将被覆盖的行，FFN 输出出现 60 量级错误。已统一为 ceil 分区：`llama`、`lfm2`、`lfm25`、`lfm2moe` 四处（`n_ff % nth == 0` 的旧场景行为不变）。
+2. **shortconv conv 状态语义**：解码期状态更新原为"全行复制 b×x"，正确语义是滑动窗口（`llama.cpp`: new_conv = (state ‖ bx) 的最后 d_conv 列）；prefill 重建时零填充应在窗口头部（右对齐）而非尾部。`lfm2moe`、`lfm2`、`lfm25` 三处均已修复。
+3. **lfm2/lfm25 conv 权重 2-D 形状**：新转换的 GGUF 把 `shortconv.conv.weight` 存为 2-D `[l_cache, n_embd]`，旧加载器只接受 1-D 导致 LFM2.5-1.2B 直接报错（基线即坏，非本次引入）。已兼容两种形状。
+
+### 验证结果（What is the capital of France?，13 token prompt）
+
+- 逐层对比（llama.cpp eval-callback dump vs Rust，step 0）：除 L5 大激活通道（|v|≈62，模型固有 massive activation）上 4.5e-4 相对量化噪声外全部 ≤ 5e-3。
+- 逐步 logits：13 步中前 7 步（含 6 步贪心生成）top-1 完全一致，logit 差 0.5~2.8；step 19 在近平局（20.78 vs 20.05）处分叉——MoE 路由近平局对量化噪声敏感，属跨实现固有现象（llama.cpp 自身跨线程 bit-exact，故差异来自算术细节而非不稳定）。
+- 生成质量：`"The capital of France is Paris. It is a major global city known for its art, fashion, gastronomy, and landmark attractions like the Eiffel Tower and Louvre Museum."`
+- 性能：~4.5 tok/s（MoE 每 token 需读 ~22 层 × 4 expert × 3 矩阵 ≈ 1GB 权重，内存带宽受限；逐 expert 5 次 pool.dispatch 的调度开销可后续优化）。
+
+工具沉淀（`tools/parity/`）：`lfm2moe_reference.py`（numpy f64 逐层真值，惰性反量化防 OOM）、`lfm2moe_layer_cmp.py`（layer-oracle 逐层对比）、`dump_tokens_oracle.cpp` / `dump_layer_oracle.cpp`（按显式 token id 驱动 llama.cpp，后者经 cb_eval dump 全部单 token 中间张量）。
+
+
+## LFM2.5-1.2B（dense）对齐 llama.cpp (2026-08) — ✅ 已完成
+
+修复 conv 2-D 加载 + silu 分区竞争 + conv 状态滑动窗口后验证：
+
+- LFM2.5-1.2B-Instruct-Q8_0（arch=`lfm2` + basename 含 2.5 → `lfm25` trunk），13 token prompt，`What is the capital of France?`。
+- Rust vs llama.cpp oracle：**8/8 步贪心 top-1 完全一致**（1098, 5706, 803, 4481, 856, 5242, 523, EOS=7），EOS 时机一致。
+- logit 数值差 0.1~4.8；step 13（首个 decode 步）top-1 值差 11.9（排名不受影响），成因未深挖——如需 bit 级对齐可用 `tools/parity/` 的 layer oracle 逐层排查。
+- 架构映射备注：`LFM2-8B-A1B-GGUF` → arch `lfm2moe` → `models::lfm2moe`；`LFM2.5-1.2B-Instruct-GGUF` → arch `lfm2` + basename 2.5 → `models::lfm25`；`models::lfm2`（dense LFM2 v2）当前模型库中没有对应 GGUF，仅为该架构保留的分发路径。

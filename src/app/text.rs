@@ -57,10 +57,7 @@ pub fn run_inference(
                 temperature,
                 n_threads_arg,
                 profile,
-                match kv_format {
-                    KvFormat::F16 => crate::models::lfm25::KvCacheFmt::F16,
-                    _ => crate::models::lfm25::KvCacheFmt::F32,
-                },
+                kv_format,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -70,13 +67,20 @@ pub fn run_inference(
                 temperature,
                 n_threads_arg,
                 profile,
-                match kv_format {
-                    KvFormat::F16 => crate::models::lfm2::KvCacheFmt::F16,
-                    _ => crate::models::lfm2::KvCacheFmt::F32,
-                },
+                kv_format,
             )
         }
-} else if arch == "llama" {
+    } else if arch == "lfm2moe" {
+        crate::models::lfm2moe::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            profile,
+            kv_format,
+        )
+    } else if arch == "llama" {
         crate::models::llama::run_inference(
             source.as_ref(),
             prompt,
