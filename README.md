@@ -78,7 +78,7 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "Describe the image and audio." --max-tokens 32 --temp 0
 ```
 
-当前仅支持一个用户轮次、每种媒体各一个文件；当同时提供时，输入顺序固定为图像、音频、提示词。音频输入为 PCM16 WAV。CPU 路径覆盖了与固定 llama.cpp Oracle 的原始 F32 位级对比；`--gpu` 可以运行，但当前不提供 GPU 位级对比保证。
+当前仅支持一个用户轮次、每种媒体各一个文件；当同时提供时，输入顺序固定为图像、音频、提示词。音频输入为 PCM16 WAV。CPU 对齐覆盖 attention softmax 前的 token IDs，以及图像 `gemma4.vision.preprocessed`、音频 `gemma4.audio.mel` 的原始 F32 `u32` 位。attention 统一使用准确、稳定的标量 softmax，因此其后的 checkpoint、logits 与 greedy token IDs 不承诺和 llama.cpp 逐位一致；`--gpu` 可以运行，但当前不提供 GPU 位级对比保证。
 
 ### Qwen3-TTS Base 声音克隆
 

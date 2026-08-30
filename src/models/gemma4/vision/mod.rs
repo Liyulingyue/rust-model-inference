@@ -1,9 +1,7 @@
 pub mod config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::{
-    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_ggml_inplace,
-};
+use crate::ops::{dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox, softmax_inplace};
 pub use config::Gemma4VisionConfig;
 use std::path::Path;
 
@@ -667,7 +665,7 @@ fn attention(
                 let k_row = &k[key * EMBED + head * HEAD_DIM..key * EMBED + (head + 1) * HEAD_DIM];
                 score[key] = dot_f32(q_row, k_row, HEAD_DIM);
             }
-            softmax_ggml_inplace(score);
+            softmax_inplace(score);
             for dimension in 0..HEAD_DIM {
                 let values = &v_transposed[(head * HEAD_DIM + dimension) * tokens
                     ..(head * HEAD_DIM + dimension + 1) * tokens];
@@ -1073,14 +1071,14 @@ mod tests {
     }
 
     #[test]
-    fn attention_uses_llama_style_softmax() {
+    fn attention_uses_stable_scalar_softmax() {
         let tokens = 4;
         let hidden_len = tokens * EMBED;
         let mut q = vec![0.0; hidden_len];
         let mut k = vec![0.0; hidden_len];
         let mut v = vec![0.0; hidden_len];
         q[0] = 1.0;
-        let logits = [0.5, -1.0, 2.0, 0.25];
+        let logits = [0x4100_5f5f, 0x40e9_d754, 0x411f_b16f, 0x4110_0e1d].map(f32::from_bits);
         let values = [1.0, -2.0, 0.75, 4.0];
         for token in 0..tokens {
             k[token * EMBED] = logits[token];
@@ -1102,20 +1100,14 @@ mod tests {
         )
         .unwrap();
 
-        let mut probabilities = logits;
-        crate::ops::softmax_ggml_inplace(&mut probabilities);
         assert_eq!(
             scores[..tokens]
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>(),
-            probabilities
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>()
+            [0x3db6_4746, 0x3d32_346f, 0x3f21_5bc5, 0x3e72_e02c]
         );
-        let expected = dot_f32(&values, &probabilities, tokens);
-        assert_eq!(output[0].to_bits(), expected.to_bits());
+        assert_eq!(output[0].to_bits(), 0x3fb6_33ae);
     }
 
     #[test]

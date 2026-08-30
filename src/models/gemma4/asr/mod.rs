@@ -4,7 +4,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
 use crate::ops::{
     dot_f16, dot_f16_f16_bytes, dot_f32, f32_to_f16, rms_norm_inplace, silu_approx_inplace,
-    softmax_ggml_inplace, sum_sq_f32,
+    softmax_inplace, sum_sq_f32,
 };
 pub use config::Gemma4AudioConfig;
 use std::path::Path;
@@ -870,7 +870,7 @@ fn softcap_masked_scores(scores: &mut [f32; ATTENTION_SLOTS], valid_mask: u32) {
             -1.0e9f32
         };
     }
-    softmax_ggml_inplace(scores);
+    softmax_inplace(scores);
 }
 
 fn causal_depthwise_conv(
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn blocked_attention_matches_24_slot_ggml_primitives() {
+    fn blocked_attention_uses_stable_scalar_softmax() {
         let mut scores = [0.0f32; 24];
         let mut values = [0.0f32; 24];
         for index in 0..24 {
@@ -1475,21 +1475,21 @@ mod tests {
                 0x0000_0000,
                 0x0000_0000,
                 0x0000_0000,
-                0x3c10_e1c5,
+                0x3c10_e1c4,
                 0x3c45_fb1e,
-                0x3c87_4899,
-                0x3cb8_e57f,
+                0x3c87_4898,
+                0x3cb8_e57c,
                 0x3cfc_b75b,
-                0x3d2c_b5db,
-                0x3d6c_10ee,
+                0x3d2c_b5da,
+                0x3d6c_10ed,
                 0x3da1_53d3,
-                0x3ddc_7dd1,
+                0x3ddc_7dd0,
                 0x3e16_aa55,
-                0x3e4d_e254,
-                0x3e8c_a72c,
+                0x3e4d_e252,
+                0x3e8c_a72b,
             ]
         );
-        assert_eq!(dot_f32(&values, &scores, 24).to_bits(), 0x3f31_fd78);
+        assert_eq!(dot_f32(&values, &scores, 24).to_bits(), 0x3f31_fd77);
     }
 
     #[cfg(target_arch = "aarch64")]

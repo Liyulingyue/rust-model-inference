@@ -315,4 +315,5 @@ for _n in 0..(QK_K / 128) {
 * 验收：
   * `cargo test --lib gemma4`：49 passed / 0 failed / 1 ignored。
   * `cargo test --test gemma4_reference`：6 passed / 0 failed / 5 ignored。
-  * llama.cpp `3173a56471c` 严格 parity：text、image、audio、image+audio 四组输入的 checkpoint shape、F32 `u32` bits 与 greedy token IDs 全部一致。
+  * llama.cpp `3173a56471c` softmax 前严格 parity：text、image、audio、image+audio 四组输入的 token IDs，以及图像预处理、audio mel 的 checkpoint shape 和 F32 `u32` bits 一致。
+  * Gemma4 attention 统一使用准确、稳定的标量 softmax；softmax 之后的 layer checkpoint、logits 与 greedy token IDs 不再承诺和 llama.cpp 逐位一致。

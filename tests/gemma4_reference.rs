@@ -15,7 +15,6 @@ const GEMMA4_MODEL_NAME: &str = "gemma-4-E2B-it-Q8_0.gguf";
 const GEMMA4_MMPROJ_NAME: &str = "mmproj-F16.gguf";
 const GEMMA4_THREADS: usize = 4;
 const GEMMA4_PROMPT: &str = "describe";
-const GEMMA4_LAYERS: usize = 35;
 const GEMMA4_CHAT_TEMPLATE: &str = r#"{{ '<|turn>user\n' + messages[0].content + '<turn|>\n' }}{% if add_generation_prompt %}{{ '<|turn>model\n' }}{% endif %}"#;
 
 static GEMMA4_TRACE_LOCK: Mutex<()> = Mutex::new(());
@@ -320,31 +319,6 @@ fn trace_records(path: &Path) -> Result<Vec<TraceRecord>, String> {
     Ok(records)
 }
 
-fn generated_id(records: &[TraceRecord]) -> Result<u32, String> {
-    let logits = records
-        .iter()
-        .rev()
-        .find(|record| record.checkpoint == "gemma4.logits")
-        .ok_or_else(|| "Rust trace has no gemma4.logits checkpoint".to_owned())?;
-    let TraceValues::F32(words) = &logits.values else {
-        return Err("Rust gemma4.logits checkpoint is not F32".to_owned());
-    };
-    if words.is_empty() {
-        return Err("Rust gemma4.logits checkpoint is empty".to_owned());
-    }
-    let mut best = 0usize;
-    for id in 0..words.len() {
-        let value = f32::from_bits(words[id]);
-        if !value.is_finite() {
-            return Err(format!("Rust logits contain {value:?} at index {id}"));
-        }
-        if value > f32::from_bits(words[best]) {
-            best = id;
-        }
-    }
-    u32::try_from(best).map_err(|_| format!("generated token ID {best} does not fit u32"))
-}
-
 #[derive(Clone, Copy)]
 struct ParityCase {
     name: &'static str,
@@ -376,32 +350,14 @@ const PARITY_CASES: [ParityCase; 4] = [
 ];
 
 fn required_trace_names(case: ParityCase) -> Vec<String> {
-    let mut names = Vec::with_capacity(4 + GEMMA4_LAYERS * 3);
+    let mut names = Vec::with_capacity(3);
     if case.image {
-        names.extend([
-            "gemma4.vision.preprocessed".to_owned(),
-            "gemma4.vision.projected".to_owned(),
-        ]);
+        names.push("gemma4.vision.preprocessed".to_owned());
     }
     if case.audio {
-        names.extend([
-            "gemma4.audio.mel".to_owned(),
-            "gemma4.audio.projected".to_owned(),
-        ]);
+        names.push("gemma4.audio.mel".to_owned());
     }
     names.push("gemma4.tokens".to_owned());
-    for layer in 0..GEMMA4_LAYERS {
-        names.extend([
-            format!("gemma4.layer.{layer}.attn_out"),
-            format!("gemma4.layer.{layer}.ffn_out"),
-            format!("gemma4.layer.{layer}.per_layer_out"),
-        ]);
-    }
-    names.extend([
-        "gemma4.final.norm".to_owned(),
-        "gemma4.logits".to_owned(),
-        "gemma4.generated_ids".to_owned(),
-    ]);
     names
 }
 
@@ -485,11 +441,7 @@ fn run_rust_case(
 ) -> Result<(), String> {
     let old_trace = std::env::var_os("RMI_PARITY_TRACE");
     let old_filter = std::env::var_os("RMI_PARITY_FILTER");
-    let filter = required_trace_names(case)
-        .into_iter()
-        .filter(|name| name != "gemma4.generated_ids")
-        .collect::<Vec<_>>()
-        .join(",");
+    let filter = required_trace_names(case).join(",");
     std::env::set_var("RMI_PARITY_TRACE", trace);
     std::env::set_var("RMI_PARITY_FILTER", filter);
     let result = run_gemma4(Gemma4Request {
@@ -600,21 +552,22 @@ fn run_parity_case(
         .map_err(|error| format!("failed to create {}: {error}", directory.display()))?;
     let rust_trace = directory.join("rust.jsonl");
     let oracle_trace = directory.join("oracle.jsonl");
+    let required = required_trace_names(case);
 
     run_rust_case(case, model, mmproj, image, audio, &rust_trace)?;
     let mut rust_records = trace_records(&rust_trace)?;
-    let generated_id = generated_id(&rust_records)?;
-    rust_records.push(token_record("gemma4.generated_ids", 0, vec![generated_id]));
+    rust_records.retain(|record| required.contains(&record.checkpoint));
     require_trace_names(case, "Rust", &rust_records)?;
 
     run_oracle_case(case, oracle, model, mmproj, image, audio, &oracle_trace)?;
-    let oracle_records = trace_records(&oracle_trace)?;
+    let mut oracle_records = trace_records(&oracle_trace)?;
+    oracle_records.retain(|record| required.contains(&record.checkpoint));
     require_trace_names(case, "Oracle", &oracle_records)?;
     assert_trace_equal(case.name, &rust_records, &oracle_records)
         .map_err(|error| format!("{error}\ntraces retained in {}", directory.display()))?;
     std::fs::remove_dir_all(&directory)
         .map_err(|error| format!("failed to remove {}: {error}", directory.display()))?;
-    eprintln!("Gemma4 parity case {}: PASS", case.name);
+    eprintln!("Gemma4 pre-softmax parity case {}: PASS", case.name);
     Ok(())
 }
 
@@ -801,7 +754,7 @@ fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
 
 #[test]
 #[ignore = "requires Gemma4 GGUFs and pinned llama.cpp trace binary"]
-fn gemma4_matches_pinned_cpu_oracle() {
+fn gemma4_matches_pinned_cpu_oracle_before_softmax() {
     let _guard = GEMMA4_TRACE_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -830,7 +783,7 @@ fn gemma4_matches_pinned_cpu_oracle() {
     }
     if !failures.is_empty() {
         panic!(
-            "Gemma4 strict pinned-Oracle parity failed\n{}\nartifacts retained in {}",
+            "Gemma4 pre-softmax pinned-Oracle parity failed\n{}\nartifacts retained in {}",
             failures.join("\n\n"),
             root.display()
         );
@@ -1012,15 +965,15 @@ fn gemma4_image_audio_smoke() {
 
 #[test]
 fn trace_comparator_reports_first_f32_word_mismatch() {
-    let rust = record("gemma4.logits", 0, &[1, 2], &[1.0, 2.0]);
+    let rust = record("gemma4.vision.preprocessed", 0, &[1, 2], &[1.0, 2.0]);
     let oracle = record(
-        "gemma4.logits",
+        "gemma4.vision.preprocessed",
         0,
         &[1, 2],
         &[1.0, f32::from_bits(0x4000_0001)],
     );
     let error = assert_trace_equal("text", &[rust], &[oracle]).unwrap_err();
-    assert!(error.contains("gemma4.logits"));
+    assert!(error.contains("gemma4.vision.preprocessed"));
     assert!(error.contains("occurrence 0"));
     assert!(error.contains("index 1"));
     assert!(error.contains("0x40000000"));
@@ -1029,11 +982,11 @@ fn trace_comparator_reports_first_f32_word_mismatch() {
 
 #[test]
 fn trace_comparator_reports_first_token_mismatch() {
-    let rust = token_record("gemma4.generated_ids", 0, vec![7, 20, 30]);
-    let oracle = token_record("gemma4.generated_ids", 0, vec![7, 21, 99]);
+    let rust = token_record("gemma4.tokens", 0, vec![7, 20, 30]);
+    let oracle = token_record("gemma4.tokens", 0, vec![7, 21, 99]);
     let error = assert_trace_equal("audio", &[rust], &[oracle]).unwrap_err();
     assert!(error.contains("case audio"));
-    assert!(error.contains("gemma4.generated_ids"));
+    assert!(error.contains("gemma4.tokens"));
     assert!(error.contains("occurrence 0"));
     assert!(error.contains("index 1"));
     assert!(error.contains("0x00000014"));

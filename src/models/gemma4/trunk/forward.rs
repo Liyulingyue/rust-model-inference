@@ -6,7 +6,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     attention_value_f32, bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_ggml_inplace,
+    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -620,7 +620,7 @@ pub(super) fn attend(
             let offset = token * dim;
             *score = dot_f32(query, &cache.keys[offset..offset + dim], dim);
         }
-        softmax_ggml_inplace(scores);
+        softmax_inplace(scores);
         for dimension in 0..dim {
             values.fill(0.0);
             for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
