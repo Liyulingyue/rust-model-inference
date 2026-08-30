@@ -809,21 +809,28 @@ fn matmul(
             .ok_or_else(|| format!("Invalid {name} BF16 kernel"))?;
         gemma4_bf16_projection_matmul(bytes, input, output, pool, q8)?;
     } else if weight.ggml_type == GGMLType::F32 {
-        if let Some(values) = weight.kernel.f32_slice() {
-            let expected = weight
-                .n_in
-                .checked_mul(weight.n_out)
-                .ok_or_else(|| format!("Invalid {name} F32 weight size"))?;
-            if values.len() != expected {
-                return Err(format!(
-                    "Invalid {name} F32 weight length: expected {expected}, got {}",
-                    values.len()
-                ));
-            }
+        let values = weight
+            .kernel
+            .f32_slice()
+            .ok_or_else(|| format!("Invalid {name} F32 kernel"))?;
+        let expected = weight
+            .n_in
+            .checked_mul(weight.n_out)
+            .ok_or_else(|| format!("Invalid {name} F32 weight size"))?;
+        if values.len() != expected {
+            return Err(format!(
+                "Invalid {name} F32 weight length: expected {expected}, got {}",
+                values.len()
+            ));
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
             for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
                 *result = dot_f32(row, input, weight.n_in);
             }
-        } else {
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
             weight
                 .kernel
                 .forward(input, output, weight.n_in, weight.n_out);
@@ -1173,6 +1180,15 @@ mod tests {
         }
     }
 
+    fn zero_q8_weight(n_in: usize, n_out: usize) -> Weight<'static> {
+        Weight {
+            kernel: Box::new(ZeroKernel),
+            ggml_type: GGMLType::Q8_0,
+            n_in,
+            n_out,
+        }
+    }
+
     fn zero_bf16_weight(n_in: usize, n_out: usize) -> Weight<'static> {
         Weight {
             kernel: Box::new(ZeroBf16Kernel {
@@ -1194,17 +1210,17 @@ mod tests {
         Gemma4Layer {
             head_dim: dim,
             attn_norm: vec![1.0; EMBED],
-            attn_q: zero_weight(EMBED, HEADS * dim),
-            attn_k: zero_weight(EMBED, dim),
-            attn_v: zero_weight(EMBED, dim),
-            attn_output: zero_weight(HEADS * dim, EMBED),
+            attn_q: zero_q8_weight(EMBED, HEADS * dim),
+            attn_k: zero_q8_weight(EMBED, dim),
+            attn_v: zero_q8_weight(EMBED, dim),
+            attn_output: zero_q8_weight(HEADS * dim, EMBED),
             attn_q_norm: vec![1.0; dim],
             attn_k_norm: vec![1.0; dim],
             post_attention_norm: vec![1.0; EMBED],
             ffn_norm: vec![1.0; EMBED],
-            ffn_gate: zero_weight(EMBED, ffn),
-            ffn_up: zero_weight(EMBED, ffn),
-            ffn_down: zero_weight(ffn, EMBED),
+            ffn_gate: zero_q8_weight(EMBED, ffn),
+            ffn_up: zero_q8_weight(EMBED, ffn),
+            ffn_down: zero_q8_weight(ffn, EMBED),
             post_ffw_norm: vec![1.0; EMBED],
             inp_gate: zero_weight(EMBED, PER_LAYER),
             proj: zero_weight(PER_LAYER, EMBED),
@@ -1279,6 +1295,41 @@ mod tests {
         assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
     }
 
+    #[test]
+    fn f32_projection_rejects_missing_or_wrong_backing_storage() {
+        let cases = [
+            (zero_weight(2, 1), "F32 kernel"),
+            (
+                Weight {
+                    kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(vec![0.0])),
+                    ggml_type: GGMLType::F32,
+                    n_in: 2,
+                    n_out: 1,
+                },
+                "expected 2, got 1",
+            ),
+        ];
+
+        for (weight, expected_error) in cases {
+            let mut output = [7.0];
+            let mut q8 = [0; 2];
+            let mut scales = [0.0];
+            let error = matmul(
+                "blk.0.inp_gate.weight",
+                &weight,
+                &[1.0, 2.0],
+                &mut output,
+                &ComputePool::new(1),
+                &mut q8,
+                &mut scales,
+            )
+            .unwrap_err();
+
+            assert!(error.contains(expected_error), "{error}");
+            assert_eq!(output, [7.0]);
+        }
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn per_layer_f32_projection_matches_pinned_neon_dot_bits() {
@@ -1345,6 +1396,57 @@ mod tests {
         .unwrap();
 
         assert_eq!(output[0].to_bits(), 0xbb08_36fd);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn per_layer_f32_projection_matches_pinned_neon_long_rows() {
+        const WIDTH: usize = 1536;
+        const ROWS: usize = 3;
+        let input = (0_u32..WIDTH as u32)
+            .map(|index| {
+                let mixed = index.wrapping_mul(0x9e37_79b9).wrapping_add(0x243f_6a88);
+                f32::from_bits((mixed & 0x8000_0000) | 0x3e00_0000 | ((mixed >> 1) & 0x007f_ffff))
+            })
+            .collect::<Vec<_>>();
+        let weights = (0_u32..ROWS as u32)
+            .flat_map(|row| {
+                (0_u32..WIDTH as u32).map(move |index| {
+                    let mixed = index
+                        .wrapping_mul(0x85eb_ca6b)
+                        .wrapping_add((row + 1).wrapping_mul(0xc2b2_ae35));
+                    f32::from_bits(
+                        (mixed & 0x8000_0000) | 0x3d80_0000 | ((mixed >> 1) & 0x007f_ffff),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let weight = Weight {
+            kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights)),
+            ggml_type: GGMLType::F32,
+            n_in: WIDTH,
+            n_out: ROWS,
+        };
+        let mut output = [0.0; ROWS];
+        let mut q8 = vec![0; WIDTH];
+        let mut scales = vec![0.0; WIDTH.div_ceil(32)];
+
+        matmul(
+            "blk.0.inp_gate.weight",
+            &weight,
+            &input,
+            &mut output,
+            &ComputePool::new(1),
+            &mut q8,
+            &mut scales,
+        )
+        .unwrap();
+
+        // Independent literals from pinned llama.cpp ggml_vec_dot_f32.
+        assert_eq!(
+            output.map(f32::to_bits),
+            [0xbe74_d6c6, 0x3df2_a865, 0x3ed8_e80e]
+        );
     }
 
     #[test]
