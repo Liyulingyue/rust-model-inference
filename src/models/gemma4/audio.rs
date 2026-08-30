@@ -3,7 +3,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
 use crate::ops::{
-    dot_f16_f16_bytes, dot_f16_f32, dot_f32, f32_to_f16, rms_norm_inplace, silu,
+    dot_f16, dot_f16_f16_bytes, dot_f32, f32_to_f16, rms_norm_inplace, silu_approx_inplace,
     softmax_ggml_inplace, sum_sq_f32,
 };
 use std::path::Path;
@@ -21,6 +21,7 @@ const HEAD_DIM: usize = EMBED / HEADS;
 const PROJECTION: usize = 1536;
 const LAYERS: usize = 12;
 const LOCAL_CONTEXT: usize = 12;
+const ATTENTION_SLOTS: usize = LOCAL_CONTEXT * 2;
 const RPE_LEN: usize = LOCAL_CONTEXT + 1;
 const CONV_KERNEL: usize = 5;
 const EPS: f32 = 1e-6;
@@ -257,7 +258,16 @@ impl<'a> Gemma4AudioModel<'a> {
     pub fn encode_wav_path(&self, path: &Path) -> Result<Vec<f32>, String> {
         let bytes = std::fs::read(path)
             .map_err(|error| format!("Failed to read Gemma4 audio {}: {error}", path.display()))?;
-        self.encode_features(&gemma4_audio_features(&bytes)?)
+        let chunks = gemma4_audio_feature_chunks(&bytes)?;
+        let mut output = Vec::new();
+        for chunk in &chunks {
+            let encoded = self.encode_features(chunk)?;
+            output
+                .try_reserve_exact(encoded.len())
+                .map_err(|_| "Gemma4 projected audio allocation failed")?;
+            output.extend_from_slice(&encoded);
+        }
+        Ok(output)
     }
 
     fn encode_features(&self, features: &Gemma4AudioFeatures) -> Result<Vec<f32>, String> {
@@ -297,10 +307,7 @@ impl<'a> Gemma4AudioModel<'a> {
                 &mut scratch.expanded,
                 &mut scratch.activation_f16,
             )?;
-            scratch
-                .expanded
-                .iter_mut()
-                .for_each(|value| *value = silu(*value));
+            audio_silu_inplace(&mut scratch.expanded);
             layer.ffn_down.forward(
                 &self.pool,
                 &scratch.expanded,
@@ -386,10 +393,7 @@ impl<'a> Gemma4AudioModel<'a> {
                 &mut scratch.projected,
             )?;
             weighted_rms_rows(&mut scratch.projected, layer.post_conv_norm, EMBED)?;
-            scratch
-                .projected
-                .iter_mut()
-                .for_each(|value| *value = silu(*value));
+            audio_silu_inplace(&mut scratch.projected);
             layer.conv_pw2.forward(
                 &self.pool,
                 &scratch.projected,
@@ -408,10 +412,7 @@ impl<'a> Gemma4AudioModel<'a> {
                 &mut scratch.expanded,
                 &mut scratch.activation_f16,
             )?;
-            scratch
-                .expanded
-                .iter_mut()
-                .for_each(|value| *value = silu(*value));
+            audio_silu_inplace(&mut scratch.expanded);
             layer.ffn_down_1.forward(
                 &self.pool,
                 &scratch.expanded,
@@ -683,14 +684,18 @@ fn conv2d_stride2(
         "Gemma4 convolution output",
         &[positions, convolution.output_channels],
     )?;
+    let mut weights_f16 = zeroed_u16("Gemma4 convolution weights", convolution.weight.len())?;
+    for (destination, source) in weights_f16.iter_mut().zip(convolution.weight) {
+        *destination = f32_to_f16(*source);
+    }
     let mut output = zeroed_f32("Gemma4 convolution output", output_len)?;
     let output_ptr = SharedMut(output.as_mut_ptr());
     pool.compute(|thread, threads| {
         for index in (thread..output_len).step_by(threads) {
             let position = index / convolution.output_channels;
             let channel = index % convolution.output_channels;
-            let value = dot_f16_f32(
-                &convolution.weight[channel * patch_len..(channel + 1) * patch_len],
+            let value = dot_f16(
+                &weights_f16[channel * patch_len..(channel + 1) * patch_len],
                 &patches[position * patch_len..(position + 1) * patch_len],
                 patch_len,
             );
@@ -709,21 +714,24 @@ fn layer_norm_row(row: &mut [f32], weight: &[f32]) -> Result<(), String> {
     if row.is_empty() || row.len() != weight.len() {
         return Err("Invalid Gemma4 convolution norm shape".into());
     }
-    let mean = row.iter().map(|value| f64::from(*value)).sum::<f64>() / row.len() as f64;
+    let mean = row.iter().sum::<f32>() / row.len() as f32;
     let variance = row
         .iter()
         .map(|value| {
-            let centered = f64::from(*value) - mean;
+            let centered = *value - mean;
             centered * centered
         })
-        .sum::<f64>()
-        / row.len() as f64;
-    let mean = mean as f32;
-    let inverse = (1.0 / (variance + f64::from(EPS)).sqrt()) as f32;
+        .sum::<f32>()
+        / row.len() as f32;
+    let inverse = 1.0f32 / (variance + EPS).sqrt();
     for (value, weight) in row.iter_mut().zip(weight) {
         *value = (*value - mean) * inverse * *weight;
     }
     validate_finite("Gemma4 convolution norm", row)
+}
+
+fn audio_silu_inplace(values: &mut [f32]) {
+    silu_approx_inplace(values);
 }
 
 fn scale_queries_and_keys(q: &mut [f32], k: &mut [f32], scale: &[f32]) -> Result<(), String> {
@@ -765,30 +773,53 @@ fn local_attention(
         for task in (thread..rows * HEADS).step_by(threads) {
             let query = task / HEADS;
             let head = task % HEADS;
-            let start = query.saturating_sub(LOCAL_CONTEXT - 1);
-            let count = query - start + 1;
+            let block = query / LOCAL_CONTEXT;
+            let block_start = block * LOCAL_CONTEXT;
             let q_row = &q[query * EMBED + head * HEAD_DIM..query * EMBED + (head + 1) * HEAD_DIM];
-            let mut scores = [0.0f32; LOCAL_CONTEXT];
-            for (offset, key) in (start..=query).enumerate() {
+            let mut scores = [0.0f32; ATTENTION_SLOTS];
+            let mut valid_mask = 0u32;
+            for slot in 0..ATTENTION_SLOTS {
+                let Some(key) = block_start.checked_add(slot).and_then(|key| {
+                    key.checked_sub(LOCAL_CONTEXT)
+                        .filter(|key| *key <= query && query - *key < LOCAL_CONTEXT)
+                }) else {
+                    continue;
+                };
                 let distance = query - key;
                 let relative_row = RPE_LEN - 1 - distance;
                 let k_row = &k[key * EMBED + head * HEAD_DIM..key * EMBED + (head + 1) * HEAD_DIM];
                 let r_row = &relative[relative_row * EMBED + head * HEAD_DIM
                     ..relative_row * EMBED + (head + 1) * HEAD_DIM];
-                let score = dot_f32(q_row, k_row, HEAD_DIM) + dot_f32(q_row, r_row, HEAD_DIM);
-                scores[offset] = (score / SOFTCAP).tanh() * SOFTCAP;
+                scores[slot] = dot_f32(q_row, k_row, HEAD_DIM) + dot_f32(q_row, r_row, HEAD_DIM);
+                valid_mask |= 1u32 << slot;
             }
-            softmax_ggml_inplace(&mut scores[..count]);
+            softcap_masked_scores(&mut scores, valid_mask);
             for dimension in 0..HEAD_DIM {
-                let mut value = 0.0f32;
-                for (offset, key) in (start..=query).enumerate() {
-                    value += v[key * EMBED + head * HEAD_DIM + dimension] * scores[offset];
+                let mut values = [0.0f32; ATTENTION_SLOTS];
+                for (slot, value) in values.iter_mut().enumerate() {
+                    if valid_mask & (1u32 << slot) != 0 {
+                        let key = block_start + slot - LOCAL_CONTEXT;
+                        *value = v[key * EMBED + head * HEAD_DIM + dimension];
+                    }
                 }
+                let value = dot_f32(&values, &scores, ATTENTION_SLOTS);
                 unsafe { output_ptr.write(query * EMBED + head * HEAD_DIM + dimension, value) };
             }
         }
     });
     validate_finite("Gemma4 local attention", output)
+}
+
+fn softcap_masked_scores(scores: &mut [f32; ATTENTION_SLOTS], valid_mask: u32) {
+    let inverse_softcap = 1.0f32 / SOFTCAP;
+    for (slot, score) in scores.iter_mut().enumerate() {
+        *score = if valid_mask & (1u32 << slot) != 0 {
+            (*score * inverse_softcap).tanh() * SOFTCAP
+        } else {
+            -1.0e9f32
+        };
+    }
+    softmax_ggml_inplace(scores);
 }
 
 fn causal_depthwise_conv(
@@ -1003,6 +1034,31 @@ fn validate_finite(label: &str, values: &[f32]) -> Result<(), String> {
 }
 
 pub fn gemma4_audio_features(bytes: &[u8]) -> Result<Gemma4AudioFeatures, String> {
+    let chunks = gemma4_audio_feature_chunks(bytes)?;
+    let frames = chunks.iter().try_fold(0usize, |frames, chunk| {
+        frames
+            .checked_add(chunk.frames)
+            .ok_or("Gemma4 audio frame count overflow")
+    })?;
+    let mut values = zeroed(
+        MEL_BINS
+            .checked_mul(frames)
+            .ok_or("Gemma4 Mel size overflow")?,
+    )?;
+    let mut frame_offset = 0usize;
+    for chunk in chunks {
+        for mel in 0..MEL_BINS {
+            let source = &chunk.values[mel * chunk.frames..(mel + 1) * chunk.frames];
+            let destination = &mut values
+                [mel * frames + frame_offset..mel * frames + frame_offset + chunk.frames];
+            destination.copy_from_slice(source);
+        }
+        frame_offset += chunk.frames;
+    }
+    Ok(Gemma4AudioFeatures { values, frames })
+}
+
+fn gemma4_audio_feature_chunks(bytes: &[u8]) -> Result<Vec<Gemma4AudioFeatures>, String> {
     let decoded = decode_pcm16_wav_any(bytes).map_err(|error| format!("{error:?}"))?;
     let channels = usize::from(decoded.channels);
     let mut mono = Vec::new();
@@ -1021,44 +1077,21 @@ pub fn gemma4_audio_features(bytes: &[u8]) -> Result<Gemma4AudioFeatures, String
     }
 
     let mut chunks = Vec::new();
-    let mut frames = 0usize;
     for chunk in samples.chunks(CHUNK_SAMPLES) {
-        let (values, chunk_frames) = gemma4_chunk_mel(chunk)?;
-        frames = frames
-            .checked_add(chunk_frames)
-            .ok_or("Gemma4 audio frame count overflow")?;
-        chunks.push((values, chunk_frames));
+        let (values, frames) = gemma4_chunk_mel(chunk)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "gemma4.audio.mel",
+            None,
+            &[MEL_BINS, frames],
+            &values,
+        ));
+        chunks.push(Gemma4AudioFeatures { values, frames });
     }
-    if frames == 0 {
+    if chunks.is_empty() {
         return Err("Gemma4 audio produced no frames".into());
     }
-    let mut values = zeroed(
-        MEL_BINS
-            .checked_mul(frames)
-            .ok_or("Gemma4 Mel size overflow")?,
-    )?;
-    let mut frame_offset = 0usize;
-    for (chunk, chunk_frames) in chunks {
-        for mel in 0..MEL_BINS {
-            let source = &chunk[mel * chunk_frames..(mel + 1) * chunk_frames];
-            let destination = &mut values
-                [mel * frames + frame_offset..mel * frames + frame_offset + chunk_frames];
-            destination.copy_from_slice(source);
-        }
-        frame_offset += chunk_frames;
-    }
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err("non-finite Gemma4 Mel value".into());
-    }
-
-    #[cfg(feature = "parity-trace")]
-    crate::parity_trace::report(crate::parity_trace::checkpoint(
-        "gemma4.audio.mel",
-        None,
-        &[MEL_BINS, frames],
-        &values,
-    ));
-    Ok(Gemma4AudioFeatures { values, frames })
+    Ok(chunks)
 }
 
 fn resample_linear(samples: &[f32], source_rate: u32) -> Result<Vec<f32>, String> {
@@ -1324,7 +1357,19 @@ mod tests {
     }
 
     #[test]
-    fn frontend_convolution_preserves_f32_weights() {
+    fn gemma4_frontend_keeps_long_audio_chunks_independent() {
+        let samples = vec![0i16; CHUNK_SAMPLES + 320];
+        let chunks = gemma4_audio_feature_chunks(&pcm16_wav(SAMPLE_RATE, 1, &samples)).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].frames, 2999);
+        assert_eq!(chunks[0].values.len(), 2999 * MEL_BINS);
+        assert_eq!(chunks[1].frames, 1);
+        assert_eq!(chunks[1].values.len(), MEL_BINS);
+    }
+
+    #[test]
+    fn frontend_convolution_rounds_weights_to_f16() {
         let mut weight = vec![0.0; 3 * 3 * 3];
         weight[4] = 1.0006;
         weight[9 + 4] = 0.2003;
@@ -1339,8 +1384,95 @@ mod tests {
             conv2d_stride2(&ComputePool::new(1), &[1.0], 1, 1, &convolution).unwrap();
 
         assert_eq!((frequency, time), (1, 1));
-        assert_eq!(output[0].to_bits(), 0x3fae_9724);
+        assert_eq!(output[0].to_bits(), 0x3fae_9856);
         assert_eq!(&output[1..], &[0.0, 0.0]);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn blocked_attention_matches_24_slot_ggml_primitives() {
+        let mut scores = [0.0f32; 24];
+        let mut values = [0.0f32; 24];
+        for index in 0..24 {
+            scores[index] = if index < 12 {
+                0.0
+            } else {
+                (index as f32 - 17.0) * 0.3125
+            };
+            values[index] = if index < 12 {
+                0.0
+            } else {
+                (index as f32 - 15.0) * 0.125
+            };
+        }
+
+        softcap_masked_scores(&mut scores, 0x00ff_f000);
+
+        assert_eq!(
+            scores.map(f32::to_bits),
+            [
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x3c10_e1c5,
+                0x3c45_fb1e,
+                0x3c87_4899,
+                0x3cb8_e57f,
+                0x3cfc_b75b,
+                0x3d2c_b5db,
+                0x3d6c_10ee,
+                0x3da1_53d3,
+                0x3ddc_7dd1,
+                0x3e16_aa55,
+                0x3e4d_e254,
+                0x3e8c_a72c,
+            ]
+        );
+        assert_eq!(dot_f32(&values, &scores, 24).to_bits(), 0x3f31_fd78);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn frontend_layer_norm_matches_ggml_f32_reduction() {
+        let mut row = [
+            f32::from_bits(0xc436_d160),
+            f32::from_bits(0x442d_b785),
+            f32::from_bits(0x4403_e327),
+        ];
+
+        layer_norm_row(&mut row, &[1.0; 3]).unwrap();
+
+        assert_eq!(
+            row.map(f32::to_bits),
+            [0xbfb3_f959, 0x3f55_9ec9, 0x3f12_53e9]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn audio_silu_matches_ggml_vector_approximation() {
+        let mut values = [
+            f32::from_bits(0xbb80_90bc),
+            f32::from_bits(0x3c17_08bd),
+            f32::from_bits(0x3c89_776f),
+            f32::from_bits(0x3ba9_f008),
+        ];
+
+        audio_silu_inplace(&mut values);
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0xbb00_502c, 0x3b97_baf3, 0x3c0a_9eb1, 0x3b2a_60d7]
+        );
     }
 
     #[test]
