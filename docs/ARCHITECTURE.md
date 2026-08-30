@@ -186,7 +186,11 @@ impl ExecutionScratchpad {
 - `src/core/thread_pool.rs`: `ComputePool` (BSP model, epoch-based dispatch, `fence(SeqCst)`)
 - `src/core/scratchpad.rs`: `ExecutionScratchpad` for KV cache + Q8_0/Q8K activation scratch buffers
 - `src/models/qwen3/`: text + ASR + TTS multi-modal architecture
+  - `qwen3/trunk/` — pure transformer decoder (`config`, `weights`, `forward`, `session`, `util`, `positions`, `tests`)
+  - `qwen3/asr/`, `qwen3/tts/` — siblings (audio encoder/decoder)
 - `src/models/llama/`, `src/models/lfm2/`, `src/models/lfm25/`, `src/models/qwen35/`: text inference skeletons
+  - `*/trunk/` — pure transformer decoder (no `base.rs` per MODEL_ORGANIZATION.md §2.1)
+  - `qwen35/vision/` — vision encoder sibling
 - `src/models/diffusion/`: diffusion model skeletons (PIG, Z-Image)
 - `docs/MODEL_ORGANIZATION.md`: directory structure convention (`trunk/{config,weights,forward,session,tests}.rs`)
 - `docs/OPTIMIZATION.md`: benchmark history, AVX2 SIMD contract, kernel parity test recipe, full quant kernel matrix
