@@ -8,23 +8,10 @@ pub use audio::Gemma4AudioModel;
 pub use multimodal::{build_turn_rows, run_multimodal, Gemma4Request};
 pub use text::{Gemma4InputRow, Gemma4Model, Gemma4Session};
 
-const GEMMA4_TOKEN_ANCHORS: &[(usize, &str)] = &[
-    (0, "<pad>"),
-    (1, "<eos>"),
-    (2, "<bos>"),
-    (3, "<unk>"),
-    (4, "<mask>"),
-    (1_024, "▁over"),
-    (4_096, "दा"),
-    (65_536, "DIST"),
-    (131_072, "▁Leh"),
-    (196_608, "▁dipilih"),
-    (255_999, "<|image>"),
-    (256_000, "<|audio>"),
-    (258_882, "<image|>"),
-    (258_883, "<audio|>"),
-    (262_143, "<unused6226>"),
-];
+#[cfg(not(test))]
+const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0xda70_6e66_3141_68dc_84fd_09da_fee1_4466;
+#[cfg(test)]
+const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0x2055_26be_4c3c_b1e6_cf1a_4a8a_00b7_7831;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Gemma4Config {
@@ -82,7 +69,7 @@ impl Gemma4Config {
         require_u32(source, "gemma4.rope.dimension_count", 512)?;
         require_u32(source, "gemma4.rope.dimension_count_swa", 256)?;
         require_string(source, "tokenizer.ggml.model", "gemma4")?;
-        require_gemma4_token_anchors(source)?;
+        require_gemma4_token_table(source)?;
 
         for (name, dims, ty) in [
             ("output_norm.weight", &[1536][..], GGMLType::F32),
@@ -428,19 +415,14 @@ fn require_array(
     }
 }
 
-fn require_gemma4_token_anchors(source: &dyn TensorSource) -> Result<(), String> {
+fn require_gemma4_token_table(source: &dyn TensorSource) -> Result<(), String> {
     match source.metadata("tokenizer.ggml.tokens") {
         Some(MetaValue::Array(MetaValueType::String, tokens)) if tokens.len() == 262_144 => {
-            for &(id, expected) in GEMMA4_TOKEN_ANCHORS {
-                match tokens.get(id) {
-                    Some(MetaValue::String(actual)) if actual == expected => {}
-                    Some(actual) => {
-                        return Err(format!(
-                            "Invalid metadata tokenizer.ggml.tokens[{id}]: expected {expected:?}, got {actual:?}"
-                        ));
-                    }
-                    None => return Err(format!("Missing metadata tokenizer.ggml.tokens[{id}]")),
-                }
+            let actual = gemma4_token_table_digest(tokens)?;
+            if actual != GEMMA4_TOKEN_TABLE_DIGEST {
+                return Err(format!(
+                    "Invalid metadata tokenizer.ggml.tokens digest: expected {GEMMA4_TOKEN_TABLE_DIGEST:#034x}, got {actual:#034x}"
+                ));
             }
             Ok(())
         }
@@ -449,6 +431,30 @@ fn require_gemma4_token_anchors(source: &dyn TensorSource) -> Result<(), String>
         )),
         None => Err("Missing metadata: tokenizer.ggml.tokens".into()),
     }
+}
+
+fn gemma4_token_table_digest(tokens: &[MetaValue]) -> Result<u128, String> {
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut digest = OFFSET;
+    let mut write = |bytes: &[u8]| {
+        for &byte in bytes {
+            digest = (digest ^ u128::from(byte)).wrapping_mul(PRIME);
+        }
+    };
+    write(&u64::try_from(tokens.len()).unwrap().to_le_bytes());
+    for (id, token) in tokens.iter().enumerate() {
+        let MetaValue::String(token) = token else {
+            return Err(format!(
+                "Invalid metadata tokenizer.ggml.tokens[{id}]: expected string, got {token:?}"
+            ));
+        };
+        write(&u64::try_from(id).unwrap().to_le_bytes());
+        write(&u64::try_from(token.len()).unwrap().to_le_bytes());
+        write(token.as_bytes());
+    }
+    Ok(digest)
 }
 
 fn require_tensor(
@@ -478,7 +484,7 @@ fn require_clippable(source: &dyn TensorSource, prefix: &str, dims: &[u64]) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{Gemma4AudioConfig, Gemma4Config, Gemma4VisionConfig};
+    use super::{gemma4_token_table_digest, Gemma4AudioConfig, Gemma4Config, Gemma4VisionConfig};
     use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
@@ -1010,16 +1016,35 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_e2b_contract_rejects_token_id_content_drift() {
+    fn gemma4_e2b_contract_rejects_non_anchor_token_drift() {
         let mut wrong_token = valid_gemma4_source();
         let Some(MetaValue::Array(_, tokens)) =
             wrong_token.metadata.get_mut("tokenizer.ggml.tokens")
         else {
             panic!("valid source has a token array");
         };
-        tokens[4_096] = MetaValue::String("token-id-drift".into());
+        tokens[12_345] = MetaValue::String("token-id-drift".into());
         assert!(Gemma4Config::from_source(&wrong_token)
             .unwrap_err()
-            .contains("tokenizer.ggml.tokens[4096]"));
+            .contains("tokenizer.ggml.tokens digest"));
+    }
+
+    #[test]
+    fn gemma4_token_digest_is_ordered_and_length_delimited() {
+        let tokens = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| MetaValue::String((*value).into()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_ne!(
+            gemma4_token_table_digest(&tokens(&["ab", "c"])).unwrap(),
+            gemma4_token_table_digest(&tokens(&["a", "bc"])).unwrap()
+        );
+        assert_ne!(
+            gemma4_token_table_digest(&tokens(&["ab", "c"])).unwrap(),
+            gemma4_token_table_digest(&tokens(&["c", "ab"])).unwrap()
+        );
     }
 }

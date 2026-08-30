@@ -636,36 +636,108 @@ fn require_gemma4_gguf(
     architecture: &str,
     tensor: &str,
     ggml_type: GGMLType,
-) {
-    assert_eq!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some(expected_name)
-    );
-    let loader = GGUFLoader::from_file(path).unwrap();
-    assert!(
-        matches!(loader.metadata("general.architecture"), Some(MetaValue::String(value)) if value == architecture)
-    );
-    assert_eq!(
-        loader.tensor_info(tensor).map(|info| info.ggml_type),
-        Some(ggml_type),
-        "invalid {tensor}"
-    );
+) -> Result<(), String> {
+    let actual_name = path.file_name().and_then(|name| name.to_str());
+    if actual_name != Some(expected_name) {
+        return Err(format!(
+            "invalid Gemma4 GGUF basename: expected {expected_name:?}, got {actual_name:?}"
+        ));
+    }
+    let loader = GGUFLoader::from_file(path)?;
+    match loader.metadata("general.architecture") {
+        Some(MetaValue::String(value)) if value == architecture => {}
+        actual => {
+            return Err(format!(
+                "invalid general.architecture in {}: expected {architecture:?}, got {actual:?}",
+                path.display()
+            ));
+        }
+    }
+    let actual_type = loader.tensor_info(tensor).map(|info| info.ggml_type);
+    if actual_type != Some(ggml_type) {
+        return Err(format!(
+            "invalid {tensor} in {}: expected {ggml_type:?}, got {actual_type:?}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_gemma4_ggufs(model: &Path, mmproj: &Path) -> Result<(), String> {
+    require_gemma4_gguf(
+        model,
+        GEMMA4_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    )?;
+    require_gemma4_gguf(
+        mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "v.patch_embd.weight",
+        GGMLType::F16,
+    )
 }
 
 #[test]
 fn gemma4_preflight_rejects_arbitrary_files() {
-    assert_ne!(
-        Path::new("/etc/passwd")
-            .file_name()
-            .and_then(|name| name.to_str()),
-        Some(GEMMA4_MODEL_NAME)
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "rmi-gemma4-invalid-preflight-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut empty_gguf = Vec::new();
+    empty_gguf.extend_from_slice(b"GGUF");
+    empty_gguf.extend_from_slice(&3u32.to_le_bytes());
+    empty_gguf.extend_from_slice(&0u64.to_le_bytes());
+    empty_gguf.extend_from_slice(&0u64.to_le_bytes());
+
+    let model = root.join(GEMMA4_MODEL_NAME);
+    let mmproj = root.join(GEMMA4_MMPROJ_NAME);
+    std::fs::write(&model, &empty_gguf).unwrap();
+    std::fs::write(&mmproj, &empty_gguf).unwrap();
+
+    for (path, expected_name, architecture, tensor, ggml_type) in [
+        (
+            model.as_path(),
+            GEMMA4_MODEL_NAME,
+            "gemma4",
+            "token_embd.weight",
+            GGMLType::Q8_0,
+        ),
+        (
+            mmproj.as_path(),
+            GEMMA4_MMPROJ_NAME,
+            "clip",
+            "v.patch_embd.weight",
+            GGMLType::F16,
+        ),
+    ] {
+        let error =
+            require_gemma4_gguf(path, expected_name, architecture, tensor, ggml_type).unwrap_err();
+        assert!(error.contains("general.architecture"), "got: {error}");
+    }
+
+    let mut oracle_started = false;
+    let error = preflight_gemma4_ggufs(&model, &mmproj)
+        .and_then(|()| {
+            oracle_started = true;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(error.contains("general.architecture"), "got: {error}");
+    assert!(
+        !oracle_started,
+        "Oracle must not run after failed preflight"
     );
-    assert_ne!(
-        Path::new("/etc/passwd")
-            .file_name()
-            .and_then(|name| name.to_str()),
-        Some(GEMMA4_MMPROJ_NAME)
-    );
+
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -735,21 +807,9 @@ fn gemma4_matches_pinned_cpu_oracle() {
         .unwrap_or_else(|poison| poison.into_inner());
     let model = gemma4_model_path();
     let mmproj = gemma4_mmproj_path();
-    require_gemma4_gguf(
-        &model,
-        GEMMA4_MODEL_NAME,
-        "gemma4",
-        "token_embd.weight",
-        GGMLType::Q8_0,
-    );
-    require_gemma4_gguf(
-        &mmproj,
-        GEMMA4_MMPROJ_NAME,
-        "clip",
-        "v.patch_embd.weight",
-        GGMLType::F16,
-    );
-    let oracle = ensure_gemma4_oracle().unwrap();
+    let oracle = preflight_gemma4_ggufs(&model, &mmproj)
+        .and_then(|()| ensure_gemma4_oracle())
+        .unwrap();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -791,7 +851,8 @@ fn gemma4_text_smoke() {
         "gemma4",
         "token_embd.weight",
         GGMLType::Q8_0,
-    );
+    )
+    .unwrap();
     run_multimodal(Gemma4Request {
         model: &model,
         mmproj: None,
@@ -818,7 +879,8 @@ fn gemma4_image_smoke() {
         "clip",
         "v.patch_embd.weight",
         GGMLType::F16,
-    );
+    )
+    .unwrap();
     let loader = GGUFLoader::from_file(&mmproj).unwrap();
     let model = Gemma4VisionModel::from_source(&loader, 4).unwrap();
     let fixture =
@@ -867,7 +929,8 @@ fn gemma4_audio_smoke() {
         "clip",
         "a.pre_encode.out.weight",
         GGMLType::F16,
-    );
+    )
+    .unwrap();
     let loader = GGUFLoader::from_file(&mmproj).unwrap();
     let model = Gemma4AudioModel::from_source(&loader, 4).unwrap();
     let fixture =
@@ -914,14 +977,16 @@ fn gemma4_image_audio_smoke() {
         "gemma4",
         "token_embd.weight",
         GGMLType::Q8_0,
-    );
+    )
+    .unwrap();
     require_gemma4_gguf(
         &mmproj,
         GEMMA4_MMPROJ_NAME,
         "clip",
         "v.patch_embd.weight",
         GGMLType::F16,
-    );
+    )
+    .unwrap();
 
     let suffix = std::process::id();
     let image_path = std::env::temp_dir().join(format!("rmi-gemma4-turn-{suffix}.png"));

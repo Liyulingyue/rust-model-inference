@@ -231,11 +231,16 @@ fn trace_tokens(_rows: &[Gemma4InputRow]) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{build_turn_rows, check_context, construct_then_encode, greedy_token};
+    use super::{
+        build_turn_rows, check_context, construct_then_encode, greedy_token, run_multimodal,
+        Gemma4Request,
+    };
+    use crate::core::scratchpad::KvFormat;
     use crate::core::tensor::{MetaValue, MetaValueType};
     use crate::core::tokenizer::BPETokenizer;
     use crate::models::gemma4::Gemma4InputRow;
     use std::collections::HashMap;
+    use std::path::Path;
 
     fn gemma4_test_tokenizer() -> BPETokenizer {
         let mut tokens = vec!["<unused>".to_string(); 258_884];
@@ -422,6 +427,40 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "invalid audio projector");
         assert_eq!(*events.borrow(), ["build_image", "build_audio"]);
+    }
+
+    #[test]
+    fn image_request_without_mmproj_is_rejected_before_model_io() {
+        let error = run_multimodal(Gemma4Request {
+            model: Path::new("missing-model.gguf"),
+            mmproj: None,
+            image: Some(Path::new("missing-image.png")),
+            audio: None,
+            prompt: "describe",
+            max_tokens: 1,
+            threads: 1,
+            kv_format: KvFormat::F32,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Gemma4 media requires an mmproj");
+    }
+
+    #[test]
+    fn audio_request_without_mmproj_is_rejected_before_model_io() {
+        let error = run_multimodal(Gemma4Request {
+            model: Path::new("missing-model.gguf"),
+            mmproj: None,
+            image: None,
+            audio: Some(Path::new("missing-audio.wav")),
+            prompt: "describe",
+            max_tokens: 1,
+            threads: 1,
+            kv_format: KvFormat::F32,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Gemma4 media requires an mmproj");
     }
 
     #[test]
