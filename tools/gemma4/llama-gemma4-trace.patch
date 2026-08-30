@@ -12,27 +12,64 @@ index e60c9c878..ae5d35be7 100644
 +    target_link_libraries(llama-gemma4-trace PRIVATE llama-common mtmd Threads::Threads)
 +    target_compile_features(llama-gemma4-trace PRIVATE cxx_std_17)
  endif()
+diff --git a/tools/mtmd/models/gemma4a.cpp b/tools/mtmd/models/gemma4a.cpp
+index 5dd64b783..4a3ab3407 100644
+--- a/tools/mtmd/models/gemma4a.cpp
++++ b/tools/mtmd/models/gemma4a.cpp
+@@ -14,6 +14,8 @@ ggml_cgraph * clip_graph_gemma4a::build() {
+
+     // 1. Input
+     ggml_tensor * inp = build_inp_raw(1);
++    inp = ggml_dup(ctx0, inp);
++    cb(inp, "audio_mel", -1);
+     auto * cur = ggml_cont(ctx0, ggml_transpose(ctx0, inp));
+
+     // 2. Subsampling Conv2D (symmetric padding=1, matching PyTorch)
+@@ -271,6 +273,7 @@ ggml_cgraph * clip_graph_gemma4a::build() {
+     if (model.mm_input_proj_w) {
+         cur = build_mm(model.mm_input_proj_w, cur);
+     }
++    cb(cur, "audio_projected", -1);
+
+     ggml_build_forward_expand(gf, cur);
+     return gf;
+diff --git a/tools/mtmd/models/gemma4v.cpp b/tools/mtmd/models/gemma4v.cpp
+index 448438947..cd4a220ce 100644
+--- a/tools/mtmd/models/gemma4v.cpp
++++ b/tools/mtmd/models/gemma4v.cpp
+@@ -3,6 +3,8 @@
+
+ ggml_cgraph * clip_graph_gemma4v::build() {
+     ggml_tensor * inp_raw = build_inp_raw();
++    inp_raw = ggml_dup(ctx0, inp_raw);
++    cb(inp_raw, "vision_preprocessed", -1);
+
+     // patches = 2 * (patches - 0.5)
+     // equivalent to: patches * 2 - 1
 diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
-index 97678c6b2..658d5ac66 100644
+index 97678c6b2..4680ef1f3 100644
 --- a/tools/mtmd/mtmd-cli.cpp
 +++ b/tools/mtmd/mtmd-cli.cpp
-@@ -13,6 +13,11 @@
- #include <vector>
+@@ -14,7 +14,14 @@
  #include <limits.h>
  #include <cinttypes>
  #include <clocale>
+-
 +#ifdef LLAMA_GEMMA4_TRACE
++#include <cstdlib>
 +#include <cstring>
 +#include <fstream>
 +#include <map>
 +#include <mutex>
++#include <sstream>
 +#endif
--
  #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-@@ -31,8 +36,79 @@
+ #include <signal.h>
+ #include <unistd.h>
+@@ -30,7 +37,185 @@
+ // volatile, because of signal being an interrupt
  static volatile bool g_is_generating = false;
  static volatile bool g_is_interrupted = false;
--
 +#ifdef LLAMA_GEMMA4_TRACE
 +class gemma4_trace {
 +public:
@@ -40,13 +77,40 @@ index 97678c6b2..658d5ac66 100644
 +        if (!path_.empty()) manifest_.open(path_, std::ios::trunc);
 +    }
 +
++    ~gemma4_trace() { flush(); }
++
 +    bool enabled() const { return manifest_.is_open() && !failed_; }
 +
 +    static bool callback(ggml_tensor * tensor, bool ask, void * user_data) {
 +        return static_cast<gemma4_trace *>(user_data)->capture(tensor, ask);
 +    }
 +
++    void write_tokens(const char * name, const llama_tokens & values, bool generated = false) {
++        if (!enabled()) return;
++        std::lock_guard<std::mutex> lock(mutex_);
++        const size_t occurrence = occurrences_[name]++;
++        std::ostringstream line;
++        line << "{\"name\":\"" << json_escape(name) << "\",\"shape\":[" << values.size()
++             << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence << ",\"token_ids\":[";
++        for (size_t i = 0; i < values.size(); ++i) {
++            if (i) line << ',';
++            line << values[i];
++        }
++        line << "]}\n";
++        (generated ? generated_ : tokens_) = line.str();
++    }
++
 +private:
++    enum class shape_kind { native, audio_mel, text };
++    enum class section { frontend, text };
++
++    struct checkpoint {
++        std::string name;
++        int layer = -1;
++        shape_kind shape = shape_kind::native;
++        section output = section::frontend;
++    };
++
 +    static std::string json_escape(const std::string & value) {
 +        std::string escaped;
 +        for (char ch : value) {
@@ -56,9 +120,65 @@ index 97678c6b2..658d5ac66 100644
 +        return escaped;
 +    }
 +
++    static bool layer_checkpoint(
++            const std::string & tensor_name,
++            const char * prefix,
++            const char * suffix,
++            checkpoint & output) {
++        const size_t prefix_len = std::strlen(prefix);
++        if (tensor_name.compare(0, prefix_len, prefix) != 0) return false;
++        char * end = nullptr;
++        const long layer = std::strtol(tensor_name.c_str() + prefix_len, &end, 10);
++        if (layer < 0 || end == tensor_name.c_str() + prefix_len || *end != '\0') return false;
++        output.name = "gemma4.layer." + std::to_string(layer) + "." + suffix;
++        output.layer = static_cast<int>(layer);
++        output.shape = shape_kind::text;
++        output.output = section::text;
++        return true;
++    }
++
++    static bool map_tensor(const ggml_tensor * tensor, checkpoint & output) {
++        const std::string name = tensor->name;
++        if (name == "vision_preprocessed") {
++            output.name = "gemma4.vision.preprocessed";
++            return true;
++        }
++        if (name == "projected") {
++            output.name = "gemma4.vision.projected";
++            return true;
++        }
++        if (name == "audio_mel") {
++            output.name = "gemma4.audio.mel";
++            output.shape = shape_kind::audio_mel;
++            return true;
++        }
++        if (name == "audio_projected") {
++            output.name = "gemma4.audio.projected";
++            return true;
++        }
++        if (name == "result_norm") {
++            output.name = "gemma4.final.norm";
++            output.shape = shape_kind::text;
++            output.output = section::text;
++            return true;
++        }
++        if (name == "result_output") {
++            output.name = "gemma4.logits";
++            output.shape = shape_kind::text;
++            output.output = section::text;
++            return true;
++        }
++        return layer_checkpoint(name, "attn_out-", "attn_out", output)
++            || layer_checkpoint(name, "pe_in-", "ffn_out", output)
++            || layer_checkpoint(name, "l_out-", "per_layer_out", output);
++    }
++
 +    bool capture(ggml_tensor * tensor, bool ask) {
-+        if (ask) return enabled() && tensor->type == GGML_TYPE_F32 && tensor->name[0] != '\0';
++        checkpoint mapped;
++        const bool selected = map_tensor(tensor, mapped);
++        if (ask) return enabled() && selected && tensor->type == GGML_TYPE_F32;
 +        if (!enabled()) return true;
++        if (!selected || tensor->type != GGML_TYPE_F32) return true;
 +
 +        std::lock_guard<std::mutex> lock(mutex_);
 +        std::vector<uint8_t> bytes(ggml_nbytes(tensor));
@@ -78,29 +198,53 @@ index 97678c6b2..658d5ac66 100644
 +                }
 +            }
 +        }
-+
-+        const std::string name = "gemma4.tensor." + std::string(tensor->name);
-+        const size_t occurrence = occurrences_[name]++;
-+        const std::string binary_path = path_ + "." + name + "." + std::to_string(occurrence) + ".f32";
+
++        const size_t occurrence = occurrences_[mapped.name]++;
++        const std::string binary_path = path_ + "." + mapped.name + "." + std::to_string(occurrence) + ".f32";
 +        std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
 +        binary.write(reinterpret_cast<const char *>(values.data()),
 +            static_cast<std::streamsize>(values.size() * sizeof(float)));
 +        if (!binary) return failed_ = true, false;
 +
-+        manifest_ << "{\"name\":\"" << json_escape(name) << "\",\"layer\":null,\"step\":0,\"shape\":[";
-+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
-+            if (i) manifest_ << ',';
-+            manifest_ << tensor->ne[i];
++        std::ostringstream line;
++        line << "{\"name\":\"" << json_escape(mapped.name) << "\",\"layer\":";
++        if (mapped.layer >= 0) line << mapped.layer;
++        else line << "null";
++        line << ",\"step\":null,\"shape\":[";
++        if (mapped.shape == shape_kind::text) {
++            line << "1," << values.size();
++        } else if (mapped.shape == shape_kind::audio_mel) {
++            line << tensor->ne[1] << ',' << tensor->ne[0];
++        } else {
++            for (int i = 0; i < GGML_MAX_DIMS; ++i) {
++                if (i) line << ',';
++                line << tensor->ne[i];
++            }
 +        }
-+        manifest_ << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence
-+                  << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        line << "],\"len\":" << values.size() << ",\"occurrence\":" << occurrence
++             << ",\"binary_path\":\"" << json_escape(binary_path) << "\"}\n";
++        (mapped.output == section::frontend ? frontend_ : text_).push_back(line.str());
++        return true;
++    }
++
++    void flush() {
++        std::lock_guard<std::mutex> lock(mutex_);
++        if (!manifest_.is_open()) return;
++        for (const std::string & line : frontend_) manifest_ << line;
++        manifest_ << tokens_;
++        for (const std::string & line : text_) manifest_ << line;
++        manifest_ << generated_;
 +        manifest_.flush();
-+        return !(failed_ = !manifest_);
++        failed_ = !manifest_;
 +    }
 +
 +    std::string path_;
 +    std::ofstream manifest_;
 +    std::map<std::string, size_t> occurrences_;
++    std::vector<std::string> frontend_;
++    std::string tokens_;
++    std::vector<std::string> text_;
++    std::string generated_;
 +    std::mutex mutex_;
 +    bool failed_ = false;
 +};
@@ -108,21 +252,20 @@ index 97678c6b2..658d5ac66 100644
  /**
   * Please note that this is NOT a production-ready binary.
   * It is a playground for trying multimodal support in llama.cpp.
-  * For contributors: please keep this code simple and easy to understand. Do not add unnecessary complexity. The goal is to have a simple CLI for testing multimodal support.
-  */
-@@ -95,8 +171,10 @@ struct mtmd_cli_context {
-     // chat template
-     common_chat_templates_ptr tmpls;
+@@ -97,7 +282,9 @@ struct mtmd_cli_context {
      std::vector<common_chat_msg> chat_history;
      bool use_jinja = false;
      // TODO: support for --system-prompt with /clear command
+-
 +#ifdef LLAMA_GEMMA4_TRACE
 +    gemma4_trace * trace;
 +#endif
--
      // support for legacy templates (models not having EOT token)
      llama_tokens antiprompt_tokens;
-@@ -107,5 +185,9 @@ struct mtmd_cli_context {
+
+@@ -105,8 +292,12 @@ struct mtmd_cli_context {
+     llama_pos n_past = 0;
+
      common_debug_cb_user_data cb_data;
 -
 +#ifdef LLAMA_GEMMA4_TRACE
@@ -133,8 +276,8 @@ index 97678c6b2..658d5ac66 100644
 +#endif
          model = llama_init->model();
          lctx = llama_init->context();
-@@ -163,6 +245,12 @@ struct mtmd_cli_context {
-         mparams.flash_attn_type  = params.flash_attn_type;
+         vocab = llama_model_get_vocab(model);
+@@ -164,6 +355,12 @@ struct mtmd_cli_context {
          mparams.warmup           = params.warmup;
          mparams.image_min_tokens = params.image_min_tokens;
          mparams.image_max_tokens = params.image_max_tokens;
@@ -146,7 +289,56 @@ index 97678c6b2..658d5ac66 100644
 +#endif
          if (std::getenv("MTMD_DEBUG_GRAPH") != nullptr) {
              mparams.cb_eval_user_data = &cb_data;
-@@ -407,4 +494,12 @@ int main(int argc, char ** argv) {
+             mparams.cb_eval = common_debug_cb_eval;
+@@ -230,6 +427,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
+             break;
+         }
+
++#ifdef LLAMA_GEMMA4_TRACE
++        if (i + 1 == n_predict) continue;
++#endif
+         // eval the token
+         common_batch_clear(ctx.batch);
+         common_batch_add(ctx.batch, token_id, ctx.n_past++, {0}, true);
+@@ -238,6 +438,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
+             return 1;
+         }
+     }
++#ifdef LLAMA_GEMMA4_TRACE
++    if (ctx.trace) ctx.trace->write_tokens("gemma4.generated_ids", generated_tokens, true);
++#endif
+
+     std::string generated_text = common_detokenize(ctx.lctx, generated_tokens);
+     common_chat_msg msg;
+@@ -285,11 +488,24 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
+         return 1;
+     }
+
++    size_t n_chunks = mtmd_input_chunks_size(chunks.ptr.get());
++#ifdef LLAMA_GEMMA4_TRACE
++    if (ctx.trace) {
++        llama_tokens prompt_tokens;
++        for (size_t i = 0; i < n_chunks; ++i) {
++            const auto chunk = mtmd_input_chunks_get(chunks.ptr.get(), i);
++            if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_TEXT) continue;
++            size_t n_tokens = 0;
++            const llama_token * tokens = mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
++            prompt_tokens.insert(prompt_tokens.end(), tokens, tokens + n_tokens);
++        }
++        ctx.trace->write_tokens("gemma4.tokens", prompt_tokens);
++    }
++#endif
+     ctx.bitmaps.entries.clear();
+     ctx.videos.clear();
+
+     // batch encode all media chunks, then decode each
+-    size_t n_chunks = mtmd_input_chunks_size(chunks.ptr.get());
+     for (size_t i = 0; i < n_chunks; i++) {
+         auto chunk = mtmd_input_chunks_get(chunks.ptr.get(), i);
+         auto chunk_type = mtmd_input_chunk_get_type(chunk);
+@@ -405,11 +621,23 @@ int main(int argc, char ** argv) {
+     }
+
      ggml_backend_load_all();
 -
 +#ifdef LLAMA_GEMMA4_TRACE
@@ -160,3 +352,33 @@ index 97678c6b2..658d5ac66 100644
      mtmd_cli_context ctx(params);
 +#endif
      LOG_INF("%s: loading model: %s\n", __func__, params.model.path.c_str());
+
++#ifdef LLAMA_GEMMA4_TRACE
++    bool is_single_turn = !params.prompt.empty();
++#else
+     bool is_single_turn = !params.prompt.empty() && !params.image.empty();
++#endif
+
+     int n_predict = params.n_predict < 0 ? INT_MAX : params.n_predict;
+
+diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
+index 77f9d58fe..fff406784 100644
+--- a/tools/mtmd/mtmd-helper.cpp
++++ b/tools/mtmd/mtmd-helper.cpp
+@@ -170,6 +170,7 @@ int32_t mtmd_helper_decode_image_chunk(
+         int pos_offset = i_batch*n_batch;
+         int n_tokens_batch = std::min(n_batch, n_tokens - pos_offset);
+         llama_batch batch_embd_view = batch_embd.get_view(pos_offset, n_tokens_batch);
++        for (int i = 0; i < n_tokens_batch; ++i) batch_embd_view.logits[i] = true;
+
+         LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
+
+@@ -225,7 +226,7 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
+                 text_batch.pos     [j]    = n_past++;
+                 text_batch.n_seq_id[j]    = 1;
+                 text_batch.seq_id  [j][0] = seq_id;
+-                text_batch.logits  [j]    = false;
++                text_batch.logits  [j]    = true;
+
+                 text_batch.n_tokens++;
+             }
