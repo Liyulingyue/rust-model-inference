@@ -580,12 +580,20 @@ fn add_positions(
         for x in 0..patches_x {
             let token = y * patches_x + x;
             for feature in 0..EMBED {
-                hidden[token * EMBED + feature] += read_f32(positions, x * EMBED + feature)
-                    + read_f32(positions, y_table_offset + y * EMBED + feature);
+                let index = token * EMBED + feature;
+                hidden[index] = add_position_tables(
+                    hidden[index],
+                    read_f32(positions, x * EMBED + feature),
+                    read_f32(positions, y_table_offset + y * EMBED + feature),
+                );
             }
         }
     }
     validate_finite("Gemma4 position embeddings", hidden)
+}
+
+fn add_position_tables(hidden: f32, pos_x: f32, pos_y: f32) -> f32 {
+    (hidden + pos_x) + pos_y
 }
 
 fn apply_2d_rope(values: &mut [f32], patches_x: usize, patches_y: usize) -> Result<(), String> {
@@ -1140,6 +1148,18 @@ mod tests {
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn position_embedding_adds_x_then_y_like_ggml() {
+        let hidden = f32::from_bits(0xbe8d_e000);
+        let pos_x = f32::from_bits(0xb202_0000);
+        let pos_y = f32::from_bits(0xb211_0000);
+
+        assert_eq!(
+            add_position_tables(hidden, pos_x, pos_y).to_bits(),
+            0xbe8d_e000
         );
     }
 
