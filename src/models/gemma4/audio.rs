@@ -27,6 +27,29 @@ const CONV_KERNEL: usize = 5;
 const EPS: f32 = 1e-6;
 const SOFTCAP: f32 = 50.0;
 
+#[cfg(target_os = "macos")]
+#[link(name = "Accelerate", kind = "framework")]
+unsafe extern "C" {
+    fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
+    fn vDSP_vsadd(
+        input: *const f32,
+        input_stride: isize,
+        scalar: *const f32,
+        output: *mut f32,
+        output_stride: isize,
+        count: usize,
+    );
+    fn vDSP_measqv(input: *const f32, stride: isize, result: *mut f32, count: usize);
+    fn vDSP_vsmul(
+        input: *const f32,
+        input_stride: isize,
+        scalar: *const f32,
+        output: *mut f32,
+        output_stride: isize,
+        count: usize,
+    );
+}
+
 #[derive(Clone, Copy)]
 struct Clamp {
     input_min: f32,
@@ -714,20 +737,47 @@ fn layer_norm_row(row: &mut [f32], weight: &[f32]) -> Result<(), String> {
     if row.is_empty() || row.len() != weight.len() {
         return Err("Invalid Gemma4 convolution norm shape".into());
     }
-    let mean = row.iter().sum::<f32>() / row.len() as f32;
-    let variance = row
-        .iter()
-        .map(|value| {
-            let centered = *value - mean;
-            centered * centered
-        })
-        .sum::<f32>()
-        / row.len() as f32;
-    let inverse = 1.0f32 / (variance + EPS).sqrt();
-    for (value, weight) in row.iter_mut().zip(weight) {
-        *value = (*value - mean) * inverse * *weight;
+    #[cfg(target_os = "macos")]
+    {
+        let mut sum = 0.0;
+        unsafe { vDSP_sve(row.as_ptr(), 1, &mut sum, row.len()) };
+        let negative_mean = -(sum / row.len() as f32);
+        unsafe {
+            vDSP_vsadd(
+                row.as_ptr(),
+                1,
+                &negative_mean,
+                row.as_mut_ptr(),
+                1,
+                row.len(),
+            )
+        };
+        let mut variance = 0.0;
+        unsafe { vDSP_measqv(row.as_ptr(), 1, &mut variance, row.len()) };
+        let inverse = 1.0f32 / (variance + EPS).sqrt();
+        unsafe { vDSP_vsmul(row.as_ptr(), 1, &inverse, row.as_mut_ptr(), 1, row.len()) };
+        for (value, weight) in row.iter_mut().zip(weight) {
+            *value *= *weight;
+        }
+        return validate_finite("Gemma4 convolution norm", row);
     }
-    validate_finite("Gemma4 convolution norm", row)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mean = row.iter().sum::<f32>() / row.len() as f32;
+        let variance = row
+            .iter()
+            .map(|value| {
+                let centered = *value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / row.len() as f32;
+        let inverse = 1.0f32 / (variance + EPS).sqrt();
+        for (value, weight) in row.iter_mut().zip(weight) {
+            *value = (*value - mean) * inverse * *weight;
+        }
+        validate_finite("Gemma4 convolution norm", row)
+    }
 }
 
 fn audio_silu_inplace(values: &mut [f32]) {
@@ -1456,6 +1506,145 @@ mod tests {
             row.map(f32::to_bits),
             [0xbfb3_f959, 0x3f55_9ec9, 0x3f12_53e9]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn frontend_layer_norm_matches_oracle_accelerate_sum() {
+        let mut row = [
+            f32::from_bits(0x40bc_3ec0),
+            f32::from_bits(0xc095_7cf8),
+            f32::from_bits(0x3e4d_0180),
+            f32::from_bits(0x3e68_2e00),
+            f32::from_bits(0xbfc0_5060),
+            f32::from_bits(0xc063_b3c0),
+            f32::from_bits(0x3e93_ffc0),
+            f32::from_bits(0x3e84_ae00),
+            f32::from_bits(0x3f88_04f0),
+            f32::from_bits(0x40ae_ce90),
+            f32::from_bits(0x4044_4d80),
+            f32::from_bits(0xc05c_17e0),
+            f32::from_bits(0xbe9c_3270),
+            f32::from_bits(0xc055_0110),
+            f32::from_bits(0xc08f_ca50),
+            f32::from_bits(0xc046_bf60),
+            f32::from_bits(0xc0f5_3f20),
+            f32::from_bits(0xbe0c_db00),
+            f32::from_bits(0x3f37_0030),
+            f32::from_bits(0xbfa7_4800),
+            f32::from_bits(0xbfb1_8e00),
+            f32::from_bits(0xbe10_8100),
+            f32::from_bits(0xc034_6ce4),
+            f32::from_bits(0x40e1_b6f8),
+            f32::from_bits(0xbeed_7800),
+            f32::from_bits(0xbf16_8980),
+            f32::from_bits(0xc08f_9d60),
+            f32::from_bits(0x3f3c_3650),
+            f32::from_bits(0x40db_78a0),
+            f32::from_bits(0x3fc9_2a40),
+            f32::from_bits(0xbf60_1f00),
+            f32::from_bits(0xbd1f_cc00),
+            f32::from_bits(0xbf9e_cb80),
+            f32::from_bits(0xc04c_d350),
+            f32::from_bits(0x3f1c_6980),
+            f32::from_bits(0x3f1b_a2a0),
+            f32::from_bits(0xc00e_f0d6),
+            f32::from_bits(0xbf9e_3330),
+            f32::from_bits(0xbeb2_0660),
+            f32::from_bits(0x401f_8a60),
+            f32::from_bits(0xbed9_f400),
+            f32::from_bits(0x3f8a_6bd0),
+            f32::from_bits(0x3ec7_f3c0),
+            f32::from_bits(0x3e96_6d80),
+            f32::from_bits(0x3e9d_a140),
+            f32::from_bits(0x3f72_3dc0),
+            f32::from_bits(0xbf11_fa00),
+            f32::from_bits(0x3f67_0b20),
+            f32::from_bits(0x3ec6_b800),
+            f32::from_bits(0xbfb5_6000),
+            f32::from_bits(0x4075_5100),
+            f32::from_bits(0x4008_9760),
+            f32::from_bits(0xc042_dd20),
+            f32::from_bits(0x3f84_c6a0),
+            f32::from_bits(0x3f65_22e8),
+            f32::from_bits(0xbec6_bf00),
+            f32::from_bits(0x3ea9_24c0),
+            f32::from_bits(0xbfdb_c030),
+            f32::from_bits(0x3f56_cb00),
+            f32::from_bits(0x3ff8_65b0),
+            f32::from_bits(0x40b6_c5d0),
+            f32::from_bits(0x40b1_6214),
+            f32::from_bits(0x403f_f300),
+            f32::from_bits(0xc081_e090),
+            f32::from_bits(0x4038_e6e0),
+            f32::from_bits(0x3f9b_7e00),
+            f32::from_bits(0x4030_ccb0),
+            f32::from_bits(0x3f02_2ec0),
+            f32::from_bits(0x3f0a_3110),
+            f32::from_bits(0x408b_4f4c),
+            f32::from_bits(0x3ec0_2000),
+            f32::from_bits(0x4092_56e0),
+            f32::from_bits(0x402f_2950),
+            f32::from_bits(0x3eb2_6380),
+            f32::from_bits(0x40b0_4dd0),
+            f32::from_bits(0x402b_f7b0),
+            f32::from_bits(0xc06a_e320),
+            f32::from_bits(0x4097_42b0),
+            f32::from_bits(0x40a9_3dc0),
+            f32::from_bits(0x40d0_859c),
+            f32::from_bits(0x3f03_a880),
+            f32::from_bits(0x4049_82e8),
+            f32::from_bits(0x3f08_d4c0),
+            f32::from_bits(0xc05d_8680),
+            f32::from_bits(0x3f65_3b00),
+            f32::from_bits(0x409a_bbd0),
+            f32::from_bits(0x3feb_6880),
+            f32::from_bits(0x3da6_0e80),
+            f32::from_bits(0x3fed_fb80),
+            f32::from_bits(0xc00f_4240),
+            f32::from_bits(0xc0d2_a320),
+            f32::from_bits(0xc034_9fa0),
+            f32::from_bits(0xbff3_8c80),
+            f32::from_bits(0x40c9_1f70),
+            f32::from_bits(0x4053_9b22),
+            f32::from_bits(0x3f09_1130),
+            f32::from_bits(0xc010_2f08),
+            f32::from_bits(0xbfef_4f60),
+            f32::from_bits(0x4010_d1f0),
+            f32::from_bits(0x4097_3ee0),
+            f32::from_bits(0xbe4f_c900),
+            f32::from_bits(0x3f13_7c20),
+            f32::from_bits(0xc103_7be8),
+            f32::from_bits(0x3f0f_6f40),
+            f32::from_bits(0x4088_f760),
+            f32::from_bits(0x3f3f_cabc),
+            f32::from_bits(0xbdac_bc00),
+            f32::from_bits(0x3e7c_8800),
+            f32::from_bits(0xc105_9840),
+            f32::from_bits(0x3f33_b040),
+            f32::from_bits(0x3f0a_4ee0),
+            f32::from_bits(0x3f94_01d0),
+            f32::from_bits(0x40b3_38b0),
+            f32::from_bits(0x3f7f_1be0),
+            f32::from_bits(0x3f7e_a900),
+            f32::from_bits(0xbee3_1d80),
+            f32::from_bits(0x403a_6a80),
+            f32::from_bits(0xbdf1_8200),
+            f32::from_bits(0x3ff0_5a00),
+            f32::from_bits(0x40b6_3f00),
+            f32::from_bits(0x4097_90d8),
+            f32::from_bits(0x3faf_6250),
+            f32::from_bits(0x3ebe_9300),
+            f32::from_bits(0x3f18_b750),
+            f32::from_bits(0xc046_9040),
+            f32::from_bits(0xbf8d_d970),
+            f32::from_bits(0x403c_3fc0),
+            f32::from_bits(0x3f01_0000),
+        ];
+
+        layer_norm_row(&mut row, &[1.0; 128]).unwrap();
+
+        assert_eq!(row[2].to_bits(), 0xbde7_5582);
     }
 
     #[cfg(target_arch = "aarch64")]
