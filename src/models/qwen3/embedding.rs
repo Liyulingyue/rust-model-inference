@@ -208,15 +208,13 @@ fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_embedding(
+pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
     n_threads_arg: usize,
-    _kv_format: crate::app::cli::KvFormat,
-    output: EmbeddingOutput,
-) {
-    let t0 = Instant::now();
-    let config = model_config_from_source(source).expect("Failed to parse model config");
+) -> Result<Vec<f32>, String> {
+    let _t0 = Instant::now();
+    let config = model_config_from_source(source).map_err(|e| e.to_string())?;
 
     let arch = source
         .metadata("general.architecture")
@@ -225,12 +223,8 @@ pub fn run_embedding(
     let is_qwen3 = arch == "qwen3";
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .expect("Failed to init tokenizer");
-    let embedding_cfg = embedding_config(&arch, |key| source.metadata(key).cloned())
-        .unwrap_or_else(|error| {
-            eprintln!("Embedding metadata error: {error}");
-            std::process::exit(1);
-        });
+        .map_err(|e| e.to_string())?;
+    let embedding_cfg = embedding_config(&arch, |key| source.metadata(key).cloned())?;
 
     let n_embd = config.n_embd;
     let n_layer = config.n_layer;
@@ -255,25 +249,18 @@ pub fn run_embedding(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
-    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
+    let embd_info = source.tensor_info("token_embd.weight").ok_or("missing token_embd.weight")?;
+    let embd_weight = source
+        .tensor_slice("token_embd.weight")
+        .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
     let layers: Vec<Qwen3LayerWeights> =
         load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, is_qwen3);
 
-    let load_ms = t0.elapsed().as_millis();
-    if output == EmbeddingOutput::Summary {
-        println!(
-            "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
-            arch, n_embd, n_layer, n_head, n_head_kv, n_ff, load_ms
-        );
-    }
-
     let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
     if prompt_tokens.is_empty() {
-        eprintln!("Embedding input produced no tokens");
-        std::process::exit(1);
+        return Err("Embedding input produced no tokens".into());
     }
     let n_tokens = prompt_tokens.len();
     let available_threads = std::thread::available_parallelism()
@@ -282,10 +269,6 @@ pub fn run_embedding(
     let n_threads = crate::app::resolve_thread_count(n_threads_arg, available_threads);
 
     let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-    if output == EmbeddingOutput::Summary {
-        println!("Prompt: {} ({} tokens)", prompt, n_tokens);
-    }
 
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
     let group_size = n_head / n_head_kv;
@@ -317,7 +300,6 @@ pub fn run_embedding(
         embedding_lookup(embd_weight, token_id as u32, n_embd, embd_type, x_slice);
     }
 
-    let t_embed = Instant::now();
     for layer in 0..n_layer {
         let lw = &layers[layer];
 
@@ -461,8 +443,7 @@ pub fn run_embedding(
             &mut q8_buf,
             &mut scale_buf,
             &pool,
-        )
-        .unwrap_or_else(|error| panic!("Embedding FFN failed: {error}"));
+        )?;
     }
 
     for t in 0..n_tokens {
@@ -476,23 +457,39 @@ pub fn run_embedding(
         x.copy_from_slice(&normed[t * n_embd..(t + 1) * n_embd]);
     }
 
-    let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)
-        .unwrap_or_else(|error| {
-            eprintln!("Embedding pooling error: {error}");
+    let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
+    l2_normalize_embedding(&mut pooled)?;
+    Ok(pooled)
+}
+
+pub fn run_embedding(
+    source: &dyn TensorSource,
+    prompt: &str,
+    n_threads_arg: usize,
+    _kv_format: crate::app::cli::KvFormat,
+    output: EmbeddingOutput,
+) {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    let config = model_config_from_source(source).expect("Failed to parse model config");
+    let t0 = Instant::now();
+    let pooled = match compute_embedding(source, prompt, n_threads_arg) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
             std::process::exit(1);
-        });
-
-    l2_normalize_embedding(&mut pooled).unwrap_or_else(|error| {
-        eprintln!("Embedding normalization error: {error}");
-        std::process::exit(1);
-    });
-
-    let embed_ms = t_embed.elapsed().as_millis();
+        }
+    };
+    let load_ms = t0.elapsed().as_millis();
+    let n_embd = config.n_embd;
+    let n_layer = config.n_layer;
     match output {
         EmbeddingOutput::Summary => {
             println!(
-                "Embedding ({} dims, {} layers, {}ms):",
-                n_embd, n_layer, embed_ms
+                "Embedding ({} dims, {} layers, arch={} {}ms):",
+                n_embd, n_layer, arch, load_ms
             );
             for value in pooled.iter().take(8) {
                 print!("{value:.9} ");
