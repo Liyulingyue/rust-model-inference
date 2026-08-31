@@ -1818,6 +1818,7 @@ version = "0.1.0"
 dependencies = [
  "ash 0.37.3+1.3.251",
  "axum",
+ "base64",
  "bytemuck",
  "futures",
  "half",

@@ -545,7 +545,7 @@ impl Qwen3TtsTalker {
     }
 }
 
-pub(crate) struct TtsSession<'model> {
+pub struct TtsSession<'model> {
     pub(crate) model: &'model Qwen3TtsTalker,
     pub(crate) kv_cache: KvCache,
     scratch: ExecutionScratchpad,
@@ -554,7 +554,7 @@ pub(crate) struct TtsSession<'model> {
 }
 
 impl<'model> TtsSession<'model> {
-    pub(crate) fn new(model: &'model Qwen3TtsTalker) -> Result<Self, String> {
+    pub fn new(model: &'model Qwen3TtsTalker) -> Result<Self, String> {
         let config = &model.config;
         let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
         let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
@@ -583,7 +583,7 @@ impl<'model> TtsSession<'model> {
         })
     }
 
-    pub(crate) fn prefill_prompt(&mut self, prompt: &TtsPrompt) -> Result<(), String> {
+    pub fn prefill_prompt(&mut self, prompt: &TtsPrompt) -> Result<(), String> {
         if prompt.embeddings.is_empty() || prompt.embeddings.len() % self.model.config.n_embd != 0 {
             return Err("TTS prompt embeddings have an invalid shape".into());
         }
@@ -614,11 +614,11 @@ impl<'model> TtsSession<'model> {
         Ok(())
     }
 
-    pub(crate) fn sample_semantic<R: Rng + ?Sized>(
-        &mut self,
-        temperature: f32,
-        rng: &mut R,
-    ) -> Result<Option<u32>, String> {
+pub fn sample_semantic<R: Rng + ?Sized>(
+    &mut self,
+    temperature: f32,
+    rng: &mut R,
+) -> Result<Option<u32>, String> {
         let logits = self.compute_logits()?;
         sample_semantic_logits(
             &logits,
@@ -644,7 +644,7 @@ impl TtsSession<'_> {
     /// embedding instead of looking up `token_embedding`. Used by the codec
     /// pipeline to feed `out_embd` from the previous frame's code predictor
     /// back into the talker as the next frame's input.
-    pub(crate) fn forward_step_with_embedding(
+    pub fn forward_step_with_embedding(
         &mut self,
         embedding: &[f32],
         position: [usize; 4],
@@ -653,7 +653,7 @@ impl TtsSession<'_> {
     }
 
     /// Borrow the talker's normalized output state used by the code predictor.
-    pub(crate) fn hidden_state(&self) -> &[f32] {
+    pub fn hidden_state(&self) -> &[f32] {
         &self.scratch.normed
     }
 

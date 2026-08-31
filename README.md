@@ -310,11 +310,71 @@ shaders/
 
 ## 服务端模式
 
-提供 REST API 服务：
+`server` 二进制与主 CLI 共用同一份 `app::parse_cli_options`，因此所有模式
+（文本、视觉、音频、ASR、TTS、Embedding、Z-Image 以外的 `qwen3/qwen35/gemma4/hunyuan/lfm2/lfm2moe/llama` 架构）
+都可以通过同一组 OpenAI 兼容 HTTP 端点暴露。`--host/--port` 是唯一额外的 server 端参数。
 
 ```bash
-cargo run --release --bin server
+# 文本（qwen3、qwen35 等）
+cargo run --release --bin server -- \
+  --model models/Qwen3-0.6B-Q8_0.gguf --host 0.0.0.0 --port 8080 --threads 4
+
+# Embedding（Qwen3-Embedding）
+cargo run --release --bin server -- \
+  --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding
+
+# ASR（Qwen3-ASR + mmproj）
+cargo run --release --bin server -- \
+  --model models/Qwen3-ASR-0.6B-Q8_0.gguf \
+  --mmproj models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf \
+  --audio models/001_16k.wav --language en
+
+# TTS（Qwen3-TTS + mmproj）
+cargo run --release --bin server -- \
+  --model models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --mmproj models/Qwen3-TTS/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --tts --language cn
 ```
+
+### 端点
+
+| 路径 | 方法 | 模式 | 说明 |
+|------|------|------|------|
+| `/health` | GET | any | liveness probe |
+| `/v1/models` | GET | any | 模型列表 |
+| `/v1/chat/completions` | POST | text | OpenAI Chat Completions，支持 `stream: true` (SSE) |
+| `/v1/embeddings` | POST | embedding | OpenAI Embeddings（字符串或字符串数组） |
+| `/v1/audio/transcriptions` | POST | asr | OpenAI Audio Transcriptions（multipart：`file`、`language`、`prompt`） |
+| `/v1/audio/transcriptions_json` | POST | asr | 同上，但用 JSON 体，`input` 字段为 base64 WAV |
+| `/v1/audio/speech` | POST | tts | OpenAI Audio Speech：`input` 是文本，`voice` 接受 `file://path` 或 `data:audio/wav;base64,...` 形式的参考音频 |
+
+### 示例
+
+```bash
+# Chat Completions (stream)
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"1+1="}],"max_tokens":10,"temperature":0,"stream":true}'
+
+# Embeddings
+curl http://localhost:8080/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"hello world"}'
+
+# ASR (multipart)
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F file=@models/001_16k.wav -F language=en
+
+# TTS
+curl http://localhost:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-tts","input":"你好，这是一个测试。"}' \
+  --output out.wav
+```
+
+**当前未覆盖：** 单次请求级别传入图片/音频的视觉多模态（VL 模型的图像通过 CLI
+`--image` 在 server 启动时固定传入）；`gemma4 / hunyuan / lfm2 / llama` 等文本架构
+的服务端流式输出（CLI 仍可用，详见 `cargo run --bin rust-model-inference -- --help`）。
 
 ## License
 

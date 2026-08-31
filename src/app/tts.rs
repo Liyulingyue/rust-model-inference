@@ -5,11 +5,12 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::qwen3::tts::codec::{
-    write_wav_f32, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
+    encode_wav_pcm16, write_wav_f32, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
 use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
 use std::cell::Cell;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -96,6 +97,59 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         started.elapsed().as_secs_f64(),
     );
     Ok(())
+}
+
+pub fn synthesize_tts_to_wav(
+    model_path: &Path,
+    mmproj_path: &Path,
+    prompt_text: &str,
+    language: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    ref_wav_bytes: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    if prompt_text.trim().is_empty() {
+        return Err("TTS prompt must not be empty".into());
+    }
+    let source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    crate::app::reject_incomplete_z_image_architecture(arch)?;
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })?);
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(n_threads_arg, available)));
+    let talker = Qwen3TtsTalker::from_source(source, tokenizer, pool)?;
+    let mmproj_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(mmproj_path, ComponentRole::Mmproj));
+    let speaker = if let Some(wav) = ref_wav_bytes {
+        let mel = reference_wav_to_mel(wav)?;
+        Some(Qwen3TtsSpeakerEncoder::from_source(mmproj_source.as_ref())?.encode(&mel)?)
+    } else {
+        None
+    };
+    let prompt = talker.prepare_prompt(prompt_text, language, speaker.as_deref())?;
+    let predictor = CodePredictor::from_source(mmproj_source.as_ref())?;
+    let decoder = Code2WavDecoder::from_source(mmproj_source.as_ref())?;
+    let mut rng = rand::thread_rng();
+    let frames = generate_tts_frames(
+        &talker,
+        &predictor,
+        &prompt,
+        max_tokens,
+        temperature,
+        &mut rng,
+    )?;
+    let waveform = decoder.decode(&frames)?;
+    encode_wav_pcm16(&waveform, WAVEFORM_SAMPLE_RATE)
+        .map_err(|error| format!("WAV encode failed: {error}"))
 }
 
 fn drive_frames(
