@@ -1,19 +1,19 @@
-﻿// Qwen3-Audio model: transformer-based audio encoder.
+// Qwen3-Audio model: transformer-based audio encoder.
 //
 // Phase 4b split from qwen3a.rs. Owns: Qwen3AudioConfig, Qwen3AudioModel, the per-layer
 // weight structs, validate_qwen3a_source, and corresponding tests.
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
-use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::quant::BlockQ8K;
+use crate::core::thread_pool::ComputePool;
+use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
-use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
+use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel, quantize_q8_0_into,
-    vec_mad_f32,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
+    quantize_q8_0_into, vec_mad_f32,
 };
-use crate::core::thread_pool::ComputePool;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -330,7 +330,7 @@ impl Qwen3AudioModel {
                 self.config.epsilon,
                 &mut scratch.normed,
             )?;
-            layer.q.project_q8(
+            layer.q.project(
                 &scratch.normed,
                 hidden.tokens,
                 &self.pool,
@@ -338,7 +338,7 @@ impl Qwen3AudioModel {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            layer.k.project_q8(
+            layer.k.project(
                 &scratch.normed,
                 hidden.tokens,
                 &self.pool,
@@ -346,7 +346,7 @@ impl Qwen3AudioModel {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            layer.v.project_q8(
+            layer.v.project(
                 &scratch.normed,
                 hidden.tokens,
                 &self.pool,
@@ -364,7 +364,7 @@ impl Qwen3AudioModel {
                 &mut scratch.scores,
                 &mut scratch.attention,
             )?;
-            layer.output.project_q8(
+            layer.output.project(
                 &scratch.attention,
                 hidden.tokens,
                 &self.pool,
@@ -495,14 +495,8 @@ impl Qwen3AudioModel {
                     .copy_from_slice(&window_values[source_start..source_end]);
             }
 
-            let (height, width) = conv2d_stride2_padding1(
-                &chunk,
-                1,
-                MEL_BINS,
-                CHUNK_FRAMES,
-                conv0,
-                &mut stage_a,
-            )?;
+            let (height, width) =
+                conv2d_stride2_padding1(&chunk, 1, MEL_BINS, CHUNK_FRAMES, conv0, &mut stage_a)?;
             apply_gelu(&mut stage_a)?;
             let (height, width) =
                 conv2d_stride2_padding1(&stage_a, 480, height, width, conv1, &mut stage_b)?;
@@ -526,16 +520,12 @@ impl Qwen3AudioModel {
             ));
 
             flatten_conv_output(&stage_a, 480, height, width, &mut flattened)?;
-            conv_out
-                .project_f16(&flattened, width, &mut projected)?;
+            conv_out.project_f16(&flattened, width, &mut projected)?;
             let tcc2 = std::time::Instant::now();
 
             // Only chunk 0 reports timing (matches original behaviour).
             let timing = if chunk_index == 0 {
-                Some((
-                    (tcc1 - tcc0).as_secs_f64(),
-                    (tcc2 - tcc1).as_secs_f64(),
-                ))
+                Some(((tcc1 - tcc0).as_secs_f64(), (tcc2 - tcc1).as_secs_f64()))
             } else {
                 None
             };
@@ -620,9 +610,17 @@ impl AudioLinear {
         output: usize,
         kind: GGMLType,
     ) -> Result<Self, String> {
+        let kind = if kind == GGMLType::Q8_0 {
+            source
+                .tensor_info(weight_name)
+                .map(|info| info.ggml_type)
+                .unwrap_or(kind)
+        } else {
+            kind
+        };
         let allowed = (weight_name == "a.conv_out.weight" && kind == GGMLType::F16)
             || (kind == GGMLType::F16 && is_qwen25_omni_audio_linear(weight_name))
-            || (kind == GGMLType::Q8_0 && is_q8_audio_linear(weight_name));
+            || (matches!(kind, GGMLType::Q8_0 | GGMLType::BF16) && is_q8_audio_linear(weight_name));
         if !allowed {
             return Err(format!(
                 "Unsupported audio linear tensor {weight_name} type {kind:?}"
@@ -690,7 +688,7 @@ impl AudioLinear {
             })
     }
 
-    fn project_q8(
+    fn project(
         &self,
         input: &[f32],
         rows: usize,
@@ -699,6 +697,18 @@ impl AudioLinear {
         q8: &mut [u8],
         scales: &mut [f32],
     ) -> Result<(), String> {
+        match self.weight.ggml_type {
+            GGMLType::F16 | GGMLType::BF16 => {
+                return self.project_dense(input, rows, result);
+            }
+            GGMLType::Q8_0 => {}
+            _ => {
+                return Err(format!(
+                    "Unsupported audio projection type {:?}",
+                    self.weight.ggml_type
+                ))
+            }
+        }
         if self.weight.ggml_type != GGMLType::Q8_0
             || rows == 0
             || self.input == 0
@@ -728,12 +738,7 @@ impl AudioLinear {
             let input_row = &input[row * n_in..(row + 1) * n_in];
             let output_row = &mut result[row * n_out..(row + 1) * n_out];
 
-            quantize_q8_0_into(
-                input_row,
-                n_in,
-                &mut q8[..n_in],
-                &mut scales[..n_in / 32],
-            );
+            quantize_q8_0_into(input_row, n_in, &mut q8[..n_in], &mut scales[..n_in / 32]);
 
             self.weight.kernel.forward_prepared(
                 input_row,
@@ -753,6 +758,44 @@ impl AudioLinear {
                     return Err("Non-finite Q8_0 audio projection output".into());
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn project_dense(
+        &self,
+        input: &[f32],
+        rows: usize,
+        result: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        if !matches!(self.weight.ggml_type, GGMLType::F16 | GGMLType::BF16)
+            || rows == 0
+            || self.input == 0
+            || self.output == 0
+            || (!self.bias.is_empty() && self.bias.len() != self.output)
+            || self.bias.iter().any(|value| !value.is_finite())
+        {
+            return Err("Invalid dense audio projection".into());
+        }
+        let input_len = checked_product("dense audio projection input", rows, self.input)?;
+        if input.len() != input_len || input.iter().any(|value| !value.is_finite()) {
+            return Err("Invalid dense audio projection input".into());
+        }
+        let output_len = checked_product("dense audio projection output", rows, self.output)?;
+        resize_f32(result, "dense audio projection output", output_len)?;
+        for (input_row, output_row) in input
+            .chunks_exact(self.input)
+            .zip(result.chunks_exact_mut(self.output))
+        {
+            self.weight
+                .kernel
+                .forward(input_row, output_row, self.input, self.output);
+            for (value, bias) in output_row.iter_mut().zip(&self.bias) {
+                *value += *bias;
+            }
+        }
+        if result.iter().any(|value| !value.is_finite()) {
+            return Err("Non-finite dense audio projection output".into());
         }
         Ok(())
     }
@@ -1247,8 +1290,7 @@ pub(in crate::models::qwen3) fn full_attention_into(
             output_row.fill(0.0);
 
             for key_token in 0..tokens {
-                let value_row =
-                    &value[key_token * width + head * head_dim..][..head_dim];
+                let value_row = &value[key_token * width + head * head_dim..][..head_dim];
 
                 vec_mad_f32(output_row, value_row, scores[key_token]);
             }
@@ -1293,7 +1335,10 @@ fn add_position_embeddings(
     Ok(())
 }
 
-pub(in crate::models::qwen3) fn add_residual(hidden: &mut [f32], update: &[f32]) -> Result<(), String> {
+pub(in crate::models::qwen3) fn add_residual(
+    hidden: &mut [f32],
+    update: &[f32],
+) -> Result<(), String> {
     if hidden.is_empty()
         || hidden.len() != update.len()
         || hidden.iter().chain(update).any(|value| !value.is_finite())
@@ -1320,7 +1365,7 @@ fn audio_ffn(
     if up.output != down.input || up.input != down.output {
         return Err("Invalid audio FFN shape".into());
     }
-    up.project_q8(
+    up.project(
         input,
         rows,
         pool,
@@ -1329,7 +1374,7 @@ fn audio_ffn(
         &mut scratch.scales,
     )?;
     apply_gelu_erf(&mut scratch.ffn_up)?;
-    down.project_q8(
+    down.project(
         &scratch.ffn_up,
         rows,
         pool,
@@ -1358,7 +1403,7 @@ fn audio_projector(
         return Err("Invalid audio projector shape".into());
     }
     layer_norm_rows(input, rows, post_ln, epsilon, &mut scratch.normed)?;
-    first.project_q8(
+    first.project(
         &scratch.normed,
         rows,
         pool,
@@ -1367,7 +1412,7 @@ fn audio_projector(
         &mut scratch.scales,
     )?;
     apply_gelu_erf(&mut scratch.ffn_up)?;
-    second.project_q8(
+    second.project(
         &scratch.ffn_up,
         rows,
         pool,
@@ -1386,10 +1431,7 @@ pub(in crate::models::qwen3) fn checked_product(
         .ok_or_else(|| format!("{name} overflows usize"))
 }
 
-pub(in crate::models::qwen3) fn reserved_f32(
-    name: &str,
-    len: usize,
-) -> Result<Vec<f32>, String> {
+pub(in crate::models::qwen3) fn reserved_f32(name: &str, len: usize) -> Result<Vec<f32>, String> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(len)
@@ -1428,10 +1470,16 @@ pub(in crate::models::qwen3) fn static_tensor(
     kind: GGMLType,
 ) -> Result<&'static [u8], String> {
     let bytes = checked_tensor(source.as_ref(), name, dims, kind)?;
-    if kind == GGMLType::F16
-        && bytes
-            .chunks_exact(2)
-            .any(|bytes| !f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]])).is_finite())
+    if matches!(kind, GGMLType::F16 | GGMLType::BF16)
+        && bytes.chunks_exact(2).any(|bytes| {
+            let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+            let value = if kind == GGMLType::F16 {
+                f16_to_f32(bits)
+            } else {
+                bf16_to_f32(bits)
+            };
+            !value.is_finite()
+        })
     {
         return Err(format!("Non-finite tensor values: {name}"));
     }
@@ -1546,6 +1594,23 @@ fn require_tensor(
     Ok(())
 }
 
+fn require_audio_linear_tensor(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+) -> Result<(), String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing Qwen3A tensor: {name}"))?;
+    if info.dims != dims || !matches!(info.ggml_type, GGMLType::Q8_0 | GGMLType::BF16) {
+        return Err(format!(
+            "Invalid Qwen3A audio linear {name}: shape {:?} type {:?}; expected {:?} Q8_0 or BF16",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_qwen3a_source(
     source: &dyn TensorSource,
 ) -> Result<Qwen3AudioConfig, String> {
@@ -1570,12 +1635,7 @@ pub(crate) fn validate_qwen3a_source(
     for i in 0..18 {
         let prefix = format!("a.blk.{i}");
         for name in ["attn_q", "attn_k", "attn_v", "attn_out"] {
-            require_tensor(
-                source,
-                &format!("{prefix}.{name}.weight"),
-                &[896, 896],
-                GGMLType::Q8_0,
-            )?;
+            require_audio_linear_tensor(source, &format!("{prefix}.{name}.weight"), &[896, 896])?;
             require_tensor(
                 source,
                 &format!("{prefix}.{name}.bias"),
@@ -1597,24 +1657,14 @@ pub(crate) fn validate_qwen3a_source(
                 GGMLType::F32,
             )?;
         }
-        require_tensor(
-            source,
-            &format!("{prefix}.ffn_up.weight"),
-            &[896, 3584],
-            GGMLType::Q8_0,
-        )?;
+        require_audio_linear_tensor(source, &format!("{prefix}.ffn_up.weight"), &[896, 3584])?;
         require_tensor(
             source,
             &format!("{prefix}.ffn_up.bias"),
             &[3584],
             GGMLType::F32,
         )?;
-        require_tensor(
-            source,
-            &format!("{prefix}.ffn_down.weight"),
-            &[3584, 896],
-            GGMLType::Q8_0,
-        )?;
+        require_audio_linear_tensor(source, &format!("{prefix}.ffn_down.weight"), &[3584, 896])?;
         require_tensor(
             source,
             &format!("{prefix}.ffn_down.bias"),
@@ -1633,13 +1683,13 @@ pub(crate) fn validate_qwen3a_source(
         ("a.conv_out.weight", &[7680, 896][..], GGMLType::F16),
         ("a.post_ln.weight", &[896][..], GGMLType::F32),
         ("a.post_ln.bias", &[896][..], GGMLType::F32),
-        ("mm.a.mlp.1.weight", &[896, 896][..], GGMLType::Q8_0),
         ("mm.a.mlp.1.bias", &[896][..], GGMLType::F32),
-        ("mm.a.mlp.2.weight", &[896, 1024][..], GGMLType::Q8_0),
         ("mm.a.mlp.2.bias", &[1024][..], GGMLType::F32),
     ] {
         require_tensor(source, name, dims, ggml_type)?;
     }
+    require_audio_linear_tensor(source, "mm.a.mlp.1.weight", &[896, 896])?;
+    require_audio_linear_tensor(source, "mm.a.mlp.2.weight", &[896, 1024])?;
 
     Ok(Qwen3AudioConfig {
         hidden,
@@ -1752,6 +1802,31 @@ mod tests {
             output[0].to_bits(),
             crate::ops::dot_f16(&input_f16, &weights, 32).to_bits()
         );
+    }
+
+    #[test]
+    fn bf16_projection_uses_native_bf16_weights() {
+        let weight_bytes = Box::leak(
+            [1.0f32, 2.0, 3.0, 4.0]
+                .into_iter()
+                .flat_map(|value| crate::ops::f32_to_bf16(value).to_le_bytes())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let linear = AudioLinear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight_bytes,
+                GGMLType::BF16,
+                2,
+                2,
+            )),
+            input: 2,
+            output: 2,
+            bias: vec![0.5, -0.5],
+        };
+        let mut output = Vec::new();
+        linear.project_dense(&[1.0, 2.0], 1, &mut output).unwrap();
+        assert_eq!(output, [5.5, 10.5]);
     }
 
     #[test]
@@ -2876,5 +2951,16 @@ mod tests {
         assert!(validate_qwen3a_source(&wrong_projection)
             .unwrap_err()
             .contains("clip.audio.projection_dim"));
+    }
+
+    #[test]
+    fn qwen3a_contract_accepts_bf16_audio_linears() {
+        let mut source = valid_qwen3a_source();
+        source
+            .tensors
+            .get_mut("a.blk.0.attn_q.weight")
+            .unwrap()
+            .ggml_type = GGMLType::BF16;
+        assert!(validate_qwen3a_source(&source).is_ok());
     }
 }

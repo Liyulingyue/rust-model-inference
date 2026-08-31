@@ -11,5 +11,18 @@
 /// uniformly. Multi-modal callers that need per-axis positions should
 /// build their own vector rather than calling this.
 pub fn qwen_text_positions(n_tokens: usize) -> Vec<[usize; 4]> {
-    (0..n_tokens).map(|position| [position; 4]).collect()
+    (0..n_tokens)
+        .map(|position| [position, position, position, 0])
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn text_positions_leave_the_fourth_mrope_axis_zero() {
+        assert_eq!(
+            super::qwen_text_positions(2),
+            vec![[0, 0, 0, 0], [1, 1, 1, 0]]
+        );
+    }
 }

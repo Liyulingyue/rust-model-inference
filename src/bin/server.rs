@@ -38,12 +38,8 @@ use rust_model_inference::models::qwen3::tts::{
 use rust_model_inference::models::qwen3::{
     Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
 };
-use rust_model_inference::models::qwen35::{
-    build_qwen35_positions, Qwen35Model, Qwen35Scratchpad,
-};
-use rust_model_inference::{
-    build_qwen_chat_prompt, KvLifecycle, QwenMessage,
-};
+use rust_model_inference::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Scratchpad};
+use rust_model_inference::{build_qwen_chat_prompt, KvLifecycle, QwenMessage};
 
 // =============================================================================
 // Backend types
@@ -411,7 +407,8 @@ async fn chat_completions(
                 return;
             }
 
-            let result = match generate_streaming(&backend, &req.messages, max_tokens, temperature) {
+            let result = match generate_streaming(&backend, &req.messages, max_tokens, temperature)
+            {
                 Ok(result) => result,
                 Err(error) => {
                     let data = serde_json::to_string(&ErrorResponse { error }).unwrap();
@@ -549,11 +546,7 @@ async fn embeddings(
     let inputs = match inputs {
         Ok(value) => value,
         Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error }),
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
         }
     };
     let source = backend.source.clone();
@@ -693,31 +686,28 @@ async fn transcriptions(
         max_new_tokens: 256,
     };
     let runtime = backend.runtime.clone();
-    let transcription = match tokio::task::spawn_blocking(move || {
-        runtime.transcribe_wav(&wav, &options)
-    })
-    .await
-    {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse {
-                    error: error.to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("asr worker failed: {error}"),
-                }),
-            )
-                .into_response();
-        }
-    };
+    let transcription =
+        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("asr worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
     let response = TranscriptionResponse {
         text: transcription.text,
     };
@@ -767,31 +757,28 @@ async fn transcriptions_json(
         max_new_tokens: 256,
     };
     let runtime = backend.runtime.clone();
-    let transcription = match tokio::task::spawn_blocking(move || {
-        runtime.transcribe_wav(&wav, &options)
-    })
-    .await
-    {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse {
-                    error: error.to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("asr worker failed: {error}"),
-                }),
-            )
-                .into_response();
-        }
-    };
+    let transcription =
+        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("asr worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
     let response = TranscriptionResponse {
         text: transcription.text,
     };
@@ -1009,12 +996,8 @@ fn generate_qwen3_streaming(
     let input_tokens = build_qwen_chat_prompt(tokenizer, &messages, false)?;
     let prompt_tokens = input_tokens.len();
     let max_ctx = model.config().n_ctx.min(4096);
-    let mut session = Qwen3Session::new_with_kv_state(
-        model,
-        max_ctx,
-        KvFormat::F16,
-        KvLifecycle::Ephemeral,
-    )?;
+    let mut session =
+        Qwen3Session::new_with_kv_state(model, max_ctx, KvFormat::F16, KvLifecycle::Ephemeral)?;
     let positions: Vec<[usize; 4]> = (0..input_tokens.len()).map(|i| [i, 0, 0, 0]).collect();
     let mut token_strings: Vec<String> = Vec::new();
     let generation = session.generate_streaming(
@@ -1022,6 +1005,7 @@ fn generate_qwen3_streaming(
             token_ids: &input_tokens,
             positions: &positions,
             embeddings: None,
+            deepstack_embeddings: None,
         },
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
@@ -1099,7 +1083,12 @@ fn generate_qwen35_streaming(
                 }
             }
         }
-        let decode_position = [[next_text_position, next_text_position, next_text_position, 0]];
+        let decode_position = [[
+            next_text_position,
+            next_text_position,
+            next_text_position,
+            0,
+        ]];
         let positions = if step == 0 {
             &prompt_positions[..]
         } else {
@@ -1166,8 +1155,7 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 }
 
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")
         .and_then(rust_model_inference::MetaValue::to_string_val)
@@ -1223,8 +1211,9 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
     }
     let audio_source = match options.mmproj.as_deref() {
         Some(path) => Arc::from(open_or_exit(path, ComponentRole::Mmproj)),
-        None => open_bundled_audio_source(&options.model)?
-            .ok_or("raw GGUF ASR requires --mmproj")?,
+        None => {
+            open_bundled_audio_source(&options.model)?.ok_or("raw GGUF ASR requires --mmproj")?
+        }
     };
     let runtime = AsrRuntime::new(decoder, audio_source).map_err(|error| error.to_string())?;
     Ok(AsrBackend {
@@ -1233,8 +1222,7 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
 }
 
 fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
         source.metadata(k).cloned()
     })?);
@@ -1318,7 +1306,11 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    if !options.tts && options.audio.is_none() && !options.embedding && options.model.as_os_str().is_empty() {
+    if !options.tts
+        && options.audio.is_none()
+        && !options.embedding
+        && options.model.as_os_str().is_empty()
+    {
         eprintln!("Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4]");
         std::process::exit(1);
     }

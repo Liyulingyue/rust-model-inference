@@ -1,5 +1,8 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
+use crate::models::qwen3::asr::audio_processor::log_mel_windows;
 use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
+use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
     add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows,
     load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
@@ -329,10 +332,30 @@ impl Qwen25OmniAudioModel {
 pub fn encode_audio(
     source: Arc<dyn TensorSource>,
     samples: &[f32],
-    _threads: usize,
+    threads: usize,
 ) -> Result<Vec<f32>, String> {
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err("Audio samples must be non-empty and finite".into());
+    }
+    if source
+        .metadata("clip.audio.projector_type")
+        .and_then(MetaValue::to_string_val)
+        .is_some_and(|value| value == "qwen3a")
+    {
+        let n_threads = if threads == 0 {
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(1)
+        } else {
+            threads
+        };
+        let model = Qwen3AudioModel::from_source(
+            Arc::clone(&source),
+            Arc::new(ComputePool::new(n_threads)),
+        )?;
+        let windows =
+            log_mel_windows(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
+        return Ok(model.encode(&windows)?.values);
     }
     Qwen25OmniAudioModel::from_source(source)?.encode(samples)
 }
@@ -980,5 +1003,40 @@ mod tests {
     fn encode_audio_rejects_empty_samples_before_loading_weights() {
         let error = encode_audio(Arc::new(valid_source()), &[], 1).unwrap_err();
         assert!(error.contains("non-empty"), "{error}");
+    }
+
+    #[test]
+    fn encode_audio_dispatches_qwen3a_to_the_qwen3_audio_tower() {
+        let mut source = valid_source();
+        source.metadata.insert(
+            "clip.projector_type".into(),
+            MetaValue::String("qwen3vl_merger".into()),
+        );
+        source.metadata.insert(
+            "clip.audio.projector_type".into(),
+            MetaValue::String("qwen3a".into()),
+        );
+        source
+            .metadata
+            .insert("clip.audio.embedding_length".into(), MetaValue::Uint32(896));
+        source.metadata.insert(
+            "clip.audio.feed_forward_length".into(),
+            MetaValue::Uint32(3584),
+        );
+        source
+            .metadata
+            .insert("clip.audio.block_count".into(), MetaValue::Uint32(18));
+        source.metadata.insert(
+            "clip.audio.attention.head_count".into(),
+            MetaValue::Uint32(14),
+        );
+        source
+            .metadata
+            .insert("clip.audio.projection_dim".into(), MetaValue::Uint32(1024));
+        let error = encode_audio(Arc::new(source), &[0.0, 0.0, 0.0], 1).unwrap_err();
+        assert!(
+            error.contains("Qwen3A") || error.contains("Qwen3Audio"),
+            "{error}"
+        );
     }
 }

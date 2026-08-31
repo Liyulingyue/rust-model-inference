@@ -1,5 +1,5 @@
 use crate::app::cli::EmbeddingOutput;
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::models::qwen3::embedding::{print_embedding, run_embedding_tokens, MediaEmbeddings};
@@ -10,10 +10,53 @@ use std::process::Command;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaKind {
+pub enum MediaKind {
     Image,
     Video,
     Audio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectorFamily {
+    Qwen3VlMerger,
+    Qwen25Omni,
+}
+
+pub fn validate_mmproj_capabilities(
+    llm_arch: &str,
+    mmproj: &dyn TensorSource,
+    media: MediaKind,
+) -> Result<ProjectorFamily, String> {
+    let family = match llm_arch {
+        "qwen3vl" | "qwen3vlmoe" => ProjectorFamily::Qwen3VlMerger,
+        "qwen2vl" | "qwen35" => ProjectorFamily::Qwen25Omni,
+        other => return Err(format!("Unsupported multimodal architecture: {other}")),
+    };
+    if llm_arch == "qwen3vl" && media == MediaKind::Audio {
+        return Err("Qwen3-VL does not support audio input".into());
+    }
+    if let Some(projector) = mmproj
+        .metadata("clip.projector_type")
+        .and_then(|v| v.to_string_val())
+    {
+        let expected = match family {
+            ProjectorFamily::Qwen3VlMerger => "qwen3vl_merger",
+            ProjectorFamily::Qwen25Omni => "qwen2.5o",
+        };
+        if projector != expected {
+            return Err(format!(
+                "{llm_arch} requires projector {expected}, got {projector}"
+            ));
+        }
+    }
+    let has_encoder = match media {
+        MediaKind::Audio => "clip.has_audio_encoder",
+        MediaKind::Image | MediaKind::Video => "clip.has_vision_encoder",
+    };
+    if let Some(MetaValue::Bool(false)) = mmproj.metadata(has_encoder) {
+        return Err(format!("mmproj does not provide {has_encoder}"));
+    }
+    Ok(family)
 }
 
 fn marker_names(kind: MediaKind) -> (&'static str, &'static str, &'static str) {
@@ -62,7 +105,7 @@ fn append_media_markers(
     }
 }
 
-fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
+pub(crate) fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
     let probe = Command::new("ffprobe")
         .args([
             "-v",
@@ -150,7 +193,7 @@ fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
     Ok(frames)
 }
 
-fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
+pub(crate) fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
     let decoded = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
@@ -299,6 +342,15 @@ pub fn run_omni_embedding(
     output: EmbeddingOutput,
 ) -> Result<(), String> {
     let started = std::time::Instant::now();
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if source.metadata(&format!("{arch}.pooling_type")).is_none() {
+        return Err(format!(
+            "embedding mode requires a Jina embedding model (got architecture {arch})"
+        ));
+    }
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     let media_count = usize::from(image_path.is_some())
@@ -416,5 +468,97 @@ mod tests {
             marker_names(MediaKind::Video),
             ("vision_start", "video_pad", "vision_end")
         );
+    }
+
+    #[test]
+    fn generative_qwen_architecture_rejects_omni_embedding_mode() {
+        use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+        use std::collections::HashMap;
+
+        struct Source {
+            metadata: HashMap<String, MetaValue>,
+        }
+
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                self.metadata.get(key)
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+
+        let source = Source {
+            metadata: HashMap::from([(
+                "general.architecture".into(),
+                MetaValue::String("qwen2vl".into()),
+            )]),
+        };
+        let error = run_omni_embedding(
+            &source,
+            Path::new("unused.mmproj"),
+            Some(Path::new("image.png")),
+            None,
+            None,
+            "prompt",
+            1,
+            EmbeddingOutput::Summary,
+        )
+        .unwrap_err();
+        assert!(error.contains("Jina embedding model"), "{error}");
+    }
+
+    #[test]
+    fn multimodal_capabilities_match_qwen_projector_families() {
+        use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+        use std::collections::HashMap;
+
+        struct Source {
+            metadata: HashMap<String, MetaValue>,
+        }
+
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                self.metadata.get(key)
+            }
+            fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+
+        let qwen25 = Source {
+            metadata: HashMap::from([
+                (
+                    "clip.projector_type".into(),
+                    MetaValue::String("qwen2.5o".into()),
+                ),
+                ("clip.has_vision_encoder".into(), MetaValue::Bool(true)),
+            ]),
+        };
+        assert_eq!(
+            validate_mmproj_capabilities("qwen2vl", &qwen25, MediaKind::Video),
+            Ok(ProjectorFamily::Qwen25Omni)
+        );
+
+        let qwen3 = Source {
+            metadata: HashMap::from([
+                (
+                    "clip.projector_type".into(),
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.has_audio_encoder".into(), MetaValue::Bool(true)),
+            ]),
+        };
+        assert_eq!(
+            validate_mmproj_capabilities("qwen3vlmoe", &qwen3, MediaKind::Audio),
+            Ok(ProjectorFamily::Qwen3VlMerger)
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", &qwen3, MediaKind::Audio).is_err());
     }
 }

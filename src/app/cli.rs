@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub use crate::core::scratchpad::KvFormat;
@@ -400,7 +400,11 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     z_image_cli_options(options)?;
     if options.tts {
-        if options.prompt.as_deref().is_none_or(|value| value.trim().is_empty()) {
+        if options
+            .prompt
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
             return Err("--tts requires a non-empty --prompt".into());
         }
         if options
@@ -446,10 +450,10 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if options.ref_audio.is_some() {
         return Err("--ref-audio requires --tts".into());
     }
+    let media_count = usize::from(options.image.is_some())
+        + usize::from(options.video.is_some())
+        + usize::from(options.audio.is_some());
     if options.embedding {
-        let media_count = usize::from(options.image.is_some())
-            + usize::from(options.video.is_some())
-            + usize::from(options.audio.is_some());
         if media_count > 1 {
             return Err("--embedding accepts only one of --image, --video, or --audio".into());
         }
@@ -465,7 +469,14 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
     }
     if options.video.is_some() {
-        return Err("--video requires --embedding".into());
+        if options
+            .mmproj
+            .as_deref()
+            .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            return Err("--video requires --mmproj".into());
+        }
+        return Ok(());
     }
     if options.audio.is_none() {
         return if options.language.is_some() {
@@ -495,9 +506,6 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if let Some(conflict) = conflict {
         return Err(format!("--audio cannot be used with {conflict}"));
     }
-    if options.temperature.is_some_and(|temperature| temperature != 0.0) {
-        return Err("--audio requires greedy decoding; --temp must be 0".into());
-    }
     if options.max_tokens == Some(0) {
         return Err("--audio requires --max-tokens greater than 0".into());
     }
@@ -515,7 +523,9 @@ pub fn resolve_cli_generation_options(options: &CliOptions) -> (usize, f32) {
     )
 }
 
-pub fn transcription_options(options: &CliOptions) -> crate::models::qwen3::asr::model::TranscriptionOptions {
+pub fn transcription_options(
+    options: &CliOptions,
+) -> crate::models::qwen3::asr::model::TranscriptionOptions {
     let language = options
         .language
         .as_ref()
@@ -531,9 +541,9 @@ pub fn transcription_options(options: &CliOptions) -> crate::models::qwen3::asr:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3::asr::model::{normalize_language, TranscriptionOptions};
     use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use crate::core::tokenizer::BPETokenizer;
+    use crate::models::qwen3::asr::model::{normalize_language, TranscriptionOptions};
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -627,15 +637,7 @@ mod tests {
         )
         .is_ok());
         assert!(
-            validate_qwen3vl_decoder_mode(
-                "qwen3",
-                true,
-                true,
-                true,
-                KvFormat::F32,
-                true
-            )
-            .is_ok()
+            validate_qwen3vl_decoder_mode("qwen3", true, true, true, KvFormat::F32, true).is_ok()
         );
     }
 
@@ -650,6 +652,35 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn video_input_is_parsed_and_media_inputs_are_exclusive() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "model.gguf",
+            "--video",
+            "clip.mp4",
+        ]))
+        .unwrap();
+        assert_eq!(options.video.as_deref(), Some(Path::new("clip.mp4")));
+        assert!(options.audio.is_none());
+
+        let mixed = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "model.gguf",
+            "--embedding",
+            "--image",
+            "still.png",
+            "--video",
+            "clip.mp4",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&mixed)
+            .unwrap_err()
+            .contains("only one of --image, --video, or --audio"));
     }
 
     #[test]
@@ -673,7 +704,10 @@ mod tests {
         assert_eq!(z_image_cli_options(&complete).unwrap().unwrap().seed, 42);
         for argv in [
             ["rmi", "--model", "dit.gguf", "--text-encoder", "text.gguf"].as_slice(),
-            ["rmi", "--model", "dit.gguf", "--vae", "vae.gguf", "--prompt", "fox"].as_slice(),
+            [
+                "rmi", "--model", "dit.gguf", "--vae", "vae.gguf", "--prompt", "fox",
+            ]
+            .as_slice(),
         ] {
             assert!(
                 z_image_cli_options(&parse_cli_options(&args(argv)).unwrap()).is_err(),
@@ -827,14 +861,7 @@ mod tests {
             vec!["rmi", "--tts", "--prompt", "hello", "--out", "output.wav"],
             vec!["rmi", "--tts", "--prompt", "hello", "--mmproj", "mm.gguf"],
             vec![
-                "rmi",
-                "--tts",
-                "--prompt",
-                "",
-                "--mmproj",
-                "mm.gguf",
-                "--out",
-                "o.wav",
+                "rmi", "--tts", "--prompt", "", "--mmproj", "mm.gguf", "--out", "o.wav",
             ],
         ] {
             let options = parse(&args);
@@ -882,19 +909,25 @@ mod tests {
     fn asr_cli_rejects_conflicting_modes_before_model_load() {
         let mut options = asr_cli_options();
         options.dump_logits = true;
-        assert!(validate_cli_options(&options).unwrap_err().contains("--dump-logits"));
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("--dump-logits"));
 
         let mut options = asr_cli_options();
         options.bench = true;
-        assert!(validate_cli_options(&options).unwrap_err().contains("--bench"));
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("--bench"));
 
         let mut options = asr_cli_options();
         options.profile = true;
-        assert!(validate_cli_options(&options).unwrap_err().contains("--profile"));
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("--profile"));
 
         let mut options = asr_cli_options();
         options.temperature = Some(0.1);
-        assert!(validate_cli_options(&options).unwrap_err().contains("--temp"));
+        assert!(validate_cli_options(&options).is_ok());
 
         let mut options = asr_cli_options();
         options.max_tokens = Some(0);
@@ -905,7 +938,9 @@ mod tests {
         let mut options = asr_cli_options();
         options.audio = None;
         options.language = Some("English".into());
-        assert!(validate_cli_options(&options).unwrap_err().contains("--language"));
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("--language"));
 
         let mut options = asr_cli_options();
         options.prompt = Some("domain context".into());
@@ -959,9 +994,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        assert!(parse_cli_options(&args)
-            .unwrap_err()
-            .contains("--language"));
+        assert!(parse_cli_options(&args).unwrap_err().contains("--language"));
 
         let args: Vec<String> = ["rmi", "-recording.wav", "--language", "English"]
             .into_iter()
@@ -984,11 +1017,11 @@ mod tests {
         .collect();
         let options = parse_cli_options(&args).unwrap();
         assert!(validate_cli_options(&options).is_ok());
-        assert!(normalize_language(
-            transcription_options(&options).language.as_deref()
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            normalize_language(transcription_options(&options).language.as_deref())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1029,35 +1062,119 @@ mod tests {
     #[test]
     fn omni_embedding_accepts_exactly_one_media_kind() {
         let image = parse_cli_options(&args(&[
-            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "vision.gguf",
-            "--image", "image.png", "--prompt", "Document: caption",
+            "rmi",
+            "--model",
+            "text.gguf",
+            "--embedding",
+            "--mmproj",
+            "vision.gguf",
+            "--image",
+            "image.png",
+            "--prompt",
+            "Document: caption",
         ]))
         .unwrap();
         assert!(validate_cli_options(&image).is_ok());
 
         let video = parse_cli_options(&args(&[
-            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "vision.gguf",
-            "--video", "video.mp4", "--prompt", "Document: clip",
+            "rmi",
+            "--model",
+            "text.gguf",
+            "--embedding",
+            "--mmproj",
+            "vision.gguf",
+            "--video",
+            "video.mp4",
+            "--prompt",
+            "Document: clip",
         ]))
         .unwrap();
         assert_eq!(video.video.as_deref(), Some(Path::new("video.mp4")));
         assert!(validate_cli_options(&video).is_ok());
 
         let audio = parse_cli_options(&args(&[
-            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "audio.gguf",
-            "--audio", "audio.flac", "--prompt", "Document: sound",
+            "rmi",
+            "--model",
+            "text.gguf",
+            "--embedding",
+            "--mmproj",
+            "audio.gguf",
+            "--audio",
+            "audio.flac",
+            "--prompt",
+            "Document: sound",
         ]))
         .unwrap();
         assert!(validate_cli_options(&audio).is_ok());
 
         for argv in [
-            ["rmi", "--embedding", "--mmproj", "m.gguf", "--image", "i.png", "--video", "v.mp4"].as_slice(),
-            ["rmi", "--embedding", "--mmproj", "m.gguf", "--video", "v.mp4", "--audio", "a.wav"].as_slice(),
-            ["rmi", "--embedding", "--mmproj", "m.gguf", "--image", "i.png", "--audio", "a.wav"].as_slice(),
+            [
+                "rmi",
+                "--embedding",
+                "--mmproj",
+                "m.gguf",
+                "--image",
+                "i.png",
+                "--video",
+                "v.mp4",
+            ]
+            .as_slice(),
+            [
+                "rmi",
+                "--embedding",
+                "--mmproj",
+                "m.gguf",
+                "--video",
+                "v.mp4",
+                "--audio",
+                "a.wav",
+            ]
+            .as_slice(),
+            [
+                "rmi",
+                "--embedding",
+                "--mmproj",
+                "m.gguf",
+                "--image",
+                "i.png",
+                "--audio",
+                "a.wav",
+            ]
+            .as_slice(),
         ] {
             let error = validate_cli_options(&parse_cli_options(&args(argv)).unwrap()).unwrap_err();
-            assert!(error.contains("one of --image, --video, or --audio"), "{argv:?}: {error}");
+            assert!(
+                error.contains("one of --image, --video, or --audio"),
+                "{argv:?}: {error}"
+            );
         }
+    }
+
+    #[test]
+    fn generative_video_requires_mmproj_and_media_is_exclusive() {
+        let video = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "text.gguf",
+            "--mmproj",
+            "vision.gguf",
+            "--video",
+            "video.mp4",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&video).is_ok());
+
+        let missing_mmproj = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "text.gguf",
+            "--video",
+            "video.mp4",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&missing_mmproj)
+            .unwrap_err()
+            .contains("--mmproj"));
     }
 
     #[test]
@@ -1084,19 +1201,76 @@ mod tests {
             parse_cli_options(&args).unwrap()
         };
         let cases: &[(&[&str], &str, Check)] = &[
-            (&["rmi", "--embedding", "--prompt", "x"], "embedding", |o| o.embedding && o.prompt.as_deref() == Some("x")),
-            (&["rmi", "--image", "image.png"], "image", |o| o.image.as_deref() == Some(Path::new("image.png"))),
-            (&["rmi", "--mmproj", "projector.gguf"], "mmproj", |o| o.mmproj.as_deref() == Some(Path::new("projector.gguf"))),
-            (&["rmi", "--model", "model.gguf"], "interactive", |o| o.prompt.is_none() && o.image.is_none() && o.mmproj.is_none()),
-            (&["rmi", "positional", "--prompt", "x"], "unknown/positional", |o| o.prompt.as_deref() == Some("x")),
-            (&["rmi"], "text defaults", |o| resolve_cli_generation_options(o) == (128, 0.6)),
-            (&["rmi", "--max-tokens", "bad"], "malformed max", |o| o.max_tokens == Some(128)),
-            (&["rmi", "--n-gen", "bad"], "malformed n-gen", |o| o.max_tokens == Some(128)),
-            (&["rmi", "--temp", "bad"], "malformed temp", |o| o.temperature == Some(0.6)),
-            (&["rmi", "--threads", "bad"], "malformed threads", |o| o.threads == 0),
-            (&["rmi", "--kv-cache", "f32"], "F32 KV", |o| o.kv_format == KvFormat::F32),
-            (&["rmi", "--kv-cache", "bad"], "fallback F16 KV", |o| o.kv_format == KvFormat::F16),
-            (&["rmi", "--model", "", "--prompt", "", "--max-tokens", "", "--temp", "", "--threads", "", "--kv-cache", "", "--mmproj", "", "--image", ""], "empty legacy values", |o| o.model.as_os_str().is_empty() && o.prompt.as_deref() == Some("") && o.max_tokens == Some(128) && o.temperature == Some(0.6) && o.threads == 0 && o.kv_format == KvFormat::F16 && o.mmproj.as_deref() == Some(Path::new("")) && o.image.as_deref() == Some(Path::new(""))),
+            (&["rmi", "--embedding", "--prompt", "x"], "embedding", |o| {
+                o.embedding && o.prompt.as_deref() == Some("x")
+            }),
+            (&["rmi", "--image", "image.png"], "image", |o| {
+                o.image.as_deref() == Some(Path::new("image.png"))
+            }),
+            (&["rmi", "--mmproj", "projector.gguf"], "mmproj", |o| {
+                o.mmproj.as_deref() == Some(Path::new("projector.gguf"))
+            }),
+            (&["rmi", "--model", "model.gguf"], "interactive", |o| {
+                o.prompt.is_none() && o.image.is_none() && o.mmproj.is_none()
+            }),
+            (
+                &["rmi", "positional", "--prompt", "x"],
+                "unknown/positional",
+                |o| o.prompt.as_deref() == Some("x"),
+            ),
+            (&["rmi"], "text defaults", |o| {
+                resolve_cli_generation_options(o) == (128, 0.6)
+            }),
+            (&["rmi", "--max-tokens", "bad"], "malformed max", |o| {
+                o.max_tokens == Some(128)
+            }),
+            (&["rmi", "--n-gen", "bad"], "malformed n-gen", |o| {
+                o.max_tokens == Some(128)
+            }),
+            (&["rmi", "--temp", "bad"], "malformed temp", |o| {
+                o.temperature == Some(0.6)
+            }),
+            (&["rmi", "--threads", "bad"], "malformed threads", |o| {
+                o.threads == 0
+            }),
+            (&["rmi", "--kv-cache", "f32"], "F32 KV", |o| {
+                o.kv_format == KvFormat::F32
+            }),
+            (&["rmi", "--kv-cache", "bad"], "fallback F16 KV", |o| {
+                o.kv_format == KvFormat::F16
+            }),
+            (
+                &[
+                    "rmi",
+                    "--model",
+                    "",
+                    "--prompt",
+                    "",
+                    "--max-tokens",
+                    "",
+                    "--temp",
+                    "",
+                    "--threads",
+                    "",
+                    "--kv-cache",
+                    "",
+                    "--mmproj",
+                    "",
+                    "--image",
+                    "",
+                ],
+                "empty legacy values",
+                |o| {
+                    o.model.as_os_str().is_empty()
+                        && o.prompt.as_deref() == Some("")
+                        && o.max_tokens == Some(128)
+                        && o.temperature == Some(0.6)
+                        && o.threads == 0
+                        && o.kv_format == KvFormat::F16
+                        && o.mmproj.as_deref() == Some(Path::new(""))
+                        && o.image.as_deref() == Some(Path::new(""))
+                },
+            ),
         ];
         for (args, name, check) in cases {
             assert!(check(&parse(args)), "{name}");

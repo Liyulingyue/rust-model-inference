@@ -42,6 +42,13 @@ pub struct Qwen3LayerWeights<'a> {
     pub ffn_norm: Vec<f32>,
     pub q_norm: Option<Vec<f32>>,
     pub k_norm: Option<Vec<f32>>,
+    pub q_bias: Option<Vec<f32>>,
+    pub k_bias: Option<Vec<f32>>,
+    pub v_bias: Option<Vec<f32>>,
+    pub moe_router: Option<Vec<f32>>,
+    pub moe_gate: Option<Vec<Weight<'a>>>,
+    pub moe_up: Option<Vec<Weight<'a>>>,
+    pub moe_down: Option<Vec<Weight<'a>>>,
     pub wq: Weight<'a>,
     pub wk: Weight<'a>,
     pub wv: Weight<'a>,
@@ -112,8 +119,17 @@ pub fn load_layers<'a>(
             } else {
                 None
             },
+            q_bias: None,
+            k_bias: None,
+            v_bias: None,
+            moe_router: None,
+            moe_gate: None,
+            moe_up: None,
+            moe_down: None,
             wq: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_q.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.attn_q.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.attn_q.weight", l))
                     .unwrap()
@@ -122,7 +138,9 @@ pub fn load_layers<'a>(
                 n_embd_q,
             )),
             wk: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_k.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.attn_k.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.attn_k.weight", l))
                     .unwrap()
@@ -131,7 +149,9 @@ pub fn load_layers<'a>(
                 n_embd_gqa,
             )),
             wv: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_v.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.attn_v.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.attn_v.weight", l))
                     .unwrap()
@@ -140,7 +160,9 @@ pub fn load_layers<'a>(
                 n_embd_gqa,
             )),
             wo: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.attn_output.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.attn_output.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.attn_output.weight", l))
                     .unwrap()
@@ -149,7 +171,9 @@ pub fn load_layers<'a>(
                 n_embd,
             )),
             w_gate: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_gate.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.ffn_gate.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.ffn_gate.weight", l))
                     .unwrap()
@@ -158,7 +182,9 @@ pub fn load_layers<'a>(
                 n_ff,
             )),
             w_up: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_up.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.ffn_up.weight", l))
                     .unwrap()
@@ -167,7 +193,9 @@ pub fn load_layers<'a>(
                 n_ff,
             )),
             w_down: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source.tensor_slice(&format!("blk.{}.ffn_down.weight", l)).unwrap(),
+                source
+                    .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
+                    .unwrap(),
                 source
                     .tensor_info(&format!("blk.{}.ffn_down.weight", l))
                     .unwrap()
@@ -211,10 +239,148 @@ pub fn load_layers_static(
     n_ff: usize,
     n_embd_head_k: usize,
     has_qk_norm: bool,
-) -> Vec<Qwen3LayerWeights<'static>> {
+    has_qkv_bias: bool,
+    moe: Option<crate::core::loader::Qwen3MoeConfig>,
+) -> Result<Vec<Qwen3LayerWeights<'static>>, String> {
     let source = source.as_ref();
-    (0..n_layer)
-        .map(|l| Qwen3LayerWeights {
+    let mut layers = Vec::with_capacity(n_layer);
+    for l in 0..n_layer {
+        let q_bias = load_optional_bias(
+            source,
+            &format!("blk.{l}.attn_q.bias"),
+            n_embd_q,
+            has_qkv_bias,
+        )?;
+        let k_bias = load_optional_bias(
+            source,
+            &format!("blk.{l}.attn_k.bias"),
+            n_embd_gqa,
+            has_qkv_bias,
+        )?;
+        let v_bias = load_optional_bias(
+            source,
+            &format!("blk.{l}.attn_v.bias"),
+            n_embd_gqa,
+            has_qkv_bias,
+        )?;
+        let (w_gate, w_up, w_down, moe_router, moe_gate, moe_up, moe_down) = if let Some(moe) = moe
+        {
+            if moe.shared_expert_ffn != 0 {
+                return Err("Qwen3VL-MoE shared experts are not supported".into());
+            }
+            let gate_slices = expert_slices(
+                source,
+                &format!("blk.{l}.ffn_gate_exps.weight"),
+                n_embd,
+                moe.expert_ffn,
+                moe.expert_count,
+            )?;
+            let up_slices = expert_slices(
+                source,
+                &format!("blk.{l}.ffn_up_exps.weight"),
+                n_embd,
+                moe.expert_ffn,
+                moe.expert_count,
+            )?;
+            let down_slices = expert_slices(
+                source,
+                &format!("blk.{l}.ffn_down_exps.weight"),
+                moe.expert_ffn,
+                n_embd,
+                moe.expert_count,
+            )?;
+            let gate = gate_slices
+                .iter()
+                .map(|bytes| {
+                    weight_from_bytes(
+                        bytes,
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let up = up_slices
+                .iter()
+                .map(|bytes| {
+                    weight_from_bytes(
+                        bytes,
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let down = down_slices
+                .iter()
+                .map(|bytes| {
+                    weight_from_bytes(
+                        bytes,
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        moe.expert_ffn,
+                        n_embd,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let router = crate::core::tensor::load_f32_tensor(
+                source,
+                &format!("blk.{l}.ffn_gate_inp.weight"),
+                &[n_embd as u64, moe.expert_count as u64],
+            )?;
+            (
+                weight_from_bytes(
+                    gate_slices[0],
+                    source
+                        .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd,
+                    moe.expert_ffn,
+                ),
+                weight_from_bytes(
+                    up_slices[0],
+                    source
+                        .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd,
+                    moe.expert_ffn,
+                ),
+                weight_from_bytes(
+                    down_slices[0],
+                    source
+                        .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
+                        .unwrap()
+                        .ggml_type,
+                    moe.expert_ffn,
+                    n_embd,
+                ),
+                Some(router),
+                Some(gate),
+                Some(up),
+                Some(down),
+            )
+        } else {
+            (
+                static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
+                static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
+                static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        layers.push(Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
             q_norm: if has_qk_norm {
@@ -226,6 +392,9 @@ pub fn load_layers_static(
             } else {
                 None
             },
+            q_bias,
+            k_bias,
+            v_bias,
             k_norm: if has_qk_norm {
                 Some(get_f32_tensor(
                     source,
@@ -235,20 +404,103 @@ pub fn load_layers_static(
             } else {
                 None
             },
-            wq: static_weight(source, &format!("blk.{}.attn_q.weight", l), n_embd, n_embd_q),
-            wk: static_weight(source, &format!("blk.{}.attn_k.weight", l), n_embd, n_embd_gqa),
-            wv: static_weight(source, &format!("blk.{}.attn_v.weight", l), n_embd, n_embd_gqa),
+            wq: static_weight(
+                source,
+                &format!("blk.{}.attn_q.weight", l),
+                n_embd,
+                n_embd_q,
+            ),
+            wk: static_weight(
+                source,
+                &format!("blk.{}.attn_k.weight", l),
+                n_embd,
+                n_embd_gqa,
+            ),
+            wv: static_weight(
+                source,
+                &format!("blk.{}.attn_v.weight", l),
+                n_embd,
+                n_embd_gqa,
+            ),
             wo: static_weight(
                 source,
                 &format!("blk.{}.attn_output.weight", l),
                 n_embd_q,
                 n_embd,
             ),
-            w_gate: static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
-            w_up: static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
-            w_down: static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
+            w_gate,
+            w_up,
+            w_down,
+            moe_router,
+            moe_gate,
+            moe_up,
+            moe_down,
+        });
+    }
+    Ok(layers)
+}
+
+fn weight_from_bytes(
+    bytes: &'static [u8],
+    ggml_type: GGMLType,
+    n_in: usize,
+    n_out: usize,
+) -> Weight<'static> {
+    Weight::from_quantized(QuantizedTensor::from_bytes(bytes, ggml_type, n_in, n_out))
+}
+
+fn expert_slices(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+) -> Result<Vec<&'static [u8]>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let expected = [n_in as u64, n_out as u64, expert_count as u64];
+    if info.dims != expected {
+        return Err(format!(
+            "Invalid {name} shape {:?}; expected {expected:?}",
+            info.dims
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let total = info
+        .checked_nbytes()
+        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))? as usize;
+    if bytes.len() != total || total % expert_count != 0 {
+        return Err(format!("Invalid {name} byte length: {}", bytes.len()));
+    }
+    let per = total / expert_count;
+    let bytes: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+    (0..expert_count)
+        .map(|expert| {
+            bytes
+                .get(expert * per..(expert + 1) * per)
+                .ok_or_else(|| format!("{name} expert slice overflow"))
         })
         .collect()
+}
+
+fn load_optional_bias(
+    source: &dyn TensorSource,
+    name: &str,
+    expected_len: usize,
+    required: bool,
+) -> Result<Option<Vec<f32>>, String> {
+    if source.tensor_info(name).is_none() {
+        return if required {
+            Err(format!("Missing tensor: {name}"))
+        } else {
+            Ok(None)
+        };
+    }
+    let dims = [u64::try_from(expected_len).map_err(|_| format!("{name} length overflow"))?];
+    crate::core::tensor::load_f32_tensor(source, name, &dims).map(Some)
 }
 
 // =============================================================================
@@ -299,7 +551,9 @@ impl Qwen3Model {
         let output_info = source
             .tensor_info("output.weight")
             .unwrap_or(token_embedding_info);
-        let output_bytes = source.tensor_slice("output.weight").unwrap_or(token_embedding_bytes);
+        let output_bytes = source
+            .tensor_slice("output.weight")
+            .unwrap_or(token_embedding_bytes);
         let output_bytes_static: &'static [u8] = unsafe { std::mem::transmute(output_bytes) };
         let output = Weight::from_quantized(QuantizedTensor::from_bytes(
             output_bytes_static,
@@ -317,7 +571,9 @@ impl Qwen3Model {
             config.n_ff,
             config.n_embd_head_k,
             config.has_qk_norm,
-        );
+            config.has_qkv_bias,
+            config.moe,
+        )?;
 
         Ok(Self {
             source,
