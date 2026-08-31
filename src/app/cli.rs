@@ -17,6 +17,7 @@ pub struct CliOptions {
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
     pub image: Option<PathBuf>,
+    pub video: Option<PathBuf>,
     pub vae: Option<PathBuf>,
     pub text_encoder: Option<PathBuf>,
     pub prompt: Option<String>,
@@ -244,6 +245,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--video" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --video")?;
+                options.video = Some(value.as_str().into());
+                i += 1;
+            }
             "--vae" => {
                 let value = args
                     .get(i + 1)
@@ -320,6 +329,8 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
         Some("--ref-audio")
     } else if options.image.is_some() {
         Some("--image")
+    } else if options.video.is_some() {
+        Some("--video")
     } else if options.mmproj.is_some() {
         Some("--mmproj")
     } else if options.embedding {
@@ -413,6 +424,8 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             Some("--audio")
         } else if options.image.is_some() {
             Some("--image")
+        } else if options.video.is_some() {
+            Some("--video")
         } else if options.embedding {
             Some("--embedding")
         } else if options.dump_logits {
@@ -432,6 +445,27 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     }
     if options.ref_audio.is_some() {
         return Err("--ref-audio requires --tts".into());
+    }
+    if options.embedding {
+        let media_count = usize::from(options.image.is_some())
+            + usize::from(options.video.is_some())
+            + usize::from(options.audio.is_some());
+        if media_count > 1 {
+            return Err("--embedding accepts only one of --image, --video, or --audio".into());
+        }
+        if media_count == 1 {
+            if options
+                .mmproj
+                .as_deref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+            {
+                return Err("media embedding requires --mmproj".into());
+            }
+            return Ok(());
+        }
+    }
+    if options.video.is_some() {
+        return Err("--video requires --embedding".into());
     }
     if options.audio.is_none() {
         return if options.language.is_some() {
@@ -847,10 +881,6 @@ mod tests {
     #[test]
     fn asr_cli_rejects_conflicting_modes_before_model_load() {
         let mut options = asr_cli_options();
-        options.embedding = true;
-        assert!(validate_cli_options(&options).unwrap_err().contains("--embedding"));
-
-        let mut options = asr_cli_options();
         options.dump_logits = true;
         assert!(validate_cli_options(&options).unwrap_err().contains("--dump-logits"));
 
@@ -994,6 +1024,56 @@ mod tests {
         let text = parse_cli_options(&args).unwrap();
         assert_eq!(text.prompt.as_deref(), Some("hello"));
         assert_eq!(resolve_cli_generation_options(&text), (128, 0.6));
+    }
+
+    #[test]
+    fn omni_embedding_accepts_exactly_one_media_kind() {
+        let image = parse_cli_options(&args(&[
+            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "vision.gguf",
+            "--image", "image.png", "--prompt", "Document: caption",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&image).is_ok());
+
+        let video = parse_cli_options(&args(&[
+            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "vision.gguf",
+            "--video", "video.mp4", "--prompt", "Document: clip",
+        ]))
+        .unwrap();
+        assert_eq!(video.video.as_deref(), Some(Path::new("video.mp4")));
+        assert!(validate_cli_options(&video).is_ok());
+
+        let audio = parse_cli_options(&args(&[
+            "rmi", "--model", "text.gguf", "--embedding", "--mmproj", "audio.gguf",
+            "--audio", "audio.flac", "--prompt", "Document: sound",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&audio).is_ok());
+
+        for argv in [
+            ["rmi", "--embedding", "--mmproj", "m.gguf", "--image", "i.png", "--video", "v.mp4"].as_slice(),
+            ["rmi", "--embedding", "--mmproj", "m.gguf", "--video", "v.mp4", "--audio", "a.wav"].as_slice(),
+            ["rmi", "--embedding", "--mmproj", "m.gguf", "--image", "i.png", "--audio", "a.wav"].as_slice(),
+        ] {
+            let error = validate_cli_options(&parse_cli_options(&args(argv)).unwrap()).unwrap_err();
+            assert!(error.contains("one of --image, --video, or --audio"), "{argv:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn text_embedding_does_not_bypass_language_validation() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--embedding",
+            "--prompt",
+            "query",
+            "--language",
+            "English",
+        ]))
+        .unwrap();
+
+        let error = validate_cli_options(&options).unwrap_err();
+        assert_eq!(error, "--language requires --audio");
     }
 
     #[test]

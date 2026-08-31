@@ -69,6 +69,7 @@ const QWEN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<|im_start|>", "im_start"),
     ("<|im_end|>", "im_end"),
     ("<|image_pad|>", "image_pad"),
+    ("<|video_pad|>", "video_pad"),
     ("<|vision_pad|>", "vision_pad"),
     ("<|vision_start|>", "vision_start"),
     ("<|vision_end|>", "vision_end"),
@@ -1376,6 +1377,12 @@ use crate::core::tensor::{MetaValue, MetaValueType};
         assert_eq!(tokenizer.special_token_id("audio_pad"), Some(audio_pad_id));
         assert_eq!(tokenizer.special_token_id("audio_end"), Some(audio_end_id));
         assert_eq!(tokenizer.special_token_id("asr_text"), Some(asr_text_id));
+    }
+
+    #[test]
+    fn qwen_video_pad_semantic_resolves_to_its_token_id() {
+        let tokenizer = BPETokenizer::from_qwen3_embedded_merges().unwrap();
+        assert_eq!(tokenizer.special_token_id("video_pad"), Some(151_656));
     }
 
     #[test]

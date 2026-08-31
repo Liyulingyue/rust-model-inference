@@ -2,7 +2,7 @@
 
 use clip_config::ClipVisionConfig;
 use crate::core::tensor::TensorSource;
-use crate::ops::{dot_f32, dot_f16_f32, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
+use crate::ops::{dot_f32, dot_f16_f32, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32, vec_add, vec_add_into, gelu_inplace};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,7 +257,7 @@ pub struct VisionLayer<'a> {
 
 impl<'a> VisionEncoder<'a> {
     pub fn from_source<S: TensorSource + ?Sized>(source: &'a S) -> Result<Self, String> {
-        let config = ClipVisionConfig::from_source(source)?;
+        let mut config = ClipVisionConfig::from_source(source)?;
 
         let patch_embd_weight = source.tensor_slice("v.patch_embd.weight")
             .ok_or("Missing v.patch_embd.weight")?;
@@ -301,6 +301,25 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source.tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
         let mm_0_bias = source.tensor_slice("mm.0.bias");
+        let mm_2_info = source
+            .tensor_info("mm.2.weight")
+            .ok_or("Missing tensor info: mm.2.weight")?;
+        let expected_mm_2_input = config
+            .n_embd
+            .checked_mul(config.spatial_merge_size)
+            .and_then(|value| value.checked_mul(config.spatial_merge_size))
+            .ok_or("Vision projector input width overflow")?;
+        if mm_2_info.dims.len() != 2
+            || usize::try_from(mm_2_info.dims[0]).ok() != Some(expected_mm_2_input)
+            || mm_2_info.dims[1] == 0
+        {
+            return Err(format!(
+                "Invalid mm.2.weight shape {:?}; expected [{expected_mm_2_input}, output]",
+                mm_2_info.dims
+            ));
+        }
+        config.projection_dim = usize::try_from(mm_2_info.dims[1])
+            .map_err(|_| "mm.2.weight output width does not fit usize")?;
         let mm_2_weight = source.tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
         let mm_2_bias = source.tensor_slice("mm.2.bias");
@@ -386,6 +405,17 @@ impl<'a> VisionEncoder<'a> {
         img_h: usize,
         scratch: &mut VisionScratchpad,
     ) -> Result<VisionGrid, String> {
+        self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch)
+    }
+
+    pub fn encode_pair(
+        &self,
+        frame_a: &[f32],
+        frame_b: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+    ) -> Result<VisionGrid, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let merge = cfg.spatial_merge_size;
@@ -394,10 +424,11 @@ impl<'a> VisionEncoder<'a> {
             "normalized image",
             &[grid.image_width(), grid.image_height(), 3],
         )?;
-        if image_pixels.len() != expected_pixels {
+        if frame_a.len() != expected_pixels || frame_b.len() != expected_pixels {
             return Err(format!(
-                "Normalized image length mismatch: expected {expected_pixels}, got {}",
-                image_pixels.len()
+                "Normalized frame length mismatch: expected {expected_pixels}, got {} and {}",
+                frame_a.len(),
+                frame_b.len()
             ));
         }
 
@@ -428,7 +459,8 @@ impl<'a> VisionEncoder<'a> {
         scratch.ensure_capacity(cfg, grid)?;
         let t_embed = std::time::Instant::now();
         self.patch_embed(
-            image_pixels,
+            frame_a,
+            frame_b,
             grid.image_width(),
             grid.image_height(),
             scratch,
@@ -465,6 +497,13 @@ impl<'a> VisionEncoder<'a> {
             }
         }
         let t_bias = t_bias.elapsed();
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.vision.patch_bias",
+            None,
+            &[n_tokens, n_embd],
+            &scratch.merged[..n_tokens * n_embd],
+        ));
 
         let t_pos = std::time::Instant::now();
         if let Some(position_data) = self.position_embd {
@@ -479,11 +518,27 @@ impl<'a> VisionEncoder<'a> {
             );
         }
         let t_pos = t_pos.elapsed();
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.vision.inp_pos_emb",
+            None,
+            &[n_tokens, n_embd],
+            &scratch.merged[..n_tokens * n_embd],
+        ));
 
         let t_layers = std::time::Instant::now();
         let mrope_positions = build_vit_mrope_positions(n_patches_x, n_patches_y, merge);
         for layer in 0..cfg.n_layer {
             self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions);
+            #[cfg(feature = "parity-trace")]
+            if layer == 0 || layer + 1 == cfg.n_layer {
+                crate::parity_trace::report(crate::parity_trace::checkpoint(
+                    "omni.vision.layer_out",
+                    Some(layer),
+                    &[n_tokens, n_embd],
+                    &scratch.merged[..n_tokens * n_embd],
+                ));
+            }
         }
         let t_layers = t_layers.elapsed();
 
@@ -554,7 +609,14 @@ impl<'a> VisionEncoder<'a> {
         Ok(grid)
     }
 
-    fn patch_embed(&self, pixels: &[f32], img_w: usize, img_h: usize, scratch: &mut VisionScratchpad) {
+    fn patch_embed(
+        &self,
+        frame_a: &[f32],
+        frame_b: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+    ) {
         let cfg = &self.config;
         let ps = cfg.patch_size;
         let n_embd = cfg.n_embd;
@@ -575,7 +637,8 @@ impl<'a> VisionEncoder<'a> {
             }
             unsafe {
                 patch_embed_simd_avx2(
-                    pixels,
+                    frame_a,
+                    frame_b,
                     img_w,
                     img_h,
                     &scratch.patch_weight_packed,
@@ -589,7 +652,8 @@ impl<'a> VisionEncoder<'a> {
         }
 
         patch_embed_scalar(
-            pixels,
+            frame_a,
+            frame_b,
             img_w,
             img_h,
             w0,
@@ -715,7 +779,7 @@ impl<'a> VisionEncoder<'a> {
             let q_base = h * n_tokens * d_head;
             let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
             for t in 0..n_tokens {
-                rope_mrope_interleaved(
+                rope_vision(
                     &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
                     mrope_positions[t],
                     mrope_sections,
@@ -723,7 +787,7 @@ impl<'a> VisionEncoder<'a> {
                     freq_base,
                     d_head / 2,
                 );
-                rope_mrope_interleaved(
+                rope_vision(
                     &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
                     mrope_positions[t],
                     mrope_sections,
@@ -993,24 +1057,7 @@ impl<'a> VisionEncoder<'a> {
         let concat_buf = &mut scratch.project_concat_buf[..concat_size];
         let mm0_out = &mut scratch.project_mm0_out[..concat_size];
 
-        for my in 0..n_merged_y {
-            for mx in 0..n_merged_x {
-                let proj_idx = my * n_merged_x + mx;
-                let dst_off = proj_idx * merged_embd;
-                for dy in 0..merge {
-                    for dx in 0..merge {
-                        let src_py = my * merge + dy;
-                        let src_px = mx * merge + dx;
-                        let src_idx = src_py * n_patches_x + src_px;
-                        let src_off = src_idx * n_embd;
-                        let sub_off = (dy * merge + dx) * n_embd;
-                        for e in 0..n_embd {
-                            concat_buf[dst_off + sub_off + e] = hidden[src_off + e];
-                        }
-                    }
-                }
-            }
-        }
+        concat_buf.copy_from_slice(&hidden[..concat_size]);
 
         if let Some(ref pc) = self.precomputed {
             for t in 0..n_projected {
@@ -1502,7 +1549,8 @@ fn matmul_f32_single(weight: &[f32], input: &[f32], output: &mut [f32], in_dim: 
 }
 
 fn patch_embed_scalar(
-    pixels: &[f32],
+    frame_a: &[f32],
+    frame_b: &[f32],
     img_w: usize,
     img_h: usize,
     w0: &[f32],
@@ -1528,11 +1576,11 @@ fn patch_embed_scalar(
                         for kx in 0..ps {
                             let pix_x = px * ps + kx;
                             let pix_y = py * ps + ky;
-                            let pix_val = pixels[(pix_y * img_w + pix_x) * 3 + c];
+                            let pixel = (pix_y * img_w + pix_x) * 3 + c;
                             let w_idx = c * ps * ps + ky * ps + kx;
-                            sum0 += w0_row[w_idx] * pix_val;
+                            sum0 += w0_row[w_idx] * frame_a[pixel];
                             if let Some(w1d) = w1_row {
-                                sum1 += w1d[w_idx] * pix_val;
+                                sum1 += w1d[w_idx] * frame_b[pixel];
                             }
                         }
                     }
@@ -1556,7 +1604,8 @@ fn repack_patch_weights(weights: &[f32], n_embd: usize, patch_dim: usize) -> Vec
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn patch_embed_simd_avx2(
-    pixels: &[f32],
+    frame_a: &[f32],
+    frame_b: &[f32],
     img_w: usize,
     img_h: usize,
     w0_packed: &[f32],
@@ -1593,8 +1642,9 @@ unsafe fn patch_embed_simd_avx2(
                     for kx in 0..ps {
                         let pix_x = px * ps + kx;
                         let pix_y = py * ps + ky;
-                        let pix_val = pixels[(pix_y * img_w + pix_x) * 3 + c];
-                        let pix_vec = _mm256_set1_ps(pix_val);
+                        let pixel = (pix_y * img_w + pix_x) * 3 + c;
+                        let frame_a_vec = _mm256_set1_ps(frame_a[pixel]);
+                        let frame_b_vec = _mm256_set1_ps(frame_b[pixel]);
                         let w_idx = c * ps * ps + ky * ps + kx;
                         let w_row_base = w_idx * n_embd;
                         let acc0_ptr_inner = acc0.as_mut_ptr();
@@ -1607,10 +1657,10 @@ unsafe fn patch_embed_simd_avx2(
                         let mut e = 0;
                         while e < n_embd_8 {
                             let w_vec = _mm256_loadu_ps(w0_ptr.add(e * 8));
-                            *acc0_ptr_inner.add(e) = _mm256_fmadd_ps(w_vec, pix_vec, *acc0_ptr_inner.add(e));
+                            *acc0_ptr_inner.add(e) = _mm256_fmadd_ps(w_vec, frame_a_vec, *acc0_ptr_inner.add(e));
                             if !w1_ptr.is_null() {
                                 let w1_vec = _mm256_loadu_ps(w1_ptr.add(e * 8));
-                                *acc1_ptr.add(e) = _mm256_fmadd_ps(w1_vec, pix_vec, *acc1_ptr.add(e));
+                                *acc1_ptr.add(e) = _mm256_fmadd_ps(w1_vec, frame_b_vec, *acc1_ptr.add(e));
                             }
                             e += 1;
                         }
@@ -1763,6 +1813,120 @@ unsafe fn attn_scaled_add_avx2(out: &mut [f32], v: *const f32, scale: f32, d: us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct MapTensorSource {
+        metadata: HashMap<String, MetaValue>,
+        tensors: HashMap<String, TensorInfo>,
+        data: HashMap<String, Vec<u8>>,
+    }
+
+    impl TensorSource for MapTensorSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.tensors.get(name)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.data.get(name).map(Vec::as_slice)
+        }
+    }
+
+    #[test]
+    fn projection_width_comes_from_mm2_tensor() {
+        let mut source = MapTensorSource {
+            metadata: HashMap::from([
+                ("clip.vision.projection_dim".into(), MetaValue::Uint32(4096)),
+                ("clip.vision.image_size".into(), MetaValue::Uint32(224)),
+                ("clip.vision.patch_size".into(), MetaValue::Uint32(16)),
+                ("clip.vision.embedding_length".into(), MetaValue::Uint32(8)),
+                ("clip.vision.feed_forward_length".into(), MetaValue::Uint32(32)),
+                ("clip.vision.block_count".into(), MetaValue::Uint32(0)),
+                ("clip.vision.attention.head_count".into(), MetaValue::Uint32(1)),
+                (
+                    "clip.vision.attention.layer_norm_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+            ]),
+            ..MapTensorSource::default()
+        };
+        for name in ["v.patch_embd.weight", "mm.0.weight", "mm.2.weight"] {
+            source.data.insert(name.into(), Vec::new());
+        }
+        source.tensors.insert(
+            "mm.2.weight".into(),
+            TensorInfo {
+                name: "mm.2.weight".into(),
+                dims: vec![32, 1024],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+        );
+
+        let encoder = VisionEncoder::from_source(&source).unwrap();
+
+        assert_eq!(encoder.config.projection_dim, 1024);
+    }
+
+    #[test]
+    fn temporal_patch_uses_the_second_frame_for_the_second_kernel() {
+        let frame_a = [1.0, 2.0, 3.0];
+        let frame_b = [10.0, 20.0, 30.0];
+        let mut output = [0.0];
+
+        patch_embed_scalar(
+            &frame_a,
+            &frame_b,
+            1,
+            1,
+            &[1.0, 0.0, 0.0],
+            Some(&[0.0, 1.0, 0.0]),
+            &mut output,
+            1,
+            1,
+        );
+
+        assert_eq!(output, [21.0]);
+    }
+
+    #[test]
+    fn projector_keeps_the_existing_spatial_block_order() {
+        let mut config = test_clip_config(1, 2, 1, 64);
+        config.n_embd = 1;
+        config.n_layer = 0;
+        config.projection_dim = 1;
+        let mm0 = vec![0u8; 4 * 4 * 2];
+        let mm2 = vec![0u8; 4 * 2];
+        let encoder = VisionEncoder {
+            config: config.clone(),
+            patch_embd_weight: &[],
+            patch_embd_weight_1: None,
+            position_embd: None,
+            post_ln_weight: None,
+            post_ln_bias: None,
+            patch_bias: None,
+            layers: Vec::new(),
+            mm_0_weight: &mm0,
+            mm_0_bias: None,
+            mm_2_weight: &mm2,
+            mm_2_bias: None,
+            precomputed: None,
+        };
+        let block_order = [0.0, 1.0, 4.0, 5.0, 2.0, 3.0, 6.0, 7.0];
+        let mut scratch = VisionScratchpad::new(&config);
+        scratch.merged.resize(block_order.len(), 0.0);
+        scratch.projected.resize(2, 0.0);
+        scratch.merged[..block_order.len()].copy_from_slice(&block_order);
+
+        encoder.project(4, 2, 1, 2, &mut scratch);
+
+        assert_eq!(&scratch.project_concat_buf[..8], &block_order);
+    }
 
     fn test_clip_config(
         patch_size: usize,
@@ -1783,6 +1947,8 @@ mod tests {
             spatial_merge_size,
             image_min_pixels: factor_pixels * min_grid_tokens,
             image_max_pixels: factor_pixels * max_grid_tokens,
+            video_min_pixels: factor_pixels * min_grid_tokens,
+            video_max_pixels: factor_pixels * max_grid_tokens,
             eps: 1e-6,
             use_gelu: true,
             image_mean: [0.0; 3],
@@ -1945,7 +2111,7 @@ mod tests {
             }
         }
         let mut out = vec![0.0f32; n_patches * n_embd];
-        patch_embed_scalar(&pixels, img_w, img_h, &weights, None, &mut out, ps, n_embd);
+        patch_embed_scalar(&pixels, &pixels, img_w, img_h, &weights, None, &mut out, ps, n_embd);
         for (a, b) in naive.iter().zip(out.iter()) {
             assert_eq!(*a, *b, "scalar mismatch: naive={a} out={b}");
         }
@@ -1959,12 +2125,13 @@ mod tests {
             let n_patches = (img_w / ps) * (img_h / ps);
             let (pixels, weights) = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 11);
             let mut scalar_out = vec![0.0f32; n_patches * n_embd];
-            patch_embed_scalar(&pixels, img_w, img_h, &weights, None, &mut scalar_out, ps, n_embd);
+            patch_embed_scalar(&pixels, &pixels, img_w, img_h, &weights, None, &mut scalar_out, ps, n_embd);
             let patch_dim = 3 * ps * ps;
             let packed = repack_patch_weights(&weights, n_embd, patch_dim);
             let mut simd_out = vec![0.0f32; n_patches * n_embd];
             unsafe {
                 patch_embed_simd_avx2(
+                    &pixels,
                     &pixels,
                     img_w,
                     img_h,
@@ -2001,12 +2168,13 @@ mod tests {
         let (pixels, w0) = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 23);
         let w1 = make_patch_embed_inputs(img_w, img_h, ps, n_embd, 29).1;
         let mut scalar_out = vec![0.0f32; n_patches * n_embd];
-        patch_embed_scalar(&pixels, img_w, img_h, &w0, Some(&w1), &mut scalar_out, ps, n_embd);
+        patch_embed_scalar(&pixels, &pixels, img_w, img_h, &w0, Some(&w1), &mut scalar_out, ps, n_embd);
         let p0 = repack_patch_weights(&w0, n_embd, patch_dim);
         let p1 = repack_patch_weights(&w1, n_embd, patch_dim);
         let mut simd_out = vec![0.0f32; n_patches * n_embd];
         unsafe {
             patch_embed_simd_avx2(
+                &pixels,
                 &pixels,
                 img_w,
                 img_h,

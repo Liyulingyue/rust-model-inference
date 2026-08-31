@@ -135,6 +135,24 @@ fn main() {
         .audio
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    let video = options
+        .video
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+
+    if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
+        app::run_or_exit(app::run_omni_embedding(
+            source.as_ref(),
+            explicit_mmproj.expect("validated media embedding mmproj"),
+            image,
+            video,
+            audio,
+            prompt,
+            options.threads,
+            options.embedding_output,
+        ));
+        return;
+    }
 
     if audio.is_some() {
         let route = dispatch_audio_arch(&arch).unwrap_or_else(|error| {

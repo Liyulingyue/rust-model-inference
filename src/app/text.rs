@@ -266,11 +266,14 @@ pub fn normalize_resized_image(
     if std.iter().any(|value| *value == 0.0) {
         return Err("Vision normalization std must be nonzero".into());
     }
-    let width = u32::try_from(target_w).map_err(|_| "Vision width exceeds u32")?;
-    let height = u32::try_from(target_h).map_err(|_| "Vision height exceeds u32")?;
-    let resized = image
-        .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-        .to_rgb8();
+    let source = image.to_rgb8();
+    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
+        source.as_raw(),
+        source.width() as usize,
+        source.height() as usize,
+        target_w,
+        target_h,
+    )?;
     let output_len = target_w
         .checked_mul(target_h)
         .and_then(|pixels| pixels.checked_mul(3))
@@ -278,11 +281,10 @@ pub fn normalize_resized_image(
     let mut output = vec![0.0f32; output_len];
     for y in 0..target_h {
         for x in 0..target_w {
-            let pixel = resized.get_pixel(x as u32, y as u32);
             let offset = (y * target_w + x) * 3;
             for channel in 0..3 {
                 output[offset + channel] =
-                    (f32::from(pixel[channel]) / 255.0 - mean[channel]) / std[channel];
+                    (f32::from(resized[offset + channel]) / 255.0 - mean[channel]) / std[channel];
             }
         }
     }
