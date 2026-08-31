@@ -297,6 +297,23 @@ pub fn run_multimodal(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     println!("LLM arch: {}", arch);
+    if arch == "lfm2" {
+        // LFM2.5-VL: mmproj carries the SigLIP encoder + LFM2 projector.
+        let mmproj = mmproj_path.ok_or("LFM2.5-VL requires --mmproj")?;
+        let mmproj_source = open_model_source(mmproj, ComponentRole::Mmproj)
+            .map_err(|e| format!("Failed to load mmproj {}: {e}", mmproj.display()))?;
+        let image = image_path.ok_or("LFM2.5-VL requires --image")?;
+        return crate::models::lfm2::vision::run_multimodal(
+            llm_source,
+            mmproj_source.as_ref(),
+            image,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            crate::core::scratchpad::KvFormat::F16,
+        );
+    }
     if arch != "qwen35" {
         return Err(format!(
             "Only qwen35 architecture is supported for multimodal, got: {arch}"

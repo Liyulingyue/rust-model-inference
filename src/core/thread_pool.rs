@@ -111,10 +111,16 @@ impl ComputePool {
 
         start_barrier.wait();
 
-        ComputePool { n_threads, inner, threads }
+        ComputePool {
+            n_threads,
+            inner,
+            threads,
+        }
     }
 
-    pub fn n_threads(&self) -> usize { self.n_threads }
+    pub fn n_threads(&self) -> usize {
+        self.n_threads
+    }
 
     pub fn compute<F: Fn(usize, usize)>(&self, f: F) {
         if self.n_threads <= 1 {
@@ -148,7 +154,9 @@ impl ComputePool {
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
 
         // Main thread does its share
-        unsafe { call_closure::<F>(0, self.n_threads, data_ptr); }
+        unsafe {
+            call_closure::<F>(0, self.n_threads, data_ptr);
+        }
         self.inner.n_complete.fetch_add(1, Ordering::SeqCst);
 
         // Wait for all threads to finish
@@ -157,10 +165,16 @@ impl ComputePool {
         }
         std::sync::atomic::fence(Ordering::SeqCst);
 
-        unsafe { drop(Box::from_raw(data_ptr as *mut F)); }
+        unsafe {
+            drop(Box::from_raw(data_ptr as *mut F));
+        }
     }
 
-    pub fn compute_with_chunks<F: Fn(usize, i32) + Send + Sync + 'static>(&self, n_chunks: i32, f: F) {
+    pub fn compute_with_chunks<F: Fn(usize, i32) + Send + Sync + 'static>(
+        &self,
+        n_chunks: i32,
+        f: F,
+    ) {
         let f = Arc::new(f);
         if self.n_threads <= 1 {
             let mut chunk_id = 0;
@@ -188,7 +202,9 @@ impl ComputePool {
                 barrier.wait();
                 let mut chunk_id = inner.chunk_counter.fetch_add(1, Ordering::Relaxed);
                 loop {
-                    if chunk_id >= n_chunks { break; }
+                    if chunk_id >= n_chunks {
+                        break;
+                    }
                     f(tid, chunk_id);
                     chunk_id = inner.chunk_counter.fetch_add(1, Ordering::Relaxed);
                 }
@@ -199,10 +215,9 @@ impl ComputePool {
         self.inner.call_fn.store(0, Ordering::Relaxed);
         self.inner.call_data.store(0, Ordering::Relaxed);
         self.inner.chunk_counter.store(0, Ordering::Relaxed);
-        self.inner.chunk_barrier.store(
-            Arc::as_ptr(&barrier) as usize,
-            Ordering::Relaxed
-        );
+        self.inner
+            .chunk_barrier
+            .store(Arc::as_ptr(&barrier) as usize, Ordering::Relaxed);
         self.inner.chunk_n_chunks.store(n_chunks, Ordering::Relaxed);
         std::sync::atomic::fence(Ordering::SeqCst);
 
@@ -216,7 +231,9 @@ impl ComputePool {
 
         let mut chunk_id = self.inner.chunk_counter.fetch_add(1, Ordering::Relaxed);
         loop {
-            if chunk_id >= n_chunks { break; }
+            if chunk_id >= n_chunks {
+                break;
+            }
             f(0, chunk_id);
             chunk_id = self.inner.chunk_counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -262,17 +279,28 @@ fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
     let mut my_epoch: u32 = 0;
     loop {
         while inner.epoch.load(Ordering::Acquire) == my_epoch {
-            if inner.shutdown.load(Ordering::Acquire) { return; }
+            if inner.shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            // While the GPU matmul path is active the CPU workers have no
+            // hot-path role (one fenced GPU dispatch covers all rows), so the
+            // idle spin here only competes with the driver's submission
+            // threads — observed to hang ANV/Meteor Lake. Despin when GPU is
+            // on; the pure-CPU path keeps the tight spin.
             std::hint::spin_loop();
         }
         my_epoch = inner.epoch.load(Ordering::Acquire);
-        if inner.shutdown.load(Ordering::Acquire) { return; }
+        if inner.shutdown.load(Ordering::Acquire) {
+            return;
+        }
 
         let call_fn = inner.call_fn.load(Ordering::Acquire);
         let call_data = inner.call_data.load(Ordering::Acquire);
         if call_fn != 0 {
             let f: CallFn = unsafe { std::mem::transmute(call_fn) };
-            unsafe { f(tid, n_threads, call_data); }
+            unsafe {
+                f(tid, n_threads, call_data);
+            }
         }
 
         inner.n_complete.fetch_add(1, Ordering::SeqCst);

@@ -22,6 +22,68 @@ pub fn matmul_q8_0_quantized_parallel_rows(
     ith: usize,
     nth: usize,
 ) {
+    // GPU path: one dispatch covers ALL rows, so thread 0 submits and every
+    // other pool thread returns immediately. On a GPU error the context is
+    // marked broken and this thread falls back to CPU for the whole matmul.
+    #[cfg(feature = "vulkan")]
+    {
+        use crate::ops::get_vulkan_context;
+
+        // Shader capacity: the input row is staged in 4096 shared words.
+        const MAX_GPU_N_IN: usize = 512 * 32;
+        let max_rows = std::env::var("RUST_GPU_MAX_ROWS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let gpu_takes_this =
+            !crate::vulkan::gpu_broken() && n_in <= MAX_GPU_N_IN && n_out <= max_rows;
+        if gpu_takes_this {
+            if let Some(ctx) = get_vulkan_context() {
+                if ith == 0 {
+                    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    let trace = *TRACE.get_or_init(|| std::env::var("RUST_GPU_TRACE").is_ok());
+                    static COUNTER: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let dispatch_idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if trace {
+                        eprintln!("[GPU] dispatch #{dispatch_idx} n_in={n_in} n_out={n_out}");
+                    }
+                    // Synchronous dispatch: one fenced submission covers all
+                    // rows; the calling thread (pool thread 0) owns the fenced
+                    // completion, so any element-wise epilogue the trunk runs
+                    // after this call is safe.
+                    match unsafe {
+                        ctx.matmul_q8_0(weight, input_q8, input_scales, output, n_in, n_out)
+                    } {
+                        Ok(()) => return,
+                        Err(e) => {
+                            // UnsupportedShape: CPU fallback for THIS matmul
+                            // only (the GPU stays alive for other shapes).
+                            if !matches!(e, crate::vulkan::VulkanError::UnsupportedShape(_)) {
+                                crate::vulkan::mark_gpu_broken(&e.to_string());
+                            }
+                            // Thread 0 re-computes ALL rows on CPU: the other
+                            // pool threads already returned, so leaving the
+                            // fallback to the per-thread partition would skip
+                            // their row ranges.
+                            matmul_q8_0_quantized_range(
+                                weight,
+                                input_q8,
+                                input_scales,
+                                output,
+                                n_in,
+                                0,
+                                n_out,
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    return;
+                }
+            }
+        }
+    }
     if nth <= 1 || n_out == 0 {
         matmul_q8_0_quantized_range(weight, input_q8, input_scales, output, n_in, 0, n_out);
         return;

@@ -727,13 +727,21 @@ pub fn run_inference_tokens(
                     nth,
                 );
 
-                // Must match the matmul kernel's ceil row partition exactly: a floor
-                // split races with the kernel when n_ff % nth != 0 (silu would
-                // read rows the matmul hasn't written yet).
-                let per_thread = (n_ff + nth - 1) / nth;
-                let r_start = ith * per_thread;
-                let r_end = (r_start + per_thread).min(n_ff);
-                silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                if crate::ops::gpu_matmul_active() {
+                    // Matmul ran as one fenced GPU dispatch owned by thread 0;
+                    // per-thread row slices would race with it.
+                    if ith == 0 {
+                        silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                    }
+                } else {
+                    // Must match the matmul kernel's ceil row partition exactly: a floor
+                    // split races with the kernel when n_ff % nth != 0 (silu would
+                    // read rows the matmul hasn't written yet).
+                    let per_thread = (n_ff + nth - 1) / nth;
+                    let r_start = ith * per_thread;
+                    let r_end = (r_start + per_thread).min(n_ff);
+                    silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                }
             });
 
             {

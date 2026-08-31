@@ -39,9 +39,45 @@ use std::time::{Duration, Instant};
 use super::config::Lfm2Config;
 use super::weights::{get_f32_tensor, load_layers, Lfm2LayerWeights};
 
+/// One item of the prefill stream: a text token or a precomputed embedding
+/// row (image tokens from the vision encoder occupy positions directly).
+#[derive(Debug, Clone)]
+pub enum Lfm2StreamItem {
+    Token(u32),
+    Embedding(Vec<f32>),
+}
+
 pub fn run_inference(
     source: &dyn TensorSource,
     prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    profile: bool,
+    kv_format: KvFormat,
+) -> Result<(), String> {
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let input_tokens = build_lfm2_chat_prompt(
+        &tokenizer,
+        &[Lfm2Message {
+            role: "user",
+            content: prompt,
+        }],
+    )?;
+    let stream: Vec<Lfm2StreamItem> = input_tokens
+        .iter()
+        .map(|&t| Lfm2StreamItem::Token(t))
+        .collect();
+    run_inference_stream(source, stream, max_tokens, temperature, n_threads_arg, profile, kv_format)
+}
+
+/// Multimodal entry: `stream` mixes text tokens and image embedding rows
+/// (from the vision projector). Prefill consumes the stream position by
+/// position; decoding appends sampled tokens.
+pub fn run_inference_stream(
+    source: &dyn TensorSource,
+    stream: Vec<Lfm2StreamItem>,
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
@@ -85,13 +121,7 @@ pub fn run_inference(
         arch, n_embd, n_layer, n_head, n_ff, cfg.d_conv, load_ms
     );
 
-    let input_tokens = build_lfm2_chat_prompt(
-        &tokenizer,
-        &[Lfm2Message {
-            role: "user",
-            content: prompt,
-        }],
-    )?;
+    let n_prompt = stream.len();
 
     // Determine max n_embd_q across attention layers for scratchpad sizing.
     let n_embd_q = n_head * cfg.n_embd_head_k;
@@ -113,7 +143,7 @@ pub fn run_inference(
         ExecutionScratchpad::new(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx);
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
-    println!("Prompt: {} tokens", input_tokens.len());
+    println!("Prompt: {} items", n_prompt);
 
     let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
     // Accumulated b*x from prompt tokens (for batch-prefill simulation).
@@ -144,10 +174,15 @@ pub fn run_inference(
 
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
+    let mut all_tokens: Vec<u32> = Vec::new();
+    for item in &stream {
+        if let Lfm2StreamItem::Token(t) = item {
+            all_tokens.push(*t);
+        }
+    }
     let mut decoder = tokenizer.streaming_decoder(false);
 
-    let total_steps = input_tokens.len() + max_tokens;
+    let total_steps = n_prompt + max_tokens;
     let t_infer = Instant::now();
     let mut prefill_evals = 0usize;
     let mut prefill_time = Duration::ZERO;
@@ -159,16 +194,27 @@ pub fn run_inference(
 
     for step in 0..total_steps {
         let eval_started = Instant::now();
-        let token_id = if step < input_tokens.len() {
-            input_tokens[step]
+        let token_id = if step < n_prompt {
+            match &stream[step] {
+                Lfm2StreamItem::Token(id) => *id,
+                Lfm2StreamItem::Embedding(_) => 0, // embedding path below
+            }
         } else {
             *generated_tokens.last().unwrap_or(&0)
         };
         let pos = step;
 
-        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        match stream.get(step) {
+            Some(Lfm2StreamItem::Embedding(row)) => {
+                debug_assert_eq!(row.len(), n_embd);
+                scratch.x.copy_from_slice(row);
+            }
+            _ => {
+                embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+            }
+        }
 
-        let is_prefill = step < input_tokens.len();
+        let is_prefill = step < n_prompt;
         for layer in 0..n_layer {
             let lw = &layers[layer];
             // During prefill, before processing token k, set state to the last
@@ -272,7 +318,7 @@ pub fn run_inference(
         });
 
         let eval_elapsed = eval_started.elapsed();
-        if step < input_tokens.len() {
+        if step < n_prompt {
             prefill_evals += 1;
             prefill_time += eval_elapsed;
         } else {
@@ -280,7 +326,7 @@ pub fn run_inference(
             decode_time += eval_elapsed;
         }
 
-        if step < input_tokens.len() - 1 {
+        if step < n_prompt - 1 {
             continue;
         }
 
@@ -489,13 +535,20 @@ let cur_after_block = if lw.is_attn {
             lw.w_up.kernel.forward_prepared(
                 input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth,
             );
-            // Must match the matmul kernel's ceil row partition exactly: a floor
-            // split races with the kernel when n_ff % nth != 0 (silu would
-            // read rows the matmul hasn't written yet).
-            let per_thread = (n_ff + nth - 1) / nth;
-            let r_start = ith * per_thread;
-            let r_end = (r_start + per_thread).min(n_ff);
-            silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+            if crate::ops::gpu_matmul_active() {
+                // Matmul ran as one fenced GPU dispatch owned by thread 0.
+                if ith == 0 {
+                    silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                }
+            } else {
+                // Must match the matmul kernel's ceil row partition exactly: a floor
+                // split races with the kernel when n_ff % nth != 0 (silu would
+                // read rows the matmul hasn't written yet).
+                let per_thread = (n_ff + nth - 1) / nth;
+                let r_start = ith * per_thread;
+                let r_end = (r_start + per_thread).min(n_ff);
+                silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+            }
         }
     });
 

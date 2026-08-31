@@ -4,7 +4,7 @@
 
 - [ ] Prompt 处理速度优化（当前远低于 llama.cpp）
 - [ ] **Q6_K embedding_lookup 调试** - 当前实现数值正确但模型挂起
-- [ ] **WGPU Buffer Pool 优化** - 当前每次 matmul 调用都重新创建 buffer/bind_group/encoder，导致巨大开销。每个 token 生成需要几十次 matmul。
+- [x] **Vulkan GPU matmul 后端可用（2026-08）** — 权重常驻 + 持久 IO 缓冲 + 单 dispatch 全行覆盖 + 看门狗。正确性（GPU vs CPU rel ≤ 3e-7）与稳定性（不再挂死）已验证，详见 `docs/VULKAN.md`。剩余为 dispatch 开销优化（合并 dispatch / 批量提交 / dp4a），见 VULKAN.md 性能分析。
 
   **尝试记录（2026-08-19）：**
   - 初步尝试失败，回滚代码

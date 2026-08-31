@@ -778,9 +778,19 @@ impl<'model> Qwen3Session<'model> {
                         .w_up
                         .kernel
                         .forward_prepared(norm_input, q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
-                    let start = thread * config.n_ff / threads;
-                    let end = (thread + 1) * config.n_ff / threads;
-                    silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
+                    if crate::ops::gpu_matmul_active() {
+                        // The matmul ran as one fenced GPU dispatch owned by
+                        // thread 0 — per-thread row slices have no data
+                        // dependency to hang off, so thread 0 applies the
+                        // epilogue over the whole buffer.
+                        if thread == 0 {
+                            silu_mul_approx_inplace(&up[..config.n_ff], &mut gate[..config.n_ff]);
+                        }
+                    } else {
+                        let start = thread * config.n_ff / threads;
+                        let end = (thread + 1) * config.n_ff / threads;
+                        silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
+                    }
                 });
 
                 let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
