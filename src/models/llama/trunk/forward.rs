@@ -235,6 +235,21 @@ pub fn run_inference_tokens(
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
 
+    // Granite-specific scaling factors. Zero means "not used" (no-op).
+    let arch_prefix = &arch;
+    let embedding_scale = source
+        .metadata(&format!("{arch_prefix}.embedding_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+    let residual_scale = source
+        .metadata(&format!("{arch_prefix}.residual_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+    let logit_scale = source
+        .metadata(&format!("{arch_prefix}.logit_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
     let embd_info = source
         .tensor_info("token_embd.weight")
@@ -338,6 +353,11 @@ pub fn run_inference_tokens(
         let pos = step;
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        if embedding_scale != 0.0 {
+            for v in scratch.x.iter_mut() {
+                *v *= embedding_scale;
+            }
+        }
         dbg_tensor(step, "embed_out", 0, &scratch.x);
 
         for layer in 0..n_layer {
@@ -636,7 +656,12 @@ pub fn run_inference_tokens(
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             for i in 0..n_embd {
-                x[i] += attn_proj[i];
+                let r = if residual_scale != 0.0 {
+                    attn_proj[i] * residual_scale
+                } else {
+                    attn_proj[i]
+                };
+                x[i] += r;
             }
             dbg_tensor(step, "ffn_inp", layer, x);
             dbg_full(step, "ffn_inp", layer, x, n_embd);
@@ -811,7 +836,12 @@ pub fn run_inference_tokens(
             dbg_full(step, "down_buf", layer, down_buf, n_embd);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             for i in 0..n_embd {
-                x[i] += down_buf[i];
+                let r = if residual_scale != 0.0 {
+                    down_buf[i] * residual_scale
+                } else {
+                    down_buf[i]
+                };
+                x[i] += r;
             }
             dbg_tensor(step, "ffn_out", layer, x);
             dbg_tensor(step, "l_out", layer, x);
@@ -868,6 +898,15 @@ pub fn run_inference_tokens(
                 );
             });
             t_logits += t0.elapsed().as_secs_f64();
+
+            // Granite rescales logits by 1/logit_scale before softmax.
+            if logit_scale != 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                let inv = 1.0 / logit_scale;
+                for v in logits.iter_mut() {
+                    *v *= inv;
+                }
+            }
 
             // DEBUG: print LOGITS for step 0 (first 16 values).
             // Marker: [RUST_LOGITS_RAW]

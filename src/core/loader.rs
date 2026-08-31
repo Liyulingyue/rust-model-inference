@@ -388,7 +388,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig" | "lfm2" | "lfm2moe") {
+    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "granite" | "hunyuan-dense" | "pig" | "lfm2" | "lfm2moe") {
         return Err(format!("Unsupported architecture: {arch}"));
     }
 
@@ -448,6 +448,21 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             // ModelConfig defaults. The model trunks read their own
             // head_count_kv array for per-layer dispatch.
             8
+        } else if arch == "granite" {
+            // Granite stores head_count_kv as a per-layer array (all values
+            // are identical for the dense variant). Read the first entry.
+            let kv_key = format!("{prefix}.attention.head_count_kv");
+            match source.metadata(&kv_key).and_then(MetaValue::to_u64) {
+                Some(v) => usize::try_from(v).unwrap_or(0),
+                None => match source.metadata(&kv_key).and_then(MetaValue::to_arr) {
+                    Some(arr) => arr
+                        .first()
+                        .and_then(MetaValue::to_u64)
+                        .map(|v| v as usize)
+                        .unwrap_or(0),
+                    None => 0,
+                },
+            }
         } else {
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
