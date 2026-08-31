@@ -249,58 +249,23 @@ fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_embedding(
+pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
     n_threads_arg: usize,
-    _kv_format: crate::app::cli::KvFormat,
-    output: EmbeddingOutput,
-) {
-    let t0 = Instant::now();
+) -> Result<Vec<f32>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .expect("Failed to init tokenizer");
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
+    if prompt_tokens.is_empty() {
+        return Err("Embedding input produced no tokens".into());
+    }
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids(
         "embedding.tokens",
         &prompt_tokens,
     ));
-    let pooled = run_embedding_tokens(source, &prompt_tokens, None, n_threads_arg)
-        .unwrap_or_else(|error| {
-            eprintln!("Embedding error: {error}");
-            std::process::exit(1);
-        });
-    let embed_ms = t0.elapsed().as_millis();
-
-    if output == EmbeddingOutput::Summary {
-        println!("Prompt: {} ({} tokens)", prompt, prompt_tokens.len());
-    }
-    print_embedding(&pooled, output, embed_ms);
-}
-
-pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput, elapsed_ms: u128) {
-    match output {
-        EmbeddingOutput::Summary => {
-            println!("Embedding ({} dims, {}ms):", pooled.len(), elapsed_ms);
-            for value in pooled.iter().take(8) {
-                print!("{value:.9} ");
-            }
-            if pooled.len() > 8 {
-                print!("... ");
-                for value in &pooled[pooled.len() - 4..] {
-                    print!("{value:.9} ");
-                }
-            }
-            println!();
-        }
-        EmbeddingOutput::Raw => {
-            print!("embedding_raw:");
-            for value in pooled {
-                print!(" {value:.9}");
-            }
-            println!();
-        }
-    }
+    run_embedding_tokens(source, &prompt_tokens, None, n_threads_arg)
 }
 
 pub fn run_embedding_tokens(
@@ -344,8 +309,10 @@ pub fn run_embedding_tokens(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
-    let embd_info = source.tensor_info("token_embd.weight").expect("no token_embd.weight");
-    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
+    let embd_info = source.tensor_info("token_embd.weight").ok_or("missing token_embd.weight")?;
+    let embd_weight = source
+        .tensor_slice("token_embd.weight")
+        .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
     let layers: Vec<Qwen3LayerWeights> =
@@ -533,8 +500,7 @@ pub fn run_embedding_tokens(
             &mut q8_buf,
             &mut scale_buf,
             &pool,
-        )
-        .unwrap_or_else(|error| panic!("Embedding FFN failed: {error}"));
+        )?;
     }
 
     for t in 0..n_tokens {
@@ -558,6 +524,81 @@ pub fn run_embedding_tokens(
         &pooled,
     ));
     Ok(pooled)
+}
+
+pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput, elapsed_ms: u128) {
+    match output {
+        EmbeddingOutput::Summary => {
+            println!("Embedding ({} dims, {}ms):", pooled.len(), elapsed_ms);
+            for value in pooled.iter().take(8) {
+                print!("{value:.9} ");
+            }
+            if pooled.len() > 8 {
+                print!("... ");
+                for value in &pooled[pooled.len() - 4..] {
+                    print!("{value:.9} ");
+                }
+            }
+            println!();
+        }
+        EmbeddingOutput::Raw => {
+            print!("embedding_raw:");
+            for value in pooled {
+                print!(" {value:.9}");
+            }
+            println!();
+        }
+    }
+}
+
+pub fn run_embedding(
+    source: &dyn TensorSource,
+    prompt: &str,
+    n_threads_arg: usize,
+    _kv_format: crate::app::cli::KvFormat,
+    output: EmbeddingOutput,
+) {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    let config = model_config_from_source(source).expect("Failed to parse model config");
+    let t0 = Instant::now();
+    let pooled = match compute_embedding(source, prompt, n_threads_arg) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let load_ms = t0.elapsed().as_millis();
+    let n_embd = config.n_embd;
+    let n_layer = config.n_layer;
+    match output {
+        EmbeddingOutput::Summary => {
+            println!(
+                "Embedding ({} dims, {} layers, arch={} {}ms):",
+                n_embd, n_layer, arch, load_ms
+            );
+            for value in pooled.iter().take(8) {
+                print!("{value:.9} ");
+            }
+            if n_embd > 8 {
+                print!("... ");
+                for value in &pooled[n_embd - 4..] {
+                    print!("{value:.9} ");
+                }
+            }
+            println!();
+        }
+        EmbeddingOutput::Raw => {
+            print!("embedding_raw:");
+            for value in &pooled {
+                print!(" {value:.9}");
+            }
+            println!();
+        }
+    }
 }
 
 #[cfg(test)]

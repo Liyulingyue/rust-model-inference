@@ -18,6 +18,7 @@ pub mod omni;
 pub mod text;
 pub mod tts;
 pub mod trunk;
+pub mod vision;
 
 pub use embedding::run_embedding;
 pub use text::{run_inference, run_inference_tokens};

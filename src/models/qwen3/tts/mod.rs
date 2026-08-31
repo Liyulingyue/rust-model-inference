@@ -17,7 +17,8 @@ pub mod speaker;
 pub mod talker;
 
 pub use talker::{
-    Qwen3TtsGeneration, Qwen3TtsTalker, Qwen3TtsTalkerConfig, TtsPrompt, TtsSpecialTokens,
+    Qwen3TtsGeneration, Qwen3TtsTalker, Qwen3TtsTalkerConfig, TtsPrompt, TtsSession,
+    TtsSpecialTokens,
 };
 
 pub(crate) fn load_f16_or_f32_tensor(

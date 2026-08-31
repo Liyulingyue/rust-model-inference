@@ -18,7 +18,7 @@ pub mod wgpu;
 pub use core::loader::{model_config_from_source, GGUFLoader};
 pub use core::memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
 pub use core::model::{ModelGraph, QuantizedLinear};
-pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32};
+pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32, KvLifecycle};
 pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 pub use core::thread_pool::ComputePool;
 pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
