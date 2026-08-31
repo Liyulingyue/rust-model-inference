@@ -175,32 +175,30 @@ pub unsafe fn matmul_q8_0_vs_q8_0_dotprod_nrc4(
             (row + 2) * stride,
             (row + 3) * stride,
         ];
-        let mut sums = [
-            vdupq_n_f32(0.0),
-            vdupq_n_f32(0.0),
-            vdupq_n_f32(0.0),
-            vdupq_n_f32(0.0),
-        ];
+        let mut sum = vdupq_n_f32(0.0);
         for block in 0..blocks {
             let input = input_q8.as_ptr().add(block * 32);
             let input_lo = vld1q_s8(input as *const i8);
             let input_hi = vld1q_s8(input.add(16) as *const i8);
-            for (offset, sum) in offsets.iter().zip(sums.iter_mut()) {
+            let mut dots = [0i32; 4];
+            let mut scales = [0.0f32; 4];
+            for (row_offset, offset) in offsets.iter().enumerate() {
                 let weight = weight.as_ptr().add(*offset + block * 34);
-                let dot = vaddq_s32(
+                dots[row_offset] = vaddvq_s32(vaddq_s32(
                     dot_i8x16_dotprod(vld1q_s8(weight.add(2) as *const i8), input_lo),
                     dot_i8x16_dotprod(vld1q_s8(weight.add(18) as *const i8), input_hi),
-                );
-                let scale =
+                ));
+                scales[row_offset] =
                     f16_to_f32(u16::from_le_bytes([*weight, *weight.add(1)])) * input_scales[block];
-                *sum = vfmaq_n_f32(*sum, vcvtq_f32_s32(dot), scale);
             }
+            sum = vfmaq_f32(
+                sum,
+                vcvtq_f32_s32(vld1q_s32(dots.as_ptr())),
+                vld1q_f32(scales.as_ptr()),
+            );
         }
         let out = tile * 4;
-        output[out] = vaddvq_f32(sums[0]);
-        output[out + 1] = vaddvq_f32(sums[1]);
-        output[out + 2] = vaddvq_f32(sums[2]);
-        output[out + 3] = vaddvq_f32(sums[3]);
+        vst1q_f32(output.as_mut_ptr().add(out), sum);
     }
 
     let tail_start = row_start + full4 * 4;

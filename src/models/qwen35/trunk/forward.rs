@@ -197,7 +197,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         Ok(result)
     }
 
-    fn forward_dense_attn_layer(
+    pub(super) fn forward_dense_attn_layer(
         &self,
         il: usize,
         input: &[f32],

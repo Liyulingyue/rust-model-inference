@@ -440,9 +440,14 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             Ok(())
         };
     }
-    let conflict = if options.image.is_some() {
-        Some("--image")
-    } else if options.embedding {
+    if options
+        .mmproj
+        .as_deref()
+        .is_none_or(|path| path.as_os_str().is_empty())
+    {
+        return Err("--audio requires --mmproj".into());
+    }
+    let conflict = if options.embedding {
         Some("--embedding")
     } else if options.dump_logits {
         Some("--dump-logits")
@@ -603,6 +608,7 @@ mod tests {
     fn asr_cli_options() -> CliOptions {
         CliOptions {
             model: "missing.gguf".into(),
+            mmproj: Some("missing-mmproj.gguf".into()),
             audio: Some("missing.wav".into()),
             ..CliOptions::default()
         }
@@ -841,10 +847,6 @@ mod tests {
     #[test]
     fn asr_cli_rejects_conflicting_modes_before_model_load() {
         let mut options = asr_cli_options();
-        options.image = Some("missing.png".into());
-        assert!(validate_cli_options(&options).unwrap_err().contains("--image"));
-
-        let mut options = asr_cli_options();
         options.embedding = true;
         assert!(validate_cli_options(&options).unwrap_err().contains("--embedding"));
 
@@ -884,6 +886,35 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_media_requires_mmproj() {
+        let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--model",
+            "gemma.gguf",
+            "--audio",
+            "a.wav",
+            "--prompt",
+            "x",
+        ]))
+        .is_err());
+        assert!(validate_cli_options(&parse(&[
+            "rmi",
+            "--model",
+            "gemma.gguf",
+            "--mmproj",
+            "mm.gguf",
+            "--image",
+            "a.png",
+            "--audio",
+            "a.wav",
+            "--prompt",
+            "x",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
     fn asr_cli_rejects_empty_and_flag_shaped_values() {
         for args in [
             vec!["rmi", "--audio", ""],
@@ -910,10 +941,17 @@ mod tests {
         assert_eq!(options.audio.as_deref(), Some(Path::new("-recording.wav")));
         assert_eq!(options.language.as_deref(), Some("English"));
 
-        let args: Vec<String> = ["rmi", "missing.wav", "--language", ""]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        let args: Vec<String> = [
+            "rmi",
+            "missing.wav",
+            "--mmproj",
+            "missing-mmproj.gguf",
+            "--language",
+            "",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         let options = parse_cli_options(&args).unwrap();
         assert!(validate_cli_options(&options).is_ok());
         assert!(normalize_language(

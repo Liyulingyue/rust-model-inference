@@ -45,6 +45,41 @@ cargo run --release --bin rust-model-inference -- \
   --language en
 ```
 
+### Gemma 4 E2B 多模态
+
+Gemma 4 E2B 使用 `models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf`。文本可直接运行；任一媒体输入都必须同时传入 `models/gemma-4-e2b/mmproj-F16.gguf`：
+
+```bash
+# 文本
+cargo run --release --bin rust-model-inference -- \
+  --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --prompt "Explain the result." --max-tokens 32 --temp 0
+
+# 图像 + 文本
+cargo run --release --bin rust-model-inference -- \
+  --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --mmproj models/gemma-4-e2b/mmproj-F16.gguf \
+  --image path/to/image.png \
+  --prompt "Describe this image." --max-tokens 32 --temp 0
+
+# 音频 + 文本
+cargo run --release --bin rust-model-inference -- \
+  --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --mmproj models/gemma-4-e2b/mmproj-F16.gguf \
+  --audio path/to/audio.wav \
+  --prompt "Transcribe the audio." --max-tokens 32 --temp 0
+
+# 图像 + 音频 + 文本
+cargo run --release --bin rust-model-inference -- \
+  --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --mmproj models/gemma-4-e2b/mmproj-F16.gguf \
+  --image path/to/image.png \
+  --audio path/to/audio.wav \
+  --prompt "Describe the image and audio." --max-tokens 32 --temp 0
+```
+
+当前仅支持一个用户轮次、每种媒体各一个文件；当同时提供时，输入顺序固定为图像、音频、提示词。音频输入为 PCM16 WAV。CPU 对齐覆盖 attention softmax 前的 token IDs，以及图像 `gemma4.vision.preprocessed`、音频 `gemma4.audio.mel` 的原始 F32 `u32` 位。attention 统一使用准确、稳定的标量 softmax，因此其后的 checkpoint、logits 与 greedy token IDs 不承诺和 llama.cpp 逐位一致；`--gpu` 可以运行，但当前不提供 GPU 位级对比保证。
+
 ### Qwen3-TTS Base 声音克隆
 
 ```bash

@@ -418,9 +418,7 @@ mod tests {
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
-    use crate::ops::attention_value_f32;
-    use crate::ops::dot_f32;
-    use crate::ops::silu_mul_inplace;
+    use crate::ops::{attention_value_f32, dot_f32, silu_mul_inplace, softmax_inplace};
     use std::sync::Arc;
 
     struct EmptySource;

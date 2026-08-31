@@ -699,6 +699,21 @@ unsafe fn hsum_pd_256(v: std::arch::x86_64::__m256d) -> f64 {
     _mm_cvtsd_f64(sum1)
 }
 
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn widen_f32x4_to_f64_pairs(
+    values: std::arch::aarch64::float32x4_t,
+) -> (
+    std::arch::aarch64::float64x2_t,
+    std::arch::aarch64::float64x2_t,
+) {
+    use std::arch::aarch64::*;
+    (
+        vcvt_f64_f32(vget_low_f32(values)),
+        vcvt_f64_f32(vget_high_f32(values)),
+    )
+}
+
 /// AVX2 reduce：`sum_sq = Σ values[i]²` as f64（bit-exact 与标量参考一致）。
 /// 流程：每 8 元素做 `x*x`（f32 lane 内），立即 `_mm256_cvtps_pd` promote
 /// 到 4 f64 doubles（low + high half），再 hsum 到 1 f64 加到 accumulator。
@@ -737,28 +752,33 @@ unsafe fn sum_sq_f32_neon(values: &[f32]) -> f64 {
     use std::arch::aarch64::*;
     let n = values.len();
     let n4 = n / 4 * 4;
-    let mut acc = vdupq_n_f64(0.0);
+    let mut acc_low = vdupq_n_f64(0.0);
+    let mut acc_high = vdupq_n_f64(0.0);
     let mut i = 0;
     while i + 16 <= n4 {
         let v0 = vld1q_f32(values.as_ptr().add(i));
         let v1 = vld1q_f32(values.as_ptr().add(i + 4));
         let v2 = vld1q_f32(values.as_ptr().add(i + 8));
         let v3 = vld1q_f32(values.as_ptr().add(i + 12));
-        let s0 = vcvt_f32_f64(v0);
-        let s1 = vcvt_f32_f64(v1);
-        let s2 = vcvt_f32_f64(v2);
-        let s3 = vcvt_f32_f64(v3);
-        acc = vfmaq_f64(acc, s0, s0);
-        acc = vfmaq_f64(acc, s1, s1);
-        acc = vfmaq_f64(acc, s2, s2);
-        acc = vfmaq_f64(acc, s3, s3);
+        let (s0_low, s0_high) = widen_f32x4_to_f64_pairs(vmulq_f32(v0, v0));
+        let (s1_low, s1_high) = widen_f32x4_to_f64_pairs(vmulq_f32(v1, v1));
+        let (s2_low, s2_high) = widen_f32x4_to_f64_pairs(vmulq_f32(v2, v2));
+        let (s3_low, s3_high) = widen_f32x4_to_f64_pairs(vmulq_f32(v3, v3));
+        acc_low = vaddq_f64(acc_low, s0_low);
+        acc_high = vaddq_f64(acc_high, s0_high);
+        acc_low = vaddq_f64(acc_low, s1_low);
+        acc_high = vaddq_f64(acc_high, s1_high);
+        acc_low = vaddq_f64(acc_low, s2_low);
+        acc_high = vaddq_f64(acc_high, s2_high);
+        acc_low = vaddq_f64(acc_low, s3_low);
+        acc_high = vaddq_f64(acc_high, s3_high);
         i += 16;
     }
-    let mut scalar_acc = vaddvq_f64(acc);
+    let mut scalar_acc = vaddvq_f64(vaddq_f64(acc_low, acc_high));
     while i + 4 <= n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let s = vcvt_f32_f64(v);
-        scalar_acc += s[0] * s[0] + s[1] * s[1] + s[2] * s[2] + s[3] * s[3];
+        let (low, high) = widen_f32x4_to_f64_pairs(vmulq_f32(v, v));
+        scalar_acc += vaddvq_f64(low) + vaddvq_f64(high);
         i += 4;
     }
     let mut tail = 0.0f64;
@@ -805,26 +825,29 @@ unsafe fn sum_f32_neon(values: &[f32]) -> f64 {
     use std::arch::aarch64::*;
     let n = values.len();
     let n4 = n / 4 * 4;
-    let mut acc = vdupq_n_f64(0.0);
+    let mut acc_low = vdupq_n_f64(0.0);
+    let mut acc_high = vdupq_n_f64(0.0);
     let mut i = 0;
     while i + 16 <= n4 {
         let v0 = vld1q_f32(values.as_ptr().add(i));
         let v1 = vld1q_f32(values.as_ptr().add(i + 4));
         let v2 = vld1q_f32(values.as_ptr().add(i + 8));
         let v3 = vld1q_f32(values.as_ptr().add(i + 12));
-        let s0 = vcvt_f32_f64(v0);
-        let s1 = vcvt_f32_f64(v1);
-        let s2 = vcvt_f32_f64(v2);
-        let s3 = vcvt_f32_f64(v3);
-        acc = vaddq_f64(acc, vaddq_f64(s0, s1));
-        acc = vaddq_f64(acc, vaddq_f64(s2, s3));
+        let (s0_low, s0_high) = widen_f32x4_to_f64_pairs(v0);
+        let (s1_low, s1_high) = widen_f32x4_to_f64_pairs(v1);
+        let (s2_low, s2_high) = widen_f32x4_to_f64_pairs(v2);
+        let (s3_low, s3_high) = widen_f32x4_to_f64_pairs(v3);
+        acc_low = vaddq_f64(acc_low, vaddq_f64(s0_low, s1_low));
+        acc_high = vaddq_f64(acc_high, vaddq_f64(s0_high, s1_high));
+        acc_low = vaddq_f64(acc_low, vaddq_f64(s2_low, s3_low));
+        acc_high = vaddq_f64(acc_high, vaddq_f64(s2_high, s3_high));
         i += 16;
     }
-    let mut scalar_acc = vaddvq_f64(acc);
+    let mut scalar_acc = vaddvq_f64(vaddq_f64(acc_low, acc_high));
     while i + 4 <= n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let s = vcvt_f32_f64(v);
-        scalar_acc += s[0] + s[1] + s[2] + s[3];
+        let (low, high) = widen_f32x4_to_f64_pairs(v);
+        scalar_acc += vaddvq_f64(low) + vaddvq_f64(high);
         i += 4;
     }
     let mut tail = 0.0f64;
@@ -876,30 +899,38 @@ unsafe fn sum_sq_centered_f32_neon(values: &[f32], mean: f32) -> f64 {
     let n = values.len();
     let n4 = n / 4 * 4;
     let vmean = vdupq_n_f32(mean);
-    let mut acc = vdupq_n_f64(0.0);
+    let mut acc_low = vdupq_n_f64(0.0);
+    let mut acc_high = vdupq_n_f64(0.0);
     let mut i = 0;
     while i + 16 <= n4 {
         let v0 = vld1q_f32(values.as_ptr().add(i));
         let v1 = vld1q_f32(values.as_ptr().add(i + 4));
         let v2 = vld1q_f32(values.as_ptr().add(i + 8));
         let v3 = vld1q_f32(values.as_ptr().add(i + 12));
-        // (v - mean)² promote to f64 lane-wise
-        let d0 = vcvt_f32_f64(vsubq_f32(v0, vmean));
-        let d1 = vcvt_f32_f64(vsubq_f32(v1, vmean));
-        let d2 = vcvt_f32_f64(vsubq_f32(v2, vmean));
-        let d3 = vcvt_f32_f64(vsubq_f32(v3, vmean));
-        // Square + accumulate in f64 (FMA)
-        acc = vfmaq_f64(acc, d0, d0);
-        acc = vfmaq_f64(acc, d1, d1);
-        acc = vfmaq_f64(acc, d2, d2);
-        acc = vfmaq_f64(acc, d3, d3);
+        let d0 = vsubq_f32(v0, vmean);
+        let d1 = vsubq_f32(v1, vmean);
+        let d2 = vsubq_f32(v2, vmean);
+        let d3 = vsubq_f32(v3, vmean);
+        let (d0_low, d0_high) = widen_f32x4_to_f64_pairs(vmulq_f32(d0, d0));
+        let (d1_low, d1_high) = widen_f32x4_to_f64_pairs(vmulq_f32(d1, d1));
+        let (d2_low, d2_high) = widen_f32x4_to_f64_pairs(vmulq_f32(d2, d2));
+        let (d3_low, d3_high) = widen_f32x4_to_f64_pairs(vmulq_f32(d3, d3));
+        acc_low = vaddq_f64(acc_low, d0_low);
+        acc_high = vaddq_f64(acc_high, d0_high);
+        acc_low = vaddq_f64(acc_low, d1_low);
+        acc_high = vaddq_f64(acc_high, d1_high);
+        acc_low = vaddq_f64(acc_low, d2_low);
+        acc_high = vaddq_f64(acc_high, d2_high);
+        acc_low = vaddq_f64(acc_low, d3_low);
+        acc_high = vaddq_f64(acc_high, d3_high);
         i += 16;
     }
-    let mut scalar_acc = vaddvq_f64(acc);
+    let mut scalar_acc = vaddvq_f64(vaddq_f64(acc_low, acc_high));
     while i + 4 <= n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let d = vcvt_f32_f64(vsubq_f32(v, vmean));
-        scalar_acc += d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + d[3] * d[3];
+        let delta = vsubq_f32(v, vmean);
+        let (low, high) = widen_f32x4_to_f64_pairs(vmulq_f32(delta, delta));
+        scalar_acc += vaddvq_f64(low) + vaddvq_f64(high);
         i += 4;
     }
     let mut tail = 0.0f64;
@@ -909,4 +940,33 @@ unsafe fn sum_sq_centered_f32_neon(values: &[f32], mean: f32) -> f64 {
         i += 1;
     }
     scalar_acc + tail
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sum_f32, sum_sq_centered_f32, sum_sq_f32};
+
+    #[test]
+    fn f64_reductions_cover_vector_and_tail_lengths() {
+        let values = [
+            -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, -2.0,
+            -1.0, 0.0, 1.0, 2.0, 3.0,
+        ];
+        let expected_sum: f64 = values.iter().map(|&value| f64::from(value)).sum();
+        let expected_sq: f64 = values.iter().map(|&value| f64::from(value * value)).sum();
+        let expected_centered: f64 = values
+            .iter()
+            .map(|&value| {
+                let delta = value - 1.0;
+                f64::from(delta * delta)
+            })
+            .sum();
+
+        assert_eq!(sum_f32(&values).to_bits(), expected_sum.to_bits());
+        assert_eq!(sum_sq_f32(&values).to_bits(), expected_sq.to_bits());
+        assert_eq!(
+            sum_sq_centered_f32(&values, 1.0).to_bits(),
+            expected_centered.to_bits()
+        );
+    }
 }

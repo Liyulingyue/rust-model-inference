@@ -99,6 +99,10 @@ impl<'a> BF16Kernel<'a> {
 }
 
 impl<'a> Kernel for BF16Kernel<'a> {
+    fn bf16_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     fn forward_prequantized(
         &self,
         input_q8: &[u8],
