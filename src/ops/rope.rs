@@ -107,6 +107,55 @@ pub fn rope_mrope(
     }
 }
 
+pub fn rope_vision(
+    x: &mut [f32],
+    positions: [usize; 4],
+    sections: [i32; 4],
+    head_dim: usize,
+    freq_base: f32,
+    n_rope_dims: usize,
+) {
+    assert_eq!(n_rope_dims * 2, head_dim);
+    let section_pairs: usize = sections.iter().map(|&value| value as usize).sum();
+    assert!(section_pairs >= head_dim / 2);
+    let boundaries = [
+        sections[0] as usize,
+        (sections[0] + sections[1]) as usize,
+        (sections[0] + sections[1] + sections[2]) as usize,
+    ];
+    let theta_scale = freq_base.powf(-2.0 / n_rope_dims as f32);
+    for head in x.chunks_exact_mut(head_dim) {
+        let mut theta = positions.map(|value| value as f32);
+        for pair in 0..head_dim / 2 {
+            let sector = pair % section_pairs;
+            let axis = if sector < boundaries[0] {
+                0
+            } else if sector < boundaries[1] {
+                1
+            } else if sector < boundaries[2] {
+                2
+            } else {
+                3
+            };
+            if sector == 0
+                || sector == boundaries[0]
+                || sector == boundaries[1]
+                || sector == boundaries[2]
+            {
+                theta[axis] = positions[axis] as f32;
+            }
+            let (sin, cos) = theta[axis].sin_cos();
+            let x0 = head[pair];
+            let x1 = head[pair + head_dim / 2];
+            head[pair] = x0 * cos - x1 * sin;
+            head[pair + head_dim / 2] = x0 * sin + x1 * cos;
+            for value in &mut theta {
+                *value *= theta_scale;
+            }
+        }
+    }
+}
+
 pub fn rope_mrope_interleaved(
     x: &mut [f32],
     positions: [usize; 4],
@@ -141,5 +190,26 @@ pub fn rope_mrope_interleaved(
                 *value *= theta_scale;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vision_rope_rotates_both_halves_with_independent_axes() {
+        let mut values = [0.0f32; 64];
+        values[0] = 1.0;
+        values[32] = 2.0;
+        values[31] = 3.0;
+        values[63] = 4.0;
+
+        super::rope_vision(&mut values, [1, 2, 1, 2], [16, 16, 16, 16], 64, 1.0, 32);
+
+        let (sin_h, cos_h) = 1.0f32.sin_cos();
+        let (sin_w, cos_w) = 2.0f32.sin_cos();
+        assert!((values[0] - (cos_h - 2.0 * sin_h)).abs() < 1e-6);
+        assert!((values[32] - (sin_h + 2.0 * cos_h)).abs() < 1e-6);
+        assert!((values[31] - (3.0 * cos_w - 4.0 * sin_w)).abs() < 1e-6);
+        assert!((values[63] - (3.0 * sin_w + 4.0 * cos_w)).abs() < 1e-6);
     }
 }

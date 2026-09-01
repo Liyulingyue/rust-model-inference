@@ -1,6 +1,7 @@
-﻿use crate::core::loader::{ByteReader, GGUFLoader};
+use crate::core::loader::{ByteReader, GGUFLoader};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use crate::models::qwen3::asr::mel_encoder::validate_qwen3a_source;
+use crate::models::qwen3::omni::Qwen25OmniAudioConfig;
 use memmap2::{Mmap, MmapOptions};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -427,7 +428,7 @@ fn load_export_source(role: ComponentRole, path: &Path) -> Result<ExportSource, 
                 .ok_or_else(|| source_error(&source, "missing or invalid general.architecture"))?;
             if !matches!(
                 architecture,
-                "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "llama"
+                "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "llama"
             ) {
                 return Err(source_error(
                     &source,
@@ -462,19 +463,30 @@ fn load_export_source(role: ComponentRole, path: &Path) -> Result<ExportSource, 
                 .metadata("clip.has_audio_encoder")
                 .is_some_and(|value| matches!(value, MetaValue::Bool(true)))
             {
-                if source
+                let audio_projector = source
                     .loader
                     .metadata("clip.audio.projector_type")
-                    .and_then(MetaValue::to_string_val)
-                    != Some("qwen3a")
-                {
-                    return Err(source_error(
-                        &source,
-                        "missing or invalid clip.audio.projector_type; expected qwen3a",
-                    ));
+                    .and_then(MetaValue::to_string_val);
+                let projector = source
+                    .loader
+                    .metadata("clip.projector_type")
+                    .and_then(MetaValue::to_string_val);
+                match (audio_projector, projector) {
+                    (Some("qwen3a"), _) => {
+                        validate_qwen3a_source(&source.loader)
+                            .map_err(|message| source_error(&source, message))?;
+                    }
+                    (_, Some("qwen2.5o")) => {
+                        Qwen25OmniAudioConfig::from_source(&source.loader)
+                            .map_err(|message| source_error(&source, message))?;
+                    }
+                    _ => {
+                        return Err(source_error(
+                            &source,
+                            "missing or invalid clip.audio.projector_type or clip.projector_type; expected qwen3a or qwen2.5o",
+                        ));
+                    }
                 }
-                validate_qwen3a_source(&source.loader)
-                    .map_err(|message| source_error(&source, message))?;
             } else {
                 for key in [
                     "clip.vision.projection_dim",
@@ -3351,10 +3363,12 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime, TranscriptionOptions};
-    use crate::models::qwen3::Qwen3Model;
     use crate::core::thread_pool::ComputePool;
     use crate::core::tokenizer::BPETokenizer;
+    use crate::models::qwen3::asr::model::{
+        open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
+    };
+    use crate::models::qwen3::Qwen3Model;
 
     #[test]
     fn qwen3vl_llm_uses_existing_shared_and_layer_segments() {

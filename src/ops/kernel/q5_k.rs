@@ -13,7 +13,11 @@ pub struct Q5_KKernel<'a> {
 
 impl<'a> Q5_KKernel<'a> {
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -37,17 +41,18 @@ impl<'a> Kernel for Q5_KKernel<'a> {
         }
 
         let owned_q8k;
-        let input_q8_k: &[crate::ops::quant::BlockQ8K] = if _input_q8.is_empty() && _input_scales.is_empty() {
-            owned_q8k = crate::ops::quant::quantize_row_q8_k(&[]);
-            &owned_q8k
-        } else {
-            let mut f32 = vec![0.0f32; n_in];
-            for (i, &q) in _input_q8.iter().take(n_in).enumerate() {
-                f32[i] = q as i8 as f32 * _input_scales[i / 32];
-            }
-            owned_q8k = crate::ops::quant::quantize_row_q8_k(&f32);
-            &owned_q8k
-        };
+        let input_q8_k: &[crate::ops::quant::BlockQ8K] =
+            if _input_q8.is_empty() && _input_scales.is_empty() {
+                owned_q8k = crate::ops::quant::quantize_row_q8_k(&[]);
+                &owned_q8k
+            } else {
+                let mut f32 = vec![0.0f32; n_in];
+                for (i, &q) in _input_q8.iter().take(n_in).enumerate() {
+                    f32[i] = q as i8 as f32 * _input_scales[i / 32];
+                }
+                owned_q8k = crate::ops::quant::quantize_row_q8_k(&f32);
+                &owned_q8k
+            };
 
         let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q5K_SIZE;
         for out_idx in start..end {
@@ -100,9 +105,6 @@ impl<'a> Kernel for Q5_KKernel<'a> {
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         let row_bytes = n_embd / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q5K_SIZE;
         let offset = token_id as usize * row_bytes;
-        crate::ops::quant::dequantize_row_q5_k(
-            &self.weight[offset..offset + row_bytes],
-            out,
-        );
+        crate::ops::quant::dequantize_row_q5_k(&self.weight[offset..offset + row_bytes], out);
     }
 }

@@ -17,7 +17,11 @@ impl<'a> Q3_KKernel<'a> {
     pub const BLOCK_BYTES: usize = 110;
 
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 

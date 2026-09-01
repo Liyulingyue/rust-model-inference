@@ -22,33 +22,52 @@ pub struct ClipVisionConfig {
 impl ClipVisionConfig {
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
         let get_u32 = |key: &str| -> Result<u32, String> {
-            source.metadata(key)
+            source
+                .metadata(key)
                 .and_then(|v| v.to_u64())
                 .map(|v| v as u32)
                 .ok_or_else(|| format!("Missing clip metadata: {}", key))
         };
 
         let get_f32 = |key: &str| -> Result<f32, String> {
-            source.metadata(key)
+            source
+                .metadata(key)
                 .and_then(|v| v.to_f64())
                 .map(|v| v as f32)
                 .ok_or_else(|| format!("Missing clip metadata: {}", key))
         };
 
         let get_bool = |key: &str| -> bool {
-            source.metadata(key)
-                .and_then(|v| match v { MetaValue::Bool(b) => Some(*b), _ => None })
+            source
+                .metadata(key)
+                .and_then(|v| match v {
+                    MetaValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
                 .unwrap_or(false)
         };
 
-        let projection_dim = get_u32("clip.vision.projection_dim")? as usize;
+        let metadata_projection_dim = source
+            .metadata("clip.vision.projection_dim")
+            .and_then(|value| value.to_u64())
+            .and_then(|value| usize::try_from(value).ok());
+        let projection_dim = source
+            .tensor_info("mm.2.weight")
+            .and_then(|info| info.dims.get(1).copied())
+            .and_then(|value| usize::try_from(value).ok())
+            .or(metadata_projection_dim)
+            .ok_or_else(|| {
+                "Missing clip projection width (mm.2.weight or clip.vision.projection_dim)"
+                    .to_string()
+            })?;
         let image_size = get_u32("clip.vision.image_size")? as usize;
         let patch_size = get_u32("clip.vision.patch_size")? as usize;
         let n_embd = get_u32("clip.vision.embedding_length")? as usize;
         let n_ff = get_u32("clip.vision.feed_forward_length")? as usize;
         let n_layer = get_u32("clip.vision.block_count")? as usize;
         let n_head = get_u32("clip.vision.attention.head_count")? as usize;
-        let spatial_merge_size = source.metadata("clip.vision.spatial_merge_size")
+        let spatial_merge_size = source
+            .metadata("clip.vision.spatial_merge_size")
             .and_then(|v| v.to_u64())
             .map(usize::try_from)
             .transpose()
@@ -88,7 +107,8 @@ impl ClipVisionConfig {
 
         let image_mean = match source.metadata("clip.vision.image_mean") {
             Some(MetaValue::Array(_, vals)) => {
-                let m: Vec<f32> = vals.iter()
+                let m: Vec<f32> = vals
+                    .iter()
                     .filter_map(|v| v.to_f64().map(|x| x as f32))
                     .collect();
                 if m.len() == 3 {
@@ -97,14 +117,13 @@ impl ClipVisionConfig {
                     [0.5, 0.5, 0.5]
                 }
             }
-            _ => {
-                [0.5, 0.5, 0.5]
-            }
+            _ => [0.5, 0.5, 0.5],
         };
 
         let image_std = match source.metadata("clip.vision.image_std") {
             Some(MetaValue::Array(_, vals)) => {
-                let s: Vec<f32> = vals.iter()
+                let s: Vec<f32> = vals
+                    .iter()
                     .filter_map(|v| v.to_f64().map(|x| x as f32))
                     .collect();
                 if s.len() == 3 {
@@ -113,17 +132,17 @@ impl ClipVisionConfig {
                     [0.5, 0.5, 0.5]
                 }
             }
-            _ => {
-                [0.5, 0.5, 0.5]
-            }
+            _ => [0.5, 0.5, 0.5],
         };
 
         let has_deepstack_layers = match source.metadata("clip.vision.is_deepstack_layers") {
-            Some(MetaValue::Array(_, vals)) => {
-                vals.iter()
-                    .filter_map(|v| match v { MetaValue::Bool(b) => Some(*b), _ => None })
-                    .collect()
-            }
+            Some(MetaValue::Array(_, vals)) => vals
+                .iter()
+                .filter_map(|v| match v {
+                    MetaValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .collect(),
             _ => vec![false; n_layer],
         };
 

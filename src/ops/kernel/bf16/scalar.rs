@@ -54,9 +54,8 @@ pub fn forward_q8_rows_scalar(
             for in_idx in input_start..input_end {
                 let weight_offset = row_start + in_idx * 2;
                 let bits = u16::from_le_bytes([weight[weight_offset], weight[weight_offset + 1]]);
-                sum += crate::ops::bf16_to_f32(bits)
-                    * (input_q8[in_idx] as i8 as f32)
-                    * input_scale;
+                sum +=
+                    crate::ops::bf16_to_f32(bits) * (input_q8[in_idx] as i8 as f32) * input_scale;
             }
         }
         let output_index = if output.len() >= n_out {

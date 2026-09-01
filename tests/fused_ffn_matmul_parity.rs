@@ -100,7 +100,8 @@ fn run_q8_0_case(label: &str, n_in: usize, n_out_per: usize, pool: &ComputePool)
     let (fused_data, fused_n_rows) =
         fuse_vstack_q8_0(&gate, &up, n_out_per, n_out_per).expect("fuse_vstack_q8_0");
     assert_eq!(fused_n_rows, 2 * n_out_per);
-    let out_fused = quantize_and_parallel_matmul_q8_0(&fused_data, &input, n_in, fused_n_rows, pool);
+    let out_fused =
+        quantize_and_parallel_matmul_q8_0(&fused_data, &input, n_in, fused_n_rows, pool);
 
     assert_eq_f32(
         &format!("{label} q8_0 gate half"),
@@ -173,7 +174,14 @@ fn make_qk_weight(total_bytes: usize, row_bytes: usize, seed: u8) -> Vec<u8> {
 
 fn quantize_input_q8k(input: &[f32]) -> Vec<BlockQ8K> {
     let blocks = input.len() / QK_K;
-    let mut q8k = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; blocks];
+    let mut q8k = vec![
+        BlockQ8K {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16]
+        };
+        blocks
+    ];
     quantize_row_q8_k_into(input, &mut q8k);
     q8k
 }
@@ -217,7 +225,9 @@ fn parallel_kk_matmul(
     pool.compute(move |ith, _nth| {
         let start = ith * chunk_size;
         let end = (start + chunk_size).min(n_out);
-        if start >= end { return; }
+        if start >= end {
+            return;
+        }
         unsafe {
             let w = std::slice::from_raw_parts(weight_ptr, weight_len);
             let q = std::slice::from_raw_parts(q8k_ptr, q8k_len);
@@ -252,11 +262,7 @@ fn run_kk_case(label: &str, dtype: KkDtype, n_in: usize, n_out_per: usize, pool:
 
     let out_up_seq = sequential_kk_matmul(dtype, &up, &q8k, n_out_per, blocks_per_row);
     let out_up_par = parallel_kk_matmul(dtype, &up, &q8k, n_out_per, blocks_per_row, pool);
-    assert_eq_f32(
-        &format!("{label} up seq==par"),
-        &out_up_seq,
-        &out_up_par,
-    );
+    assert_eq_f32(&format!("{label} up seq==par"), &out_up_seq, &out_up_par);
 
     // Fused weight via fuse_vstack_q*Kk, then run sequential + parallel,
     // confirm the first n_out_per rows == gate result, the last == up result.
@@ -330,7 +336,9 @@ fn assert_eq_f32(label: &str, expected: &[f32], actual: &[f32]) {
                 let d = (e2 - a2).abs();
                 if d > 0.0 {
                     mismatches += 1;
-                    if d > max_abs { max_abs = d; }
+                    if d > max_abs {
+                        max_abs = d;
+                    }
                 }
             }
             panic!(

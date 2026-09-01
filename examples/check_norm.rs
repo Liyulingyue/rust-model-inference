@@ -12,12 +12,7 @@ fn main() {
     let mut vals = vec![0.0f32; 2048];
     for i in 0..2048 {
         let off = i * 4;
-        vals[i] = f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]);
+        vals[i] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
     }
     println!("first 8: {:?}", &vals[..8]);
     println!(
@@ -33,12 +28,7 @@ fn main() {
     let mut vals = vec![0.0f32; 2048];
     for i in 0..2048 {
         let off = i * 4;
-        vals[i] = f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]);
+        vals[i] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
     }
     println!("first 8: {:?}", &vals[..8]);
     println!(
@@ -50,8 +40,14 @@ fn main() {
 
     // Compare with what RMSNorm would produce
     let x = [
-        -0.0070474744f32, 0.0016092658, -0.0006659031, -0.0010543466, -0.00033295155,
-        0.0018312335, 0.0009433627, 0.0039954185,
+        -0.0070474744f32,
+        0.0016092658,
+        -0.0006659031,
+        -0.0010543466,
+        -0.00033295155,
+        0.0018312335,
+        0.0009433627,
+        0.0039954185,
     ];
     let w = &vals[..8];
     let eps = 1e-5;

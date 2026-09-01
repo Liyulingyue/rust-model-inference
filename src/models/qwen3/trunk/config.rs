@@ -1,8 +1,10 @@
 //! Qwen3Config — hyperparameters extracted from GGUF metadata.
 
-use crate::core::loader::{check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs};
-use crate::core::tensor::TensorSource;
 use super::util::optional_usize;
+use crate::core::loader::{
+    check_qwen3_allowed_dimensions, model_config_from_source, qwen3_arch_knobs,
+};
+use crate::core::tensor::TensorSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen3Rope {
@@ -25,6 +27,9 @@ pub struct Qwen3Config {
     pub eps: f32,
     pub freq_base: f32,
     pub has_qk_norm: bool,
+    pub has_qkv_bias: bool,
+    pub n_deepstack_layers: usize,
+    pub moe: Option<crate::core::loader::Qwen3MoeConfig>,
     pub rope: Qwen3Rope,
 }
 
@@ -33,8 +38,9 @@ impl Qwen3Config {
         let config = model_config_from_source(source)?;
         let knobs = qwen3_arch_knobs(source)?;
 
-        let n_embd_head_k = optional_usize(source, &format!("{}.attention.key_length", knobs.arch))?
-            .unwrap_or(config.n_embd_head);
+        let n_embd_head_k =
+            optional_usize(source, &format!("{}.attention.key_length", knobs.arch))?
+                .unwrap_or(config.n_embd_head);
         let n_embd_head_v =
             optional_usize(source, &format!("{}.attention.value_length", knobs.arch))?
                 .unwrap_or(config.n_embd_head);
@@ -56,6 +62,8 @@ impl Qwen3Config {
             },
             None => Qwen3Rope::Neox,
         };
+        let n_deepstack_layers =
+            optional_usize(source, &format!("{}.n_deepstack_layers", knobs.arch))?.unwrap_or(0);
 
         Ok(Self {
             architecture: knobs.arch,
@@ -71,6 +79,9 @@ impl Qwen3Config {
             eps: config.norm_eps,
             freq_base: config.rope_freq_base,
             has_qk_norm: knobs.has_qk_norm,
+            has_qkv_bias: knobs.has_qkv_bias,
+            n_deepstack_layers,
+            moe: knobs.moe,
             rope,
         })
     }

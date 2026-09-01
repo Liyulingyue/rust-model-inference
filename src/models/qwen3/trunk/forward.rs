@@ -12,25 +12,104 @@
 //! `Qwen3GenerateOptions`, `Qwen3Generation`) and the `Qwen3Model::generate` /
 //! `Qwen3Model::text_encode` method wrappers.
 
-use super::config::Qwen3Rope;
-use super::weights::{Qwen3Model, Qwen3LayerWeights};
+use super::config::{Qwen3Config, Qwen3Rope};
 use super::positions::qwen_text_positions;
 use super::session::Qwen3Session;
 use super::util::{
     check_allocation, checked_product, checked_session_capacity, validate_generation,
     validate_input_shapes, validate_token_ids,
 };
+use super::weights::{Qwen3LayerWeights, Qwen3Model};
 use crate::app::cli::resolve_thread_count;
 use crate::core::scratchpad::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
+
+pub(super) fn forward_moe_token(
+    input: &[f32],
+    layer: &Qwen3LayerWeights<'_>,
+    config: &Qwen3Config,
+    output: &mut [f32],
+) -> Result<(), String> {
+    let router = layer.moe_router.as_deref().ok_or("missing MoE router")?;
+    let gate = layer
+        .moe_gate
+        .as_deref()
+        .ok_or("missing MoE gate experts")?;
+    let up = layer.moe_up.as_deref().ok_or("missing MoE up experts")?;
+    let down = layer
+        .moe_down
+        .as_deref()
+        .ok_or("missing MoE down experts")?;
+    let expert_count = gate.len();
+    let used = config.moe.map(|value| value.expert_used_count).unwrap_or(0);
+    if expert_count == 0
+        || used == 0
+        || used > expert_count
+        || router.len() != input.len() * expert_count
+    {
+        return Err("invalid Qwen3VL-MoE router shape".into());
+    }
+    let mut logits: Vec<(usize, f32)> = (0..expert_count)
+        .map(|expert| {
+            let row = &router[expert * input.len()..(expert + 1) * input.len()];
+            (expert, dot_f32(input, row, input.len()))
+        })
+        .collect();
+    logits.sort_by(|(a, va), (b, vb)| {
+        vb.partial_cmp(va)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+    let max = logits[..used]
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut probs: Vec<f32> = logits[..used]
+        .iter()
+        .map(|(_, value)| (*value - max).exp())
+        .collect();
+    let norm = probs.iter().sum::<f32>();
+    for value in &mut probs {
+        *value /= norm;
+    }
+    output.fill(0.0);
+    let mut gate_buf = vec![
+        0.0;
+        config
+            .moe
+            .map(|value| value.expert_ffn)
+            .unwrap_or(config.n_ff)
+    ];
+    let mut up_buf = vec![0.0; gate_buf.len()];
+    let mut down_buf = vec![0.0; output.len()];
+    let expert_ffn = gate_buf.len();
+    for ((expert, _), probability) in logits[..used].iter().zip(probs) {
+        gate[*expert]
+            .kernel
+            .forward(input, &mut gate_buf, input.len(), expert_ffn);
+        up[*expert]
+            .kernel
+            .forward(input, &mut up_buf, input.len(), expert_ffn);
+        for (gate_value, up_value) in gate_buf.iter_mut().zip(&up_buf) {
+            *gate_value = silu(*gate_value) * *up_value;
+        }
+        down[*expert]
+            .kernel
+            .forward(&gate_buf, &mut down_buf, expert_ffn, output.len());
+        for (value, expert_value) in output.iter_mut().zip(&down_buf) {
+            *value += probability * *expert_value;
+        }
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Forward-loop input/output types
@@ -41,6 +120,7 @@ pub struct Qwen3Input<'a> {
     pub token_ids: &'a [u32],
     pub positions: &'a [[usize; 4]],
     pub embeddings: Option<&'a [f32]>,
+    pub deepstack_embeddings: Option<&'a [f32]>,
 }
 
 #[derive(Clone)]
@@ -195,23 +275,41 @@ pub fn text_encode(
                 0,
                 1,
             );
+            if let Some(bias) = layer.q_bias.as_deref() {
+                for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
+                    *value += *bias;
+                }
+            }
+            if let Some(bias) = layer.k_bias.as_deref() {
+                for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
+                    *value += *bias;
+                }
+            }
+            if let Some(bias) = layer.v_bias.as_deref() {
+                for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
+                    *value += *bias;
+                }
+            }
         }
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
-            for head in 0..cfg.n_head {
-                let off = head * cfg.n_embd_head_k;
-                rms_norm_inplace(&mut q_all[off..off + cfg.n_embd_head_k], q_norm, cfg.eps);
-            }
-            for head in 0..cfg.n_head_kv {
-                let off = head * cfg.n_embd_head_k;
-                rms_norm_inplace(&mut k_all[off..off + cfg.n_embd_head_k], k_norm, cfg.eps);
-            }
+            apply_qk_norms(
+                &mut q_all,
+                &mut k_all,
+                n_tokens,
+                cfg.n_head,
+                cfg.n_head_kv,
+                cfg.n_embd_head_k,
+                q_norm,
+                k_norm,
+                cfg.eps,
+            );
         }
 
         for tok in 0..n_tokens {
             let pos = positions[tok];
             for head in 0..cfg.n_head {
-                let off = head * cfg.n_embd_head_k;
+                let off = tok * n_embd_q + head * cfg.n_embd_head_k;
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Qwen3Rope::Neox => {
@@ -230,7 +328,7 @@ pub fn text_encode(
                 }
             }
             for head in 0..cfg.n_head_kv {
-                let off = head * cfg.n_embd_head_k;
+                let off = tok * n_embd_k + head * cfg.n_embd_head_k;
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Qwen3Rope::Neox => {
@@ -262,8 +360,10 @@ pub fn text_encode(
                 let mut max_val = f32::NEG_INFINITY;
                 let mut scores = vec![0.0; n_tokens];
                 for j in 0..=i {
-                    let q_row = &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
-                    let k_row = &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
+                    let q_row =
+                        &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
+                    let k_row =
+                        &k_all[j * n_embd_k + k_off..j * n_embd_k + k_off + cfg.n_embd_head_k];
                     scores[j] = dot_f32(q_row, k_row, cfg.n_embd_head_k) * kq_scale;
                     if scores[j] > max_val {
                         max_val = scores[j];
@@ -280,7 +380,8 @@ pub fn text_encode(
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
                     for j in 0..=i {
-                        let v_row = &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
+                        let v_row =
+                            &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
                         sum += scores[j] * v_row[dim];
                     }
                     attn_out[i * n_attn + attn_off + dim] = sum;
@@ -326,73 +427,85 @@ pub fn text_encode(
             );
         }
 
-        let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
-        let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-        for tok in 0..n_tokens {
-            let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-            let blocks = (cfg.n_embd + 31) / 32;
-            let mut q8_buf = vec![0u8; cfg.n_embd];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-            layer.w_gate.kernel.forward_prepared(
-                ffn_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                cfg.n_embd,
-                cfg.n_ff,
-                0,
-                1,
-            );
-            layer.w_up.kernel.forward_prepared(
-                ffn_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                cfg.n_embd,
-                cfg.n_ff,
-                0,
-                1,
-            );
-        }
-
-        for tok in 0..n_tokens {
-            let off = tok * cfg.n_ff;
-            for i in 0..cfg.n_ff {
-                gate_buf[off + i] = silu(gate_buf[off + i]) * up_buf[off + i];
+        if layer.moe_router.is_some() {
+            let mut moe_out = vec![0.0; cfg.n_embd];
+            for tok in 0..n_tokens {
+                let off = tok * cfg.n_embd;
+                forward_moe_token(&ffn_normed[off..off + cfg.n_embd], layer, cfg, &mut moe_out)?;
+                hidden[off..off + cfg.n_embd]
+                    .iter_mut()
+                    .zip(&moe_out)
+                    .for_each(|(value, update)| *value += *update);
             }
-        }
+        } else {
+            let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
+            let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
+            for tok in 0..n_tokens {
+                let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+                let blocks = (cfg.n_embd + 31) / 32;
+                let mut q8_buf = vec![0u8; cfg.n_embd];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+                layer.w_gate.kernel.forward_prepared(
+                    ffn_row,
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_embd,
+                    cfg.n_ff,
+                    0,
+                    1,
+                );
+                layer.w_up.kernel.forward_prepared(
+                    ffn_row,
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_embd,
+                    cfg.n_ff,
+                    0,
+                    1,
+                );
+            }
 
-        let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-        for tok in 0..n_tokens {
-            let blocks = (cfg.n_ff + 31) / 32;
-            let mut q8_buf = vec![0u8; cfg.n_ff];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(
-                &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                cfg.n_ff,
-                &mut q8_buf,
-                &mut scale_buf,
-            );
-            layer.w_down.kernel.forward_prepared(
-                &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                cfg.n_ff,
-                cfg.n_embd,
-                0,
-                1,
-            );
-        }
+            for tok in 0..n_tokens {
+                let off = tok * cfg.n_ff;
+                for i in 0..cfg.n_ff {
+                    gate_buf[off + i] = silu(gate_buf[off + i]) * up_buf[off + i];
+                }
+            }
 
-        for tok in 0..n_tokens {
-            let off = tok * cfg.n_embd;
-            for i in 0..cfg.n_embd {
-                hidden[off + i] += down_buf[off + i];
+            let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
+            for tok in 0..n_tokens {
+                let blocks = (cfg.n_ff + 31) / 32;
+                let mut q8_buf = vec![0u8; cfg.n_ff];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(
+                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    cfg.n_ff,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                );
+                layer.w_down.kernel.forward_prepared(
+                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                    &q8_buf,
+                    &scale_buf,
+                    None,
+                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
+                    cfg.n_ff,
+                    cfg.n_embd,
+                    0,
+                    1,
+                );
+            }
+
+            for tok in 0..n_tokens {
+                let off = tok * cfg.n_embd;
+                for i in 0..cfg.n_embd {
+                    hidden[off + i] += down_buf[off + i];
+                }
             }
         }
     }
@@ -409,6 +522,31 @@ pub fn text_encode(
     }
 
     Ok(output)
+}
+
+fn apply_qk_norms(
+    q_all: &mut [f32],
+    k_all: &mut [f32],
+    n_tokens: usize,
+    n_head: usize,
+    n_head_kv: usize,
+    head_dim: usize,
+    q_norm: &[f32],
+    k_norm: &[f32],
+    eps: f32,
+) {
+    let q_width = n_head * head_dim;
+    let k_width = n_head_kv * head_dim;
+    for tok in 0..n_tokens {
+        let q_row = &mut q_all[tok * q_width..(tok + 1) * q_width];
+        for head in q_row.chunks_exact_mut(head_dim) {
+            rms_norm_inplace(head, q_norm, eps);
+        }
+        let k_row = &mut k_all[tok * k_width..(tok + 1) * k_width];
+        for head in k_row.chunks_exact_mut(head_dim) {
+            rms_norm_inplace(head, k_norm, eps);
+        }
+    }
 }
 
 pub fn run_shared_inference(
@@ -461,6 +599,7 @@ pub fn run_shared_inference(
             token_ids: &input_tokens,
             positions: &positions,
             embeddings: None,
+            deepstack_embeddings: None,
         },
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
@@ -483,4 +622,18 @@ pub fn run_shared_inference(
         tokens_per_second,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_qk_norms;
+
+    #[test]
+    fn qk_norms_are_applied_to_every_token_and_head() {
+        let mut q = vec![3.0, 4.0, 5.0, 12.0];
+        let mut k = vec![3.0, 4.0, 5.0, 12.0];
+        apply_qk_norms(&mut q, &mut k, 2, 1, 1, 2, &[1.0, 1.0], &[1.0, 1.0], 0.0);
+        assert_eq!(q, [0.84852815, 1.1313709, 0.54392827, 1.3054278]);
+        assert_eq!(k, q);
+    }
 }

@@ -12,14 +12,12 @@
 
 use crate::app::cli::{per_second, resolve_thread_count, KvFormat};
 use crate::core::loader::model_config_from_source;
+use crate::core::scratchpad::KvLifecycle;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::{
-    Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
-};
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session};
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
-use crate::core::scratchpad::KvLifecycle;
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -110,17 +108,15 @@ pub fn run_inference_tokens(
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
     let max_ctx = 512usize.min(model_config_from_source(source.as_ref())?.n_ctx);
-    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
 
     // 1) 加载共享模型（与 ASR/TTS/Image 共用同一份 Qwen3Model）
-    let model = Qwen3Model::from_source(
-        source,
-        Arc::new(tokenizer),
-        pool,
-    )?;
+    let model = Qwen3Model::from_source(source, Arc::new(tokenizer), pool)?;
     let load_ms = t0.elapsed().as_millis();
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} n_ff={} | loaded in {}ms",
@@ -135,17 +131,11 @@ pub fn run_inference_tokens(
     println!("Prompt: {} tokens", input_tokens.len());
 
     // 2) 创建标准会话（共享 base::Qwen3Session）
-    let mut session = Qwen3Session::new_with_kv_state(
-        &model,
-        max_ctx,
-        kv_format,
-        KvLifecycle::Ephemeral,
-    )?;
+    let mut session =
+        Qwen3Session::new_with_kv_state(&model, max_ctx, kv_format, KvLifecycle::Ephemeral)?;
 
     // 3) 构造 positions（文本推理每 token 位置递增）
-    let positions: Vec<[usize; 4]> = (0..input_tokens.len())
-        .map(|i| [i, 0, 0, 0])
-        .collect();
+    let positions: Vec<[usize; 4]> = (0..input_tokens.len()).map(|i| [i, 0, 0, 0]).collect();
 
     // 4) Streaming 调用 + bench 计时
     print!("Output: ");
@@ -159,6 +149,7 @@ pub fn run_inference_tokens(
             token_ids: &input_tokens,
             positions: &positions,
             embeddings: None,
+            deepstack_embeddings: None,
         },
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
@@ -193,6 +184,10 @@ pub fn run_inference_tokens(
         per_second(decode_count, decode_time),
         tok_s
     );
-    println!("[{} output tokens in {}ms]", generation.token_ids.len(), infer_ms);
+    println!(
+        "[{} output tokens in {}ms]",
+        generation.token_ids.len(),
+        infer_ms
+    );
     Ok(())
 }

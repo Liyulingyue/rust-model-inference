@@ -33,7 +33,11 @@ where
         };
         values.push(value);
     }
-    assert_eq!(values.len(), expected, "wrong length for ggml table {table_name}");
+    assert_eq!(
+        values.len(),
+        expected,
+        "wrong length for ggml table {table_name}"
+    );
     values
 }
 

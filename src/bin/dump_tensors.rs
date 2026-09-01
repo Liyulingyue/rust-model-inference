@@ -1,4 +1,4 @@
-use rust_model_inference::{GGUFLoader, GGMLType};
+use rust_model_inference::{GGMLType, GGUFLoader};
 
 fn dump(path: &str) {
     println!("=== {path} ===");

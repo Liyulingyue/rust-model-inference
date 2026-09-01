@@ -4,10 +4,15 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::qwen3::qwen_text_positions;
+use crate::models::qwen3::vision::{
+    qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
+    VisionScratchpad as VisionScratchpad3vl,
+};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
-use crate::models::qwen35::vision::{qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid, VisionScratchpad as VisionScratchpad35};
-use crate::models::qwen3::vision::{qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl, VisionScratchpad as VisionScratchpad3vl};
+use crate::models::qwen35::vision::{
+    qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
+    VisionScratchpad as VisionScratchpad35,
+};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::Kernel;
@@ -267,11 +272,14 @@ pub fn normalize_resized_image(
     if std.iter().any(|value| *value == 0.0) {
         return Err("Vision normalization std must be nonzero".into());
     }
-    let width = u32::try_from(target_w).map_err(|_| "Vision width exceeds u32")?;
-    let height = u32::try_from(target_h).map_err(|_| "Vision height exceeds u32")?;
-    let resized = image
-        .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-        .to_rgb8();
+    let source = image.to_rgb8();
+    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
+        source.as_raw(),
+        source.width() as usize,
+        source.height() as usize,
+        target_w,
+        target_h,
+    )?;
     let output_len = target_w
         .checked_mul(target_h)
         .and_then(|pixels| pixels.checked_mul(3))
@@ -279,15 +287,397 @@ pub fn normalize_resized_image(
     let mut output = vec![0.0f32; output_len];
     for y in 0..target_h {
         for x in 0..target_w {
-            let pixel = resized.get_pixel(x as u32, y as u32);
             let offset = (y * target_w + x) * 3;
             for channel in 0..3 {
                 output[offset + channel] =
-                    (f32::from(pixel[channel]) / 255.0 - mean[channel]) / std[channel];
+                    (f32::from(resized[offset + channel]) / 255.0 - mean[channel]) / std[channel];
             }
         }
     }
     Ok(output)
+}
+
+fn build_qwen3_media_positions(
+    token_ids: &[u32],
+    placeholder_id: u32,
+    grid_shapes: &[(usize, usize)],
+) -> Result<Vec<[usize; 4]>, String> {
+    let mut positions = Vec::with_capacity(token_ids.len());
+    let mut next = 0usize;
+    let mut token = 0usize;
+    let mut grid_index = 0usize;
+    while token < token_ids.len() {
+        if token_ids[token] != placeholder_id {
+            positions.push([next, next, next, 0]);
+            next = next.checked_add(1).ok_or("Qwen media position overflow")?;
+            token += 1;
+            continue;
+        }
+        if grid_shapes.is_empty() {
+            positions.push([next, next, next, 0]);
+            next = next.checked_add(1).ok_or("Qwen audio position overflow")?;
+            token += 1;
+            continue;
+        }
+        let (grid_h, grid_w) = *grid_shapes
+            .get(grid_index)
+            .ok_or("Media placeholder has no matching vision grid")?;
+        let count = grid_h
+            .checked_mul(grid_w)
+            .ok_or("Qwen media grid token count overflow")?;
+        let end = token
+            .checked_add(count)
+            .ok_or("Qwen media placeholder range overflow")?;
+        if count == 0
+            || end > token_ids.len()
+            || token_ids[token..end].iter().any(|id| *id != placeholder_id)
+        {
+            return Err(format!(
+                "Vision grid {grid_index} requires {count} contiguous placeholders"
+            ));
+        }
+        let base = next;
+        for index in 0..count {
+            let row = index / grid_w;
+            let column = index % grid_w;
+            positions.push([
+                base,
+                base.checked_add(row)
+                    .ok_or("Qwen media row position overflow")?,
+                base.checked_add(column)
+                    .ok_or("Qwen media column position overflow")?,
+                0,
+            ]);
+        }
+        next = base
+            .checked_add(grid_h.max(grid_w))
+            .ok_or("Qwen media logical position overflow")?;
+        token = end;
+        grid_index += 1;
+    }
+    if !grid_shapes.is_empty() && grid_index != grid_shapes.len() {
+        return Err(format!(
+            "Unused vision grids: consumed {grid_index}, provided {}",
+            grid_shapes.len()
+        ));
+    }
+    Ok(positions)
+}
+
+fn run_qwen3_family_multimodal(
+    llm_source: &dyn TensorSource,
+    model_source: Arc<dyn TensorSource>,
+    mmproj_path: &Path,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+) -> Result<(), String> {
+    validate_single_qwen_media(
+        image_path.is_some(),
+        video_path.is_some(),
+        audio_path.is_some(),
+    )?;
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    let mmproj: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(mmproj_path, ComponentRole::Mmproj)
+            .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
+    );
+    let media_kind = if audio_path.is_some() {
+        crate::app::omni::MediaKind::Audio
+    } else if video_path.is_some() {
+        crate::app::omni::MediaKind::Video
+    } else {
+        crate::app::omni::MediaKind::Image
+    };
+    let family = crate::app::omni::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let mut media = Vec::new();
+    let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
+    let mut media_grid_shapes = Vec::new();
+    if let Some(audio_path) = audio_path {
+        let samples = crate::app::omni::decode_audio(audio_path)?;
+        media =
+            crate::models::qwen3::omni::encode_audio(Arc::clone(&mmproj), &samples, n_threads_arg)?;
+    } else {
+        let mut frames = if let Some(path) = image_path {
+            vec![decode_image(path)?]
+        } else {
+            crate::app::omni::decode_video(video_path.ok_or("missing image or video input")?)?
+        };
+        let is_video = video_path.is_some();
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let (grid_w, grid_h) = match family {
+            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+                let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+        };
+        let (mean, std) = match family {
+            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+                let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                (encoder.config.image_mean, encoder.config.image_std)
+            }
+            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+                let encoder = VisionEncoder35::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                (encoder.config.image_mean, encoder.config.image_std)
+            }
+        };
+        let normalized = frames
+            .drain(..)
+            .map(|frame| normalize_resized_image(&frame, grid_w, grid_h, &mean, &std))
+            .collect::<Result<Vec<_>, _>>()?;
+        let pairs = if is_video {
+            (0..normalized.len())
+                .step_by(2)
+                .map(|index| (index, (index + 1).min(normalized.len() - 1)))
+                .collect::<Vec<_>>()
+        } else {
+            vec![(0, 0)]
+        };
+        match family {
+            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+                let mut encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad3vl::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid.image_width(),
+                        grid.image_height(),
+                        &mut scratch,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    let deepstack_layers = encoder
+                        .config
+                        .has_deepstack_layers
+                        .iter()
+                        .filter(|enabled| **enabled)
+                        .count();
+                    if deepstack_layers > 0 {
+                        if scratch.deepstack.len() % deepstack_layers != 0 {
+                            return Err("Vision deepstack output is not layer aligned".into());
+                        }
+                        if media_deepstack_layers.is_empty() {
+                            media_deepstack_layers.resize_with(deepstack_layers, Vec::new);
+                        } else if media_deepstack_layers.len() != deepstack_layers {
+                            return Err(
+                                "Vision deepstack layer count changed between frames".into()
+                            );
+                        }
+                        let per_layer = scratch.deepstack.len() / deepstack_layers;
+                        for (layer, output) in media_deepstack_layers.iter_mut().enumerate() {
+                            output.extend_from_slice(
+                                &scratch.deepstack[layer * per_layer..(layer + 1) * per_layer],
+                            );
+                        }
+                    }
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
+                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad35::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid.image_width(),
+                        grid.image_height(),
+                        &mut scratch,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+        }
+    }
+
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), pool)?;
+    let width = model.config().n_embd;
+    if media.len() % width != 0 {
+        return Err(format!(
+            "Media projector width does not match model width {width}"
+        ));
+    }
+    let (start_name, pad_name, end_name) = match media_kind {
+        crate::app::omni::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
+        crate::app::omni::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
+        crate::app::omni::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
+    };
+    let start = tokenizer
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: {start_name}"))?;
+    let pad = tokenizer
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: {pad_name}"))?;
+    let end = tokenizer
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: {end_name}"))?;
+    let rows = media.len() / width;
+    let media_deepstack = media_deepstack_layers.concat();
+    let deepstack_layers = if media_deepstack.is_empty() {
+        0
+    } else {
+        let per_layer = rows
+            .checked_mul(width)
+            .ok_or("Media deepstack shape overflow")?;
+        if per_layer == 0 || media_deepstack.len() % per_layer != 0 {
+            return Err("Media deepstack output is not row aligned".into());
+        }
+        media_deepstack.len() / per_layer
+    };
+    if deepstack_layers != model.config().n_deepstack_layers {
+        return Err(format!(
+            "Deepstack layer mismatch: model={}, projector={deepstack_layers}",
+            model.config().n_deepstack_layers
+        ));
+    }
+    let mut content = vec![start];
+    content.extend(std::iter::repeat_n(pad, rows));
+    content.push(end);
+    content.extend(tokenizer.encode(
+        prompt,
+        EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        },
+    ));
+    let mut token_ids = Vec::new();
+    append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
+    append_qwen_assistant_prefix(&mut token_ids, &tokenizer, false)?;
+    let mut embeddings = model.embed_tokens(&token_ids)?;
+    let deepstack_embeddings = inject_qwen_media_embeddings(
+        &token_ids,
+        pad,
+        &mut embeddings,
+        &media,
+        &media_deepstack,
+        width,
+    )?;
+    let positions = build_qwen3_media_positions(&token_ids, pad, &media_grid_shapes)?;
+    let generation = model.generate(
+        Qwen3Input {
+            token_ids: &token_ids,
+            positions: &positions,
+            embeddings: Some(&embeddings),
+            deepstack_embeddings: (!deepstack_embeddings.is_empty())
+                .then_some(deepstack_embeddings.as_slice()),
+        },
+        Qwen3GenerateOptions {
+            max_new_tokens: max_tokens,
+            temperature,
+        },
+    )?;
+    print!("{}", generation.text);
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
+}
+
+fn inject_qwen_media_embeddings(
+    token_ids: &[u32],
+    pad: u32,
+    embeddings: &mut [f32],
+    media: &[f32],
+    media_deepstack: &[f32],
+    width: usize,
+) -> Result<Vec<f32>, String> {
+    if width == 0 || embeddings.len() != token_ids.len().saturating_mul(width) {
+        return Err("Prompt embedding shape mismatch".into());
+    }
+    if media.len() % width != 0 {
+        return Err("Media embeddings are not row aligned".into());
+    }
+    let media_rows = media.len() / width;
+    let per_layer = media.len();
+    if !media_deepstack.is_empty() && (per_layer == 0 || media_deepstack.len() % per_layer != 0) {
+        return Err("Media deepstack embeddings are not layer aligned".into());
+    }
+    let deepstack_layers = if per_layer == 0 {
+        0
+    } else {
+        media_deepstack.len() / per_layer
+    };
+    let mut deepstack = vec![0.0; deepstack_layers * embeddings.len()];
+    let mut media_row = 0;
+    for (token_index, (&token, row)) in token_ids
+        .iter()
+        .zip(embeddings.chunks_exact_mut(width))
+        .enumerate()
+    {
+        if token != pad {
+            continue;
+        }
+        if media_row >= media_rows {
+            return Err("Media placeholder count exceeds projector rows".into());
+        }
+        row.copy_from_slice(&media[media_row * width..(media_row + 1) * width]);
+        for layer in 0..deepstack_layers {
+            let src = (layer * media_rows + media_row) * width;
+            let dst = (layer * token_ids.len() + token_index) * width;
+            deepstack[dst..dst + width].copy_from_slice(&media_deepstack[src..src + width]);
+        }
+        media_row += 1;
+    }
+    if media_row != media_rows {
+        return Err(format!(
+            "Media placeholder count mismatch: placeholders={media_row}, rows={media_rows}"
+        ));
+    }
+    Ok(deepstack)
+}
+
+fn validate_single_qwen_media(image: bool, video: bool, audio: bool) -> Result<(), String> {
+    if usize::from(image) + usize::from(video) + usize::from(audio) != 1 {
+        return Err(
+            "Qwen multimodal generation requires exactly one of --image, --video, or --audio"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 pub fn run_multimodal(
@@ -301,12 +691,71 @@ pub fn run_multimodal(
     temperature: f32,
     n_threads_arg: usize,
 ) -> Result<(), String> {
+    run_multimodal_with_video_ref(
+        llm_source,
+        model_path,
+        mmproj_path,
+        image_path,
+        None,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        None,
+    )
+}
+
+pub fn run_multimodal_with_video(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+) -> Result<(), String> {
+    let owned_source = Arc::clone(&llm_source);
+    run_multimodal_with_video_ref(
+        llm_source.as_ref(),
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        Some(owned_source),
+    )
+}
+
+fn run_multimodal_with_video_ref(
+    llm_source: &dyn TensorSource,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    model_source: Option<Arc<dyn TensorSource>>,
+) -> Result<(), String> {
     let arch = llm_source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     validate_gemma4_temperature(arch, temperature)?;
     if arch == "gemma4" {
+        if video_path.is_some() {
+            return Err("Gemma4 multimodal generation does not support --video".into());
+        }
         return super::gemma4::run_gemma4(super::gemma4::Gemma4Request {
             model: model_path,
             mmproj: mmproj_path,
@@ -317,6 +766,22 @@ pub fn run_multimodal(
             threads: n_threads_arg,
             kv_format: KvFormat::F32,
         });
+    }
+    if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")
+        && (image_path.is_some() || video_path.is_some() || audio_path.is_some())
+    {
+        return run_qwen3_family_multimodal(
+            llm_source,
+            model_source.ok_or("Qwen multimodal routing requires an owned model source")?,
+            mmproj_path.ok_or("multimodal Qwen models require --mmproj")?,
+            image_path,
+            video_path,
+            audio_path,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+        );
     }
     if audio_path.is_some() {
         return Err(format!(
@@ -440,7 +905,16 @@ pub fn run_multimodal(
                 grid.token_count(),
                 projection_dim
             );
-            (Some(VisionGrid { grid_t: grid.grid_t, grid_h: grid.grid_h, grid_w: grid.grid_w, patch_size: grid.patch_size, merge_size: grid.merge_size }), scratch.projected.clone())
+            (
+                Some(VisionGrid {
+                    grid_t: grid.grid_t,
+                    grid_h: grid.grid_h,
+                    grid_w: grid.grid_w,
+                    patch_size: grid.patch_size,
+                    merge_size: grid.merge_size,
+                }),
+                scratch.projected.clone(),
+            )
         } else {
             let mut encoder = VisionEncoder35::from_source(mmproj_source.as_ref())
                 .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
@@ -774,7 +1248,10 @@ pub fn run_multimodal(
 
 #[cfg(test)]
 mod tests {
-    use super::run_multimodal;
+    use super::{
+        build_qwen3_media_positions, inject_qwen_media_embeddings, run_multimodal,
+        validate_single_qwen_media,
+    };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::path::Path;
 
@@ -810,5 +1287,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("--temp"), "{error}");
+    }
+
+    #[test]
+    fn qwen_media_positions_expand_grid_rows_and_audio_rows() {
+        assert_eq!(
+            build_qwen3_media_positions(&[10, 99, 99, 99, 99, 11], 99, &[(2, 2)]).unwrap(),
+            vec![
+                [0, 0, 0, 0],
+                [1, 1, 1, 0],
+                [1, 1, 2, 0],
+                [1, 2, 1, 0],
+                [1, 2, 2, 0],
+                [3, 3, 3, 0]
+            ]
+        );
+        assert_eq!(
+            build_qwen3_media_positions(&[10, 99, 99, 11], 99, &[]).unwrap(),
+            vec![[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]]
+        );
+        assert!(build_qwen3_media_positions(&[99, 99], 99, &[(1, 1)]).is_err());
+    }
+
+    #[test]
+    fn qwen_multimodal_generation_rejects_combined_media() {
+        assert!(validate_single_qwen_media(true, false, false).is_ok());
+        assert!(validate_single_qwen_media(false, true, true).is_err());
+    }
+
+    #[test]
+    fn qwen_media_injection_preserves_deepstack_layer_and_prompt_order() {
+        let tokens = [1, 99, 2, 99];
+        let mut embeddings = vec![0.0; tokens.len() * 2];
+        let media = [10.0, 11.0, 20.0, 21.0];
+        let media_deepstack = [
+            100.0, 101.0, 200.0, 201.0, // layer 0 media rows
+            300.0, 301.0, 400.0, 401.0, // layer 1 media rows
+        ];
+
+        let deepstack =
+            inject_qwen_media_embeddings(&tokens, 99, &mut embeddings, &media, &media_deepstack, 2)
+                .unwrap();
+
+        assert_eq!(embeddings, [0.0, 0.0, 10.0, 11.0, 0.0, 0.0, 20.0, 21.0]);
+        assert_eq!(
+            deepstack,
+            [
+                0.0, 0.0, 100.0, 101.0, 0.0, 0.0, 200.0, 201.0, // layer 0
+                0.0, 0.0, 300.0, 301.0, 0.0, 0.0, 400.0, 401.0, // layer 1
+            ]
+        );
     }
 }

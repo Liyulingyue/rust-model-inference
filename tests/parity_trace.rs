@@ -23,10 +23,8 @@ fn checkpoint_schema_records_decode_step() {
     )
     .unwrap()
     .unwrap();
-    let record: serde_json::Value = serde_json::from_str(
-        std::fs::read_to_string(&path).unwrap().trim(),
-    )
-    .unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
 
     assert_eq!(record["name"], "attn_norm");
     assert_eq!(record["layer"], 3);

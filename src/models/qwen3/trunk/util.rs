@@ -5,8 +5,8 @@
 //! All functions here are pure: they do not mutate model state and have no
 //! hidden dependencies.
 
-use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 pub use crate::core::tensor::load_f32_tensor;
+use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 
 pub fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>, String> {
     let Some(value) = source.metadata(key) else {
@@ -128,12 +128,32 @@ pub fn validate_generation(
         input.positions.len(),
         input.embeddings.map(<[f32]>::len),
     )?;
+    if let Some(deepstack) = input.deepstack_embeddings {
+        let expected = input
+            .token_ids
+            .len()
+            .checked_mul(model.config.n_embd)
+            .and_then(|values| values.checked_mul(model.config.n_deepstack_layers))
+            .ok_or_else(|| "Deepstack embedding shape overflow".to_string())?;
+        if deepstack.len() != expected {
+            return Err(format!(
+                "Deepstack embedding value count {} does not match expected {expected}",
+                deepstack.len()
+            ));
+        }
+    }
     validate_token_ids(input.token_ids, model.config.vocab)?;
     if input
         .embeddings
         .is_some_and(|values| values.iter().any(|value| !value.is_finite()))
     {
         return Err("Input embeddings contain NaN or infinity".into());
+    }
+    if input
+        .deepstack_embeddings
+        .is_some_and(|values| values.iter().any(|value| !value.is_finite()))
+    {
+        return Err("Deepstack embeddings contain NaN or infinity".into());
     }
     checked_session_capacity(
         input.token_ids.len(),
@@ -287,6 +307,7 @@ mod tests {
                 n_dims: 128,
             }
         );
+        assert_eq!(config.n_deepstack_layers, 3);
     }
 
     #[test]

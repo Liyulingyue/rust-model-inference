@@ -6,9 +6,7 @@ use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
-use crate::ops::{
-    attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox,
-};
+use crate::ops::{attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -340,7 +338,11 @@ fn attention(
             for (key_position, score) in active_scores.iter_mut().enumerate() {
                 let key_start =
                     (layer * token_count + key_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-                *score = dot_f32(query, &cache.k[key_start..key_start + HEAD_WIDTH], HEAD_WIDTH) * scale;
+                *score = dot_f32(
+                    query,
+                    &cache.k[key_start..key_start + HEAD_WIDTH],
+                    HEAD_WIDTH,
+                ) * scale;
             }
         }
         softmax_inplace(&mut scores[..=position]);
@@ -593,7 +595,10 @@ mod tests {
     #[test]
     fn attention_value_f32_matches_scalar_reference() {
         let mut max_diff_overall = 0u32;
-        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 384] {
+        for &len in &[
+            0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256,
+            257, 384,
+        ] {
             let values: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 2.5).collect();
             let weights: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.029).cos() * 1.3).collect();
             let expected: f32 = values
@@ -601,7 +606,9 @@ mod tests {
                 .zip(&weights)
                 .fold(0.0f32, |acc, (v, w)| acc + v * w);
             let actual = attention_value_f32(&values, &weights, values.len(), values.len());
-            let diff_bits = (actual.to_bits() as i32).wrapping_sub(expected.to_bits() as i32).abs() as u32;
+            let diff_bits = (actual.to_bits() as i32)
+                .wrapping_sub(expected.to_bits() as i32)
+                .abs() as u32;
             if diff_bits > max_diff_overall {
                 max_diff_overall = diff_bits;
             }
@@ -622,17 +629,41 @@ mod tests {
     #[test]
     fn attention_value_f32_matches_pinned_ggml_reduction() {
         let values = [
-            0xbc43_7f80u32, 0x3dcf_0c16, 0x3ab2_6fac, 0xbc9e_b19e,
-            0xbc68_338b, 0x3e83_1f48, 0xbd8d_9b7b, 0xbea6_6c9f,
-            0xbe7e_b316, 0x3dcd_159e, 0xbd1d_9b7f, 0xbe02_e230,
-            0x3d0c_95ad, 0xbe0a_58fc, 0xbe55_ef52, 0x3d88_c14e,
+            0xbc43_7f80u32,
+            0x3dcf_0c16,
+            0x3ab2_6fac,
+            0xbc9e_b19e,
+            0xbc68_338b,
+            0x3e83_1f48,
+            0xbd8d_9b7b,
+            0xbea6_6c9f,
+            0xbe7e_b316,
+            0x3dcd_159e,
+            0xbd1d_9b7f,
+            0xbe02_e230,
+            0x3d0c_95ad,
+            0xbe0a_58fc,
+            0xbe55_ef52,
+            0x3d88_c14e,
         ]
         .map(f32::from_bits);
         let weights = [
-            0x3dd4_b07fu32, 0x3ca8_09ef, 0x3eb9_f242, 0x3e8f_d4ec,
-            0x3e6d_1827, 0x0000_0000, 0x0000_0000, 0x0000_0000,
-            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
-            0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+            0x3dd4_b07fu32,
+            0x3ca8_09ef,
+            0x3eb9_f242,
+            0x3e8f_d4ec,
+            0x3e6d_1827,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
         ]
         .map(f32::from_bits);
         // 两 arch 都跑：aarch64 → dot_f32_neon，x86 → dot_f32 (AVX2)。

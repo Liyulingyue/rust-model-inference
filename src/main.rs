@@ -26,11 +26,13 @@ fn generic_dispatch_mode(options: &app::CliOptions) -> GenericDispatchMode {
 enum AudioRoute {
     Asr,
     Gemma4,
+    Multimodal,
 }
 
 fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
     match arch {
         "qwen3vl" => Ok(AudioRoute::Asr),
+        "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
             "--audio is not supported for architecture {arch:?}"
@@ -41,6 +43,13 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
 fn validate_audio_route(route: AudioRoute, has_image: bool) -> Result<(), String> {
     if route == AudioRoute::Asr && has_image {
         return Err("Qwen3-ASR --audio cannot be used with --image".into());
+    }
+    Ok(())
+}
+
+fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Result<(), String> {
+    if route == AudioRoute::Asr && temperature.is_some_and(|value| value != 0.0) {
+        return Err("Qwen3-ASR requires greedy decoding; --temp must be 0".into());
     }
     Ok(())
 }
@@ -135,6 +144,24 @@ fn main() {
         .audio
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    let video = options
+        .video
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+
+    if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
+        app::run_or_exit(app::run_omni_embedding(
+            source.as_ref(),
+            explicit_mmproj.expect("validated media embedding mmproj"),
+            image,
+            video,
+            audio,
+            prompt,
+            options.threads,
+            options.embedding_output,
+        ));
+        return;
+    }
 
     if audio.is_some() {
         let route = dispatch_audio_arch(&arch).unwrap_or_else(|error| {
@@ -142,6 +169,7 @@ fn main() {
             std::process::exit(1);
         });
         app::run_or_exit(validate_audio_route(route, image.is_some()));
+        app::run_or_exit(validate_audio_temperature(route, options.temperature));
         if route == AudioRoute::Asr {
             app::run_or_exit(app::run_asr_cli(&options));
             return;
@@ -149,24 +177,26 @@ fn main() {
     }
 
     if arch == "gemma4" {
-        app::run_or_exit(app::run_multimodal(
-            source.as_ref(),
+        app::run_or_exit(app::run_multimodal_with_video(
+            Arc::clone(&source),
             model_path,
             explicit_mmproj,
             image,
+            video,
             audio,
             prompt,
             max_tokens,
             options.temperature.unwrap_or(0.0),
             n_threads,
         ));
-    } else if explicit_mmproj.is_some() || image.is_some() {
-        app::run_or_exit(app::run_multimodal(
-            source.as_ref(),
+    } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
+        app::run_or_exit(app::run_multimodal_with_video(
+            Arc::clone(&source),
             model_path,
             explicit_mmproj,
             image,
-            None,
+            video,
+            audio,
             prompt,
             max_tokens,
             temperature,
@@ -174,11 +204,12 @@ fn main() {
         ));
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
-            app::run_or_exit(app::run_multimodal(
-                source.as_ref(),
+            app::run_or_exit(app::run_multimodal_with_video(
+                Arc::clone(&source),
                 model_path,
                 None,
                 None,
+                video,
                 None,
                 prompt,
                 max_tokens,
@@ -309,6 +340,12 @@ mod tests {
         assert!(validate_audio_route(AudioRoute::Asr, true).is_err());
         assert!(validate_audio_route(AudioRoute::Asr, false).is_ok());
         assert!(validate_audio_route(AudioRoute::Gemma4, true).is_ok());
+    }
+
+    #[test]
+    fn only_qwen_asr_keeps_greedy_audio_validation() {
+        assert!(validate_audio_temperature(AudioRoute::Asr, Some(0.1)).is_err());
+        assert!(validate_audio_temperature(AudioRoute::Multimodal, Some(0.1)).is_ok());
     }
 
     #[test]

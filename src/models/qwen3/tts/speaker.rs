@@ -577,7 +577,10 @@ impl Qwen3TtsSpeakerEncoder {
         }
         eprintln!("  [speaker] stem.forward start, frames={}", mel.frames);
         let mut current = self.stem.forward(&mel.values, mel.frames)?;
-        eprintln!("  [speaker] stem.forward done, current.len={}", current.len());
+        eprintln!(
+            "  [speaker] stem.forward done, current.len={}",
+            current.len()
+        );
         relu_inplace(&mut current);
         let mut block_outputs = Vec::with_capacity(1536 * mel.frames);
         for (i, block) in self.blocks.iter().enumerate() {

@@ -1,12 +1,12 @@
-﻿// Phase 2.7-final: Q8_0 production matmul functions moved to
+// Phase 2.7-final: Q8_0 production matmul functions moved to
 // `kernel::q8_0::parallel`. Re-export them under their historical names
 // so existing callers (`bin/server.rs`, `bin/micro_bench.rs`,
 // `app/embedding.rs`, `app/text.rs`) keep working without rewrites.
+pub use super::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
 pub use super::kernel::q8_0::parallel::{
     matmul_q8_0_quantized_dynamic, matmul_q8_0_quantized_parallel,
     matmul_q8_0_quantized_parallel_rows,
 };
-pub use super::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
 
 // Phase 2.7-final cleanup: `ProcessedWeight` enum has been retired.
 // Weight handling now flows entirely through the `Kernel` trait in

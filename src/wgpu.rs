@@ -1,5 +1,5 @@
 #[cfg(feature = "wgpu")]
-use wgpu::{Device, Queue, ComputePipeline, Buffer};
+use wgpu::{Buffer, ComputePipeline, Device, Queue};
 
 #[cfg(feature = "wgpu")]
 pub struct WgpuContext {
@@ -14,7 +14,7 @@ impl WgpuContext {
     pub async fn new() -> Result<Self, WgpuError> {
         Self::new_impl().await
     }
-    
+
     pub fn new_blocking() -> Result<Self, WgpuError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -22,7 +22,7 @@ impl WgpuContext {
             .map_err(|e| WgpuError::new(&format!("Failed to create runtime: {}", e)))?;
         rt.block_on(Self::new_impl())
     }
-    
+
     async fn new_impl() -> Result<Self, WgpuError> {
         eprintln!("[WGPU] Creating instance with DX12 backend...");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -33,12 +33,15 @@ impl WgpuContext {
             display: None,
         });
         eprintln!("[WGPU] Instance created, requesting adapter...");
-        
-        let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }).await {
+
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+        {
             Ok(a) => a,
             Err(e) => return Err(WgpuError::new(&format!("No GPU adapter found: {}", e))),
         };
@@ -60,16 +63,17 @@ impl WgpuContext {
             wgpu::Features::empty()
         };
 
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
                 label: Some("WGPU Device"),
                 required_features,
                 memory_hints: Default::default(),
                 required_limits: Default::default(),
                 experimental_features: Default::default(),
                 trace: Default::default(),
-            },
-        ).await.map_err(|e| WgpuError::new(&e.to_string()))?;
+            })
+            .await
+            .map_err(|e| WgpuError::new(&e.to_string()))?;
         eprintln!("[WGPU] Device created, compiling shader...");
 
         let shader_source = include_str!("../shaders/wgsl/matvec_q8_0.wgsl");
@@ -172,7 +176,10 @@ impl WgpuContext {
             usage,
             mapped_at_creation: true,
         });
-        buffer.slice(..).get_mapped_range_mut().copy_from_slice(data);
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(data);
         buffer.unmap();
         buffer
     }
@@ -185,7 +192,10 @@ impl WgpuContext {
             usage,
             mapped_at_creation: true,
         });
-        buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytes);
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytes);
         buffer.unmap();
         buffer
     }
@@ -213,7 +223,10 @@ impl WgpuContext {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: true,
         });
-        output_buffer.slice(..).get_mapped_range_mut().copy_from_slice(output_bytes);
+        output_buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(output_bytes);
         output_buffer.unmap();
 
         let dims_data: [u32; 4] = [
@@ -228,7 +241,10 @@ impl WgpuContext {
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: true,
         });
-        dims_buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&dims_data));
+        dims_buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(&dims_data));
         dims_buffer.unmap();
 
         let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
@@ -258,9 +274,11 @@ impl WgpuContext {
             ],
         });
 
-        let mut encoder = self.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("matvec_encoder"),
-        });
+        let mut encoder = self
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("matvec_encoder"),
+            });
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -273,28 +291,47 @@ impl WgpuContext {
         }
 
         self.queue().submit(Some(encoder.finish()));
-        self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        
+        self.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
         let staging_buffer = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging_buffer"),
             size: output_bytes.len() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        
-        let mut copy_encoder = self.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("copy_encoder"),
-        });
-        copy_encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_bytes.len() as u64);
+
+        let mut copy_encoder =
+            self.device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("copy_encoder"),
+                });
+        copy_encoder.copy_buffer_to_buffer(
+            &output_buffer,
+            0,
+            &staging_buffer,
+            0,
+            output_bytes.len() as u64,
+        );
         self.queue().submit(Some(copy_encoder.finish()));
-        self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        
-        let (tx, rx) = std::sync::mpsc::channel();
-        staging_buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
+        self.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
         });
-        self.device().poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        self.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
         match rx.recv() {
             Ok(Ok(())) => {
                 let staging_slice = staging_buffer.slice(..);

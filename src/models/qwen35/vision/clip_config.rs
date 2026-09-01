@@ -1,4 +1,4 @@
-﻿use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct ClipVisionConfig {
@@ -12,8 +12,12 @@ pub struct ClipVisionConfig {
     pub spatial_merge_size: usize,
     pub image_min_pixels: usize,
     pub image_max_pixels: usize,
+    pub video_min_pixels: usize,
+    pub video_max_pixels: usize,
     pub eps: f32,
     pub use_gelu: bool,
+    pub use_silu: bool,
+    pub n_wa_pattern: usize,
     pub image_mean: [f32; 3],
     pub image_std: [f32; 3],
     pub has_deepstack_layers: Vec<bool>,
@@ -22,22 +26,28 @@ pub struct ClipVisionConfig {
 impl ClipVisionConfig {
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
         let get_u32 = |key: &str| -> Result<u32, String> {
-            source.metadata(key)
+            source
+                .metadata(key)
                 .and_then(|v| v.to_u64())
                 .map(|v| v as u32)
                 .ok_or_else(|| format!("Missing clip metadata: {}", key))
         };
 
         let get_f32 = |key: &str| -> Result<f32, String> {
-            source.metadata(key)
+            source
+                .metadata(key)
                 .and_then(|v| v.to_f64())
                 .map(|v| v as f32)
                 .ok_or_else(|| format!("Missing clip metadata: {}", key))
         };
 
         let get_bool = |key: &str| -> bool {
-            source.metadata(key)
-                .and_then(|v| match v { MetaValue::Bool(b) => Some(*b), _ => None })
+            source
+                .metadata(key)
+                .and_then(|v| match v {
+                    MetaValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
                 .unwrap_or(false)
         };
 
@@ -48,7 +58,8 @@ impl ClipVisionConfig {
         let n_ff = get_u32("clip.vision.feed_forward_length")? as usize;
         let n_layer = get_u32("clip.vision.block_count")? as usize;
         let n_head = get_u32("clip.vision.attention.head_count")? as usize;
-        let spatial_merge_size = source.metadata("clip.vision.spatial_merge_size")
+        let spatial_merge_size = source
+            .metadata("clip.vision.spatial_merge_size")
             .and_then(|v| v.to_u64())
             .map(usize::try_from)
             .transpose()
@@ -83,12 +94,36 @@ impl ClipVisionConfig {
         if image_min_pixels == 0 || image_min_pixels > image_max_pixels {
             return Err("Invalid clip vision pixel limits".into());
         }
+        let video_min_pixels = source
+            .metadata("clip.vision.video_min_pixels")
+            .and_then(MetaValue::to_u64)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "clip.vision.video_min_pixels does not fit usize")?
+            .unwrap_or(image_min_pixels);
+        let video_max_pixels = source
+            .metadata("clip.vision.video_max_pixels")
+            .and_then(MetaValue::to_u64)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "clip.vision.video_max_pixels does not fit usize")?
+            .unwrap_or(image_max_pixels);
+        if video_min_pixels == 0 || video_min_pixels > video_max_pixels {
+            return Err("Invalid clip vision video pixel limits".into());
+        }
         let eps = get_f32("clip.vision.attention.layer_norm_epsilon")?;
         let use_gelu = get_bool("clip.use_gelu");
+        let use_silu = get_bool("clip.use_silu");
+        let n_wa_pattern = source
+            .metadata("clip.vision.n_wa_pattern")
+            .and_then(MetaValue::to_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
 
         let image_mean = match source.metadata("clip.vision.image_mean") {
             Some(MetaValue::Array(_, vals)) => {
-                let m: Vec<f32> = vals.iter()
+                let m: Vec<f32> = vals
+                    .iter()
                     .filter_map(|v| v.to_f64().map(|x| x as f32))
                     .collect();
                 if m.len() == 3 {
@@ -97,14 +132,13 @@ impl ClipVisionConfig {
                     [0.48145466, 0.4578275, 0.40821073]
                 }
             }
-            _ => {
-                [0.48145466, 0.4578275, 0.40821073]
-            }
+            _ => [0.48145466, 0.4578275, 0.40821073],
         };
 
         let image_std = match source.metadata("clip.vision.image_std") {
             Some(MetaValue::Array(_, vals)) => {
-                let s: Vec<f32> = vals.iter()
+                let s: Vec<f32> = vals
+                    .iter()
                     .filter_map(|v| v.to_f64().map(|x| x as f32))
                     .collect();
                 if s.len() == 3 {
@@ -113,17 +147,17 @@ impl ClipVisionConfig {
                     [0.26862954, 0.26130258, 0.27577711]
                 }
             }
-            _ => {
-                [0.26862954, 0.26130258, 0.27577711]
-            }
+            _ => [0.26862954, 0.26130258, 0.27577711],
         };
 
         let has_deepstack_layers = match source.metadata("clip.vision.is_deepstack_layers") {
-            Some(MetaValue::Array(_, vals)) => {
-                vals.iter()
-                    .filter_map(|v| match v { MetaValue::Bool(b) => Some(*b), _ => None })
-                    .collect()
-            }
+            Some(MetaValue::Array(_, vals)) => vals
+                .iter()
+                .filter_map(|v| match v {
+                    MetaValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .collect(),
             _ => vec![false; n_layer],
         };
 
@@ -138,8 +172,12 @@ impl ClipVisionConfig {
             spatial_merge_size,
             image_min_pixels,
             image_max_pixels,
+            video_min_pixels,
+            video_max_pixels,
             eps,
             use_gelu,
+            use_silu,
+            n_wa_pattern,
             image_mean,
             image_std,
             has_deepstack_layers,
@@ -165,4 +203,3 @@ impl ClipVisionConfig {
         (ps / merge) * (ps / merge)
     }
 }
-

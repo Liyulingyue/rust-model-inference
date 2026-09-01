@@ -1,4 +1,4 @@
-﻿use crate::format::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
+use crate::format::ggufrs::{GgufrsError, GgufrsFile, MappedSegment, SegmentKind, TensorRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -688,8 +688,8 @@ pub fn load_logical_cpu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::ggufrs::{GgufrsFile, SegmentKind};
     use crate::core::tensor::{GGMLType, TensorInfo};
+    use crate::format::ggufrs::{GgufrsFile, SegmentKind};
 
     struct ExportedFixture {
         package: GgufrsFile,

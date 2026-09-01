@@ -6,6 +6,4 @@
 pub mod trunk;
 pub mod vision;
 
-pub use trunk::{
-    get_f32_tensor, load_layers, run_inference, Lfm2Config, Lfm2LayerWeights,
-};
+pub use trunk::{get_f32_tensor, load_layers, run_inference, Lfm2Config, Lfm2LayerWeights};

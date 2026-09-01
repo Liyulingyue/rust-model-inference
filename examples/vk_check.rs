@@ -6,16 +6,22 @@ fn main() {
     enable_gpu();
     let ctx = match get_vulkan_context() {
         Some(ctx) => ctx,
-        None => { eprintln!("no vulkan context"); return; }
+        None => {
+            eprintln!("no vulkan context");
+            return;
+        }
     };
     let cases: Vec<(usize, usize)> = vec![
-        (1024, 1024),   // qwen3 wq-like: the exact first model dispatch
+        (1024, 1024), // qwen3 wq-like: the exact first model dispatch
     ];
     for (n_in, n_out) in cases {
         let blocks = n_in / 32;
         // deterministic pseudo-random q8 weight + input
         let mut seed = 12345u64;
-        let mut next = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); (seed >> 33) as i64 };
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 33) as i64
+        };
         let mut weight = vec![0u8; n_out * blocks * 34];
         for row in 0..n_out {
             for b in 0..blocks {
@@ -30,7 +36,9 @@ fn main() {
             }
         }
         let input_q8: Vec<u8> = (0..n_in).map(|_| (next() as i8) as u8).collect();
-        let input_scales: Vec<f32> = (0..blocks).map(|_| 0.001 + (next() % 1000) as f32 / 1e6).collect();
+        let input_scales: Vec<f32> = (0..blocks)
+            .map(|_| 0.001 + (next() % 1000) as f32 / 1e6)
+            .collect();
 
         // CPU reference: exact Q8_0 semantics
         let mut cpu = vec![0f32; n_out];
@@ -50,13 +58,22 @@ fn main() {
 
         let mut gpu = vec![0f32; n_out];
         unsafe {
-            if let Err(e) = ctx.matmul_q8_0(&weight, &input_q8, &input_scales, &mut gpu, n_in, n_out) {
+            if let Err(e) =
+                ctx.matmul_q8_0(&weight, &input_q8, &input_scales, &mut gpu, n_in, n_out)
+            {
                 println!("({n_in},{n_out}): GPU ERROR {e}");
                 continue;
             }
         }
-        let max_diff = gpu.iter().zip(&cpu).map(|(g, c)| (g - c).abs()).fold(0.0f32, f32::max);
-        let first_bad = gpu.iter().zip(&cpu).position(|(g, c)| (g - c).abs() > 0.01 * c.abs().max(1.0));
+        let max_diff = gpu
+            .iter()
+            .zip(&cpu)
+            .map(|(g, c)| (g - c).abs())
+            .fold(0.0f32, f32::max);
+        let first_bad = gpu
+            .iter()
+            .zip(&cpu)
+            .position(|(g, c)| (g - c).abs() > 0.01 * c.abs().max(1.0));
         let rel = max_diff / cpu.iter().copied().fold(0.0f32, f32::max).max(1e-9);
         println!("({n_in:6},{n_out:6}): max_diff={max_diff:.6} rel={rel:.2e} first_bad_row={first_bad:?}  gpu[0]={:.4} cpu[0]={:.4}", gpu[0], cpu[0]);
     }
@@ -66,6 +83,14 @@ fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as f32;
     let exp = ((bits >> 10) & 0x1F) as i32;
     let man = (bits & 0x3FF) as f32;
-    let v = if exp == 0 { man / 1024.0 * 2f32.powi(-14) } else { (1.0 + man / 1024.0) * 2f32.powi(exp - 15) };
-    if sign > 0.5 { -v } else { v }
+    let v = if exp == 0 {
+        man / 1024.0 * 2f32.powi(-14)
+    } else {
+        (1.0 + man / 1024.0) * 2f32.powi(exp - 15)
+    };
+    if sign > 0.5 {
+        -v
+    } else {
+        v
+    }
 }

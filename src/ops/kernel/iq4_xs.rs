@@ -11,7 +11,11 @@ impl<'a> IQ4XSKernel<'a> {
     pub const BLOCK_BYTES: usize = 136;
 
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -25,7 +29,11 @@ impl<'a> IQ2XXSKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 66;
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -39,7 +47,11 @@ impl<'a> IQ2SKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 82;
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -53,7 +65,11 @@ impl<'a> IQ3XXSKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 98;
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -67,7 +83,11 @@ impl<'a> IQ1MKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 56;
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -81,7 +101,11 @@ impl<'a> IQ1SKernel<'a> {
     pub const BLOCK_ELEMENTS: usize = 256;
     pub const BLOCK_BYTES: usize = 50;
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -125,8 +149,7 @@ impl<'a> Kernel for IQ4XSKernel<'a> {
         if start >= end {
             return;
         }
-        let row_bytes =
-            n_in / Self::BLOCK_ELEMENTS * Self::BLOCK_BYTES;
+        let row_bytes = n_in / Self::BLOCK_ELEMENTS * Self::BLOCK_BYTES;
         for out_idx in start..end {
             let offset = out_idx * row_bytes;
             if let Some(q8k_buf) = q8_k {
@@ -208,18 +231,25 @@ macro_rules! iq_kernel_impl {
             fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
                 let row_bytes = n_embd / 256 * $block_bytes;
                 let offset = token_id as usize * row_bytes;
-                crate::ops::quant::$dequant_row(
-                    &self.weight[offset..offset + row_bytes],
-                    out,
-                );
+                crate::ops::quant::$dequant_row(&self.weight[offset..offset + row_bytes], out);
             }
         }
     };
 }
 
-iq_kernel_impl!(IQ2XXSKernel, 66, vec_dot_iq2_xxs_q8k, dequantize_row_iq2_xxs);
+iq_kernel_impl!(
+    IQ2XXSKernel,
+    66,
+    vec_dot_iq2_xxs_q8k,
+    dequantize_row_iq2_xxs
+);
 iq_kernel_impl!(IQ2SKernel, 82, vec_dot_iq2_s_q8k, dequantize_row_iq2_s);
-iq_kernel_impl!(IQ3XXSKernel, 98, vec_dot_iq3_xxs_q8k, dequantize_row_iq3_xxs);
+iq_kernel_impl!(
+    IQ3XXSKernel,
+    98,
+    vec_dot_iq3_xxs_q8k,
+    dequantize_row_iq3_xxs
+);
 iq_kernel_impl!(IQ3SKernel, 110, vec_dot_iq3_s_q8k, dequantize_row_iq3_s);
 iq_kernel_impl!(IQ1MKernel, 56, vec_dot_iq1_m_q8k, dequantize_row_iq1_m);
 iq_kernel_impl!(IQ1SKernel, 50, vec_dot_iq1_s_q8k, dequantize_row_iq1_s);
@@ -235,7 +265,11 @@ impl<'a> IQ2XSKernel<'a> {
     pub const BLOCK_BYTES: usize = 74;
 
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -309,6 +343,10 @@ impl<'a> IQ3SKernel<'a> {
     pub const BLOCK_BYTES: usize = 110;
 
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }

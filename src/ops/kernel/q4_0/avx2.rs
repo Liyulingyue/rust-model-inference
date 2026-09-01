@@ -118,7 +118,10 @@ unsafe fn q4_0_block_dot(
 
     // Split 16 nibble bytes into 16 lo-nibbles and 16 hi-nibbles.
     let lo = _mm_and_si128(q4_bytes, _mm256_castsi256_si128(low_mask));
-    let hi = _mm_and_si128(_mm_srli_epi16(q4_bytes, 4), _mm256_castsi256_si128(low_mask));
+    let hi = _mm_and_si128(
+        _mm_srli_epi16(q4_bytes, 4),
+        _mm256_castsi256_si128(low_mask),
+    );
 
     // Interleave lo | hi into a single 32-byte vector matching q8_input layout.
     // q8_input layout (scalar convention): [q8[0..16], q8[16..32]]
@@ -213,13 +216,13 @@ mod tests {
     }
     fn q8_input_linspace() -> Vec<u8> {
         // 0, 1, 2, ..., 127, -128, -127, ..., -1 (32 values, wrapping i8)
-        (0..32)
-            .map(|i| (i as i8) as u8)
-            .collect()
+        (0..32).map(|i| (i as i8) as u8).collect()
     }
     fn q8_input_alt() -> Vec<u8> {
         // alternating +max, -max
-        (0..32).map(|i| if i % 2 == 0 { 0x7F } else { 0x80 }).collect()
+        (0..32)
+            .map(|i| if i % 2 == 0 { 0x7F } else { 0x80 })
+            .collect()
     }
 
     fn assert_avx2_eq_scalar(label: &str, weight: &[u8], q8: &[u8], scales: &[f32]) {
@@ -238,7 +241,13 @@ mod tests {
             assert!(
                 a_bits == b_bits,
                 "{} row {}: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
-                label, i, a, a_bits, b, b_bits, diff
+                label,
+                i,
+                a,
+                a_bits,
+                b,
+                b_bits,
+                diff
             );
         }
     }
@@ -337,12 +346,16 @@ mod tests {
         let mut state: u64 = 0xdead_beef_1234_5678;
         for _ in 0..4 {
             for _ in 0..16 {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let d = 0.01 + (state >> 33) as f32 / u32::MAX as f32;
                 let s_bits = crate::ops::f32_to_f16(d).to_le_bytes();
                 weight.extend_from_slice(&s_bits);
                 for _ in 0..16 {
-                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     weight.push((state >> 33) as u8);
                 }
             }
@@ -368,7 +381,10 @@ mod tests {
         let tensor = loader
             .tensors()
             .iter()
-            .find(|t| t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q4_0)
+            .find(|t| {
+                t.name == "blk.0.attn_q.weight"
+                    && t.ggml_type == crate::core::tensor::GGMLType::Q4_0
+            })
             .expect("blk.0.attn_q.weight Q4_0 not found");
         let weight = loader.tensor_slice(&tensor.name).unwrap();
         let n_in = tensor.dims[0] as usize;

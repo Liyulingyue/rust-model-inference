@@ -12,11 +12,40 @@ pub struct Q4_KKernel<'a> {
 
 impl<'a> Q4_KKernel<'a> {
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q4_k_embedding_lookup_dequantizes_a_row() {
+        let mut weight = vec![0u8; crate::ops::quant::BLOCK_Q4K_SIZE];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        for scale in &mut weight[4..16] {
+            *scale = 1;
+        }
+        weight[16..].fill(0x11);
+
+        let kernel = Q4_KKernel::new(&weight, crate::ops::quant::QK_K, 1);
+        let mut output = vec![0.0f32; crate::ops::quant::QK_K];
+        kernel.embedding_lookup(0, crate::ops::quant::QK_K, &mut output);
+
+        assert!(output.iter().all(|value| *value == 1.0));
     }
 }
 
 impl<'a> Kernel for Q4_KKernel<'a> {
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_q4_k(self.weight, token_id, n_embd, out);
+    }
+
     fn forward_prequantized(
         &self,
         input_q8: &[u8],

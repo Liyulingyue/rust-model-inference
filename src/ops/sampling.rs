@@ -63,11 +63,7 @@ pub fn sample_top_k(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
 
 /// Sample a token id using top-K + random draw (matches the reference codec
 /// decoder's on-device sampler).
-pub fn sample_top_k_draw<R: rand::Rng>(
-    logits: &[f32],
-    k: usize,
-    rng: &mut R,
-) -> usize {
+pub fn sample_top_k_draw<R: rand::Rng>(logits: &[f32], k: usize, rng: &mut R) -> usize {
     let candidates = sample_top_k(logits, k);
     let target: f32 = rng.gen();
     let mut cumulative = 0.0f32;
@@ -115,10 +111,7 @@ pub fn sample_llama_cpp(
     }
 
     // 3. Find the max logit (for softmax numerical stability).
-    let max_l = logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_l = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
     // 4. Build a partial sorted vector: first by top_k (if > 0), then by
     //    top_p nucleus. llama.cpp does top_k first, then top_p, on the

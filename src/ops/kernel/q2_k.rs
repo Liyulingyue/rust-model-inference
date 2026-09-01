@@ -17,7 +17,11 @@ impl<'a> Q2_KKernel<'a> {
     pub const BLOCK_BYTES: usize = 84;
 
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 

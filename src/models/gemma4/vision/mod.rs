@@ -776,7 +776,7 @@ fn add_inplace(target: &mut [f32], source: &[f32]) -> Result<(), String> {
     validate_finite("Gemma4 residual", target)
 }
 
-fn resize_bicubic_pillow(
+pub(crate) fn resize_bicubic_pillow(
     rgb: &[u8],
     width: usize,
     height: usize,

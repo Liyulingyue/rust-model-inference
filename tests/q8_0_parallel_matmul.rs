@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use rust_model_inference::core::thread_pool::ComputePool;
 use rust_model_inference::ops::quant::BLOCK_Q80_SIZE;
-use rust_model_inference::ops::{matmul_q8_0_quantized, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into};
+use rust_model_inference::ops::{
+    matmul_q8_0_quantized, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into,
+};
 
 const Q8_0_BLOCK_ELEMS: usize = 32;
 
@@ -42,7 +44,13 @@ fn make_q8_0_weight(n_rows: usize, n_cols: usize, row_offset: i8) -> Vec<u8> {
 }
 
 /// Reference single-threaded output: `matmul_q8_0_quantized`.
-fn reference_output(weight: &[u8], input_q8: &[u8], input_scales: &[f32], n_in: usize, n_out: usize) -> Vec<f32> {
+fn reference_output(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; n_out];
     matmul_q8_0_quantized(weight, input_q8, input_scales, &mut out, n_in, n_out);
     out
@@ -50,7 +58,14 @@ fn reference_output(weight: &[u8], input_q8: &[u8], input_scales: &[f32], n_in: 
 
 /// Production parallel output: `matmul_q8_0_quantized_parallel_rows` via
 /// `ComputePool::compute`. This is what `qwen35::QWeight::Q8_0` actually calls.
-fn parallel_output(weight: &[u8], input_q8: &[u8], input_scales: &[f32], n_in: usize, n_out: usize, pool: &ComputePool) -> Vec<f32> {
+fn parallel_output(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    n_in: usize,
+    n_out: usize,
+    pool: &ComputePool,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; n_out];
     let n_out_local = n_out;
     let weight_ptr = weight.as_ptr();
@@ -95,7 +110,9 @@ fn assert_outputs_match(label: &str, expected: &[f32], actual: &[f32]) {
             let d = (e - a).abs();
             if d > 0.0 {
                 mismatches += 1;
-                if d > max_abs_diff { max_abs_diff = d; }
+                if d > max_abs_diff {
+                    max_abs_diff = d;
+                }
             }
         }
         panic!(
@@ -140,6 +157,11 @@ fn parallel_matches_reference_at_double_n_out() {
 fn parallel_matches_reference_with_varied_thread_counts() {
     for n_threads in [1usize, 2, 4, 8] {
         let pool = ComputePool::new(n_threads);
-        run_case(&format!("n_threads={n_threads} n_out=7168"), 1024, 7168, &pool);
+        run_case(
+            &format!("n_threads={n_threads} n_out=7168"),
+            1024,
+            7168,
+            &pool,
+        );
     }
 }

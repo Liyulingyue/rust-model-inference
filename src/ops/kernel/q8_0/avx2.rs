@@ -145,7 +145,9 @@ mod tests {
         let mut v = Vec::with_capacity(34);
         let s = crate::ops::f32_to_f16(scale).to_le_bytes();
         v.extend_from_slice(&s);
-        for _ in 0..32 { v.push(weight as u8); }
+        for _ in 0..32 {
+            v.push(weight as u8);
+        }
         v
     }
 
@@ -164,7 +166,11 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         let max_scalar = scalar_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        let rel = if max_scalar > 1e-3 { max_diff / max_scalar } else { max_diff };
+        let rel = if max_scalar > 1e-3 {
+            max_diff / max_scalar
+        } else {
+            max_diff
+        };
         // Find worst diff index
         let mut worst_idx = 0;
         let mut worst_diff = 0.0f32;
@@ -177,19 +183,29 @@ mod tests {
         }
         eprintln!(
             "[{}] {}x{} max_diff={} rel={} worst_idx={} avx2={} scalar={}",
-            label, n_out, n_in, max_diff, rel, worst_idx,
-            avx2_out[worst_idx], scalar_out[worst_idx]
+            label,
+            n_out,
+            n_in,
+            max_diff,
+            rel,
+            worst_idx,
+            avx2_out[worst_idx],
+            scalar_out[worst_idx]
         );
         if n_out >= 4 {
             eprintln!(
                 "[{}] avx2[0..4]={:?} scalar[0..4]={:?}",
-                label, &avx2_out[0..4], &scalar_out[0..4]
+                label,
+                &avx2_out[0..4],
+                &scalar_out[0..4]
             );
         }
         assert!(
             rel < 1e-3,
             "{} AVX2 diverged: max_diff={} rel={}",
-            label, max_diff, rel
+            label,
+            max_diff,
+            rel
         );
     }
 
@@ -230,15 +246,16 @@ mod tests {
         let tensor = loader
             .tensors()
             .iter()
-            .find(|t| t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q8_0)
+            .find(|t| {
+                t.name == "blk.0.attn_q.weight"
+                    && t.ggml_type == crate::core::tensor::GGMLType::Q8_0
+            })
             .expect("blk.0.attn_q.weight Q8_0 not found");
         let weight = loader.tensor_slice(&tensor.name).unwrap();
         let n_in = tensor.dims[0] as usize;
         let n_out = tensor.dims[1] as usize;
         let blocks = n_in / 32;
-        let q8: Vec<u8> = (0..blocks * 32)
-            .map(|i| (i as i8) as u8)
-            .collect();
+        let q8: Vec<u8> = (0..blocks * 32).map(|i| (i as i8) as u8).collect();
         let scales: Vec<f32> = (0..blocks).map(|b| 0.01 + (b as f32) * 0.001).collect();
         assert_avx2_matches_scalar("q8_0-model-blk0-attnq", &weight, &q8, &scales);
     }

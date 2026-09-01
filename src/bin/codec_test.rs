@@ -2,11 +2,11 @@
 //! noise. Skips Talker + Code Predictor and feeds a synthetic sine input
 //! through the codec decoder.
 
-use rust_model_inference::models::qwen3::tts::codec::{DacDecoder, RvqDecoder};
-use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
-use std::sync::Arc;
+use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
+use rust_model_inference::models::qwen3::tts::codec::{DacDecoder, RvqDecoder};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -18,8 +18,9 @@ fn main() -> Result<(), String> {
     let out_path = PathBuf::from(&args[2]);
 
     eprintln!("Loading {}", mmproj_path.display());
-    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> =
-        Arc::from(open_model_source(&mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?);
+    let source: Arc<dyn rust_model_inference::core::tensor::TensorSource> = Arc::from(
+        open_model_source(&mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?,
+    );
 
     let _rvq = RvqDecoder::from_source(source.as_ref())?;
     let dac = DacDecoder::from_source(source.as_ref())?;
@@ -36,12 +37,24 @@ fn main() -> Result<(), String> {
             continuous[t * hidden_dim + d] = 0.1;
         }
     }
-    eprintln!("input: {} uniform samples rms {}", continuous.len(), rms(&continuous));
+    eprintln!(
+        "input: {} uniform samples rms {}",
+        continuous.len(),
+        rms(&continuous)
+    );
     eprintln!("input rms: {}", rms(&continuous));
-    eprintln!("Pre DAC.pre_conv: input is {} floats ({} timesteps × {} dim)",
-             continuous.len(), timesteps, hidden_dim);
+    eprintln!(
+        "Pre DAC.pre_conv: input is {} floats ({} timesteps × {} dim)",
+        continuous.len(),
+        timesteps,
+        hidden_dim
+    );
     let preconv = dac.pre_conv(&continuous, timesteps)?;
-    eprintln!("After pre_conv: {} floats rms {}", preconv.len(), rms(&preconv));
+    eprintln!(
+        "After pre_conv: {} floats rms {}",
+        preconv.len(),
+        rms(&preconv)
+    );
     // Dump norm_w stats from the first upsample block for sanity.
     // (Cannot access private fields; show first 5 preconv values instead.)
     eprintln!("preconv[:5] = {:?}", &preconv[..5.min(preconv.len())]);
@@ -58,7 +71,10 @@ fn main() -> Result<(), String> {
         autocorr_max(&waveform)
     );
     eprintln!("waveform[:5] = {:?}", &waveform[..5.min(waveform.len())]);
-    eprintln!("waveform[max//2:max//2+5] = {:?}", &waveform[waveform.len()/2..waveform.len()/2+5]);
+    eprintln!(
+        "waveform[max//2:max//2+5] = {:?}",
+        &waveform[waveform.len() / 2..waveform.len() / 2 + 5]
+    );
 
     write_wav_f32(&out_path, &waveform, 24000).map_err(|e| e.to_string())?;
     eprintln!("wrote {}", out_path.display());

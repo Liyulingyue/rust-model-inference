@@ -64,9 +64,7 @@ unsafe fn tanh_approx_inplace_avx2(values: &mut [f32]) {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub(crate) unsafe fn tanh_approx_avx2(
-    x: std::arch::x86_64::__m256,
-) -> std::arch::x86_64::__m256 {
+pub(crate) unsafe fn tanh_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
 
     let zero = _mm256_setzero_ps();
@@ -80,7 +78,6 @@ pub(crate) unsafe fn tanh_approx_avx2(
     let result = _mm256_div_ps(numerator, denominator);
     _mm256_blendv_ps(result, zero, _mm256_cmp_ps(x, x, _CMP_UNORD_Q))
 }
-
 
 // 待验证，速度/精度问题
 #[cfg(target_arch = "aarch64")]
@@ -121,8 +118,10 @@ mod tests {
         let mut output = input.clone();
         tanh_approx_inplace(&mut output);
         for (actual, expected) in output.iter().zip(input.iter().map(|value| value.tanh())) {
-            assert!((*actual - expected).abs() < 2e-3, "actual={actual}, expected={expected}");
+            assert!(
+                (*actual - expected).abs() < 2e-3,
+                "actual={actual}, expected={expected}"
+            );
         }
     }
-
 }

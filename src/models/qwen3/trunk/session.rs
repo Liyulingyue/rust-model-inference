@@ -10,18 +10,18 @@
 //! the architectural split; behaviour is unchanged.
 
 use super::config::Qwen3Rope;
-use super::forward::{Qwen3Generation, Qwen3GenerateOptions, Qwen3Input};
-use super::weights::Qwen3Model;
+use super::forward::{forward_moe_token, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input};
 use super::util::{
     check_allocation, checked_decoder_steps, checked_generated_position, checked_product,
     checked_session_capacity, sample_token, validate_generation, validate_input_shapes,
 };
+use super::weights::Qwen3Model;
 use crate::core::scratchpad::{
     ExecutionScratchpad, KvArch, KvCache, KvCacheF16, KvFormat, KvLifecycle, KvState,
 };
 use crate::core::thread_pool::ComputePool;
-use crate::ops::*;
 use crate::ops::kernel::Kernel;
+use crate::ops::*;
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 use std::io::{self, Write};
@@ -48,6 +48,20 @@ pub struct Qwen3Session<'model> {
 pub(crate) enum KvPtrs {
     F16 { k: *mut u16, v: *mut u16 },
     F32 { k: *mut f32, v: *mut f32 },
+}
+
+fn add_deepstack_embedding(
+    hidden: &mut [f32],
+    deepstack: &[f32],
+    layer: usize,
+    token: usize,
+    token_count: usize,
+    width: usize,
+) {
+    let start = (layer * token_count + token) * width;
+    for (value, addition) in hidden.iter_mut().zip(&deepstack[start..start + width]) {
+        *value += *addition;
+    }
 }
 
 impl<'model> Qwen3Session<'model> {
@@ -142,8 +156,7 @@ impl<'model> Qwen3Session<'model> {
             config.n_embd_head_v,
             model.config.n_ctx,
         ));
-        let mut kv_state = KvState::new(arch, kv_format, capacity)
-            .with_lifecycle(lifecycle);
+        let mut kv_state = KvState::new(arch, kv_format, capacity).with_lifecycle(lifecycle);
         // KvState 自带的 KvCache 已分配好容量，但我们需要重新分配为正确的 stride
         // （KvState::new 用的是 max(k,v) 而非实际的 kv_stride）
         match (kv_format, &mut kv_state.cache) {
@@ -483,6 +496,21 @@ impl<'model> Qwen3Session<'model> {
                     let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
                     let k = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_k) };
                     let v = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_v) };
+                    if let Some(bias) = weights.q_bias.as_deref() {
+                        for (value, bias) in q.iter_mut().zip(bias) {
+                            *value += *bias;
+                        }
+                    }
+                    if let Some(bias) = weights.k_bias.as_deref() {
+                        for (value, bias) in k.iter_mut().zip(bias) {
+                            *value += *bias;
+                        }
+                    }
+                    if let Some(bias) = weights.v_bias.as_deref() {
+                        for (value, bias) in v.iter_mut().zip(bias) {
+                            *value += *bias;
+                        }
+                    }
                     if let (Some(q_norm), Some(k_norm)) =
                         (weights.q_norm.as_deref(), weights.k_norm.as_deref())
                     {
@@ -558,12 +586,10 @@ impl<'model> Qwen3Session<'model> {
                     // 根据格式选择写入路径
                     match kv_ptrs {
                         KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
-                            let k_cache = unsafe {
-                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
-                            };
-                            let v_cache = unsafe {
-                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
-                            };
+                            let k_cache =
+                                unsafe { std::slice::from_raw_parts_mut(k_ptr, kv_cache_size) };
+                            let v_cache =
+                                unsafe { std::slice::from_raw_parts_mut(v_ptr, kv_cache_size) };
                             for head in 0..config.n_head_kv {
                                 let k_offset = head * config.n_embd_head_k;
                                 let v_offset = head * config.n_embd_head_v;
@@ -581,12 +607,10 @@ impl<'model> Qwen3Session<'model> {
                             }
                         }
                         KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
-                            let k_cache = unsafe {
-                                std::slice::from_raw_parts_mut(k_ptr, kv_cache_size)
-                            };
-                            let v_cache = unsafe {
-                                std::slice::from_raw_parts_mut(v_ptr, kv_cache_size)
-                            };
+                            let k_cache =
+                                unsafe { std::slice::from_raw_parts_mut(k_ptr, kv_cache_size) };
+                            let v_cache =
+                                unsafe { std::slice::from_raw_parts_mut(v_ptr, kv_cache_size) };
                             for head in 0..config.n_head_kv {
                                 let k_offset = head * config.n_embd_head_k;
                                 let v_offset = head * config.n_embd_head_v;
@@ -623,21 +647,26 @@ impl<'model> Qwen3Session<'model> {
                     let n_padded = (step + 1).div_ceil(256) * 256;
                     match kv_ptrs_inner {
                         KvPtrs::F16 { k: k_ptr, v: v_ptr } => {
-                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
-                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            let k_cache =
+                                unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache =
+                                unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
                             for head in head_start..head_end {
                                 let kv_head = head / group_size;
                                 let q_offset = head * config.n_embd_head_k;
                                 let output_offset = head * config.n_embd_head_v;
-                                let output =
-                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let output = &mut attn_out
+                                    [output_offset..output_offset + config.n_embd_head_v];
                                 let query = unsafe {
                                     std::slice::from_raw_parts_mut(
                                         output.as_mut_ptr().cast::<u16>(),
                                         config.n_embd_head_k,
                                     )
                                 };
-                                f32_slice_to_f16(&q[q_offset..q_offset + config.n_embd_head_k], query);
+                                f32_slice_to_f16(
+                                    &q[q_offset..q_offset + config.n_embd_head_k],
+                                    query,
+                                );
                                 scores[..n_padded].fill(f32::NEG_INFINITY);
                                 for token in 0..=step {
                                     let row = layer_base + token * kv_stride;
@@ -652,16 +681,20 @@ impl<'model> Qwen3Session<'model> {
                                 for index in 0..n_padded {
                                     unsafe { *f16_scratch.add(index) = f32_to_f16(scores[index]) };
                                 }
-                                let weights = unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
+                                let weights =
+                                    unsafe { std::slice::from_raw_parts(f16_scratch, n_padded) };
                                 let values = unsafe {
-                                    std::slice::from_raw_parts_mut(f16_scratch.add(score_stride), n_padded)
+                                    std::slice::from_raw_parts_mut(
+                                        f16_scratch.add(score_stride),
+                                        n_padded,
+                                    )
                                 };
                                 values[step + 1..].fill(0);
                                 for dimension in 0..config.n_embd_head_v {
                                     for token in 0..=step {
                                         let row = layer_base + token * kv_stride;
-                                        values[token] =
-                                            v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                        values[token] = v_cache
+                                            [row + kv_head * config.n_embd_head_v + dimension];
                                     }
                                     output[dimension] = dot_f16(values, weights, n_padded);
                                 }
@@ -669,14 +702,16 @@ impl<'model> Qwen3Session<'model> {
                         }
                         KvPtrs::F32 { k: k_ptr, v: v_ptr } => {
                             // F32 路径：直接用 f32 计算，无 F16 优化
-                            let k_cache = unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
-                            let v_cache = unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
+                            let k_cache =
+                                unsafe { std::slice::from_raw_parts(k_ptr, kv_cache_size) };
+                            let v_cache =
+                                unsafe { std::slice::from_raw_parts(v_ptr, kv_cache_size) };
                             for head in head_start..head_end {
                                 let kv_head = head / group_size;
                                 let q_offset = head * config.n_embd_head_k;
                                 let output_offset = head * config.n_embd_head_v;
-                                let output =
-                                    &mut attn_out[output_offset..output_offset + config.n_embd_head_v];
+                                let output = &mut attn_out
+                                    [output_offset..output_offset + config.n_embd_head_v];
                                 let query = &q[q_offset..q_offset + config.n_embd_head_k];
                                 scores[..n_padded].fill(f32::NEG_INFINITY);
                                 for token in 0..=step {
@@ -696,7 +731,8 @@ impl<'model> Qwen3Session<'model> {
                                     let mut acc = 0.0f32;
                                     for token in 0..=step {
                                         let row = layer_base + token * kv_stride;
-                                        let v = v_cache[row + kv_head * config.n_embd_head_v + dimension];
+                                        let v = v_cache
+                                            [row + kv_head * config.n_embd_head_v + dimension];
                                         acc += weights[token] * v;
                                     }
                                     output[dimension] = acc;
@@ -756,67 +792,102 @@ impl<'model> Qwen3Session<'model> {
                     *hidden += *projection;
                 }
                 rms_norm(x, &weights.ffn_norm, normed, config.eps);
-                let norm_input_ptr = normed.as_ptr();
-                quantize_q8_0_into(
-                    normed,
-                    config.n_embd,
-                    &mut q8_buf[..config.n_embd],
-                    &mut scale_buf[..config.n_embd / 32],
-                );
-                let q8 = q8_buf[..config.n_embd].as_ptr();
-                let scales = scale_buf[..config.n_embd / 32].as_ptr();
-                let pool = Arc::clone(&model.pool);
-                pool.compute(move |thread, threads| {
-                    let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
-                    let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
-                    let norm_input = unsafe { std::slice::from_raw_parts(norm_input_ptr, config.n_embd) };
-                    let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
-                    let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
-                    weights
-                        .w_gate
-                        .kernel
-                        .forward_prepared(norm_input, q8, scales, None, up, config.n_embd, config.n_ff, thread, threads);
-                    weights
-                        .w_up
-                        .kernel
-                        .forward_prepared(norm_input, q8, scales, None, gate, config.n_embd, config.n_ff, thread, threads);
-                    if crate::ops::gpu_matmul_active() {
-                        // The matmul ran as one fenced GPU dispatch owned by
-                        // thread 0 — per-thread row slices have no data
-                        // dependency to hang off, so thread 0 applies the
-                        // epilogue over the whole buffer.
-                        if thread == 0 {
-                            silu_mul_approx_inplace(&up[..config.n_ff], &mut gate[..config.n_ff]);
+                if weights.moe_router.is_some() {
+                    forward_moe_token(normed, weights, config, unsafe {
+                        std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd)
+                    })?;
+                } else {
+                    let norm_input_ptr = normed.as_ptr();
+                    quantize_q8_0_into(
+                        normed,
+                        config.n_embd,
+                        &mut q8_buf[..config.n_embd],
+                        &mut scale_buf[..config.n_embd / 32],
+                    );
+                    let q8 = q8_buf[..config.n_embd].as_ptr();
+                    let scales = scale_buf[..config.n_embd / 32].as_ptr();
+                    let pool = Arc::clone(&model.pool);
+                    pool.compute(move |thread, threads| {
+                        let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
+                        let scales =
+                            unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
+                        let norm_input =
+                            unsafe { std::slice::from_raw_parts(norm_input_ptr, config.n_embd) };
+                        let gate =
+                            unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
+                        let up = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, config.n_ff) };
+                        weights.w_gate.kernel.forward_prepared(
+                            norm_input,
+                            q8,
+                            scales,
+                            None,
+                            up,
+                            config.n_embd,
+                            config.n_ff,
+                            thread,
+                            threads,
+                        );
+                        weights.w_up.kernel.forward_prepared(
+                            norm_input,
+                            q8,
+                            scales,
+                            None,
+                            gate,
+                            config.n_embd,
+                            config.n_ff,
+                            thread,
+                            threads,
+                        );
+                        if crate::ops::gpu_matmul_active() {
+                            // The matmul ran as one fenced GPU dispatch owned by
+                            // thread 0 — per-thread row slices have no data
+                            // dependency to hang off, so thread 0 applies the
+                            // epilogue over the whole buffer.
+                            if thread == 0 {
+                                silu_mul_approx_inplace(
+                                    &up[..config.n_ff],
+                                    &mut gate[..config.n_ff],
+                                );
+                            }
+                        } else {
+                            let start = thread * config.n_ff / threads;
+                            let end = (thread + 1) * config.n_ff / threads;
+                            silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
                         }
-                    } else {
-                        let start = thread * config.n_ff / threads;
-                        let end = (thread + 1) * config.n_ff / threads;
-                        silu_mul_approx_inplace(&up[start..end], &mut gate[start..end]);
-                    }
-                });
+                    });
 
-                let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
-                let gate_input_ptr = gate.as_ptr();
-                quantize_q8_0_into(
-                    gate,
-                    config.n_ff,
-                    &mut q8_buf[..config.n_ff],
-                    &mut scale_buf[..config.n_ff / 32],
-                );
-                let q8 = q8_buf[..config.n_ff].as_ptr();
-                let scales = scale_buf[..config.n_ff / 32].as_ptr();
-                let pool = Arc::clone(&model.pool);
-                pool.compute(move |thread, threads| {
-                    let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_ff) };
-                    let scales = unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
-                    let gate_input = unsafe { std::slice::from_raw_parts(gate_input_ptr, config.n_ff) };
-                    let down =
-                        unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
-                    weights
-                        .w_down
-                        .kernel
-                        .forward_prepared(gate_input, q8, scales, None, down, config.n_ff, config.n_embd, thread, threads);
-                });
+                    let gate = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, config.n_ff) };
+                    let gate_input_ptr = gate.as_ptr();
+                    quantize_q8_0_into(
+                        gate,
+                        config.n_ff,
+                        &mut q8_buf[..config.n_ff],
+                        &mut scale_buf[..config.n_ff / 32],
+                    );
+                    let q8 = q8_buf[..config.n_ff].as_ptr();
+                    let scales = scale_buf[..config.n_ff / 32].as_ptr();
+                    let pool = Arc::clone(&model.pool);
+                    pool.compute(move |thread, threads| {
+                        let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_ff) };
+                        let scales =
+                            unsafe { std::slice::from_raw_parts(scales, config.n_ff / 32) };
+                        let gate_input =
+                            unsafe { std::slice::from_raw_parts(gate_input_ptr, config.n_ff) };
+                        let down =
+                            unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
+                        weights.w_down.kernel.forward_prepared(
+                            gate_input,
+                            q8,
+                            scales,
+                            None,
+                            down,
+                            config.n_ff,
+                            config.n_embd,
+                            thread,
+                            threads,
+                        );
+                    });
+                }
 
                 let down = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, config.n_embd) };
                 #[cfg(feature = "parity-trace")]
@@ -831,6 +902,11 @@ impl<'model> Qwen3Session<'model> {
                 let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, config.n_embd) };
                 for (hidden, projection) in x.iter_mut().zip(down) {
                     *hidden += *projection;
+                }
+                if step < n_prompt && layer < config.n_deepstack_layers {
+                    if let Some(deepstack) = input.deepstack_embeddings {
+                        add_deepstack_embedding(x, deepstack, layer, step, n_prompt, config.n_embd);
+                    }
                 }
             }
 
@@ -861,7 +937,8 @@ impl<'model> Qwen3Session<'model> {
             pool.compute(move |thread, threads| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8, config.n_embd) };
                 let scales = unsafe { std::slice::from_raw_parts(scales, config.n_embd / 32) };
-                let output_input = unsafe { std::slice::from_raw_parts(output_input_ptr, config.n_embd) };
+                let output_input =
+                    unsafe { std::slice::from_raw_parts(output_input_ptr, config.n_embd) };
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, config.vocab) };
                 model.output.kernel.forward_prepared(
                     output_input,
@@ -934,5 +1011,23 @@ impl<'model> Qwen3Session<'model> {
             token_ids: generated_tokens,
             prompt_tokens: n_prompt,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_deepstack_embedding;
+
+    #[test]
+    fn deepstack_injection_uses_layer_major_token_rows() {
+        let deepstack = [
+            1.0, 2.0, 3.0, 4.0, // decoder layer 0, prompt tokens 0 and 1
+            5.0, 6.0, 7.0, 8.0, // decoder layer 1, prompt tokens 0 and 1
+        ];
+        let mut hidden = [10.0, 20.0];
+
+        add_deepstack_embedding(&mut hidden, &deepstack, 1, 0, 2, 2);
+
+        assert_eq!(hidden, [15.0, 26.0]);
     }
 }

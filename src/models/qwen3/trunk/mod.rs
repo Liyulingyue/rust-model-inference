@@ -19,11 +19,10 @@ pub mod weights;
 
 pub use config::{Qwen3Config, Qwen3Rope};
 pub use forward::{
-    Qwen3Generation, Qwen3GenerateOptions, Qwen3Input, run_shared_inference, text_encode,
+    run_shared_inference, text_encode, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,
 };
 pub use positions::qwen_text_positions;
 pub use session::Qwen3Session;
 pub use weights::{
-    get_f32_tensor, load_layers, load_layers_static, static_weight, Qwen3LayerWeights,
-    Qwen3Model,
+    get_f32_tensor, load_layers, load_layers_static, static_weight, Qwen3LayerWeights, Qwen3Model,
 };
