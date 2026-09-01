@@ -347,6 +347,7 @@ impl BPETokenizer {
                 }
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
                         "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, or llama-bpe"
