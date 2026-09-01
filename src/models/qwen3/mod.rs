@@ -14,6 +14,7 @@
 pub mod asr;
 pub mod embedding;
 pub mod hunyuan;
+pub mod omni;
 pub mod text;
 pub mod tts;
 pub mod trunk;

@@ -69,12 +69,20 @@ const QWEN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<|im_start|>", "im_start"),
     ("<|im_end|>", "im_end"),
     ("<|image_pad|>", "image_pad"),
+    ("<|video_pad|>", "video_pad"),
     ("<|vision_pad|>", "vision_pad"),
     ("<|vision_start|>", "vision_start"),
     ("<|vision_end|>", "vision_end"),
+    ("<|vision_bos|>", "vision_start"),
+    ("<|vision_eos|>", "vision_end"),
     ("<|audio_start|>", "audio_start"),
     ("<|audio_pad|>", "audio_pad"),
     ("<|audio_end|>", "audio_end"),
+    ("<|audio_bos|>", "audio_start"),
+    ("<|audio_eos|>", "audio_end"),
+    ("<|IMAGE|>", "image_pad"),
+    ("<|VIDEO|>", "video_pad"),
+    ("<|AUDIO|>", "audio_pad"),
     ("<asr_text>", "asr_text"),
     ("<|endoftext|>", "endoftext"),
 ];
@@ -1376,6 +1384,43 @@ use crate::core::tensor::{MetaValue, MetaValueType};
         assert_eq!(tokenizer.special_token_id("audio_pad"), Some(audio_pad_id));
         assert_eq!(tokenizer.special_token_id("audio_end"), Some(audio_end_id));
         assert_eq!(tokenizer.special_token_id("asr_text"), Some(asr_text_id));
+    }
+
+    #[test]
+    fn qwen25_omni_semantic_aliases_resolve_to_media_names() {
+        let tokenizer = tokenizer_from_parts(
+            &[
+                "<|vision_bos|>",
+                "<|vision_eos|>",
+                "<|vision_pad|>",
+                "<|IMAGE|>",
+                "<|VIDEO|>",
+                "<|audio_bos|>",
+                "<|audio_eos|>",
+                "<|AUDIO|>",
+            ],
+            &[3, 3, 3, 3, 3, 3, 3, 3],
+            None,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(tokenizer.special_token_id("vision_start"), Some(0));
+        assert_eq!(tokenizer.special_token_id("vision_end"), Some(1));
+        assert_eq!(tokenizer.special_token_id("vision_pad"), Some(2));
+        assert_eq!(tokenizer.special_token_id("image_pad"), Some(3));
+        assert_eq!(tokenizer.special_token_id("video_pad"), Some(4));
+        assert_eq!(tokenizer.special_token_id("audio_start"), Some(5));
+        assert_eq!(tokenizer.special_token_id("audio_end"), Some(6));
+        assert_eq!(tokenizer.special_token_id("audio_pad"), Some(7));
+    }
+
+    #[test]
+    fn qwen_video_pad_semantic_resolves_to_its_token_id() {
+        let tokenizer = BPETokenizer::from_qwen3_embedded_merges().unwrap();
+        assert_eq!(tokenizer.special_token_id("video_pad"), Some(151_656));
     }
 
     #[test]

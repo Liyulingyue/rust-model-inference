@@ -12,8 +12,12 @@ pub struct ClipVisionConfig {
     pub spatial_merge_size: usize,
     pub image_min_pixels: usize,
     pub image_max_pixels: usize,
+    pub video_min_pixels: usize,
+    pub video_max_pixels: usize,
     pub eps: f32,
     pub use_gelu: bool,
+    pub use_silu: bool,
+    pub n_wa_pattern: usize,
     pub image_mean: [f32; 3],
     pub image_std: [f32; 3],
     pub has_deepstack_layers: Vec<bool>,
@@ -83,8 +87,31 @@ impl ClipVisionConfig {
         if image_min_pixels == 0 || image_min_pixels > image_max_pixels {
             return Err("Invalid clip vision pixel limits".into());
         }
+        let video_min_pixels = source
+            .metadata("clip.vision.video_min_pixels")
+            .and_then(MetaValue::to_u64)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "clip.vision.video_min_pixels does not fit usize")?
+            .unwrap_or(image_min_pixels);
+        let video_max_pixels = source
+            .metadata("clip.vision.video_max_pixels")
+            .and_then(MetaValue::to_u64)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "clip.vision.video_max_pixels does not fit usize")?
+            .unwrap_or(image_max_pixels);
+        if video_min_pixels == 0 || video_min_pixels > video_max_pixels {
+            return Err("Invalid clip vision video pixel limits".into());
+        }
         let eps = get_f32("clip.vision.attention.layer_norm_epsilon")?;
         let use_gelu = get_bool("clip.use_gelu");
+        let use_silu = get_bool("clip.use_silu");
+        let n_wa_pattern = source
+            .metadata("clip.vision.n_wa_pattern")
+            .and_then(MetaValue::to_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
 
         let image_mean = match source.metadata("clip.vision.image_mean") {
             Some(MetaValue::Array(_, vals)) => {
@@ -138,8 +165,12 @@ impl ClipVisionConfig {
             spatial_merge_size,
             image_min_pixels,
             image_max_pixels,
+            video_min_pixels,
+            video_max_pixels,
             eps,
             use_gelu,
+            use_silu,
+            n_wa_pattern,
             image_mean,
             image_std,
             has_deepstack_layers,
@@ -165,4 +196,3 @@ impl ClipVisionConfig {
         (ps / merge) * (ps / merge)
     }
 }
-

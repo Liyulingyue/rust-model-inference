@@ -1,8 +1,12 @@
+use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{ComponentRole, GgufrsFile};
-use crate::core::tensor::{MetaValue, TensorSource};
-use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav, log_mel_windows, AsrAudioError};
-use crate::models::qwen3::asr::mel_encoder::{validate_qwen3a_source, AudioEmbeddings, Qwen3AudioModel};
+use crate::models::qwen3::asr::audio_processor::{
+    decode_pcm16_wav, log_mel_windows, AsrAudioError,
+};
+use crate::models::qwen3::asr::mel_encoder::{
+    validate_qwen3a_source, AudioEmbeddings, Qwen3AudioModel,
+};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use std::fs::File;
 use std::io::Read;
@@ -218,6 +222,7 @@ impl AsrRuntime {
                     token_ids: &prompt.token_ids,
                     positions: &prompt.positions,
                     embeddings: Some(&embeddings),
+                    deepstack_embeddings: None,
                 },
                 Qwen3GenerateOptions {
                     max_new_tokens: options.max_new_tokens,

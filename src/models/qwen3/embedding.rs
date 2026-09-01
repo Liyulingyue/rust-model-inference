@@ -26,6 +26,47 @@ struct EmbeddingConfig {
     pooling: EmbeddingPooling,
 }
 
+#[derive(Clone, Copy)]
+pub struct MediaEmbeddings<'a> {
+    pub placeholder_id: u32,
+    pub values: &'a [f32],
+}
+
+fn inject_media_embeddings(
+    hidden: &mut [f32],
+    token_ids: &[u32],
+    n_embd: usize,
+    media: Option<MediaEmbeddings<'_>>,
+) -> Result<(), String> {
+    if hidden.len() != token_ids.len().saturating_mul(n_embd) {
+        return Err("Token embedding shape mismatch".into());
+    }
+    let Some(media) = media else {
+        return Ok(());
+    };
+    if n_embd == 0 || media.values.len() % n_embd != 0 {
+        return Err("Media embeddings are not row aligned".into());
+    }
+    let placeholders = token_ids
+        .iter()
+        .filter(|&&token| token == media.placeholder_id)
+        .count();
+    let rows = media.values.len() / n_embd;
+    if placeholders != rows {
+        return Err(format!(
+            "Media row count mismatch: placeholders={placeholders}, rows={rows}"
+        ));
+    }
+    let mut row = 0usize;
+    for (token, output) in token_ids.iter().zip(hidden.chunks_exact_mut(n_embd)) {
+        if *token == media.placeholder_id {
+            output.copy_from_slice(&media.values[row * n_embd..(row + 1) * n_embd]);
+            row += 1;
+        }
+    }
+    Ok(())
+}
+
 fn embedding_config(
     arch: &str,
     get_meta: impl Fn(&str) -> Option<crate::core::tensor::MetaValue>,
@@ -213,17 +254,36 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
-    let _t0 = Instant::now();
-    let config = model_config_from_source(source).map_err(|e| e.to_string())?;
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
+    if prompt_tokens.is_empty() {
+        return Err("Embedding input produced no tokens".into());
+    }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "embedding.tokens",
+        &prompt_tokens,
+    ));
+    run_embedding_tokens(source, &prompt_tokens, None, n_threads_arg)
+}
+
+pub fn run_embedding_tokens(
+    source: &dyn TensorSource,
+    token_ids: &[u32],
+    media: Option<MediaEmbeddings<'_>>,
+    n_threads_arg: usize,
+) -> Result<Vec<f32>, String> {
+    if token_ids.is_empty() {
+        return Err("Embedding input produced no tokens".into());
+    }
+    let config = model_config_from_source(source)?;
 
     let arch = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     let is_qwen3 = arch == "qwen3";
-
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|e| e.to_string())?;
     let embedding_cfg = embedding_config(&arch, |key| source.metadata(key).cloned())?;
 
     let n_embd = config.n_embd;
@@ -258,18 +318,14 @@ pub fn compute_embedding(
     let layers: Vec<Qwen3LayerWeights> =
         load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, is_qwen3);
 
-    let prompt_tokens = encode_embedding_input(&tokenizer, prompt);
-    if prompt_tokens.is_empty() {
-        return Err("Embedding input produced no tokens".into());
-    }
-    let n_tokens = prompt_tokens.len();
+    let n_tokens = token_ids.len();
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = crate::app::resolve_thread_count(n_threads_arg, available_threads);
 
     let pool = Arc::new(ComputePool::new(n_threads));
-
+    eprintln!("compute pool: {} threads", pool.n_threads());
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
     let group_size = n_head / n_head_kv;
 
@@ -295,10 +351,11 @@ pub fn compute_embedding(
     let mut values = vec![0.0f32; max_n_padded];
 
     for t in 0..n_tokens {
-        let token_id = prompt_tokens[t];
+        let token_id = token_ids[t];
         let x_slice = &mut hidden[t * n_embd..(t + 1) * n_embd];
         embedding_lookup(embd_weight, token_id as u32, n_embd, embd_type, x_slice);
     }
+    inject_media_embeddings(&mut hidden, token_ids, n_embd, media)?;
 
     for layer in 0..n_layer {
         let lw = &layers[layer];
@@ -459,7 +516,39 @@ pub fn compute_embedding(
 
     let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
     l2_normalize_embedding(&mut pooled)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "embedding.final",
+        None,
+        &[n_embd],
+        &pooled,
+    ));
     Ok(pooled)
+}
+
+pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput, elapsed_ms: u128) {
+    match output {
+        EmbeddingOutput::Summary => {
+            println!("Embedding ({} dims, {}ms):", pooled.len(), elapsed_ms);
+            for value in pooled.iter().take(8) {
+                print!("{value:.9} ");
+            }
+            if pooled.len() > 8 {
+                print!("... ");
+                for value in &pooled[pooled.len() - 4..] {
+                    print!("{value:.9} ");
+                }
+            }
+            println!();
+        }
+        EmbeddingOutput::Raw => {
+            print!("embedding_raw:");
+            for value in pooled {
+                print!(" {value:.9}");
+            }
+            println!();
+        }
+    }
 }
 
 pub fn run_embedding(
@@ -509,5 +598,76 @@ pub fn run_embedding(
             }
             println!();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EmptySource;
+
+    impl TensorSource for EmptySource {
+        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            None
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn explicit_embedding_tokens_reject_empty_input_before_model_loading() {
+        let error = run_embedding_tokens(&EmptySource, &[], None, 1).unwrap_err();
+        assert_eq!(error, "Embedding input produced no tokens");
+    }
+
+    #[test]
+    fn media_rows_replace_placeholder_tokens_in_order() {
+        let tokens = [7, 99, 8, 99];
+        let mut hidden = vec![
+            1.0, 1.0,
+            2.0, 2.0,
+            3.0, 3.0,
+            4.0, 4.0,
+        ];
+        let media = MediaEmbeddings {
+            placeholder_id: 99,
+            values: &[10.0, 11.0, 20.0, 21.0],
+        };
+
+        inject_media_embeddings(&mut hidden, &tokens, 2, Some(media)).unwrap();
+
+        assert_eq!(hidden, [1.0, 1.0, 10.0, 11.0, 3.0, 3.0, 20.0, 21.0]);
+    }
+
+    #[test]
+    fn media_row_count_must_match_placeholders() {
+        let mut hidden = vec![0.0; 6];
+        let error = inject_media_embeddings(
+            &mut hidden,
+            &[99, 1, 99],
+            2,
+            Some(MediaEmbeddings {
+                placeholder_id: 99,
+                values: &[1.0, 2.0],
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("placeholders=2"), "{error}");
+    }
+
+    #[test]
+    fn last_pooling_and_l2_contract_are_shared_by_media_inputs() {
+        let hidden = [9.0, 9.0, 3.0, 4.0];
+        let mut pooled = pool_embedding_rows(&hidden, 2, 2, EmbeddingPooling::Last).unwrap();
+        l2_normalize_embedding(&mut pooled).unwrap();
+        assert_eq!(pooled[0].to_bits(), 0.6f32.to_bits());
+        assert_eq!(pooled[1].to_bits(), 0.8f32.to_bits());
     }
 }

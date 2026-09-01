@@ -1,4 +1,4 @@
-﻿//! GGUF file loader: byte-level GGUF parser, mmap-backed [`GGUFLoader`], and
+//! GGUF file loader: byte-level GGUF parser, mmap-backed [`GGUFLoader`], and
 //! free-function [`model_config_from_source`] that derives a
 //! [`crate::core::traits::ModelConfig`] from GGUF metadata.
 //!
@@ -9,8 +9,8 @@ use std::fs::File;
 use memmap2::Mmap;
 
 use crate::core::tensor::{
-    GGMLType, GGUF_DEFAULT_ALIGNMENT, GGUF_MAGIC, MetaValue, MetaValueType, TensorInfo,
-    TensorSource,
+    GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource, GGUF_DEFAULT_ALIGNMENT,
+    GGUF_MAGIC,
 };
 use crate::core::traits::ModelConfig;
 
@@ -388,7 +388,21 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     } else {
         &arch
     };
-    if !matches!(prefix, "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "pig" | "lfm2" | "lfm2moe") {
+    if !matches!(
+        prefix,
+        "qwen2"
+            | "qwen2vl"
+            | "qwen3"
+            | "qwen3vl"
+            | "qwen3vlmoe"
+            | "qwen35"
+            | "qwen3tts"
+            | "llama"
+            | "hunyuan-dense"
+            | "pig"
+            | "lfm2"
+            | "lfm2moe"
+    ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
 
@@ -494,6 +508,8 @@ pub struct Qwen3ArchKnobs {
     pub arch: String,
     /// Whether per-head Q/K RMSNorm is applied.
     pub has_qk_norm: bool,
+    /// Whether the attention projections carry per-output Q/K/V bias rows.
+    pub has_qkv_bias: bool,
     /// Multi-modal rope sections for Qwen3-VL. `None` means Neox rope.
     /// Callers using the Interleaved variant must combine these sections
     /// with the model's `n_embd_head_k` to build the final rope flavor.
@@ -502,6 +518,16 @@ pub struct Qwen3ArchKnobs {
     /// `None` means any configuration derived from `model_config_from_source`
     /// is accepted (e.g. Qwen3 base).
     pub allowed_dimensions: Option<Qwen3AllowedDimensions>,
+    /// Optional routed FFN configuration for the Qwen3-VL MoE variant.
+    pub moe: Option<Qwen3MoeConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen3MoeConfig {
+    pub expert_count: usize,
+    pub expert_used_count: usize,
+    pub expert_ffn: usize,
+    pub shared_expert_ffn: usize,
 }
 
 /// Concrete dimensional constraints for an architecture whose variants are
@@ -539,6 +565,19 @@ const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions 
     freq_base_bits: 1_000_000_f32.to_bits(),
 };
 
+const KNOWN_QWEN3VL_2B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 2048,
+    n_layer: 28,
+    n_head: 16,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 6144,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
 /// Resolve the Qwen3-family knobs from `general.architecture`.
 ///
 /// This is the **single** place where architecture dispatch happens. It is
@@ -546,9 +585,7 @@ const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions 
 /// `model_config_from_source` has produced the dimension set; together they
 /// replace the older `Qwen3Config::from_source` that hardcoded the arch list
 /// inside the model file.
-pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
-    source: &S,
-) -> Result<Qwen3ArchKnobs, String> {
+pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3ArchKnobs, String> {
     let arch = source
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
@@ -556,19 +593,36 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         .to_string();
     if !matches!(
         arch.as_str(),
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen35" | "qwen3tts" | "llama" | "hunyuan-dense" | "lfm2"
+        "qwen2"
+            | "qwen2vl"
+            | "qwen3"
+            | "qwen3vl"
+            | "qwen3vlmoe"
+            | "qwen35"
+            | "qwen3tts"
+            | "llama"
+            | "hunyuan-dense"
+            | "lfm2"
     ) {
         return Err(format!("Unsupported Qwen3-family architecture: {arch}"));
     }
 
-    let has_qk_norm = matches!(arch.as_str(), "qwen3" | "qwen3vl" | "hunyuan-dense" | "lfm2");
+    let has_qk_norm = matches!(
+        arch.as_str(),
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
+    );
+    let has_qkv_bias = arch == "qwen2vl";
 
-    let rope_sections = if arch == "qwen3vl" {
-        let sections = read_i32_array(source, "qwen3vl.rope.dimension_sections")?;
-        if sections != [24, 20, 20, 0] {
-            return Err(format!(
-                "Unsupported qwen3vl.rope.dimension_sections: {sections:?}"
-            ));
+    let rope_sections = if matches!(arch.as_str(), "qwen2vl" | "qwen3vl" | "qwen3vlmoe") {
+        let key = format!("{arch}.rope.dimension_sections");
+        let sections = read_i32_array(source, &key)?;
+        let expected = if arch == "qwen2vl" {
+            [16, 24, 24, 0]
+        } else {
+            [24, 20, 20, 0]
+        };
+        if sections != expected {
+            return Err(format!("Unsupported {key}: {sections:?}"));
         }
         Some(sections)
     } else {
@@ -581,11 +635,37 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(
         None
     };
 
+    let moe = if arch == "qwen3vlmoe" {
+        let get = |name: &str| -> Result<usize, String> {
+            let key = format!("{arch}.{name}");
+            source
+                .metadata(&key)
+                .and_then(MetaValue::to_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| format!("Missing or invalid metadata: {key}"))
+        };
+        Some(Qwen3MoeConfig {
+            expert_count: get("expert_count")?,
+            expert_used_count: get("expert_used_count")?,
+            expert_ffn: get("expert_feed_forward_length")?,
+            shared_expert_ffn: source
+                .metadata(&format!("{arch}.expert_shared_feed_forward_length"))
+                .and_then(MetaValue::to_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0),
+        })
+    } else {
+        None
+    };
+
     Ok(Qwen3ArchKnobs {
         arch,
         has_qk_norm,
+        has_qkv_bias,
         rope_sections,
         allowed_dimensions,
+        moe,
     })
 }
 
@@ -607,8 +687,7 @@ pub(crate) fn read_i32_array<S: TensorSource + ?Sized>(
     for (i, item) in items.iter().enumerate() {
         out[i] = item
             .to_u64()
-            .ok_or_else(|| format!("{key}[{i}] is not an integer"))?
-            as i32;
+            .ok_or_else(|| format!("{key}[{i}] is not an integer"))? as i32;
     }
     Ok(out)
 }
@@ -621,16 +700,20 @@ pub(crate) fn check_qwen3_allowed_dimensions(
     n_embd_head_k: usize,
     n_embd_head_v: usize,
 ) -> Result<(), String> {
-    if config.n_embd == allowed.n_embd
-        && config.n_layer == allowed.n_layer
-        && config.n_head == allowed.n_head
-        && config.n_head_kv == allowed.n_head_kv
-        && n_embd_head_k == allowed.n_embd_head_k
-        && n_embd_head_v == allowed.n_embd_head_v
-        && config.n_ff == allowed.n_ff
-        && config.n_ctx == allowed.n_ctx
-        && config.norm_eps.to_bits() == allowed.norm_eps_bits
-        && config.rope_freq_base.to_bits() == allowed.freq_base_bits
+    let matches = |allowed: Qwen3AllowedDimensions| {
+        config.n_embd == allowed.n_embd
+            && config.n_layer == allowed.n_layer
+            && config.n_head == allowed.n_head
+            && config.n_head_kv == allowed.n_head_kv
+            && n_embd_head_k == allowed.n_embd_head_k
+            && n_embd_head_v == allowed.n_embd_head_v
+            && config.n_ff == allowed.n_ff
+            && config.n_ctx == allowed.n_ctx
+            && config.norm_eps.to_bits() == allowed.norm_eps_bits
+            && config.rope_freq_base.to_bits() == allowed.freq_base_bits
+    };
+    if matches(allowed)
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_2B_DIMENSIONS))
     {
         Ok(())
     } else {
@@ -990,6 +1073,164 @@ mod tests {
         assert_eq!((config.n_ff, config.n_ctx), (3072, 65536));
         assert_eq!(config.rope_freq_base, 1_000_000.0);
         assert_eq!(config.norm_eps, 1e-6);
+    }
+
+    #[test]
+    fn qwen_omni_architectures_use_their_metadata_prefixes() {
+        let qwen2vl = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen2vl".into()),
+                ),
+                ("qwen2vl.embedding_length".into(), MetaValue::Uint32(2048)),
+                ("qwen2vl.block_count".into(), MetaValue::Uint32(36)),
+                ("qwen2vl.attention.head_count".into(), MetaValue::Uint32(16)),
+                (
+                    "qwen2vl.attention.head_count_kv".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "qwen2vl.feed_forward_length".into(),
+                    MetaValue::Uint32(11008),
+                ),
+                ("qwen2vl.context_length".into(), MetaValue::Uint32(32768)),
+                (
+                    "qwen2vl.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "qwen2vl.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                (
+                    "qwen2vl.rope.dimension_sections".into(),
+                    MetaValue::Array(
+                        MetaValueType::Int32,
+                        vec![
+                            MetaValue::Int32(16),
+                            MetaValue::Int32(24),
+                            MetaValue::Int32(24),
+                            MetaValue::Int32(0),
+                        ],
+                    ),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&qwen2vl).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (2048, 36, 16, 2)
+        );
+        assert_eq!(qwen3_arch_knobs(&qwen2vl).unwrap().arch, "qwen2vl");
+
+        let qwen3moe = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen3vlmoe".into()),
+                ),
+                (
+                    "qwen3vlmoe.embedding_length".into(),
+                    MetaValue::Uint32(2048),
+                ),
+                ("qwen3vlmoe.block_count".into(), MetaValue::Uint32(48)),
+                (
+                    "qwen3vlmoe.attention.head_count".into(),
+                    MetaValue::Uint32(32),
+                ),
+                (
+                    "qwen3vlmoe.attention.head_count_kv".into(),
+                    MetaValue::Uint32(4),
+                ),
+                (
+                    "qwen3vlmoe.feed_forward_length".into(),
+                    MetaValue::Uint32(768),
+                ),
+                ("qwen3vlmoe.context_length".into(), MetaValue::Uint32(65536)),
+                (
+                    "qwen3vlmoe.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "qwen3vlmoe.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                (
+                    "qwen3vlmoe.rope.dimension_sections".into(),
+                    MetaValue::Array(
+                        MetaValueType::Int32,
+                        vec![
+                            MetaValue::Int32(24),
+                            MetaValue::Int32(20),
+                            MetaValue::Int32(20),
+                            MetaValue::Int32(0),
+                        ],
+                    ),
+                ),
+                ("qwen3vlmoe.expert_count".into(), MetaValue::Uint32(128)),
+                ("qwen3vlmoe.expert_used_count".into(), MetaValue::Uint32(8)),
+                (
+                    "qwen3vlmoe.expert_feed_forward_length".into(),
+                    MetaValue::Uint32(768),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&qwen3moe).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (2048, 48, 32, 4)
+        );
+        assert_eq!(qwen3_arch_knobs(&qwen3moe).unwrap().arch, "qwen3vlmoe");
+    }
+
+    #[test]
+    fn qwen_omni_architecture_rejects_unknown_rope_sections() {
+        let source = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen2vl".into()),
+                ),
+                ("qwen2vl.embedding_length".into(), MetaValue::Uint32(2048)),
+                ("qwen2vl.block_count".into(), MetaValue::Uint32(36)),
+                ("qwen2vl.attention.head_count".into(), MetaValue::Uint32(16)),
+                (
+                    "qwen2vl.attention.head_count_kv".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "qwen2vl.feed_forward_length".into(),
+                    MetaValue::Uint32(11008),
+                ),
+                ("qwen2vl.context_length".into(), MetaValue::Uint32(32768)),
+                (
+                    "qwen2vl.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                (
+                    "qwen2vl.rope.dimension_sections".into(),
+                    MetaValue::Array(
+                        MetaValueType::Int32,
+                        vec![MetaValue::Int32(1), MetaValue::Int32(2)],
+                    ),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        assert!(qwen3_arch_knobs(&source).is_err());
     }
 
     #[test]
