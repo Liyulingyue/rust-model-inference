@@ -144,22 +144,36 @@ pub fn run_inference(
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-        // Build the prompt using MiniCPM5's chat template (rendered via
-        // the Jinja template that ships in the GGUF; auto-detected by
-        // llama.cpp with `enable_thinking=true`). The rendered format for
-        // a single user message is:
-        //
-        //     <s><|im_start|>user\n{prompt}<|im_end|>\n
-        //     <|im_start|>assistant\n<think>\n
-        //
-        // (BOS is added because the chat template explicitly emits `<s>`.)
-        let im_start_str = "<|im_start|>";
-        let im_end_str = "<|im_end|>";
-        // Build the prompt text with the literal special tokens inline.
-        let prompt_text =
-            format!("{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n");
-        // encode() with add_special=true prepends `<s>` and parse_special=true
-        // emits the literal `<|im_start|>`/`<|im_end|>` strings as single token ids.
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(|v| v.to_string_val())
+            .unwrap_or_default();
+
+        // Build the prompt based on the architecture. Granite uses a
+        // distinct chat template: `<|start_of_role|>{role}<|end_of_role|>
+        // {content}<|end_of_text|>` between turns and ends the user turn
+        // with `<|end_of_text|>\n`. MiniCPM5/Llama use the Qwen2-style
+        // `<|im_start|>{role}\n{content}<|im_end|>\n` template.
+        let prompt_text = if arch == "granite" {
+            // Granite chat template (Jinja):
+            //   "<|start_of_role|>user<|end_of_role|>{content}<|end_of_text|>\n
+            //    <|start_of_role|>assistant<|end_of_role|>"
+            format!(
+                "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+            )
+        } else {
+            // MiniCPM5/Qwen2-style template. The rendered format for a
+            // single user message is:
+            //
+            //     <s><|im_start|>user\n{prompt}<|im_end|>\n
+            //     <|im_start|>assistant\n<think>\n
+            //
+            // (BOS is added because the chat template explicitly emits `<s>`.)
+            let im_start_str = "<|im_start|>";
+            let im_end_str = "<|im_end|>";
+            format!("{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n")
+        };
+        eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
         let mut body = tokenizer.encode(
             &prompt_text,
             EncodeOptions {
@@ -168,8 +182,9 @@ pub fn run_inference(
             },
         );
         // The chat template starts with `{{- bos_token }}`, but MiniCPM5
-        // has `tokenizer.ggml.add_bos_token=false`, so encode() does not
-        // emit BOS automatically. Prepend BOS manually to match llama.cpp.
+        // and Granite both have `tokenizer.ggml.add_bos_token=false`, so
+        // encode() does not emit BOS automatically. Prepend BOS manually
+        // to match llama.cpp.
         if let Some(bos) = tokenizer.bos_id() {
             body.insert(0, bos);
         }
@@ -321,7 +336,15 @@ pub fn run_inference_tokens(
     let mut decoder = tokenizer.streaming_decoder(false);
 
     let group_size = n_head / n_head_kv;
-    let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
+    // Granite ships `granite.attention.scale` (= 1/n_embd_head) which
+    // overrides the standard 1/sqrt(n_embd_head) scale. Read it from
+    // metadata when present.
+    let attention_scale_meta = source
+        .metadata(&format!("{arch}.attention.scale"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32);
+    let kq_scale = attention_scale_meta
+        .unwrap_or_else(|| 1.0f32 / (n_embd_head_k as f32).sqrt());
 
     let mut t_norm: f64 = 0.0;
     let _t_quant: f64 = 0.0;
