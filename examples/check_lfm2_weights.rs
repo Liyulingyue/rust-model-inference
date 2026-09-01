@@ -8,7 +8,10 @@ fn main() {
 
     let name = "blk.0.shortconv.in_proj.weight";
     let info = loader.tensor_info(name).unwrap();
-    println!("{}: dims={:?}, ggml_type={:?}", name, info.dims, info.ggml_type);
+    println!(
+        "{}: dims={:?}, ggml_type={:?}",
+        name, info.dims, info.ggml_type
+    );
 
     let bytes = loader.tensor_slice(name).unwrap();
     let n_embd = 2048usize;
@@ -53,26 +56,20 @@ fn main() {
     let mut k0 = vec![0.0f32; n_embd];
     for j in 0..n_embd {
         let off = j * 4;
-        k0[j] = f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]);
+        k0[j] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
     }
     println!("kernel[0] first 8: {:?}", &k0[..8]);
-    println!("kernel[0] sum: {}, norm: {}", k0.iter().sum::<f32>(), k0.iter().map(|v| v*v).sum::<f32>().sqrt());
+    println!(
+        "kernel[0] sum: {}, norm: {}",
+        k0.iter().sum::<f32>(),
+        k0.iter().map(|v| v * v).sum::<f32>().sqrt()
+    );
 
     // Row 1
     let mut k1 = vec![0.0f32; n_embd];
     for j in 0..n_embd {
         let off = (n_embd + j) * 4;
-        k1[j] = f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]);
+        k1[j] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
     }
     println!("kernel[1] first 8: {:?}", &k1[..8]);
 
@@ -80,33 +77,24 @@ fn main() {
     let mut k2 = vec![0.0f32; n_embd];
     for j in 0..n_embd {
         let off = (2 * n_embd + j) * 4;
-        k2[j] = f32::from_le_bytes([
-            bytes[off],
-            bytes[off + 1],
-            bytes[off + 2],
-            bytes[off + 3],
-        ]);
+        k2[j] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
     }
     println!("kernel[2] first 8: {:?}", &k2[..8]);
+
+    // Check attn_norm weight
+    println!("\n\n==== blk.0.attn_norm.weight ====");
+    let name = "blk.0.attn_norm.weight";
+    let bytes = loader.tensor_slice(name).unwrap();
+    let mut vals = vec![0.0f32; 2048];
+    for i in 0..2048 {
+        let off = i * 4;
+        vals[i] = f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+    }
+    println!("first 8: {:?}", &vals[..8]);
+    println!(
+        "sum: {:.6}, mean: {:.6}, norm: {:.6}",
+        vals.iter().sum::<f32>(),
+        vals.iter().sum::<f32>() / 2048.0,
+        vals.iter().map(|v| v * v).sum::<f32>().sqrt()
+    );
 }
-// Check attn_norm weight
-println!("\n\n==== blk.0.attn_norm.weight ====");
-let name = "blk.0.attn_norm.weight";
-let bytes = loader.tensor_slice(name).unwrap();
-let mut vals = vec![0.0f32; 2048];
-for i in 0..2048 {
-    let off = i * 4;
-    vals[i] = f32::from_le_bytes([
-        bytes[off],
-        bytes[off + 1],
-        bytes[off + 2],
-        bytes[off + 3],
-    ]);
-}
-println!("first 8: {:?}", &vals[..8]);
-println!(
-    "sum: {:.6}, mean: {:.6}, norm: {:.6}",
-    vals.iter().sum::<f32>(),
-    vals.iter().sum::<f32>() / 2048.0,
-    vals.iter().map(|v| v * v).sum::<f32>().sqrt()
-);
