@@ -756,7 +756,7 @@ fn run_multimodal_with_video_ref(
         if video_path.is_some() {
             return Err("Gemma4 multimodal generation does not support --video".into());
         }
-        return super::gemma4::run_gemma4(super::gemma4::Gemma4Request {
+        return crate::models::gemma4::run_gemma4(crate::models::gemma4::Gemma4Request {
             model: model_path,
             mmproj: mmproj_path,
             image: image_path,

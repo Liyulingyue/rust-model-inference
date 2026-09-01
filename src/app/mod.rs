@@ -1,7 +1,6 @@
 pub(crate) mod audio;
 pub mod cli;
 pub(crate) mod embedding;
-pub mod gemma4;
 pub(crate) mod image;
 pub(crate) mod omni;
 pub(crate) mod selftest;
@@ -16,7 +15,6 @@ pub use cli::{
     EmbeddingOutput, KvFormat, ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
 pub use embedding::{compute_embedding, run_embedding};
-pub use gemma4::{run_gemma4, Gemma4Request};
 pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use selftest::run_self_test;
