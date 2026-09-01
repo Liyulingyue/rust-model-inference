@@ -644,9 +644,8 @@ fn linear_into_scaled_impl(
                         unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
                     let scales =
                         unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-                    let out = unsafe {
-                        std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out)
-                    };
+                    let out =
+                        unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
                     matmul_q8_0_quantized_parallel_rows(
                         weight, input, scales, out, n_in, n_out, ith, nth,
                     );
@@ -723,18 +722,11 @@ fn matmul_q8_0_ggml(
         let scale_len = input_scales.len();
         let output_ptr = output.as_mut_ptr() as usize;
         pool.compute(move |ith, nth| {
-            let weight =
-                unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
-            let input =
-                unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
-            let scales =
-                unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
-            let out = unsafe {
-                std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out)
-            };
-            matmul_q8_0_quantized_parallel_rows(
-                weight, input, scales, out, n_in, n_out, ith, nth,
-            );
+            let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+            let input = unsafe { std::slice::from_raw_parts(input_ptr as *const u8, input_len) };
+            let scales = unsafe { std::slice::from_raw_parts(scale_ptr as *const f32, scale_len) };
+            let out = unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, n_out) };
+            matmul_q8_0_quantized_parallel_rows(weight, input, scales, out, n_in, n_out, ith, nth);
         });
     }
 }

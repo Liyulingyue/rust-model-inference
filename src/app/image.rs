@@ -27,9 +27,11 @@ pub fn run_pig_image(
     let pool = Arc::new(ComputePool::new(n_threads.max(1)));
     let model = pig::PigModel::from_source(source.clone(), pool)?;
 
-    println!("Model: pig (Z-Image) | layers={} | loaded in {}ms",
+    println!(
+        "Model: pig (Z-Image) | layers={} | loaded in {}ms",
         model.config().n_layer,
-        started.elapsed().as_millis());
+        started.elapsed().as_millis()
+    );
 
     let vae = if let Some(vs) = vae_source {
         match pig::PigVAE::from_source(vs.as_ref()) {
@@ -57,24 +59,27 @@ pub fn run_pig_image(
         let te_pool = Arc::new(ComputePool::new(n_threads.max(1)));
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| te_source.metadata(k).cloned())
             .map_err(|e| format!("Failed to load text encoder tokenizer: {}", e))?;
-        let text_model = Qwen3Model::from_source(
-            Arc::clone(te_source),
-            Arc::new(tokenizer),
-            te_pool,
-        ).map_err(|e| format!("Failed to load text encoder model: {}", e))?;
+        let text_model =
+            Qwen3Model::from_source(Arc::clone(te_source), Arc::new(tokenizer), te_pool)
+                .map_err(|e| format!("Failed to load text encoder model: {}", e))?;
 
-        let full_prompt = format!("<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n", prompt);
-        let token_ids = text_model.tokenizer().encode(&full_prompt, Default::default());
+        let full_prompt = format!(
+            "<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n",
+            prompt
+        );
+        let token_ids = text_model
+            .tokenizer()
+            .encode(&full_prompt, Default::default());
         let n_tokens = token_ids.len();
-        let positions: Vec<[usize; 4]> = (0..n_tokens)
-            .map(|i| [i, 0, 0, 0])
-            .collect();
+        let positions: Vec<[usize; 4]> = (0..n_tokens).map(|i| [i, 0, 0, 0]).collect();
 
         println!("Encoding text: {} tokens", n_tokens);
-        let text_embeddings = text_model.text_encode(
-            &token_ids.iter().map(|&t| t as u32).collect::<Vec<u32>>(),
-            &positions,
-        ).map_err(|e| format!("Text encoding failed: {}", e))?;
+        let text_embeddings = text_model
+            .text_encode(
+                &token_ids.iter().map(|&t| t as u32).collect::<Vec<u32>>(),
+                &positions,
+            )
+            .map_err(|e| format!("Text encoding failed: {}", e))?;
         println!("Text encoding done: {} dimensions", text_embeddings.len());
 
         text_embeddings
@@ -87,14 +92,17 @@ pub fn run_pig_image(
 
     match session.generate_image(&text_context, steps) {
         Ok(pixels) => {
-            println!("Generated {} bytes image in {}ms",
-                pixels.len(), started.elapsed().as_millis());
+            println!(
+                "Generated {} bytes image in {}ms",
+                pixels.len(),
+                started.elapsed().as_millis()
+            );
 
             let img_side = (pixels.len() / 4) as u32;
-            let img = image::RgbaImage::from_raw(
-                img_side, img_side, pixels
-            ).ok_or("Failed to create image from pixels")?;
-            img.save("output.png").map_err(|e| format!("Failed to save PNG: {}", e))?;
+            let img = image::RgbaImage::from_raw(img_side, img_side, pixels)
+                .ok_or("Failed to create image from pixels")?;
+            img.save("output.png")
+                .map_err(|e| format!("Failed to save PNG: {}", e))?;
             println!("Image saved to output.png");
         }
         Err(e) => {

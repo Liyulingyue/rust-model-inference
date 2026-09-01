@@ -252,12 +252,20 @@ impl KvState {
         self.seq_len = 0;
         match &mut self.cache {
             KvCache::F16(c) => {
-                for x in c.k.iter_mut() { *x = 0; }
-                for x in c.v.iter_mut() { *x = 0; }
+                for x in c.k.iter_mut() {
+                    *x = 0;
+                }
+                for x in c.v.iter_mut() {
+                    *x = 0;
+                }
             }
             KvCache::F32(c) => {
-                for x in c.k.iter_mut() { *x = 0.0; }
-                for x in c.v.iter_mut() { *x = 0.0; }
+                for x in c.k.iter_mut() {
+                    *x = 0.0;
+                }
+                for x in c.v.iter_mut() {
+                    *x = 0.0;
+                }
             }
         }
         self.update_access();
@@ -317,8 +325,9 @@ mod tests {
     #[test]
     fn kv_lifecycle_timed_can_expire() {
         let arch = make_arch();
-        let mut state = KvState::new(arch, KvFormat::F16, 128)
-            .with_lifecycle(KvLifecycle::Timed { ttl: Duration::from_millis(50) });
+        let mut state = KvState::new(arch, KvFormat::F16, 128).with_lifecycle(KvLifecycle::Timed {
+            ttl: Duration::from_millis(50),
+        });
         assert!(!state.is_expired());
         std::thread::sleep(Duration::from_millis(80));
         assert!(state.is_expired());
@@ -329,8 +338,8 @@ mod tests {
     #[test]
     fn kv_lifecycle_persistent_never_expires() {
         let arch = make_arch();
-        let mut state = KvState::new(arch, KvFormat::F16, 128)
-            .with_lifecycle(KvLifecycle::Persistent);
+        let mut state =
+            KvState::new(arch, KvFormat::F16, 128).with_lifecycle(KvLifecycle::Persistent);
         state.last_access = std::time::Instant::now() - Duration::from_secs(3600);
         assert!(!state.is_expired());
     }

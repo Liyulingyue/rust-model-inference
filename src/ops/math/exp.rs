@@ -41,9 +41,7 @@ unsafe fn exp_approx_inplace_avx2(values: &mut [f32]) {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub(crate) unsafe fn exp_approx_avx2(
-    x: std::arch::x86_64::__m256,
-) -> std::arch::x86_64::__m256 {
+pub(crate) unsafe fn exp_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
 
     let x = _mm256_max_ps(

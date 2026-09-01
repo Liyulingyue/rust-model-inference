@@ -13,10 +13,7 @@ unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(
-    q4xs_data: &[u8],
-    q8k: &[super::BlockQ8K],
-) -> f32 {
+pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(q4xs_data: &[u8], q8k: &[super::BlockQ8K]) -> f32 {
     use std::arch::x86_64::*;
 
     let nb = q8k.len();
@@ -88,10 +85,7 @@ pub(crate) unsafe fn vec_dot_iq4_xs_q8k_avx2(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(
-    q2k_data: &[u8],
-    q8k: &[super::BlockQ8K],
-) -> f32 {
+pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(q2k_data: &[u8], q8k: &[super::BlockQ8K]) -> f32 {
     use std::arch::x86_64::*;
 
     let nb = q8k.len();
@@ -173,10 +167,7 @@ unsafe fn hsum_i32(v: std::arch::x86_64::__m256i) -> i32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
-    q3k_data: &[u8],
-    q8k: &[super::BlockQ8K],
-) -> f32 {
+pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(q3k_data: &[u8], q8k: &[super::BlockQ8K]) -> f32 {
     use std::arch::x86_64::*;
 
     let nb = q8k.len();
@@ -192,13 +183,22 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(
 
         // Decode scales (same as scalar).
         let aux0 = u32::from_le_bytes([
-            q3k_data[boff + 96], q3k_data[boff + 97], q3k_data[boff + 98], q3k_data[boff + 99],
+            q3k_data[boff + 96],
+            q3k_data[boff + 97],
+            q3k_data[boff + 98],
+            q3k_data[boff + 99],
         ]);
         let aux1 = u32::from_le_bytes([
-            q3k_data[boff + 100], q3k_data[boff + 101], q3k_data[boff + 102], q3k_data[boff + 103],
+            q3k_data[boff + 100],
+            q3k_data[boff + 101],
+            q3k_data[boff + 102],
+            q3k_data[boff + 103],
         ]);
         let aux2 = u32::from_le_bytes([
-            q3k_data[boff + 104], q3k_data[boff + 105], q3k_data[boff + 106], q3k_data[boff + 107],
+            q3k_data[boff + 104],
+            q3k_data[boff + 105],
+            q3k_data[boff + 106],
+            q3k_data[boff + 107],
         ]);
         let kmask1 = 0x03030303u32;
         let kmask2 = 0x0f0f0f0fu32;

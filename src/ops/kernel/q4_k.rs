@@ -12,7 +12,11 @@ pub struct Q4_KKernel<'a> {
 
 impl<'a> Q4_KKernel<'a> {
     pub fn new(data: &'a [u8], n_in: usize, n_out: usize) -> Self {
-        Self { weight: data, n_in, n_out }
+        Self {
+            weight: data,
+            n_in,
+            n_out,
+        }
     }
 }
 

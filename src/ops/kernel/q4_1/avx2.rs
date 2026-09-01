@@ -131,7 +131,10 @@ unsafe fn q4_1_block_pair_dot(
     use std::arch::x86_64::*;
 
     let lo = _mm_and_si128(q4_bytes, _mm256_castsi256_si128(low_mask));
-    let hi = _mm_and_si128(_mm_srli_epi16(q4_bytes, 4), _mm256_castsi256_si128(low_mask));
+    let hi = _mm_and_si128(
+        _mm_srli_epi16(q4_bytes, 4),
+        _mm256_castsi256_si128(low_mask),
+    );
     let q4_unpacked = _mm256_set_m128i(hi, lo);
 
     let prod16 = _mm256_maddubs_epi16(q4_unpacked, q8_input);
@@ -191,28 +194,9 @@ mod tests {
         let mut avx2_out = vec![0.0f32; n_out];
         let mut scalar_out = vec![0.0f32; n_out];
         unsafe {
-            matmul_q4_1_vs_q8_0_avx2(
-                weight,
-                q8,
-                scales,
-                sums,
-                &mut avx2_out,
-                n_in,
-                0,
-                n_out,
-            );
+            matmul_q4_1_vs_q8_0_avx2(weight, q8, scales, sums, &mut avx2_out, n_in, 0, n_out);
         }
-        matmul_q4_1_scalar_range(
-            weight,
-            q8,
-            scales,
-            sums,
-            &mut scalar_out,
-            n_in,
-            n_out,
-            0,
-            1,
-        );
+        matmul_q4_1_scalar_range(weight, q8, scales, sums, &mut scalar_out, n_in, n_out, 0, 1);
         for (i, (a, s)) in avx2_out.iter().zip(scalar_out.iter()).enumerate() {
             assert!(
                 (a - s).abs() < 1e-3,

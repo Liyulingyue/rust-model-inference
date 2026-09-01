@@ -111,10 +111,7 @@ pub fn matmul_q6_k_scalar_range(
     let mut row = vec![0.0; n_in];
     for out_idx in my_start..my_end {
         let row_off = out_idx * row_stride;
-        crate::ops::quant::dequantize_row_q6_k(
-            &weight[row_off..row_off + row_stride],
-            &mut row,
-        );
+        crate::ops::quant::dequantize_row_q6_k(&weight[row_off..row_off + row_stride], &mut row);
         output[out_idx] = row.iter().zip(&input).map(|(x, y)| x * y).sum();
     }
 }

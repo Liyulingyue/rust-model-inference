@@ -1,4 +1,4 @@
-﻿//! Generic model-graph types: [`QuantizedLinear`] (a quantized matmul Layer)
+//! Generic model-graph types: [`QuantizedLinear`] (a quantized matmul Layer)
 //! and [`ModelGraph`] (a heterogeneous stack of `Layer` impls driven by a
 //! shared scratchpad).
 //!
@@ -6,8 +6,8 @@
 //! [`crate::traits`] (Layer, ModelConfig, ExecContext).
 
 use crate::core::tensor::TensorSource;
-use crate::ops::quant::dequantize_q4_k_weight;
 use crate::core::traits::{ExecContext, Layer, ModelConfig};
+use crate::ops::quant::dequantize_q4_k_weight;
 
 pub struct QuantizedLinear<'a> {
     weight: &'a [u8],

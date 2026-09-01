@@ -26,17 +26,17 @@ use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::Qwen3Config;
+use crate::models::qwen3::static_weight;
 use crate::models::qwen3::trunk::util::{
     check_allocation, checked_product, load_f32_tensor, usize_to_u64,
 };
-use crate::models::qwen3::static_weight;
 use crate::models::qwen3::tts::AUDIO_CODEBOOK_SIZE;
+use crate::models::qwen3::Qwen3Config;
 use crate::ops::kernel::Weight;
 use crate::ops::{
-    dot_f16, f16_to_f32, f32_slice_to_f16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_mrope_interleaved, rope_neox, silu_mul_approx_inplace, softmax_inplace, vec_scale_f32,
+    dot_f16, f16_to_f32, f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm,
+    rms_norm_inplace, rope_mrope_interleaved, rope_neox, silu_mul_approx_inplace, softmax_inplace,
+    vec_scale_f32,
 };
 
 const SEMANTIC_CODEBOOK_SIZE: usize = 2048;
@@ -614,11 +614,11 @@ impl<'model> TtsSession<'model> {
         Ok(())
     }
 
-pub fn sample_semantic<R: Rng + ?Sized>(
-    &mut self,
-    temperature: f32,
-    rng: &mut R,
-) -> Result<Option<u32>, String> {
+    pub fn sample_semantic<R: Rng + ?Sized>(
+        &mut self,
+        temperature: f32,
+        rng: &mut R,
+    ) -> Result<Option<u32>, String> {
         let logits = self.compute_logits()?;
         sample_semantic_logits(
             &logits,
@@ -713,7 +713,9 @@ impl TtsSession<'_> {
         // lookup or from a precomputed 2048-dim vector.
         match (token_id, precomputed_embedding) {
             (Some(tid), _) => {
-                model.token_embedding.embedding_lookup(tid, &mut self.scratch.x);
+                model
+                    .token_embedding
+                    .embedding_lookup(tid, &mut self.scratch.x);
             }
             (None, Some(emb)) => {
                 if emb.len() != config.n_embd {
@@ -1093,7 +1095,12 @@ impl TtsSession<'_> {
             for (hidden, projection) in x.iter_mut().zip(down) {
                 *hidden += *projection;
             }
-            eprintln!("  [layer {}] took {:.3}ms (step={})", layer, t_layer_start.elapsed().as_secs_f64() * 1000.0, step);
+            eprintln!(
+                "  [layer {}] took {:.3}ms (step={})",
+                layer,
+                t_layer_start.elapsed().as_secs_f64() * 1000.0,
+                step
+            );
         }
         Ok(())
     }

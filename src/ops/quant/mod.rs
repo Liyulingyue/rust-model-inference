@@ -1,4 +1,4 @@
-﻿use crate::core::tensor::TensorInfo;
+use crate::core::tensor::TensorInfo;
 
 pub mod fuse;
 pub mod iq_tables;
@@ -26,14 +26,24 @@ pub const BLOCK_IQ1_M_SIZE: usize = 56;
 pub const BLOCK_IQ1_S_SIZE: usize = 50;
 
 fn f16_from_bytes(data: &[u8], byte_idx: usize) -> f32 {
-    if byte_idx + 2 > data.len() { return 0.0; }
+    if byte_idx + 2 > data.len() {
+        return 0.0;
+    }
     let bits = u16::from_le_bytes([data[byte_idx], data[byte_idx + 1]]);
     let sign = if bits & 0x8000 != 0 { -1.0f32 } else { 1.0f32 };
     let exp = ((bits >> 10) & 0x1F) as i32;
     let frac = (bits & 0x3FF) as f32 / 1024.0;
-    if exp == 0 { sign * frac * 2.0f32.powi(-14) }
-    else if exp == 31 { if frac == 0.0 { sign * f32::INFINITY } else { sign * f32::NAN } }
-    else { sign * (1.0 + frac) * 2.0f32.powi(exp - 15) }
+    if exp == 0 {
+        sign * frac * 2.0f32.powi(-14)
+    } else if exp == 31 {
+        if frac == 0.0 {
+            sign * f32::INFINITY
+        } else {
+            sign * f32::NAN
+        }
+    } else {
+        sign * (1.0 + frac) * 2.0f32.powi(exp - 15)
+    }
 }
 
 #[inline]
@@ -112,7 +122,11 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
         }
 
         if amax == 0.0 {
-            buf[i] = BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] };
+            buf[i] = BlockQ8K {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            };
             continue;
         }
 
@@ -132,7 +146,11 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
             bsums[j] = sum as i16;
         }
 
-        buf[i] = BlockQ8K { d: 1.0 / iscale, qs, bsums };
+        buf[i] = BlockQ8K {
+            d: 1.0 / iscale,
+            qs,
+            bsums,
+        };
     }
 }
 
@@ -167,11 +185,18 @@ unsafe fn quantize_row_q8_k_avx2_into(x: &[f32], buf: &mut [BlockQ8K]) {
         let mut max_val = 0.0f32;
         for j in 0..QK_K {
             let ax = block[j].abs();
-            if ax > amax { amax = ax; max_val = block[j]; }
+            if ax > amax {
+                amax = ax;
+                max_val = block[j];
+            }
         }
 
         if amax == 0.0 {
-            buf[i] = BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] };
+            buf[i] = BlockQ8K {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            };
             continue;
         }
 
@@ -210,7 +235,11 @@ unsafe fn quantize_row_q8_k_avx2_into(x: &[f32], buf: &mut [BlockQ8K]) {
             bsums[bs] = sum as i16;
         }
 
-        buf[i] = BlockQ8K { d: inv_iscale, qs, bsums };
+        buf[i] = BlockQ8K {
+            d: inv_iscale,
+            qs,
+            bsums,
+        };
     }
 }
 
@@ -229,7 +258,9 @@ pub fn vec_dot_q4k_q8k_scalar(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q4K_SIZE;
-        if boff + BLOCK_Q4K_SIZE > q4k_data.len() { break; }
+        if boff + BLOCK_Q4K_SIZE > q4k_data.len() {
+            break;
+        }
 
         let d = f16_from_bytes(q4k_data, boff);
         let dmin = f16_from_bytes(q4k_data, boff + 2);
@@ -250,9 +281,24 @@ pub fn vec_dot_q4k_q8k_scalar(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         }
 
         let mut utmp = [0u32; 4];
-        utmp[0] = u32::from_le_bytes([scales_bytes[0], scales_bytes[1], scales_bytes[2], scales_bytes[3]]);
-        utmp[1] = u32::from_le_bytes([scales_bytes[4], scales_bytes[5], scales_bytes[6], scales_bytes[7]]);
-        utmp[2] = u32::from_le_bytes([scales_bytes[8], scales_bytes[9], scales_bytes[10], scales_bytes[11]]);
+        utmp[0] = u32::from_le_bytes([
+            scales_bytes[0],
+            scales_bytes[1],
+            scales_bytes[2],
+            scales_bytes[3],
+        ]);
+        utmp[1] = u32::from_le_bytes([
+            scales_bytes[4],
+            scales_bytes[5],
+            scales_bytes[6],
+            scales_bytes[7],
+        ]);
+        utmp[2] = u32::from_le_bytes([
+            scales_bytes[8],
+            scales_bytes[9],
+            scales_bytes[10],
+            scales_bytes[11],
+        ]);
 
         let kmask1: u32 = 0x3f3f3f3f;
         let kmask2: u32 = 0x0f0f0f0f;
@@ -294,12 +340,16 @@ pub fn vec_dot_q4k_q8k_scalar(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         }
 
         let dd = d * q8k[i].d;
-        for l in 0..8 { sums[l] += dd * aux32[l] as f32; }
+        for l in 0..8 {
+            sums[l] += dd * aux32[l] as f32;
+        }
         let dmin_val = dmin * q8k[i].d;
         sumf -= dmin_val * sumi as f32;
     }
 
-    for l in 0..8 { sumf += sums[l]; }
+    for l in 0..8 {
+        sumf += sums[l];
+    }
     sumf
 }
 
@@ -318,7 +368,9 @@ pub fn vec_dot_q5k_q8k_scalar(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q5K_SIZE;
-        if boff + BLOCK_Q5K_SIZE > q5k_data.len() { break; }
+        if boff + BLOCK_Q5K_SIZE > q5k_data.len() {
+            break;
+        }
 
         let d = f16_from_bytes(q5k_data, boff);
         let dmin = f16_from_bytes(q5k_data, boff + 2);
@@ -347,9 +399,24 @@ pub fn vec_dot_q5k_q8k_scalar(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         }
 
         let mut utmp = [0u32; 4];
-        utmp[0] = u32::from_le_bytes([scales_bytes[0], scales_bytes[1], scales_bytes[2], scales_bytes[3]]);
-        utmp[1] = u32::from_le_bytes([scales_bytes[4], scales_bytes[5], scales_bytes[6], scales_bytes[7]]);
-        utmp[2] = u32::from_le_bytes([scales_bytes[8], scales_bytes[9], scales_bytes[10], scales_bytes[11]]);
+        utmp[0] = u32::from_le_bytes([
+            scales_bytes[0],
+            scales_bytes[1],
+            scales_bytes[2],
+            scales_bytes[3],
+        ]);
+        utmp[1] = u32::from_le_bytes([
+            scales_bytes[4],
+            scales_bytes[5],
+            scales_bytes[6],
+            scales_bytes[7],
+        ]);
+        utmp[2] = u32::from_le_bytes([
+            scales_bytes[8],
+            scales_bytes[9],
+            scales_bytes[10],
+            scales_bytes[11],
+        ]);
 
         let kmask1: u32 = 0x3f3f3f3f;
         let kmask2: u32 = 0x0f0f0f0f;
@@ -391,12 +458,16 @@ pub fn vec_dot_q5k_q8k_scalar(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         }
 
         let dd = d * q8k[i].d;
-        for l in 0..8 { sums[l] += dd * aux32[l] as f32; }
+        for l in 0..8 {
+            sums[l] += dd * aux32[l] as f32;
+        }
         let dmin_val = dmin * q8k[i].d;
         sumf -= dmin_val * sumi as f32;
     }
 
-    for l in 0..8 { sumf += sums[l]; }
+    for l in 0..8 {
+        sumf += sums[l];
+    }
     sumf
 }
 
@@ -425,7 +496,11 @@ pub fn matmul_q5k_q8k(weight_data: &[u8], input: &[f32], n_cols: usize, n_rows: 
 pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
     let n_el = ti.n_elements();
     let n_cols = ti.dims[0] as usize;
-    let n_rows = if ti.dims.len() >= 2 { ti.dims[1] as usize } else { 1 };
+    let n_rows = if ti.dims.len() >= 2 {
+        ti.dims[1] as usize
+    } else {
+        1
+    };
     let blocks_per_row = n_cols / QK_K;
     let mut out = vec![0.0f32; n_el];
 
@@ -435,7 +510,9 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
 
         for bi in 0..blocks_per_row {
             let boff = byte_offset + bi * BLOCK_Q4K_SIZE;
-            if boff + BLOCK_Q4K_SIZE > data.len() { continue; }
+            if boff + BLOCK_Q4K_SIZE > data.len() {
+                continue;
+            }
 
             let d = f16_from_bytes(data, boff);
             let dmin = f16_from_bytes(data, boff + 2);
@@ -446,7 +523,8 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
             let mut is = 0usize;
             while is < 8 {
                 let (sc1, m1) = get_scale_min_k4(is, &data[scales_off..scales_off + K_SCALE_SIZE]);
-                let (sc2, m2) = get_scale_min_k4(is + 1, &data[scales_off..scales_off + K_SCALE_SIZE]);
+                let (sc2, m2) =
+                    get_scale_min_k4(is + 1, &data[scales_off..scales_off + K_SCALE_SIZE]);
 
                 let d1 = d * sc1 as f32;
                 let m1_eff = dmin * m1 as f32;
@@ -472,7 +550,9 @@ pub fn dequantize_row_q2_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_Q2K_SIZE;
-        if boff + BLOCK_Q2K_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_Q2K_SIZE > block_bytes.len() {
+            break;
+        }
 
         let d = f16_from_bytes(block_bytes, boff + 80);
         let dmin = f16_from_bytes(block_bytes, boff + 82);
@@ -517,7 +597,9 @@ pub fn vec_dot_q2k_q8k_scalar(q2k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q2K_SIZE;
-        if boff + BLOCK_Q2K_SIZE > q2k_data.len() { break; }
+        if boff + BLOCK_Q2K_SIZE > q2k_data.len() {
+            break;
+        }
 
         let d = f16_from_bytes(q2k_data, boff + 80);
         let dmin = f16_from_bytes(q2k_data, boff + 82);
@@ -591,7 +673,9 @@ pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_Q3K_SIZE;
-        if boff + BLOCK_Q3K_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_Q3K_SIZE > block_bytes.len() {
+            break;
+        }
 
         let d_all = f16_from_bytes(block_bytes, boff + 108);
         let hmask = &block_bytes[boff..boff + 32];
@@ -602,16 +686,22 @@ pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
         // Mirrors llama.cpp `dequantize_row_q3_K` exactly.
         let mut auxs = [0u32; 4];
         auxs[0] = u32::from_le_bytes([
-            block_bytes[boff + 96], block_bytes[boff + 97],
-            block_bytes[boff + 98], block_bytes[boff + 99],
+            block_bytes[boff + 96],
+            block_bytes[boff + 97],
+            block_bytes[boff + 98],
+            block_bytes[boff + 99],
         ]);
         auxs[1] = u32::from_le_bytes([
-            block_bytes[boff + 100], block_bytes[boff + 101],
-            block_bytes[boff + 102], block_bytes[boff + 103],
+            block_bytes[boff + 100],
+            block_bytes[boff + 101],
+            block_bytes[boff + 102],
+            block_bytes[boff + 103],
         ]);
         auxs[2] = u32::from_le_bytes([
-            block_bytes[boff + 104], block_bytes[boff + 105],
-            block_bytes[boff + 106], block_bytes[boff + 107],
+            block_bytes[boff + 104],
+            block_bytes[boff + 105],
+            block_bytes[boff + 106],
+            block_bytes[boff + 107],
         ]);
         auxs[3] = 0;
         let tmp = auxs[2];
@@ -621,10 +711,22 @@ pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
         auxs[1] = (auxs[1] & 0x0f0f_0f0f) | (((tmp >> 2) & 0x0303_0303) << 4);
         let scales_bytes: [u8; 16] = bytemuck::cast(auxs);
         let scales_signed: [i8; 16] = [
-            scales_bytes[0] as i8, scales_bytes[1] as i8, scales_bytes[2] as i8, scales_bytes[3] as i8,
-            scales_bytes[4] as i8, scales_bytes[5] as i8, scales_bytes[6] as i8, scales_bytes[7] as i8,
-            scales_bytes[8] as i8, scales_bytes[9] as i8, scales_bytes[10] as i8, scales_bytes[11] as i8,
-            scales_bytes[12] as i8, scales_bytes[13] as i8, scales_bytes[14] as i8, scales_bytes[15] as i8,
+            scales_bytes[0] as i8,
+            scales_bytes[1] as i8,
+            scales_bytes[2] as i8,
+            scales_bytes[3] as i8,
+            scales_bytes[4] as i8,
+            scales_bytes[5] as i8,
+            scales_bytes[6] as i8,
+            scales_bytes[7] as i8,
+            scales_bytes[8] as i8,
+            scales_bytes[9] as i8,
+            scales_bytes[10] as i8,
+            scales_bytes[11] as i8,
+            scales_bytes[12] as i8,
+            scales_bytes[13] as i8,
+            scales_bytes[14] as i8,
+            scales_bytes[15] as i8,
         ];
 
         let mut is = 0usize;
@@ -666,7 +768,9 @@ pub fn vec_dot_q3k_q8k_scalar(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q3K_SIZE;
-        if boff + BLOCK_Q3K_SIZE > q3k_data.len() { break; }
+        if boff + BLOCK_Q3K_SIZE > q3k_data.len() {
+            break;
+        }
 
         let d = f16_from_bytes(q3k_data, boff + 108);
         let hmask = &q3k_data[boff..boff + 32];
@@ -676,16 +780,22 @@ pub fn vec_dot_q3k_q8k_scalar(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         // Deinterleave scales (same as dequantize_row_q3_k).
         let mut auxs = [0u32; 4];
         auxs[0] = u32::from_le_bytes([
-            q3k_data[boff + 96], q3k_data[boff + 97],
-            q3k_data[boff + 98], q3k_data[boff + 99],
+            q3k_data[boff + 96],
+            q3k_data[boff + 97],
+            q3k_data[boff + 98],
+            q3k_data[boff + 99],
         ]);
         auxs[1] = u32::from_le_bytes([
-            q3k_data[boff + 100], q3k_data[boff + 101],
-            q3k_data[boff + 102], q3k_data[boff + 103],
+            q3k_data[boff + 100],
+            q3k_data[boff + 101],
+            q3k_data[boff + 102],
+            q3k_data[boff + 103],
         ]);
         auxs[2] = u32::from_le_bytes([
-            q3k_data[boff + 104], q3k_data[boff + 105],
-            q3k_data[boff + 106], q3k_data[boff + 107],
+            q3k_data[boff + 104],
+            q3k_data[boff + 105],
+            q3k_data[boff + 106],
+            q3k_data[boff + 107],
         ]);
         auxs[3] = 0;
         let tmp = auxs[2];
@@ -695,10 +805,22 @@ pub fn vec_dot_q3k_q8k_scalar(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         auxs[1] = (auxs[1] & 0x0f0f_0f0f) | (((tmp >> 2) & 0x0303_0303) << 4);
         let scales_bytes: [u8; 16] = bytemuck::cast(auxs);
         let scales_signed: [i8; 16] = [
-            scales_bytes[0] as i8, scales_bytes[1] as i8, scales_bytes[2] as i8, scales_bytes[3] as i8,
-            scales_bytes[4] as i8, scales_bytes[5] as i8, scales_bytes[6] as i8, scales_bytes[7] as i8,
-            scales_bytes[8] as i8, scales_bytes[9] as i8, scales_bytes[10] as i8, scales_bytes[11] as i8,
-            scales_bytes[12] as i8, scales_bytes[13] as i8, scales_bytes[14] as i8, scales_bytes[15] as i8,
+            scales_bytes[0] as i8,
+            scales_bytes[1] as i8,
+            scales_bytes[2] as i8,
+            scales_bytes[3] as i8,
+            scales_bytes[4] as i8,
+            scales_bytes[5] as i8,
+            scales_bytes[6] as i8,
+            scales_bytes[7] as i8,
+            scales_bytes[8] as i8,
+            scales_bytes[9] as i8,
+            scales_bytes[10] as i8,
+            scales_bytes[11] as i8,
+            scales_bytes[12] as i8,
+            scales_bytes[13] as i8,
+            scales_bytes[14] as i8,
+            scales_bytes[15] as i8,
         ];
 
         // Decode Q3K into aux8 (256 signed 3-bit values), grouped into 8 sums × 32 lanes.
@@ -763,15 +885,16 @@ pub fn vec_dot_q3k_q8k(q3k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 /// Non-linear lookup table for IQ4_NL: maps 4-bit nibble to quantized value.
 // Mirrors llama.cpp's `kvalues_iq4nl`.
 pub const IQ4_NL_LUT: [i8; 16] = [
-    -127, -104, -83, -65, -49, -35, -22, -10,
-    1, 13, 25, 38, 53, 69, 89, 113,
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
 pub fn dequantize_row_iq4_nl(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / 32;
     for block_idx in 0..num_blocks {
         let boff = block_idx * 18;
-        if boff + 18 > block_bytes.len() { break; }
+        if boff + 18 > block_bytes.len() {
+            break;
+        }
 
         let d = f16_from_bytes(block_bytes, boff);
         let qs = &block_bytes[boff + 2..boff + 18];
@@ -794,7 +917,9 @@ pub fn vec_dot_iq4_nl_q8k_scalar(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let super_off = i * blocks_per_super * 18;
-        if super_off + blocks_per_super * 18 > iq4nl_data.len() { break; }
+        if super_off + blocks_per_super * 18 > iq4nl_data.len() {
+            break;
+        }
 
         let mut sum_block = 0.0f32;
         for sb in 0..blocks_per_super {
@@ -940,7 +1065,11 @@ pub fn dequantize_row_iq3_s(block_bytes: &[u8], output: &mut [f32]) {
                     let out_off = out_base + (ib32 + pair) * 32 + l * 8;
                     for j in 0..4usize {
                         let s1 = if sgn & mask[j] != 0 { -1.0f32 } else { 1.0f32 };
-                        let s2 = if sgn & mask[j + 4] != 0 { -1.0f32 } else { 1.0f32 };
+                        let s2 = if sgn & mask[j + 4] != 0 {
+                            -1.0f32
+                        } else {
+                            1.0f32
+                        };
                         output[out_off + j] = dl * g1_bytes[j] as f32 * s1;
                         output[out_off + j + 4] = dl * g2_bytes[j] as f32 * s2;
                     }
@@ -1114,15 +1243,23 @@ pub fn dequantize_row_iq2_xxs(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ2_XXS_SIZE;
-        if boff + BLOCK_IQ2_XXS_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_IQ2_XXS_SIZE > block_bytes.len() {
+            break;
+        }
         let d = f16_from_bytes(block_bytes, boff);
         for ib32 in 0..8usize {
             let aux_off = boff + 2 + ib32 * 8;
             let aux0 = u32::from_le_bytes([
-                block_bytes[aux_off], block_bytes[aux_off+1], block_bytes[aux_off+2], block_bytes[aux_off+3],
+                block_bytes[aux_off],
+                block_bytes[aux_off + 1],
+                block_bytes[aux_off + 2],
+                block_bytes[aux_off + 3],
             ]);
             let aux1 = u32::from_le_bytes([
-                block_bytes[aux_off+4], block_bytes[aux_off+5], block_bytes[aux_off+6], block_bytes[aux_off+7],
+                block_bytes[aux_off + 4],
+                block_bytes[aux_off + 5],
+                block_bytes[aux_off + 6],
+                block_bytes[aux_off + 7],
             ]);
             let db = d * (0.5 + ((aux1 >> 28) as f32)) * 0.25;
             let aux8 = aux0.to_le_bytes();
@@ -1147,7 +1284,9 @@ pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ2_XXS_SIZE;
-        if boff + BLOCK_IQ2_XXS_SIZE > iq2xxs_data.len() { break; }
+        if boff + BLOCK_IQ2_XXS_SIZE > iq2xxs_data.len() {
+            break;
+        }
         let d = f16_from_bytes(iq2xxs_data, boff) * q8k[i].d;
         let q2 = &iq2xxs_data[boff + 2..boff + 2 + 64];
         let q8 = &q8k[i].qs;
@@ -1156,8 +1295,14 @@ pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let mut q8_idx = 0;
         for _ib32 in 0..8 {
             let mut aux32 = [0u32; 2];
-            aux32[0] = u32::from_le_bytes([q2[q2_idx], q2[q2_idx+1], q2[q2_idx+2], q2[q2_idx+3]]);
-            aux32[1] = u32::from_le_bytes([q2[q2_idx+4], q2[q2_idx+5], q2[q2_idx+6], q2[q2_idx+7]]);
+            aux32[0] =
+                u32::from_le_bytes([q2[q2_idx], q2[q2_idx + 1], q2[q2_idx + 2], q2[q2_idx + 3]]);
+            aux32[1] = u32::from_le_bytes([
+                q2[q2_idx + 4],
+                q2[q2_idx + 5],
+                q2[q2_idx + 6],
+                q2[q2_idx + 7],
+            ]);
             q2_idx += 8;
             let aux8 = aux32[0].to_le_bytes();
             let ls = (2 * ((aux32[1] >> 28) as i64)) + 1;
@@ -1184,7 +1329,9 @@ pub fn dequantize_row_iq2_s(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ2_S_SIZE;
-        if boff + BLOCK_IQ2_S_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_IQ2_S_SIZE > block_bytes.len() {
+            break;
+        }
         let d = f16_from_bytes(block_bytes, boff);
         let qs = &block_bytes[boff + 2..boff + 2 + 32];
         let signs = &block_bytes[boff + 2 + 32..boff + 2 + 32 + 32];
@@ -1217,7 +1364,9 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ2_S_SIZE;
-        if boff + BLOCK_IQ2_S_SIZE > iq2s_data.len() { break; }
+        if boff + BLOCK_IQ2_S_SIZE > iq2s_data.len() {
+            break;
+        }
         let d = f16_from_bytes(iq2s_data, boff) * q8k[i].d;
         let qs = &iq2s_data[boff + 2..boff + 2 + 32];
         let qh = &iq2s_data[boff + 66..boff + 66 + 8];
@@ -1235,7 +1384,8 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             let mut sumi1: i64 = 0;
             for l in 0..2 {
                 let qh_shift = 8 - 2 * l;
-                let grid_idx = (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
+                let grid_idx =
+                    (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
                 let s = iq2s_data[signs_idx + l];
                 for j in 0..8 {
@@ -1247,7 +1397,8 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             let mut sumi2: i64 = 0;
             for l in 2..4 {
                 let qh_shift = 8 - 2 * l;
-                let grid_idx = (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
+                let grid_idx =
+                    (qs[qs_idx + l] as u32 | ((qh_byte as u32) << qh_shift) & 0x300) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
                 let s = iq2s_data[signs_idx + l];
                 for j in 0..8 {
@@ -1272,14 +1423,18 @@ pub fn dequantize_row_iq3_xxs(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ3_XXS_SIZE;
-        if boff + BLOCK_IQ3_XXS_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_IQ3_XXS_SIZE > block_bytes.len() {
+            break;
+        }
         let d = f16_from_bytes(block_bytes, boff);
         let qs = &block_bytes[boff + 2..boff + 2 + 96];
         let scales_and_signs = &block_bytes[boff + 2 + 64..boff + 2 + 64 + 32];
         for ib32 in 0..8usize {
             let aux32 = u32::from_le_bytes([
-                scales_and_signs[ib32 * 4], scales_and_signs[ib32 * 4 + 1],
-                scales_and_signs[ib32 * 4 + 2], scales_and_signs[ib32 * 4 + 3],
+                scales_and_signs[ib32 * 4],
+                scales_and_signs[ib32 * 4 + 1],
+                scales_and_signs[ib32 * 4 + 2],
+                scales_and_signs[ib32 * 4 + 3],
             ]);
             let db = d * (0.5 + (aux32 >> 28) as f32) * 0.5;
             let qs_off = ib32 * 8;
@@ -1307,7 +1462,9 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ3_XXS_SIZE;
-        if boff + BLOCK_IQ3_XXS_SIZE > iq3xxs_data.len() { break; }
+        if boff + BLOCK_IQ3_XXS_SIZE > iq3xxs_data.len() {
+            break;
+        }
         let d = f16_from_bytes(iq3xxs_data, boff) * q8k[i].d;
         let q3 = &iq3xxs_data[boff + 2..boff + 2 + 96];
         let gas = &iq3xxs_data[boff + 2 + 64..boff + 2 + 64 + 32];
@@ -1318,7 +1475,10 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let mut gas_idx = 0;
         for _ib32 in 0..8 {
             let aux32 = u32::from_le_bytes([
-                gas[gas_idx], gas[gas_idx+1], gas[gas_idx+2], gas[gas_idx+3],
+                gas[gas_idx],
+                gas[gas_idx + 1],
+                gas[gas_idx + 2],
+                gas[gas_idx + 3],
             ]);
             gas_idx += 4;
             let ls = (2 * ((aux32 >> 28) as i64)) + 1;
@@ -1349,7 +1509,9 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ1_M_SIZE;
-        if boff + BLOCK_IQ1_M_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_IQ1_M_SIZE > block_bytes.len() {
+            break;
+        }
         let sc_bytes = &block_bytes[boff + 48..boff + 56];
         let sc_u16 = [
             u16::from_le_bytes([sc_bytes[0], sc_bytes[1]]),
@@ -1357,8 +1519,10 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12) | ((sc_u16[1] >> 8) & 0x00f0)
-            | ((sc_u16[2] >> 4) & 0x0f00) | (sc_u16[3] & 0xf000));
+        let scale_u16 = ((sc_u16[0] >> 12)
+            | ((sc_u16[1] >> 8) & 0x00f0)
+            | ((sc_u16[2] >> 4) & 0x0f00)
+            | (sc_u16[3] & 0xf000));
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0);
         let qs = &block_bytes[boff..boff + 32];
         let qh = &block_bytes[boff + 32..boff + 48];
@@ -1375,10 +1539,26 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
             let idx1 = qs[qs_off + 1] as u16 | (((qh[qh_off + 0] as u16) << 4) & 0x700);
             let idx2 = qs[qs_off + 2] as u16 | (((qh[qh_off + 1] as u16) << 8) & 0x700);
             let idx3 = qs[qs_off + 3] as u16 | (((qh[qh_off + 1] as u16) << 4) & 0x700);
-            let delta0: f32 = if qh[qh_off + 0] & 0x08 != 0 { -0.125 } else { 0.125 };
-            let delta1: f32 = if qh[qh_off + 0] & 0x80 != 0 { -0.125 } else { 0.125 };
-            let delta2: f32 = if qh[qh_off + 1] & 0x08 != 0 { -0.125 } else { 0.125 };
-            let delta3: f32 = if qh[qh_off + 1] & 0x80 != 0 { -0.125 } else { 0.125 };
+            let delta0: f32 = if qh[qh_off + 0] & 0x08 != 0 {
+                -0.125
+            } else {
+                0.125
+            };
+            let delta1: f32 = if qh[qh_off + 0] & 0x80 != 0 {
+                -0.125
+            } else {
+                0.125
+            };
+            let delta2: f32 = if qh[qh_off + 1] & 0x08 != 0 {
+                -0.125
+            } else {
+                0.125
+            };
+            let delta3: f32 = if qh[qh_off + 1] & 0x80 != 0 {
+                -0.125
+            } else {
+                0.125
+            };
             let g0 = grid[idx0 as usize].to_le_bytes();
             let g1 = grid[idx1 as usize].to_le_bytes();
             let g2 = grid[idx2 as usize].to_le_bytes();
@@ -1402,7 +1582,9 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ1_M_SIZE;
-        if boff + BLOCK_IQ1_M_SIZE > iq1m_data.len() { break; }
+        if boff + BLOCK_IQ1_M_SIZE > iq1m_data.len() {
+            break;
+        }
         let sc_bytes = &iq1m_data[boff + 48..boff + 56];
         let sc_u16 = [
             u16::from_le_bytes([sc_bytes[0], sc_bytes[1]]),
@@ -1410,8 +1592,10 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12) | ((sc_u16[1] >> 8) & 0x00f0)
-            | ((sc_u16[2] >> 4) & 0x0f00) | (sc_u16[3] & 0xf000));
+        let scale_u16 = ((sc_u16[0] >> 12)
+            | ((sc_u16[1] >> 8) & 0x00f0)
+            | ((sc_u16[2] >> 4) & 0x0f00)
+            | (sc_u16[3] & 0xf000));
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0) * q8k[i].d;
         let qs = &iq1m_data[boff..boff + 32];
         let qh = &iq1m_data[boff + 32..boff + 48];
@@ -1446,21 +1630,24 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             }
             sum1_0 += lsum1;
             sum2_0 += lsum2 * delta0;
-            lsum1 = 0; lsum2 = 0;
+            lsum1 = 0;
+            lsum2 = 0;
             for j in 0..8 {
                 lsum1 += q8[q8_off + 8 + j] as i64 * (g1[j] as i8 as i64);
                 lsum2 += q8[q8_off + 8 + j] as i64;
             }
             sum1_0 += lsum1;
             sum2_0 += lsum2 * delta1;
-            lsum1 = 0; lsum2 = 0;
+            lsum1 = 0;
+            lsum2 = 0;
             for j in 0..8 {
                 lsum1 += q8[q8_off + 16 + j] as i64 * (g2[j] as i8 as i64);
                 lsum2 += q8[q8_off + 16 + j] as i64;
             }
             sum1_1 += lsum1;
             sum2_1 += lsum2 * delta2;
-            lsum1 = 0; lsum2 = 0;
+            lsum1 = 0;
+            lsum2 = 0;
             for j in 0..8 {
                 lsum1 += q8[q8_off + 24 + j] as i64 * (g3[j] as i8 as i64);
                 lsum2 += q8[q8_off + 24 + j] as i64;
@@ -1490,7 +1677,9 @@ pub fn dequantize_row_iq1_s(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ1_S_SIZE;
-        if boff + BLOCK_IQ1_S_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_IQ1_S_SIZE > block_bytes.len() {
+            break;
+        }
         let d = f16_from_bytes(block_bytes, boff);
         let qs = &block_bytes[boff + 2..boff + 2 + 32];
         let qh_u16 = &block_bytes[boff + 34..boff + 34 + 16];
@@ -1501,7 +1690,8 @@ pub fn dequantize_row_iq1_s(block_bytes: &[u8], output: &mut [f32]) {
             let dl = d * (2.0 * (((qh_val >> 12) & 0x7) as f32) + 1.0);
             let delta: f32 = if qh_val & 0x8000 != 0 { -0.125 } else { 0.125 };
             for l in 0..4 {
-                let idx = qs[qs_off + l] as u16 | ((((qh_val >> (3 * l as u32)) & 0x7) as u16) << 8);
+                let idx =
+                    qs[qs_off + l] as u16 | ((((qh_val >> (3 * l as u32)) & 0x7) as u16) << 8);
                 let g = grid[idx as usize].to_le_bytes();
                 for j in 0..8 {
                     output[out_off + l * 8 + j] = dl * (g[j] as i8 as f32 + delta);
@@ -1519,7 +1709,9 @@ pub fn vec_dot_iq1_s_q8k_scalar(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..nb {
         let boff = i * BLOCK_IQ1_S_SIZE;
-        if boff + BLOCK_IQ1_S_SIZE > iq1s_data.len() { break; }
+        if boff + BLOCK_IQ1_S_SIZE > iq1s_data.len() {
+            break;
+        }
         let d = f16_from_bytes(iq1s_data, boff) * q8k[i].d;
         let qs = &iq1s_data[boff + 2..boff + 2 + 32];
         let qh_u16 = &iq1s_data[boff + 34..boff + 34 + 16];
@@ -1535,7 +1727,8 @@ pub fn vec_dot_iq1_s_q8k_scalar(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             let delta: i64 = if qh_val & 0x8000 != 0 { -1 } else { 1 };
             let mut lsum: i64 = 0;
             for l in 0..4 {
-                let idx = qs[qs_off + l] as u16 | ((((qh_val >> (3 * l as u32)) & 0x7) as u16) << 8);
+                let idx =
+                    qs[qs_off + l] as u16 | ((((qh_val >> (3 * l as u32)) & 0x7) as u16) << 8);
                 let g = grid[idx as usize].to_le_bytes();
                 for j in 0..8 {
                     lsum += (q8[q8_off + j] as i64) * (g[j] as i8 as i64);
@@ -1559,7 +1752,9 @@ pub fn dequantize_row_q4_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let byte_offset = block_idx * BLOCK_Q4K_SIZE;
-        if byte_offset + BLOCK_Q4K_SIZE > block_bytes.len() { break; }
+        if byte_offset + BLOCK_Q4K_SIZE > block_bytes.len() {
+            break;
+        }
 
         let d = f16_from_bytes(block_bytes, byte_offset);
         let dmin = f16_from_bytes(block_bytes, byte_offset + 2);
@@ -1570,8 +1765,10 @@ pub fn dequantize_row_q4_k(block_bytes: &[u8], output: &mut [f32]) {
         let mut q_off = 0usize;
         let mut is = 0usize;
         while q_off < QK_K / 2 {
-            let (sc1, m1) = get_scale_min_k4(is, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
-            let (sc2, m2) = get_scale_min_k4(is + 1, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
+            let (sc1, m1) =
+                get_scale_min_k4(is, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
+            let (sc2, m2) =
+                get_scale_min_k4(is + 1, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
 
             let d1 = d * sc1 as f32;
             let m1_eff = dmin * m1 as f32;
@@ -1617,7 +1814,9 @@ pub fn dequant_q80_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32>
     for row in 0..n_rows {
         for bi in 0..blocks_per_row {
             let boff = row * blocks_per_row * BLOCK_Q80_SIZE + bi * BLOCK_Q80_SIZE;
-            if boff + BLOCK_Q80_SIZE > data.len() { continue; }
+            if boff + BLOCK_Q80_SIZE > data.len() {
+                continue;
+            }
             let d = f16_from_bytes(data, boff);
             let out_base = row * n_cols + bi * 32;
             for j in 0..32 {
@@ -1633,7 +1832,9 @@ pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_Q6K_SIZE;
-        if boff + BLOCK_Q6K_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_Q6K_SIZE > block_bytes.len() {
+            break;
+        }
 
         let d = f16_from_bytes(block_bytes, boff + 208);
         let ql_off = boff;
@@ -1647,13 +1848,17 @@ pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
                 let ql_idx = j128 * 64 + l;
                 let qh_idx = j128 * 32 + l;
                 let q1 = ((block_bytes[ql_off + ql_idx] & 0xF) as i32
-                    | (((block_bytes[qh_off + qh_idx] as i32) & 3) << 4)) - 32;
+                    | (((block_bytes[qh_off + qh_idx] as i32) & 3) << 4))
+                    - 32;
                 let q2 = ((block_bytes[ql_off + ql_idx + 32] & 0xF) as i32
-                    | (((block_bytes[qh_off + qh_idx] as i32 >> 2) & 3) << 4)) - 32;
+                    | (((block_bytes[qh_off + qh_idx] as i32 >> 2) & 3) << 4))
+                    - 32;
                 let q3 = ((block_bytes[ql_off + ql_idx] as i32 >> 4)
-                    | (((block_bytes[qh_off + qh_idx] as i32 >> 4) & 3) << 4)) - 32;
+                    | (((block_bytes[qh_off + qh_idx] as i32 >> 4) & 3) << 4))
+                    - 32;
                 let q4 = ((block_bytes[ql_off + ql_idx + 32] as i32 >> 4)
-                    | (((block_bytes[qh_off + qh_idx] as i32 >> 6) & 3) << 4)) - 32;
+                    | (((block_bytes[qh_off + qh_idx] as i32 >> 6) & 3) << 4))
+                    - 32;
 
                 let is = l / 16;
                 let sc0 = block_bytes[sc_off + j128 * 8 + is + 0] as i8 as f32;
@@ -1688,7 +1893,10 @@ pub fn dequant_q5k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32>
     let blocks_per_row = n_cols / QK_K;
     for row in 0..n_rows {
         let byte_offset = row * blocks_per_row * BLOCK_Q5K_SIZE;
-        dequantize_row_q5_k(&data[byte_offset..], &mut out[row * n_cols..row * n_cols + n_cols]);
+        dequantize_row_q5_k(
+            &data[byte_offset..],
+            &mut out[row * n_cols..row * n_cols + n_cols],
+        );
     }
     out
 }
@@ -1697,7 +1905,9 @@ pub fn dequantize_row_q5_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_Q5K_SIZE;
-        if boff + BLOCK_Q5K_SIZE > block_bytes.len() { break; }
+        if boff + BLOCK_Q5K_SIZE > block_bytes.len() {
+            break;
+        }
 
         let d = f16_from_bytes(block_bytes, boff);
         let dmin = f16_from_bytes(block_bytes, boff + 2);
@@ -1711,8 +1921,10 @@ pub fn dequantize_row_q5_k(block_bytes: &[u8], output: &mut [f32]) {
         let mut is = 0usize;
         let mut m = 1u8;
         while j < QK_K {
-            let (sc1, m1) = get_scale_min_k4(is, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
-            let (sc2, m2) = get_scale_min_k4(is + 1, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
+            let (sc1, m1) =
+                get_scale_min_k4(is, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
+            let (sc2, m2) =
+                get_scale_min_k4(is + 1, &block_bytes[scales_off..scales_off + K_SCALE_SIZE]);
 
             let d1 = d * sc1 as f32;
             let m1_eff = dmin * m1 as f32;
@@ -1721,14 +1933,24 @@ pub fn dequantize_row_q5_k(block_bytes: &[u8], output: &mut [f32]) {
 
             for l in 0..32 {
                 let ql = block_bytes[qs_off + q4_off + l];
-                let l_val = (ql & 0xF) as f32 + if block_bytes[qh_off + l] & m != 0 { 16.0 } else { 0.0 };
+                let l_val = (ql & 0xF) as f32
+                    + if block_bytes[qh_off + l] & m != 0 {
+                        16.0
+                    } else {
+                        0.0
+                    };
                 output[out_base + j + l] = d1 * l_val - m1_eff;
             }
             j += 32;
             m <<= 1;
             for l in 0..32 {
                 let ql = block_bytes[qs_off + q4_off + l];
-                let l_val = (ql >> 4) as f32 + if block_bytes[qh_off + l] & m != 0 { 16.0 } else { 0.0 };
+                let l_val = (ql >> 4) as f32
+                    + if block_bytes[qh_off + l] & m != 0 {
+                        16.0
+                    } else {
+                        0.0
+                    };
                 output[out_base + j + l] = d2 * l_val - m2_eff;
             }
             j += 32;
@@ -1746,7 +1968,9 @@ pub fn vec_dot_q6k_q8k_scalar(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q6K_SIZE;
-        if boff + BLOCK_Q6K_SIZE > q6k_data.len() { break; }
+        if boff + BLOCK_Q6K_SIZE > q6k_data.len() {
+            break;
+        }
 
         let ql_off = boff;
         let qh_off = boff + 128;
@@ -1760,13 +1984,17 @@ pub fn vec_dot_q6k_q8k_scalar(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             for _j in 0..QK_K / 128 {
                 for l in 0..32 {
                     a[l + 0] = ((q6k_data[ql_off + q4_idx + l] & 0xF) as i32
-                        | (((q6k_data[qh_off + qh_idx + l] as i32) & 3) << 4)) - 32;
+                        | (((q6k_data[qh_off + qh_idx + l] as i32) & 3) << 4))
+                        - 32;
                     a[l + 32] = ((q6k_data[ql_off + q4_idx + l + 32] & 0xF) as i32
-                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 2) & 3) << 4)) - 32;
+                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 2) & 3) << 4))
+                        - 32;
                     a[l + 64] = ((q6k_data[ql_off + q4_idx + l] as i32 >> 4)
-                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 4) & 3) << 4)) - 32;
+                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 4) & 3) << 4))
+                        - 32;
                     a[l + 96] = ((q6k_data[ql_off + q4_idx + l + 32] as i32 >> 4)
-                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 6) & 3) << 4)) - 32;
+                        | (((q6k_data[qh_off + qh_idx + l] as i32 >> 6) & 3) << 4))
+                        - 32;
                 }
                 a = &mut aux8[(_j + 1) * 128..];
                 q4_idx += 64;
@@ -1781,15 +2009,27 @@ pub fn vec_dot_q6k_q8k_scalar(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         for _j in 0..QK_K / 16 {
             let scale = q6k_data[sc_off + is_] as i8 as i32;
             is_ += 1;
-            for l in 0..8 { aux32[l] += scale * q8k[i].qs[q8_idx] as i32 * aux8[a_idx]; q8_idx += 1; a_idx += 1; }
-            for l in 0..8 { aux32[l] += scale * q8k[i].qs[q8_idx] as i32 * aux8[a_idx]; q8_idx += 1; a_idx += 1; }
+            for l in 0..8 {
+                aux32[l] += scale * q8k[i].qs[q8_idx] as i32 * aux8[a_idx];
+                q8_idx += 1;
+                a_idx += 1;
+            }
+            for l in 0..8 {
+                aux32[l] += scale * q8k[i].qs[q8_idx] as i32 * aux8[a_idx];
+                q8_idx += 1;
+                a_idx += 1;
+            }
         }
 
         let d = f16_from_bytes(q6k_data, boff + 208) * q8k[i].d;
-        for l in 0..8 { sums[l] += d * aux32[l] as f32; }
+        for l in 0..8 {
+            sums[l] += d * aux32[l] as f32;
+        }
     }
 
-    for l in 0..8 { sumf += sums[l]; }
+    for l in 0..8 {
+        sumf += sums[l];
+    }
     sumf
 }
 
@@ -1827,7 +2067,9 @@ unsafe fn vec_dot_q4k_q8k_avx2(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q4K_SIZE;
-        if boff + BLOCK_Q4K_SIZE > q4k_data.len() { break; }
+        if boff + BLOCK_Q4K_SIZE > q4k_data.len() {
+            break;
+        }
 
         let d_raw = u16::from_le_bytes([q4k_data[boff], q4k_data[boff + 1]]);
         let dmin_raw = u16::from_le_bytes([q4k_data[boff + 2], q4k_data[boff + 3]]);
@@ -1836,9 +2078,24 @@ unsafe fn vec_dot_q4k_q8k_avx2(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
         let mut utmp = [0u32; 4];
         let sc_base = boff + 4;
-        utmp[0] = u32::from_le_bytes([q4k_data[sc_base], q4k_data[sc_base+1], q4k_data[sc_base+2], q4k_data[sc_base+3]]);
-        utmp[1] = u32::from_le_bytes([q4k_data[sc_base+4], q4k_data[sc_base+5], q4k_data[sc_base+6], q4k_data[sc_base+7]]);
-        utmp[2] = u32::from_le_bytes([q4k_data[sc_base+8], q4k_data[sc_base+9], q4k_data[sc_base+10], q4k_data[sc_base+11]]);
+        utmp[0] = u32::from_le_bytes([
+            q4k_data[sc_base],
+            q4k_data[sc_base + 1],
+            q4k_data[sc_base + 2],
+            q4k_data[sc_base + 3],
+        ]);
+        utmp[1] = u32::from_le_bytes([
+            q4k_data[sc_base + 4],
+            q4k_data[sc_base + 5],
+            q4k_data[sc_base + 6],
+            q4k_data[sc_base + 7],
+        ]);
+        utmp[2] = u32::from_le_bytes([
+            q4k_data[sc_base + 8],
+            q4k_data[sc_base + 9],
+            q4k_data[sc_base + 10],
+            q4k_data[sc_base + 11],
+        ]);
 
         utmp[3] = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
         let uaux = utmp[1] & kmask1;
@@ -1846,12 +2103,17 @@ unsafe fn vec_dot_q4k_q8k_avx2(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         utmp[2] = uaux;
         utmp[0] &= kmask1;
 
-        let mins_and_scales = _mm256_cvtepu8_epi16(_mm_set_epi32(utmp[3] as i32, utmp[2] as i32, utmp[1] as i32, utmp[0] as i32));
+        let mins_and_scales = _mm256_cvtepu8_epi16(_mm_set_epi32(
+            utmp[3] as i32,
+            utmp[2] as i32,
+            utmp[1] as i32,
+            utmp[0] as i32,
+        ));
 
         let q8sums = _mm256_loadu_si256(q8k[i].bsums.as_ptr() as *const __m256i);
         let q8s = _mm_hadd_epi16(
             _mm256_extracti128_si256(q8sums, 0),
-            _mm256_extracti128_si256(q8sums, 1)
+            _mm256_extracti128_si256(q8sums, 1),
         );
         let prod = _mm_madd_epi16(_mm256_extracti128_si256(mins_and_scales, 1), q8s);
         acc_m = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m);
@@ -1865,8 +2127,14 @@ unsafe fn vec_dot_q4k_q8k_avx2(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let mut q8_off = 0usize;
 
         for j in 0..4 {
-            let scale_l = _mm256_shuffle_epi8(scales256, _mm256_loadu_si256(scale_shuffle[2 * j].as_ptr() as *const __m256i));
-            let scale_h = _mm256_shuffle_epi8(scales256, _mm256_loadu_si256(scale_shuffle[2 * j + 1].as_ptr() as *const __m256i));
+            let scale_l = _mm256_shuffle_epi8(
+                scales256,
+                _mm256_loadu_si256(scale_shuffle[2 * j].as_ptr() as *const __m256i),
+            );
+            let scale_h = _mm256_shuffle_epi8(
+                scales256,
+                _mm256_loadu_si256(scale_shuffle[2 * j + 1].as_ptr() as *const __m256i),
+            );
 
             let q4bits = _mm256_loadu_si256(q4k_data.as_ptr().add(q4_off) as *const __m256i);
             q4_off += 32;
@@ -1906,9 +2174,17 @@ fn f16_to_f32(bits: u16) -> f32 {
     let sign = if bits & 0x8000 != 0 { -1.0f32 } else { 1.0f32 };
     let exp = ((bits >> 10) & 0x1F) as i32;
     let frac = (bits & 0x3FF) as f32 / 1024.0;
-    if exp == 0 { sign * frac * 2.0f32.powi(-14) }
-    else if exp == 31 { if frac == 0.0 { sign * f32::INFINITY } else { sign * f32::NAN } }
-    else { sign * (1.0 + frac) * 2.0f32.powi(exp - 15) }
+    if exp == 0 {
+        sign * frac * 2.0f32.powi(-14)
+    } else if exp == 31 {
+        if frac == 0.0 {
+            sign * f32::INFINITY
+        } else {
+            sign * f32::NAN
+        }
+    } else {
+        sign * (1.0 + frac) * 2.0f32.powi(exp - 15)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1946,7 +2222,9 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q5K_SIZE;
-        if boff + BLOCK_Q5K_SIZE > q5k_data.len() { break; }
+        if boff + BLOCK_Q5K_SIZE > q5k_data.len() {
+            break;
+        }
 
         let d_raw = u16::from_le_bytes([q5k_data[boff], q5k_data[boff + 1]]);
         let dmin_raw = u16::from_le_bytes([q5k_data[boff + 2], q5k_data[boff + 3]]);
@@ -1955,9 +2233,24 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
         let mut utmp = [0u32; 4];
         let sc_base = boff + 4;
-        utmp[0] = u32::from_le_bytes([q5k_data[sc_base], q5k_data[sc_base+1], q5k_data[sc_base+2], q5k_data[sc_base+3]]);
-        utmp[1] = u32::from_le_bytes([q5k_data[sc_base+4], q5k_data[sc_base+5], q5k_data[sc_base+6], q5k_data[sc_base+7]]);
-        utmp[2] = u32::from_le_bytes([q5k_data[sc_base+8], q5k_data[sc_base+9], q5k_data[sc_base+10], q5k_data[sc_base+11]]);
+        utmp[0] = u32::from_le_bytes([
+            q5k_data[sc_base],
+            q5k_data[sc_base + 1],
+            q5k_data[sc_base + 2],
+            q5k_data[sc_base + 3],
+        ]);
+        utmp[1] = u32::from_le_bytes([
+            q5k_data[sc_base + 4],
+            q5k_data[sc_base + 5],
+            q5k_data[sc_base + 6],
+            q5k_data[sc_base + 7],
+        ]);
+        utmp[2] = u32::from_le_bytes([
+            q5k_data[sc_base + 8],
+            q5k_data[sc_base + 9],
+            q5k_data[sc_base + 10],
+            q5k_data[sc_base + 11],
+        ]);
 
         utmp[3] = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
         let uaux = utmp[1] & kmask1;
@@ -1965,12 +2258,17 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         utmp[2] = uaux;
         utmp[0] &= kmask1;
 
-        let mins_and_scales = _mm256_cvtepu8_epi16(_mm_set_epi32(utmp[3] as i32, utmp[2] as i32, utmp[1] as i32, utmp[0] as i32));
+        let mins_and_scales = _mm256_cvtepu8_epi16(_mm_set_epi32(
+            utmp[3] as i32,
+            utmp[2] as i32,
+            utmp[1] as i32,
+            utmp[0] as i32,
+        ));
 
         let q8sums = _mm256_loadu_si256(q8k[i].bsums.as_ptr() as *const __m256i);
         let q8s = _mm_hadd_epi16(
             _mm256_extracti128_si256(q8sums, 0),
-            _mm256_extracti128_si256(q8sums, 1)
+            _mm256_extracti128_si256(q8sums, 1),
         );
         let prod = _mm_madd_epi16(_mm256_extracti128_si256(mins_and_scales, 1), q8s);
         acc_m = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m);
@@ -1990,14 +2288,21 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let mut qh_shift = 0i32;
 
         for j in 0..4 {
-            let scale_l = _mm256_shuffle_epi8(scales256, _mm256_loadu_si256(scale_shuffle[2 * j].as_ptr() as *const __m256i));
-            let scale_h = _mm256_shuffle_epi8(scales256, _mm256_loadu_si256(scale_shuffle[2 * j + 1].as_ptr() as *const __m256i));
+            let scale_l = _mm256_shuffle_epi8(
+                scales256,
+                _mm256_loadu_si256(scale_shuffle[2 * j].as_ptr() as *const __m256i),
+            );
+            let scale_h = _mm256_shuffle_epi8(
+                scales256,
+                _mm256_loadu_si256(scale_shuffle[2 * j + 1].as_ptr() as *const __m256i),
+            );
 
             let qh_mask_l = _mm256_set1_epi8(1i8 << qh_shift);
             let qh_mask_h = _mm256_set1_epi8(1i8 << (qh_shift + 1));
             qh_shift += 2;
 
-            let qs_bits = _mm256_loadu_si256(q5k_data.as_ptr().add(qs_base + q4_off) as *const __m256i);
+            let qs_bits =
+                _mm256_loadu_si256(q5k_data.as_ptr().add(qs_base + q4_off) as *const __m256i);
             let q5l_raw = _mm256_and_si256(qs_bits, m4);
 
             let qh_l = _mm256_and_si256(hbits, qh_mask_l);
@@ -2088,7 +2393,9 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
     for i in 0..nb {
         let boff = i * BLOCK_Q6K_SIZE;
-        if boff + BLOCK_Q6K_SIZE > q6k_data.len() { break; }
+        if boff + BLOCK_Q6K_SIZE > q6k_data.len() {
+            break;
+        }
 
         let d_raw = u16::from_le_bytes([q6k_data[boff + 208], q6k_data[boff + 209]]);
         let d = f16_to_f32(d_raw) * q8k[i].d;
@@ -2120,7 +2427,10 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             let q4h_0 = _mm256_slli_epi16(_mm256_and_si256(q4bitsH, m3), 4);
             let q4h_1 = _mm256_slli_epi16(_mm256_and_si256(q4bitsH, _mm256_set1_epi8(12)), 2);
             let q4h_2 = _mm256_and_si256(q4bitsH, _mm256_set1_epi8(48));
-            let q4h_3 = _mm256_srli_epi16(_mm256_and_si256(q4bitsH, _mm256_set1_epi8(-64i32 as i8 as u8 as i8)), 2);
+            let q4h_3 = _mm256_srli_epi16(
+                _mm256_and_si256(q4bitsH, _mm256_set1_epi8(-64i32 as i8 as u8 as i8)),
+                2,
+            );
 
             let q4_0 = _mm256_or_si256(_mm256_and_si256(q4bits1, m15), q4h_0);
             let q4_1 = _mm256_or_si256(_mm256_and_si256(q4bits2, m15), q4h_1);
@@ -2141,10 +2451,22 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             let mut p16_2 = _mm256_maddubs_epi16(q4_2, q8_2);
             let mut p16_3 = _mm256_maddubs_epi16(q4_3, q8_3);
 
-            let scale_0 = _mm_shuffle_epi8(scales, _mm_loadu_si128(scale_shuffle[is].as_ptr() as *const __m128i));
-            let scale_1 = _mm_shuffle_epi8(scales, _mm_loadu_si128(scale_shuffle[is + 1].as_ptr() as *const __m128i));
-            let scale_2 = _mm_shuffle_epi8(scales, _mm_loadu_si128(scale_shuffle[is + 2].as_ptr() as *const __m128i));
-            let scale_3 = _mm_shuffle_epi8(scales, _mm_loadu_si128(scale_shuffle[is + 3].as_ptr() as *const __m128i));
+            let scale_0 = _mm_shuffle_epi8(
+                scales,
+                _mm_loadu_si128(scale_shuffle[is].as_ptr() as *const __m128i),
+            );
+            let scale_1 = _mm_shuffle_epi8(
+                scales,
+                _mm_loadu_si128(scale_shuffle[is + 1].as_ptr() as *const __m128i),
+            );
+            let scale_2 = _mm_shuffle_epi8(
+                scales,
+                _mm_loadu_si128(scale_shuffle[is + 2].as_ptr() as *const __m128i),
+            );
+            let scale_3 = _mm_shuffle_epi8(
+                scales,
+                _mm_loadu_si128(scale_shuffle[is + 3].as_ptr() as *const __m128i),
+            );
             is += 4;
 
             p16_0 = _mm256_madd_epi16(_mm256_cvtepi8_epi16(scale_0), p16_0);
@@ -2167,11 +2489,22 @@ unsafe fn vec_dot_q6k_q8k_avx2(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 mod avx2_parity {
     use super::*;
 
-    fn make_q3k_block(hmask: &[u8; 32], qs: &[u8; 64], scales_packed: &[u8; 12], d: f32) -> Vec<u8> {
+    fn make_q3k_block(
+        hmask: &[u8; 32],
+        qs: &[u8; 64],
+        scales_packed: &[u8; 12],
+        d: f32,
+    ) -> Vec<u8> {
         let mut v = vec![0u8; 110];
-        for i in 0..32 { v[i] = hmask[i]; }
-        for i in 0..64 { v[32 + i] = qs[i]; }
-        for i in 0..12 { v[96 + i] = scales_packed[i]; }
+        for i in 0..32 {
+            v[i] = hmask[i];
+        }
+        for i in 0..64 {
+            v[32 + i] = qs[i];
+        }
+        for i in 0..12 {
+            v[96 + i] = scales_packed[i];
+        }
         let d_bits = crate::ops::f32_to_f16(d).to_le_bytes();
         v[108] = d_bits[0];
         v[109] = d_bits[1];
@@ -2197,11 +2530,19 @@ mod avx2_parity {
         out
     }
 
-    fn make_q4k_block(ql: &[u8; 128], qh: &[u8; 64], scales: &[i8; 16], d: f32, dmin: f32) -> Vec<u8> {
+    fn make_q4k_block(
+        ql: &[u8; 128],
+        qh: &[u8; 64],
+        scales: &[i8; 16],
+        d: f32,
+        dmin: f32,
+    ) -> Vec<u8> {
         let mut v = Vec::with_capacity(144);
         v.extend_from_slice(&crate::ops::f32_to_f16(d).to_le_bytes());
         v.extend_from_slice(&crate::ops::f32_to_f16(dmin).to_le_bytes());
-        for &s in scales { v.push(s as u8); }
+        for &s in scales {
+            v.push(s as u8);
+        }
         v.extend_from_slice(ql);
         v.extend_from_slice(qh);
         v
@@ -2210,11 +2551,17 @@ mod avx2_parity {
     fn make_q6k_block(ql: &[u8; 128], qh: &[u8; 64], scales: &[i8; 16], d: f32) -> Vec<u8> {
         let mut v = vec![0u8; 210];
         // ql region: bytes [0..128]
-        for i in 0..128 { v[i] = ql[i]; }
+        for i in 0..128 {
+            v[i] = ql[i];
+        }
         // qh region: bytes [128..192]
-        for i in 0..64 { v[128 + i] = qh[i]; }
+        for i in 0..64 {
+            v[128 + i] = qh[i];
+        }
         // scales region: bytes [192..208]
-        for i in 0..16 { v[192 + i] = scales[i] as u8; }
+        for i in 0..16 {
+            v[192 + i] = scales[i] as u8;
+        }
         // d F16 at offset 208
         let d_bytes = crate::ops::f32_to_f16(d).to_le_bytes();
         v[208] = d_bytes[0];
@@ -2236,13 +2583,30 @@ mod avx2_parity {
 
         let avx2 = unsafe { vec_dot_q4k_q8k_avx2(&weight, &q8k) };
         let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
-        eprintln!("q4k one block zero: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
-            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
-            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        eprintln!(
+            "q4k one block zero: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2,
+            avx2.to_bits(),
+            scalar,
+            scalar.to_bits(),
+            (avx2.to_bits() as i32)
+                .wrapping_sub(scalar.to_bits() as i32)
+                .unsigned_abs()
+        );
         // Tolerance: 4 ULPs (hsum + FMA both can drift)
         let diff = (avx2 - scalar).abs();
-        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
-        assert!(rel < 1e-3, "q4k AVX2 diverged: avx2={} scalar={} rel={}", avx2, scalar, rel);
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "q4k AVX2 diverged: avx2={} scalar={} rel={}",
+            avx2,
+            scalar,
+            rel
+        );
     }
 
     #[test]
@@ -2255,10 +2619,20 @@ mod avx2_parity {
         for i in 0..4 {
             let mut ql = [0u8; 128];
             let mut qh = [0u8; 64];
-            for j in 0..128 { ql[j] = ((i * 7 + j) % 16) as u8; }
-            for j in 0..64 { qh[j] = ((i + j * 3) % 4) as u8; }
+            for j in 0..128 {
+                ql[j] = ((i * 7 + j) % 16) as u8;
+            }
+            for j in 0..64 {
+                qh[j] = ((i + j * 3) % 4) as u8;
+            }
             let scales: [i8; 16] = std::array::from_fn(|k| ((i * 3 + k) as i8) - 8);
-            weight.extend(make_q4k_block(&ql, &qh, &scales, 0.01 + i as f32 * 0.1, 0.005));
+            weight.extend(make_q4k_block(
+                &ql,
+                &qh,
+                &scales,
+                0.01 + i as f32 * 0.1,
+                0.005,
+            ));
         }
         // 4 blocks of input (1024 floats total)
         let input: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) * 0.01).collect();
@@ -2266,12 +2640,29 @@ mod avx2_parity {
 
         let avx2 = unsafe { vec_dot_q4k_q8k_avx2(&weight, &q8k) };
         let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
-        eprintln!("q4k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
-            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
-            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        eprintln!(
+            "q4k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2,
+            avx2.to_bits(),
+            scalar,
+            scalar.to_bits(),
+            (avx2.to_bits() as i32)
+                .wrapping_sub(scalar.to_bits() as i32)
+                .unsigned_abs()
+        );
         let diff = (avx2 - scalar).abs();
-        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
-        assert!(rel < 1e-3, "q4k AVX2 diverged on 4 blocks: avx2={} scalar={} rel={}", avx2, scalar, rel);
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "q4k AVX2 diverged on 4 blocks: avx2={} scalar={} rel={}",
+            avx2,
+            scalar,
+            rel
+        );
     }
 
     #[test]
@@ -2288,12 +2679,29 @@ mod avx2_parity {
 
         let avx2 = unsafe { vec_dot_q6k_q8k_avx2(&weight, &q8k) };
         let scalar = vec_dot_q6k_q8k_scalar(&weight, &q8k);
-        eprintln!("q6k one block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
-            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
-            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
+        eprintln!(
+            "q6k one block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2,
+            avx2.to_bits(),
+            scalar,
+            scalar.to_bits(),
+            (avx2.to_bits() as i32)
+                .wrapping_sub(scalar.to_bits() as i32)
+                .unsigned_abs()
+        );
         let diff = (avx2 - scalar).abs();
-        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
-        assert!(rel < 1e-3, "q6k AVX2 diverged: avx2={} scalar={} rel={}", avx2, scalar, rel);
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "q6k AVX2 diverged: avx2={} scalar={} rel={}",
+            avx2,
+            scalar,
+            rel
+        );
     }
 
     #[test]
@@ -2313,10 +2721,21 @@ mod avx2_parity {
 
         let avx2 = unsafe { vec_dot_q6k_q8k_avx2(&weight, &q8k) };
         let scalar = vec_dot_q6k_q8k_scalar(&weight, &q8k);
-        eprintln!("q6k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
-            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
-            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs());
-        let rel = if scalar.abs() > 1e-3 { (avx2 - scalar).abs() / scalar.abs() } else { (avx2 - scalar).abs() };
+        eprintln!(
+            "q6k 4-block: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={}",
+            avx2,
+            avx2.to_bits(),
+            scalar,
+            scalar.to_bits(),
+            (avx2.to_bits() as i32)
+                .wrapping_sub(scalar.to_bits() as i32)
+                .unsigned_abs()
+        );
+        let rel = if scalar.abs() > 1e-3 {
+            (avx2 - scalar).abs() / scalar.abs()
+        } else {
+            (avx2 - scalar).abs()
+        };
         assert!(rel < 1e-3, "q6k AVX2 diverged: rel={}", rel);
         // Q6_K has a residual <4 ULP drift from FMA single-rounding vs scalar
         // double-rounding. Production model output is unaffected (drift does
@@ -2334,7 +2753,9 @@ mod avx2_parity {
         let qs = [0u8; 64];
         // scales_packed = [0x11; 8, 0, 0, 0] (lsb 1, msb 0 for all 16 scales)
         let mut scales_packed = [0u8; 12];
-        for i in 0..8 { scales_packed[i] = 0x11; }
+        for i in 0..8 {
+            scales_packed[i] = 0x11;
+        }
         let weight = make_q3k_block(&hmask, &qs, &scales_packed, 1.0);
         let mut output = vec![0.0f32; 256];
         super::dequantize_row_q3_k(&weight, &mut output);
@@ -2342,7 +2763,8 @@ mod avx2_parity {
             assert!(
                 (output[j] - 124.0).abs() < 1e-3,
                 "Q3_K zero qs: j={} got {} expected 124",
-                j, output[j]
+                j,
+                output[j]
             );
         }
     }
@@ -2355,12 +2777,19 @@ mod avx2_parity {
         let hmask = [0xffu8; 32];
         let qs = [0u8; 64];
         let mut scales_packed = [0u8; 12];
-        for i in 0..8 { scales_packed[i] = 0x11; }
+        for i in 0..8 {
+            scales_packed[i] = 0x11;
+        }
         let weight = make_q3k_block(&hmask, &qs, &scales_packed, 1.0);
         let mut output = vec![0.0f32; 256];
         super::dequantize_row_q3_k(&weight, &mut output);
         for j in 0..256 {
-            assert!(output[j].abs() < 1e-6, "Q3_K all-max-hmask: j={} got {} expected 0", j, output[j]);
+            assert!(
+                output[j].abs() < 1e-6,
+                "Q3_K all-max-hmask: j={} got {} expected 0",
+                j,
+                output[j]
+            );
         }
     }
 
@@ -2376,7 +2805,9 @@ mod avx2_parity {
             qs[j / 4] |= 2u8 << ((j % 4) * 2);
         }
         let mut scales_packed = [0u8; 12];
-        for i in 0..8 { scales_packed[i] = 0x11; }
+        for i in 0..8 {
+            scales_packed[i] = 0x11;
+        }
         let weight = make_q3k_block(&hmask, &qs, &scales_packed, 1.0);
         let mut output = vec![0.0f32; 256];
         super::dequantize_row_q3_k(&weight, &mut output);
@@ -2384,7 +2815,8 @@ mod avx2_parity {
             assert!(
                 (output[j] - 62.0).abs() < 1e-3,
                 "Q3_K ql=2: j={} got {} expected 62",
-                j, output[j]
+                j,
+                output[j]
             );
         }
     }
@@ -2396,7 +2828,9 @@ mod avx2_parity {
         let hmask = [0u8; 32];
         let qs = [0u8; 64];
         let mut scales_packed = [0u8; 12];
-        for i in 0..8 { scales_packed[i] = 0x11; }
+        for i in 0..8 {
+            scales_packed[i] = 0x11;
+        }
         let weight = make_q3k_block(&hmask, &qs, &scales_packed, 1.0);
         let q8k = vec![BlockQ8K {
             d: 0.0,
@@ -2404,7 +2838,11 @@ mod avx2_parity {
             bsums: [0i16; 16],
         }];
         let dot = super::vec_dot_q3k_q8k_scalar(&weight, &q8k);
-        assert!(dot.abs() < 1e-6, "Q3_K dot with zero q8k: got {} expected 0", dot);
+        assert!(
+            dot.abs() < 1e-6,
+            "Q3_K dot with zero q8k: got {} expected 0",
+            dot
+        );
     }
 
     fn q4k_avx2_matches_scalar_real_model() {
@@ -2420,7 +2858,9 @@ mod avx2_parity {
         let tensor = loader
             .tensors()
             .iter()
-            .find(|t| t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q4K)
+            .find(|t| {
+                t.name == "blk.0.attn_q.weight" && t.ggml_type == crate::core::tensor::GGMLType::Q4K
+            })
             .expect("blk.0.attn_q.weight Q4_K not found");
         let weight = loader.tensor_slice(&tensor.name).unwrap();
         let n_in = tensor.dims[0] as usize;
@@ -2434,11 +2874,20 @@ mod avx2_parity {
         let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
         eprintln!(
             "q4k real-model: avx2={} (bits {:x}) scalar={} (bits {:x}) diff_bits={}",
-            avx2, avx2.to_bits(), scalar, scalar.to_bits(),
-            (avx2.to_bits() as i32).wrapping_sub(scalar.to_bits() as i32).unsigned_abs()
+            avx2,
+            avx2.to_bits(),
+            scalar,
+            scalar.to_bits(),
+            (avx2.to_bits() as i32)
+                .wrapping_sub(scalar.to_bits() as i32)
+                .unsigned_abs()
         );
         let diff = (avx2 - scalar).abs();
-        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
         assert!(rel < 1e-3, "q4k real-model AVX2 diverged: rel={}", rel);
     }
 }
@@ -2447,12 +2896,7 @@ mod avx2_parity {
 mod avx2_kq_parity {
     use super::*;
 
-    fn make_q2k_block(
-        d: f32,
-        dmin: f32,
-        scales: &[u8; 16],
-        qs: &[u8; 64],
-    ) -> Vec<u8> {
+    fn make_q2k_block(d: f32, dmin: f32, scales: &[u8; 16], qs: &[u8; 64]) -> Vec<u8> {
         let mut v = Vec::with_capacity(84);
         for s in scales {
             v.push(*s);
@@ -2469,15 +2913,30 @@ mod avx2_kq_parity {
             return;
         }
         let mut block = vec![0u8; BLOCK_Q2K_SIZE];
-        block[80] = 0x00; block[81] = 0x3c;
-        block[82] = 0x00; block[83] = 0x3c;
-        for i in 0..16 { block[i] = 0x11; }
-        for i in 0..64 { block[16 + i] = 0xff; }
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        block[80] = 0x00;
+        block[81] = 0x3c;
+        block[82] = 0x00;
+        block[83] = 0x3c;
+        for i in 0..16 {
+            block[i] = 0x11;
+        }
+        for i in 0..64 {
+            block[16 + i] = 0xff;
+        }
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let scalar = vec_dot_q2k_q8k_scalar(&block, &q8k);
         let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&block, &q8k) };
         eprintln!("scalar = {}, avx2 = {}", scalar, avx2);
-        assert!((scalar - avx2).abs() < 1.0, "scalar={}, avx2={}", scalar, avx2);
+        assert!(
+            (scalar - avx2).abs() < 1.0,
+            "scalar={}, avx2={}",
+            scalar,
+            avx2
+        );
     }
 
     #[test]
@@ -2491,14 +2950,29 @@ mod avx2_kq_parity {
         if !std::path::Path::new(path).exists() {
             return;
         }
-        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let loader =
+            open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
         let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
         let block = &bytes[..BLOCK_Q2K_SIZE];
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let scalar = vec_dot_q2k_q8k_scalar(block, &q8k);
         let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(block, &q8k) };
-        eprintln!("real Q2K: scalar = {}, avx2 = {}, diff = {}", scalar, avx2, (scalar - avx2).abs());
-        assert!((scalar - avx2).abs() < 1.0, "scalar={}, avx2={}", scalar, avx2);
+        eprintln!(
+            "real Q2K: scalar = {}, avx2 = {}, diff = {}",
+            scalar,
+            avx2,
+            (scalar - avx2).abs()
+        );
+        assert!(
+            (scalar - avx2).abs() < 1.0,
+            "scalar={}, avx2={}",
+            scalar,
+            avx2
+        );
     }
 
     #[test]
@@ -2528,13 +3002,24 @@ mod avx2_kq_parity {
         };
         let input: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
         let q8k = {
-            let mut buf = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; 1];
+            let mut buf = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0i8; 256],
+                    bsums: [0i16; 16]
+                };
+                1
+            ];
             super::quantize_row_q8_k_scalar_into(&input, &mut buf);
             buf
         };
         let avx2 = unsafe { vec_dot_iq4_xs_q8k_avx2_direct(&weight, &q8k) };
         let scalar = vec_dot_iq4_xs_q8k_scalar(&weight, &q8k);
-        assert_eq!(avx2.to_bits(), scalar.to_bits(), "iq4_xs AVX2 not bit-exact");
+        assert_eq!(
+            avx2.to_bits(),
+            scalar.to_bits(),
+            "iq4_xs AVX2 not bit-exact"
+        );
     }
 
     #[test]
@@ -2543,9 +3028,16 @@ mod avx2_kq_parity {
             return;
         }
         let mut block = vec![0u8; BLOCK_Q3K_SIZE];
-        block[108] = 0x00; block[109] = 0x3c;
-        for i in 0..12 { block[96 + i] = 0x01; }
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        block[108] = 0x00;
+        block[109] = 0x3c;
+        for i in 0..12 {
+            block[96 + i] = 0x01;
+        }
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let s = vec_dot_q3k_q8k_scalar(&block, &q8k);
         let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(&block, &q8k) };
         assert!((s - avx2).abs() < 1.0, "scalar={}, avx2={}", s, avx2);
@@ -2562,10 +3054,15 @@ mod avx2_kq_parity {
         if !std::path::Path::new(path).exists() {
             return;
         }
-        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let loader =
+            open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
         let bytes = loader.tensor_slice("blk.0.attn_v.weight").expect("slice");
         let block = &bytes[..BLOCK_Q3K_SIZE];
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let s = vec_dot_q3k_q8k_scalar(block, &q8k);
         let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(block, &q8k) };
         assert!((s - avx2).abs() < 1.0, "scalar={}, avx2={}", s, avx2);
@@ -2583,9 +3080,7 @@ mod i_quant_tests {
     fn iq4_nl_lut_matches_llama_cpp() {
         assert_eq!(
             KVALUES_IQ4NL,
-            [
-                -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-            ]
+            [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113]
         );
     }
 
@@ -2628,7 +3123,11 @@ mod i_quant_tests {
     #[test]
     fn iq_vecdot_with_zero_q8k_yields_zero() {
         let block = vec![0u8; 136];
-        let q8k = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }];
+        let q8k = vec![BlockQ8K {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16],
+        }];
         let dot = vec_dot_iq4_xs_q8k_scalar(&block, &q8k);
         assert!(dot.abs() < 1e-6);
 
@@ -2650,10 +3149,20 @@ mod i_quant_tests {
             block[2 + i] = i as u8;
         }
         let mut qs = [0i8; 256];
-        for q in qs.iter_mut() { *q = 1; }
-        let q8k = vec![BlockQ8K { d: 1.0, qs, bsums: [0i16; 16] }];
+        for q in qs.iter_mut() {
+            *q = 1;
+        }
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs,
+            bsums: [0i16; 16],
+        }];
         let dot = vec_dot_iq2_xxs_q8k_scalar(&block, &q8k);
-        assert!((dot - 155.875).abs() < 0.01, "expected 155.875, got {}", dot);
+        assert!(
+            (dot - 155.875).abs() < 0.01,
+            "expected 155.875, got {}",
+            dot
+        );
     }
 
     #[test]
@@ -2665,8 +3174,14 @@ mod i_quant_tests {
             block[2 + i] = i as u8;
         }
         let mut qs = [0i8; 256];
-        for q in qs.iter_mut() { *q = 1; }
-        let q8k = vec![BlockQ8K { d: 1.0, qs, bsums: [0i16; 16] }];
+        for q in qs.iter_mut() {
+            *q = 1;
+        }
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs,
+            bsums: [0i16; 16],
+        }];
         let dot = vec_dot_iq3_xxs_q8k_scalar(&block, &q8k);
         eprintln!("iq3_xxs dot = {}", dot);
         // Just ensure it's a finite number for now
@@ -2677,7 +3192,11 @@ mod i_quant_tests {
     fn iq1_m_scalar_dot_matches_python_reference() {
         let mut block = vec![0u8; 56];
         block[48..56].copy_from_slice(&[0x00, 0x30, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00]);
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let dot = vec_dot_iq1_m_q8k_scalar(&block, &q8k);
         eprintln!("iq1_m dot = {}", dot);
         assert!((dot - (-0.0026035308837890625)).abs() < 1e-6, "got {}", dot);
@@ -2692,10 +3211,15 @@ mod i_quant_tests {
             eprintln!("skipping: {} not found", path);
             return;
         }
-        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let loader =
+            open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
         let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
         let first_block = &bytes[..56];
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
         let dot = vec_dot_iq1_m_q8k_scalar(first_block, &q8k);
         eprintln!("iq1_m first model block dot = {}", dot);
         assert!(dot.is_finite());
@@ -2710,16 +3234,29 @@ mod i_quant_tests {
             eprintln!("skipping: {} not found", path);
             return;
         }
-        let loader = open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+        let loader =
+            open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
         let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
         let first_block = &bytes[..98];
-        let q8k = vec![BlockQ8K { d: 1.0, qs: [1i8; 256], bsums: [0i16; 16] }];
-        eprintln!("DEBUG: d bytes = {:02x} {:02x}", first_block[0], first_block[1]);
+        let q8k = vec![BlockQ8K {
+            d: 1.0,
+            qs: [1i8; 256],
+            bsums: [0i16; 16],
+        }];
+        eprintln!(
+            "DEBUG: d bytes = {:02x} {:02x}",
+            first_block[0], first_block[1]
+        );
         eprintln!("DEBUG: gas bytes [66..74] = {:?}", &first_block[66..74]);
         eprintln!("DEBUG: d f16 = {}", f16_from_bytes(first_block, 0));
         eprintln!("DEBUG: q3 first 8 = {:?}", &first_block[2..10]);
         // Manual compute for ib32=0
-        let aux32 = u32::from_le_bytes([first_block[66], first_block[67], first_block[68], first_block[69]]);
+        let aux32 = u32::from_le_bytes([
+            first_block[66],
+            first_block[67],
+            first_block[68],
+            first_block[69],
+        ]);
         eprintln!("DEBUG: aux32 ib32=0 = 0x{:08x}", aux32);
         let ls = (2 * ((aux32 >> 28) as i32)) + 1;
         eprintln!("DEBUG: ls ib32=0 = {}", ls);

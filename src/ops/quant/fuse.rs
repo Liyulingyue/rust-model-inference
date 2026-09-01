@@ -7,9 +7,7 @@
 //! Returns `None` when row layouts are inconsistent, leaving the caller to fall
 //! back to the per-projection path.
 
-use super::{
-    BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, BLOCK_Q80_SIZE, QK_K,
-};
+use super::{BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, BLOCK_Q80_SIZE, QK_K};
 
 const Q8_0_BLOCK_ELEMS: usize = 32;
 
@@ -160,13 +158,29 @@ mod tests {
         // Separate
         let mut out_gate = vec![0.0f32; n_out];
         let mut out_up = vec![0.0f32; n_out];
-        matmul_q8_0_quantized_range(&gate, &input_q8, &input_scales, &mut out_gate, n_in, 0, n_out);
+        matmul_q8_0_quantized_range(
+            &gate,
+            &input_q8,
+            &input_scales,
+            &mut out_gate,
+            n_in,
+            0,
+            n_out,
+        );
         matmul_q8_0_quantized_range(&up, &input_q8, &input_scales, &mut out_up, n_in, 0, n_out);
 
         // Fused
         let (fused, fused_rows) = fuse_vstack_q8_0(&gate, &up, n_out, n_out).expect("fuse");
         let mut out_fused = vec![0.0f32; fused_rows];
-        matmul_q8_0_quantized_range(&fused, &input_q8, &input_scales, &mut out_fused, n_in, 0, fused_rows);
+        matmul_q8_0_quantized_range(
+            &fused,
+            &input_q8,
+            &input_scales,
+            &mut out_fused,
+            n_in,
+            0,
+            fused_rows,
+        );
 
         // First n_out rows == gate output; last n_out rows == up output.
         for i in 0..n_out {

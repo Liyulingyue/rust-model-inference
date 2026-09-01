@@ -198,7 +198,20 @@ mod tests {
 
     #[test]
     fn vec_add_matches_scalar() {
-        for &len in &[1usize, 7, 8, 15, 16, 17, 63, 64, 65, 1000, 3072, 2304 * 3072] {
+        for &len in &[
+            1usize,
+            7,
+            8,
+            15,
+            16,
+            17,
+            63,
+            64,
+            65,
+            1000,
+            3072,
+            2304 * 3072,
+        ] {
             let a: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 50.0).collect();
             let b: Vec<f32> = (0..len).map(|i| (i as f32 * 0.029).cos() * 10.0).collect();
             let mut c_avx2 = vec![0.0f32; len];
@@ -213,8 +226,7 @@ mod tests {
     fn vec_add_into_matches_scalar() {
         for &len in &[1usize, 7, 8, 15, 16, 17, 63, 64, 65, 1000, 3072] {
             let a: Vec<f32> = (0..len).map(|i| (i as f32 * 0.013).sin() * 50.0).collect();
-            let mut b_avx2: Vec<f32> =
-                (0..len).map(|i| (i as f32 * 0.029).cos() * 10.0).collect();
+            let mut b_avx2: Vec<f32> = (0..len).map(|i| (i as f32 * 0.029).cos() * 10.0).collect();
             vec_add_into(&a, &mut b_avx2);
             for i in 0..len {
                 let expected =

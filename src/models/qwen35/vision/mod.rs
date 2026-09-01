@@ -528,9 +528,12 @@ impl<'a> VisionEncoder<'a> {
                 v_weights.push(None);
             } else {
                 qkv_weights.push(None);
-                let q = decode_linear_weight(layer.q_weight.expect("missing q weight"), n_embd, n_embd);
-                let k = decode_linear_weight(layer.k_weight.expect("missing k weight"), n_embd, n_embd);
-                let v = decode_linear_weight(layer.v_weight.expect("missing v weight"), n_embd, n_embd);
+                let q =
+                    decode_linear_weight(layer.q_weight.expect("missing q weight"), n_embd, n_embd);
+                let k =
+                    decode_linear_weight(layer.k_weight.expect("missing k weight"), n_embd, n_embd);
+                let v =
+                    decode_linear_weight(layer.v_weight.expect("missing v weight"), n_embd, n_embd);
                 q_weights.push(Some(Q8Weight::from_f32(&q, n_embd, n_embd)));
                 k_weights.push(Some(Q8Weight::from_f32(&k, n_embd, n_embd)));
                 v_weights.push(Some(Q8Weight::from_f32(&v, n_embd, n_embd)));
@@ -1005,8 +1008,8 @@ impl<'a> VisionEncoder<'a> {
                 for t in 0..n_tokens {
                     let dst = &mut scratch.qkv_buf[t * n_embd * 3..(t + 1) * n_embd * 3];
                     for part in 0..3 {
-                        let src = &scratch.separate_qkv_buf
-                            [part * n_tokens * n_embd + t * n_embd..part * n_tokens * n_embd + (t + 1) * n_embd];
+                        let src = &scratch.separate_qkv_buf[part * n_tokens * n_embd + t * n_embd
+                            ..part * n_tokens * n_embd + (t + 1) * n_embd];
                         dst[part * n_embd..(part + 1) * n_embd].copy_from_slice(src);
                     }
                 }
@@ -1075,8 +1078,8 @@ impl<'a> VisionEncoder<'a> {
                 for t in 0..n_tokens {
                     let dst = &mut scratch.qkv_buf[t * n_embd * 3..(t + 1) * n_embd * 3];
                     for part in 0..3 {
-                        let src = &scratch.separate_qkv_buf
-                            [part * n_tokens * n_embd + t * n_embd..part * n_tokens * n_embd + (t + 1) * n_embd];
+                        let src = &scratch.separate_qkv_buf[part * n_tokens * n_embd + t * n_embd
+                            ..part * n_tokens * n_embd + (t + 1) * n_embd];
                         dst[part * n_embd..(part + 1) * n_embd].copy_from_slice(src);
                     }
                 }
@@ -1318,13 +1321,16 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
 
-            pc.ffn_up_weights[il].as_ref().expect("missing vision ffn up weight").matmul_batch(
-                &scratch.merged[..n_tokens * n_embd],
-                &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
-                n_tokens,
-                &mut scratch.q8_buf,
-                &mut scratch.q8_scale_buf,
-            );
+            pc.ffn_up_weights[il]
+                .as_ref()
+                .expect("missing vision ffn up weight")
+                .matmul_batch(
+                    &scratch.merged[..n_tokens * n_embd],
+                    &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
+                    n_tokens,
+                    &mut scratch.q8_buf,
+                    &mut scratch.q8_scale_buf,
+                );
             if let Some(ref bias) = pc.ffn_up_biases[il] {
                 for t in 0..n_tokens {
                     let off = t * cfg.n_ff;
@@ -1342,7 +1348,10 @@ impl<'a> VisionEncoder<'a> {
                 if let Some(ref bias) = pc.ffn_gate_biases[il] {
                     for t in 0..n_tokens {
                         let off = t * cfg.n_ff;
-                        vec_add_into(bias.as_slice(), &mut scratch.ffn_gate_buf[off..off + cfg.n_ff]);
+                        vec_add_into(
+                            bias.as_slice(),
+                            &mut scratch.ffn_gate_buf[off..off + cfg.n_ff],
+                        );
                     }
                 }
             }
@@ -1415,13 +1424,16 @@ impl<'a> VisionEncoder<'a> {
 
         let t_ffn_down_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
-            pc.ffn_down_weights[il].as_ref().expect("missing vision ffn down weight").matmul_batch(
-                &scratch.ffn_buf[..n_tokens * cfg.n_ff],
-                &mut scratch.proj_buf[..n_tokens * n_embd],
-                n_tokens,
-                &mut scratch.q8_buf,
-                &mut scratch.q8_scale_buf,
-            );
+            pc.ffn_down_weights[il]
+                .as_ref()
+                .expect("missing vision ffn down weight")
+                .matmul_batch(
+                    &scratch.ffn_buf[..n_tokens * cfg.n_ff],
+                    &mut scratch.proj_buf[..n_tokens * n_embd],
+                    n_tokens,
+                    &mut scratch.q8_buf,
+                    &mut scratch.q8_scale_buf,
+                );
             if let Some(ref bias) = pc.ffn_down_biases[il] {
                 for t in 0..n_tokens {
                     let off = t * n_embd;
@@ -1800,8 +1812,10 @@ impl VisionScratchpad {
             .resize(checked_len("pos_embd_buf", &[n_tokens, n_embd])?, 0.0);
         self.qkv_buf
             .resize(checked_len("qkv_buf", &[n_tokens, n_embd, 3])?, 0.0);
-        self.separate_qkv_buf
-            .resize(checked_len("separate_qkv_buf", &[n_tokens, n_embd, 3])?, 0.0);
+        self.separate_qkv_buf.resize(
+            checked_len("separate_qkv_buf", &[n_tokens, n_embd, 3])?,
+            0.0,
+        );
         self.attn_buf.resize(
             checked_len("attn_buf", &[3, n_head, n_tokens, d_head])?,
             0.0,

@@ -109,19 +109,52 @@ fn compare_backends(
 ) -> (f64, f64) {
     let mut scalar_output = vec![0.0f32; n_out];
     let mut auto_output = vec![0.0f32; n_out];
-    scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out);
-    matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out);
+    scalar_q8_matmul(
+        weight,
+        input_q8,
+        input_scales,
+        &mut scalar_output,
+        n_in,
+        n_out,
+    );
+    matmul_q8_0_quantized_range(
+        weight,
+        input_q8,
+        input_scales,
+        &mut auto_output,
+        n_in,
+        0,
+        n_out,
+    );
     for i in 0..n_out {
         let tolerance = 1e-4 + 1e-4 * scalar_output[i].abs();
         if (auto_output[i] - scalar_output[i]).abs() > tolerance {
-            eprintln!("backend mismatch at row {i}: auto={} scalar={}", auto_output[i], scalar_output[i]);
+            eprintln!(
+                "backend mismatch at row {i}: auto={} scalar={}",
+                auto_output[i], scalar_output[i]
+            );
             std::process::exit(3);
         }
     }
 
     for _ in 0..WARMUP {
-        scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out);
-        matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out);
+        scalar_q8_matmul(
+            weight,
+            input_q8,
+            input_scales,
+            &mut scalar_output,
+            n_in,
+            n_out,
+        );
+        matmul_q8_0_quantized_range(
+            weight,
+            input_q8,
+            input_scales,
+            &mut auto_output,
+            n_in,
+            0,
+            n_out,
+        );
     }
 
     let mut scalar_times = Vec::with_capacity(SAMPLES);
@@ -129,20 +162,58 @@ fn compare_backends(
     for sample in 0..SAMPLES {
         if sample % 2 == 0 {
             scalar_times.push(measure_once(
-                || scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out),
+                || {
+                    scalar_q8_matmul(
+                        weight,
+                        input_q8,
+                        input_scales,
+                        &mut scalar_output,
+                        n_in,
+                        n_out,
+                    )
+                },
                 iterations,
             ));
             auto_times.push(measure_once(
-                || matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out),
+                || {
+                    matmul_q8_0_quantized_range(
+                        weight,
+                        input_q8,
+                        input_scales,
+                        &mut auto_output,
+                        n_in,
+                        0,
+                        n_out,
+                    )
+                },
                 iterations,
             ));
         } else {
             auto_times.push(measure_once(
-                || matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut auto_output, n_in, 0, n_out),
+                || {
+                    matmul_q8_0_quantized_range(
+                        weight,
+                        input_q8,
+                        input_scales,
+                        &mut auto_output,
+                        n_in,
+                        0,
+                        n_out,
+                    )
+                },
                 iterations,
             ));
             scalar_times.push(measure_once(
-                || scalar_q8_matmul(weight, input_q8, input_scales, &mut scalar_output, n_in, n_out),
+                || {
+                    scalar_q8_matmul(
+                        weight,
+                        input_q8,
+                        input_scales,
+                        &mut scalar_output,
+                        n_in,
+                        n_out,
+                    )
+                },
                 iterations,
             ));
         }
@@ -159,18 +230,42 @@ fn bench(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
     let mut output = vec![0.0f32; n_out];
 
     for _ in 0..3 {
-        matmul_q8_0_quantized_range(&weight, &input_q8, &input_scales, &mut output, n_in, 0, n_out);
+        matmul_q8_0_quantized_range(
+            &weight,
+            &input_q8,
+            &input_scales,
+            &mut output,
+            n_in,
+            0,
+            n_out,
+        );
     }
 
     let elapsed = measure_once(
-        || matmul_q8_0_quantized_range(&weight, &input_q8, &input_scales, &mut output, n_in, 0, n_out),
+        || {
+            matmul_q8_0_quantized_range(
+                &weight,
+                &input_q8,
+                &input_scales,
+                &mut output,
+                n_in,
+                0,
+                n_out,
+            )
+        },
         iterations,
     );
     std::hint::black_box(&output);
     let gflops = (n_in as f64 * n_out as f64 * 2.0) / elapsed / 1e9;
     let bw = (n_out as f64 * row_stride as f64 + n_in as f64 * 4.0 + n_in as f64) / elapsed / 1e9;
-    println!("{:7} x {:7} | {:7.2}ms | {:7.2}GF | {:7.2}GB",
-        n_in, n_out, elapsed * 1000.0, gflops, bw);
+    println!(
+        "{:7} x {:7} | {:7.2}ms | {:7.2}GF | {:7.2}GB",
+        n_in,
+        n_out,
+        elapsed * 1000.0,
+        gflops,
+        bw
+    );
 }
 
 fn main() {
@@ -191,14 +286,8 @@ fn main() {
 
     let weight = valid_q8_weights(GATE_N_IN, GATE_N_OUT, 42);
     let (input_q8, input_scales) = valid_q8_input(GATE_N_IN, 43);
-    let (scalar_median, auto_median) = compare_backends(
-        &weight,
-        &input_q8,
-        &input_scales,
-        GATE_N_IN,
-        GATE_N_OUT,
-        20,
-    );
+    let (scalar_median, auto_median) =
+        compare_backends(&weight, &input_q8, &input_scales, GATE_N_IN, GATE_N_OUT, 20);
     let speedup = scalar_median / auto_median;
     let operations = (GATE_N_IN * GATE_N_OUT * 2) as f64;
     let bytes = (GATE_N_OUT * (GATE_N_IN / 32 * 34) + GATE_N_IN * 5) as f64;
@@ -221,7 +310,10 @@ fn main() {
     }
 
     println!("\n=== Q8_0 Matmul Auto-backend Report (deterministic data) ===");
-    println!("{:>26} | {:>8} | {:>7} | {:>7}", "n_in x n_out", "time", "GFLOPS", "GB/s");
+    println!(
+        "{:>26} | {:>8} | {:>7} | {:>7}",
+        "n_in x n_out", "time", "GFLOPS", "GB/s"
+    );
     println!("{}", "=".repeat(65));
 
     println!("\n-- Qwen3-0.6B --");

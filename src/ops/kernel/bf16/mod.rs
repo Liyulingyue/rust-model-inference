@@ -51,28 +51,13 @@ impl<'a> BF16Kernel<'a> {
                 if end > start {
                     let my_out = &mut output[start..end];
                     unsafe {
-                        avx2::matmul_bf16_vs_f32_avx2(
-                            self.weight,
-                            input,
-                            my_out,
-                            n_in,
-                            start,
-                            end,
-                        );
+                        avx2::matmul_bf16_vs_f32_avx2(self.weight, input, my_out, n_in, start, end);
                         return;
                     }
                 }
             }
         }
-        scalar::forward_f32_rows_scalar(
-            self.weight,
-            input,
-            output,
-            n_in,
-            n_out,
-            ith,
-            nth,
-        );
+        scalar::forward_f32_rows_scalar(self.weight, input, output, n_in, n_out, ith, nth);
     }
 
     fn forward_q8_rows(
@@ -134,15 +119,7 @@ impl<'a> Kernel for BF16Kernel<'a> {
         if input_f32.len() >= n_in {
             self.forward_f32_rows(&input_f32[..n_in], output, n_in, n_out, ith, nth);
         } else {
-            self.forward_prequantized(
-                input_q8,
-                input_scales,
-                output,
-                n_in,
-                n_out,
-                ith,
-                nth,
-            );
+            self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
         }
     }
 
@@ -150,13 +127,7 @@ impl<'a> Kernel for BF16Kernel<'a> {
         self.forward_f32_rows(&input[..n_in], output, n_in, n_out, 0, 1);
     }
 
-    fn forward_batched(
-        &self,
-        input: &[f32],
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-    ) {
+    fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);

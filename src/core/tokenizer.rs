@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use unicode_categories::UnicodeCategories;
@@ -342,7 +342,9 @@ impl BPETokenizer {
             match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
                 Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
-                Some(MetaValue::String(value)) if value == "hunyuan-dense" => PreTokenizer::HunyuanDense,
+                Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
+                    PreTokenizer::HunyuanDense
+                }
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) => {
@@ -949,7 +951,7 @@ fn build_byte_encoder() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::core::tensor::{MetaValue, MetaValueType};
+    use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {

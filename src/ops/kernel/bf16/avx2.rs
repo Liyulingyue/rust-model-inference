@@ -88,11 +88,7 @@ pub unsafe fn matmul_bf16_vs_f32_avx2(
             ]);
             let w_val = crate::ops::bf16_to_f32(bits);
             let x_val = *i_ptr.add(i);
-            acc0 = _mm256_fmadd_ps(
-                _mm256_set1_ps(w_val),
-                _mm256_set1_ps(x_val),
-                acc0,
-            );
+            acc0 = _mm256_fmadd_ps(_mm256_set1_ps(w_val), _mm256_set1_ps(x_val), acc0);
             i += 1;
         }
 
@@ -184,8 +180,7 @@ mod tests {
         for r in 0..n_out {
             for c in 0..n_in {
                 weight.extend(
-                    crate::ops::f32_to_bf16(((r * n_in + c) as f32 * 0.01).sin())
-                        .to_le_bytes(),
+                    crate::ops::f32_to_bf16(((r * n_in + c) as f32 * 0.01).sin()).to_le_bytes(),
                 );
             }
         }

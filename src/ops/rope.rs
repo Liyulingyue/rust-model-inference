@@ -137,7 +137,11 @@ pub fn rope_vision(
             } else {
                 3
             };
-            if sector == 0 || sector == boundaries[0] || sector == boundaries[1] || sector == boundaries[2] {
+            if sector == 0
+                || sector == boundaries[0]
+                || sector == boundaries[1]
+                || sector == boundaries[2]
+            {
                 theta[axis] = positions[axis] as f32;
             }
             let (sin, cos) = theta[axis].sin_cos();
@@ -199,14 +203,7 @@ mod tests {
         values[31] = 3.0;
         values[63] = 4.0;
 
-        super::rope_vision(
-            &mut values,
-            [1, 2, 1, 2],
-            [16, 16, 16, 16],
-            64,
-            1.0,
-            32,
-        );
+        super::rope_vision(&mut values, [1, 2, 1, 2], [16, 16, 16, 16], 64, 1.0, 32);
 
         let (sin_h, cos_h) = 1.0f32.sin_cos();
         let (sin_w, cos_w) = 2.0f32.sin_cos();

@@ -4,10 +4,9 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::Kernel;
 use crate::ops::{
-    attention_value_f32, dot_f32, dot_f16_f32, embedding_lookup, quantize_q8_0_into,
-    quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox, sample_top_k,
-    silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mul_inplace,
-    vec_scale_f32,
+    attention_value_f32, dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into,
+    quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox, sample_top_k, silu_mul_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 
@@ -71,7 +70,11 @@ pub fn run_inference(
             content: prompt,
         }],
     )?;
-    eprintln!("[RUST_TOKENS] n={} ids={:?}", input_tokens.len(), input_tokens);
+    eprintln!(
+        "[RUST_TOKENS] n={} ids={:?}",
+        input_tokens.len(),
+        input_tokens
+    );
 
     let n_embd_q = n_head * cfg.n_embd_head_k;
     let n_embd_gqa = cfg
@@ -86,10 +89,15 @@ pub fn run_inference(
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let n_threads = if n_threads_arg > 0 { n_threads_arg } else { available_threads };
+    let n_threads = if n_threads_arg > 0 {
+        n_threads_arg
+    } else {
+        available_threads
+    };
 
-    let mut scratch =
-        ExecutionScratchpad::new(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx);
+    let mut scratch = ExecutionScratchpad::new(
+        n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx,
+    );
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
     println!("Prompt: {} tokens", input_tokens.len());
@@ -189,11 +197,17 @@ pub fn run_inference(
                 scratch.q8_buf.len(),
             )
         };
-        let scale_buf = unsafe { std::slice::from_raw_parts_mut(scratch.scale_buf.as_mut_ptr(), n_embd / 32) };
+        let scale_buf =
+            unsafe { std::slice::from_raw_parts_mut(scratch.scale_buf.as_mut_ptr(), n_embd / 32) };
         let q8k_buf = unsafe {
             std::slice::from_raw_parts_mut(scratch.q8k_buf.as_mut_ptr(), scratch.q8k_buf.len())
         };
-        quantize_q8_0_into(normed, n_embd, &mut q8_buf[..n_embd], &mut scale_buf[..n_embd / 32]);
+        quantize_q8_0_into(
+            normed,
+            n_embd,
+            &mut q8_buf[..n_embd],
+            &mut scale_buf[..n_embd / 32],
+        );
         quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
         let q8 = &q8_buf[..n_embd];
         let sc = &scale_buf[..n_embd / 32];
@@ -315,7 +329,11 @@ pub fn run_inference(
     };
     let per_second = |count: usize, secs: Duration| -> f64 {
         let s = secs.as_secs_f64();
-        if s > 0.0 { count as f64 / s } else { 0.0 }
+        if s > 0.0 {
+            count as f64 / s
+        } else {
+            0.0
+        }
     };
     eprintln!(
         "\nPrompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
@@ -324,7 +342,11 @@ pub fn run_inference(
         tok_s
     );
     println!();
-    println!("[{} output tokens in {}ms]", generated_tokens.len(), infer_ms);
+    println!(
+        "[{} output tokens in {}ms]",
+        generated_tokens.len(),
+        infer_ms
+    );
     Ok(())
 }
 
@@ -362,8 +384,7 @@ fn forward_layer(
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
     let max_n_in = n_embd_q.max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
-    let scale_buf =
-        unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+    let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
     unsafe {
@@ -451,10 +472,26 @@ fn forward_layer(
             let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
             let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
             lw.w_gate.kernel.forward_prepared(
-                input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                up_buf,
+                n_embd,
+                n_ff,
+                ith,
+                nth,
             );
             lw.w_up.kernel.forward_prepared(
-                input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                gate_buf,
+                n_embd,
+                n_ff,
+                ith,
+                nth,
             );
             if crate::ops::gpu_matmul_active() {
                 // Matmul ran as one fenced GPU dispatch owned by thread 0.
@@ -473,10 +510,12 @@ fn forward_layer(
         }
     });
 
-    let gate_buf =
-        unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+    let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
     quantize_q8_0_into(
-        gate_buf, n_ff, &mut q8_buf[..n_ff], &mut scale_buf[..n_ff / 32],
+        gate_buf,
+        n_ff,
+        &mut q8_buf[..n_ff],
+        &mut scale_buf[..n_ff / 32],
     );
     quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
     let q8 = &q8_buf[..n_ff];
@@ -495,7 +534,15 @@ fn forward_layer(
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
             let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
             lw.w_down.kernel.forward_prepared(
-                input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                down_buf,
+                n_ff,
+                n_embd,
+                ith,
+                nth,
             );
         }
     });
@@ -538,8 +585,7 @@ fn forward_attention(
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
 
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
-    let scale_buf =
-        unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+    let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
     let q8 = &q8_buf[..n_embd];
@@ -563,13 +609,37 @@ fn forward_attention(
             let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
             let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
             lw.wq.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                q,
+                n_embd,
+                n_embd_q,
+                ith,
+                nth,
             );
             lw.wk.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                k_new,
+                n_embd,
+                n_embd_gqa,
+                ith,
+                nth,
             );
             lw.wv.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                v_new,
+                n_embd,
+                n_embd_gqa,
+                ith,
+                nth,
             );
         }
     });
@@ -583,7 +653,11 @@ fn forward_attention(
             rms_norm_inplace(&mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k], qn, eps);
         }
         for h in 0..n_head_kv {
-            rms_norm_inplace(&mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k], kn, eps);
+            rms_norm_inplace(
+                &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                kn,
+                eps,
+            );
         }
         for h in 0..n_head {
             rope_neox(
@@ -622,10 +696,8 @@ fn forward_attention(
                 *v_cache_f16_ptr.add(off + i) = crate::ops::f32_to_f16(v_new[i]);
             }
         } else {
-            let k_dst =
-                std::slice::from_raw_parts_mut(k_cache_f32_ptr.add(off), n_embd_gqa);
-            let v_dst =
-                std::slice::from_raw_parts_mut(v_cache_f32_ptr.add(off), n_embd_gqa);
+            let k_dst = std::slice::from_raw_parts_mut(k_cache_f32_ptr.add(off), n_embd_gqa);
+            let v_dst = std::slice::from_raw_parts_mut(v_cache_f32_ptr.add(off), n_embd_gqa);
             k_dst.copy_from_slice(k_new);
             v_dst.copy_from_slice(v_new);
         }
@@ -636,15 +708,26 @@ fn forward_attention(
 
     match kv_cache {
         KvCache::F16(_) => {
-            let k_cache = unsafe { std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, n_layer * max_ctx * n_embd_gqa) };
-            let v_cache = unsafe { std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, n_layer * max_ctx * n_embd_gqa) };
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(
+                    k_cache_f16_ptr as *const u16,
+                    n_layer * max_ctx * n_embd_gqa,
+                )
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(
+                    v_cache_f16_ptr as *const u16,
+                    n_layer * max_ctx * n_embd_gqa,
+                )
+            };
             pool.compute({
                 let q_ptr = q_ptr;
                 let attn_out_ptr = attn_out_ptr;
                 let kb_local = kb;
                 move |ith, nth| {
                     let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-                    let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+                    let attn_out =
+                        unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
                     let h_start = ith * n_head / nth;
                     let h_end = (ith + 1) * n_head / nth;
                     for h in h_start..h_end {
@@ -660,7 +743,10 @@ fn forward_attention(
                             let score = dot_f16_f32(
                                 &q[q_off..q_off + n_embd_head_k],
                                 &k_cache[kb_local + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb_local + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                    ..kb_local
+                                        + t * n_embd_gqa
+                                        + kv_h * n_embd_head_v
+                                        + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
                             if score > ms {
@@ -682,17 +768,18 @@ fn forward_attention(
                             s_sum += vs;
                         }
                         let inv_sum = 1.0 / s_sum;
-                        vec_scale_f32(
-                            &mut attn_out[out_base..out_base + n_embd_head_v],
-                            inv_sum,
-                        );
+                        vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
                     }
                 }
             });
         }
         KvCache::F32(_) => {
-            let k_cache = unsafe { std::slice::from_raw_parts(k_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa) };
-            let v_cache = unsafe { std::slice::from_raw_parts(v_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa) };
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(k_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa)
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(v_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa)
+            };
             let n_cached = pos + 1;
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
@@ -703,7 +790,8 @@ fn forward_attention(
                 let kb_local = kb;
                 move |ith, nth| {
                     let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-                    let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+                    let attn_out =
+                        unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
                     let h_start = ith * n_head / nth;
                     let h_end = (ith + 1) * n_head / nth;
                     for h in h_start..h_end {
@@ -712,16 +800,16 @@ fn forward_attention(
                         let out_base = h * n_embd_head_v;
                         let s_off = ith * score_stride;
                         let scores = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                scores_ptr.add(s_off),
-                                score_stride,
-                            )
+                            std::slice::from_raw_parts_mut(scores_ptr.add(s_off), score_stride)
                         };
                         for t in 0..n_cached {
                             scores[t] = dot_f32(
                                 &q[q_off..q_off + n_embd_head_k],
                                 &k_cache[kb_local + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb_local + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                    ..kb_local
+                                        + t * n_embd_gqa
+                                        + kv_h * n_embd_head_v
+                                        + n_embd_head_k],
                                 n_embd_head_k,
                             ) * kq_scale;
                         }
@@ -732,7 +820,8 @@ fn forward_attention(
                         let mut values = [0.0f32; 512];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
-                                values[t] = v_cache[kb_local + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                                values[t] =
+                                    v_cache[kb_local + t * n_embd_gqa + kv_h * n_embd_head_v + d];
                             }
                             attn_out[out_base + d] = attention_value_f32(
                                 &values[..n_padded],
@@ -772,7 +861,15 @@ fn forward_attention(
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
             let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
             lw.wo.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                attn_proj,
+                n_embd_q,
+                n_embd,
+                ith,
+                nth,
             );
         }
     });
@@ -803,8 +900,7 @@ fn forward_shortconv(
 
     let max_n_in = (n_embd * 3).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
-    let scale_buf =
-        unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+    let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
     unsafe {
@@ -836,7 +932,15 @@ fn forward_shortconv(
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
             lw.shortconv_in.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), bcx, n_embd, three_n, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                bcx,
+                n_embd,
+                three_n,
+                ith,
+                nth,
             );
         }
     });
@@ -919,7 +1023,15 @@ fn forward_shortconv(
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
             lw.shortconv_out.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, Some(q8k), o, n_embd, n_embd, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                o,
+                n_embd,
+                n_embd,
+                ith,
+                nth,
             );
         }
     });

@@ -1,19 +1,18 @@
-﻿use crate::app::cli::{resolve_thread_count, transcription_options};
+use crate::app::cli::{resolve_thread_count, transcription_options};
 use crate::app::open_or_exit;
-use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime};
-use crate::format::ggufrs::ComponentRole;
 use crate::core::tensor::TensorSource;
-use crate::models::qwen3::Qwen3Model;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::format::ggufrs::ComponentRole;
+use crate::models::qwen3::asr::model::{open_bundled_audio_source, AsrRuntime};
+use crate::models::qwen3::Qwen3Model;
 use std::sync::Arc;
 use std::time::Instant;
 
 pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
     let started = Instant::now();
-    let llm_source: Arc<dyn TensorSource> = Arc::from(
-        open_or_exit(&options.model, ComponentRole::Llm),
-    );
+    let llm_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = llm_source
         .metadata("general.architecture")
         .and_then(|value| value.to_string_val())
@@ -36,11 +35,10 @@ pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     }
     let load_decoder_done = started.elapsed();
     let audio_source: Arc<dyn TensorSource> = match options.mmproj.as_deref() {
-        Some(path) => Arc::from(
-            open_or_exit(path, ComponentRole::Mmproj),
-        ),
-        None => open_bundled_audio_source(&options.model)?
-            .ok_or("raw GGUF ASR requires --mmproj")?,
+        Some(path) => Arc::from(open_or_exit(path, ComponentRole::Mmproj)),
+        None => {
+            open_bundled_audio_source(&options.model)?.ok_or("raw GGUF ASR requires --mmproj")?
+        }
     };
     let runtime = AsrRuntime::new(decoder, audio_source).map_err(|error| error.to_string())?;
     let load_runtime_done = started.elapsed();

@@ -6,8 +6,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::dot_f32;
 use crate::ops::{
-    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu,
-    silu_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
+    attention_value_f32, rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_inplace,
+    silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
 };
 
 use super::{
@@ -189,12 +189,20 @@ fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
     } else {
         let n_nan = values.iter().filter(|v| v.is_nan()).count();
         let n_inf = values.iter().filter(|v| v.is_infinite()).count();
-        let n_neg = values.iter().filter(|v| v.is_finite() == false && v.is_sign_negative()).count();
-        let n_pos = values.iter().filter(|v| v.is_finite() == false && v.is_sign_positive()).count();
+        let n_neg = values
+            .iter()
+            .filter(|v| v.is_finite() == false && v.is_sign_negative())
+            .count();
+        let n_pos = values
+            .iter()
+            .filter(|v| v.is_finite() == false && v.is_sign_positive())
+            .count();
         let (min, max) = values
             .iter()
             .filter(|v| v.is_finite())
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(*v), hi.max(*v))
+            });
         let first_bad = values.iter().position(|v| !v.is_finite()).unwrap_or(0);
         Err(format!(
             "Non-finite Z-Image {name}: len={}, nan={}, inf={} (+inf={}, -inf={}), finite_range=[{:.3},{:.3}], first_bad_idx={}",
@@ -878,7 +886,8 @@ impl ZImageDit {
             )?;
         }
         let t_layers_done = std::time::Instant::now();
-        eprintln!("[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
+        eprintln!(
+            "[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
             sigma,
             t_setup_done.duration_since(t_setup).as_secs_f64() * 1000.0,
             t_layers_done.duration_since(t_setup_done).as_secs_f64() * 1000.0,
@@ -1018,7 +1027,11 @@ impl ZImageDit {
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
         let pct = |x: f64| if total > 0.0 { x / total * 100.0 } else { 0.0 };
-        eprintln!("\n[block-profile over {} denoise steps] total={:.1}ms", sigmas.len() - 1, total);
+        eprintln!(
+            "\n[block-profile over {} denoise steps] total={:.1}ms",
+            sigmas.len() - 1,
+            total
+        );
         eprintln!("  modulation:           {:8.1}ms ({:5.1}%)", t.0, pct(t.0));
         eprintln!("  rms_norm:              {:8.1}ms ({:5.1}%)", t.1, pct(t.1));
         eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
@@ -1027,7 +1040,11 @@ impl ZImageDit {
         eprintln!("  attention_into:       {:8.1}ms ({:5.1}%)", t.5, pct(t.5));
         eprintln!("  linear out:           {:8.1}ms ({:5.1}%)", t.6, pct(t.6));
         eprintln!("  linear ffn (w1+w3+w2): {:8.1}ms ({:5.1}%)", t.7, pct(t.7));
-        eprintln!("  other (zero-cost in for row): {:8.1}ms ({:5.1}%)", t.8, pct(t.8));
+        eprintln!(
+            "  other (zero-cost in for row): {:8.1}ms ({:5.1}%)",
+            t.8,
+            pct(t.8)
+        );
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.final_latent",
@@ -1253,10 +1270,17 @@ fn run_block(
         t_residual += t.elapsed();
     }
 
-// 累计到 thread_local
+    // 累计到 thread_local
     let block_total = block_start.elapsed();
-    let accounted = t_modulation + t_rms_norm + t_scale_mod + t_linear_qkv + t_rope
-        + t_attention + t_linear_out + t_linear_ffn + t_residual;
+    let accounted = t_modulation
+        + t_rms_norm
+        + t_scale_mod
+        + t_linear_qkv
+        + t_rope
+        + t_attention
+        + t_linear_out
+        + t_linear_ffn
+        + t_residual;
     let other = block_total.saturating_sub(accounted);
     PROFILE_TIMERS.with(|cell| {
         let mut t = cell.borrow_mut();
@@ -1691,8 +1715,8 @@ mod tests {
         layer_norm_no_affine, pad_rows_to_32, patchify_latent, patchify_latent_into,
         real_image_row, require_finite, rotate_interleaved_inplace, scale_modulated_branch,
         sign_and_unpatchify_image, split_adaln_modulation, time_snr_shift, timestep_embedding,
-        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas,
-        TorchMt19937, ZImageDit,
+        unpatchify_latent, z_image_model_timestep, z_image_rope, z_image_sigmas, TorchMt19937,
+        ZImageDit,
     };
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
@@ -2128,7 +2152,10 @@ mod tests {
     /// 行为：tokens[i] += residual[i]。覆盖 8-lane SIMD 边界 + DiT 真实宽度 (HIDDEN=3840)。
     #[test]
     fn add_modulated_residual_no_gates_adds_residual() {
-        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024, 3840] {
+        for &len in &[
+            0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256,
+            257, 1024, 3840,
+        ] {
             let mut tokens: Vec<f32> = (0..len).map(|i| (i as f32).sin() * 1.7).collect();
             let residual: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.013).cos() * 0.9).collect();
             let mut expected = tokens.clone();

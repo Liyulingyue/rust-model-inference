@@ -17,7 +17,7 @@ use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{gelu, softmax_inplace};
 
-use super::trunk::forward::{Lfm2StreamItem, run_inference_stream};
+use super::trunk::forward::{run_inference_stream, Lfm2StreamItem};
 use crate::core::scratchpad::KvFormat;
 
 pub struct VisionConfig {
@@ -55,12 +55,14 @@ impl VisionConfig {
         let get_f32x3 = |key: &str| -> Result<[f32; 3], String> {
             let v = source
                 .metadata(key)
-                .ok_or_else(|| format!("Missing metadata: {key}"))?.clone();;
+                .ok_or_else(|| format!("Missing metadata: {key}"))?
+                .clone();
             if let crate::core::tensor::MetaValue::Array(_, items) = v {
                 let mut out = [0.0f32; 3];
                 for (i, item) in items.iter().enumerate().take(3) {
                     out[i] = crate::core::tensor::MetaValue::to_f64(item)
-                        .ok_or_else(|| format!("{key} non-float"))? as f32;
+                        .ok_or_else(|| format!("{key} non-float"))?
+                        as f32;
                 }
                 Ok(out)
             } else {
@@ -155,12 +157,7 @@ impl<'a> VisionModel<'a> {
         // ggml stores conv weight as [kw][kh][ic][oc]; flatten to oc-major
         // [oc][ic][kh][kw] for the direct conv below.
         {
-            let (kw, kh, ic, oc) = (
-                config.patch_size,
-                config.patch_size,
-                3usize,
-                ne,
-            );
+            let (kw, kh, ic, oc) = (config.patch_size, config.patch_size, 3usize, ne);
             let mut reordered = vec![0.0f32; patch_embd.len()];
             for o in 0..oc {
                 for i in 0..ic {
@@ -208,12 +205,7 @@ impl<'a> VisionModel<'a> {
                 bv: f32_vec(source, &format!("v.blk.{l}.attn_v.bias"), ne)?,
                 wo: quant_weight(source, &format!("v.blk.{l}.attn_out.weight"), ne, ne)?,
                 bo: f32_vec(source, &format!("v.blk.{l}.attn_out.bias"), ne)?,
-                ffn_up: quant_weight(
-                    source,
-                    &format!("v.blk.{l}.ffn_up.weight"),
-                    ne,
-                    config.n_ff,
-                )?,
+                ffn_up: quant_weight(source, &format!("v.blk.{l}.ffn_up.weight"), ne, config.n_ff)?,
                 ffn_up_b: f32_vec(source, &format!("v.blk.{l}.ffn_up.bias"), config.n_ff)?,
                 ffn_down: quant_weight(
                     source,
@@ -228,7 +220,12 @@ impl<'a> VisionModel<'a> {
         Ok(Self {
             mm1: quant_weight(source, "mm.1.weight", 4 * ne, config.projection_dim)?,
             mm1_b: f32_vec(source, "mm.1.bias", config.projection_dim)?,
-            mm2: quant_weight(source, "mm.2.weight", config.projection_dim, config.projection_dim)?,
+            mm2: quant_weight(
+                source,
+                "mm.2.weight",
+                config.projection_dim,
+                config.projection_dim,
+            )?,
             mm2_b: f32_vec(source, "mm.2.bias", config.projection_dim)?,
             config,
             patch_embd,
@@ -281,7 +278,10 @@ pub fn smart_resize(width: usize, height: usize) -> Size {
         h_bar = ceil_by_factor(height as f64 * beta, ALIGN_SIZE);
         w_bar = ceil_by_factor(width as f64 * beta, ALIGN_SIZE);
     }
-    Size { width: w_bar, height: h_bar }
+    Size {
+        width: w_bar,
+        height: h_bar,
+    }
 }
 
 fn target_ratios() -> Vec<Size> {
@@ -289,10 +289,14 @@ fn target_ratios() -> Vec<Size> {
     for n in MIN_TILES..=MAX_TILES {
         for w in 1..=n {
             for h in 1..=n {
-                if (w * h) >= MIN_TILES && (w * h) <= MAX_TILES
+                if (w * h) >= MIN_TILES
+                    && (w * h) <= MAX_TILES
                     && !ratios.iter().any(|r: &Size| r.width == w && r.height == h)
                 {
-                    ratios.push(Size { width: w, height: h });
+                    ratios.push(Size {
+                        width: w,
+                        height: h,
+                    });
                 }
             }
         }
@@ -305,7 +309,10 @@ fn grid_layout(width: usize, height: usize) -> Size {
     let aspect = width as f32 / height as f32;
     let ratios = target_ratios();
     let mut best_diff = f32::MAX;
-    let mut best = Size { width: 1, height: 1 };
+    let mut best = Size {
+        width: 1,
+        height: 1,
+    };
     let area = (width * height) as f32;
     for ratio in &ratios {
         let target_aspect = ratio.width as f32 / ratio.height as f32;
@@ -365,22 +372,32 @@ pub fn preprocess_image(
     };
 
     if !needs_tiling {
-        let img = image::DynamicImage::ImageRgb8(to_rgb8(rgb, width, height))
-            .resize_exact(
-                overview_size.width as u32,
-                overview_size.height as u32,
-                image::imageops::FilterType::Triangle,
-            );
+        let img = image::DynamicImage::ImageRgb8(to_rgb8(rgb, width, height)).resize_exact(
+            overview_size.width as u32,
+            overview_size.height as u32,
+            image::imageops::FilterType::Triangle,
+        );
         let data = to_f32(&img);
         return (
-            ImageEntry { data, width: overview_size.width, height: overview_size.height, is_overview: false },
+            ImageEntry {
+                data,
+                width: overview_size.width,
+                height: overview_size.height,
+                is_overview: false,
+            },
             Vec::new(),
-            Size { width: 0, height: 0 },
+            Size {
+                width: 0,
+                height: 0,
+            },
         );
     }
 
     let grid = grid_layout(width, height);
-    let refined = Size { width: TILE_SIZE * grid.width, height: TILE_SIZE * grid.height };
+    let refined = Size {
+        width: TILE_SIZE * grid.width,
+        height: TILE_SIZE * grid.height,
+    };
     let resized = image::DynamicImage::ImageRgb8(to_rgb8(rgb, width, height)).resize_exact(
         refined.width as u32,
         refined.height as u32,
@@ -410,7 +427,12 @@ pub fn preprocess_image(
                 TILE_SIZE as u32,
             );
             let data = to_f32(&image::DynamicImage::ImageRgb8(cropped.to_rgb8()));
-            tiles.push(ImageEntry { data, width: TILE_SIZE, height: TILE_SIZE, is_overview: false });
+            tiles.push(ImageEntry {
+                data,
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                is_overview: false,
+            });
         }
     }
     (overview, tiles, grid)
@@ -421,7 +443,11 @@ fn to_rgb8(rgb: &[u8], width: usize, height: usize) -> image::RgbImage {
     for y in 0..height {
         for x in 0..width {
             let i = (y * width + x) * 3;
-            img.put_pixel(x as u32, y as u32, image::Rgb([rgb[i], rgb[i + 1], rgb[i + 2]]));
+            img.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgb([rgb[i], rgb[i + 1], rgb[i + 2]]),
+            );
         }
     }
     img
@@ -546,9 +572,18 @@ impl<'a> VisionModel<'a> {
             let mut v = vec![0.0f32; n_patches * ne];
             for t in 0..n_patches {
                 let i = &normed[t * ne..(t + 1) * ne];
-                layer.wq.kernel.forward(i, &mut q[t * ne..(t + 1) * ne], ne, ne);
-                layer.wk.kernel.forward(i, &mut k[t * ne..(t + 1) * ne], ne, ne);
-                layer.wv.kernel.forward(i, &mut v[t * ne..(t + 1) * ne], ne, ne);
+                layer
+                    .wq
+                    .kernel
+                    .forward(i, &mut q[t * ne..(t + 1) * ne], ne, ne);
+                layer
+                    .wk
+                    .kernel
+                    .forward(i, &mut k[t * ne..(t + 1) * ne], ne, ne);
+                layer
+                    .wv
+                    .kernel
+                    .forward(i, &mut v[t * ne..(t + 1) * ne], ne, ne);
                 for c in 0..ne {
                     q[t * ne + c] += layer.bq[c];
                     k[t * ne + c] += layer.bk[c];
@@ -726,23 +761,37 @@ pub fn run_multimodal(
     let rgb = img.into_raw();
 
     let model = VisionModel::from_source(mmproj_source)?;
-    let (overview, tiles, grid) =
-        preprocess_image(&rgb, width, height, model.config.image_mean, model.config.image_std);
+    let (overview, tiles, grid) = preprocess_image(
+        &rgb,
+        width,
+        height,
+        model.config.image_mean,
+        model.config.image_std,
+    );
 
     println!(
         "Vision: grid {}x{} ({} tiles), overview {}x{}",
-        grid.width, grid.height, tiles.len(), overview.width, overview.height
+        grid.width,
+        grid.height,
+        tiles.len(),
+        overview.width,
+        overview.height
     );
 
-    let pool = std::sync::Arc::new(ComputePool::new(
-        if n_threads_arg > 0 { n_threads_arg } else { 8 },
-    ));
+    let pool = std::sync::Arc::new(ComputePool::new(if n_threads_arg > 0 {
+        n_threads_arg
+    } else {
+        8
+    }));
 
     // encode tiles (row-major) then overview (thumbnail last)
     let mut tile_rows: Vec<Vec<f32>> = Vec::new();
     for (i, tile) in tiles.iter().enumerate() {
         let rows = model.encode_entry(tile, &pool)?;
-        println!("tile {i}: {} tokens", rows.len() / model.config.projection_dim);
+        println!(
+            "tile {i}: {} tokens",
+            rows.len() / model.config.projection_dim
+        );
         tile_rows.push(rows);
     }
     let overview_rows = model.encode_entry(&overview, &pool)?;
@@ -769,10 +818,13 @@ pub fn run_multimodal(
     stream.push(tok("<|startoftext|>")?);
     stream.extend(
         tokenizer
-            .encode("user\n", crate::core::tokenizer::EncodeOptions {
-                add_special: false,
-                parse_special: true,
-            })
+            .encode(
+                "user\n",
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            )
             .into_iter()
             .map(Lfm2StreamItem::Token),
     );
@@ -803,19 +855,25 @@ pub fn run_multimodal(
     stream.push(tok("<|image_end|>")?);
     stream.extend(
         tokenizer
-            .encode(&format!("\n{prompt}\n"), crate::core::tokenizer::EncodeOptions {
-                add_special: false,
-                parse_special: true,
-            })
+            .encode(
+                &format!("\n{prompt}\n"),
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            )
             .into_iter()
             .map(Lfm2StreamItem::Token),
     );
     stream.extend(
         tokenizer
-            .encode("assistant\n", crate::core::tokenizer::EncodeOptions {
-                add_special: false,
-                parse_special: true,
-            })
+            .encode(
+                "assistant\n",
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            )
             .into_iter()
             .map(Lfm2StreamItem::Token),
     );

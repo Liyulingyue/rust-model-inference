@@ -2,9 +2,9 @@
 //!
 //! Builds hunyuan-specific chat prompt, then delegates to base skeleton.
 
+use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::BPETokenizer;
 use crate::prompt::{build_hunyuan_chat_prompt, HunyuanMessage};
-use crate::core::tensor::TensorSource;
 use std::sync::Arc;
 
 pub fn run_inference(

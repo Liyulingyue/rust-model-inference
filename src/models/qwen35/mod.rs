@@ -1,4 +1,4 @@
-﻿//! Qwen3.5 (hybrid Mamba SSM + dense attention) inference.
+//! Qwen3.5 (hybrid Mamba SSM + dense attention) inference.
 //!
 //! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
 //! - `trunk/` contains the pure LLM decoder (`Qwen35Model` + `Qwen35Session`).

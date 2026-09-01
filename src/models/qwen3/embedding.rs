@@ -7,10 +7,13 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen3::{Qwen3LayerWeights, get_f32_tensor, load_layers};
+use crate::models::qwen3::{get_f32_tensor, load_layers, Qwen3LayerWeights};
 use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
-use crate::ops::{attention_value_f32, dot_f32, embedding_lookup, f32_slice_to_f16, rms_norm, rms_norm_inplace, rope_neox, silu_mul_approx_inplace, softmax_inplace};
+use crate::ops::{
+    attention_value_f32, dot_f32, embedding_lookup, f32_slice_to_f16, rms_norm, rms_norm_inplace,
+    rope_neox, silu_mul_approx_inplace, softmax_inplace,
+};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -169,18 +172,12 @@ fn apply_embedding_ffn_typed(
         .chunks_exact(n_embd)
         .zip(hidden.chunks_exact_mut(n_embd))
     {
-        w_gate.quantize_and_matmul_with_scratch(
-            input, q8k_buf, q8_buf, scale_buf, gate_buf, pool,
-        );
-        w_up.quantize_and_matmul_with_scratch(
-            input, q8k_buf, q8_buf, scale_buf, up_buf, pool,
-        );
+        w_gate.quantize_and_matmul_with_scratch(input, q8k_buf, q8_buf, scale_buf, gate_buf, pool);
+        w_up.quantize_and_matmul_with_scratch(input, q8k_buf, q8_buf, scale_buf, up_buf, pool);
 
         silu_mul_approx_inplace(gate_buf, up_buf);
 
-        w_down.quantize_and_matmul_with_scratch(
-            up_buf, q8k_buf, q8_buf, scale_buf, down_buf, pool,
-        );
+        w_down.quantize_and_matmul_with_scratch(up_buf, q8k_buf, q8_buf, scale_buf, down_buf, pool);
 
         for index in 0..n_embd {
             residual[index] += down_buf[index];
@@ -291,7 +288,8 @@ pub fn run_embedding_tokens(
     let n_head = config.n_head;
     let n_head_kv = config.n_head_kv;
     let n_embd_head = config.n_embd_head;
-    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch)) {
+    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch))
+    {
         v.to_u64().unwrap_or(n_embd_head as u64) as usize
     } else {
         n_embd_head
@@ -309,14 +307,24 @@ pub fn run_embedding_tokens(
     let freq_base = config.rope_freq_base;
 
     let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
-    let embd_info = source.tensor_info("token_embd.weight").ok_or("missing token_embd.weight")?;
+    let embd_info = source
+        .tensor_info("token_embd.weight")
+        .ok_or("missing token_embd.weight")?;
     let embd_weight = source
         .tensor_slice("token_embd.weight")
         .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
-    let layers: Vec<Qwen3LayerWeights> =
-        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff, n_embd_head_k, is_qwen3);
+    let layers: Vec<Qwen3LayerWeights> = load_layers(
+        source,
+        n_layer,
+        n_embd,
+        n_embd_q,
+        n_embd_gqa,
+        n_ff,
+        n_embd_head_k,
+        is_qwen3,
+    );
 
     let n_tokens = token_ids.len();
     let available_threads = std::thread::available_parallelism()
@@ -343,7 +351,14 @@ pub fn run_embedding_tokens(
     let q8k_buf_size = max_buf_size.div_ceil(crate::ops::quant::QK_K);
     let q8_buf_size = max_buf_size;
     let scale_buf_size = max_buf_size.div_ceil(32);
-    let mut q8k_buf = vec![BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] }; q8k_buf_size];
+    let mut q8k_buf = vec![
+        BlockQ8K {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16]
+        };
+        q8k_buf_size
+    ];
     let mut q8_buf = vec![0u8; q8_buf_size];
     let mut scale_buf = vec![0.0f32; scale_buf_size];
     let max_n_padded = (n_tokens + 255) / 256 * 256;
@@ -376,13 +391,28 @@ pub fn run_embedding_tokens(
             let v = &mut v_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
 
             lw.wq.quantize_and_matmul_with_scratch(
-                x, &mut q8k_buf, &mut q8_buf, &mut scale_buf, q, &pool,
+                x,
+                &mut q8k_buf,
+                &mut q8_buf,
+                &mut scale_buf,
+                q,
+                &pool,
             );
             lw.wk.quantize_and_matmul_with_scratch(
-                x, &mut q8k_buf, &mut q8_buf, &mut scale_buf, k, &pool,
+                x,
+                &mut q8k_buf,
+                &mut q8_buf,
+                &mut scale_buf,
+                k,
+                &pool,
             );
             lw.wv.quantize_and_matmul_with_scratch(
-                x, &mut q8k_buf, &mut q8_buf, &mut scale_buf, v, &pool,
+                x,
+                &mut q8k_buf,
+                &mut q8_buf,
+                &mut scale_buf,
+                v,
+                &pool,
             );
         }
 
@@ -464,7 +494,12 @@ pub fn run_embedding_tokens(
             let proj = &mut attn_proj[t * n_embd..(t + 1) * n_embd];
 
             lw.wo.quantize_and_matmul_with_scratch(
-                attn, &mut q8k_buf, &mut q8_buf, &mut scale_buf, proj, &pool,
+                attn,
+                &mut q8k_buf,
+                &mut q8_buf,
+                &mut scale_buf,
+                proj,
+                &pool,
             );
         }
 
@@ -630,12 +665,7 @@ mod tests {
     #[test]
     fn media_rows_replace_placeholder_tokens_in_order() {
         let tokens = [7, 99, 8, 99];
-        let mut hidden = vec![
-            1.0, 1.0,
-            2.0, 2.0,
-            3.0, 3.0,
-            4.0, 4.0,
-        ];
+        let mut hidden = vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0];
         let media = MediaEmbeddings {
             placeholder_id: 99,
             values: &[10.0, 11.0, 20.0, 21.0],

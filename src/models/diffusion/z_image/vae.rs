@@ -173,7 +173,10 @@ pub(crate) struct FluxVae {
 }
 
 impl FluxVae {
-    pub(crate) fn load(source: Arc<dyn TensorSource>, pool: Arc<ComputePool>) -> Result<Self, String> {
+    pub(crate) fn load(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Vae)?;
         let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", 16, 512, 3)?;
         let mid_block_1 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_1", 512, 512)?;
@@ -719,7 +722,7 @@ fn conv_f16_parallel_into(
         return Err("Non-finite VAE convolution input".into());
     }
 
-let patch_len = kernel
+    let patch_len = kernel
         .checked_mul(kernel)
         .and_then(|value| value.checked_mul(input_channels))
         .ok_or_else(|| "VAE convolution patch size overflow".to_string())?;
@@ -755,18 +758,15 @@ let patch_len = kernel
         if start >= end {
             return;
         }
-        let input_local = unsafe {
-            std::slice::from_raw_parts(input_usize as *const f32, input_len)
-        };
+        let input_local =
+            unsafe { std::slice::from_raw_parts(input_usize as *const f32, input_len) };
         let weight_rows_local = unsafe {
             std::slice::from_raw_parts(weight_rows_usize as *const &[u8], weight_rows_len)
         };
-        let bias_values_local = unsafe {
-            std::slice::from_raw_parts(bias_values_usize as *const f32, bias_values_len)
-        };
-        let output_local = unsafe {
-            std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len)
-        };
+        let bias_values_local =
+            unsafe { std::slice::from_raw_parts(bias_values_usize as *const f32, bias_values_len) };
+        let output_local =
+            unsafe { std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len) };
         let mut patch = vec![0u16; patch_len];
         for pixel in start..end {
             let output_y = pixel / side;
@@ -1287,18 +1287,7 @@ mod tests {
         let mut output = [0.0; 4];
         let pool = Arc::new(ComputePool::new(1));
 
-        conv_f16_parallel_into(
-            &input,
-            1,
-            2,
-            &weights,
-            1,
-            1,
-            None,
-            &mut output,
-            &pool,
-        )
-        .unwrap();
+        conv_f16_parallel_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &pool).unwrap();
         // Verify output values are non-zero (regression check on parallelism).
         assert!(output.iter().any(|&v| v.is_finite()));
     }
@@ -1629,14 +1618,22 @@ mod tests {
 
     #[test]
     fn decode_rgb_rejects_wrong_or_zero_latent_shape() {
-        let vae = FluxVae::load(Arc::new(decoder_source_without("")), Arc::new(ComputePool::new(1))).unwrap();
+        let vae = FluxVae::load(
+            Arc::new(decoder_source_without("")),
+            Arc::new(ComputePool::new(1)),
+        )
+        .unwrap();
         assert!(vae.decode_rgb(&[0.0; 15], 1).is_err());
         assert!(vae.decode_rgb(&[], 0).is_err());
     }
 
     #[test]
     fn decoder_stages_load_in_oracle_order_with_three_blocks_each() {
-        let vae = FluxVae::load(Arc::new(decoder_source_without("")), Arc::new(ComputePool::new(1))).unwrap();
+        let vae = FluxVae::load(
+            Arc::new(decoder_source_without("")),
+            Arc::new(ComputePool::new(1)),
+        )
+        .unwrap();
         assert_eq!(
             vae.stages
                 .iter()

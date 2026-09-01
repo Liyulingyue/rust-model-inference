@@ -112,8 +112,7 @@ pub fn synthesize_tts_to_wav(
     if prompt_text.trim().is_empty() {
         return Err("TTS prompt must not be empty".into());
     }
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")
         .and_then(|value| value.to_string_val())
@@ -125,7 +124,10 @@ pub fn synthesize_tts_to_wav(
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
-    let pool = Arc::new(ComputePool::new(resolve_thread_count(n_threads_arg, available)));
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        available,
+    )));
     let talker = Qwen3TtsTalker::from_source(source, tokenizer, pool)?;
     let mmproj_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(mmproj_path, ComponentRole::Mmproj));
@@ -180,7 +182,10 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
     let mut session = talker.new_session()?;
     let t_prefill = std::time::Instant::now();
     session.prefill_prompt(prompt)?;
-    eprintln!("  [frame_loop] prefill_prompt took {:.3}s", t_prefill.elapsed().as_secs_f64());
+    eprintln!(
+        "  [frame_loop] prefill_prompt took {:.3}s",
+        t_prefill.elapsed().as_secs_f64()
+    );
     let next_semantic = Cell::new(session.sample_semantic(temperature, rng)?);
     let mut frames = Vec::with_capacity(max_frames);
     let mut t_total = std::time::Instant::now();
@@ -230,8 +235,14 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
             Ok(())
         },
     )?;
-    eprintln!("  [frame_loop] total={:.3}s hidden={:.3}s codec={:.3}s tts={:.3}s sample={:.3}s", 
-        t_total.elapsed().as_secs_f64(), t_hidden.as_secs_f64(), t_codec.as_secs_f64(), t_tts.as_secs_f64(), t_sample.as_secs_f64());
+    eprintln!(
+        "  [frame_loop] total={:.3}s hidden={:.3}s codec={:.3}s tts={:.3}s sample={:.3}s",
+        t_total.elapsed().as_secs_f64(),
+        t_hidden.as_secs_f64(),
+        t_codec.as_secs_f64(),
+        t_tts.as_secs_f64(),
+        t_sample.as_secs_f64()
+    );
     Ok(frames)
 }
 

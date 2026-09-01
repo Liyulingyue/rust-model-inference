@@ -135,7 +135,6 @@ unsafe fn gelu_inplace_neon(values: &mut [f32]) {
     }
 }
 
-
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn gelu_approx_inplace_neon(values: &mut [f32]) {
@@ -177,7 +176,10 @@ mod tests {
 
     fn close(a: f32, b: f32) {
         let rel_diff = (a - b).abs() / a.abs().max(b.abs()).max(1e-6);
-        assert!(rel_diff < 1e-5 || (a - b).abs() < 1e-5, "a={a}, b={b}, rel={rel_diff}");
+        assert!(
+            rel_diff < 1e-5 || (a - b).abs() < 1e-5,
+            "a={a}, b={b}, rel={rel_diff}"
+        );
     }
 
     fn gelu_scalar(values: &[f32]) -> Vec<f32> {
@@ -205,10 +207,14 @@ mod tests {
             .collect();
         let mut output = input.clone();
         gelu_inplace(&mut output);
-        for (index, (actual, expected)) in output.iter().zip(gelu_scalar(&input).iter()).enumerate() {
+        for (index, (actual, expected)) in output.iter().zip(gelu_scalar(&input).iter()).enumerate()
+        {
             let error = (actual - expected).abs();
             let tolerance = 2e-6f32.max(expected.abs() * 2e-5);
-            assert!(error <= tolerance, "index={index}, actual={actual}, expected={expected}, error={error}");
+            assert!(
+                error <= tolerance,
+                "index={index}, actual={actual}, expected={expected}, error={error}"
+            );
         }
     }
 
@@ -218,7 +224,10 @@ mod tests {
         let mut output = input.clone();
         gelu_approx_inplace(&mut output);
         for (actual, expected) in output.iter().zip(gelu_scalar(&input).iter()) {
-            assert!((actual - expected).abs() < 2e-3, "actual={actual}, expected={expected}");
+            assert!(
+                (actual - expected).abs() < 2e-3,
+                "actual={actual}, expected={expected}"
+            );
         }
     }
 
@@ -229,7 +238,10 @@ mod tests {
             let mut output = input.clone();
             gelu_approx_inplace(&mut output);
             for (actual, expected) in output.iter().zip(gelu_scalar(&input).iter()) {
-                assert!((actual - expected).abs() < 2e-3, "actual={actual}, expected={expected}");
+                assert!(
+                    (actual - expected).abs() < 2e-3,
+                    "actual={actual}, expected={expected}"
+                );
             }
         }
     }
