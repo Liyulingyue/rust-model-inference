@@ -343,8 +343,7 @@ pub fn run_inference_tokens(
         .metadata(&format!("{arch}.attention.scale"))
         .and_then(|v| v.to_f64())
         .map(|v| v as f32);
-    let kq_scale = attention_scale_meta
-        .unwrap_or_else(|| 1.0f32 / (n_embd_head_k as f32).sqrt());
+    let kq_scale = attention_scale_meta.unwrap_or_else(|| 1.0f32 / (n_embd_head_k as f32).sqrt());
 
     let mut t_norm: f64 = 0.0;
     let _t_quant: f64 = 0.0;
