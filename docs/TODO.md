@@ -216,9 +216,20 @@ Qwen3.5-2B / MiniCPM5 冒烟回归通过。
 
 - [ ] **精度对齐 XFllama.cpp oracle** — `references/XFllama.cpp/src/models/spark2_5.cpp`
   是科大讯飞自家实现的参考实现。当前未做 token-id 级别逐位对齐（不像 qwen3 有
-  Q8_0/Q4_K 等的量化 oracle 测试，Spark2_5 是 BF16 没有量化分歧）。建议跑一遍
+  Q8_0/Q4_K 等的量化 oracle 测试，Spark2.5 是 BF16 没有量化分歧）。建议跑一遍
   同样的"prompt → token id 序列"对照，找差异层（最可能是 rope_partial 的
   theta_scale、GeLUU 近似、per-head gate 输入源）。
+
+- [ ] **`get_f32_tensor` 重复 6 处** — llama/lfm2/lfm25/lfm2moe/qwen3/spark 的
+  `trunk/weights.rs` 各自定义 `pub fn get_f32_tensor(s, name, n) -> Vec<f32>`，都是
+  3 行薄包装，调用 `core::tensor::load_f32_tensor(...).unwrap_or_else(panic!)`。
+  重复 30 行 + 36 处调用。**评估后暂不抽**：(1) `panic` 是当前 contract（"权重 tensor
+  不存在 = GGUF 损坏 = crash"），不是低优先级可改；(2) `load_static_weight` 抽到 `core`
+  是因为 `unsafe transmute` 需要集中文档化，安全价值高；而 `get_f32_tensor` 只是形式
+  重构，行为零差异，价值与工作量不匹配；(3) 真正统一的时机是当 `core::loader` 长出统一的
+  "required tensor" policy 时（比如新增 `RequiredTensor` trait / `load_required_f32` 等），
+  一次性把所有 call site 改成 `Result<Vec<f32>>` 或统一 panic 语义。**TODO**：等待
+  上述 policy 落地后一并处理。
 
 ### 文件清单
 
