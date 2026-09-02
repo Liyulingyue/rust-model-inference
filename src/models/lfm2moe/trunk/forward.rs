@@ -16,6 +16,29 @@
 //!   weights = probs[top-k] / clamp(sum(probs[top-k]), 6.1e-5, inf)
 //!   y       = sum_e weights[e] * down_e(silu(gate_e @ x) * (up_e @ x))
 //! ```
+//!
+//! ## Scratch buffer sizing invariant
+//!
+//! [`ExecutionScratchpad`] is shared between attention, FFN, and shortconv
+//! paths; every consumer must agree on the maximum width it may write.
+//! The widths that actually flow through the scratch are:
+//!
+//! | Buffer         | Largest writer (and the dimension it writes)
+//! | -------------- | ----------------------------------------------
+//! | `q8_buf`       | `n_embd * 3`       (quantize the shortconv in_proj output)
+//! | `scale_buf`    | `n_ff`             (FFN Q8_0 scales, n_ff / 32 floats)
+//! | `q8k_buf`      | `n_ff`             (FFN Q8_K blocks, n_ff / 256 blocks)
+//! | `gate_buf`     | `max(n_ff, 3*n_embd)` (dense FFN gate, OR shortconv in_proj → b∥c∥x)
+//! | `up_buf`       | `max(n_ff, 3*n_embd)` (dense FFN up   OR shortconv in_proj scratch)
+//!
+//! All three local `max_n_in` calculations in `forward_layer`,
+//! `forward_attention`, and `forward_shortconv` MUST use the same expression
+//! `(n_embd * 3).max(n_embd_q).max(n_ff)` for the Q8/scale/q8k slices; using
+//! `n_ff` alone is a latent buffer overflow when `n_embd * 3 > n_ff`
+//! (e.g. LFM2.5-230M where `n_embd=1024`, `n_ff=2560`, but `3*n_embd=3072`).
+//! Keep `ExecutionScratchpad::new` and the three `max_n_in` sites in sync.
+//! Symptoms of drift: silent corruption that only surfaces when an adjacent
+//! heap allocation is freed (STATUS_HEAP_CORRUPTION / STATUS_ACCESS_VIOLATION).
 
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
@@ -448,7 +471,10 @@ fn forward_layer(
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    // Scratch Q8 / scale / q8k slice width — must equal the value used in
+    // ExecutionScratchpad::new and in forward_attention/forward_shortconv.
+    // See the module-level "Scratch buffer sizing invariant" table.
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
@@ -653,7 +679,12 @@ fn forward_layer(
 /// The caller has already computed `normed = ffn_norm(x)` and quantized it
 /// (`input_q8/sc/q8k`, sized `n_embd`) — the gate/up pass consumes those.
 /// Expert gate/up outputs share the `gate_buf`/`up_buf` scratch in
-/// `n_expert_used * n_ff_exp` slots (both are sized `n_ff >= n_used * n_ff_exp`).
+/// `n_expert_used * n_ff_exp` slots. The scratch is sized
+/// `max(n_ff, n_embd * 3)` (see module header), so we additionally rely on
+/// `n_ff >= n_expert_used * n_ff_exp` being true for MoE layers — this is
+/// an architectural invariant of LFM2-MoE, not something we enforce here.
+/// If you change the model definition or scratch sizing, double-check both
+/// the dense-FFN path AND the MoE experts still fit in `gate_buf`/`up_buf`.
 /// After the gate/up pass, the same quantization buffers are reused (sized
 /// `n_ff_exp`) for each expert's FFN hidden state feeding the down projection.
 #[allow(clippy::too_many_arguments)]
@@ -869,7 +900,8 @@ fn forward_attention(
     let attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    // Keep in sync with forward_layer and forward_shortconv (see module header).
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -1220,6 +1252,9 @@ fn forward_shortconv(
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
     let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
 
+    // Keep in sync with forward_layer and forward_attention (see module header).
+    // Note: shortconv never touches the QKV/QK matmul path, so n_embd_q drops
+    // out — only the FFN width (n_ff) and the in_proj output (3*n_embd) matter.
     let max_n_in = (n_embd * 3).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
@@ -1237,6 +1272,10 @@ fn forward_shortconv(
     }
 
     // Step 1: in_proj -> 3 chunks of size n_embd: b, c, x.
+    // `three_n` is the OUTPUT dimension of `shortconv_in`, written into
+    // gate_buf. ExecutionScratchpad sizes gate_buf as `max(n_ff, 3*n_embd)`,
+    // so gate_buf.len() >= three_n is guaranteed when both forward_layer and
+    // ExecutionScratchpad::new use the correct formula.
     let three_n = 3 * n_embd;
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];

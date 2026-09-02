@@ -47,6 +47,31 @@ pub enum KvCache {
 }
 
 impl ExecutionScratchpad {
+    /// Builds the shared per-step scratchpad.
+    ///
+    /// ## Buffer sizing invariant
+    ///
+    /// `q8_buf` / `scale_buf` / `q8k_buf` are sized for the *largest* write
+    /// any consumer will perform. Consumers and their widths:
+    ///
+    /// - attention QKV matmul inputs: `n_embd` (Q8_0 / Q8_K)
+    /// - attention output projection input: `n_embd_q`
+    /// - FFN gate/up matmul outputs (dense LFM2 / LFM2-MoE): `n_ff`
+    /// - FFN Q8_0/Q8_K quantization: `n_ff` bytes / `n_ff/32` scales / `n_ff/256` Q8_K blocks
+    /// - shortconv `in_proj` output (the b∥c∥x concat): `3 * n_embd`
+    /// - MoE expert gate/up writes share `gate_buf`/`up_buf`, requiring
+    ///   `n_ff >= n_expert_used * n_ff_exp` (architectural invariant of LFM2-MoE).
+    ///
+    /// `max_n_in` is therefore `(n_embd * 3).max(n_embd_q).max(n_ff)`. Every
+    /// local `max_n_in` in the model forwards (`forward_layer`,
+    /// `forward_attention`, `forward_shortconv`) **must** use the same
+    /// expression — keep them in sync. `gate_buf`/`up_buf` are sized
+    /// `max(n_ff, n_embd * 3)` to cover both dense-FFN (`n_ff`) and shortconv
+    /// in-proj (`3 * n_embd`) writers.
+    ///
+    /// Failure mode if drift occurs: silent heap corruption that only
+    /// surfaces when an adjacent allocation is freed
+    /// (STATUS_HEAP_CORRUPTION / STATUS_ACCESS_VIOLATION at process exit).
     pub fn new(
         n_embd: usize,
         n_embd_q: usize,
@@ -56,7 +81,7 @@ impl ExecutionScratchpad {
         n_threads: usize,
         max_ctx: usize,
     ) -> Self {
-        let max_n_in = n_embd_q.max(n_ff);
+        let max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
         let score_stride = max_ctx.div_ceil(256) * 256;
         Self {
             x: vec![0.0f32; n_embd],
@@ -67,8 +92,8 @@ impl ExecutionScratchpad {
             attn_out: vec![0.0f32; n_embd_q],
             attn_proj: vec![0.0f32; n_embd],
             down_buf: vec![0.0f32; n_embd],
-            gate_buf: vec![0.0f32; n_ff],
-            up_buf: vec![0.0f32; n_ff],
+            gate_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
+            up_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
             logits: vec![0.0f32; vocab],
             q8_buf: vec![0u8; max_n_in],
             scale_buf: vec![0.0f32; max_n_in / 32],

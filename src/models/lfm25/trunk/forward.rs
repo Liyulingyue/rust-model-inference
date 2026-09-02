@@ -1,3 +1,12 @@
+//! # LFM2.5 Inference Loop
+//!
+//! Mirrors the `lfm2` trunk; the same scratch buffer sizing rules apply.
+//! See [`ExecutionScratchpad`] and the `lfm2::forward` module header for
+//! the buffer-sizing invariant. The three local `max_n_in` expressions in
+//! `forward_layer`, `forward_attention`, and `forward_shortconv` **must**
+//! equal `(n_embd * 3).max(n_embd_q).max(n_ff)` and stay synchronized with
+//! `ExecutionScratchpad::new`.
+
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -382,7 +391,7 @@ fn forward_layer(
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
@@ -579,7 +588,7 @@ fn forward_attention(
     let attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();

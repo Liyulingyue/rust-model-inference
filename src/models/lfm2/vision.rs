@@ -217,16 +217,24 @@ impl<'a> VisionModel<'a> {
             });
         }
 
+        let mm1_info = source
+            .tensor_info("mm.1.weight")
+            .ok_or_else(|| "tensor mm.1.weight not found".to_string())?;
+        let mm1_out_dim = mm1_info.dims.get(1).copied().unwrap_or(config.projection_dim as u64) as usize;
+
+        let mm2_info = source
+            .tensor_info("mm.2.weight")
+            .ok_or_else(|| "tensor mm.2.weight not found".to_string())?;
+        let mm2_out_dim = mm2_info.dims.get(1).copied().unwrap_or(config.projection_dim as u64) as usize;
+
+        let mm1_b = f32_vec(source, "mm.1.bias", mm1_out_dim)?;
+        let mm2_b = f32_vec(source, "mm.2.bias", mm2_out_dim)?;
+
         Ok(Self {
-            mm1: quant_weight(source, "mm.1.weight", 4 * ne, config.projection_dim)?,
-            mm1_b: f32_vec(source, "mm.1.bias", config.projection_dim)?,
-            mm2: quant_weight(
-                source,
-                "mm.2.weight",
-                config.projection_dim,
-                config.projection_dim,
-            )?,
-            mm2_b: f32_vec(source, "mm.2.bias", config.projection_dim)?,
+            mm1: quant_weight(source, "mm.1.weight", 4 * ne, mm1_out_dim)?,
+            mm1_b,
+            mm2: quant_weight(source, "mm.2.weight", mm1_out_dim, mm2_out_dim)?,
+            mm2_b,
             config,
             patch_embd,
             patch_bias,
@@ -814,7 +822,6 @@ pub fn run_multimodal(
     };
 
     let mut stream: Vec<Lfm2StreamItem> = Vec::new();
-    stream.push(Lfm2StreamItem::Token(124894)); // BOS <|startoftext|>
     stream.push(tok("<|startoftext|>")?);
     stream.extend(
         tokenizer
