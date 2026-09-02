@@ -355,7 +355,27 @@ pub fn run_inference(
     let started = Instant::now();
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    let prompt_text = format!("<|user|>\n{prompt}<|end|>\n<|assistant|>\n");
+
+    // Spark 2.5 chat template (from `tokenizer.chat_template` in GGUF).
+    // Default `enable_thinking = false` (set to true for reasoning-capable output).
+    //
+    //   System:    <｜start▁of▁sentence｜><|System|>\nyou are a helpful assistant.<｜end▁of▁sentence｜>
+    //   User:      <｜start▁of▁sentence｜><|User|>{content}<｜end▁of▁sentence｜>
+    //   Assistant: <｜start▁of▁sentence｜><|Bot|><think>{reasoning}</think>{content}<｜end▁of▁sentence｜>
+    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|><think> (when thinking=true)
+    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|></think> (when thinking=false)
+    let sos = "<｜start▁of▁sentence｜>";
+    let eos = "<｜end▁of▁sentence｜>";
+    let enable_thinking = false;
+    let bot_suffix = if enable_thinking { "<think>" } else { "</think>" };
+    let prompt_text = format!(
+        "{sos}<|System|>\nyou are a helpful assistant.{eos}\n\
+         {sos}<|User|>\n{prompt}{eos}\n\
+         {sos}<|Bot|>{bot_suffix}\n",
+        sos = sos,
+        eos = eos,
+        bot_suffix = bot_suffix,
+    );
     let mut prompt_tokens = tokenizer.encode(
         &prompt_text,
         EncodeOptions {
@@ -409,10 +429,16 @@ pub fn run_inference(
         print!("{}", piece);
         io::stdout().flush().map_err(|error| error.to_string())?;
         generated.push(next);
+        // Stop on EOS token (matches `tokenizer.ggml.eos_token_id`) or
+        // on the trailing `<｜end▁of▁sentence｜>` (the assistant turn
+        // delimiter that the model emits at the end of its reply).
         if let Some(eos) = tokenizer.eos_id() {
             if next == eos {
                 break;
             }
+        }
+        if piece.contains("<｜end▁of▁sentence｜>") {
+            break;
         }
         last_token = next;
     }
