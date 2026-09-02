@@ -342,6 +342,7 @@ impl BPETokenizer {
             match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
                 Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
+                Some(MetaValue::String(value)) if value == "spark2_5" => PreTokenizer::Qwen2,
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }

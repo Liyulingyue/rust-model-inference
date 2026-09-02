@@ -107,6 +107,17 @@ pub fn run_inference(
             profile,
             kv_format,
         )
+    } else if arch == "spark2_5" {
+        crate::models::spark::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            profile,
+            kv_format,
+        )
     } else {
         crate::models::qwen3::text::run_inference(
             source.clone(),
