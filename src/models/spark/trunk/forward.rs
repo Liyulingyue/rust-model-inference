@@ -348,6 +348,7 @@ pub fn run_inference(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    enable_thinking: bool,
     _bench: bool,
     _profile: bool,
     _kv_format: KvFormat,
@@ -357,16 +358,16 @@ pub fn run_inference(
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
     // Spark 2.5 chat template (from `tokenizer.chat_template` in GGUF).
-    // Default `enable_thinking = false` (set to true for reasoning-capable output).
+    // `enable_thinking` (--thinking flag) controls whether the model
+    // produces a reasoning block before its reply.
     //
     //   System:    <｜start▁of▁sentence｜><|System|>\nyou are a helpful assistant.<｜end▁of▁sentence｜>
     //   User:      <｜start▁of▁sentence｜><|User|>{content}<｜end▁of▁sentence｜>
     //   Assistant: <｜start▁of▁sentence｜><|Bot|><think>{reasoning}</think>{content}<｜end▁of▁sentence｜>
-    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|><think> (when thinking=true)
-    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|></think> (when thinking=false)
+    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|><think>  (thinking=true)
+    //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|></think>  (thinking=false)
     let sos = "<｜start▁of▁sentence｜>";
     let eos = "<｜end▁of▁sentence｜>";
-    let enable_thinking = false;
     let bot_suffix = if enable_thinking { "<think>" } else { "</think>" };
     let prompt_text = format!(
         "{sos}<|System|>\nyou are a helpful assistant.{eos}\n\

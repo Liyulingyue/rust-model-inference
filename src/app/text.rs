@@ -114,6 +114,7 @@ pub fn run_inference(
             max_tokens,
             temperature,
             n_threads_arg,
+            thinking,
             bench,
             profile,
             kv_format,
