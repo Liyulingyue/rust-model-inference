@@ -16,6 +16,7 @@ pub struct CliOptions {
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
+    pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
     pub video: Option<PathBuf>,
     pub vae: Option<PathBuf>,
@@ -285,6 +286,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.ref_audio = Some(value.as_str().into());
                 i += 1;
             }
+            "--ref-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --ref-text")?;
+                options.ref_text = Some(value.clone());
+                i += 1;
+            }
             "--language" => {
                 let value = args
                     .get(i + 1)
@@ -445,10 +454,13 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             return Err(format!("--tts cannot be used with {conflict}"));
         }
         normalize_tts_language(options.language.as_deref())?;
+        if options.ref_text.is_some() && options.ref_audio.is_none() {
+            return Err("--ref-text requires --ref-audio".into());
+        }
         return Ok(());
     }
-    if options.ref_audio.is_some() {
-        return Err("--ref-audio requires --tts".into());
+    if options.ref_audio.is_some() || options.ref_text.is_some() {
+        return Err("--ref-audio/--ref-text require --tts".into());
     }
     let media_count = usize::from(options.image.is_some())
         + usize::from(options.video.is_some())
