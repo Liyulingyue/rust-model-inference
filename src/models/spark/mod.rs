@@ -3,5 +3,5 @@
 pub mod trunk;
 
 pub use trunk::{
-    run_inference, load_layers, SparkConfig, SparkLayerWeights, SparkModel, SparkSession,
+    load_layers, run_inference, SparkConfig, SparkLayerWeights, SparkModel, SparkSession,
 };

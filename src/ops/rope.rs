@@ -46,7 +46,10 @@ pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
 /// `n_rot` per head are left untouched, matching `ggml_rope_ext(ctx, x,
 /// pos, nullptr, n_rot, ...)` in llama.cpp.
 pub fn rope_neox_partial(x: &mut [f32], pos: usize, head_dim: usize, n_rot: usize, freq_base: f32) {
-    assert!(n_rot <= head_dim, "n_rot ({n_rot}) must be <= head_dim ({head_dim})");
+    assert!(
+        n_rot <= head_dim,
+        "n_rot ({n_rot}) must be <= head_dim ({head_dim})"
+    );
     assert!(n_rot % 2 == 0, "n_rot ({n_rot}) must be even");
     let half = n_rot / 2;
     let n_heads = x.len() / head_dim;

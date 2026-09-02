@@ -42,16 +42,8 @@ pub fn load_layers(
 ) -> Vec<SparkLayerWeights<'static>> {
     (0..n_layer)
         .map(|l| SparkLayerWeights {
-            attn_norm: get_f32_tensor(
-                source,
-                &format!("blk.{l}.attn_norm.weight"),
-                n_embd,
-            ),
-            ffn_norm: get_f32_tensor(
-                source,
-                &format!("blk.{l}.ffn_norm.weight"),
-                n_embd,
-            ),
+            attn_norm: get_f32_tensor(source, &format!("blk.{l}.attn_norm.weight"), n_embd),
+            ffn_norm: get_f32_tensor(source, &format!("blk.{l}.ffn_norm.weight"), n_embd),
             attn_qkv: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.attn_qkv.weight"),

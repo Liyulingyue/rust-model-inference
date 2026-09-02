@@ -862,9 +862,8 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
             // at whitespace (whitespace + letter is still one piece, e.g.
             // ` hello`). This is the practical reading of llama.cpp's
             // `[punct][A-Za-z]+` rule.
-            let current_is_punct_only = !current.is_whitespace()
-                && !is_word_char(current, pre)
-                && !is_number(current);
+            let current_is_punct_only =
+                !current.is_whitespace() && !is_word_char(current, pre) && !is_number(current);
             let starts_word = if pre == PreTokenizer::Spark2_5 && current_is_punct_only {
                 false
             } else {

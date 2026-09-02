@@ -26,10 +26,7 @@ pub struct SparkConfig {
     pub is_swa: Vec<bool>,
 }
 
-pub(crate) fn read_u32<S: TensorSource + ?Sized>(
-    source: &S,
-    key: &str,
-) -> Result<u32, String> {
+pub(crate) fn read_u32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<u32, String> {
     source
         .metadata(key)
         .and_then(MetaValue::to_u64)
@@ -37,10 +34,7 @@ pub(crate) fn read_u32<S: TensorSource + ?Sized>(
         .ok_or_else(|| format!("Missing metadata: {key}"))
 }
 
-pub(crate) fn read_f32<S: TensorSource + ?Sized>(
-    source: &S,
-    key: &str,
-) -> Result<f32, String> {
+pub(crate) fn read_f32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<f32, String> {
     source
         .metadata(key)
         .and_then(MetaValue::to_f64)
@@ -99,11 +93,7 @@ impl SparkConfig {
         let n_rot_full = read_u32(source, "spark2_5.rope.dimension_count")? as usize;
         let n_rot_swa = read_u32(source, "spark2_5.rope.dimension_count_swa")? as usize;
         let sliding_window = read_u32(source, "spark2_5.attention.sliding_window")? as usize;
-        let is_swa = read_bool_array(
-            source,
-            "spark2_5.attention.sliding_window_pattern",
-            n_layer,
-        )?;
+        let is_swa = read_bool_array(source, "spark2_5.attention.sliding_window_pattern", n_layer)?;
 
         if n_embd_head_k != n_embd_head_v {
             return Err(format!(

@@ -161,9 +161,24 @@ pub fn load_layers_static(
                 n_embd_q,
                 n_embd,
             ),
-            w_gate: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
-            w_up: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
-            w_down: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
+            w_gate: crate::core::loader::load_static_weight(
+                source,
+                &format!("blk.{}.ffn_gate.weight", l),
+                n_embd,
+                n_ff,
+            ),
+            w_up: crate::core::loader::load_static_weight(
+                source,
+                &format!("blk.{}.ffn_up.weight", l),
+                n_embd,
+                n_ff,
+            ),
+            w_down: crate::core::loader::load_static_weight(
+                source,
+                &format!("blk.{}.ffn_down.weight", l),
+                n_ff,
+                n_embd,
+            ),
         })
         .collect()
 }

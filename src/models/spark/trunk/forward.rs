@@ -55,8 +55,7 @@ impl SparkModel {
         let tok_embd_info = source
             .tensor_info("token_embd.weight")
             .ok_or_else(|| "Missing token_embd.weight info".to_string())?;
-        let tok_embd_bytes_static: &'static [u8] =
-            unsafe { std::mem::transmute(tok_embd_bytes) };
+        let tok_embd_bytes_static: &'static [u8] = unsafe { std::mem::transmute(tok_embd_bytes) };
         let tok_embd = Weight::from_quantized(QuantizedTensor::from_bytes(
             tok_embd_bytes_static,
             tok_embd_info.ggml_type,
@@ -121,8 +120,8 @@ impl SparkSession {
             cfg.n_embd_head_v,
             max_ctx,
         ));
-        let kv_state = KvState::new(arch, KvFormat::F16, max_ctx)
-            .with_lifecycle(KvLifecycle::Ephemeral);
+        let kv_state =
+            KvState::new(arch, KvFormat::F16, max_ctx).with_lifecycle(KvLifecycle::Ephemeral);
         Ok(Self {
             config: model.config,
             layers: model.layers,
@@ -368,7 +367,11 @@ pub fn run_inference(
     //   Gen-prompt:<｜start▁of▁sentence｜><|Bot|></think>  (thinking=false)
     let sos = "<｜start▁of▁sentence｜>";
     let eos = "<｜end▁of▁sentence｜>";
-    let bot_suffix = if enable_thinking { "<think>" } else { "</think>" };
+    let bot_suffix = if enable_thinking {
+        "<think>"
+    } else {
+        "</think>"
+    };
     // Match the GGUF `tokenizer.chat_template` Jinja output exactly. The
     // template uses `{{- ... }}` to strip adjacent whitespace, so each
     // role block concatenates directly without `\n` separators between
