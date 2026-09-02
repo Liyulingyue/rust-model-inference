@@ -28,6 +28,11 @@ enum PreTokenizer {
     Lfm2,
     LlamaBpe,
     Gemma4,
+    /// Xunfei Spark 2.5 (and other Chinese-tokenizer dialects that share
+    /// the same byte-level BPE setup but use a different regex split).
+    /// Differs from `Qwen2` in that punctuation immediately preceding a
+    /// letter (`!hello`) is split off as its own token.
+    Spark2_5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +347,7 @@ impl BPETokenizer {
             match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
                 Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
+                Some(MetaValue::String(value)) if value == "spark2_5" => PreTokenizer::Spark2_5,
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }
@@ -796,6 +802,24 @@ fn is_punctuation_run_char(value: char, pre: PreTokenizer) -> bool {
     !value.is_whitespace() && !is_word_char(value, pre) && !is_number(value)
 }
 
+/// Spark2_5-specific punctuation rule: returns true if `pos` is at a
+/// punctuation char followed by a letter (which Spark2_5 splits into
+/// two tokens). Mirrors llama.cpp's
+/// `[!"#$%&'()*+,\-./:;<=>?@\[\]^_`{|}~][A-Za-z]+` regex.
+fn spark2_5_splits_punct_before_letter(values: &[char], pos: usize) -> bool {
+    let here = match values.get(pos).copied() {
+        Some(c) => c,
+        None => return false,
+    };
+    if here.is_whitespace() || is_word_char(here, PreTokenizer::Spark2_5) || is_number(here) {
+        return false;
+    }
+    match values.get(pos + 1).copied() {
+        Some(next) => is_word_char(next, PreTokenizer::Spark2_5),
+        None => false,
+    }
+}
+
 fn contraction_len(chars: &[char], pos: usize) -> Option<usize> {
     if chars.get(pos) != Some(&'\'') {
         return None;
@@ -834,11 +858,22 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
         }
 
         if current != '\r' && current != '\n' && !is_number(current) {
-            let starts_word = is_word_char(current, pre)
-                || values
-                    .get(pos + 1)
-                    .copied()
-                    .is_some_and(|value| is_word_char(value, pre));
+            // Spark2_5 only suppresses word-start at *punctuation* chars, not
+            // at whitespace (whitespace + letter is still one piece, e.g.
+            // ` hello`). This is the practical reading of llama.cpp's
+            // `[punct][A-Za-z]+` rule.
+            let current_is_punct_only = !current.is_whitespace()
+                && !is_word_char(current, pre)
+                && !is_number(current);
+            let starts_word = if pre == PreTokenizer::Spark2_5 && current_is_punct_only {
+                false
+            } else {
+                is_word_char(current, pre)
+                    || values
+                        .get(pos + 1)
+                        .copied()
+                        .is_some_and(|value| is_word_char(value, pre))
+            };
             if starts_word {
                 pos += 1;
                 while values
@@ -866,11 +901,29 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
             .is_some_and(|value| is_punctuation_run_char(value, pre))
         {
             pos = punctuation_start;
+            // Always consume at least the first punctuation char so we
+            // make forward progress even if Spark2_5 immediately splits
+            // (in which case the loop body below terminates after one step).
+            if values
+                .get(pos)
+                .copied()
+                .is_some_and(|value| is_punctuation_run_char(value, pre))
+            {
+                pos += 1;
+            }
             while values
                 .get(pos)
                 .copied()
                 .is_some_and(|value| is_punctuation_run_char(value, pre))
             {
+                // Spark2_5: stop the punctuation run before a letter so
+                // `!hello` tokenizes as `!` + `hello`, matching the
+                // `[punct][A-Za-z]+` regex in llama.cpp.
+                if pre == PreTokenizer::Spark2_5
+                    && spark2_5_splits_punct_before_letter(&values, pos)
+                {
+                    break;
+                }
                 pos += 1;
             }
             while matches!(values.get(pos), Some('\r' | '\n')) {
@@ -1056,6 +1109,39 @@ mod tests {
         assert_eq!(
             scan_qwen_words("e\u{301}", PreTokenizer::Qwen2),
             vec!["e", "\u{301}"]
+        );
+    }
+
+    #[test]
+    fn spark2_5_splits_punctuation_before_letter() {
+        // `[!"#$%&'()*+,\-./:;<=>?@\[\]^_`{|}~][A-Za-z]+` pattern:
+        // a single punctuation char immediately followed by ASCII letters
+        // is split into two tokens.
+        assert_eq!(
+            scan_qwen_words("!hello", PreTokenizer::Spark2_5),
+            vec!["!", "hello"]
+        );
+        assert_eq!(
+            scan_qwen_words("/world", PreTokenizer::Spark2_5),
+            vec!["/", "world"]
+        );
+        // Qwen2 keeps the run together (its regex has no such rule).
+        assert_eq!(
+            scan_qwen_words("!hello", PreTokenizer::Qwen2),
+            vec!["!hello"]
+        );
+        // Two punctuation chars: the first splits before the second (non-letter),
+        // the second splits before the letter run — yielding three tokens.
+        // (llama.cpp's full regex would not match `!!hello`; BPE merges
+        // would then split, which is functionally similar.)
+        assert_eq!(
+            scan_qwen_words("!!hello", PreTokenizer::Spark2_5),
+            vec!["!", "!", "hello"]
+        );
+        // Letter run after a space is unaffected.
+        assert_eq!(
+            scan_qwen_words("! hello", PreTokenizer::Spark2_5),
+            vec!["!", " hello"]
         );
     }
 

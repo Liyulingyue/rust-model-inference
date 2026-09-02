@@ -13,6 +13,7 @@ use crate::core::tensor::{
     GGUF_MAGIC,
 };
 use crate::core::traits::ModelConfig;
+use crate::ops::kernel::{QuantizedTensor, Weight};
 
 pub(crate) struct ByteReader<'a> {
     data: &'a [u8],
@@ -706,6 +707,43 @@ pub(crate) fn read_i32_array<S: TensorSource + ?Sized>(
             .ok_or_else(|| format!("{key}[{i}] is not an integer"))? as i32;
     }
     Ok(out)
+}
+
+/// Load a quantized weight tensor as a `Weight<'static>` by extending
+/// the tensor's byte slice lifetime via `unsafe transmute`.
+///
+/// **Safety contract**: the caller must guarantee that `source` (or the
+/// underlying `Arc<dyn TensorSource>` that owns the GGUF bytes) outlives
+/// every `Weight<'static>` returned by this function. In practice this
+/// is enforced by `Arc`-keeping model objects: `Qwen3Model`,
+/// `LlamaModel`-like structs, and `SparkModel` all hold an
+/// `Arc<dyn TensorSource>` for their full lifetime, so the bytes can
+/// never be unmapped underneath the weight slice.
+///
+/// Panics if the tensor is missing — this indicates a malformed GGUF,
+/// not a recoverable runtime condition.
+pub fn load_static_weight(
+    source: &dyn TensorSource,
+    name: &str,
+    rows: usize,
+    cols: usize,
+) -> Weight<'static> {
+    let bytes = source
+        .tensor_slice(name)
+        .unwrap_or_else(|| panic!("tensor {name} not found"));
+    let info = source
+        .tensor_info(name)
+        .unwrap_or_else(|| panic!("tensor info {name} not found"));
+    let ggml_type = info.ggml_type;
+    // SAFETY: see function-level docstring. The caller (a model struct
+    // holding an Arc to the TensorSource) guarantees the source outl
+    let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+    Weight::from_quantized(QuantizedTensor::from_bytes(
+        bytes_static,
+        ggml_type,
+        rows,
+        cols,
+    ))
 }
 
 /// Check that the supplied dimensions match the allowed whitelist. Returns
