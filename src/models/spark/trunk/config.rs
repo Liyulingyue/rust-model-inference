@@ -26,7 +26,10 @@ pub struct SparkConfig {
     pub is_swa: Vec<bool>,
 }
 
-fn read_u32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<u32, String> {
+pub(crate) fn read_u32<S: TensorSource + ?Sized>(
+    source: &S,
+    key: &str,
+) -> Result<u32, String> {
     source
         .metadata(key)
         .and_then(MetaValue::to_u64)
@@ -34,7 +37,10 @@ fn read_u32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<u32, Stri
         .ok_or_else(|| format!("Missing metadata: {key}"))
 }
 
-fn read_f32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<f32, String> {
+pub(crate) fn read_f32<S: TensorSource + ?Sized>(
+    source: &S,
+    key: &str,
+) -> Result<f32, String> {
     source
         .metadata(key)
         .and_then(MetaValue::to_f64)
@@ -42,7 +48,7 @@ fn read_f32<S: TensorSource + ?Sized>(source: &S, key: &str) -> Result<f32, Stri
         .ok_or_else(|| format!("Missing metadata: {key}"))
 }
 
-fn read_bool_array<S: TensorSource + ?Sized>(
+pub(crate) fn read_bool_array<S: TensorSource + ?Sized>(
     source: &S,
     key: &str,
     expected_len: usize,
