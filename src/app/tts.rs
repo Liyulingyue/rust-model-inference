@@ -32,6 +32,18 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         .as_deref()
         .ok_or_else(|| "--tts requires --out".to_string())?;
 
+    // dots.tts uses an arch-qwen2 LLM gguf + a `dotstts` mmproj; dispatch on
+    // the mmproj architecture before the Qwen3-TTS path.
+    let mmproj_probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
+    let mmproj_arch = mmproj_probe
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    if mmproj_arch == "dotstts" {
+        return crate::app::dots::run_dots_tts_cli(options);
+    }
+    drop(mmproj_probe);
+
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")

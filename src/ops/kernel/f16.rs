@@ -63,24 +63,44 @@ impl<'a> F16Kernel<'a> {
     }
 }
 
+fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
+    input_scales[k / 32] * (input_q8[k] as i8 as f32)
+}
+
 impl<'a> Kernel for F16Kernel<'a> {
-    /// Hot path. F16 weights are dequantized to f32 per row before the dot
-    /// product. For now this ignores the prequantized Q8 input and falls
-    /// back to a scalar f32 dot — F16 weights are not yet on the Qwen3
-    /// hot path, so this is acceptable until the AVX2/NEON F16 kernel lands.
+    /// Row-partitioned scalar F16×F32 matmul. The default
+    /// `forward_prepared` routes here with the Q8-quantized input; dequantize
+    /// those rows to f32 and dot against the F16 weight rows so F16 models
+    /// get real math (this path is used by the dots.tts LLM).
     fn forward_prequantized(
         &self,
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
-        _ith: usize,
-        _nth: usize,
+        ith: usize,
+        nth: usize,
     ) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
-        for slot in output.iter_mut().take(n_out) {
-            *slot = 0.0;
+        let per_thread = n_out / nth.max(1);
+        let start = ith * per_thread;
+        let end = if ith + 1 == nth {
+            n_out
+        } else {
+            (ith + 1) * per_thread
+        };
+        for i in start..end {
+            let row = &self.weight[i * n_in * 2..(i + 1) * n_in * 2];
+            let mut sum = 0.0f32;
+            for k in 0..n_in {
+                let bits = u16::from_le_bytes([row[k * 2], row[k * 2 + 1]]);
+                sum = crate::ops::f16_to_f32(bits).mul_add(
+                    dequant_q8(input_q8, input_scales, k),
+                    sum,
+                );
+            }
+            output[i] = sum;
         }
     }
 
@@ -105,6 +125,10 @@ impl<'a> Kernel for F16Kernel<'a> {
                 n_out,
             );
         }
+    }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_f16(self.weight, token_id, n_embd, out);
     }
 }
 

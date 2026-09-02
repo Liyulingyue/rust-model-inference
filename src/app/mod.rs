@@ -1,4 +1,5 @@
 pub(crate) mod audio;
+pub(crate) mod dots;
 pub mod cli;
 pub(crate) mod embedding;
 pub(crate) mod image;
