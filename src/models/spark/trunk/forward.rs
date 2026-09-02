@@ -26,7 +26,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-fn sigmoid_f32(x: f32) -> f32 {
+pub(crate) fn sigmoid_f32(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
