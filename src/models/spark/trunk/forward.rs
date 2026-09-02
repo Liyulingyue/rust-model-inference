@@ -20,7 +20,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
-use crate::ops::{dot_f32, gelu_inplace, rms_norm, rope_neox, softmax_inplace};
+use crate::ops::{dot_f32, gelu_inplace, rms_norm, rope_neox_partial, softmax_inplace};
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -178,8 +178,8 @@ impl SparkSession {
             let k_full = &mut k_full[..n_embd_kv];
             let v_full = &mut v_full[..n_embd_kv];
 
-            rope_neox(q, pos, n_rot, freq_base);
-            rope_neox(k_full, pos, n_rot, freq_base);
+            rope_neox_partial(q, pos, n_embd_head, n_rot, freq_base);
+            rope_neox_partial(k_full, pos, n_embd_head, n_rot, freq_base);
 
             // Write KV cache for this layer at this position
             {
@@ -369,10 +369,14 @@ pub fn run_inference(
     let sos = "<｜start▁of▁sentence｜>";
     let eos = "<｜end▁of▁sentence｜>";
     let bot_suffix = if enable_thinking { "<think>" } else { "</think>" };
+    // Match the GGUF `tokenizer.chat_template` Jinja output exactly. The
+    // template uses `{{- ... }}` to strip adjacent whitespace, so each
+    // role block concatenates directly without `\n` separators between
+    // them. The only embedded `\n` is right after `<|System|>`.
     let prompt_text = format!(
-        "{sos}<|System|>\nyou are a helpful assistant.{eos}\n\
-         {sos}<|User|>\n{prompt}{eos}\n\
-         {sos}<|Bot|>{bot_suffix}\n",
+        "{sos}<|System|>\nyou are a helpful assistant.{eos}\
+         {sos}<|User|>{prompt}{eos}\
+         {sos}<|Bot|>{bot_suffix}",
         sos = sos,
         eos = eos,
         bot_suffix = bot_suffix,
@@ -384,8 +388,12 @@ pub fn run_inference(
             parse_special: true,
         },
     );
-    if let Some(bos) = tokenizer.bos_id() {
-        prompt_tokens.insert(0, bos);
+    // Only prepend BOS if `tokenizer.ggml.add_bos_token` is set. Spark2.5
+    // sets this to 0; the chat template already emits `<｜start▁of▁sentence｜>`.
+    if tokenizer.add_bos() {
+        if let Some(bos) = tokenizer.bos_id() {
+            prompt_tokens.insert(0, bos);
+        }
     }
 
     let available_threads = std::thread::available_parallelism()
