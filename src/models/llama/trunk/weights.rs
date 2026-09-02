@@ -129,20 +129,7 @@ fn static_weight(
     rows: usize,
     cols: usize,
 ) -> Weight<'static> {
-    let bytes = source
-        .tensor_slice(name)
-        .unwrap_or_else(|| panic!("tensor {name} not found"));
-    let info = source
-        .tensor_info(name)
-        .unwrap_or_else(|| panic!("tensor info {name} not found"));
-    let ggml_type = info.ggml_type;
-    let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
-    Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes_static,
-        ggml_type,
-        rows,
-        cols,
-    ))
+    crate::core::loader::load_static_weight(source, name, rows, cols)
 }
 
 #[allow(clippy::too_many_arguments)]

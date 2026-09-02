@@ -9,7 +9,7 @@
 //! - `ffn_down` (BF16, [n_ff, n_embd])
 
 use crate::core::tensor::TensorSource;
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::kernel::Weight;
 
 pub struct SparkLayerWeights<'a> {
     pub attn_norm: Vec<f32>,
@@ -32,46 +32,13 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn quant_weight<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    n_in: usize,
-    n_out: usize,
-) -> Result<Weight<'a>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("tensor {name} not found"))?;
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("tensor info {name} not found"))?;
-    Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes,
-        info.ggml_type,
-        n_in,
-        n_out,
-    )))
-}
-
 fn static_weight(
     source: &dyn TensorSource,
     name: &str,
     rows: usize,
     cols: usize,
 ) -> Weight<'static> {
-    let bytes = source
-        .tensor_slice(name)
-        .unwrap_or_else(|| panic!("tensor {name} not found"));
-    let info = source
-        .tensor_info(name)
-        .unwrap_or_else(|| panic!("tensor info {name} not found"));
-    let ggml_type = info.ggml_type;
-    let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
-    Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes_static,
-        ggml_type,
-        rows,
-        cols,
-    ))
+    crate::core::loader::load_static_weight(source, name, rows, cols)
 }
 
 pub fn load_layers(
