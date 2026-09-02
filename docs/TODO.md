@@ -158,3 +158,72 @@ vocab 248320）。现有 qwen35 trunk 逻辑全部适用，适配点有三：
 验证：llama.cpp token-id oracle 贪心序列 **8/8 步一致**（760→6511→314→9338→369→11751→13→10838），
 top-1 logit 差 0.3~0.8；生成 `"The capital of France is Paris. 🇫🇷 …"` 与中文自我介绍均连贯；
 Qwen3.5-2B / MiniCPM5 冒烟回归通过。
+
+## Spark-X2.5-1.7B / 4B-GGUF 适配 — ✅ 已完成（功能）+ ⚠️ 性能待优化
+
+`models/Spark-X2.5-{1.7B,4B}-GGUF`（arch=`spark2_5`，Xunfei Spark 2.5 讯飞星火）。模型
+结构差异（vs qwen3）需要独立适配：
+
+- **Fused QKV**：`attn_qkv [n_embd, n_embd_qkv]` 单一投影 → split 为 Q/K/V（Q=2048/2560,
+  K=V=512/1024）。需在 `forward` 里 `split_at_mut` 而非三次独立 matmul。
+- **Per-layer heterogeneous RoPE**：full-attn 层用 `n_rot=64, freq_base=5M`；SWA 层用
+  `n_rot=256, freq_base=10K`（sliding_window=512）。需新增 `rope_neox_partial(x, pos,
+  head_dim, n_rot, ...)`，只旋转每 head 前 `n_rot` 维；不能用 `rope_neox(x, pos, n_rot, ...)`
+  （那会把 `[n_head × head_dim]` 当 `[n_head×n_rot × n_rot]` 处理）。
+- **Sliding window mask**：SWA 层 attention 只看最后 `sliding_window=512` 个位置。pattern
+  3-swa + 1-full-attn 循环。mask 在 softmax 后清零：`if is_swa && pos+1 > sliding_window { for t in 0..start { scores[t]=0.0; } }`。
+- **Per-head gating**：`attn_gate [n_embd, n_head=8/16]` 矩阵乘 pre-attention norm → sigmoid →
+  逐 head 乘 attention output（不是 post-output 的 MLP gate，而是 element-wise gate）。
+- **GeGLU FFN**：`gelu(gate(x)) * up(x)` 后 down。SwiGLU/GeLU 的差异在 qwen3 里没有，需单独实现。
+- **Tied embeddings**：GGUF 无 `output.weight` → 复用 `token_embd.weight`。`load_model`
+  里 `output = if source.tensor_info("output.weight").is_some() { ... } else { None }`。
+- **Tokenizer pre=`"spark2_5"`**：与 qwen2 正则不同（[punct][A-Za-z]+ 切分 `!hello` 为 `!` + `hello`）。
+  新增 `PreTokenizer::Spark2_5` 变体；在 `scan_qwen_ranges` 里对标点+字母边界做切分。
+
+适配后冒烟通过（"`What is the capital of France?` → `capital of France is Paris.`，`你好`
+ → `！很高兴与你交流...`，`What is 2+2?` → `+ 2 = **4**`）。1.7B ≈ 1.1 tok/s, 4B ≈ 0.4 tok/s
+（4 线程；生产路径未优化）。
+
+### 待优化（性能，正确性已 OK）
+
+- [ ] **Per-token prefill O(N²) 注意力** — `models::spark::trunk::forward::decode_step` 当前对
+  每个 prompt token 单独跑一次，每次对前面所有 token 重算 attention。
+  100 token prompt → 100×100 = 10K 次。生产路径需 batched prefill（一次 matmul 跑所有
+  Q/K/V，按 layer 处理，然后一次性对完整 token 序列做 attention），参考 `llama.cpp`
+  `llm_graph_context::build_attn(inp_attn, ..., Qcur, Kcur, Vcur, ...)` 的 batched 路径。
+
+- [ ] **每次 `decode_step` 全量 `Vec::new`** — `hidden / normed / qkv / attn_out /
+  attn_proj / gate_raw / gate_proj / up_proj / ffn_hidden / down_out` 每次分配。短期可加
+  `ExecutionScratchpad`（参考 qwen3 trunk）；长期与 batched prefill 一起重构。
+
+- [ ] **Generate 阶段没有 KV cache 预热** — 首 token 生成需要 prefill N 个 prompt token
+  各自的 K/V 进 cache。当前是 N 次 `decode_step` 串行 → 单线程跑完所有层 + attention。可
+  改为 prefilled `Session::new_with_kv_state(...)`，构造时一次性吃进 prompt。
+
+- [ ] **FFN gate 计算输入是 pre-attention norm 还是 post-attention hidden？**
+  当前用 `normed`（pre-attention rms_norm 输出），与 XFllama.cpp `attn_inp = cur`
+  一致（cur 在 rms_norm 之后立刻）。但需要 llama.cpp 数值对照才能确定精度 — 当前输出
+  与 llama.cpp oracle 没逐 token 验证（不像 Ornith-1.5-9B 那次有 8/8 一致）。
+
+- [ ] **GeGLU 用 `0.5 * x * (1 + tanh(0.7978845 * (x + 0.044715 * x³)))` 近似** — 与
+  llama.cpp 默认 `LLM_FFN_GELU` 的精确 GELU（`x * Φ(x)`）是否 bit-equivalent 需验证。
+
+- [ ] **chat template 整段手写，未走 `tokenizer.chat_template` 的 Jinja 引擎** —
+  当前从 GGUF 读出 template 字符串，用 `format!()` 在 Rust 里"模拟"渲染（手抄
+  `{{- ... }}` strip-whitespace 行为）。如果未来模型加 tool_call、message 类型分支、
+  reasoning_content 字段，手写版会失效。考虑引入 mini Jinja 引擎（参考 `llama.cpp`
+  `common/jinja` 子模块的 PEG-native 方案；保持无依赖优先）。
+
+- [ ] **精度对齐 XFllama.cpp oracle** — `references/XFllama.cpp/src/models/spark2_5.cpp`
+  是科大讯飞自家实现的参考实现。当前未做 token-id 级别逐位对齐（不像 qwen3 有
+  Q8_0/Q4_K 等的量化 oracle 测试，Spark2_5 是 BF16 没有量化分歧）。建议跑一遍
+  同样的"prompt → token id 序列"对照，找差异层（最可能是 rope_partial 的
+  theta_scale、GeLUU 近似、per-head gate 输入源）。
+
+### 文件清单
+
+- `src/models/spark/mod.rs`、`src/models/spark/trunk/{mod,config,weights,forward}.rs`
+- `src/models/mod.rs`：加 `pub mod spark;`
+- `src/app/text.rs`：加 `spark2_5` 分发；`enable_thinking` 从 `--thinking` 传入
+- `src/core/tokenizer.rs`：加 `PreTokenizer::Spark2_5` 变体 + `spark2_5 → Spark2_5` 映射
+- `src/ops/rope.rs`：加 `rope_neox_partial`
