@@ -32,15 +32,6 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn static_weight(
-    source: &dyn TensorSource,
-    name: &str,
-    rows: usize,
-    cols: usize,
-) -> Weight<'static> {
-    crate::core::loader::load_static_weight(source, name, rows, cols)
-}
-
 pub fn load_layers(
     n_layer: usize,
     n_embd: usize,
@@ -61,37 +52,37 @@ pub fn load_layers(
                 &format!("blk.{l}.ffn_norm.weight"),
                 n_embd,
             ),
-            attn_qkv: static_weight(
+            attn_qkv: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.attn_qkv.weight"),
                 n_embd,
                 n_embd_qkv,
             ),
-            attn_gate: static_weight(
+            attn_gate: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.attn_gate.weight"),
                 n_embd,
                 n_head,
             ),
-            attn_output: static_weight(
+            attn_output: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.attn_output.weight"),
                 n_embd,
                 n_embd,
             ),
-            ffn_gate: static_weight(
+            ffn_gate: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.ffn_gate.weight"),
                 n_embd,
                 n_ff,
             ),
-            ffn_up: static_weight(
+            ffn_up: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.ffn_up.weight"),
                 n_embd,
                 n_ff,
             ),
-            ffn_down: static_weight(
+            ffn_down: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{l}.ffn_down.weight"),
                 n_ff,

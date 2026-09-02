@@ -123,15 +123,6 @@ pub fn load_layers<'a>(
         .collect()
 }
 
-fn static_weight(
-    source: &dyn TensorSource,
-    name: &str,
-    rows: usize,
-    cols: usize,
-) -> Weight<'static> {
-    crate::core::loader::load_static_weight(source, name, rows, cols)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn load_layers_static(
     source: Arc<dyn TensorSource>,
@@ -146,33 +137,33 @@ pub fn load_layers_static(
         .map(|l| LlamaLayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            wq: static_weight(
+            wq: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{}.attn_q.weight", l),
                 n_embd,
                 n_embd_q,
             ),
-            wk: static_weight(
+            wk: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{}.attn_k.weight", l),
                 n_embd,
                 n_embd_gqa,
             ),
-            wv: static_weight(
+            wv: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{}.attn_v.weight", l),
                 n_embd,
                 n_embd_gqa,
             ),
-            wo: static_weight(
+            wo: crate::core::loader::load_static_weight(
                 source,
                 &format!("blk.{}.attn_output.weight", l),
                 n_embd_q,
                 n_embd,
             ),
-            w_gate: static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
-            w_up: static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
-            w_down: static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
+            w_gate: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_gate.weight", l), n_embd, n_ff),
+            w_up: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_up.weight", l), n_embd, n_ff),
+            w_down: crate::core::loader::load_static_weight(source, &format!("blk.{}.ffn_down.weight", l), n_ff, n_embd),
         })
         .collect()
 }
