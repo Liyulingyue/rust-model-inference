@@ -18,6 +18,17 @@
 //! single new element; the conv state shifts left and a new column is
 //! appended. For prefill (n_tokens > 1) we process them all at once and
 //! write the trailing `d_conv - 1` columns back to the state.
+//!
+//! ## Scratch buffer sizing invariant
+//!
+//! All three local `max_n_in` expressions in `forward_layer`,
+//! `forward_attention`, and `forward_shortconv` **must** equal
+//! `(n_embd * 3).max(n_embd_q).max(n_ff)` and stay synchronized with
+//! `ExecutionScratchpad::new`. The `n_embd * 3` term covers the shortconv
+//! `in_proj` output (the b∥c∥x concatenation); using only `n_ff` here is a
+//! latent heap overflow when `n_embd * 3 > n_ff` (e.g. LFM2.5-230M where
+//! `n_embd=1024, n_ff=2560, 3*n_embd=3072`). See `ExecutionScratchpad` for
+//! the full table of consumers and widths.
 
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
@@ -461,7 +472,7 @@ fn forward_layer(
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
@@ -663,7 +674,7 @@ fn forward_attention(
     let attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let max_n_in = n_embd_q.max(cfg.n_ff);
+    let max_n_in = (cfg.n_embd * 3).max(n_embd_q).max(cfg.n_ff);
     let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
     let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
     let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
