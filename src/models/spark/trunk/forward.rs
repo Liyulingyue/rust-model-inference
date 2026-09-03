@@ -430,28 +430,27 @@ pub fn run_inference(
         let _ = tokenizer.decode(&[tok], true);
     }
     let mut generated: Vec<u32> = Vec::new();
-    for _ in 0..max_tokens {
-        let next = session.decode_step(
-            last_token,
-            prompt_tokens.len() + generated.len(),
-            temperature,
-        )?;
-        let piece = tokenizer.decode(&[next], true);
+    // `last_token` is the first predicted token, produced by the final
+    // prefill step. Print it first, then keep decoding its successors.
+    let mut current = last_token;
+    for step in 0..max_tokens {
+        let pos = prompt_tokens.len() + step;
+        let piece = tokenizer.decode(&[current], true);
         print!("{}", piece);
         io::stdout().flush().map_err(|error| error.to_string())?;
-        generated.push(next);
+        generated.push(current);
         // Stop on EOS token (matches `tokenizer.ggml.eos_token_id`) or
         // on the trailing `<｜end▁of▁sentence｜>` (the assistant turn
         // delimiter that the model emits at the end of its reply).
         if let Some(eos) = tokenizer.eos_id() {
-            if next == eos {
+            if current == eos {
                 break;
             }
         }
         if piece.contains("<｜end▁of▁sentence｜>") {
             break;
         }
-        last_token = next;
+        current = session.decode_step(current, pos, temperature)?;
     }
 
     let elapsed_ms = inference_started.elapsed().as_millis();
