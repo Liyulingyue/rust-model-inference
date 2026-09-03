@@ -21,8 +21,10 @@ import argparse
 import io
 import json
 import math
+import os
 import pickle
 import struct
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,7 @@ ALIGNMENT = 32
 GGML_F32 = 0
 GGML_F16 = 1
 GGML_I64 = 27
+GGML_BF16 = 30
 
 # GGUF metadata value types
 _T_UINT8, _T_INT8, _T_UINT16, _T_INT16 = 0, 1, 2, 3
@@ -273,6 +276,115 @@ def _gguf_array(values: list) -> bytes:
     raise ValueError(f"mixed array {values!r}")
 
 
+def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
+    if any(dim <= 0 for dim in dims):
+        raise ValueError(f"invalid tensor dimensions: {dims}")
+    size = {GGML_F32: 4, GGML_F16: 2, GGML_BF16: 2, GGML_I64: 8}.get(ggml_type)
+    if size is None:
+        raise ValueError(f"unsupported GGML type {ggml_type}")
+    return math.prod(dims) * size
+
+
+def _read_gguf(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tuple[int, ...], int, int]]]:
+    file_size = path.stat().st_size
+    pos = 0
+    fh = path.open("rb")
+
+    def take(fmt: str):
+        nonlocal pos
+        size = struct.calcsize(fmt)
+        raw = fh.read(size)
+        if len(raw) != size:
+            raise ValueError(f"{path}: truncated GGUF")
+        result = struct.unpack(fmt, raw)
+        pos += size
+        return result[0] if len(result) == 1 else result
+
+    def string() -> str:
+        nonlocal pos
+        length = take("<Q")
+        raw = fh.read(length)
+        if len(raw) != length:
+            raise ValueError(f"{path}: truncated GGUF string")
+        pos += length
+        return raw.decode("utf-8")
+
+    def value() -> object:
+        value_type = take("<I")
+        if value_type == _T_STRING:
+            return string()
+        if value_type == _T_BOOL:
+            return bool(take("<B"))
+        if value_type == _T_ARRAY:
+            item_type, count = take("<I"), take("<Q")
+            return [value_for_type(item_type) for _ in range(count)]
+        return value_for_type(value_type)
+
+    def value_for_type(value_type: int) -> object:
+        scalar_formats = {
+            _T_UINT8: "<B", _T_INT8: "<b", _T_UINT16: "<H", _T_INT16: "<h",
+            _T_UINT32: "<I", _T_INT32: "<i", _T_FLOAT32: "<f", _T_UINT64: "<Q",
+            _T_INT64: "<q", _T_FLOAT64: "<d",
+        }
+        if value_type == _T_STRING:
+            return string()
+        if value_type == _T_BOOL:
+            return bool(take("<B"))
+        fmt = scalar_formats.get(value_type)
+        if fmt is None:
+            raise ValueError(f"{path}: unsupported GGUF metadata type {value_type}")
+        return take(fmt)
+
+    try:
+        if take("<4s") != b"GGUF" or take("<I") != 3:
+            raise ValueError(f"{path}: unsupported GGUF header")
+        tensor_count, metadata_count = take("<Q"), take("<Q")
+        metadata: dict[str, object] = {}
+        for _ in range(metadata_count):
+            key = string()
+            if key in metadata:
+                raise ValueError(f"{path}: duplicate metadata key {key}")
+            metadata[key] = value()
+        directory: dict[str, tuple[int, tuple[int, ...], int, int]] = {}
+        pending: list[tuple[str, int, tuple[int, ...], int]] = []
+        tensor_names: set[str] = set()
+        for _ in range(tensor_count):
+            name = string()
+            ndim = take("<I")
+            dims = tuple(take("<Q") for _ in range(ndim))
+            ggml_type, relative_offset = take("<I"), take("<Q")
+            if name in tensor_names:
+                raise ValueError(f"{path}: duplicate tensor {name}")
+            tensor_names.add(name)
+            pending.append((name, ggml_type, dims, relative_offset))
+        data_start = (pos + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
+        for name, ggml_type, dims, relative_offset in pending:
+            length = _tensor_nbytes(ggml_type, dims)
+            absolute_offset = data_start + relative_offset
+            if absolute_offset < data_start or absolute_offset + length > file_size:
+                raise ValueError(f"{path}: tensor {name} lies outside file")
+            directory[name] = (ggml_type, dims, length, absolute_offset)
+        return metadata, directory
+    finally:
+        fh.close()
+
+
+def read_gguf_directory(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tuple[int, ...], int]]]:
+    metadata, directory = _read_gguf(path)
+    return metadata, {name: entry[:3] for name, entry in directory.items()}
+
+
+def read_gguf_tensor_bytes(path: Path, name: str) -> bytes:
+    _metadata, directory = _read_gguf(path)
+    try:
+        _ggml_type, _dims, length, offset = directory[name]
+    except KeyError as error:
+        raise KeyError(f"{path}: missing tensor {name}") from error
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        return fh.read(length)
+
+
 class GgufWriter:
     """Two-pass GGUF v3 writer: header (metadata + tensor info) then aligned data.
 
@@ -284,11 +396,22 @@ class GgufWriter:
         self.path = path
         self.metadata: list[tuple[str, object]] = []
         self.tensors: list[tuple[str, int, tuple, bytes]] = []  # name, ggml_type, gguf_dims, raw
+        self._metadata_keys: set[str] = set()
+        self._tensor_names: set[str] = set()
 
     def add_meta(self, key: str, value) -> None:
+        if key in self._metadata_keys:
+            raise ValueError(f"duplicate metadata key {key}")
+        self._metadata_keys.add(key)
         self.metadata.append((key, value))
 
     def add_tensor(self, name: str, ggml_type: int, gguf_dims: tuple, raw: bytes) -> None:
+        if name in self._tensor_names:
+            raise ValueError(f"duplicate output tensor {name}")
+        expected = _tensor_nbytes(ggml_type, gguf_dims)
+        if len(raw) != expected:
+            raise ValueError(f"{name}: {len(raw)} bytes, expected {expected}")
+        self._tensor_names.add(name)
         self.tensors.append((name, ggml_type, gguf_dims, raw))
 
     def _build_header(self, offsets: list) -> bytes:
@@ -314,7 +437,7 @@ class GgufWriter:
         # derives the data region as align_up(end-of-header).
         return buf.getvalue()
 
-    def write(self) -> None:
+    def _write_file(self, path: Path) -> None:
         placeholder = self._build_header([0] * len(self.tensors))
         data_start = (len(placeholder) + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
         # relative offsets the reader adds to its own padded data offset
@@ -327,7 +450,7 @@ class GgufWriter:
         header = self._build_header(rel_offsets)
         if len(header) != len(placeholder):
             raise AssertionError("header size instability")
-        with open(self.path, "wb") as fh:
+        with open(path, "wb") as fh:
             fh.write(header)
             fh.write(b"\x00" * (data_start - len(header)))
             for rel, (_name, _t, _dims, raw) in zip(rel_offsets, self.tensors):
@@ -336,6 +459,37 @@ class GgufWriter:
                 pad = (ALIGNMENT - (len(raw) % ALIGNMENT)) % ALIGNMENT
                 if pad:
                     fh.write(b"\x00" * pad)
+
+    def _validate_readback(self, metadata: dict[str, object], tensors: dict[str, tuple[int, tuple[int, ...], int]]) -> None:
+        if metadata != dict(self.metadata):
+            raise ValueError("GGUF metadata readback mismatch")
+        expected = {
+            name: (ggml_type, dims, len(raw))
+            for name, ggml_type, dims, raw in self.tensors
+        }
+        if tensors != expected:
+            raise ValueError("GGUF tensor directory readback mismatch")
+
+    def write(self, *, overwrite: bool = False) -> None:
+        if self.path.exists() and not overwrite:
+            raise FileExistsError(f"output already exists: {self.path}")
+        fd, raw_tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        os.close(fd)
+        tmp = Path(raw_tmp)
+        try:
+            self._write_file(tmp)
+            metadata, tensors = read_gguf_directory(tmp)
+            self._validate_readback(metadata, tensors)
+            for name, _ggml_type, _dims, raw in self.tensors:
+                if read_gguf_tensor_bytes(tmp, name) != raw:
+                    raise ValueError(f"GGUF tensor payload readback mismatch: {name}")
+            if overwrite:
+                os.replace(tmp, self.path)
+            else:
+                os.link(tmp, self.path)
+                tmp.unlink()
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def gguf_dims(torch_dims: tuple) -> tuple:
@@ -397,25 +551,57 @@ def _i0(x: float) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="export dots.tts to GGUF + mmproj")
-    parser.add_argument("model_dir", type=str, help="models/dots.tts-base or models/dots.tts.edit")
-    parser.add_argument("--variant", default=None, help="base|edit (default: from dir name)")
-    parser.add_argument("--out-dir", default=None, help="output directory (default: model dir parent)")
-    args = parser.parse_args()
+def validate_variant(value: str) -> str:
+    if value not in {"base", "edit"}:
+        raise ValueError(f"unsupported dots.tts variant: {value}")
+    return value
 
-    model_dir = validated_dir(args.model_dir, must_exist=True)
-    variant = args.variant or ("edit" if "edit" in model_dir.name else "base")
-    out_dir = validated_dir(args.out_dir or str(model_dir.parent), must_exist=False)
+
+def export_model(model_dir: Path, variant: str, out_dir: Path, overwrite: bool) -> tuple[Path, Path]:
+    variant = validate_variant(variant)
+    model_dir = Path(model_dir).resolve()
+    out_dir = Path(out_dir).resolve()
+    required = (
+        "model.safetensors", "speaker_encoder.safetensors", "vocoder.safetensors",
+        "llm_config.json", "config.json", "tokenizer_config.json", "vocab.json",
+        "added_tokens.json", "merges.txt", "latent_stats.pt",
+    )
+    missing = [str(model_dir / name) for name in required if not (model_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"missing required input paths: {', '.join(missing)}")
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"dots-tts-{variant}"
     llm_path = out_dir / f"{prefix}.gguf"
     mmproj_path = out_dir / f"{prefix}-mmproj.gguf"
+    if not overwrite and (llm_path.exists() or mmproj_path.exists()):
+        existing = llm_path if llm_path.exists() else mmproj_path
+        raise FileExistsError(f"output already exists: {existing}")
 
     print(f"exporting variant={variant} from {model_dir}")
-    core = open_safetensors(model_dir / "model.safetensors")
-    speaker = open_safetensors(model_dir / "speaker_encoder.safetensors")
-    vocoder = open_safetensors(model_dir / "vocoder.safetensors")
+    core = speaker = vocoder = None
+    try:
+        core = open_safetensors(model_dir / "model.safetensors")
+        speaker = open_safetensors(model_dir / "speaker_encoder.safetensors")
+        vocoder = open_safetensors(model_dir / "vocoder.safetensors")
+        return _export_open_model(model_dir, variant, out_dir, overwrite, core, speaker, vocoder)
+    finally:
+        for source in (core, speaker, vocoder):
+            if source is not None:
+                source.close()
+
+
+def _export_open_model(
+    model_dir: Path,
+    variant: str,
+    out_dir: Path,
+    overwrite: bool,
+    core: Safetensors,
+    speaker: Safetensors,
+    vocoder: Safetensors,
+) -> tuple[Path, Path]:
+    prefix = f"dots-tts-{variant}"
+    llm_path = out_dir / f"{prefix}.gguf"
+    mmproj_path = out_dir / f"{prefix}-mmproj.gguf"
     llm_cfg = json.loads((model_dir / "llm_config.json").read_text())
     cfg = json.loads((model_dir / "config.json").read_text())
     tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
@@ -432,7 +618,7 @@ def main() -> None:
     gguf = GgufWriter(llm_path)
     gguf.add_meta("general.architecture", "qwen2")
     gguf.add_meta("general.name", f"dots.tts-{variant}")
-    gguf.add_meta("general.file_type", 1)  # F16
+    gguf.add_meta("general.file_type", 32)
     gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta("qwen2.block_count", n_layer)
     gguf.add_meta("qwen2.context_length", llm_cfg["max_position_embeddings"])
@@ -479,17 +665,15 @@ def main() -> None:
             )
             gguf.add_tensor(dst_name, GGML_F32, gguf_dims(t.shape), raw)
         else:
-            raw = (
-                bf16_to_f16(t.raw)
-                if t.dtype == "BF16"
-                else (t.raw if t.dtype == "F16" else f32_to_f16(t.raw))
-            )
-            gguf.add_tensor(dst_name, GGML_F16, gguf_dims(t.shape), raw)
+            if t.dtype != "BF16":
+                raise ValueError(f"{src_name}: expected BF16, got {t.dtype}")
+            gguf.add_tensor(dst_name, GGML_BF16, gguf_dims(t.shape), t.raw)
 
     embed = core.tensor("llm.model.embed_tokens.weight")
-    raw_embed = bf16_to_f16(embed.raw) if embed.dtype == "BF16" else embed.raw
-    gguf.add_tensor("token_embd.weight", GGML_F16, gguf_dims(embed.shape), raw_embed)
-    gguf.add_tensor("output.weight", GGML_F16, gguf_dims(embed.shape), raw_embed)  # tied
+    if embed.dtype != "BF16":
+        raise ValueError(f"{embed.name}: expected BF16, got {embed.dtype}")
+    gguf.add_tensor("token_embd.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)
+    gguf.add_tensor("output.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)  # tied
     emit_llm("llm.model.norm.weight", "output_norm.weight")
     layer_map = {
         "input_layernorm.weight": "attn_norm.weight",
@@ -505,14 +689,19 @@ def main() -> None:
     for layer in range(n_layer):
         for src_key, dst_key in layer_map.items():
             emit_llm(f"llm.model.layers.{layer}.{src_key}", f"blk.{layer}.{dst_key}")
-    gguf.write()
+    gguf.write(overwrite=overwrite)
     print(f"wrote {llm_path} ({len(gguf.tensors)} tensors)")
 
-    # ---------------- mmproj gguf (arch dotstts) ---------------- #
+    # ---------------- mmproj gguf (arch clip) ---------------- #
     gguf = GgufWriter(mmproj_path)
-    gguf.add_meta("general.architecture", "dotstts")
+    gguf.add_meta("general.architecture", "clip")
     gguf.add_meta("general.name", f"dots.tts-{variant}-mmproj")
-    gguf.add_meta("general.file_type", 1)
+    gguf.add_meta("general.file_type", 32)
+    gguf.add_meta("clip.has_vision_encoder", False)
+    gguf.add_meta("clip.has_audio_encoder", True)
+    gguf.add_meta("clip.has_gen_audio_encoder", True)
+    gguf.add_meta("clip.audio.projector_type", "dotstts_spkenc")
+    gguf.add_meta("clip.gen.audio.projector_type", "dotstts_gen")
     gguf.add_meta("dotstts.patch_size", cfg["patch_size"])
     gguf.add_meta("dotstts.latent_dim", cfg["latent_dim"])
     gguf.add_meta("dotstts.hop_size", math.prod(cfg["vocoder"]["downsample_rates"]))
@@ -520,13 +709,21 @@ def main() -> None:
     gguf.add_meta("dotstts.fm_hidden_size", cfg["DiT"]["hidden_size"])
     gguf.add_meta("dotstts.llm_hidden_size", n_embd)
     gguf.add_meta("dotstts.xvec_dim", cfg.get("campplus_embedding_size", 512))
+    gguf.add_meta("dotstts.sampling.nfe", 10)
+    gguf.add_meta("dotstts.sampling.guidance", 1.2)
+    gguf.add_meta("dotstts.sampling.speaker_scale", 1.5)
+    gguf.add_meta("dotstts.sampling.eos_threshold", 0.8)
 
     gguf.add_tensor("dotstts.latent_stats.mean", GGML_F32, (128,), struct.pack("<128f", *latent_stats["mean"][:128]))
     gguf.add_tensor("dotstts.latent_stats.var", GGML_F32, (128,), struct.pack("<128f", *latent_stats["var"][:128]))
 
     def emit(source: Safetensors, src_name: str, dst_name: str, ggml_type: int) -> None:
         t = source.tensor(src_name)
-        if ggml_type == GGML_F16:
+        if ggml_type == GGML_BF16:
+            if t.dtype != "BF16":
+                raise ValueError(f"{src_name}: expected BF16, got {t.dtype}")
+            raw = t.raw
+        elif ggml_type == GGML_F16:
             raw = bf16_to_f16(t.raw) if t.dtype == "BF16" else (t.raw if t.dtype == "F16" else f32_to_f16(t.raw))
         elif ggml_type == GGML_F32:
             if t.dtype != "F32":
@@ -538,19 +735,19 @@ def main() -> None:
 
     # heads
     for name in ("hidden_proj", "latent_proj", "coordinate_proj"):
-        emit(core, f"{name}.weight", f"dotstts.{name}.weight", GGML_F16)
-        emit(core, f"{name}.bias", f"dotstts.{name}.bias", GGML_F16)
+        emit(core, f"{name}.weight", f"dotstts.{name}.weight", GGML_BF16)
+        emit(core, f"{name}.bias", f"dotstts.{name}.bias", GGML_BF16)
     for idx in (0, 1):
-        emit(core, f"xvec_proj.{idx}.weight", f"dotstts.xvec_proj.{idx}.weight", GGML_F16)
-        emit(core, f"xvec_proj.{idx}.bias", f"dotstts.xvec_proj.{idx}.bias", GGML_F16)
+        emit(core, f"xvec_proj.{idx}.weight", f"dotstts.xvec_proj.{idx}.weight", GGML_BF16)
+        emit(core, f"xvec_proj.{idx}.bias", f"dotstts.xvec_proj.{idx}.bias", GGML_BF16)
     for idx in (0, 2):
-        emit(core, f"eos_proj.{idx}.weight", f"dotstts.eos_proj.{idx}.weight", GGML_F16)
-        emit(core, f"eos_proj.{idx}.bias", f"dotstts.eos_proj.{idx}.bias", GGML_F16)
+        emit(core, f"eos_proj.{idx}.weight", f"dotstts.eos_proj.{idx}.weight", GGML_BF16)
+        emit(core, f"eos_proj.{idx}.bias", f"dotstts.eos_proj.{idx}.bias", GGML_BF16)
 
     # patch encoder
     for part in ("ds_proj", "in_proj", "out_proj"):
-        emit(core, f"patch_encoder.{part}.weight", f"dotstts.patch_encoder.{part}.weight", GGML_F16)
-        emit(core, f"patch_encoder.{part}.bias", f"dotstts.patch_encoder.{part}.bias", GGML_F16)
+        emit(core, f"patch_encoder.{part}.weight", f"dotstts.patch_encoder.{part}.weight", GGML_BF16)
+        emit(core, f"patch_encoder.{part}.bias", f"dotstts.patch_encoder.{part}.bias", GGML_BF16)
     enc_map = {
         "attn_norm.weight": "attn_norm.weight",
         "attn.q_proj.weight": "attn_q.weight",
@@ -567,17 +764,17 @@ def main() -> None:
     for layer in range(cfg["PatchEncoder"]["num_layers"]):
         for src_key, dst_key in enc_map.items():
             emit(core, f"patch_encoder.encoder.layers.{layer}.{src_key}",
-                 f"dotstts.patch_encoder.encoder.layers.{layer}.{dst_key}", GGML_F16)
+                 f"dotstts.patch_encoder.encoder.layers.{layer}.{dst_key}", GGML_BF16)
 
     # DiT
     for idx_name in ("input_layer",):
-        emit(core, f"velocity_field_predictor.{idx_name}.weight", f"dotstts.dit.{idx_name}.weight", GGML_F16)
-        emit(core, f"velocity_field_predictor.{idx_name}.bias", f"dotstts.dit.{idx_name}.bias", GGML_F16)
+        emit(core, f"velocity_field_predictor.{idx_name}.weight", f"dotstts.dit.{idx_name}.weight", GGML_BF16)
+        emit(core, f"velocity_field_predictor.{idx_name}.bias", f"dotstts.dit.{idx_name}.bias", GGML_BF16)
     for sub in ("mlp.0", "mlp.2"):
         emit(core, f"velocity_field_predictor.time_embedder.{sub}.weight",
-             f"dotstts.dit.time_embedder.{sub}.weight", GGML_F16)
+             f"dotstts.dit.time_embedder.{sub}.weight", GGML_BF16)
         emit(core, f"velocity_field_predictor.time_embedder.{sub}.bias",
-             f"dotstts.dit.time_embedder.{sub}.bias", GGML_F16)
+             f"dotstts.dit.time_embedder.{sub}.bias", GGML_BF16)
     dit_block_map = {
         "attn.q_proj.weight": "attn.q.weight",
         "attn.k_proj.weight": "attn.k.weight",
@@ -596,12 +793,12 @@ def main() -> None:
     for layer in range(cfg["DiT"]["num_layers"]):
         for src_key, dst_key in dit_block_map.items():
             emit(core, f"velocity_field_predictor.blocks.{layer}.{src_key}",
-                 f"dotstts.dit.blocks.{layer}.{dst_key}", GGML_F16)
+                 f"dotstts.dit.blocks.{layer}.{dst_key}", GGML_BF16)
     for sub in ("adaLN_modulation.1", "linear"):
         emit(core, f"velocity_field_predictor.output_layer.{sub}.weight",
-             f"dotstts.dit.output_layer.{sub}.weight", GGML_F16)
+             f"dotstts.dit.output_layer.{sub}.weight", GGML_BF16)
         emit(core, f"velocity_field_predictor.output_layer.{sub}.bias",
-             f"dotstts.dit.output_layer.{sub}.bias", GGML_F16)
+             f"dotstts.dit.output_layer.{sub}.bias", GGML_BF16)
 
     # speaker, strip the "model." prefix; I64 scalars (BN counters) pass through
     for name in sorted(speaker.header):
@@ -666,12 +863,23 @@ def main() -> None:
                 gguf.add_tensor(f"dotstts.vocoder.decoder.resblocks.{b}.activations.{a}.{tag}",
                                 GGML_F32, (12,), struct.pack("<12f", *filt))
 
-    gguf.write()
+    gguf.write(overwrite=overwrite)
     print(f"wrote {mmproj_path} ({len(gguf.tensors)} tensors)")
 
-    core.close()
-    speaker.close()
-    vocoder.close()
+    return llm_path, mmproj_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="export dots.tts to GGUF + mmproj")
+    parser.add_argument("model_dir", type=str, help="models/dots.tts-base or models/dots.tts.edit")
+    parser.add_argument("--variant", default=None, help="base|edit (default: from dir name)")
+    parser.add_argument("--out-dir", default=None, help="output directory (default: model dir parent)")
+    parser.add_argument("--overwrite", action="store_true", help="replace existing output files")
+    args = parser.parse_args()
+    model_dir = validated_dir(args.model_dir, must_exist=True)
+    variant = args.variant or ("edit" if "edit" in model_dir.name else "base")
+    out_dir = validated_dir(args.out_dir or str(model_dir.parent), must_exist=False)
+    export_model(model_dir, variant, out_dir, args.overwrite)
 
 
 if __name__ == "__main__":
