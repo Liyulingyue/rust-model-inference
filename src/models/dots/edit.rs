@@ -56,14 +56,8 @@ pub fn resolve_edit_request(
     let (parts, operations) = parse_instruction(instruction)?;
     let rendered_source = render_source(&parts)?;
     let rendered_target = render_target(&parts)?;
-    let source_text = match source_text {
-        Some(text) => text.trim().to_owned(),
-        None => rendered_source,
-    };
-    let target_text = match target_text {
-        Some(text) => text.trim().to_owned(),
-        None => rendered_target,
-    };
+    let source_text = source_text.unwrap_or(&rendered_source).trim().to_owned();
+    let target_text = target_text.unwrap_or(&rendered_target).trim().to_owned();
     if source_text.is_empty() || target_text.is_empty() {
         return Err("edit source and target text must both be non-empty".into());
     }
@@ -278,6 +272,9 @@ fn parse_attributes(opening: &str, attr_start: usize) -> Result<Option<String>, 
         if value.is_empty() {
             return Err("attributes need a value".into());
         }
+        if !quoted && !is_decimal(value) {
+            return Err("unquoted attribute values must be signed decimals".into());
+        }
         let value = decode_entities(value)?;
         if name.eq_ignore_ascii_case("targ") {
             if !quoted {
@@ -290,6 +287,20 @@ fn parse_attributes(opening: &str, attr_start: usize) -> Result<Option<String>, 
         rest = following;
     }
     Ok(target)
+}
+
+fn is_decimal(value: &str) -> bool {
+    let value = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fractional = parts.next();
+    if parts.next().is_some() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match fractional {
+        None => !whole.is_empty(),
+        Some(part) => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
+    }
 }
 
 fn decode_entities(text: &str) -> Result<String, String> {
@@ -440,7 +451,8 @@ fn normalize_target_parts(parts: &[String]) -> String {
         }
         rendered.push_str(part);
     }
-    trim_space_before_punctuation(&rendered)
+    let collapsed = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    trim_space_before_punctuation(&collapsed)
 }
 
 fn needs_target_space(left: &str, right: &str) -> bool {
@@ -456,7 +468,8 @@ fn word_internal_join(left: &str, right: &str) -> bool {
         return false;
     };
     if matches!(right_edge, '\'' | '-' | '’') {
-        return is_ascii_word(left_edge) && apostrophe_or_hyphen_suffix(&right[1..], right_edge);
+        return is_ascii_word(left_edge)
+            && apostrophe_or_hyphen_suffix(&right[right_edge.len_utf8()..], right_edge);
     }
     if matches!(left_edge, '\'' | '-' | '’') {
         let before = left[..left.len() - left_edge.len_utf8()].chars().last();
@@ -727,7 +740,7 @@ mod tests {
         for instruction in [
             "<pitch, semitones=-2>hello</pitch>",
             "<rate, factor=0.8>hello</rate>",
-            "<sub note=keep targ='new'>old</sub>",
+            "<sub note='keep' targ='new'>old</sub>",
         ] {
             assert!(resolve_edit_request(instruction, None, None, XVectorMode::Auto).is_ok());
         }
@@ -744,5 +757,37 @@ mod tests {
         ] {
             assert!(resolve_edit_request(instruction, None, None, XVectorMode::Auto).is_err());
         }
+    }
+
+    #[test]
+    fn normalizes_internal_target_whitespace_only_for_text_edits() {
+        let request =
+            resolve_edit_request("foo\tbar<ins>x</ins>baz", None, None, XVectorMode::Auto).unwrap();
+        assert_eq!(request.source_text, "foo\tbar baz");
+        assert_eq!(request.target_text, "foo bar x baz");
+    }
+
+    #[test]
+    fn rejects_merged_unquoted_numeric_attributes() {
+        assert!(resolve_edit_request(
+            "<pitch semitones=-2rate=1>hello</pitch>",
+            None,
+            None,
+            XVectorMode::Auto,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn renders_curly_apostrophe_insertions_without_panicking() {
+        let request =
+            resolve_edit_request("foo<ins>’s</ins>bar", None, None, XVectorMode::Auto).unwrap();
+        assert_eq!(request.source_text, "foo bar");
+        assert_eq!(request.target_text, "foo’s bar");
+    }
+
+    #[test]
+    fn rejects_whitespace_only_rendered_surfaces() {
+        assert!(resolve_edit_request(" \t\n ", None, None, XVectorMode::Auto).is_err());
     }
 }
