@@ -378,10 +378,6 @@ fn fixed_noise_patch(
         .ok_or_else(|| "fixed DiT noise is shorter than the decoded patch count".into())
 }
 
-fn should_emit_patch(decoded_index: usize, drop_count: usize) -> bool {
-    decoded_index >= drop_count
-}
-
 /// One decoded latent patch in normalized space plus its raw (denormalized) form.
 pub struct GenerateOptions {
     pub max_patches: usize,
@@ -440,6 +436,39 @@ impl FillPolicy {
 
     fn drop_generated_head_patches(self) -> usize {
         usize::from(matches!(self, Self::BasePrompt))
+    }
+
+    fn decode_plan(self, target_patch_count: usize) -> Result<DecodePlan, String> {
+        let drop_count = self.drop_generated_head_patches();
+        let scheduled_patch_count = target_patch_count
+            .checked_add(drop_count)
+            .ok_or_else(|| "dots decode patch count overflow".to_string())?;
+        Ok(DecodePlan {
+            scheduled_patch_count,
+            drop_count,
+        })
+    }
+}
+
+struct DecodePlan {
+    scheduled_patch_count: usize,
+    drop_count: usize,
+}
+
+struct DecodeStep {
+    noise_patch_index: usize,
+    should_check_eos: bool,
+    should_emit: bool,
+}
+
+impl DecodePlan {
+    fn step(&self, decoded_index: usize) -> DecodeStep {
+        let is_payload = decoded_index >= self.drop_count;
+        DecodeStep {
+            noise_patch_index: decoded_index,
+            should_check_eos: is_payload,
+            should_emit: is_payload,
+        }
     }
 }
 
@@ -607,7 +636,7 @@ where
     if patch_len == 0 {
         return Err("dots latent patch size must be positive".into());
     }
-    let (conditioning, fill_policy, schedule) = match request {
+    let (conditioning, fill_policy, decode_plan, schedule) = match request {
         GenerationRequest::Base { text, prompt } => {
             let fill_patch_count = match prompt {
                 Some(prompt) => {
@@ -618,11 +647,15 @@ where
                 }
                 None => 0,
             };
-            (
-                prompt,
-                FillPolicy::base(fill_patch_count),
-                build_generation_schedule(tokenizer, text, fill_patch_count, options.max_patches)?,
-            )
+            let fill_policy = FillPolicy::base(fill_patch_count);
+            let decode_plan = fill_policy.decode_plan(options.max_patches)?;
+            let schedule = build_generation_schedule(
+                tokenizer,
+                text,
+                fill_patch_count,
+                decode_plan.scheduled_patch_count,
+            )?;
+            (prompt, fill_policy, decode_plan, schedule)
         }
         GenerationRequest::Edit {
             source_text,
@@ -634,17 +667,21 @@ where
                 return Err("edit source conditioning is not patch-sized".into());
             }
             let fill_patch_count = source.patches.len() / patch_len;
+            let fill_policy = FillPolicy::EditSource;
+            let decode_plan = fill_policy.decode_plan(options.max_patches)?;
+            let schedule = build_edit_generation_schedule(
+                tokenizer,
+                source_text,
+                instruction,
+                target_text,
+                fill_patch_count,
+                decode_plan.scheduled_patch_count,
+            )?;
             (
                 Some(source),
-                FillPolicy::EditSource,
-                build_edit_generation_schedule(
-                    tokenizer,
-                    source_text,
-                    instruction,
-                    target_text,
-                    fill_patch_count,
-                    options.max_patches,
-                )?,
+                fill_policy,
+                decode_plan,
+                schedule,
             )
         }
     };
@@ -729,9 +766,9 @@ where
     }
     let mut raw_patches: Vec<f32> = Vec::new();
     let mut position = prefill_end;
-    let drop_count = fill_policy.drop_generated_head_patches();
     let mut stopped = false;
     for (decoded_index, &decode_position) in decode_span_positions.iter().enumerate() {
+        let decode_step = decode_plan.step(decoded_index);
         if decode_position < position {
             return Err("dots decode span positions are not ascending".into());
         }
@@ -747,11 +784,10 @@ where
             let hidden = session.llm.last_hidden().to_vec();
             session.append_hidden_chunk(&hidden)?;
         }
-        let should_check_eos = decoded_index >= drop_count;
-        let stop_after = should_check_eos
+        let stop_after = decode_step.should_check_eos
             && model.eos_probability(session.llm.last_hidden())? > options.eos_threshold;
         let mut z0 = vec![0.0f32; patch_len];
-        fill_noise(decoded_index, &mut z0)?;
+        fill_noise(decode_step.noise_patch_index, &mut z0)?;
         let patch = session.decode_next_patch(&g_cond, options, &z0)?;
         session.append_history_chunk(&patch)?;
         let raw = model.denormalize(&patch);
@@ -759,7 +795,7 @@ where
             .patch_encoder
             .encode_patch(&raw, &mut session.patch_encoder_state)?;
         session.llm.step_row(LlmInputRow::Embedding(&embedding))?;
-        if should_emit_patch(decoded_index, drop_count) {
+        if decode_step.should_emit {
             raw_patches.extend_from_slice(&raw);
         }
         position += 1;
@@ -823,8 +859,7 @@ pub fn synthesize_request_with_noise<R: Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        fixed_noise_patch, should_emit_patch, FillPolicy, GenerateOptions, GenerationRequest,
-        PromptConditioning,
+        fixed_noise_patch, FillPolicy, GenerateOptions, GenerationRequest, PromptConditioning,
     };
     use crate::models::dots::config::DotsTtsConfig;
 
@@ -874,18 +909,34 @@ mod tests {
     }
 
     #[test]
-    fn fixed_noise_is_consumed_once_per_decoded_patch() {
-        let fixed: Vec<f32> = (0..1024).map(|v| v as f32).collect();
-        assert_eq!(fixed_noise_patch(&fixed, 0, 512).unwrap(), &fixed[..512]);
-        assert_eq!(fixed_noise_patch(&fixed, 1, 512).unwrap(), &fixed[512..]);
-        assert!(fixed_noise_patch(&fixed, 2, 512).is_err());
-    }
+    fn decode_plan_preserves_target_budget_and_consumes_noise_for_every_solved_patch() {
+        let fixed_noise = [10.0, 11.0, 20.0, 21.0];
 
-    #[test]
-    fn discarded_base_head_is_consumed_but_not_emitted() {
-        assert!(!should_emit_patch(0, 1));
-        assert!(should_emit_patch(1, 1));
-        assert!(should_emit_patch(0, 0));
+        let conditioned_base = FillPolicy::BasePrompt.decode_plan(1).unwrap();
+        assert_eq!(conditioned_base.scheduled_patch_count, 2);
+        let head = conditioned_base.step(0);
+        assert_eq!((head.should_check_eos, head.should_emit), (false, false));
+        assert_eq!(
+            fixed_noise_patch(&fixed_noise, head.noise_patch_index, 2).unwrap(),
+            &[10.0, 11.0]
+        );
+        let payload = conditioned_base.step(1);
+        assert_eq!((payload.should_check_eos, payload.should_emit), (true, true));
+        assert_eq!(
+            fixed_noise_patch(&fixed_noise, payload.noise_patch_index, 2).unwrap(),
+            &[20.0, 21.0]
+        );
+
+        for policy in [FillPolicy::EditSource, FillPolicy::None] {
+            let plan = policy.decode_plan(1).unwrap();
+            assert_eq!(plan.scheduled_patch_count, 1);
+            let payload = plan.step(0);
+            assert_eq!((payload.should_check_eos, payload.should_emit), (true, true));
+            assert_eq!(
+                fixed_noise_patch(&fixed_noise, payload.noise_patch_index, 2).unwrap(),
+                &[10.0, 11.0]
+            );
+        }
     }
 
     #[test]
