@@ -950,9 +950,9 @@ pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
 /// IQ2_XS super-block (256 elements, 74 bytes). See `ggml-quants.c::dequantize_row_iq2_xs`.
 pub fn dequantize_row_iq2_xs(block_bytes: &[u8], output: &mut [f32]) {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_xs_grid();
-    let signs = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2XS_GRID;
+    let signs = &self::iq_tables::IQ2XS_SIGNS;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ2_XS_SIZE;
@@ -985,9 +985,9 @@ pub fn dequantize_row_iq2_xs(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_xs_grid();
-    let signs = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2XS_GRID;
+    let signs = &self::iq_tables::IQ2XS_SIGNS;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1032,8 +1032,8 @@ pub fn vec_dot_iq2_xs_q8k(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
 /// IQ3_S super-block (256 elements, 110 bytes). See `ggml-quants.c::dequantize_row_iq3_s`.
 pub fn dequantize_row_iq3_s(block_bytes: &[u8], output: &mut [f32]) {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq3_s_grid();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ3S_GRID;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ3_S_SIZE;
@@ -1082,8 +1082,8 @@ pub fn dequantize_row_iq3_s(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq3_s_grid();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ3S_GRID;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1237,9 +1237,9 @@ pub fn vec_dot_iq3_xxs_q8k(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn dequantize_row_iq2_xxs(block_bytes: &[u8], output: &mut [f32]) {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_xxs_grid();
-    let signs_tbl = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2XXS_GRID;
+    let signs_tbl = &self::iq_tables::IQ2XS_SIGNS;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ2_XXS_SIZE;
@@ -1277,9 +1277,9 @@ pub fn dequantize_row_iq2_xxs(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_xxs_grid();
-    let signs_tbl = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2XXS_GRID;
+    let signs_tbl = &self::iq_tables::IQ2XS_SIGNS;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1324,8 +1324,8 @@ pub fn vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn dequantize_row_iq2_s(block_bytes: &[u8], output: &mut [f32]) {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_s_grid();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2S_GRID;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ2_S_SIZE;
@@ -1358,8 +1358,8 @@ pub fn dequantize_row_iq2_s(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq2_s_grid();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ2S_GRID;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1417,9 +1417,9 @@ pub fn vec_dot_iq2_s_q8k_scalar(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn dequantize_row_iq3_xxs(block_bytes: &[u8], output: &mut [f32]) {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq3_xxs_grid();
-    let signs_tbl = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ3XXS_GRID;
+    let signs_tbl = &self::iq_tables::IQ2XS_SIGNS;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ3_XXS_SIZE;
@@ -1455,9 +1455,9 @@ pub fn dequantize_row_iq3_xxs(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let mask = self::iq_tables::iq2_xs_mask();
-    let grid = self::iq_tables::iq3_xxs_grid();
-    let signs_tbl = self::iq_tables::iq2_xs_signs();
+    let mask = &self::iq_tables::IQ2XS_MASK;
+    let grid = &self::iq_tables::IQ3XXS_GRID;
+    let signs_tbl = &self::iq_tables::IQ2XS_SIGNS;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1505,7 +1505,7 @@ pub fn vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
 /// IQ1_M super-block (256 elements, 56 bytes). See `ggml-quants.c::dequantize_row_iq1_m`.
 pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
-    let grid = self::iq_tables::iq1s_grid();
+    let grid = &self::iq_tables::IQ1S_GRID;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ1_M_SIZE;
@@ -1577,7 +1577,7 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let grid = self::iq_tables::iq1s_grid();
+    let grid = &self::iq_tables::IQ1S_GRID;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -1673,7 +1673,7 @@ pub fn vec_dot_iq1_m_q8k(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 
 /// IQ1_S super-block (256 elements, 50 bytes). See `ggml-quants.c::dequantize_row_iq1_s`.
 pub fn dequantize_row_iq1_s(block_bytes: &[u8], output: &mut [f32]) {
-    let grid = self::iq_tables::iq1s_grid();
+    let grid = &self::iq_tables::IQ1S_GRID;
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
         let boff = block_idx * BLOCK_IQ1_S_SIZE;
@@ -1704,7 +1704,7 @@ pub fn dequantize_row_iq1_s(block_bytes: &[u8], output: &mut [f32]) {
 }
 
 pub fn vec_dot_iq1_s_q8k_scalar(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
-    let grid = self::iq_tables::iq1s_grid();
+    let grid = &self::iq_tables::IQ1S_GRID;
     let nb = q8k.len();
     let mut sumf = 0.0f64;
     for i in 0..nb {
@@ -3073,7 +3073,7 @@ mod avx2_kq_parity {
 mod i_quant_tests {
     use super::*;
     use crate::ops::quant::iq_tables::{
-        iq2_xs_grid, iq2_xs_mask, iq2_xs_signs, iq3_s_grid, KVALUES_IQ4NL,
+        IQ2XS_GRID, IQ2XS_MASK, IQ2XS_SIGNS, IQ3S_GRID, KVALUES_IQ4NL,
     };
 
     #[test]
@@ -3086,10 +3086,10 @@ mod i_quant_tests {
 
     #[test]
     fn iq_grid_tables_have_expected_length() {
-        assert_eq!(iq2_xs_grid().len(), 512);
-        assert_eq!(iq2_xs_signs().len(), 128);
-        assert_eq!(iq2_xs_mask().len(), 8);
-        assert_eq!(iq3_s_grid().len(), 512);
+        assert_eq!(IQ2XS_GRID.len(), 512);
+        assert_eq!(IQ2XS_SIGNS.len(), 128);
+        assert_eq!(IQ2XS_MASK.len(), 8);
+        assert_eq!(IQ3S_GRID.len(), 512);
     }
 
     #[test]

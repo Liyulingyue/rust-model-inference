@@ -1,86 +1,40 @@
-use std::sync::OnceLock;
+//! Lookup tables for IQ2/IQ3/IQ1 quant codebooks and sign masks.
+//!
+//! All values are transcribed verbatim from `llama.cpp` `ggml-common.h` into
+//! plain Rust `const` arrays. No `.h` is parsed at build time and no tables
+//! are parsed at runtime; the data lives directly in the binary's read-only
+//! data section. If upstream `llama.cpp` ever changes one of these tables,
+//! regenerate `iq_tables_data.rs` from the header.
 
-const GGML_COMMON: &str = include_str!("../../../references/llama.cpp/ggml/src/ggml-common.h");
+include!("iq_tables_data.rs");
 
-fn parse_table<T>(type_name: &str, table_name: &str, expected: usize) -> Vec<T>
-where
-    T: TryFrom<i128>,
-{
-    let marker = format!("GGML_TABLE_BEGIN({type_name}, {table_name},");
-    let begin = GGML_COMMON
-        .find(&marker)
-        .unwrap_or_else(|| panic!("missing ggml table {type_name}, {table_name}"));
-    let tail = &GGML_COMMON[begin..];
-    let end = tail
-        .find("GGML_TABLE_END")
-        .unwrap_or_else(|| panic!("unterminated ggml table {type_name}, {table_name}"));
-    let mut values = Vec::with_capacity(expected);
-    for token in tail[..end]
-        .split(|character: char| character == ',' || character == ';' || character.is_whitespace())
-        .filter(|token| !token.is_empty())
-    {
-        let parsed = if let Some(hex) = token.strip_prefix("0x") {
-            i128::from_str_radix(hex, 16)
-        } else {
-            token.parse::<i128>()
-        };
-        let value = match parsed {
-            Ok(value) => match T::try_from(value) {
-                Ok(value) => value,
-                Err(_) => panic!("value out of range in ggml table {table_name}: {value}"),
-            },
-            Err(_) => continue,
-        };
-        values.push(value);
-    }
-    assert_eq!(
-        values.len(),
-        expected,
-        "wrong length for ggml table {table_name}"
-    );
-    values
-}
-
+/// Non-linear 4-bit quantization values for IQ4_NL.
+/// Mirrors `kvalues_iq4nl` in `llama.cpp`.
 pub const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
-pub fn iq2_xs_grid() -> &'static [u64] {
-    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint64_t", "iq2xs_grid", 512))
-}
+// Re-export the two constants that have upstream names not matching our
+// `IQ<family>_<table>` convention. The other tables already use that name.
+pub use {
+    KMASK_IQ2XS as IQ2XS_MASK,
+    KSIGNS_IQ2XS as IQ2XS_SIGNS,
+};
 
-pub fn iq3_s_grid() -> &'static [u32] {
-    static GRID: OnceLock<Vec<u32>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint32_t", "iq3s_grid", 512))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn iq2_xs_signs() -> &'static [u8] {
-    static SIGNS: OnceLock<Vec<u8>> = OnceLock::new();
-    SIGNS.get_or_init(|| parse_table("uint8_t", "ksigns_iq2xs", 128))
-}
-
-pub fn iq2_xs_mask() -> &'static [u8] {
-    static MASK: OnceLock<Vec<u8>> = OnceLock::new();
-    MASK.get_or_init(|| parse_table("uint8_t", "kmask_iq2xs", 8))
-}
-
-pub fn iq2_xxs_grid() -> &'static [u64] {
-    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint64_t", "iq2xxs_grid", 256))
-}
-
-pub fn iq2_s_grid() -> &'static [u64] {
-    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint64_t", "iq2s_grid", 1024))
-}
-
-pub fn iq3_xxs_grid() -> &'static [u32] {
-    static GRID: OnceLock<Vec<u32>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint32_t", "iq3xxs_grid", 256))
-}
-
-pub fn iq1s_grid() -> &'static [u64] {
-    static GRID: OnceLock<Vec<u64>> = OnceLock::new();
-    GRID.get_or_init(|| parse_table("uint64_t", "iq1s_grid", 2048))
+    #[test]
+    fn expected_lengths() {
+        assert_eq!(IQ2XS_MASK.len(), 8);
+        assert_eq!(IQ2XS_SIGNS.len(), 128);
+        assert_eq!(IQ2XS_GRID.len(), 512);
+        assert_eq!(IQ2XXS_GRID.len(), 256);
+        assert_eq!(IQ2S_GRID.len(), 1024);
+        assert_eq!(IQ3S_GRID.len(), 512);
+        assert_eq!(IQ3XXS_GRID.len(), 256);
+        assert_eq!(IQ1S_GRID.len(), 2048);
+        assert_eq!(KVALUES_IQ4NL.len(), 16);
+    }
 }
