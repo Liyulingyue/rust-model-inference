@@ -220,12 +220,20 @@ impl<'a> VisionModel<'a> {
         let mm1_info = source
             .tensor_info("mm.1.weight")
             .ok_or_else(|| "tensor mm.1.weight not found".to_string())?;
-        let mm1_out_dim = mm1_info.dims.get(1).copied().unwrap_or(config.projection_dim as u64) as usize;
+        let mm1_out_dim = mm1_info
+            .dims
+            .get(1)
+            .copied()
+            .unwrap_or(config.projection_dim as u64) as usize;
 
         let mm2_info = source
             .tensor_info("mm.2.weight")
             .ok_or_else(|| "tensor mm.2.weight not found".to_string())?;
-        let mm2_out_dim = mm2_info.dims.get(1).copied().unwrap_or(config.projection_dim as u64) as usize;
+        let mm2_out_dim = mm2_info
+            .dims
+            .get(1)
+            .copied()
+            .unwrap_or(config.projection_dim as u64) as usize;
 
         let mm1_b = f32_vec(source, "mm.1.bias", mm1_out_dim)?;
         let mm2_b = f32_vec(source, "mm.2.bias", mm2_out_dim)?;

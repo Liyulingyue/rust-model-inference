@@ -1507,9 +1507,9 @@ pub fn load_tokenizer(
     get_meta: impl Fn(&str) -> Option<MetaValue>,
 ) -> Result<Box<dyn Tokenizer>, String> {
     match get_meta("tokenizer.ggml.model") {
-        Some(MetaValue::String(value)) if value == "llama" => Ok(Box::new(
-            SPMTokenizer::from_gguf_metadata(get_meta)?,
-        )),
+        Some(MetaValue::String(value)) if value == "llama" => {
+            Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
+        }
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
 }
