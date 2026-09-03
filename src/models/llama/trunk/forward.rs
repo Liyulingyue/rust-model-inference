@@ -1,4 +1,4 @@
-//! # LLaMA Text Inference
+﻿//! # LLaMA Text Inference
 //!
 //! LLaMA-family text generation, aligning with llama.cpp's forward pass and
 //! sample/decode path. Standard LLaMA has no Q/K per-head RMSNorm.
@@ -9,7 +9,7 @@ use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
@@ -141,7 +141,7 @@ pub fn run_inference(
     kv_format: KvFormat,
 ) -> Result<(), String> {
     let input_tokens = {
-        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
         let arch = source
@@ -153,7 +153,9 @@ pub fn run_inference(
         // distinct chat template: `<|start_of_role|>{role}<|end_of_role|>
         // {content}<|end_of_text|>` between turns and ends the user turn
         // with `<|end_of_text|>\n`. MiniCPM5/Llama use the Qwen2-style
-        // `<|im_start|>{role}\n{content}<|im_end|>\n` template.
+        // `<|im_start|>{role}\n{content}<|im_end|>\n` template. Nanbeige is
+        // a base model with no chat template — feed the prompt as-is and let
+        // the BOS token mark the start of generation.
         let prompt_text = if arch == "granite" {
             // Granite chat template (Jinja):
             //   "<|start_of_role|>user<|end_of_role|>{content}<|end_of_text|>\n
@@ -161,6 +163,10 @@ pub fn run_inference(
             format!(
                 "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
             )
+        } else if arch == "nanbeige" {
+            // Base model: no chat wrapping. The SPM tokenizer prepends BOS
+            // when add_special=true is passed below.
+            prompt.to_string()
         } else {
             // MiniCPM5/Qwen2-style template. The rendered format for a
             // single user message is:
@@ -174,10 +180,15 @@ pub fn run_inference(
             format!("{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n")
         };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+        // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
+        // expects no BOS since add_bos_token=false), so add_special=false
+        // and we manually prepend BOS. For Nanbeige (base model), let the
+        // tokenizer's add_bos setting handle BOS via add_special=true.
+        let add_special = arch == "nanbeige";
         let mut body = tokenizer.encode(
             &prompt_text,
             EncodeOptions {
-                add_special: false,
+                add_special,
                 parse_special: true,
             },
         );
@@ -185,8 +196,10 @@ pub fn run_inference(
         // and Granite both have `tokenizer.ggml.add_bos_token=false`, so
         // encode() does not emit BOS automatically. Prepend BOS manually
         // to match llama.cpp.
-        if let Some(bos) = tokenizer.bos_id() {
-            body.insert(0, bos);
+        if !add_special {
+            if let Some(bos) = tokenizer.bos_id() {
+                body.insert(0, bos);
+            }
         }
         eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
         body
@@ -223,7 +236,7 @@ pub fn run_inference_tokens(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
 
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+    let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
     let max_ctx = 512usize.min(config.n_ctx);
@@ -333,7 +346,7 @@ pub fn run_inference_tokens(
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
     let mut all_tokens: Vec<u32> = input_tokens.clone();
-    let mut decoder = tokenizer.streaming_decoder(false);
+    let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
 
     let group_size = n_head / n_head_kv;
     // Granite ships `granite.attention.scale` (= 1/n_embd_head) which
@@ -482,7 +495,7 @@ pub fn run_inference_tokens(
 
                 // LLaMA does not have QK norm.
                 // The `llama` GGUF arch uses interleaved ("normal"-style)
-                // RoPE — the converter permutes HF rotate_half weights into
+                // RoPE 鈥?the converter permutes HF rotate_half weights into
                 // adjacent-pair layout (MiniCPM5 ships this arch too).
                 for h in 0..n_head {
                     rope_norm(
