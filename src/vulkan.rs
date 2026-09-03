@@ -100,7 +100,20 @@ struct BufferInfo {
 impl VulkanContext {
     pub fn new() -> Result<Self, VulkanError> {
         unsafe {
-            let entry = ash::Entry::load().map_err(|e| VulkanError::InitFailed(e.to_string()))?;
+            let entry = ash::Entry::load()
+                .or_else(|error| {
+                    #[cfg(target_os = "macos")]
+                    for path in [
+                        "/opt/homebrew/lib/libvulkan.dylib",
+                        "/usr/local/lib/libvulkan.dylib",
+                    ] {
+                        if let Ok(entry) = ash::Entry::load_from(path) {
+                            return Ok(entry);
+                        }
+                    }
+                    Err(error)
+                })
+                .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
             let instance = Self::create_instance(&entry)?;
             let (physical_device, queue_family, device_name) =
                 Self::select_physical_device(&instance)?;
@@ -430,15 +443,27 @@ impl VulkanContext {
             api_version: vk::API_VERSION_1_3,
         };
 
+        let portability_name = vk::KhrPortabilityEnumerationFn::name();
+        let portability_available = extension_available(
+            &entry
+                .enumerate_instance_extension_properties(None)
+                .map_err(|e| VulkanError::InitFailed(e.to_string()))?,
+            portability_name,
+        );
+        let extension_names = [portability_name.as_ptr()];
         let create_info = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
             p_application_info: &app_info,
-            flags: Default::default(),
+            flags: if portability_available {
+                vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
+            } else {
+                vk::InstanceCreateFlags::empty()
+            },
             enabled_layer_count: 0,
             pp_enabled_layer_names: std::ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: std::ptr::null(),
+            enabled_extension_count: portability_available as u32,
+            pp_enabled_extension_names: extension_names.as_ptr(),
         };
 
         unsafe {
@@ -513,6 +538,17 @@ impl VulkanContext {
             ..Default::default()
         };
 
+        let portability_name = vk::KhrPortabilitySubsetFn::name();
+        let portability_available = extension_available(
+            &unsafe {
+                instance
+                    .enumerate_device_extension_properties(physical_device)
+                    .map_err(|e| VulkanError::InitFailed(e.to_string()))?
+            },
+            portability_name,
+        );
+        let extension_names = [portability_name.as_ptr()];
+
         let device_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
             p_next: &vulkan13_features as *const _ as *const std::os::raw::c_void,
@@ -521,6 +557,8 @@ impl VulkanContext {
             p_queue_create_infos: &queue_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: std::ptr::null(),
+            enabled_extension_count: portability_available as u32,
+            pp_enabled_extension_names: extension_names.as_ptr(),
             p_enabled_features: &features,
             ..Default::default()
         };
@@ -853,6 +891,13 @@ fn storage_binding(binding: u32) -> vk::DescriptorSetLayoutBinding {
     }
 }
 
+#[cfg(feature = "vulkan")]
+fn extension_available(properties: &[vk::ExtensionProperties], name: &CStr) -> bool {
+    properties
+        .iter()
+        .any(|property| unsafe { CStr::from_ptr(property.extension_name.as_ptr()) == name })
+}
+
 #[derive(Debug)]
 pub enum VulkanError {
     InitFailed(String),
@@ -876,5 +921,28 @@ impl std::fmt::Display for VulkanError {
             VulkanError::UnsupportedShape(s) => write!(f, "Unsupported shape: {}", s),
             VulkanError::Timeout => write!(f, "GPU dispatch timed out"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "vulkan", target_os = "macos"))]
+mod tests {
+    use super::VulkanContext;
+    use std::path::Path;
+
+    #[test]
+    fn initializes_with_homebrew_moltenvk() {
+        if ![
+            "/opt/homebrew/lib/libvulkan.dylib",
+            "/usr/local/lib/libvulkan.dylib",
+        ]
+        .iter()
+        .any(|path| Path::new(path).exists())
+        {
+            eprintln!("skipping: no Homebrew Vulkan loader installed");
+            return;
+        }
+
+        let context = VulkanContext::new().expect("Homebrew MoltenVK should initialize");
+        assert!(!context.device_name().is_empty());
     }
 }
