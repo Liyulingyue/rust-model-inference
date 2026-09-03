@@ -117,6 +117,14 @@ def open_safetensors(path: Path) -> Safetensors:
     return sf
 
 
+def _require_tensor(tensor: Tensor, dtype: str, shape: tuple[int, ...]) -> Tensor:
+    if tensor.dtype != dtype:
+        raise ValueError(f"{tensor.name}: expected {dtype}, got {tensor.dtype}")
+    if tensor.shape != shape:
+        raise ValueError(f"{tensor.name}: expected shape {shape}, got {tensor.shape}")
+    return tensor
+
+
 # --------------------------------------------------------------------------- #
 # dtype conversions
 # --------------------------------------------------------------------------- #
@@ -613,7 +621,10 @@ def _export_open_model(
     n_layer = llm_cfg["num_hidden_layers"]
     n_embd = llm_cfg["hidden_size"]
     n_head = llm_cfg["num_attention_heads"]
-
+    n_kv = llm_cfg["num_key_value_heads"]
+    if n_embd % n_head:
+        raise ValueError(f"hidden_size {n_embd} is not divisible by attention heads {n_head}")
+    n_kv_embd = n_kv * (n_embd // n_head)
     # ---------------- LLM gguf (arch qwen2) ---------------- #
     gguf = GgufWriter(llm_path)
     gguf.add_meta("general.architecture", "qwen2")
@@ -654,27 +665,17 @@ def _export_open_model(
     gguf.add_meta("tokenizer.ggml.add_bos_token", False)
     gguf.add_meta("tokenizer.ggml.add_eos_token", False)
 
-    def emit_llm(src_name: str, dst_name: str) -> None:
-        t = core.tensor(src_name)
-        # norm weights must be F32/BF16 for the engine's load_f32_tensor
+    def emit_llm(src_name: str, dst_name: str, shape: tuple[int, ...]) -> None:
+        t = _require_tensor(core.tensor(src_name), "BF16", shape)
         if dst_name.endswith("norm.weight"):
-            raw = (
-                bf16_to_f32(t.raw)
-                if t.dtype == "BF16"
-                else (f16_to_f32(t.raw) if t.dtype == "F16" else t.raw)
-            )
-            gguf.add_tensor(dst_name, GGML_F32, gguf_dims(t.shape), raw)
+            gguf.add_tensor(dst_name, GGML_F32, gguf_dims(t.shape), bf16_to_f32(t.raw))
         else:
-            if t.dtype != "BF16":
-                raise ValueError(f"{src_name}: expected BF16, got {t.dtype}")
             gguf.add_tensor(dst_name, GGML_BF16, gguf_dims(t.shape), t.raw)
 
-    embed = core.tensor("llm.model.embed_tokens.weight")
-    if embed.dtype != "BF16":
-        raise ValueError(f"{embed.name}: expected BF16, got {embed.dtype}")
+    embed = _require_tensor(core.tensor("llm.model.embed_tokens.weight"), "BF16", (llm_cfg["vocab_size"], n_embd))
     gguf.add_tensor("token_embd.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)
     gguf.add_tensor("output.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)  # tied
-    emit_llm("llm.model.norm.weight", "output_norm.weight")
+    emit_llm("llm.model.norm.weight", "output_norm.weight", (n_embd,))
     layer_map = {
         "input_layernorm.weight": "attn_norm.weight",
         "post_attention_layernorm.weight": "ffn_norm.weight",
@@ -686,9 +687,20 @@ def _export_open_model(
         "mlp.up_proj.weight": "ffn_up.weight",
         "mlp.down_proj.weight": "ffn_down.weight",
     }
+    llm_shapes = {
+        "input_layernorm.weight": (n_embd,),
+        "post_attention_layernorm.weight": (n_embd,),
+        "self_attn.q_proj.weight": (n_embd, n_embd),
+        "self_attn.k_proj.weight": (n_kv_embd, n_embd),
+        "self_attn.v_proj.weight": (n_kv_embd, n_embd),
+        "self_attn.o_proj.weight": (n_embd, n_embd),
+        "mlp.gate_proj.weight": (llm_cfg["intermediate_size"], n_embd),
+        "mlp.up_proj.weight": (llm_cfg["intermediate_size"], n_embd),
+        "mlp.down_proj.weight": (n_embd, llm_cfg["intermediate_size"]),
+    }
     for layer in range(n_layer):
         for src_key, dst_key in layer_map.items():
-            emit_llm(f"llm.model.layers.{layer}.{src_key}", f"blk.{layer}.{dst_key}")
+            emit_llm(f"llm.model.layers.{layer}.{src_key}", f"blk.{layer}.{dst_key}", llm_shapes[src_key])
     gguf.write(overwrite=overwrite)
     print(f"wrote {llm_path} ({len(gguf.tensors)} tensors)")
 
@@ -717,37 +729,54 @@ def _export_open_model(
     gguf.add_tensor("dotstts.latent_stats.mean", GGML_F32, (128,), struct.pack("<128f", *latent_stats["mean"][:128]))
     gguf.add_tensor("dotstts.latent_stats.var", GGML_F32, (128,), struct.pack("<128f", *latent_stats["var"][:128]))
 
-    def emit(source: Safetensors, src_name: str, dst_name: str, ggml_type: int) -> None:
+    def emit(source: Safetensors, src_name: str, dst_name: str, ggml_type: int, shape: tuple[int, ...] | None = None) -> None:
+        expected_dtype = "BF16" if ggml_type == GGML_BF16 else "F32"
         t = source.tensor(src_name)
+        if shape is None:
+            if t.dtype != expected_dtype:
+                raise ValueError(f"{src_name}: expected {expected_dtype}, got {t.dtype}")
+        else:
+            _require_tensor(t, expected_dtype, shape)
         if ggml_type == GGML_BF16:
-            if t.dtype != "BF16":
-                raise ValueError(f"{src_name}: expected BF16, got {t.dtype}")
             raw = t.raw
         elif ggml_type == GGML_F16:
             raw = bf16_to_f16(t.raw) if t.dtype == "BF16" else (t.raw if t.dtype == "F16" else f32_to_f16(t.raw))
         elif ggml_type == GGML_F32:
-            if t.dtype != "F32":
-                raise ValueError(f"{src_name}: expected F32, got {t.dtype}")
             raw = t.raw
         else:
             raw = t.raw
         gguf.add_tensor(dst_name, ggml_type, gguf_dims(t.shape), raw)
 
+    patch_cfg = cfg["PatchEncoder"]
+    dit_cfg = cfg["DiT"]
+    patch_hidden = patch_cfg["hidden_size"]
+    dit_hidden = dit_cfg["hidden_size"]
+    latent_dim = cfg["latent_dim"]
+    xvec_dim = cfg.get("campplus_embedding_size", 512)
+
     # heads
-    for name in ("hidden_proj", "latent_proj", "coordinate_proj"):
-        emit(core, f"{name}.weight", f"dotstts.{name}.weight", GGML_BF16)
-        emit(core, f"{name}.bias", f"dotstts.{name}.bias", GGML_BF16)
-    for idx in (0, 1):
-        emit(core, f"xvec_proj.{idx}.weight", f"dotstts.xvec_proj.{idx}.weight", GGML_BF16)
-        emit(core, f"xvec_proj.{idx}.bias", f"dotstts.xvec_proj.{idx}.bias", GGML_BF16)
-    for idx in (0, 2):
-        emit(core, f"eos_proj.{idx}.weight", f"dotstts.eos_proj.{idx}.weight", GGML_BF16)
-        emit(core, f"eos_proj.{idx}.bias", f"dotstts.eos_proj.{idx}.bias", GGML_BF16)
+    head_shapes = {
+        "hidden_proj": ((dit_hidden, n_embd), (dit_hidden,)),
+        "latent_proj": ((dit_hidden, latent_dim), (dit_hidden,)),
+        "coordinate_proj": ((dit_hidden, latent_dim), (dit_hidden,)),
+        "xvec_proj.0": ((dit_hidden, xvec_dim), (dit_hidden,)),
+        "xvec_proj.1": ((dit_hidden,), (dit_hidden,)),
+        "eos_proj.0": ((n_embd, n_embd), (n_embd,)),
+        "eos_proj.2": ((2, n_embd), (2,)),
+    }
+    for name, (weight_shape, bias_shape) in head_shapes.items():
+        emit(core, f"{name}.weight", f"dotstts.{name}.weight", GGML_BF16, weight_shape)
+        emit(core, f"{name}.bias", f"dotstts.{name}.bias", GGML_BF16, bias_shape)
 
     # patch encoder
-    for part in ("ds_proj", "in_proj", "out_proj"):
-        emit(core, f"patch_encoder.{part}.weight", f"dotstts.patch_encoder.{part}.weight", GGML_BF16)
-        emit(core, f"patch_encoder.{part}.bias", f"dotstts.patch_encoder.{part}.bias", GGML_BF16)
+    patch_shapes = {
+        "ds_proj": ((latent_dim, latent_dim, 2), (latent_dim,)),
+        "in_proj": ((patch_hidden, latent_dim), (patch_hidden,)),
+        "out_proj": ((n_embd, 2 * patch_hidden), (n_embd,)),
+    }
+    for part, (weight_shape, bias_shape) in patch_shapes.items():
+        emit(core, f"patch_encoder.{part}.weight", f"dotstts.patch_encoder.{part}.weight", GGML_BF16, weight_shape)
+        emit(core, f"patch_encoder.{part}.bias", f"dotstts.patch_encoder.{part}.bias", GGML_BF16, bias_shape)
     enc_map = {
         "attn_norm.weight": "attn_norm.weight",
         "attn.q_proj.weight": "attn_q.weight",
@@ -761,20 +790,35 @@ def _export_open_model(
         "ffn.fc2.weight": "ffn_fc2.weight",
         "ffn.fc2.bias": "ffn_fc2.bias",
     }
+    encoder_shapes = {
+        "attn_norm.weight": (patch_hidden,),
+        "attn.q_proj.weight": (patch_hidden, patch_hidden),
+        "attn.k_proj.weight": (patch_hidden, patch_hidden),
+        "attn.v_proj.weight": (patch_hidden, patch_hidden),
+        "attn.o_proj.weight": (patch_hidden, patch_hidden),
+        "attn.o_proj.bias": (patch_hidden,),
+        "ffn_norm.weight": (patch_hidden,),
+        "ffn.fc1.weight": (patch_cfg["ffn_hidden_size"], patch_hidden),
+        "ffn.fc1.bias": (patch_cfg["ffn_hidden_size"],),
+        "ffn.fc2.weight": (patch_hidden, patch_cfg["ffn_hidden_size"]),
+        "ffn.fc2.bias": (patch_hidden,),
+    }
     for layer in range(cfg["PatchEncoder"]["num_layers"]):
         for src_key, dst_key in enc_map.items():
             emit(core, f"patch_encoder.encoder.layers.{layer}.{src_key}",
-                 f"dotstts.patch_encoder.encoder.layers.{layer}.{dst_key}", GGML_BF16)
+                 f"dotstts.patch_encoder.encoder.layers.{layer}.{dst_key}", GGML_BF16,
+                 encoder_shapes[src_key])
 
     # DiT
     for idx_name in ("input_layer",):
-        emit(core, f"velocity_field_predictor.{idx_name}.weight", f"dotstts.dit.{idx_name}.weight", GGML_BF16)
-        emit(core, f"velocity_field_predictor.{idx_name}.bias", f"dotstts.dit.{idx_name}.bias", GGML_BF16)
+        emit(core, f"velocity_field_predictor.{idx_name}.weight", f"dotstts.dit.{idx_name}.weight", GGML_BF16, (dit_hidden, dit_hidden))
+        emit(core, f"velocity_field_predictor.{idx_name}.bias", f"dotstts.dit.{idx_name}.bias", GGML_BF16, (dit_hidden,))
     for sub in ("mlp.0", "mlp.2"):
         emit(core, f"velocity_field_predictor.time_embedder.{sub}.weight",
-             f"dotstts.dit.time_embedder.{sub}.weight", GGML_BF16)
+             f"dotstts.dit.time_embedder.{sub}.weight", GGML_BF16,
+             (dit_hidden, 256 if sub == "mlp.0" else dit_hidden))
         emit(core, f"velocity_field_predictor.time_embedder.{sub}.bias",
-             f"dotstts.dit.time_embedder.{sub}.bias", GGML_BF16)
+             f"dotstts.dit.time_embedder.{sub}.bias", GGML_BF16, (dit_hidden,))
     dit_block_map = {
         "attn.q_proj.weight": "attn.q.weight",
         "attn.k_proj.weight": "attn.k.weight",
@@ -790,15 +834,32 @@ def _export_open_model(
         "adaLN_modulation.1.weight": "adaLN_modulation.1.weight",
         "adaLN_modulation.1.bias": "adaLN_modulation.1.bias",
     }
+    dit_shapes = {
+        "attn.q_proj.weight": (dit_hidden, dit_hidden),
+        "attn.k_proj.weight": (dit_hidden, dit_hidden),
+        "attn.v_proj.weight": (dit_hidden, dit_hidden),
+        "attn.o_proj.weight": (dit_hidden, dit_hidden),
+        "attn.o_proj.bias": (dit_hidden,),
+        "attn.q_norm.weight": (dit_hidden // dit_cfg["num_heads"],),
+        "attn.k_norm.weight": (dit_hidden // dit_cfg["num_heads"],),
+        "ffn.fc1.weight": (dit_cfg["ffn_hidden_size"], dit_hidden),
+        "ffn.fc1.bias": (dit_cfg["ffn_hidden_size"],),
+        "ffn.fc2.weight": (dit_hidden, dit_cfg["ffn_hidden_size"]),
+        "ffn.fc2.bias": (dit_hidden,),
+        "adaLN_modulation.1.weight": (6 * dit_hidden, dit_hidden),
+        "adaLN_modulation.1.bias": (6 * dit_hidden,),
+    }
     for layer in range(cfg["DiT"]["num_layers"]):
         for src_key, dst_key in dit_block_map.items():
             emit(core, f"velocity_field_predictor.blocks.{layer}.{src_key}",
-                 f"dotstts.dit.blocks.{layer}.{dst_key}", GGML_BF16)
+                 f"dotstts.dit.blocks.{layer}.{dst_key}", GGML_BF16, dit_shapes[src_key])
     for sub in ("adaLN_modulation.1", "linear"):
         emit(core, f"velocity_field_predictor.output_layer.{sub}.weight",
-             f"dotstts.dit.output_layer.{sub}.weight", GGML_BF16)
+             f"dotstts.dit.output_layer.{sub}.weight", GGML_BF16,
+             (2 * dit_hidden, dit_hidden) if sub == "adaLN_modulation.1" else (latent_dim, dit_hidden))
         emit(core, f"velocity_field_predictor.output_layer.{sub}.bias",
-             f"dotstts.dit.output_layer.{sub}.bias", GGML_BF16)
+             f"dotstts.dit.output_layer.{sub}.bias", GGML_BF16,
+             (2 * dit_hidden,) if sub == "adaLN_modulation.1" else (latent_dim,))
 
     # speaker, strip the "model." prefix; I64 scalars (BN counters) pass through
     for name in sorted(speaker.header):

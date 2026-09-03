@@ -6,6 +6,8 @@ from convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
     GgufWriter,
+    Tensor,
+    _require_tensor,
     read_gguf_directory,
     read_gguf_tensor_bytes,
     validate_variant,
@@ -53,6 +55,16 @@ class ExportContractTest(unittest.TestCase):
         self.assertEqual(validate_variant("edit"), "edit")
         with self.assertRaises(ValueError):
             validate_variant("experimental")
+
+    def test_llm_norm_must_be_bf16(self):
+        norm = Tensor("llm.model.norm.weight", "F16", (4,), bytes(8))
+        with self.assertRaisesRegex(ValueError, "expected BF16"):
+            _require_tensor(norm, "BF16", (4,))
+
+    def test_mapped_tensor_shape_must_match_config_dimensions(self):
+        weight = Tensor("hidden_proj.weight", "BF16", (1024, 1024), bytes(2 * 1024 * 1024))
+        with self.assertRaisesRegex(ValueError, "expected shape"):
+            _require_tensor(weight, "BF16", (1024, 1536))
 
 
 if __name__ == "__main__":
