@@ -27,5 +27,5 @@ pub mod schedule;
 pub mod speaker;
 pub mod vocoder;
 
-pub use config::DotsTtsConfig;
+pub use config::{is_dots_tts_mmproj, DotsTtsConfig};
 pub use generate::DotsTtsModel;

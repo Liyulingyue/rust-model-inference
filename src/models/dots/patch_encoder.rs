@@ -20,9 +20,14 @@ pub(crate) fn load_f16_f32(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims || !matches!(info.ggml_type, GGMLType::F16 | GGMLType::F32) {
+    if info.dims != dims
+        || !matches!(
+            info.ggml_type,
+            GGMLType::F16 | GGMLType::BF16 | GGMLType::F32
+        )
+    {
         return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {dims:?} F16/F32",
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {dims:?} F16/BF16/F32",
             info.dims, info.ggml_type
         ));
     }
@@ -33,6 +38,10 @@ pub(crate) fn load_f16_f32(
         GGMLType::F16 => bytes
             .chunks_exact(2)
             .map(|chunk| crate::ops::f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+            .collect(),
+        GGMLType::BF16 => bytes
+            .chunks_exact(2)
+            .map(|chunk| crate::core::tensor::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
             .collect(),
         GGMLType::F32 => bytes
             .chunks_exact(4)
@@ -490,5 +499,71 @@ fn rms_norm_ones(x: &mut [f32], eps: f32) {
     let inv = 1.0 / (mean_sq + eps as f64).sqrt();
     for value in x.iter_mut() {
         *value = (*value as f64 * inv) as f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::TensorInfo;
+
+    #[derive(Default)]
+    struct Source {
+        metadata: std::collections::HashMap<String, crate::core::tensor::MetaValue>,
+        infos: std::collections::HashMap<String, TensorInfo>,
+        bytes: std::collections::HashMap<String, Vec<u8>>,
+    }
+
+    impl TensorSource for Source {
+        fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.infos.get(name)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.bytes.get(name).map(Vec::as_slice)
+        }
+    }
+
+    fn one_tensor_source(
+        name: &str,
+        ggml_type: GGMLType,
+        dims: Vec<u64>,
+        bytes: Vec<u8>,
+    ) -> Source {
+        Source {
+            infos: std::collections::HashMap::from([(
+                name.into(),
+                TensorInfo {
+                    name: name.into(),
+                    dims,
+                    ggml_type,
+                    offset: 0,
+                },
+            )]),
+            bytes: std::collections::HashMap::from([(name.into(), bytes)]),
+            ..Source::default()
+        }
+    }
+
+    #[test]
+    fn component_loader_decodes_bf16_without_f16_rounding() {
+        let source = one_tensor_source(
+            "x",
+            GGMLType::BF16,
+            vec![2],
+            [0x3f80u16.to_le_bytes(), 0xc020u16.to_le_bytes()].concat(),
+        );
+        assert_eq!(
+            load_f16_f32(&source, "x", &[2])
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            vec![0x3f80_0000, 0xc020_0000],
+        );
     }
 }

@@ -12,9 +12,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
-use crate::models::dots::generate::{
-    synthesize, GenerateOptions, DEFAULT_EOS_THRESHOLD, DEFAULT_GUIDANCE, DEFAULT_SPEAKER_SCALE,
-};
+use crate::models::dots::generate::{synthesize, GenerateOptions};
 use crate::models::dots::DotsTtsModel;
 
 /// Run the dots.tts pipeline (base + edit share the same core loop; edit adds
@@ -55,16 +53,6 @@ pub fn run_dots_tts_cli(options: &CliOptions) -> Result<(), String> {
     eprintln!("Loading dots.tts mmproj from {}", mmproj_path.display());
     let mmproj_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(mmproj_path, ComponentRole::Mmproj));
-    let arch = mmproj_source
-        .metadata("general.architecture")
-        .and_then(|value| value.to_string_val())
-        .unwrap_or_default();
-    if arch != "dotstts" {
-        return Err(format!(
-            "--tts mmproj architecture must be dotstts, got {arch}"
-        ));
-    }
-
     let model = DotsTtsModel::from_sources(llm_source, mmproj_source, pool)?;
     eprintln!(
         "dots.tts: sr={} hop={} patch={} latent={} fm={} patches_llm={}",
@@ -81,10 +69,10 @@ pub fn run_dots_tts_cli(options: &CliOptions) -> Result<(), String> {
     let mut options_out = GenerateOptions {
         max_patches: options.max_tokens.unwrap_or(64),
         temperature: options.temperature.unwrap_or(0.9),
-        nfe: 10,
-        guidance: DEFAULT_GUIDANCE,
-        speaker_scale: DEFAULT_SPEAKER_SCALE,
-        eos_threshold: DEFAULT_EOS_THRESHOLD,
+        nfe: model.config.default_nfe,
+        guidance: model.config.default_guidance,
+        speaker_scale: model.config.default_speaker_scale,
+        eos_threshold: model.config.default_eos_threshold,
     };
     if let Some(steps) = options.steps {
         if steps > 0 {
