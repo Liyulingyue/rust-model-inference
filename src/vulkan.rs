@@ -21,6 +21,10 @@ use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 const SHADER: &[u8] = include_bytes!("../shaders/bin/q8_matmul.spv");
+#[cfg(feature = "vulkan")]
+const SHADER_DP4A: &[u8] = include_bytes!("../shaders/bin/q8_matmul_dp4a.spv");
+#[cfg(feature = "vulkan")]
+const Q8_SHARED_BYTES: u32 = (4096 + 64) * 4;
 
 /// Set when a GPU matmul fails at runtime: all subsequent calls fall back to
 /// CPU without retrying the broken path.
@@ -62,6 +66,7 @@ pub struct VulkanContext {
     io_state: Mutex<IoState>,
     mutex: Mutex<()>,
     device_name: String,
+    limits: vk::PhysicalDeviceLimits,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
@@ -97,57 +102,113 @@ struct BufferInfo {
 }
 
 #[cfg(feature = "vulkan")]
+struct DeviceCandidate {
+    physical_device: vk::PhysicalDevice,
+    queue_family: u32,
+    name: String,
+    device_type: vk::PhysicalDeviceType,
+    api_version: u32,
+    limits: vk::PhysicalDeviceLimits,
+    portability_subset: bool,
+    integer_dot_product: bool,
+}
+
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PipelineVariant {
+    Baseline,
+    IntegerDotProduct,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceCandidate {
+    fn pipeline_variant(&self) -> PipelineVariant {
+        if self.integer_dot_product {
+            PipelineVariant::IntegerDotProduct
+        } else {
+            PipelineVariant::Baseline
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+struct DeviceResources {
+    device: ash::Device,
+    queue: vk::Queue,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+}
+
+#[cfg(feature = "vulkan")]
 impl VulkanContext {
     pub fn new() -> Result<Self, VulkanError> {
         unsafe {
-            let entry = ash::Entry::load()
-                .or_else(|error| {
-                    #[cfg(target_os = "macos")]
-                    for path in [
-                        "/opt/homebrew/lib/libvulkan.dylib",
-                        "/usr/local/lib/libvulkan.dylib",
-                    ] {
-                        if let Ok(entry) = ash::Entry::load_from(path) {
-                            return Ok(entry);
-                        }
+            let entry = load_entry()?;
+            let (instance, instance_api_version, properties2_extension) =
+                Self::create_instance(&entry)?;
+            let candidates = match Self::device_candidates(
+                &entry,
+                &instance,
+                instance_api_version,
+                properties2_extension,
+            ) {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    instance.destroy_instance(None);
+                    return Err(error);
+                }
+            };
+
+            let mut failures = Vec::new();
+            for candidate in &candidates {
+                if let Some(reason) = rejection_reason(candidate) {
+                    failures.push(format!("{}: {reason}", candidate.name));
+                }
+            }
+
+            for candidate in rank_supported(candidates) {
+                match Self::create_candidate_resources(&instance, &candidate) {
+                    Ok(resources) => {
+                        eprintln!("[GPU] Vulkan device: {}", candidate.name);
+                        return Ok(Self {
+                            entry,
+                            instance,
+                            device: resources.device,
+                            _physical_device: candidate.physical_device,
+                            queue: resources.queue,
+                            queue_family: candidate.queue_family,
+                            pipeline: resources.pipeline,
+                            pipeline_layout: resources.pipeline_layout,
+                            descriptor_set_layout: resources.descriptor_set_layout,
+                            descriptor_pool: resources.descriptor_pool,
+                            descriptor_set: resources.descriptor_set,
+                            command_pool: resources.command_pool,
+                            command_buffer: resources.command_buffer,
+                            fence: resources.fence,
+                            weight_cache: Mutex::new(HashMap::new()),
+                            io_state: Mutex::new(IoState::default()),
+                            mutex: Mutex::new(()),
+                            device_name: candidate.name,
+                            limits: candidate.limits,
+                            completed_gen: std::sync::atomic::AtomicU64::new(0),
+                        });
                     }
-                    Err(error)
-                })
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-            let instance = Self::create_instance(&entry)?;
-            let (physical_device, queue_family, device_name) =
-                Self::select_physical_device(&instance)?;
-            let device = Self::create_device(&instance, physical_device, queue_family)?;
-            let queue = device.get_device_queue(queue_family, 0);
-            let (pipeline_layout, descriptor_set_layout, descriptor_pool, descriptor_set) =
-                Self::create_compute_pipeline(&device)?;
-            let pipeline = Self::create_pipeline(&device, pipeline_layout)?;
-            let (command_pool, command_buffer, fence) =
-                Self::create_command_pool(&device, queue_family)?;
+                    Err(error) => failures.push(format!("{}: {error}", candidate.name)),
+                }
+            }
 
-            eprintln!("[GPU] Vulkan device: {device_name}");
-
-            Ok(Self {
-                entry,
-                instance,
-                device,
-                _physical_device: physical_device,
-                queue,
-                queue_family,
-                pipeline,
-                pipeline_layout,
-                descriptor_set_layout,
-                descriptor_pool,
-                descriptor_set,
-                command_pool,
-                command_buffer,
-                fence,
-                weight_cache: Mutex::new(HashMap::new()),
-                io_state: Mutex::new(IoState::default()),
-                mutex: Mutex::new(()),
-                device_name,
-                completed_gen: std::sync::atomic::AtomicU64::new(0),
-            })
+            instance.destroy_instance(None);
+            if failures.is_empty() {
+                Err(VulkanError::NoComputeDevice)
+            } else {
+                Err(VulkanError::InitFailed(failures.join("; ")))
+            }
         }
     }
 
@@ -289,8 +350,9 @@ impl VulkanContext {
             0,
             bytemuck::cast_slice(&push_constants),
         );
+        let (groups_x, groups_y) = dispatch_grid(n_out, &self.limits)?;
         self.device
-            .cmd_dispatch(self.command_buffer, n_out as u32, 1, 1);
+            .cmd_dispatch(self.command_buffer, groups_x, groups_y, 1);
 
         self.device
             .end_command_buffer(self.command_buffer)
@@ -431,7 +493,12 @@ impl VulkanContext {
         self.device.free_memory(buf.memory, None);
     }
 
-    fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, VulkanError> {
+    fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, u32, bool), VulkanError> {
+        let loader_version = entry
+            .try_enumerate_instance_version()
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))?
+            .unwrap_or(vk::API_VERSION_1_0);
+        let api_version = loader_version.min(vk::API_VERSION_1_3);
         let engine_name = CStr::from_bytes_with_nul(b"rust-model-inference\0").unwrap();
         let app_info = vk::ApplicationInfo {
             s_type: vk::StructureType::APPLICATION_INFO,
@@ -440,17 +507,24 @@ impl VulkanContext {
             application_version: 0,
             p_engine_name: engine_name.as_ptr(),
             engine_version: vk::make_api_version(0, 1, 0, 0),
-            api_version: vk::API_VERSION_1_3,
+            api_version,
         };
 
+        let available_extensions = entry
+            .enumerate_instance_extension_properties(None)
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
         let portability_name = vk::KhrPortabilityEnumerationFn::name();
-        let portability_available = extension_available(
-            &entry
-                .enumerate_instance_extension_properties(None)
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?,
-            portability_name,
-        );
-        let extension_names = [portability_name.as_ptr()];
+        let portability_available = extension_available(&available_extensions, portability_name);
+        let properties2_name = vk::KhrGetPhysicalDeviceProperties2Fn::name();
+        let properties2_extension = api_version < vk::API_VERSION_1_1
+            && extension_available(&available_extensions, properties2_name);
+        let mut extension_names = Vec::with_capacity(2);
+        if portability_available {
+            extension_names.push(portability_name.as_ptr());
+        }
+        if properties2_extension {
+            extension_names.push(properties2_name.as_ptr());
+        }
         let create_info = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
@@ -462,102 +536,230 @@ impl VulkanContext {
             },
             enabled_layer_count: 0,
             pp_enabled_layer_names: std::ptr::null(),
-            enabled_extension_count: portability_available as u32,
+            enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
         };
 
         unsafe {
             entry
                 .create_instance(&create_info, None)
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))
+                .map(|instance| (instance, api_version, properties2_extension))
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))
         }
     }
 
-    /// Pick the best compute device: discrete > integrated > software/CPU.
-    fn select_physical_device(
+    fn device_candidates(
+        entry: &ash::Entry,
         instance: &ash::Instance,
-    ) -> Result<(vk::PhysicalDevice, u32, String), VulkanError> {
+        instance_api_version: u32,
+        properties2_extension: bool,
+    ) -> Result<Vec<DeviceCandidate>, VulkanError> {
         unsafe {
             let devices = instance
                 .enumerate_physical_devices()
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-
-            let mut best: Option<(u8, vk::PhysicalDevice, u32, String)> = None;
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+            let mut candidates = Vec::with_capacity(devices.len());
             for device in devices {
                 let props = instance.get_physical_device_properties(device);
                 let name = CStr::from_ptr(props.device_name.as_ptr())
                     .to_string_lossy()
                     .into_owned();
-                let type_score = match props.device_type {
-                    vk::PhysicalDeviceType::DISCRETE_GPU => 3u8,
-                    vk::PhysicalDeviceType::INTEGRATED_GPU => 2,
-                    vk::PhysicalDeviceType::VIRTUAL_GPU => 1,
-                    _ => 0, // CPU (lavapipe) and unknown
-                };
-                for (i, family) in instance
+                let queue_family = instance
                     .get_physical_device_queue_family_properties(device)
                     .iter()
                     .enumerate()
-                {
-                    if family.queue_flags.contains(vk::QueueFlags::COMPUTE) {
-                        let candidate = (type_score, device, i as u32, name.clone());
-                        if best.as_ref().is_none_or(|(s, ..)| type_score > *s) {
-                            best = Some(candidate);
+                    .find_map(|(index, family)| {
+                        family
+                            .queue_flags
+                            .contains(vk::QueueFlags::COMPUTE)
+                            .then_some(index as u32)
+                    });
+                let Some(queue_family) = queue_family else {
+                    continue;
+                };
+
+                let extensions = instance
+                    .enumerate_device_extension_properties(device)
+                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                let portability_subset =
+                    extension_available(&extensions, vk::KhrPortabilitySubsetFn::name());
+                let integer_dot_extension =
+                    extension_available(&extensions, vk::KhrShaderIntegerDotProductFn::name());
+                let api_version = props.api_version.min(instance_api_version);
+                let can_use_integer_dot =
+                    api_version >= vk::API_VERSION_1_3 || integer_dot_extension;
+                let can_query_features2 =
+                    instance_api_version >= vk::API_VERSION_1_1 || properties2_extension;
+                let integer_dot_product = can_use_integer_dot
+                    && can_query_features2
+                    && Self::integer_dot_product_supported(
+                        entry,
+                        instance,
+                        device,
+                        instance_api_version,
+                    );
+
+                candidates.push(DeviceCandidate {
+                    physical_device: device,
+                    queue_family,
+                    name,
+                    device_type: props.device_type,
+                    api_version,
+                    limits: props.limits,
+                    portability_subset,
+                    integer_dot_product,
+                });
+            }
+            Ok(candidates)
+        }
+    }
+
+    unsafe fn integer_dot_product_supported(
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        instance_api_version: u32,
+    ) -> bool {
+        let mut integer_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut features = vk::PhysicalDeviceFeatures2::builder()
+            .push_next(&mut integer_dot)
+            .build();
+        if instance_api_version >= vk::API_VERSION_1_1 {
+            instance.get_physical_device_features2(physical_device, &mut features);
+        } else {
+            ash::extensions::khr::GetPhysicalDeviceProperties2::new(entry, instance)
+                .get_physical_device_features2(physical_device, &mut features);
+        }
+        integer_dot.shader_integer_dot_product == vk::TRUE
+    }
+
+    unsafe fn create_candidate_resources(
+        instance: &ash::Instance,
+        candidate: &DeviceCandidate,
+    ) -> Result<DeviceResources, VulkanError> {
+        let device = Self::create_device(instance, candidate)?;
+        let queue = device.get_device_queue(candidate.queue_family, 0);
+        let (pipeline_layout, descriptor_set_layout, descriptor_pool, descriptor_set) =
+            match Self::create_compute_pipeline(&device) {
+                Ok(resources) => resources,
+                Err(error) => {
+                    device.destroy_device(None);
+                    return Err(error);
+                }
+            };
+
+        let pipeline = match candidate.pipeline_variant() {
+            PipelineVariant::IntegerDotProduct => {
+                match Self::create_pipeline(&device, pipeline_layout, SHADER_DP4A) {
+                    Ok(pipeline) => pipeline,
+                    Err(error) => {
+                        eprintln!(
+                            "[GPU] {} integer-dot-product pipeline unavailable: {error}; using baseline",
+                            candidate.name
+                        );
+                        match Self::create_pipeline(&device, pipeline_layout, SHADER) {
+                            Ok(pipeline) => pipeline,
+                            Err(baseline_error) => {
+                                Self::destroy_compute_resources(
+                                    &device,
+                                    pipeline_layout,
+                                    descriptor_set_layout,
+                                    descriptor_pool,
+                                );
+                                device.destroy_device(None);
+                                return Err(baseline_error);
+                            }
                         }
-                        break;
                     }
                 }
             }
+            PipelineVariant::Baseline => {
+                match Self::create_pipeline(&device, pipeline_layout, SHADER) {
+                    Ok(pipeline) => pipeline,
+                    Err(error) => {
+                        Self::destroy_compute_resources(
+                            &device,
+                            pipeline_layout,
+                            descriptor_set_layout,
+                            descriptor_pool,
+                        );
+                        device.destroy_device(None);
+                        return Err(error);
+                    }
+                }
+            }
+        };
 
-            best.map(|(_, d, q, name)| (d, q, name))
-                .ok_or(VulkanError::NoComputeDevice)
-        }
+        let (command_pool, command_buffer, fence) =
+            match Self::create_command_pool(&device, candidate.queue_family) {
+                Ok(resources) => resources,
+                Err(error) => {
+                    device.destroy_pipeline(pipeline, None);
+                    Self::destroy_compute_resources(
+                        &device,
+                        pipeline_layout,
+                        descriptor_set_layout,
+                        descriptor_pool,
+                    );
+                    device.destroy_device(None);
+                    return Err(error);
+                }
+            };
+
+        Ok(DeviceResources {
+            device,
+            queue,
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+            command_pool,
+            command_buffer,
+            fence,
+        })
     }
 
     fn create_device(
         instance: &ash::Instance,
-        physical_device: vk::PhysicalDevice,
-        queue_family: u32,
+        candidate: &DeviceCandidate,
     ) -> Result<ash::Device, VulkanError> {
         let queue_priorities = [1.0f32];
         let queue_info = vk::DeviceQueueCreateInfo {
             s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
             p_next: std::ptr::null(),
             flags: Default::default(),
-            queue_family_index: queue_family,
+            queue_family_index: candidate.queue_family,
             queue_count: 1,
             p_queue_priorities: queue_priorities.as_ptr(),
         };
 
-        let features = vk::PhysicalDeviceFeatures {
-            shader_int64: 1,
+        let features = vk::PhysicalDeviceFeatures::default();
+        let mut integer_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
+            shader_integer_dot_product: candidate.integer_dot_product.into(),
             ..Default::default()
         };
-        let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features {
-            shader_integer_dot_product: 1,
-            ..Default::default()
-        };
-
-        let portability_name = vk::KhrPortabilitySubsetFn::name();
-        let portability_available = extension_available(
-            &unsafe {
-                instance
-                    .enumerate_device_extension_properties(physical_device)
-                    .map_err(|e| VulkanError::InitFailed(e.to_string()))?
-            },
-            portability_name,
-        );
-        let extension_names = [portability_name.as_ptr()];
+        let mut extension_names = Vec::with_capacity(2);
+        if candidate.portability_subset {
+            extension_names.push(vk::KhrPortabilitySubsetFn::name().as_ptr());
+        }
+        if candidate.integer_dot_product && candidate.api_version < vk::API_VERSION_1_3 {
+            extension_names.push(vk::KhrShaderIntegerDotProductFn::name().as_ptr());
+        }
 
         let device_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
-            p_next: &vulkan13_features as *const _ as *const std::os::raw::c_void,
+            p_next: if candidate.integer_dot_product {
+                &mut integer_dot as *mut _ as *const std::os::raw::c_void
+            } else {
+                std::ptr::null()
+            },
             flags: Default::default(),
             queue_create_info_count: 1,
             p_queue_create_infos: &queue_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: std::ptr::null(),
-            enabled_extension_count: portability_available as u32,
+            enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
             p_enabled_features: &features,
             ..Default::default()
@@ -565,8 +767,8 @@ impl VulkanContext {
 
         unsafe {
             instance
-                .create_device(physical_device, &device_info, None)
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))
+                .create_device(candidate.physical_device, &device_info, None)
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))
         }
     }
 
@@ -609,20 +811,24 @@ impl VulkanContext {
         };
 
         let pipeline_layout = unsafe {
-            device
-                .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo {
-                        s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
-                        p_next: std::ptr::null(),
-                        flags: Default::default(),
-                        set_layout_count: 1,
-                        p_set_layouts: &descriptor_set_layout,
-                        push_constant_range_count: 1,
-                        p_push_constant_ranges: &push_constant_range,
-                    },
-                    None,
-                )
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?
+            match device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo {
+                    s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
+                    p_next: std::ptr::null(),
+                    flags: Default::default(),
+                    set_layout_count: 1,
+                    p_set_layouts: &descriptor_set_layout,
+                    push_constant_range_count: 1,
+                    p_push_constant_ranges: &push_constant_range,
+                },
+                None,
+            ) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    return Err(VulkanError::InitFailed(error.to_string()));
+                }
+            }
         };
 
         let pool_sizes = [vk::DescriptorPoolSize {
@@ -631,19 +837,24 @@ impl VulkanContext {
         }];
 
         let descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo {
-                        s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
-                        p_next: std::ptr::null(),
-                        flags: Default::default(),
-                        max_sets: 1,
-                        pool_size_count: 1,
-                        p_pool_sizes: pool_sizes.as_ptr(),
-                    },
-                    None,
-                )
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?
+            match device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo {
+                    s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
+                    p_next: std::ptr::null(),
+                    flags: Default::default(),
+                    max_sets: 1,
+                    pool_size_count: 1,
+                    p_pool_sizes: pool_sizes.as_ptr(),
+                },
+                None,
+            ) {
+                Ok(pool) => pool,
+                Err(error) => {
+                    device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+                    return Err(VulkanError::InitFailed(error.to_string()));
+                }
+            }
         };
 
         let descriptor_set = unsafe {
@@ -654,9 +865,18 @@ impl VulkanContext {
                 descriptor_set_count: 1,
                 p_set_layouts: &descriptor_set_layout,
             };
-            device
-                .allocate_descriptor_sets(&alloc_info)
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?[0]
+            match device.allocate_descriptor_sets(&alloc_info) {
+                Ok(sets) => sets[0],
+                Err(error) => {
+                    Self::destroy_compute_resources(
+                        device,
+                        pipeline_layout,
+                        descriptor_set_layout,
+                        descriptor_pool,
+                    );
+                    return Err(VulkanError::InitFailed(error.to_string()));
+                }
+            }
         };
 
         Ok((
@@ -667,9 +887,21 @@ impl VulkanContext {
         ))
     }
 
+    unsafe fn destroy_compute_resources(
+        device: &ash::Device,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_set_layout: vk::DescriptorSetLayout,
+        descriptor_pool: vk::DescriptorPool,
+    ) {
+        device.destroy_descriptor_pool(descriptor_pool, None);
+        device.destroy_pipeline_layout(pipeline_layout, None);
+        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
+    }
+
     fn create_pipeline(
         device: &ash::Device,
         pipeline_layout: vk::PipelineLayout,
+        shader: &[u8],
     ) -> Result<vk::Pipeline, VulkanError> {
         let shader_module = unsafe {
             device
@@ -678,8 +910,8 @@ impl VulkanContext {
                         s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
                         p_next: std::ptr::null(),
                         flags: Default::default(),
-                        code_size: SHADER.len(),
-                        p_code: SHADER.as_ptr() as *const u32,
+                        code_size: shader.len(),
+                        p_code: shader.as_ptr() as *const u32,
                     },
                     None,
                 )
@@ -706,21 +938,14 @@ impl VulkanContext {
                 base_pipeline_handle: vk::Pipeline::null(),
                 base_pipeline_index: 0,
             };
-            match device.create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None) {
-                Ok(pipelines) => pipelines[0],
-                Err((_, _)) => {
-                    return Err(VulkanError::ShaderCompileFailed(
-                        "Pipeline creation failed".to_string(),
-                    ))
-                }
-            }
-        };
-
-        unsafe {
+            let result = device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
+                .map(|pipelines| pipelines[0])
+                .map_err(|(_, error)| VulkanError::ShaderCompileFailed(error.to_string()));
             device.destroy_shader_module(shader_module, None);
-        }
-
-        Ok(pipeline)
+            result
+        };
+        pipeline
     }
 
     fn create_command_pool(
@@ -740,26 +965,35 @@ impl VulkanContext {
                 )
                 .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
 
-            let command_buffer = device
-                .allocate_command_buffers(&vk::CommandBufferAllocateInfo {
+            let command_buffer =
+                match device.allocate_command_buffers(&vk::CommandBufferAllocateInfo {
                     s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
                     p_next: std::ptr::null(),
                     command_pool,
                     level: vk::CommandBufferLevel::PRIMARY,
                     command_buffer_count: 1,
-                })
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?[0];
+                }) {
+                    Ok(command_buffers) => command_buffers[0],
+                    Err(error) => {
+                        device.destroy_command_pool(command_pool, None);
+                        return Err(VulkanError::InitFailed(error.to_string()));
+                    }
+                };
 
-            let fence = device
-                .create_fence(
-                    &vk::FenceCreateInfo {
-                        s_type: vk::StructureType::FENCE_CREATE_INFO,
-                        p_next: std::ptr::null(),
-                        flags: Default::default(),
-                    },
-                    None,
-                )
-                .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
+            let fence = match device.create_fence(
+                &vk::FenceCreateInfo {
+                    s_type: vk::StructureType::FENCE_CREATE_INFO,
+                    p_next: std::ptr::null(),
+                    flags: Default::default(),
+                },
+                None,
+            ) {
+                Ok(fence) => fence,
+                Err(error) => {
+                    device.destroy_command_pool(command_pool, None);
+                    return Err(VulkanError::InitFailed(error.to_string()));
+                }
+            };
 
             Ok((command_pool, command_buffer, fence))
         }
@@ -881,6 +1115,77 @@ impl Drop for VulkanContext {
 }
 
 #[cfg(feature = "vulkan")]
+unsafe fn load_entry() -> Result<ash::Entry, VulkanError> {
+    ash::Entry::load()
+        .or_else(|error| {
+            #[cfg(target_os = "macos")]
+            for path in [
+                "/opt/homebrew/lib/libvulkan.dylib",
+                "/usr/local/lib/libvulkan.dylib",
+            ] {
+                if let Ok(entry) = ash::Entry::load_from(path) {
+                    return Ok(entry);
+                }
+            }
+            Err(error)
+        })
+        .map_err(|error| VulkanError::InitFailed(error.to_string()))
+}
+
+#[cfg(feature = "vulkan")]
+fn rejection_reason(candidate: &DeviceCandidate) -> Option<String> {
+    let limits = &candidate.limits;
+    if limits.max_compute_work_group_invocations < 64 {
+        return Some("maxComputeWorkGroupInvocations is below 64".into());
+    }
+    if limits.max_compute_work_group_size[0] < 64 {
+        return Some("maxComputeWorkGroupSize[0] is below 64".into());
+    }
+    if limits.max_compute_shared_memory_size < Q8_SHARED_BYTES {
+        return Some(format!(
+            "maxComputeSharedMemorySize {} is below {Q8_SHARED_BYTES}",
+            limits.max_compute_shared_memory_size
+        ));
+    }
+    None
+}
+
+#[cfg(feature = "vulkan")]
+fn rank_supported(mut candidates: Vec<DeviceCandidate>) -> Vec<DeviceCandidate> {
+    candidates.retain(|candidate| rejection_reason(candidate).is_none());
+    candidates.sort_by_key(|candidate| match candidate.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+        vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+        vk::PhysicalDeviceType::CPU => 3,
+        _ => 4,
+    });
+    candidates
+}
+
+#[cfg(feature = "vulkan")]
+fn dispatch_grid(
+    n_out: usize,
+    limits: &vk::PhysicalDeviceLimits,
+) -> Result<(u32, u32), VulkanError> {
+    let max_x = limits.max_compute_work_group_count[0] as usize;
+    let max_y = limits.max_compute_work_group_count[1] as usize;
+    if n_out == 0 || max_x == 0 || max_y == 0 {
+        return Err(VulkanError::UnsupportedShape(format!(
+            "cannot dispatch {n_out} output rows"
+        )));
+    }
+    let groups_x = n_out.min(max_x);
+    let groups_y = n_out.div_ceil(groups_x);
+    if groups_y > max_y {
+        return Err(VulkanError::UnsupportedShape(format!(
+            "{n_out} output rows exceed the device's 2D dispatch limit"
+        )));
+    }
+    Ok((groups_x as u32, groups_y as u32))
+}
+
+#[cfg(feature = "vulkan")]
 fn storage_binding(binding: u32) -> vk::DescriptorSetLayoutBinding {
     vk::DescriptorSetLayoutBinding {
         binding,
@@ -924,13 +1229,71 @@ impl std::fmt::Display for VulkanError {
     }
 }
 
-#[cfg(all(test, feature = "vulkan", target_os = "macos"))]
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use super::VulkanContext;
-    use std::path::Path;
+    use super::{
+        dispatch_grid, rank_supported, rejection_reason, DeviceCandidate, PipelineVariant,
+        VulkanContext,
+    };
+    use ash::vk;
+
+    fn candidate_for_test(
+        device_type: vk::PhysicalDeviceType,
+        integer_dot_product: bool,
+        shared_bytes: u32,
+    ) -> DeviceCandidate {
+        let mut limits = vk::PhysicalDeviceLimits::default();
+        limits.max_compute_work_group_invocations = 64;
+        limits.max_compute_work_group_size[0] = 64;
+        limits.max_compute_work_group_count = [65_535, 65_535, 65_535];
+        limits.max_compute_shared_memory_size = shared_bytes;
+        DeviceCandidate {
+            physical_device: vk::PhysicalDevice::null(),
+            queue_family: 0,
+            name: match device_type {
+                vk::PhysicalDeviceType::DISCRETE_GPU => "test-discrete",
+                _ => "test-integrated",
+            }
+            .into(),
+            device_type,
+            api_version: vk::API_VERSION_1_1,
+            limits,
+            portability_subset: false,
+            integer_dot_product,
+        }
+    }
 
     #[test]
+    fn baseline_accepts_compute_without_int64_or_dot_product() {
+        let candidate =
+            candidate_for_test(vk::PhysicalDeviceType::INTEGRATED_GPU, false, 32 * 1024);
+        assert_eq!(rejection_reason(&candidate), None);
+        assert_eq!(candidate.pipeline_variant(), PipelineVariant::Baseline);
+    }
+
+    #[test]
+    fn unsupported_discrete_is_removed_before_ranking() {
+        let bad = candidate_for_test(vk::PhysicalDeviceType::DISCRETE_GPU, true, 8 * 1024);
+        let good = candidate_for_test(vk::PhysicalDeviceType::INTEGRATED_GPU, false, 32 * 1024);
+        let names: Vec<_> = rank_supported(vec![bad, good])
+            .into_iter()
+            .map(|value| value.name)
+            .collect();
+        assert_eq!(names, ["test-integrated"]);
+    }
+
+    #[test]
+    fn vocabulary_projection_uses_two_dimensional_dispatch() {
+        let mut limits = vk::PhysicalDeviceLimits::default();
+        limits.max_compute_work_group_count = [65_535, 65_535, 65_535];
+        assert_eq!(dispatch_grid(151_936, &limits).unwrap(), (65_535, 3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn initializes_with_homebrew_moltenvk() {
+        use std::path::Path;
+
         if ![
             "/opt/homebrew/lib/libvulkan.dylib",
             "/usr/local/lib/libvulkan.dylib",
