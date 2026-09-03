@@ -15,6 +15,8 @@
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
+pub(crate) mod qwen3;
+#[cfg(feature = "vulkan")]
 #[doc(hidden)]
 pub use ops::run_qwen3_operator_check;
 
