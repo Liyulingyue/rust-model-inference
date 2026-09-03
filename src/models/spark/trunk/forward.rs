@@ -107,10 +107,18 @@ pub struct SparkSession {
     pub(crate) output_norm: Vec<f32>,
     pub(crate) output: Option<Weight<'static>>,
     pub(crate) kv_state: KvState,
+    pub(crate) pool: Arc<ComputePool>,
+    pub(crate) q8_buf: Vec<u8>,
+    pub(crate) scale_buf: Vec<f32>,
+    pub(crate) q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
 }
 
 impl SparkSession {
-    pub fn new(source: &dyn TensorSource, max_ctx: usize) -> Result<Self, String> {
+    pub fn new(
+        source: &dyn TensorSource,
+        pool: Arc<ComputePool>,
+        max_ctx: usize,
+    ) -> Result<Self, String> {
         let model = SparkModel::from_source(source)?;
         let cfg = &model.config;
         let arch = Arc::new(KvArch::new(
@@ -122,6 +130,7 @@ impl SparkSession {
         ));
         let kv_state =
             KvState::new(arch, KvFormat::F16, max_ctx).with_lifecycle(KvLifecycle::Ephemeral);
+        let max_n_in = cfg.n_embd_q().max(cfg.n_ff).max(cfg.n_embd);
         Ok(Self {
             config: model.config,
             layers: model.layers,
@@ -129,6 +138,17 @@ impl SparkSession {
             output_norm: model.output_norm,
             output: model.output,
             kv_state,
+            pool,
+            q8_buf: vec![0u8; max_n_in],
+            scale_buf: vec![0.0f32; max_n_in.div_ceil(32)],
+            q8k_buf: vec![
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; 256],
+                    bsums: [0; 16],
+                };
+                max_n_in / 256
+            ],
         })
     }
 
@@ -168,9 +188,14 @@ impl SparkSession {
 
             // Fused QKV
             let mut qkv = vec![0.0f32; cfg.n_embd_qkv()];
-            lw.attn_qkv
-                .kernel
-                .forward(&normed, &mut qkv, n_embd, cfg.n_embd_qkv());
+            lw.attn_qkv.quantize_and_matmul_with_scratch(
+                &normed,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut qkv,
+                &self.pool,
+            );
 
             let (q, mid) = qkv.split_at_mut(n_embd_q);
             let (k_full, v_full) = mid.split_at_mut(n_embd_kv);
@@ -243,9 +268,14 @@ impl SparkSession {
 
             // Per-head gating: sigmoid(attn_gate @ x_inp)
             let mut gate_raw = vec![0.0f32; n_head];
-            lw.attn_gate
-                .kernel
-                .forward(&normed, &mut gate_raw, n_embd, n_head);
+            lw.attn_gate.quantize_and_matmul_with_scratch(
+                &normed,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut gate_raw,
+                &self.pool,
+            );
             let gate: Vec<f32> = gate_raw.iter().map(|&g| sigmoid_f32(g)).collect();
             for h in 0..n_head {
                 for d in 0..n_embd_head {
@@ -255,9 +285,14 @@ impl SparkSession {
 
             // Output projection
             let mut attn_proj = vec![0.0f32; n_embd];
-            lw.attn_output
-                .kernel
-                .forward(&attn_out, &mut attn_proj, n_embd_q, n_embd);
+            lw.attn_output.quantize_and_matmul_with_scratch(
+                &attn_out,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut attn_proj,
+                &self.pool,
+            );
 
             // Residual
             for i in 0..n_embd {
@@ -269,23 +304,38 @@ impl SparkSession {
             rms_norm(&hidden, &lw.ffn_norm, &mut normed2, cfg.eps);
 
             let mut gate_proj = vec![0.0f32; n_ff];
-            lw.ffn_gate
-                .kernel
-                .forward(&normed2, &mut gate_proj, n_embd, n_ff);
+            lw.ffn_gate.quantize_and_matmul_with_scratch(
+                &normed2,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut gate_proj,
+                &self.pool,
+            );
             gelu_inplace(&mut gate_proj);
             let mut up_proj = vec![0.0f32; n_ff];
-            lw.ffn_up
-                .kernel
-                .forward(&normed2, &mut up_proj, n_embd, n_ff);
+            lw.ffn_up.quantize_and_matmul_with_scratch(
+                &normed2,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut up_proj,
+                &self.pool,
+            );
             let mut ffn_hidden: Vec<f32> = gate_proj
                 .iter()
                 .zip(up_proj.iter())
                 .map(|(g, u)| g * u)
                 .collect();
             let mut ffn_out = vec![0.0f32; n_embd];
-            lw.ffn_down
-                .kernel
-                .forward(&ffn_hidden, &mut ffn_out, n_ff, n_embd);
+            lw.ffn_down.quantize_and_matmul_with_scratch(
+                &ffn_hidden,
+                &mut self.q8k_buf,
+                &mut self.q8_buf,
+                &mut self.scale_buf,
+                &mut ffn_out,
+                &self.pool,
+            );
 
             // Residual
             for i in 0..n_embd {
@@ -297,9 +347,15 @@ impl SparkSession {
         let mut final_normed = vec![0.0f32; n_embd];
         rms_norm(&hidden, &self.output_norm, &mut final_normed, cfg.eps);
         let mut logits = vec![0.0f32; cfg.vocab];
-        self.output_weight()
-            .kernel
-            .forward(&final_normed, &mut logits, n_embd, cfg.vocab);
+        let output_w: &Weight<'static> = self.output.as_ref().unwrap_or(&self.tok_embd);
+        output_w.quantize_and_matmul_with_scratch(
+            &final_normed,
+            &mut self.q8k_buf,
+            &mut self.q8_buf,
+            &mut self.scale_buf,
+            &mut logits,
+            &self.pool,
+        );
 
         sample_token(&logits, temperature)
     }
@@ -402,7 +458,10 @@ pub fn run_inference(
         .map(|threads| threads.get())
         .unwrap_or(4);
     use crate::app::cli::resolve_thread_count;
-    let _pool = ComputePool::new(resolve_thread_count(n_threads_arg, available_threads));
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        available_threads,
+    )));
 
     let config = SparkConfig::from_source(source)?;
     println!(
@@ -414,10 +473,10 @@ pub fn run_inference(
         config.n_ff,
         started.elapsed().as_millis()
     );
-    eprintln!("compute pool: {} threads", _pool.n_threads());
+    eprintln!("compute pool: {} threads", pool.n_threads());
     println!("Prompt: {} ({} tokens)", prompt_text, prompt_tokens.len());
 
-    let mut session = SparkSession::new(source, prompt_tokens.len() + max_tokens)?;
+    let mut session = SparkSession::new(source, pool.clone(), prompt_tokens.len() + max_tokens)?;
 
     print!("Output: ");
     io::stdout().flush().map_err(|error| error.to_string())?;
