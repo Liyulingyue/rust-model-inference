@@ -19,7 +19,10 @@
 - **单线程提交**：`pool.compute` 闭包中 `ith == 0` 提交 GPU dispatch，其余线程直接返回。
   *调用线程拥有 fence 完成点*——trunk 的 element-wise 后处理（silu 等）必须在拥有完成的
   线程上执行（见下"并发所有权"）。
-- **设备优选**：discrete > integrated > CPU(软渲染)，初始化时打印设备名。
+- **设备优选**：先按 shader 的 workgroup / shared-memory 要求过滤，再按
+  discrete > integrated > virtual > CPU 排序；候选初始化失败时继续尝试下一设备。
+  baseline 不要求 Vulkan 1.3、`shaderInt64` 或整数点积，整数点积可用时选用 dp4a，
+  否则使用 baseline pipeline。
 - **预热**：上下文创建后立即跑一次 32×32 dummy matmul——驱动首次 dispatch 需要 JIT
   （Meteor Lake 实测 >5 s），不预热会触发看门狗误放弃首次真实 matmul。
   预热在 `OnceLock::get_or_init` 闭包**内部**执行（曾经放在外面，输掉
@@ -51,7 +54,7 @@ CPU 路径中，每个线程的 element-wise 后处理（silu）读自己行的 
 1. 合并 dispatch：QKV 三合一（同输入）、gate/up 二合一 → 每层 7→4 次；
 2. 整层/整 token 批量提交（一个 command buffer 多个 dispatch，一次 fence）；
 3. element-wise 后处理上 GPU，消除 CPU↔GPU 数据往返；
-4. dp4a（`shaderIntegerDotProduct`，设备 feature 已启用）提升 shader 吞吐。
+4. dp4a（设备支持 `shaderIntegerDotProduct` 时启用）提升 shader 吞吐。
 
 前三项完成后 GPU 才可能在 0.6B 上超过 CPU；更大的模型因开销占比下降会先受益。
 
@@ -63,8 +66,11 @@ CPU 路径中，每个线程的 element-wise 后处理（silu）读自己行的 
 - `RUST_GPU_TRACE=1`：打印每次 dispatch 的序号/形状/耗时。
 - `RUST_GPU_MAX_ROWS=<n>`：超过 n 行的 matmul 回退 CPU（0 = 全 CPU）。
 - `RUST_GPU_TIMEOUT_MS=<n>`：单次 GPU 调用看门狗超时（默认 5000）。
-- 正确性基准：`cargo run --release --features vulkan --example vk_check`
-  （GPU vs CPU 标量参考，5 种形状，rel ≤ 3e-7）；`vk_bench` 吞吐基准。
-- shader 源码 `shaders/glsl/q8_matmul.comp`，编译：
-  `glslangValidator -V shaders/glsl/q8_matmul.comp -o shaders/bin/q8_matmul.spv`。
+- 正确性基准：`cargo run --release --features vulkan --example vk_check`。它逐行比较
+  GPU 与 CPU 标量参考，覆盖 `(1024,1024)`、`(1024,3072)`、`(3072,1024)`、
+  `(1024,151936)` 和 `(16384,32)`，判定条件为
+  `abs(gpu - cpu) <= 1e-4 + 1e-4 * abs(cpu)`；Vulkan 错误、非有限输出或越界都会以
+  非零状态退出。`vk_bench` 是独立吞吐基准。
+- shader 唯一源码位于 `shaders/glsl/`；运行 `bash scripts/vulkan-shaders.sh update`
+  重新生成，运行 `bash scripts/vulkan-shaders.sh check` 校验源码、SPIR-V 和 manifest。
 - wgpu 后端（`--features wgpu`）当前未接入新分发路径，保持 CPU。

@@ -43,7 +43,7 @@ void main() {
     uint lid = gl_LocalInvocationID.x;
     uint in_words = bpr * 8u;
 
-    // cooperative input staging (bpr*8 words <= 1024 guarded by the host)
+    // cooperative input staging (bpr*8 words <= 4096 guarded by the host)
     for (uint w = lid; w < in_words; w += 64u) {
         s_input[w] = i_data[w];
     }
