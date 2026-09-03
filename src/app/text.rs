@@ -96,7 +96,7 @@ pub fn run_inference(
             profile,
             kv_format,
         )
-    } else if arch == "llama" || arch == "granite" {
+    } else if arch == "llama" || arch == "granite" || arch == "nanbeige" {
         crate::models::llama::run_inference(
             source.as_ref(),
             prompt,

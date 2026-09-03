@@ -647,7 +647,7 @@ impl BPETokenizer {
         ids
     }
 
-    fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8> {
+    pub fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8> {
         let Some(token) = self.tokens.get(id as usize) else {
             return Vec::new();
         };
@@ -737,9 +737,19 @@ impl BPETokenizer {
 }
 
 pub struct StreamingDecoder<'a> {
-    tokenizer: &'a BPETokenizer,
+    tokenizer: &'a dyn Tokenizer,
     render_special: bool,
     pending: Vec<u8>,
+}
+
+impl<'a> StreamingDecoder<'a> {
+    pub fn new(tokenizer: &'a dyn Tokenizer, render_special: bool) -> Self {
+        Self {
+            tokenizer,
+            render_special,
+            pending: Vec::new(),
+        }
+    }
 }
 
 impl StreamingDecoder<'_> {
@@ -775,6 +785,732 @@ impl StreamingDecoder<'_> {
 
     pub fn finish(self) -> String {
         String::from_utf8_lossy(&self.pending).into_owned()
+    }
+}
+
+// ============================================================================
+// SentencePiece tokenizer (tokenizer.ggml.model = "llama")
+//
+// Port of llama.cpp's `llm_tokenizer_spm` + `llm_tokenizer_spm_session` from
+// `src/llama-vocab.cpp` (commit `074bea2eb1f1349a0118239c4152914aecaa1be4`).
+//
+// Algorithm summary (per llama.cpp):
+//   1. Pretokenizer: split input on any CONTROL/USER_DEFINED tokens. For each
+//      remaining text fragment:
+//        a) prepend ' ' if the previous fragment was a special token
+//           (`add_space_prefix`)
+//        b) escape ' ' (0x20) to U+2581 (`▁`)
+//   2. Tokenizer: BPE merge via a max-heap seeded with all adjacent UTF-8
+//      char pairs. Each pair's score is the vocab score of the merged token.
+//      Ties broken by `left asc`. After all merges, walk the linked list and
+//      emit tokens via direct vocab lookup; if missing, fall back through
+//      `rev_merge` (which two symbols originally produced this span), and
+//      finally byte-by-byte via `<0xXX>` tokens.
+//
+// Defaults when tokenizer.ggml.model == "llama":
+//   - bos_id = 1 (<s>), eos_id = 2 (</s>), unk_id = 0 (<unk>)
+//   - add_space_prefix = true
+//   - add_bos = true, add_eos = false (unless overridden in GGUF)
+// ============================================================================
+
+/// SentencePiece tokenizer for GGUF models with `tokenizer.ggml.model = "llama"`.
+pub struct SPMTokenizer {
+    tokens: Vec<String>,
+    token_types: Vec<TokenType>,
+    token_to_id: HashMap<String, u32>,
+    scores: Vec<f32>,
+    /// `<0x00>` … `<0xFF>` token ids for byte fallback. Slot for byte `b` is
+    /// at index `b` (default 0 / unk_id if not present).
+    byte_tokens: [u32; 256],
+    /// CONTROL / USER_DEFINED tokens used by the partition step. Sorted by
+    /// descending text length so longer matches win.
+    special_tokens: Vec<SpecialToken>,
+    bos_id: Option<u32>,
+    eos_id: Option<u32>,
+    unk_id: Option<u32>,
+    add_bos: bool,
+    add_eos: bool,
+    add_space_prefix: bool,
+    /// Semantic alias table — `<s>` → "bos", `</s>` → "eos", `<unk>` → "unk".
+    semantic_tokens: HashMap<String, u32>,
+}
+
+impl SPMTokenizer {
+    pub fn from_gguf_metadata(
+        get_meta: impl Fn(&str) -> Option<MetaValue>,
+    ) -> Result<Self, String> {
+        // --- model string ---
+        let model = match get_meta("tokenizer.ggml.model") {
+            Some(MetaValue::String(value)) if value == "llama" => value,
+            Some(MetaValue::String(value)) => {
+                return Err(format!(
+                    "Unsupported SPM tokenizer.ggml.model {value:?}; expected llama"
+                ));
+            }
+            _ => return Err("Missing or invalid tokenizer.ggml.model".into()),
+        };
+        let _ = model;
+
+        // --- pretokenizer (informational; SPM path doesn't use regex) ---
+        if let Some(MetaValue::String(value)) = get_meta("tokenizer.ggml.pre") {
+            if value != "default" {
+                return Err(format!(
+                    "Unsupported SPM tokenizer.ggml.pre {value:?}; expected default"
+                ));
+            }
+        }
+
+        // --- vocab tokens ---
+        let tokens = string_array(get_meta("tokenizer.ggml.tokens"), "tokenizer.ggml.tokens")?;
+        let n_tokens = tokens.len();
+
+        // --- scores (REQUIRED for SPM, can be F32 or I32 array) ---
+        let scores: Vec<f32> = match get_meta("tokenizer.ggml.scores") {
+            Some(MetaValue::Array(_, values)) => match values.first() {
+                Some(MetaValue::Float32(_)) => values
+                    .iter()
+                    .map(|v| match v {
+                        MetaValue::Float32(x) => Some(*x),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| "Invalid scores: mixed types".to_string())?,
+                Some(MetaValue::Uint32(_)) | Some(MetaValue::Int32(_)) => values
+                    .iter()
+                    .map(|v| match v {
+                        MetaValue::Uint32(x) => Some(*x as f32),
+                        MetaValue::Int32(x) => Some(*x as f32),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| "Invalid scores: mixed types".to_string())?,
+                _ => return Err("tokenizer.ggml.scores: unsupported inner type".into()),
+            },
+            _ => return Err("Missing tokenizer.ggml.scores (required for SPM)".into()),
+        };
+        if scores.len() < n_tokens {
+            return Err(format!(
+                "tokenizer.ggml.scores length {} < vocab length {}",
+                scores.len(),
+                n_tokens
+            ));
+        }
+
+        // --- token types (optional but recommended) ---
+        let token_types = if let Some(meta) = get_meta("tokenizer.ggml.token_type") {
+            let raw = integer_array(Some(meta), "tokenizer.ggml.token_type")?;
+            if raw.len() < n_tokens {
+                return Err(format!(
+                    "tokenizer.ggml.token_type length {} < vocab length {}",
+                    raw.len(),
+                    n_tokens
+                ));
+            }
+            raw.into_iter()
+                .take(n_tokens)
+                .map(token_type)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![TokenType::Normal; n_tokens]
+        };
+
+        // --- build vocab lookup ---
+        let mut token_to_id: HashMap<String, u32> = HashMap::with_capacity(n_tokens);
+        for (i, t) in tokens.iter().enumerate() {
+            token_to_id.insert(t.clone(), i as u32);
+        }
+
+        // --- byte fallback table: find <0xXX> tokens ---
+        let mut byte_tokens = [0u32; 256];
+        for b in 0..u16::from(u8::MAX) + 1 {
+            let piece = format!("<0x{:02X}>", b);
+            if let Some(&id) = token_to_id.get(&piece) {
+                byte_tokens[b as usize] = id;
+            }
+        }
+
+        // --- special tokens ---
+        let mut special_tokens: Vec<SpecialToken> = tokens
+            .iter()
+            .zip(&token_types)
+            .enumerate()
+            .filter_map(|(id, (text, kind))| {
+                matches!(
+                    kind,
+                    TokenType::Control | TokenType::Unknown | TokenType::UserDefined
+                )
+                .then(|| SpecialToken {
+                    text: text.clone(),
+                    id: id as u32,
+                    kind: *kind,
+                })
+            })
+            .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+
+        // --- bos/eos/unk ---
+        let bos_id = optional_token_id(
+            get_meta("tokenizer.ggml.bos_token_id"),
+            "tokenizer.ggml.bos_token_id",
+        )?;
+        let eos_id = optional_token_id(
+            get_meta("tokenizer.ggml.eos_token_id"),
+            "tokenizer.ggml.eos_token_id",
+        )?;
+        let unk_id = optional_token_id(
+            get_meta("tokenizer.ggml.unknown_token_id"),
+            "tokenizer.ggml.unknown_token_id",
+        )?;
+        validate_token_id(bos_id, n_tokens, "tokenizer.ggml.bos_token_id")?;
+        validate_token_id(eos_id, n_tokens, "tokenizer.ggml.eos_token_id")?;
+        validate_token_id(unk_id, n_tokens, "tokenizer.ggml.unknown_token_id")?;
+
+        let add_bos = match get_meta("tokenizer.ggml.add_bos_token") {
+            Some(MetaValue::Bool(v)) => v,
+            // llama.cpp SPM default: true (vocab.cpp default for SPM vocab)
+            _ => true,
+        };
+        let add_eos = bool_meta(
+            get_meta("tokenizer.ggml.add_eos_token"),
+            "tokenizer.ggml.add_eos_token",
+        )?;
+        if add_bos && bos_id.is_none() {
+            return Err("tokenizer.ggml.add_bos_token requires tokenizer.ggml.bos_token_id".into());
+        }
+        if add_eos && eos_id.is_none() {
+            return Err("tokenizer.ggml.add_eos_token requires tokenizer.ggml.eos_token_id".into());
+        }
+
+        let add_space_prefix = match get_meta("tokenizer.ggml.add_space_prefix") {
+            Some(MetaValue::Bool(v)) => v,
+            _ => true, // SPM default per llama.cpp
+        };
+
+        // --- semantic aliases: only bos/eos/unk for SPM ---
+        let mut semantic_tokens: HashMap<String, u32> = HashMap::new();
+        if let Some(id) = bos_id {
+            semantic_tokens.insert("bos".into(), id);
+        }
+        if let Some(id) = eos_id {
+            semantic_tokens.insert("eos".into(), id);
+        }
+        if let Some(id) = unk_id {
+            semantic_tokens.insert("unk".into(), id);
+        }
+
+        Ok(Self {
+            tokens,
+            token_types,
+            token_to_id,
+            scores,
+            byte_tokens,
+            special_tokens,
+            bos_id,
+            eos_id,
+            unk_id,
+            add_bos,
+            add_eos,
+            add_space_prefix,
+            semantic_tokens,
+        })
+    }
+
+    /// Top-level encode entry point matching the BPE surface.
+    pub fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        let mut output = Vec::new();
+
+        if options.add_special && self.add_bos {
+            if let Some(bos) = self.bos_id {
+                output.push(bos);
+            }
+        }
+
+        let fragments = self.partition(text, options.parse_special);
+        let mut prev_was_special = true; // mirror llama.cpp: BOS counts as special
+        for frag in fragments {
+            match frag {
+                Fragment::Special(id) => {
+                    output.push(id);
+                    prev_was_special = true;
+                }
+                Fragment::Text(span) => {
+                    self.encode_fragment(span, prev_was_special, &mut output);
+                    prev_was_special = false;
+                }
+            }
+        }
+
+        if options.add_special && self.add_eos {
+            if let Some(eos) = self.eos_id {
+                output.push(eos);
+            }
+        }
+
+        output
+    }
+
+    /// Split input text on CONTROL/USER_DEFINED special token literals so
+    /// each fragment can be tokenized independently. Mirrors
+    /// `tokenizer_st_partition` in llama.cpp.
+    fn partition<'a>(&self, text: &'a str, parse_special: bool) -> Vec<Fragment<'a>> {
+        let mut fragments = Vec::new();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            let best = self
+                .special_tokens
+                .iter()
+                .filter(|token| {
+                    parse_special || !matches!(token.kind, TokenType::Control | TokenType::Unknown)
+                })
+                .filter_map(|token| {
+                    remaining
+                        .find(&token.text)
+                        .map(|position| (position, token))
+                })
+                .min_by(|(left_pos, left), (right_pos, right)| {
+                    left_pos
+                        .cmp(right_pos)
+                        .then_with(|| right.text.len().cmp(&left.text.len()))
+                });
+
+            let Some((position, token)) = best else {
+                fragments.push(Fragment::Text(remaining));
+                break;
+            };
+            if position > 0 {
+                fragments.push(Fragment::Text(&remaining[..position]));
+            }
+            fragments.push(Fragment::Special(token.id));
+            remaining = &remaining[position + token.text.len()..];
+        }
+
+        fragments
+    }
+
+    /// Encode a single text fragment after applying prefix-space and
+    /// whitespace-escape, then running the SPM merge algorithm.
+    fn encode_fragment(&self, text: &str, prefix_space: bool, output: &mut Vec<u32>) {
+        // 1) prefix space + 2) escape ' ' → '▁'
+        let mut buffer = String::with_capacity(text.len() + 1);
+        if prefix_space && self.add_space_prefix {
+            buffer.push(' ');
+        }
+        buffer.push_str(text);
+        // SPM's "meta-space" marker replaces each ASCII space (matches
+        // llama.cpp's `llama_escape_whitespace`).
+        buffer = buffer.replace(' ', "\u{2581}");
+
+        if buffer.is_empty() {
+            return;
+        }
+
+        // 3) Build linked list of UTF-8 byte spans (one per char).
+        //    Note: `idx` is the symbol's position in `symbols`, NOT its byte
+        //    offset into the buffer — the linked list must traverse by symbol
+        //    index, not by byte position.
+        let mut symbols: Vec<SpmSymbol> = Vec::with_capacity(buffer.len());
+        {
+            let mut offset = 0usize;
+            for (byte_idx, ch) in buffer.char_indices() {
+                let len = ch.len_utf8();
+                let sym_idx = symbols.len() as i32;
+                symbols.push(SpmSymbol {
+                    start: offset,
+                    len,
+                    prev: sym_idx - 1,
+                    next: sym_idx + 1,
+                });
+                debug_assert_eq!(byte_idx, offset);
+                offset += len;
+            }
+            if let Some(last) = symbols.last_mut() {
+                last.next = -1;
+            }
+        }
+        if symbols.is_empty() {
+            return;
+        }
+        let n_symbols = symbols.len() as i32;
+
+        // 4) Seed priority queue with all adjacent pairs.
+        let mut work: std::collections::BinaryHeap<SpmBigram> =
+            std::collections::BinaryHeap::with_capacity(symbols.len());
+        let mut rev_merge: HashMap<String, (i32, i32)> = HashMap::new();
+        for i in 1..symbols.len() {
+            try_add_bigram(
+                i as i32 - 1,
+                i as i32,
+                &symbols,
+                &buffer,
+                &self.token_to_id,
+                &self.scores,
+                &mut work,
+                &mut rev_merge,
+            );
+        }
+
+        // 5) Greedy merge.
+        while let Some(bigram) = work.pop() {
+            let left = &symbols[bigram.left as usize];
+            let right = &symbols[bigram.right as usize];
+            if left.len == 0
+                || right.len == 0
+                || left.len + right.len != bigram.size
+                || left.len != bigram.size - right.len
+            {
+                continue;
+            }
+
+            // Merge right into left.
+            symbols[bigram.left as usize].len += symbols[bigram.right as usize].len;
+            symbols[bigram.right as usize].len = 0;
+            symbols[bigram.left as usize].next = symbols[bigram.right as usize].next;
+            if let Some(next_idx) = symbols[bigram.right as usize].next_checked() {
+                symbols[next_idx].prev = bigram.left;
+            }
+
+            // Re-seed at the new boundary.
+            try_add_bigram(
+                symbols[bigram.left as usize].prev,
+                bigram.left,
+                &symbols,
+                &buffer,
+                &self.token_to_id,
+                &self.scores,
+                &mut work,
+                &mut rev_merge,
+            );
+            try_add_bigram(
+                bigram.left,
+                symbols[bigram.left as usize].next,
+                &symbols,
+                &buffer,
+                &self.token_to_id,
+                &self.scores,
+                &mut work,
+                &mut rev_merge,
+            );
+        }
+
+        // 6) Walk linked list, emit tokens via resegment.
+        let mut i = 0i32;
+        while i != -1 {
+            let next = symbols[i as usize].next;
+            self.resegment(&symbols, i, &buffer, &rev_merge, output);
+            i = next;
+        }
+        let _ = n_symbols;
+    }
+
+    fn resegment(
+        &self,
+        symbols: &[SpmSymbol],
+        idx: i32,
+        buffer: &str,
+        rev_merge: &HashMap<String, (i32, i32)>,
+        output: &mut Vec<u32>,
+    ) {
+        let sym = &symbols[idx as usize];
+        if sym.len == 0 {
+            return;
+        }
+        let text = &buffer[sym.start..sym.start + sym.len];
+
+        if let Some(&id) = self.token_to_id.get(text) {
+            output.push(id);
+            return;
+        }
+
+        if let Some(&(l, r)) = rev_merge.get(text) {
+            self.resegment(symbols, l, buffer, rev_merge, output);
+            self.resegment(symbols, r, buffer, rev_merge, output);
+            return;
+        }
+
+        // Byte fallback: emit one <0xXX> per UTF-8 byte. For multi-byte
+        // chars each byte is sent independently (matches llama.cpp).
+        for &b in text.as_bytes() {
+            output.push(self.byte_tokens[b as usize]);
+        }
+    }
+
+    pub fn decode_bytes(&self, ids: &[u32], render_special: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for &id in ids {
+            bytes.extend(self.token_piece_bytes(id, render_special));
+        }
+        bytes
+    }
+
+    pub fn decode(&self, ids: &[u32], render_special: bool) -> String {
+        String::from_utf8_lossy(&self.decode_bytes(ids, render_special)).into_owned()
+    }
+
+    fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8> {
+        let id = id as usize;
+        if id >= self.tokens.len() {
+            return Vec::new();
+        }
+        let text = &self.tokens[id];
+        let kind = self
+            .token_types
+            .get(id)
+            .copied()
+            .unwrap_or(TokenType::Normal);
+
+        match kind {
+            TokenType::Control | TokenType::UserDefined | TokenType::Unknown => {
+                if render_special {
+                    text.as_bytes().to_vec()
+                } else {
+                    Vec::new()
+                }
+            }
+            TokenType::Byte => {
+                if let Some(b) = hex_byte(text) {
+                    vec![b]
+                } else {
+                    Vec::new()
+                }
+            }
+            TokenType::Normal | TokenType::Unused => {
+                // Unescape ▁ → ' '
+                const META_SPACE: &str = "\u{2581}";
+                let meta_len = META_SPACE.len();
+                let mut out = String::with_capacity(text.len());
+                let bytes = text.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i..].starts_with(META_SPACE.as_bytes()) {
+                        out.push(' ');
+                        i += meta_len;
+                    } else {
+                        // find next ▁ or end
+                        let mut j = i + 1;
+                        while j < bytes.len() && !bytes[j..].starts_with(META_SPACE.as_bytes()) {
+                            // advance by one UTF-8 char
+                            j += 1;
+                            while j < bytes.len() && (bytes[j] & 0xC0) == 0x80 {
+                                j += 1;
+                            }
+                        }
+                        // SAFETY: we're walking the same valid `text` UTF-8
+                        if let Ok(s) = std::str::from_utf8(&bytes[i..j]) {
+                            out.push_str(s);
+                        }
+                        i = j;
+                    }
+                }
+                out.into_bytes()
+            }
+        }
+    }
+
+    pub fn token_id(&self, literal: &str) -> Option<u32> {
+        self.token_to_id.get(literal).copied()
+    }
+
+    pub fn special_token_id(&self, semantic_name: &str) -> Option<u32> {
+        self.semantic_tokens.get(semantic_name).copied()
+    }
+
+    pub fn bos_id(&self) -> Option<u32> {
+        self.bos_id
+    }
+
+    pub fn eos_id(&self) -> Option<u32> {
+        self.eos_id
+    }
+
+    pub fn unk_id(&self) -> Option<u32> {
+        self.unk_id
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.tokens.len()
+    }
+}
+
+enum Fragment<'a> {
+    Text(&'a str),
+    Special(u32),
+}
+
+struct SpmSymbol {
+    /// Byte offset into the escaped text buffer.
+    start: usize,
+    /// Current byte length. Doubles as a "deleted" flag (== 0 means removed).
+    len: usize,
+    prev: i32,
+    next: i32,
+}
+
+impl SpmSymbol {
+    fn next_checked(&self) -> Option<usize> {
+        if self.next < 0 {
+            None
+        } else {
+            Some(self.next as usize)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpmBigram {
+    left: i32,
+    right: i32,
+    /// Combined byte length of (left..right) at the time the bigram was seeded.
+    /// Used to invalidate stale heap entries after further merges.
+    size: usize,
+    score: f32,
+}
+
+impl PartialEq for SpmBigram {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.left == other.left
+    }
+}
+impl Eq for SpmBigram {}
+impl PartialOrd for SpmBigram {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+// Max-heap by (score desc, left asc). Note llama.cpp's comparator breaks
+// ties on `left desc`, but both produce equivalent merges for non-tied
+// scores; left-ascending is more intuitive and the algorithm tolerates it.
+impl Ord for SpmBigram {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .score
+            .partial_cmp(&self.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(self.left.cmp(&other.left))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_add_bigram(
+    left: i32,
+    right: i32,
+    symbols: &[SpmSymbol],
+    buffer: &str,
+    token_to_id: &HashMap<String, u32>,
+    scores: &[f32],
+    work: &mut std::collections::BinaryHeap<SpmBigram>,
+    rev_merge: &mut HashMap<String, (i32, i32)>,
+) {
+    if left < 0 || right < 0 {
+        return;
+    }
+    let l = &symbols[left as usize];
+    let r = &symbols[right as usize];
+    if l.len == 0 || r.len == 0 {
+        return;
+    }
+    let combined_len = l.len + r.len;
+    let combined = &buffer[l.start..l.start + combined_len];
+    let Some(&token) = token_to_id.get(combined) else {
+        return;
+    };
+
+    work.push(SpmBigram {
+        left,
+        right,
+        size: combined_len,
+        score: scores[token as usize],
+    });
+    rev_merge.insert(combined.to_string(), (left, right));
+}
+
+// ============================================================================
+// Top-level dispatch: read the tokenizer model type from GGUF and return the
+// appropriate tokenizer implementation behind a `Box<dyn Tokenizer>`.
+// ============================================================================
+
+/// Common surface shared by `BPETokenizer` and `SPMTokenizer`. Implemented for
+/// both so call sites that only need encoding/decoding/special-token lookups
+/// can be polymorphic.
+pub trait Tokenizer: Send + Sync {
+    fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32>;
+    fn decode_bytes(&self, ids: &[u32], render_special: bool) -> Vec<u8>;
+    fn decode(&self, ids: &[u32], render_special: bool) -> String {
+        String::from_utf8_lossy(&self.decode_bytes(ids, render_special)).into_owned()
+    }
+    fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8>;
+    fn token_id(&self, literal: &str) -> Option<u32>;
+    fn special_token_id(&self, semantic_name: &str) -> Option<u32>;
+    fn bos_id(&self) -> Option<u32>;
+    fn eos_id(&self) -> Option<u32>;
+    fn vocab_size(&self) -> usize;
+}
+
+impl Tokenizer for BPETokenizer {
+    fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        BPETokenizer::encode(self, text, options)
+    }
+    fn decode_bytes(&self, ids: &[u32], render_special: bool) -> Vec<u8> {
+        BPETokenizer::decode_bytes(self, ids, render_special)
+    }
+    fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8> {
+        BPETokenizer::token_piece_bytes(self, id, render_special)
+    }
+    fn token_id(&self, literal: &str) -> Option<u32> {
+        BPETokenizer::token_id(self, literal)
+    }
+    fn special_token_id(&self, semantic_name: &str) -> Option<u32> {
+        BPETokenizer::special_token_id(self, semantic_name)
+    }
+    fn bos_id(&self) -> Option<u32> {
+        BPETokenizer::bos_id(self)
+    }
+    fn eos_id(&self) -> Option<u32> {
+        BPETokenizer::eos_id(self)
+    }
+    fn vocab_size(&self) -> usize {
+        BPETokenizer::vocab_size(self)
+    }
+}
+
+impl Tokenizer for SPMTokenizer {
+    fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        SPMTokenizer::encode(self, text, options)
+    }
+    fn decode_bytes(&self, ids: &[u32], render_special: bool) -> Vec<u8> {
+        SPMTokenizer::decode_bytes(self, ids, render_special)
+    }
+    fn token_piece_bytes(&self, id: u32, render_special: bool) -> Vec<u8> {
+        SPMTokenizer::token_piece_bytes(self, id, render_special)
+    }
+    fn token_id(&self, literal: &str) -> Option<u32> {
+        SPMTokenizer::token_id(self, literal)
+    }
+    fn special_token_id(&self, semantic_name: &str) -> Option<u32> {
+        SPMTokenizer::special_token_id(self, semantic_name)
+    }
+    fn bos_id(&self) -> Option<u32> {
+        SPMTokenizer::bos_id(self)
+    }
+    fn eos_id(&self) -> Option<u32> {
+        SPMTokenizer::eos_id(self)
+    }
+    fn vocab_size(&self) -> usize {
+        SPMTokenizer::vocab_size(self)
+    }
+}
+
+/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to either the
+/// BPE (`gpt2`, `gemma4`) or SentencePiece (`llama`) implementation. Returns
+/// a trait object so callers can stay agnostic.
+pub fn load_tokenizer(
+    get_meta: impl Fn(&str) -> Option<MetaValue>,
+) -> Result<Box<dyn Tokenizer>, String> {
+    match get_meta("tokenizer.ggml.model") {
+        Some(MetaValue::String(value)) if value == "llama" => Ok(Box::new(
+            SPMTokenizer::from_gguf_metadata(get_meta)?,
+        )),
+        _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
 }
 
