@@ -272,8 +272,8 @@ fn parse_attributes(opening: &str, attr_start: usize) -> Result<Option<String>, 
         if value.is_empty() {
             return Err("attributes need a value".into());
         }
-        if !quoted && !is_decimal(value) {
-            return Err("unquoted attribute values must be signed decimals".into());
+        if !quoted && value.contains(['=', '\'', '"', '<', '>']) {
+            return Err("invalid unquoted attribute value".into());
         }
         let value = decode_entities(value)?;
         if name.eq_ignore_ascii_case("targ") {
@@ -287,20 +287,6 @@ fn parse_attributes(opening: &str, attr_start: usize) -> Result<Option<String>, 
         rest = following;
     }
     Ok(target)
-}
-
-fn is_decimal(value: &str) -> bool {
-    let value = value.strip_prefix(['+', '-']).unwrap_or(value);
-    let mut parts = value.split('.');
-    let whole = parts.next().unwrap_or_default();
-    let fractional = parts.next();
-    if parts.next().is_some() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    match fractional {
-        None => !whole.is_empty(),
-        Some(part) => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
-    }
 }
 
 fn decode_entities(text: &str) -> Result<String, String> {
@@ -740,7 +726,7 @@ mod tests {
         for instruction in [
             "<pitch, semitones=-2>hello</pitch>",
             "<rate, factor=0.8>hello</rate>",
-            "<sub note='keep' targ='new'>old</sub>",
+            "<sub note=keep targ='new'>old</sub>",
         ] {
             assert!(resolve_edit_request(instruction, None, None, XVectorMode::Auto).is_ok());
         }
