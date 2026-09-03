@@ -216,14 +216,15 @@ impl SparkSession {
                             .collect();
                         scores[t] = dot_f32(q_h, &k_row_f32, n_embd_head) * scale;
                     }
-                    softmax_inplace(&mut scores);
-                    // Sliding-window mask (post-softmax): zero scores outside window.
+                    // Sliding-window mask (pre-softmax): -inf outside window so
+                    // softmax excludes them from the denominator.
                     if is_swa && sliding_window > 0 && pos + 1 > sliding_window {
                         let start = (pos + 1) - sliding_window;
                         for t in 0..start {
-                            scores[t] = 0.0;
+                            scores[t] = f32::NEG_INFINITY;
                         }
                     }
+                    softmax_inplace(&mut scores);
                     for t in 0..=pos {
                         if scores[t] == 0.0 {
                             continue;
@@ -290,8 +291,6 @@ impl SparkSession {
             for i in 0..n_embd {
                 hidden[i] += ffn_out[i];
             }
-
-            let _ = sliding_window;
         }
 
         // Final norm + logits (tied embeddings)
