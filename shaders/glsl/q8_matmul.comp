@@ -49,7 +49,7 @@ void main() {
     }
     barrier();
 
-    uint row = gl_WorkGroupID.x;  // one row per 64-thread workgroup
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (row >= dims.y) return;
 
     uint row_off = row * dims.w;

@@ -1,6 +1,6 @@
 #version 450
-#extension GL_EXT_shader_integer_dot_product : require
-// dp4a variant: inner loop uses ivec4 dot products (Intel Xe INT8 pipe).
+#extension GL_EXT_integer_dot_product : require
+// dp4a variant: inner loop uses packed 4x int8 dot products.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer W  { uint w_data[]; };
 layout(std430, binding = 1) readonly buffer IQ { uint i_data[]; };
@@ -30,7 +30,7 @@ void main() {
     uint in_words = bpr * 8u;
     for (uint w = lid; w < in_words; w += 64u) { s_input[w] = i_data[w]; }
     barrier();
-    uint row = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (row >= dims.y) return;
     uint row_off = row * dims.w;
     float acc = 0.0;
@@ -39,7 +39,7 @@ void main() {
         uint s_word = w_data[w_off >> 2u];
         uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
         float w_scale = f16_decode(s_bits);
-        int dot = 0;
+        int dot_sum = 0;
         uint w_body = w_off + 2u;
         uint in_base = block * 32u;
         for (uint g = 0u; g < 8u; g++) {
@@ -49,11 +49,9 @@ void main() {
             uint sh = (g_off & 3u) * 8u;
             uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
             uint i_word = s_input[(in_base + g * 4u) >> 2u];
-            ivec4 wv = ivec4(i8_of(packed, 0u), i8_of(packed, 1u), i8_of(packed, 2u), i8_of(packed, 3u));
-            ivec4 iv = ivec4(i8_of(i_word, 0u), i8_of(i_word, 1u), i8_of(i_word, 2u), i8_of(i_word, 3u));
-            dot += dot(wv, iv);
+            dot_sum += dotPacked4x8EXT(int(packed), int(i_word));
         }
-        acc += w_scale * i_scales[block] * float(dot);
+        acc += w_scale * i_scales[block] * float(dot_sum);
     }
     s_red[lid] = acc;
     barrier();
