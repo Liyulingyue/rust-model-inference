@@ -16,7 +16,7 @@ use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::dit::DiT;
 use crate::models::dots::llm::{DotsLlm, DotsLlmSession, LlmInputRow};
 use crate::models::dots::patch_encoder::{linear_forward, load_f16_f32, PatchEncoder};
-use crate::models::dots::schedule::{DotsSchedule, build_generation_schedule};
+use crate::models::dots::schedule::{build_generation_schedule, DotsSchedule};
 use crate::models::dots::speaker::{kaldi_fbank, CamPlus, Resampler};
 use crate::models::dots::vocoder::Vocoder;
 
@@ -147,8 +147,8 @@ impl DotsTtsModel {
         var /= out.len() as f64;
         let inv = 1.0 / (var + LN_EPS as f64).sqrt();
         for i in 0..out.len() {
-            out[i] = ((out[i] as f64 - mean) * inv) as f32 * self.xvec_proj.2[i]
-                + self.xvec_proj.3[i];
+            out[i] =
+                ((out[i] as f64 - mean) * inv) as f32 * self.xvec_proj.2[i] + self.xvec_proj.3[i];
         }
         Ok(out)
     }
@@ -170,7 +170,14 @@ impl DotsTtsModel {
             *v = crate::ops::silu(*v);
         }
         let mut logits = vec![0.0f32; 2];
-        linear_forward(&self.eos_proj.2, Some(&self.eos_proj.3), &l0, self.config.llm_hidden_size, 2, &mut logits);
+        linear_forward(
+            &self.eos_proj.2,
+            Some(&self.eos_proj.3),
+            &l0,
+            self.config.llm_hidden_size,
+            2,
+            &mut logits,
+        );
         let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let e0 = (logits[0] - max).exp();
         let e1 = (logits[1] - max).exp();
@@ -270,6 +277,23 @@ impl Default for GenerateOptions {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FillPolicy {
+    None,
+    BasePrompt,
+    EditSource,
+}
+
+impl FillPolicy {
+    fn fill_fm_history(self) -> bool {
+        matches!(self, Self::BasePrompt)
+    }
+
+    fn drop_generated_head_patches(self) -> usize {
+        usize::from(matches!(self, Self::BasePrompt))
+    }
+}
+
 /// Streaming generation state: the FM sequence buffer and the LLM session.
 pub struct DotsGenerateSession<'a> {
     model: &'a DotsTtsModel,
@@ -334,7 +358,12 @@ impl<'a> DotsGenerateSession<'a> {
         Ok(())
     }
 
-    fn decode_next_patch<R: Rng + ?Sized>(&mut self, g_cond: &[f32], options: &GenerateOptions, rng: &mut R) -> Result<Vec<f32>, String> {
+    fn decode_next_patch<R: Rng + ?Sized>(
+        &mut self,
+        g_cond: &[f32],
+        options: &GenerateOptions,
+        rng: &mut R,
+    ) -> Result<Vec<f32>, String> {
         // noise z0: [patch_size, latent_dim]
         let p = self.model.config.patch_size;
         let d = self.model.config.latent_dim;
@@ -372,26 +401,33 @@ pub fn generate_latents<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Result<Vec<f32>, String> {
     let prompt_patch_count = prompt.map_or(0, |p| p.patches.len() / (4 * model.config.latent_dim));
-    // the LLM schedule covers the prompt (reference) spans too, so the
-    // generation span budget sits *after* the prompt prefill
-    let schedule =
-        build_generation_schedule(tokenizer, text, options.max_patches + prompt_patch_count)?;
-    let span_ids = DotsSchedule::audio_span_ids(tokenizer)?;
-    let span_positions = &schedule.span_positions;
-
-    // prompt prefill = up to the first *generated* span
-    // schedule must contain prompt_patch_count prompt spans + ≥1 generation span
-    let prefill_end = if span_positions.len() > prompt_patch_count {
-        span_positions[prompt_patch_count]
+    let fill_policy = if prompt.is_some() {
+        FillPolicy::BasePrompt
     } else {
+        FillPolicy::None
+    };
+    let schedule =
+        build_generation_schedule(tokenizer, text, prompt_patch_count, options.max_patches)?;
+    let span_ids = DotsSchedule::audio_span_ids(tokenizer)?;
+    let fill_span_positions = &schedule.fill_span_positions;
+    let decode_span_positions = &schedule.decode_span_positions;
+
+    let prefill_end = *decode_span_positions
+        .first()
+        .ok_or_else(|| "generation schedule provides no decode spans".to_string())?;
+    if fill_span_positions.len() != prompt_patch_count {
         return Err(format!(
-            "generation schedule provides {} spans; prompt prefill requires {} + 1",
-            span_positions.len(),
+            "generation schedule provides {} fill spans; prompt requires {}",
+            fill_span_positions.len(),
             prompt_patch_count
         ));
-    };
+    }
 
-    let mut session = DotsGenerateSession::new(model, options.max_patches + prompt_patch_count)?;
+    let capacity_patches = fill_span_positions
+        .len()
+        .checked_add(decode_span_positions.len())
+        .ok_or_else(|| "generation schedule patch count overflow".to_string())?;
+    let mut session = DotsGenerateSession::new(model, capacity_patches)?;
 
     // ---- LLM prefill -------------------------------------------------- //
     let mut hiddens: Vec<Vec<f32>> = Vec::new();
@@ -400,18 +436,13 @@ pub fn generate_latents<R: Rng + ?Sized>(
         // patch-encoder embeddings for the prompt spans
         let mut pe_state = model.patch_encoder.new_state(prompt_patch_count * 2 + 8);
         let raw_patches = denormalize_patches(model, &p.patches);
-        let embeddings = model
-            .patch_encoder
-            .prefill(&raw_patches, &mut pe_state)?;
+        let embeddings = model.patch_encoder.prefill(&raw_patches, &mut pe_state)?;
         prompt_embeds = Some(embeddings);
     }
     for pos in 0..prefill_end {
         let id = schedule.ids[pos];
         let row: LlmInputRow<'_> = if let Some(ref emb) = prompt_embeds {
-            if let Some(span_idx) = span_positions[..prompt_patch_count]
-                .iter()
-                .position(|&s| s == pos)
-            {
+            if let Some(span_idx) = fill_span_positions.iter().position(|&s| s == pos) {
                 LlmInputRow::Embedding(
                     &emb[span_idx * model.config.llm_hidden_size
                         ..(span_idx + 1) * model.config.llm_hidden_size],
@@ -427,19 +458,23 @@ pub fn generate_latents<R: Rng + ?Sized>(
 
     // ---- FM buffer assembly from the prefill --------------------------- //
     let mut cursor = 0usize;
-    if let Some(p) = prompt {
-        let patches_per_span = model.config.patch_size * model.config.latent_dim;
-        for (span_idx, &span_position) in span_positions[..prompt_patch_count].iter().enumerate() {
-            if span_position > cursor {
-                session.append_hidden_chunk(&hiddens[span_position - 1])?;
+    if fill_policy.fill_fm_history() {
+        if let Some(p) = prompt {
+            let patches_per_span = model.config.patch_size * model.config.latent_dim;
+            for (span_idx, &span_position) in fill_span_positions.iter().enumerate() {
+                if span_position > cursor {
+                    session.append_hidden_chunk(&hiddens[span_position - 1])?;
+                }
+                let patch =
+                    &p.patches[span_idx * patches_per_span..(span_idx + 1) * patches_per_span];
+                session.append_history_chunk(patch)?;
+                if span_position + 1 < schedule.ids.len()
+                    && span_ids.contains(&schedule.ids[span_position + 1])
+                {
+                    session.append_hidden_chunk(&hiddens[span_position])?;
+                }
+                cursor = span_position + 1;
             }
-            let patch = &p.patches
-                [span_idx * patches_per_span..(span_idx + 1) * patches_per_span];
-            session.append_history_chunk(patch)?;
-            if span_position + 1 < schedule.ids.len() && span_ids.contains(&schedule.ids[span_position + 1]) {
-                session.append_hidden_chunk(&hiddens[span_position])?;
-            }
-            cursor = span_position + 1;
         }
     }
     if prefill_end > cursor {
@@ -452,11 +487,11 @@ pub fn generate_latents<R: Rng + ?Sized>(
         None => vec![0.0f32; model.config.fm_hidden_size],
     };
     let mut raw_patches: Vec<f32> = Vec::new();
-    let mut pe_state = model.patch_encoder.new_state(options.max_patches * 2 + 8);
+    let mut pe_state = model.patch_encoder.new_state(capacity_patches * 2 + 8);
     let mut emitted_patches = 0usize;
-    let suppress_first_eos = prompt_patch_count > 0;
+    let suppress_first_eos = fill_policy.drop_generated_head_patches() > 0;
     let mut position = prefill_end;
-    let mut span_cursor = prompt_patch_count;
+    let mut span_cursor = 0usize;
 
     while position < schedule.ids.len() {
         let id = schedule.ids[position];
@@ -474,7 +509,9 @@ pub fn generate_latents<R: Rng + ?Sized>(
             let raw = model.denormalize(&patch);
             let embedding = model.patch_encoder.encode_patch(&raw, &mut pe_state)?;
             session.llm.step_row(LlmInputRow::Embedding(&embedding))?;
-            raw_patches.extend_from_slice(&raw);
+            if emitted_patches >= fill_policy.drop_generated_head_patches() {
+                raw_patches.extend_from_slice(&raw);
+            }
             emitted_patches += 1;
             position += 1;
             span_cursor += 1;
@@ -488,8 +525,8 @@ pub fn generate_latents<R: Rng + ?Sized>(
             continue;
         }
         // text run until the next span
-        let next_audio = if span_cursor < span_positions.len() {
-            span_positions[span_cursor]
+        let next_audio = if span_cursor < decode_span_positions.len() {
+            decode_span_positions[span_cursor]
         } else {
             schedule.ids.len()
         };
@@ -526,4 +563,19 @@ pub fn synthesize<R: Rng + ?Sized>(
         return Err("latent stream width mismatch".into());
     }
     model.vocoder.decode_latents(&latents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FillPolicy;
+
+    #[test]
+    fn base_and_edit_fill_policies_are_not_interchangeable() {
+        assert!(!FillPolicy::None.fill_fm_history());
+        assert_eq!(FillPolicy::None.drop_generated_head_patches(), 0);
+        assert!(FillPolicy::BasePrompt.fill_fm_history());
+        assert_eq!(FillPolicy::BasePrompt.drop_generated_head_patches(), 1);
+        assert!(!FillPolicy::EditSource.fill_fm_history());
+        assert_eq!(FillPolicy::EditSource.drop_generated_head_patches(), 0);
+    }
 }

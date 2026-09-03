@@ -41,8 +41,10 @@ fn encode_literal(tokenizer: &BPETokenizer, text: &str) -> Result<Vec<u32>, Stri
 pub struct DotsSchedule {
     /// Full schedule token ids.
     pub ids: Vec<u32>,
-    /// Positions of the audio span tokens (gen/comp spans), ascending.
-    pub span_positions: Vec<usize>,
+    /// Audio span positions filled during prefill, ascending.
+    pub fill_span_positions: Vec<usize>,
+    /// Audio span positions decoded after prefill, ascending.
+    pub decode_span_positions: Vec<usize>,
 }
 
 impl DotsSchedule {
@@ -53,19 +55,14 @@ impl DotsSchedule {
             token_id(tokenizer, AUDIO_COMP_SPAN_TOKEN)?,
         ])
     }
+}
 
-    fn finalize(ids: Vec<u32>, span_ids: &[u32]) -> Self {
-        let span_positions = ids
-            .iter()
-            .enumerate()
-            .filter(|(_, id)| span_ids.contains(id))
-            .map(|(pos, _)| pos)
-            .collect();
-        Self {
-            ids,
-            span_positions,
-        }
-    }
+fn checked_total_len(parts: &[usize]) -> Result<usize, String> {
+    parts.iter().try_fold(0usize, |total, &part| {
+        total
+            .checked_add(part)
+            .ok_or_else(|| "dots schedule token count overflow".into())
+    })
 }
 
 /// TTS generation schedule:
@@ -73,15 +70,165 @@ impl DotsSchedule {
 pub fn build_generation_schedule(
     tokenizer: &BPETokenizer,
     text: &str,
-    max_audio_patches: usize,
+    fill_patch_count: usize,
+    target_patch_count: usize,
 ) -> Result<DotsSchedule, String> {
     let gen_start = token_id(tokenizer, AUDIO_GEN_START_TOKEN)?;
     let gen_span = token_id(tokenizer, AUDIO_GEN_SPAN_TOKEN)?;
-    let mut ids = Vec::new();
-    ids.extend(encode_literal(tokenizer, TTS_TEXT_PREFIX)?);
-    ids.extend(tokenizer.encode(text, Default::default()));
-    ids.extend(encode_literal(tokenizer, TTS_AUDIO_PREFIX)?);
+    let text_prefix = encode_literal(tokenizer, TTS_TEXT_PREFIX)?;
+    let text_ids = tokenizer.encode(text, Default::default());
+    let audio_prefix = encode_literal(tokenizer, TTS_AUDIO_PREFIX)?;
+    let span_count = fill_patch_count
+        .checked_add(target_patch_count)
+        .ok_or_else(|| "dots schedule patch count overflow".to_string())?;
+    let capacity = checked_total_len(&[
+        text_prefix.len(),
+        text_ids.len(),
+        audio_prefix.len(),
+        1,
+        span_count,
+    ])?;
+    let mut ids = Vec::with_capacity(capacity);
+    ids.extend(text_prefix);
+    ids.extend(text_ids);
+    ids.extend(audio_prefix);
     ids.push(gen_start);
-    ids.extend(std::iter::repeat(gen_span).take(max_audio_patches));
-    Ok(DotsSchedule::finalize(ids, &[gen_span]))
+    let fill_start = ids.len();
+    ids.extend(std::iter::repeat_n(gen_span, fill_patch_count));
+    let decode_start = ids.len();
+    ids.extend(std::iter::repeat_n(gen_span, target_patch_count));
+    Ok(DotsSchedule {
+        fill_span_positions: (fill_start..decode_start).collect(),
+        decode_span_positions: (decode_start..ids.len()).collect(),
+        ids,
+    })
+}
+
+pub fn build_edit_generation_schedule(
+    tokenizer: &BPETokenizer,
+    source_text: &str,
+    instruction: &str,
+    target_text: &str,
+    source_patch_count: usize,
+    target_patch_count: usize,
+) -> Result<DotsSchedule, String> {
+    assemble_edit_schedule(
+        &encode_literal(tokenizer, EDIT_SOURCE_TEXT_PREFIX)?,
+        &tokenizer.encode(source_text, Default::default()),
+        &encode_literal(tokenizer, EDIT_SOURCE_AUDIO_PREFIX)?,
+        &encode_literal(tokenizer, EDIT_INSTRUCTION_PREFIX)?,
+        &tokenizer.encode(instruction, Default::default()),
+        &encode_literal(tokenizer, EDIT_TARGET_TEXT_PREFIX)?,
+        &tokenizer.encode(target_text, Default::default()),
+        &encode_literal(tokenizer, EDIT_TARGET_AUDIO_PREFIX)?,
+        token_id(tokenizer, AUDIO_GEN_START_TOKEN)?,
+        token_id(tokenizer, AUDIO_GEN_SPAN_TOKEN)?,
+        token_id(tokenizer, AUDIO_GEN_END_TOKEN)?,
+        source_patch_count,
+        target_patch_count,
+    )
+}
+
+fn assemble_edit_schedule(
+    source_prefix: &[u32],
+    source_text: &[u32],
+    source_audio_prefix: &[u32],
+    instruction_prefix: &[u32],
+    instruction: &[u32],
+    target_prefix: &[u32],
+    target_text: &[u32],
+    target_audio_prefix: &[u32],
+    gen_start: u32,
+    gen_span: u32,
+    gen_end: u32,
+    source_count: usize,
+    target_count: usize,
+) -> Result<DotsSchedule, String> {
+    if source_count == 0 || target_count == 0 {
+        return Err("dots edit source and target patch counts must be positive".into());
+    }
+    source_count
+        .checked_add(target_count)
+        .ok_or_else(|| "dots edit schedule patch count overflow".to_string())?;
+    let capacity = checked_total_len(&[
+        source_prefix.len(),
+        source_text.len(),
+        source_audio_prefix.len(),
+        1,
+        source_count,
+        1,
+        instruction_prefix.len(),
+        instruction.len(),
+        target_prefix.len(),
+        target_text.len(),
+        target_audio_prefix.len(),
+        1,
+        target_count,
+        1,
+    ])?;
+    let mut ids = Vec::with_capacity(capacity);
+    ids.extend_from_slice(source_prefix);
+    ids.extend_from_slice(source_text);
+    ids.extend_from_slice(source_audio_prefix);
+    ids.push(gen_start);
+    let fill_start = ids.len();
+    ids.extend(std::iter::repeat_n(gen_span, source_count));
+    let fill_end = ids.len();
+    ids.push(gen_end);
+    ids.extend_from_slice(instruction_prefix);
+    ids.extend_from_slice(instruction);
+    ids.extend_from_slice(target_prefix);
+    ids.extend_from_slice(target_text);
+    ids.extend_from_slice(target_audio_prefix);
+    ids.push(gen_start);
+    let decode_start = ids.len();
+    ids.extend(std::iter::repeat_n(gen_span, target_count));
+    let decode_end = ids.len();
+    ids.push(gen_end);
+    Ok(DotsSchedule {
+        ids,
+        fill_span_positions: (fill_start..fill_end).collect(),
+        decode_span_positions: (decode_start..decode_end).collect(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_schedule_separates_source_fill_from_target_decode() {
+        let schedule = assemble_edit_schedule(
+            &[10],
+            &[20],
+            &[30],
+            &[40],
+            &[50],
+            &[60],
+            &[70],
+            &[80],
+            90,
+            91,
+            92,
+            2,
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            schedule.ids,
+            vec![10, 20, 30, 90, 91, 91, 92, 40, 50, 60, 70, 80, 90, 91, 91, 91, 92]
+        );
+        assert_eq!(schedule.fill_span_positions, vec![3, 4]);
+        assert_eq!(schedule.decode_span_positions, vec![12, 13, 14]);
+    }
+
+    #[test]
+    fn edit_schedule_requires_positive_source_and_target_counts() {
+        assert!(
+            assemble_edit_schedule(&[], &[], &[], &[], &[], &[], &[], &[], 1, 2, 3, 0, 1).is_err()
+        );
+        assert!(
+            assemble_edit_schedule(&[], &[], &[], &[], &[], &[], &[], &[], 1, 2, 3, 1, 0).is_err()
+        );
+    }
 }
