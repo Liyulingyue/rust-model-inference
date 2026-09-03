@@ -16,10 +16,7 @@ pub const KVALUES_IQ4NL: [i8; 16] = [
 
 // Re-export the two constants that have upstream names not matching our
 // `IQ<family>_<table>` convention. The other tables already use that name.
-pub use {
-    KMASK_IQ2XS as IQ2XS_MASK,
-    KSIGNS_IQ2XS as IQ2XS_SIGNS,
-};
+pub use {KMASK_IQ2XS as IQ2XS_MASK, KSIGNS_IQ2XS as IQ2XS_SIGNS};
 
 #[cfg(test)]
 mod tests {
