@@ -1,0 +1,19 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint gate_word;
+    uint up_word;
+    uint count;
+} pc;
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+    float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
+    float up = uintBitsToFloat(arena.data[pc.up_word + index]);
+    arena.data[pc.gate_word + index] = floatBitsToUint((gate / (1.0 + exp(-gate))) * up);
+}

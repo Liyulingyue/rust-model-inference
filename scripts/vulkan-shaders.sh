@@ -2,7 +2,20 @@
 set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
-shader_names=(q8_matmul q8_matmul_dp4a)
+shader_names=(
+    q8_matmul
+    q8_matmul_dp4a
+    quantize_q8_0
+    q8_matmul_grouped
+    rms_norm
+    qk_norm_rope
+    kv_write
+    attention_scores
+    softmax
+    attention_values
+    silu_mul
+    add
+)
 manifest="$root_dir/shaders/manifest.sha256"
 
 for tool in glslangValidator spirv-val; do
@@ -18,12 +31,10 @@ compile_shader() {
 }
 
 hash_files() {
-    local files=(
-        shaders/glsl/q8_matmul.comp
-        shaders/glsl/q8_matmul_dp4a.comp
-        shaders/bin/q8_matmul.spv
-        shaders/bin/q8_matmul_dp4a.spv
-    )
+    local files=()
+    for name in "${shader_names[@]}"; do
+        files+=("shaders/glsl/$name.comp" "shaders/bin/$name.spv")
+    done
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "${files[@]}"
     else

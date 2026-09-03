@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint cache_k_word;
+    uint scores_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    float scale;
+} pc;
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    uint total = pc.q_heads * pc.sequence_length;
+    if (index >= total) return;
+    uint head = index / pc.sequence_length;
+    uint token = index - head * pc.sequence_length;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint q_base = pc.q_word + head * pc.head_dim;
+    uint key_base = pc.cache_k_word
+        + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+        + kv_head * pc.head_dim;
+    float sum = 0.0;
+    for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
+        float query = uintBitsToFloat(arena.data[q_base + dimension]);
+        float key = uintBitsToFloat(arena.data[key_base + dimension]);
+        sum = fma(query, key, sum);
+    }
+    arena.data[pc.scores_word + index] = floatBitsToUint(sum * pc.scale);
+}

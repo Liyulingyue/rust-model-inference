@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint scores_word;
+    uint heads;
+    uint sequence_length;
+} pc;
+
+shared float partial[64];
+shared float row_max;
+shared float inverse_sum;
+
+void main() {
+    uint head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (head >= pc.heads) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint base = pc.scores_word + head * pc.sequence_length;
+    float maximum = -1.0 / 0.0;
+    for (uint index = lane; index < pc.sequence_length; index += 64u) {
+        maximum = max(maximum, uintBitsToFloat(arena.data[base + index]));
+    }
+    partial[lane] = maximum;
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) partial[lane] = max(partial[lane], partial[lane + step]);
+        barrier();
+    }
+    if (lane == 0u) row_max = partial[0];
+    barrier();
+
+    float sum = 0.0;
+    for (uint index = lane; index < pc.sequence_length; index += 64u) {
+        float value = exp(uintBitsToFloat(arena.data[base + index]) - row_max);
+        arena.data[base + index] = floatBitsToUint(value);
+        sum += value;
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) partial[lane] += partial[lane + step];
+        barrier();
+    }
+    if (lane == 0u) inverse_sum = 1.0 / partial[0];
+    barrier();
+    for (uint index = lane; index < pc.sequence_length; index += 64u) {
+        float value = uintBitsToFloat(arena.data[base + index]);
+        arena.data[base + index] = floatBitsToUint(value * inverse_sum);
+    }
+}

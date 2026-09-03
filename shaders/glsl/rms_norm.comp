@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer Weight { uint data[]; } weight;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint weight_word;
+    uint output_word;
+    uint count;
+    uint vectors;
+    float eps;
+} pc;
+
+shared float partial[64];
+shared float inverse_rms;
+
+void main() {
+    uint vector_index = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (vector_index >= pc.vectors) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint base = vector_index * pc.count;
+    float sum = 0.0;
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        sum = fma(value, value, sum);
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) partial[lane] += partial[lane + step];
+        barrier();
+    }
+    if (lane == 0u) inverse_rms = inversesqrt(partial[0] / float(pc.count) + pc.eps);
+    barrier();
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        float scale = uintBitsToFloat(weight.data[pc.weight_word + index]);
+        arena.data[pc.output_word + base + index] = floatBitsToUint(value * inverse_rms * scale);
+    }
+}

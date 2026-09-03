@@ -14,6 +14,9 @@
 
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
+#[cfg(feature = "vulkan")]
+#[doc(hidden)]
+pub use ops::run_qwen3_operator_check;
 
 #[cfg(feature = "vulkan")]
 use ash::vk;
@@ -859,7 +862,7 @@ impl VulkanContext {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             offset: 0,
-            size: 16, // 4 * u32 = 16 bytes
+            size: 64,
         };
 
         let pipeline_layout = unsafe {
