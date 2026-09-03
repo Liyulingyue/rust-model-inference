@@ -54,10 +54,16 @@ pub fn resolve_edit_request(
     mode: XVectorMode,
 ) -> Result<EditRequest, String> {
     let (parts, operations) = parse_instruction(instruction)?;
-    let rendered_source = normalize_rendered(render(&parts, false)?);
-    let rendered_target = normalize_rendered(render(&parts, true)?);
-    let source_text = source_text.unwrap_or(&rendered_source).trim().to_owned();
-    let target_text = target_text.unwrap_or(&rendered_target).trim().to_owned();
+    let rendered_source = render_source(&parts)?;
+    let rendered_target = render_target(&parts)?;
+    let source_text = match source_text {
+        Some(text) => text.trim().to_owned(),
+        None => rendered_source,
+    };
+    let target_text = match target_text {
+        Some(text) => text.trim().to_owned(),
+        None => rendered_target,
+    };
     if source_text.is_empty() || target_text.is_empty() {
         return Err("edit source and target text must both be non-empty".into());
     }
@@ -99,14 +105,8 @@ fn parse_instruction(instruction: &str) -> Result<(Vec<Part>, Vec<String>), Stri
             &mut stack,
             decode_entities(&instruction[cursor..at])?,
         );
-        let end = instruction[at + 1..]
-            .find('>')
-            .map(|end| at + 1 + end)
-            .ok_or_else(|| "unclosed < in edit instruction".to_owned())?;
+        let end = tag_end(instruction, at + 1)?;
         let opening = &instruction[at + 1..end];
-        if opening.ends_with('/') {
-            return Err("self-closing edit tags are not supported".into());
-        }
         if let Some(closing) = opening.strip_prefix('/') {
             let tag = tag_name(closing)?;
             if !closing[tag.len()..].trim().is_empty() {
@@ -118,24 +118,45 @@ fn parse_instruction(instruction: &str) -> Result<(Vec<Part>, Vec<String>), Stri
             if node.tag != tag {
                 return Err(format!("mismatched edit tag: expected </{}>", node.tag));
             }
-            if EMPTY.contains(&tag.as_str()) && !node.children.is_empty() {
-                return Err(format!("<{tag}> must be empty"));
-            }
             push_part(&mut root, &mut stack, Part::Node(node));
         } else {
-            let tag = tag_name(opening)?;
+            let trimmed = opening.trim_end();
+            let (opening, self_closing) = match trimmed.strip_suffix('/') {
+                Some(opening) => (opening.trim_end(), true),
+                None => (opening, false),
+            };
+            let (tag, attr_start) = opening_tag(opening)?;
             if !CONTAINERS.contains(&tag.as_str()) && !EMPTY.contains(&tag.as_str()) {
                 return Err(format!("unknown edit tag <{tag}>"));
             }
+            parse_attributes(opening, attr_start)?;
             if tag == "sub" {
                 sub_target(opening)?;
             }
             operations.push(tag.clone());
-            stack.push(Node {
-                tag,
-                opening: opening.to_owned(),
-                children: Vec::new(),
-            });
+            if self_closing {
+                if !EMPTY.contains(&tag.as_str()) {
+                    return Err(format!("self-closing <{tag}/> is not supported"));
+                }
+                push_part(
+                    &mut root,
+                    &mut stack,
+                    Part::Node(Node {
+                        tag,
+                        opening: opening.to_owned(),
+                        children: Vec::new(),
+                    }),
+                );
+            } else {
+                if EMPTY.contains(&tag.as_str()) {
+                    return Err(format!("<{tag}> must be self-closing"));
+                }
+                stack.push(Node {
+                    tag,
+                    opening: opening.to_owned(),
+                    children: Vec::new(),
+                });
+            }
         }
         cursor = end + 1;
     }
@@ -143,6 +164,17 @@ fn parse_instruction(instruction: &str) -> Result<(Vec<Part>, Vec<String>), Stri
         return Err("unclosed edit tag".into());
     }
     Ok((root, operations))
+}
+
+fn tag_end(instruction: &str, start: usize) -> Result<usize, String> {
+    for (offset, ch) in instruction[start..].char_indices() {
+        match ch {
+            '<' => return Err("raw < inside edit tag".into()),
+            '>' => return Ok(start + offset),
+            _ => {}
+        }
+    }
+    Err("unclosed < in edit instruction".into())
 }
 
 fn push_text(root: &mut Vec<Part>, stack: &mut [Node], text: String) {
@@ -160,50 +192,104 @@ fn push_part(root: &mut Vec<Part>, stack: &mut [Node], part: Part) {
 }
 
 fn tag_name(opening: &str) -> Result<String, String> {
-    let name = opening
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| "empty edit tag".to_owned())?;
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+    let (tag, _) = opening_tag(opening)?;
+    Ok(tag)
+}
+
+fn opening_tag(opening: &str) -> Result<(String, usize), String> {
+    let leading = opening.len() - opening.trim_start().len();
+    let rest = &opening[leading..];
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || ch == ',')
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty()
+        || !name.bytes().enumerate().all(|(index, byte)| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'_' => true,
+            b'0'..=b'9' | b'-' => index > 0,
+            _ => false,
+        })
     {
         return Err("invalid edit tag name".into());
     }
-    Ok(name.to_ascii_lowercase())
+    Ok((name.to_ascii_lowercase(), leading + end))
 }
 
 fn sub_target(opening: &str) -> Result<String, String> {
-    let mut rest = opening[3..].trim_start();
+    let (_, attr_start) = opening_tag(opening)?;
+    parse_attributes(opening, attr_start)?
+        .ok_or_else(|| "sub requires a quoted targ attribute".into())
+}
+
+fn parse_attributes(opening: &str, attr_start: usize) -> Result<Option<String>, String> {
+    let mut rest = &opening[attr_start..];
     let mut target = None;
     while !rest.is_empty() {
+        let separator = rest
+            .chars()
+            .next()
+            .ok_or_else(|| "missing attribute separator".to_owned())?;
+        if separator == ',' {
+            rest = rest[1..].trim_start();
+        } else if separator.is_whitespace() {
+            rest = rest.trim_start();
+        } else {
+            return Err("attributes require whitespace or a comma separator".into());
+        }
+        if rest.is_empty() {
+            return Err("missing attribute after separator".into());
+        }
         let name_end = rest
             .find(|ch: char| ch.is_whitespace() || ch == '=')
-            .ok_or_else(|| "sub attributes need =\"value\"".to_owned())?;
+            .unwrap_or(rest.len());
         let name = &rest[..name_end];
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'_' => true,
+                b'0'..=b'9' | b'-' => index > 0,
+                _ => false,
+            })
+        {
+            return Err("invalid attribute name".into());
+        }
         rest = rest[name_end..].trim_start();
         rest = rest
             .strip_prefix('=')
-            .ok_or_else(|| "sub attributes need =\"value\"".to_owned())?
+            .ok_or_else(|| "attributes need a value".to_owned())?
             .trim_start();
-        let quote = rest
-            .chars()
-            .next()
-            .filter(|quote| *quote == '\'' || *quote == '\"')
-            .ok_or_else(|| "sub attributes must be quoted".to_owned())?;
-        rest = &rest[quote.len_utf8()..];
-        let end = rest
-            .find(quote)
-            .ok_or_else(|| "unclosed sub attribute".to_owned())?;
-        let value = decode_entities(&rest[..end])?;
-        if name == "targ" {
+        if rest.is_empty() {
+            return Err("attributes need a value".into());
+        }
+        let (value, quoted, following) = match rest.chars().next().unwrap() {
+            quote @ ('\'' | '\"') => {
+                let body = &rest[quote.len_utf8()..];
+                let end = body
+                    .find(quote)
+                    .ok_or_else(|| "unclosed quoted attribute".to_owned())?;
+                (&body[..end], true, &body[end + quote.len_utf8()..])
+            }
+            _ => {
+                let end = rest
+                    .find(|ch: char| ch.is_whitespace() || ch == ',')
+                    .unwrap_or(rest.len());
+                (&rest[..end], false, &rest[end..])
+            }
+        };
+        if value.is_empty() {
+            return Err("attributes need a value".into());
+        }
+        let value = decode_entities(value)?;
+        if name.eq_ignore_ascii_case("targ") {
+            if !quoted {
+                return Err("sub targ attribute must be quoted".into());
+            }
             if target.replace(value).is_some() {
                 return Err("sub requires exactly one targ attribute".into());
             }
         }
-        rest = rest[end + quote.len_utf8()..].trim_start();
+        rest = following;
     }
-    target.ok_or_else(|| "sub requires a quoted targ attribute".into())
+    Ok(target)
 }
 
 fn decode_entities(text: &str) -> Result<String, String> {
@@ -229,25 +315,230 @@ fn decode_entities(text: &str) -> Result<String, String> {
     Ok(decoded)
 }
 
-fn render(parts: &[Part], target: bool) -> Result<String, String> {
+fn render_source(parts: &[Part]) -> Result<String, String> {
+    let parts = source_parts(parts)?;
     let mut rendered = String::new();
-    for part in parts {
-        match part {
-            Part::Text(text) => rendered.push_str(text),
-            Part::Node(node) => match node.tag.as_str() {
-                "del" if target => {}
-                "ins" if !target => {}
-                "pause" | "spk_transfer" => {}
-                "sub" if target => rendered.push_str(&sub_target(&node.opening)?),
-                _ => rendered.push_str(&render(&node.children, target)?),
-            },
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(text) = part {
+            rendered.push_str(text);
+            continue;
+        }
+        let right = parts[index + 1..]
+            .iter()
+            .find_map(|part| part.as_deref().filter(|text| !text.is_empty()))
+            .unwrap_or("");
+        if source_insertion_needs_space(&rendered, right) {
+            rendered.push(' ');
         }
     }
     Ok(rendered)
 }
 
-fn normalize_rendered(text: String) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+fn source_parts(parts: &[Part]) -> Result<Vec<Option<String>>, String> {
+    let mut rendered = Vec::new();
+    for part in parts {
+        match part {
+            Part::Text(text) => rendered.push(Some(text.clone())),
+            Part::Node(node) => {
+                let children = source_parts(&node.children)?;
+                match node.tag.as_str() {
+                    "ins" => rendered.push(None),
+                    "sub" => {
+                        sub_target(&node.opening)?;
+                        rendered.extend(children);
+                    }
+                    "pause" | "spk_transfer" => {}
+                    _ => rendered.extend(children),
+                }
+            }
+        }
+    }
+    Ok(rendered)
+}
+
+fn source_insertion_needs_space(left: &str, right: &str) -> bool {
+    let (Some(left), Some(right)) = (left.chars().last(), right.chars().next()) else {
+        return false;
+    };
+    [left, right]
+        .iter()
+        .all(|ch| !ch.is_whitespace() && !is_punctuation(*ch) && !is_cjk(*ch))
+}
+
+fn render_target(parts: &[Part]) -> Result<String, String> {
+    let (segments, has_text_edit) = target_segments(parts)?;
+    if !has_text_edit {
+        return Ok(segments.into_iter().map(|(text, _)| text).collect());
+    }
+    let mut parts = Vec::new();
+    let mut unchanged = String::new();
+    for (text, is_edit) in segments {
+        if is_edit {
+            if !unchanged.is_empty() {
+                parts.push(std::mem::take(&mut unchanged));
+            }
+            parts.push(text);
+        } else {
+            unchanged.push_str(&text);
+        }
+    }
+    if !unchanged.is_empty() {
+        parts.push(unchanged);
+    }
+    Ok(normalize_target_parts(&parts))
+}
+
+fn target_segments(parts: &[Part]) -> Result<(Vec<(String, bool)>, bool), String> {
+    let mut rendered = Vec::new();
+    let mut has_text_edit = false;
+    for part in parts {
+        match part {
+            Part::Text(text) => rendered.push((text.clone(), false)),
+            Part::Node(node) => {
+                let (children, child_has_text_edit) = target_segments(&node.children)?;
+                has_text_edit |= child_has_text_edit;
+                match node.tag.as_str() {
+                    "del" => {
+                        rendered.push((String::new(), true));
+                        has_text_edit = true;
+                    }
+                    "sub" => {
+                        rendered.push((sub_target(&node.opening)?, true));
+                        has_text_edit = true;
+                    }
+                    "ins" => {
+                        rendered.push((children.into_iter().map(|(text, _)| text).collect(), true));
+                        has_text_edit = true;
+                    }
+                    "pause" | "spk_transfer" => {}
+                    _ => rendered.extend(children),
+                }
+            }
+        }
+    }
+    Ok((rendered, has_text_edit))
+}
+
+fn normalize_target_parts(parts: &[String]) -> String {
+    let clean: Vec<&str> = parts.iter().map(|part| part.trim()).collect();
+    let mut rendered = String::new();
+    for (index, part) in clean.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let next = clean[index + 1..]
+            .iter()
+            .copied()
+            .find(|part| !part.is_empty())
+            .unwrap_or("");
+        if !rendered.is_empty() && attach_connector_to_left(part, &rendered, next) {
+            rendered.push_str(part);
+            continue;
+        }
+        if !rendered.is_empty() && needs_target_space(&rendered, part) {
+            rendered.push(' ');
+        }
+        rendered.push_str(part);
+    }
+    trim_space_before_punctuation(&rendered)
+}
+
+fn needs_target_space(left: &str, right: &str) -> bool {
+    !word_internal_join(left, right)
+        && (contains_ascii_word(left.chars().last()) || contains_ascii_word(right.chars().next()))
+}
+
+fn word_internal_join(left: &str, right: &str) -> bool {
+    let Some(left_edge) = left.chars().last() else {
+        return false;
+    };
+    let Some(right_edge) = right.chars().next() else {
+        return false;
+    };
+    if matches!(right_edge, '\'' | '-' | '’') {
+        return is_ascii_word(left_edge) && apostrophe_or_hyphen_suffix(&right[1..], right_edge);
+    }
+    if matches!(left_edge, '\'' | '-' | '’') {
+        let before = left[..left.len() - left_edge.len_utf8()].chars().last();
+        return before.is_some_and(is_ascii_word)
+            && is_ascii_word(right_edge)
+            && (left_edge == '-' || apostrophe_suffix(right));
+    }
+    false
+}
+
+fn attach_connector_to_left(part: &str, left: &str, right: &str) -> bool {
+    let Some(left_edge) = left.chars().last() else {
+        return false;
+    };
+    if !is_ascii_word(left_edge) {
+        return false;
+    }
+    match part {
+        "-" => right.chars().next().is_some_and(is_ascii_word),
+        "'" | "’" => apostrophe_suffix(right) || matches!(left_edge, 's' | 'S'),
+        _ => false,
+    }
+}
+
+fn apostrophe_or_hyphen_suffix(right: &str, connector: char) -> bool {
+    connector == '-' && right.chars().next().is_some_and(is_ascii_word)
+        || connector != '-' && apostrophe_suffix(right)
+}
+
+fn apostrophe_suffix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["s", "t", "re", "ve", "ll", "d", "m"].iter().any(|suffix| {
+        lower
+            .strip_prefix(suffix)
+            .is_some_and(|rest| !rest.chars().next().is_some_and(is_ascii_word))
+    })
+}
+
+fn contains_ascii_word(ch: Option<char>) -> bool {
+    ch.is_some_and(is_ascii_word)
+}
+
+fn is_ascii_word(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+}
+
+fn is_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        ',' | '.' | ';' | ':' | '!' | '?' | '，' | '。' | '？' | '！' | '；' | '：'
+    ) || ch.is_ascii_punctuation()
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x30000..=0x3134F
+    )
+}
+
+fn trim_space_before_punctuation(text: &str) -> String {
+    let mut rendered = String::new();
+    for ch in text.chars() {
+        if matches!(
+            ch,
+            ',' | '.' | ';' | ':' | '!' | '?' | '，' | '。' | '？' | '！' | '；' | '：'
+        ) {
+            while rendered.ends_with(char::is_whitespace) {
+                rendered.pop();
+            }
+        }
+        rendered.push(ch);
+    }
+    rendered.trim().to_owned()
 }
 
 #[cfg(test)]
@@ -270,7 +561,7 @@ mod tests {
             XVectorMode::Auto,
         )
         .unwrap();
-        assert_eq!(insertion.source_text, "hello world");
+        assert_eq!(insertion.source_text, "hello  world");
         assert_eq!(insertion.target_text, "hello brave world");
 
         let substitution = resolve_edit_request(
@@ -385,7 +676,7 @@ mod tests {
             "<rate>text</rate>",
             "<enhance>text</enhance>",
             "<bg>text</bg>",
-            "<pause></pause><spk_transfer></spk_transfer>text",
+            "<pause/><spk_transfer/>text",
             "<sub targ='new'>old</sub>",
         ] {
             assert!(resolve_edit_request(
@@ -395,6 +686,63 @@ mod tests {
                 XVectorMode::Auto
             )
             .is_ok());
+        }
+    }
+
+    #[test]
+    fn preserves_style_whitespace_and_normalizes_only_text_edit_boundaries() {
+        let text_edit =
+            resolve_edit_request("foo<ins>bar</ins>baz", None, None, XVectorMode::Auto).unwrap();
+        assert_eq!(text_edit.source_text, "foo baz");
+        assert_eq!(text_edit.target_text, "foo bar baz");
+
+        let connector =
+            resolve_edit_request("well<ins>-</ins>known", None, None, XVectorMode::Auto).unwrap();
+        assert_eq!(connector.source_text, "well known");
+        assert_eq!(connector.target_text, "well-known");
+
+        let style_only = resolve_edit_request(
+            "<emo>line one\tline two\nline three</emo>",
+            None,
+            None,
+            XVectorMode::Auto,
+        )
+        .unwrap();
+        assert_eq!(style_only.source_text, "line one\tline two\nline three");
+        assert_eq!(style_only.target_text, "line one\tline two\nline three");
+    }
+
+    #[test]
+    fn accepts_official_empty_tags_and_attribute_forms() {
+        let empty = resolve_edit_request(
+            "hello<pause duration=0.5/><spk_transfer/> world",
+            None,
+            None,
+            XVectorMode::Auto,
+        )
+        .unwrap();
+        assert_eq!(empty.source_text, "hello world");
+        assert_eq!(empty.target_text, "hello world");
+
+        for instruction in [
+            "<pitch, semitones=-2>hello</pitch>",
+            "<rate, factor=0.8>hello</rate>",
+            "<sub note=keep targ='new'>old</sub>",
+        ] {
+            assert!(resolve_edit_request(instruction, None, None, XVectorMode::Auto).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_attribute_and_empty_tag_forms() {
+        for instruction in [
+            "<emo value=>x</emo>",
+            "<sub targ='new'junk='x'>old</sub>",
+            "<sub targ='new < safe'>old</sub>",
+            "<pause></pause>",
+            "<spk_transfer></spk_transfer>",
+        ] {
+            assert!(resolve_edit_request(instruction, None, None, XVectorMode::Auto).is_err());
         }
     }
 }
