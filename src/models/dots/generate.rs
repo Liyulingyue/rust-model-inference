@@ -285,6 +285,14 @@ enum FillPolicy {
 }
 
 impl FillPolicy {
+    fn base(fill_patch_count: usize) -> Self {
+        if fill_patch_count == 0 {
+            Self::None
+        } else {
+            Self::BasePrompt
+        }
+    }
+
     fn fill_fm_history(self) -> bool {
         matches!(self, Self::BasePrompt)
     }
@@ -401,11 +409,7 @@ pub fn generate_latents<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Result<Vec<f32>, String> {
     let prompt_patch_count = prompt.map_or(0, |p| p.patches.len() / (4 * model.config.latent_dim));
-    let fill_policy = if prompt.is_some() {
-        FillPolicy::BasePrompt
-    } else {
-        FillPolicy::None
-    };
+    let fill_policy = FillPolicy::base(prompt_patch_count);
     let schedule =
         build_generation_schedule(tokenizer, text, prompt_patch_count, options.max_patches)?;
     let span_ids = DotsSchedule::audio_span_ids(tokenizer)?;
@@ -577,5 +581,13 @@ mod tests {
         assert_eq!(FillPolicy::BasePrompt.drop_generated_head_patches(), 1);
         assert!(!FillPolicy::EditSource.fill_fm_history());
         assert_eq!(FillPolicy::EditSource.drop_generated_head_patches(), 0);
+    }
+
+    #[test]
+    fn base_policy_requires_llm_fill_patches() {
+        assert!(!FillPolicy::base(0).fill_fm_history());
+        assert_eq!(FillPolicy::base(0).drop_generated_head_patches(), 0);
+        assert!(FillPolicy::base(1).fill_fm_history());
+        assert_eq!(FillPolicy::base(1).drop_generated_head_patches(), 1);
     }
 }
