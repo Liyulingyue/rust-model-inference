@@ -12,6 +12,10 @@ pub fn enable_gpu() {
     GPU_ENABLED.store(true, Ordering::Relaxed);
 }
 
+pub fn gpu_requested() -> bool {
+    GPU_ENABLED.load(Ordering::Relaxed)
+}
+
 /// Set when a GPU matmul fails at runtime: all subsequent calls fall back to
 /// CPU without retrying the broken path.
 #[cfg(feature = "vulkan")]

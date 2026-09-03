@@ -129,41 +129,51 @@ cargo run --release --bin micro-bench -- --check
 
 启用 GPU 加速推理（需要支持 Vulkan 的 GPU）：
 
-**1. 安装 glslangValidator（如需重新编译 shader）**
+**1. 检查 Vulkan runtime 和设备**
+
 ```bash
-sudo apt install glslang-tools
+vulkaninfo --summary
 ```
 
-**2. 编译 shader**
+程序会先使用系统 Vulkan Loader 的标准发现机制；macOS 还会自动尝试 Homebrew 的
+`/opt/homebrew/lib/libvulkan.dylib` 和 `/usr/local/lib/libvulkan.dylib`，并自动启用
+MoltenVK 需要的 portability 扩展。正常使用不需要设置 `DYLD_*`、
+`VK_ICD_FILENAMES` 或 `VK_DRIVER_FILES`。
+
+macOS 可通过 `brew install vulkan-tools molten-vk glslang spirv-tools` 安装运行时和工具；
+Debian/Ubuntu 可安装 `vulkan-tools glslang-tools spirv-tools` 以及对应显卡驱动。
+
+**2. 校验或重新生成 shader（仅开发时需要）**
+
 ```bash
-glslangValidator -V shaders/src/q8_matmul.comp -o shaders/bin/q8_matmul.spv
+glslangValidator -V shaders/glsl/q8_matmul.comp -o shaders/bin/q8_matmul.spv
+spirv-val shaders/bin/q8_matmul.spv
 ```
 
-**3. 配置 Vulkan ICD**
+**3. 启用 GPU 推理**
+
 ```bash
-# Intel GPU
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json
-
-# NVIDIA GPU
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
-
-# AMD GPU
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/amd_icd.json
+cargo run --release --features vulkan -- \
+  --gpu \
+  --model /Users/gouzi/Documents/git/rust-model-inference/models/Qwen3-0.6B-Q8_0/Qwen3-0.6B-Q8_0.gguf \
+  --prompt "法国的首都是"
 ```
 
-查看可用设备：
+server 使用同一个 `--gpu` 开关：
+
 ```bash
-ls /usr/share/vulkan/icd.d/
-ls -la /dev/dri/  # 查看 GPU 设备
+cargo run --release --features vulkan --bin server -- \
+  --gpu --model /path/to/model.gguf --port 8080
 ```
 
-**4. 启用 GPU 推理**
+只有在标准发现选错 ICD 或调试多驱动机器时才需要覆盖 Loader，例如：
+
 ```bash
-export USE_GPU=1
-cargo run --release --features vulkan -- --model models/Qwen3-0.6B-Q8_0.gguf --prompt "法国的首都是"
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json vulkaninfo --summary
 ```
 
-**注意**：GPU 输出结果可能有乱码，当前为实验性支持。
+**注意**：当前仍是实验性 Q8_0 matmul offload；完整模型算子和更多权重格式的 Vulkan
+覆盖见 [VULKAN.md](./docs/VULKAN.md)。未传 `--gpu` 时保持纯 CPU 路径。
 
 ### CLI 选项
 
