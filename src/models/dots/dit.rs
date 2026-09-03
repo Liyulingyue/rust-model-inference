@@ -19,6 +19,35 @@ const DIT_ROPE_THETA: f32 = 10_000.0;
 const DIT_NORM_EPS: f32 = 1e-5;
 const TIME_EMBED_DIM: usize = 256;
 
+pub(crate) fn build_decode_mask_positions(
+    fm_seq_len: usize,
+    patch_size: usize,
+) -> Result<(Vec<bool>, Vec<usize>), String> {
+    if fm_seq_len == 0 || patch_size == 0 {
+        return Err("decode mask requires non-empty prefix and latent patch".into());
+    }
+    let total = fm_seq_len
+        .checked_add(patch_size)
+        .ok_or_else(|| "decode mask length overflow".to_string())?;
+    let mask_len = total
+        .checked_mul(total)
+        .ok_or_else(|| "decode mask shape overflow".to_string())?;
+    let block_start = fm_seq_len - 1;
+    let mut mask = vec![false; mask_len];
+    for query in 0..total {
+        for key in 0..total {
+            mask[query * total + key] = if query < block_start {
+                key <= query
+            } else if query < fm_seq_len {
+                true
+            } else {
+                key < fm_seq_len || key >= fm_seq_len
+            };
+        }
+    }
+    Ok((mask, (0..total).collect()))
+}
+
 pub(crate) struct DitBlockWeights {
     pub(crate) q: Vec<f32>,
     pub(crate) k: Vec<f32>,
@@ -390,7 +419,9 @@ impl DiT {
         out: &mut [f32],
     ) -> Result<(), String> {
         let patch = self.n_latent_slots();
-        let total = fm_seq_len + patch;
+        let total = fm_seq_len
+            .checked_add(patch)
+            .ok_or_else(|| "solve_patch: sequence length overflow".to_string())?;
         if sequence.len() != fm_seq_len * DIT_HIDDEN || cfg_sequence.len() != fm_seq_len * DIT_HIDDEN {
             return Err("solve_patch: sequence width mismatch".into());
         }
@@ -402,23 +433,8 @@ impl DiT {
         }
 
         // reference mask (EagerDiTRunner._build_decode_mask)
-        let block_start = fm_seq_len.saturating_sub(1);
         let latent_start = total - patch;
-        let mut mask = vec![false; total * total];
-        for qr in 0..total {
-            for key in 0..total {
-                let allowed = if qr < block_start {
-                    key <= qr
-                } else if qr < fm_seq_len {
-                    true
-                } else {
-                    key < fm_seq_len || key >= latent_start
-                };
-                mask[qr * total + key] = allowed;
-            }
-        }
-        // positions: 0..fm_seq_len, then fm_seq_len..fm_seq_len+patch
-        let positions: Vec<usize> = (0..total).map(|i| if i < fm_seq_len { i } else { fm_seq_len + (i - latent_start) }).collect();
+        let (mask, positions) = build_decode_mask_positions(fm_seq_len, patch)?;
 
         // input tensors: [cond seq; uncond seq] + z region
         let mut x = vec![0.0f32; 2 * total * DIT_HIDDEN];
@@ -537,5 +553,23 @@ mod tests {
         let mean_sq = (1.0f64 + 4.0 + 9.0 + 16.0) / 4.0;
         let inv = 1.0 / (mean_sq + 1e-5).sqrt();
         assert!((x[0] - (inv as f32) * 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn decode_mask_and_positions_match_reference_layout() {
+        let (mask, positions) = build_decode_mask_positions(6, 4).unwrap();
+        assert_eq!(positions, (0..10).collect::<Vec<_>>());
+        for query in 0..10 {
+            for key in 0..10 {
+                let expected = if query < 5 {
+                    key <= query
+                } else if query < 6 {
+                    true
+                } else {
+                    key < 6 || key >= 6
+                };
+                assert_eq!(mask[query * 10 + key], expected, "q={query} k={key}");
+            }
+        }
     }
 }

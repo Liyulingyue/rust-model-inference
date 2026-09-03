@@ -26,6 +26,8 @@ pub struct Resampler {
     kernel: Vec<f32>,
     ratio: f64, // orig / new (>= 1 assumed; downsampling path used for 48k->16k)
     k_max: usize,
+    phases: usize,
+    stride: usize,
 }
 
 fn bessel_i0(x: f64) -> f64 {
@@ -59,53 +61,76 @@ impl Resampler {
             kernel: kernel.to_vec(),
             ratio: 3.0,
             k_max: 20,
+            phases: 0,
+            stride: 0,
         })
     }
 
     /// Build a kaiser-windowed sinc resampler (torchaudio-style:
     /// lowpass_filter_width=64, rolloff=0.95, sinc_interp_kaiser).
     pub fn new(orig: u32, new: u32) -> Self {
-        let ratio = orig as f64 / new as f64;
-        let cutoff = 0.95 / ratio.max(1.0); // normalized to the input rate
-        // beta for a kaiser window with the torchaudio "lowpass_filter_width"
-        // width parameter (A = 2.285*(w-1)*pi*0.475*2 + 7.95 style)
-        let width = 64.0;
-        let a = 2.285 * (width - 1.0) * std::f64::consts::PI * (1.0 - cutoff) + 7.95;
-        let beta = if a > 50.0 {
-            0.1102 * (a - 8.7)
-        } else if a >= 21.0 {
-            0.5842 * (a - 21.0).powf(0.4) + 0.07886 * (a - 21.0)
-        } else {
-            0.0
-        };
-        let k_max = (width * ratio).round() as usize;
-        let n_taps = 2 * k_max + 1;
-        let i0b = bessel_i0(beta);
-        let mut kernel = Vec::with_capacity(n_taps);
-        for i in 0..n_taps {
-            let t = i as f64 - k_max as f64;
-            let rel = t / k_max as f64;
-            let window = bessel_i0(beta * (1.0 - rel * rel).max(0.0).sqrt()) / i0b;
-            let sinc = if t == 0.0 {
-                1.0
-            } else {
-                (std::f64::consts::PI * cutoff * t).sin() / (std::f64::consts::PI * cutoff * t)
-            };
-            kernel.push((2.0 * cutoff * window * sinc) as f32);
+        Self::with_width(orig, new, 64)
+    }
+
+    pub(crate) fn with_width(orig: u32, new: u32, lowpass_filter_width: usize) -> Self {
+        assert!(orig > 0 && new > 0 && lowpass_filter_width > 0);
+        let mut a = orig;
+        let mut b = new;
+        while b != 0 {
+            (a, b) = (b, a % b);
         }
-        // DC gain 1 (sum normalized)
-        let sum: f32 = kernel.iter().sum();
-        for tap in kernel.iter_mut() {
-            *tap /= sum;
+        let stride = (orig / a) as usize;
+        let phases = (new / a) as usize;
+        let ratio = orig as f64 / new as f64;
+        let base_freq = stride.min(phases) as f64 * 0.95;
+        let k_max = (lowpass_filter_width as f64 * stride as f64 / base_freq).ceil() as usize;
+        let taps = 2 * k_max + stride;
+        let beta = 14.769_656_459_379_492;
+        let i0_beta = bessel_i0(beta);
+        let mut kernel = Vec::with_capacity(phases * taps);
+        for phase in 0..phases {
+            for tap in 0..taps {
+                let index = (tap as f64 - k_max as f64) / stride as f64;
+                let t = ((-(phase as f64) / phases as f64 + index) * base_freq)
+                    .clamp(-(lowpass_filter_width as f64), lowpass_filter_width as f64);
+                let rel = t / lowpass_filter_width as f64;
+                let window = bessel_i0(beta * (1.0 - rel * rel).max(0.0).sqrt()) / i0_beta;
+                let angle = std::f64::consts::PI * t;
+                let sinc = if angle == 0.0 { 1.0 } else { angle.sin() / angle };
+                kernel.push((sinc * window * base_freq / stride as f64) as f32);
+            }
         }
         Self {
             kernel,
             ratio,
             k_max,
+            phases,
+            stride,
         }
     }
 
     pub fn resample(&self, input: &[f32]) -> Vec<f32> {
+        if self.phases != 0 {
+            let out_len = input
+                .len()
+                .saturating_mul(self.phases)
+                .div_ceil(self.stride);
+            let taps = self.kernel.len() / self.phases;
+            let mut out = vec![0.0f32; out_len];
+            for (index, value) in out.iter_mut().enumerate() {
+                let frame = index / self.phases;
+                let phase = index % self.phases;
+                let source_start = frame * self.stride;
+                let phase_kernel = &self.kernel[phase * taps..(phase + 1) * taps];
+                for (tap, &weight) in phase_kernel.iter().enumerate() {
+                    let source = source_start as isize + tap as isize - self.k_max as isize;
+                    if (0..input.len() as isize).contains(&source) {
+                        *value += input[source as usize] * weight;
+                    }
+                }
+            }
+            return out;
+        }
         let out_len = (input.len() as f64 / self.ratio) as usize;
         let mut out = vec![0.0f32; out_len];
         let k_max = self.k_max as f64;
@@ -870,5 +895,16 @@ fn transit_forward(
             }
             out[j * out_ch + o] = sum;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Resampler;
+
+    #[test]
+    fn sinc_resampler_keeps_the_fractional_final_phase() {
+        let output = Resampler::new(3, 2).resample(&[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(output.len(), 3);
     }
 }

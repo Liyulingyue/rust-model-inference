@@ -11,6 +11,7 @@ use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
 
 const LEAKY: f32 = 0.2;
+const RESSTACK_LEAKY: f32 = 0.01;
 const SNAKE_EPS: f32 = 1e-9;
 const HOP: usize = 1920; // product of decoder upsample rates
 
@@ -365,18 +366,31 @@ impl AudioEncoder {
         let mut length = x.len();
         for (ci, conv) in self.convs.iter().enumerate() {
             let in_ch = if ci == 0 { 1 } else { self.convs[ci - 1].out_ch };
-            let left_pad = conv.kernel - 1; // causal, dilation 1
-            out = conv1d_causal_strided(
-                &conv.weight,
-                &conv.bias,
-                &out,
-                in_ch,
-                length,
-                conv.out_ch,
-                conv.kernel,
-                conv.stride,
-                left_pad,
-            );
+            out = if ci == 7 {
+                conv1d_pad2(
+                    &conv.weight,
+                    &conv.bias,
+                    &out,
+                    in_ch,
+                    length,
+                    conv.out_ch,
+                    conv.kernel,
+                    2,
+                )
+            } else {
+                let left_pad = conv.kernel - 1; // causal, dilation 1
+                conv1d_causal_strided(
+                    &conv.weight,
+                    &conv.bias,
+                    &out,
+                    in_ch,
+                    length,
+                    conv.out_ch,
+                    conv.kernel,
+                    conv.stride,
+                    left_pad,
+                )
+            };
             length = out.len() / conv.out_ch;
             if ci == 0 {
                 leaky_inplace(&mut out);
@@ -394,11 +408,22 @@ impl AudioEncoder {
         let mut cur = x.to_vec();
         for layer in &rs.layers {
             let mut h = cur.clone();
+            for value in h.iter_mut() {
+                *value = if *value > 0.0 {
+                    *value
+                } else {
+                    RESSTACK_LEAKY * *value
+                };
+            }
             // conv1 d=layer.d1 causal pad d*(k-1)=2*d
             let pad1 = 2 * layer.d1;
             h = conv1d_causal(&layer.c1, &layer.b1, &h, rs.ch, length, rs.ch, 3, layer.d1, pad1);
             for value in h.iter_mut() {
-                *value = if *value > 0.0 { *value } else { LEAKY * *value };
+                *value = if *value > 0.0 {
+                    *value
+                } else {
+                    RESSTACK_LEAKY * *value
+                };
             }
             // conv2 d=1 causal pad 2
             h = conv1d_causal(&layer.c2, &layer.b2, &h, rs.ch, length, rs.ch, 3, 1, 2);
@@ -864,6 +889,58 @@ impl Vocoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_resstack_applies_leaky_relu_before_each_first_convolution() {
+        let stack = EncResStack {
+            layers: vec![EncResStackLayer {
+                c1: vec![0.0, 0.0, 1.0],
+                b1: vec![0.0],
+                d1: 1,
+                c2: vec![0.0, 0.0, 1.0],
+                b2: vec![0.0],
+            }],
+            ch: 1,
+        };
+
+        let output = AudioEncoder {
+            convs: Vec::new(),
+            resstacks: Vec::new(),
+        }
+        .resstack(&stack, &[-1.0, 1.0], 2);
+
+        assert_eq!(output, vec![-1.0001, 2.0]);
+    }
+
+    #[test]
+    fn encoder_final_convolution_uses_default_two_frame_lookahead() {
+        let mut convs = (0..7)
+            .map(|_| EncConv {
+                weight: vec![1.0],
+                bias: vec![0.0],
+                kernel: 1,
+                stride: 1,
+                out_ch: 1,
+            })
+            .collect::<Vec<_>>();
+        convs.push(EncConv {
+            weight: vec![1.0, 0.0, 0.0, 0.0, 0.0],
+            bias: vec![0.0],
+            kernel: 5,
+            stride: 1,
+            out_ch: 1,
+        });
+        let resstacks = (0..6)
+            .map(|_| EncResStack {
+                layers: Vec::new(),
+                ch: 1,
+            })
+            .collect();
+
+        let output = AudioEncoder { convs, resstacks }.forward(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        assert_eq!(output, vec![0.0, 0.0, 1.0, 2.0, 3.0]);
+    }
 
     #[test]
     fn snakebeta_matches_reference_formula() {

@@ -14,14 +14,35 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
-    let started = Instant::now();
+enum TtsFrontend<'a> {
+    Dots,
+    Qwen3 {
+        prompt_text: &'a str,
+        language: &'static str,
+    },
+}
+
+fn tts_frontend<'a>(
+    options: &'a crate::app::cli::CliOptions,
+    is_dots_mmproj: bool,
+) -> Result<TtsFrontend<'a>, String> {
+    if is_dots_mmproj {
+        return Ok(TtsFrontend::Dots);
+    }
     let prompt_text = options
         .prompt
         .as_deref()
         .filter(|prompt| !prompt.trim().is_empty())
         .ok_or_else(|| "--tts requires --prompt".to_string())?;
     let language = normalize_tts_language(options.language.as_deref())?;
+    Ok(TtsFrontend::Qwen3 {
+        prompt_text,
+        language,
+    })
+}
+
+pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
+    let started = Instant::now();
     let mmproj_path = options
         .mmproj
         .as_deref()
@@ -35,9 +56,16 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     // dots.tts uses an arch-qwen2 LLM gguf + a clip mmproj; dispatch on the
     // exact projector pair before the Qwen3-TTS path.
     let mmproj_probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
-    if crate::models::dots::is_dots_tts_mmproj(mmproj_probe.as_ref()) {
-        return crate::app::dots::run_dots_tts_cli(options);
-    }
+    let (prompt_text, language) = match tts_frontend(
+        options,
+        crate::models::dots::is_dots_tts_mmproj(mmproj_probe.as_ref()),
+    )? {
+        TtsFrontend::Dots => return crate::app::dots::run_dots_tts_cli(options),
+        TtsFrontend::Qwen3 {
+            prompt_text,
+            language,
+        } => (prompt_text, language),
+    };
     drop(mmproj_probe);
 
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
@@ -257,6 +285,33 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legal_dots_edit_routes_before_base_prompt_requirements() {
+        let args = [
+            "rmi",
+            "--tts",
+            "--edit",
+            "--model",
+            "edit.gguf",
+            "--mmproj",
+            "edit-mmproj.gguf",
+            "--source-audio",
+            "source.wav",
+            "--instruction",
+            "Hello <sub targ=\"small\">brave</sub> world.",
+            "--out",
+            "edited.wav",
+        ]
+        .map(str::to_string);
+        let options = crate::app::cli::parse_cli_options(&args).unwrap();
+        crate::app::cli::validate_cli_options(&options).unwrap();
+
+        assert!(matches!(
+            tts_frontend(&options, true).unwrap(),
+            TtsFrontend::Dots
+        ));
+    }
 
     #[test]
     fn frame_loop_keeps_first_and_last_non_eos_frames() {
