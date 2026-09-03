@@ -20,6 +20,7 @@
 
 pub mod config;
 pub mod dit;
+pub mod edit;
 pub mod generate;
 pub mod llm;
 pub mod patch_encoder;
@@ -28,4 +29,5 @@ pub mod speaker;
 pub mod vocoder;
 
 pub use config::{is_dots_tts_mmproj, DotsTtsConfig};
+pub use edit::{resolve_edit_request, EditRequest, XVectorMode};
 pub use generate::DotsTtsModel;
