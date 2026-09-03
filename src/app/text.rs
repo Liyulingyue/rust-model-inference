@@ -199,41 +199,42 @@ pub fn inject_vision_embeddings(
     tokens: &[i32],
     image_token_id: Option<i32>,
     vis_embd: &[f32],
-    _n_vis_tokens: usize,
+    n_vis_tokens: usize,
     proj_dim: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, String> {
     let n_embd = llm.config.n_embd;
-    let n_tokens = tokens.len();
-    let mut embeddings = vec![0.0f32; n_tokens * n_embd];
-
-    let mut vis_idx = 0;
-
-    for t in 0..n_tokens {
-        if image_token_id == Some(tokens[t]) && vis_idx * proj_dim < vis_embd.len() {
-            let embd_off = t * n_embd;
-            let vis_off = vis_idx * proj_dim;
-            if proj_dim == n_embd {
-                embeddings[embd_off..embd_off + n_embd]
-                    .copy_from_slice(&vis_embd[vis_off..vis_off + n_embd]);
-            } else {
-                for e in 0..n_embd.min(proj_dim) {
-                    embeddings[embd_off + e] = vis_embd[vis_off + e];
-                }
-            }
+    let expected_vis_len = n_vis_tokens
+        .checked_mul(proj_dim)
+        .ok_or("Qwen3.5 vision embedding length overflow")?;
+    let placeholders = tokens
+        .iter()
+        .filter(|&&token| image_token_id == Some(token))
+        .count();
+    if proj_dim != n_embd || vis_embd.len() != expected_vis_len || placeholders != n_vis_tokens {
+        return Err(format!(
+            "Qwen3.5 vision embedding mismatch: placeholders={placeholders}, rows={n_vis_tokens}, projection_dim={proj_dim}, model_dim={n_embd}, values={}",
+            vis_embd.len()
+        ));
+    }
+    let token_ids = tokens
+        .iter()
+        .copied()
+        .filter(|&token| image_token_id != Some(token))
+        .map(|token| u32::try_from(token).map_err(|_| format!("invalid negative token id {token}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let text_embeddings = llm.embed_tokens(&token_ids)?;
+    let mut embeddings = vec![0.0; tokens.len() * n_embd];
+    let (mut text_idx, mut vis_idx) = (0, 0);
+    for (token, row) in tokens.iter().zip(embeddings.chunks_exact_mut(n_embd)) {
+        if image_token_id == Some(*token) {
+            row.copy_from_slice(&vis_embd[vis_idx * n_embd..(vis_idx + 1) * n_embd]);
             vis_idx += 1;
         } else {
-            let tok = tokens[t] as usize;
-            let tok_off = tok * n_embd;
-            let embd_off = t * n_embd;
-            for e in 0..n_embd {
-                if tok_off + e < llm.tok_embd.len() {
-                    embeddings[embd_off + e] = llm.tok_embd[tok_off + e];
-                }
-            }
+            row.copy_from_slice(&text_embeddings[text_idx * n_embd..(text_idx + 1) * n_embd]);
+            text_idx += 1;
         }
     }
-
-    embeddings
+    Ok(embeddings)
 }
 
 pub fn sample_token(logits: &[f32], temperature: f32) -> i32 {
@@ -1017,7 +1018,11 @@ fn run_multimodal_with_video_ref(
 
     let llm = Qwen35Model::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
-    println!("Qwen3.5 model loaded: {} layers, n_embd={}, n_head={}, n_ff={}, rope_freq_base={}, rope_sections={:?}, rope_dim_count={}", llm.config.n_layer, llm.config.n_embd, llm.config.n_head, llm.config.n_ff, llm.config.rope_freq_base, llm.config.rope_dimension_sections, llm.config.rope_dimension_count);
+    let model_name = llm_source
+        .metadata("general.name")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or("Qwen3.5-family");
+    println!("{model_name} model loaded: {} layers, n_embd={}, n_head={}, n_ff={}, rope_freq_base={}, rope_sections={:?}, rope_dim_count={}", llm.config.n_layer, llm.config.n_embd, llm.config.n_head, llm.config.n_ff, llm.config.rope_freq_base, llm.config.rope_dimension_sections, llm.config.rope_dimension_count);
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -1115,7 +1120,34 @@ fn run_multimodal_with_video_ref(
         vis_embeddings,
         n_vis_tokens,
         llm.config.n_embd,
-    );
+    )?;
+    #[cfg(feature = "parity-trace")]
+    {
+        let flat_positions = prompt_positions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        crate::parity_trace::report(crate::parity_trace::token_ids(
+            "qwen35.prompt_ids",
+            &prompt_ids,
+        ));
+        crate::parity_trace::report(crate::parity_trace::usize_values(
+            "qwen35.mrope_positions",
+            &[prompt_positions.len(), 4],
+            &flat_positions,
+        ));
+        crate::parity_trace::report(crate::parity_trace::bool_values(
+            "qwen35.layer_is_recurrent",
+            &llm.config.is_recurrent,
+        ));
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "qwen35.embedding",
+            None,
+            &[prompt_tokens.len(), llm.config.n_embd],
+            &prompt_embd,
+        ));
+    }
 
     let n_prompt = prompt_tokens.len();
     let mut all_tokens = prompt_tokens.clone();
@@ -1125,6 +1157,8 @@ fn run_multimodal_with_video_ref(
     eprintln!("compute pool: {} threads", pool.n_threads());
 
     let mut generated = String::new();
+    #[cfg(feature = "parity-trace")]
+    let mut greedy_token_ids = Vec::with_capacity(max_tokens);
     let mut decoder = tokenizer.streaming_decoder(false);
     println!("\n--- Generation ---");
     let t_gen_start = std::time::Instant::now();
@@ -1143,19 +1177,12 @@ fn run_multimodal_with_video_ref(
         let n_tok = tokens.len();
 
         if step == 0 {
-            for t in 0..n_prompt {
-                let embd_off = t * llm.config.n_embd;
-                llm_scratch.x[embd_off..embd_off + llm.config.n_embd]
-                    .copy_from_slice(&prompt_embd[embd_off..embd_off + llm.config.n_embd]);
-            }
+            llm_scratch.x[..prompt_embd.len()].copy_from_slice(&prompt_embd);
         } else {
-            let tok = tokens[0] as usize;
-            let tok_off = tok * llm.config.n_embd;
-            for e in 0..llm.config.n_embd {
-                if tok_off + e < llm.tok_embd.len() {
-                    llm_scratch.x[e] = llm.tok_embd[tok_off + e];
-                }
-            }
+            let token_id = u32::try_from(tokens[0])
+                .map_err(|_| format!("invalid negative token id {}", tokens[0]))?;
+            let embedding = llm.embed_tokens(&[token_id])?;
+            llm_scratch.x[..embedding.len()].copy_from_slice(&embedding);
         }
 
         let decode_position = [[
@@ -1211,6 +1238,8 @@ fn run_multimodal_with_video_ref(
         } else {
             sample_token(&logits, temperature)
         };
+        #[cfg(feature = "parity-trace")]
+        greedy_token_ids.push(next_token as u32);
 
         if next_token >= 0
             && (tokenizer.eos_id() == Some(next_token as u32)
@@ -1226,6 +1255,11 @@ fn run_multimodal_with_video_ref(
 
         all_tokens.push(next_token);
     }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "qwen35.greedy_token_ids",
+        &greedy_token_ids,
+    ));
 
     let tail = decoder.finish();
     generated.push_str(&tail);
@@ -1261,11 +1295,52 @@ fn run_multimodal_with_video_ref(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_qwen3_media_positions, inject_qwen_media_embeddings, run_multimodal,
-        validate_single_qwen_media,
+        build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
+        run_multimodal, validate_single_qwen_media,
     };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    use crate::models::qwen35::{Qwen35Config, Qwen35Model};
+    use crate::ops::kernel::{QuantizedTensor, Weight};
     use std::path::Path;
+
+    fn qwen35_embedding_model() -> Qwen35Model<'static> {
+        let mut tok_embd =
+            Weight::from_quantized(QuantizedTensor::F32(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]));
+        tok_embd.n_in = 2;
+        tok_embd.n_out = 3;
+        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32(Vec::new()));
+        output_weight.n_in = 2;
+        output_weight.n_out = 3;
+        Qwen35Model {
+            config: Qwen35Config {
+                n_nextn: 0,
+                n_embd: 2,
+                n_layer: 0,
+                n_head: 1,
+                n_head_kv: 1,
+                n_ff: 2,
+                n_ctx: 4,
+                vocab_size: 3,
+                rope_freq_base: 1.0,
+                norm_eps: 0.0,
+                rope_dimension_count: 2,
+                rope_dimension_sections: [0; 4],
+                ssm_d_conv: 1,
+                ssm_d_state: 1,
+                ssm_n_group: 1,
+                ssm_dt_rank: 1,
+                ssm_d_inner: 1,
+                full_attention_interval: 1,
+                is_recurrent: Vec::new(),
+                key_length: 2,
+                value_length: 2,
+            },
+            tok_embd,
+            output_norm: vec![1.0; 2],
+            output_weight,
+            layers: Vec::new(),
+        }
+    }
 
     struct ArchSource(MetaValue);
 
@@ -1349,5 +1424,23 @@ mod tests {
                 0.0, 0.0, 300.0, 301.0, 0.0, 0.0, 400.0, 401.0, // layer 1
             ]
         );
+    }
+
+    #[test]
+    fn inject_vision_embeddings_preserves_text_and_image_row_order() {
+        let model = qwen35_embedding_model();
+
+        assert_eq!(
+            inject_vision_embeddings(&model, &[0, 99, 1], Some(99), &[9.0, 8.0], 1, 2).unwrap(),
+            [0.0, 1.0, 9.0, 8.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn inject_vision_embeddings_rejects_invalid_rows() {
+        let model = qwen35_embedding_model();
+
+        assert!(inject_vision_embeddings(&model, &[-1], None, &[], 0, 2).is_err());
+        assert!(inject_vision_embeddings(&model, &[99], Some(99), &[1.0], 1, 1).is_err());
     }
 }
