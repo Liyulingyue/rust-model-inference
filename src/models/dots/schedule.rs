@@ -218,8 +218,8 @@ mod tests {
             schedule.ids,
             vec![10, 20, 30, 90, 91, 91, 92, 40, 50, 60, 70, 80, 90, 91, 91, 91, 92]
         );
-        assert_eq!(schedule.fill_span_positions, vec![3, 4]);
-        assert_eq!(schedule.decode_span_positions, vec![12, 13, 14]);
+        assert_eq!(schedule.fill_span_positions, vec![4, 5]);
+        assert_eq!(schedule.decode_span_positions, vec![13, 14, 15]);
     }
 
     #[test]
