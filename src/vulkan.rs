@@ -13,6 +13,9 @@
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod ops;
+
+#[cfg(feature = "vulkan")]
 use ash::vk;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -61,12 +64,13 @@ pub struct VulkanContext {
     fence: vk::Fence,
     /// Weights keyed by (data_ptr, byte_len); mmap slices are stable, so the
     /// first matmul over a tensor uploads it and every later call is a hit.
-    weight_cache: Mutex<HashMap<(usize, usize), BufferInfo>>,
+    weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
     mutex: Mutex<()>,
     device_name: String,
     limits: vk::PhysicalDeviceLimits,
+    submission_count: std::sync::atomic::AtomicU64,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
@@ -77,9 +81,9 @@ pub struct VulkanContext {
 /// matmul seen; sizes shrink rarely in practice (vocab dominates).
 #[cfg(feature = "vulkan")]
 struct IoState {
-    input_q8: Option<BufferInfo>,
-    scales: Option<BufferInfo>,
-    output: Option<BufferInfo>,
+    input_q8: Option<GpuBuffer>,
+    scales: Option<GpuBuffer>,
+    output: Option<GpuBuffer>,
 }
 
 #[cfg(feature = "vulkan")]
@@ -94,11 +98,11 @@ impl Default for IoState {
 }
 
 #[cfg(feature = "vulkan")]
-struct BufferInfo {
-    buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
-    size: u64,
-    mapped: *mut u8,
+pub(crate) struct GpuBuffer {
+    pub(crate) buffer: vk::Buffer,
+    pub(crate) memory: vk::DeviceMemory,
+    pub(crate) size: u64,
+    pub(crate) mapped: *mut u8,
 }
 
 #[cfg(feature = "vulkan")]
@@ -196,6 +200,7 @@ impl VulkanContext {
                             mutex: Mutex::new(()),
                             device_name: candidate.name,
                             limits: candidate.limits,
+                            submission_count: std::sync::atomic::AtomicU64::new(0),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
                         });
                     }
@@ -214,6 +219,10 @@ impl VulkanContext {
 
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    pub fn submission_count(&self) -> u64 {
+        self.submission_count.load(Ordering::Relaxed)
     }
 
     /// Run one tiny matmul and wait for it. The driver JITs the compute
@@ -375,6 +384,7 @@ impl VulkanContext {
         self.device
             .queue_submit(self.queue, &[submit_info], self.fence)
             .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
+        self.submission_count.fetch_add(1, Ordering::Relaxed);
         // 60s: the driver JITs shaders on first dispatch (observed >5 s on
         // Meteor Lake), so this timeout only catches true GPU hangs. The
         // outer watchdog (5 s) abandons wedged calls long before this fires.
@@ -397,9 +407,9 @@ impl VulkanContext {
     // alias `&self` buffers.
     unsafe fn ensure_buffer(
         &self,
-        slot: &mut Option<BufferInfo>,
+        slot: &mut Option<GpuBuffer>,
         size: usize,
-    ) -> Result<BufferInfo, VulkanError> {
+    ) -> Result<GpuBuffer, VulkanError> {
         if slot.as_ref().is_some_and(|b| b.size as usize >= size) {
             return Ok(*slot.as_ref().unwrap());
         }
@@ -413,7 +423,7 @@ impl VulkanContext {
         Ok(*slot.as_ref().unwrap())
     }
 
-    unsafe fn weight_for(&self, weight: &[u8]) -> Result<BufferInfo, VulkanError> {
+    unsafe fn weight_for(&self, weight: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let key = (weight.as_ptr() as usize, weight.len());
         if let Some(buf) = self.weight_cache.lock().unwrap().get(&key) {
             return Ok(*buf);
@@ -426,7 +436,7 @@ impl VulkanContext {
         Ok(*self.weight_cache.lock().unwrap().get(&key).unwrap())
     }
 
-    unsafe fn alloc_persistently_mapped(&self, size: u64) -> Result<BufferInfo, VulkanError> {
+    unsafe fn alloc_persistently_mapped(&self, size: u64) -> Result<GpuBuffer, VulkanError> {
         let buffer = self
             .device
             .create_buffer(
@@ -479,7 +489,7 @@ impl VulkanContext {
             .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
             .map_err(|e| VulkanError::OutOfMemory)? as *mut u8;
 
-        Ok(BufferInfo {
+        Ok(GpuBuffer {
             buffer,
             memory,
             size,
@@ -487,10 +497,52 @@ impl VulkanContext {
         })
     }
 
-    unsafe fn destroy_buffer(&self, buf: &BufferInfo) {
+    pub(crate) unsafe fn destroy_buffer(&self, buf: &GpuBuffer) {
         self.device.unmap_memory(buf.memory);
         self.device.destroy_buffer(buf.buffer, None);
         self.device.free_memory(buf.memory, None);
+    }
+
+    pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
+        let size = data
+            .len()
+            .checked_add(16)
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or(VulkanError::OutOfMemory)?;
+        let buffer = self.alloc_persistently_mapped(size)?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
+        Ok(buffer)
+    }
+
+    pub(crate) unsafe fn allocate_session_buffer(
+        &self,
+        size: usize,
+    ) -> Result<GpuBuffer, VulkanError> {
+        let size = u64::try_from(size).map_err(|_| VulkanError::OutOfMemory)?;
+        self.alloc_persistently_mapped(size.max(16))
+    }
+
+    pub(crate) fn create_pipeline(
+        &self,
+        pipeline_layout: vk::PipelineLayout,
+        shader: &[u8],
+    ) -> Result<vk::Pipeline, VulkanError> {
+        Self::create_pipeline_for_device(&self.device, pipeline_layout, shader)
+    }
+
+    pub(crate) unsafe fn compute_barrier(&self, command: vk::CommandBuffer) {
+        let barrier = vk::MemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        self.device.cmd_pipeline_barrier(
+            command,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            std::slice::from_ref(&barrier),
+            &[],
+            &[],
+        );
     }
 
     fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, u32, bool), VulkanError> {
@@ -650,14 +702,14 @@ impl VulkanContext {
 
         let pipeline = match candidate.pipeline_variant() {
             PipelineVariant::IntegerDotProduct => {
-                match Self::create_pipeline(&device, pipeline_layout, SHADER_DP4A) {
+                match Self::create_pipeline_for_device(&device, pipeline_layout, SHADER_DP4A) {
                     Ok(pipeline) => pipeline,
                     Err(error) => {
                         eprintln!(
                             "[GPU] {} integer-dot-product pipeline unavailable: {error}; using baseline",
                             candidate.name
                         );
-                        match Self::create_pipeline(&device, pipeline_layout, SHADER) {
+                        match Self::create_pipeline_for_device(&device, pipeline_layout, SHADER) {
                             Ok(pipeline) => pipeline,
                             Err(baseline_error) => {
                                 Self::destroy_compute_resources(
@@ -674,7 +726,7 @@ impl VulkanContext {
                 }
             }
             PipelineVariant::Baseline => {
-                match Self::create_pipeline(&device, pipeline_layout, SHADER) {
+                match Self::create_pipeline_for_device(&device, pipeline_layout, SHADER) {
                     Ok(pipeline) => pipeline,
                     Err(error) => {
                         Self::destroy_compute_resources(
@@ -898,7 +950,7 @@ impl VulkanContext {
         device.destroy_descriptor_set_layout(descriptor_set_layout, None);
     }
 
-    fn create_pipeline(
+    fn create_pipeline_for_device(
         device: &ash::Device,
         pipeline_layout: vk::PipelineLayout,
         shader: &[u8],
@@ -1067,19 +1119,19 @@ impl VulkanContext {
 // SAFETY: mapped device memory is host-addressable process-wide; all use of
 // the mapped pointers is serialized by `VulkanContext::mutex`.
 #[cfg(feature = "vulkan")]
-unsafe impl Send for BufferInfo {}
+unsafe impl Send for GpuBuffer {}
 #[cfg(feature = "vulkan")]
-unsafe impl Sync for BufferInfo {}
+unsafe impl Sync for GpuBuffer {}
 
 #[cfg(feature = "vulkan")]
-impl Clone for BufferInfo {
+impl Clone for GpuBuffer {
     fn clone(&self) -> Self {
         *self
     }
 }
 
 #[cfg(feature = "vulkan")]
-impl Copy for BufferInfo {}
+impl Copy for GpuBuffer {}
 
 #[cfg(feature = "vulkan")]
 impl Drop for VulkanContext {
