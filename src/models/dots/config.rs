@@ -88,35 +88,58 @@ impl DotsTtsConfig {
         if !is_dots_tts_mmproj(source) {
             return Err(clip_contract_error(source));
         }
-        let u = |key: &str| -> Result<usize, String> {
-            source
-                .metadata(key)
-                .and_then(MetaValue::to_u64)
-                .map(|value| value as usize)
-                .ok_or_else(|| format!("Missing metadata: {key}"))
+        let dimension = |key: &str, expected: u64| -> Result<usize, String> {
+            match source.metadata(key) {
+                Some(MetaValue::Uint64(value)) if *value == expected => Ok(expected as usize),
+                _ => Err(format!("Invalid metadata: {key}; expected Uint64({expected})")),
+            }
         };
-        let f = |key: &str| -> Result<f32, String> {
-            source
-                .metadata(key)
-                .and_then(MetaValue::to_f64)
-                .map(|value| value as f32)
-                .ok_or_else(|| format!("Missing metadata: {key}"))
+        let nfe = match source.metadata("dotstts.sampling.nfe") {
+            Some(MetaValue::Uint64(value)) if *value > 0 => usize::try_from(*value)
+                .map_err(|_| "Invalid metadata: dotstts.sampling.nfe does not fit usize".to_string()),
+            _ => Err("Invalid metadata: dotstts.sampling.nfe; expected positive Uint64".into()),
+        }?;
+        let sampling = |key: &str| -> Result<f32, String> {
+            match source.metadata(key) {
+                Some(MetaValue::Float64(value))
+                    if value.is_finite() && *value > 0.0 && (*value as f32).is_finite() =>
+                {
+                    Ok(*value as f32)
+                }
+                _ => Err(format!("Invalid metadata: {key}; expected positive finite Float64")),
+            }
+        };
+        let eos_threshold = match source.metadata("dotstts.sampling.eos_threshold") {
+            Some(MetaValue::Float64(value))
+                if value.is_finite()
+                    && *value > 0.0
+                    && *value <= 1.0
+                    && (*value as f32).is_finite() =>
+            {
+                *value as f32
+            }
+            _ => {
+                return Err(
+                    "Invalid metadata: dotstts.sampling.eos_threshold; expected positive finite Float64 <= 1.0"
+                        .into(),
+                );
+            }
         };
         Ok(Self {
-            patch_size: u("dotstts.patch_size")?,
-            latent_dim: u("dotstts.latent_dim")?,
-            hop_size: u("dotstts.hop_size")?,
-            sample_rate: u("dotstts.sample_rate")?,
-            fm_hidden_size: u("dotstts.fm_hidden_size")?,
-            llm_hidden_size: u("dotstts.llm_hidden_size")?,
-            xvec_dim: u("dotstts.xvec_dim")?,
+            patch_size: dimension("dotstts.patch_size", 4)?,
+            latent_dim: dimension("dotstts.latent_dim", 128)?,
+            hop_size: dimension("dotstts.hop_size", 1920)?,
+            sample_rate: dimension("dotstts.sample_rate", 48_000)?,
+            fm_hidden_size: dimension("dotstts.fm_hidden_size", 1024)?,
+            llm_hidden_size: dimension("dotstts.llm_hidden_size", 1536)?,
+            xvec_dim: dimension("dotstts.xvec_dim", 512)?,
             patch_encoder_layers: 24,
             dit_layers: 18,
             dit_heads: 16,
-            default_nfe: u("dotstts.sampling.nfe")?,
-            default_guidance: f("dotstts.sampling.guidance")?,
-            default_speaker_scale: f("dotstts.sampling.speaker_scale")?,
-            default_eos_threshold: f("dotstts.sampling.eos_threshold")?,
+            default_nfe: nfe,
+            default_guidance: sampling("dotstts.sampling.guidance")?,
+            default_speaker_scale: sampling("dotstts.sampling.speaker_scale")?,
+            default_eos_threshold: eos_threshold,
         })
     }
 
@@ -216,5 +239,37 @@ mod tests {
         );
         assert!(!is_dots_tts_mmproj(&source));
         assert!(DotsTtsConfig::from_source(&source).is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_dimension_and_sampling_metadata() {
+        for (name, key, value) in [
+            ("dimension type", "dotstts.patch_size", MetaValue::Float64(4.0)),
+            ("fixed dimension", "dotstts.sample_rate", MetaValue::Uint64(1)),
+            ("zero nfe", "dotstts.sampling.nfe", MetaValue::Uint64(0)),
+            ("nan float", "dotstts.sampling.guidance", MetaValue::Float64(f64::NAN)),
+            (
+                "nonpositive float",
+                "dotstts.sampling.speaker_scale",
+                MetaValue::Float64(0.0),
+            ),
+            (
+                "eos above one",
+                "dotstts.sampling.eos_threshold",
+                MetaValue::Float64(1.1),
+            ),
+            (
+                "eos rounding above one",
+                "dotstts.sampling.eos_threshold",
+                MetaValue::Float64(1.0 + f64::EPSILON),
+            ),
+        ] {
+            let mut source = dots_metadata_source();
+            source.metadata.insert(key.into(), value);
+            assert!(
+                DotsTtsConfig::from_source(&source).is_err(),
+                "accepted invalid {name}"
+            );
+        }
     }
 }
