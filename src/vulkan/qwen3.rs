@@ -163,9 +163,15 @@ pub(crate) struct GpuTokenResult<'a> {
 }
 
 #[derive(Clone, Copy)]
+enum QkvBindings {
+    Grouped(OperatorBindings),
+    Split([OperatorBindings; 3]),
+}
+
+#[derive(Clone, Copy)]
 struct LayerBindings {
     attn_norm: OperatorBindings,
-    qkv: OperatorBindings,
+    qkv: QkvBindings,
     qk_norm: OperatorBindings,
     wo: OperatorBindings,
     ffn_norm: OperatorBindings,
@@ -264,7 +270,7 @@ impl Qwen3VulkanSession {
         let layout = ArenaLayout::qwen3(&config, capacity)?;
         let descriptor_capacity = config
             .n_layer
-            .checked_mul(7)
+            .checked_mul(9)
             .and_then(|count| count.checked_add(3))
             .ok_or(VulkanError::OutOfMemory)?;
         let mut ops = Qwen3Ops::new(context, layout, descriptor_capacity)?;
@@ -280,14 +286,20 @@ impl Qwen3VulkanSession {
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_k.weight"))?,
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_v.weight"))?,
             ];
-            let qkv = ops.bind_weight_buffers(
-                &qkv_buffers,
-                &[
-                    GpuWeightFormat::from_ggml_type(layer.wq.ggml_type)?,
-                    GpuWeightFormat::from_ggml_type(layer.wk.ggml_type)?,
-                    GpuWeightFormat::from_ggml_type(layer.wv.ggml_type)?,
-                ],
-            )?;
+            let qkv_formats = [
+                GpuWeightFormat::from_ggml_type(layer.wq.ggml_type)?,
+                GpuWeightFormat::from_ggml_type(layer.wk.ggml_type)?,
+                GpuWeightFormat::from_ggml_type(layer.wv.ggml_type)?,
+            ];
+            let qkv = if qkv_formats.iter().all(|format| *format == qkv_formats[0]) {
+                QkvBindings::Grouped(ops.bind_weight_buffers(&qkv_buffers, &qkv_formats)?)
+            } else {
+                QkvBindings::Split([
+                    ops.bind_weight_buffers(&qkv_buffers[0..1], &qkv_formats[0..1])?,
+                    ops.bind_weight_buffers(&qkv_buffers[1..2], &qkv_formats[1..2])?,
+                    ops.bind_weight_buffers(&qkv_buffers[2..3], &qkv_formats[2..3])?,
+                ])
+            };
 
             let qk_norm = match (&layer.q_norm, &layer.k_norm) {
                 (Some(q_norm), Some(k_norm)) => {
@@ -432,22 +444,42 @@ impl Qwen3VulkanSession {
                 config.n_embd,
                 config.eps,
             )?;
-            self.ops.record_weight_matvec_group(
-                &commands,
-                bindings.qkv,
-                self.layout.normed,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                &[
-                    (self.layout.q, q_count),
-                    (self.layout.k, kv_count),
-                    (self.layout.v, kv_count),
-                ],
-                config.n_embd,
-            )?;
+            let qkv_outputs = [
+                (self.layout.q, q_count),
+                (self.layout.k, kv_count),
+                (self.layout.v, kv_count),
+            ];
+            match bindings.qkv {
+                QkvBindings::Grouped(grouped) => self.ops.record_weight_matvec_group(
+                    &commands,
+                    grouped,
+                    self.layout.normed,
+                    self.layout.q8,
+                    self.layout.q8_scales,
+                    self.layout.q4_1_input_sums,
+                    self.layout.q8k,
+                    self.layout.q8k_scales,
+                    &qkv_outputs,
+                    config.n_embd,
+                )?,
+                QkvBindings::Split(split) => {
+                    for (binding, &(output, count)) in split.iter().zip(&qkv_outputs) {
+                        self.ops.record_weight_matvec(
+                            &commands,
+                            *binding,
+                            self.layout.normed,
+                            self.layout.q8,
+                            self.layout.q8_scales,
+                            self.layout.q4_1_input_sums,
+                            self.layout.q8k,
+                            self.layout.q8k_scales,
+                            output,
+                            config.n_embd,
+                            count,
+                        )?;
+                    }
+                }
+            }
             self.ops.record_qk_norm_rope(
                 &commands,
                 bindings.qk_norm,
@@ -712,7 +744,7 @@ mod tests {
             (
                 "weight format",
                 EligibilityFacts {
-                    weight_formats: vec![GGMLType::Q4_0],
+                    weight_formats: vec![GGMLType::Q5K],
                     ..eligible_facts()
                 },
             ),

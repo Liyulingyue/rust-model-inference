@@ -9,6 +9,7 @@ const QUANTIZE_Q8_K_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q
 const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_matmul_grouped.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
+const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
@@ -24,21 +25,23 @@ const QUANTIZE_K: usize = 1;
 const Q8_MATMUL_GROUPED: usize = 2;
 const Q4_0_MATMUL: usize = 3;
 const Q4_1_MATMUL: usize = 4;
-const Q6_K_MATMUL: usize = 5;
-const RMS_NORM: usize = 6;
-const QK_NORM_ROPE: usize = 7;
-const KV_WRITE: usize = 8;
-const ATTENTION_SCORES: usize = 9;
-const SOFTMAX: usize = 10;
-const ATTENTION_VALUES: usize = 11;
-const SILU_MUL: usize = 12;
-const ADD: usize = 13;
-const OPERATOR_SHADERS: [&[u8]; 14] = [
+const Q4_K_MATMUL: usize = 5;
+const Q6_K_MATMUL: usize = 6;
+const RMS_NORM: usize = 7;
+const QK_NORM_ROPE: usize = 8;
+const KV_WRITE: usize = 9;
+const ATTENTION_SCORES: usize = 10;
+const SOFTMAX: usize = 11;
+const ATTENTION_VALUES: usize = 12;
+const SILU_MUL: usize = 13;
+const ADD: usize = 14;
+const OPERATOR_SHADERS: [&[u8]; 15] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
     Q4_0_MATMUL_SHADER,
     Q4_1_MATMUL_SHADER,
+    Q4_K_MATMUL_SHADER,
     Q6_K_MATMUL_SHADER,
     RMS_NORM_SHADER,
     QK_NORM_ROPE_SHADER,
@@ -55,6 +58,7 @@ pub(crate) enum GpuWeightFormat {
     Q8_0,
     Q4_0,
     Q4_1,
+    Q4_K,
     Q6_K,
 }
 
@@ -66,6 +70,7 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q8_0 => Ok(Self::Q8_0),
             crate::core::tensor::GGMLType::Q4_0 => Ok(Self::Q4_0),
             crate::core::tensor::GGMLType::Q4_1 => Ok(Self::Q4_1),
+            crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
             value => Err(VulkanError::UnsupportedShape(format!(
                 "unsupported Vulkan weight format {value:?}"
@@ -78,6 +83,7 @@ impl GpuWeightFormat {
             Self::Q8_0 => (32, 34, Q8_MATMUL_GROUPED),
             Self::Q4_0 => (32, 18, Q4_0_MATMUL),
             Self::Q4_1 => (32, 20, Q4_1_MATMUL),
+            Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
         }
     }
@@ -727,7 +733,15 @@ impl<'a> Qwen3Ops<'a> {
         n_in: usize,
         n_out: usize,
     ) -> Result<(), VulkanError> {
-        self.record_q8_matvec_group(commands, bindings, q8, scales, &[(output, n_out)], n_in, None)
+        self.record_q8_matvec_group(
+            commands,
+            bindings,
+            q8,
+            scales,
+            &[(output, n_out)],
+            n_in,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -744,21 +758,16 @@ impl<'a> Qwen3Ops<'a> {
         outputs: &[(ArenaRegion, usize)],
         n_in: usize,
     ) -> Result<(), VulkanError> {
-        let (activation, scales) =
-            if bindings.weight_format(outputs.len())? == GpuWeightFormat::Q6_K {
-                self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
-                (q8k, q8k_scales)
-            } else {
-                self.record_quantize_q8_0(
-                    commands,
-                    input,
-                    q8,
-                    q8_scales,
-                    q4_1_input_sums,
-                    n_in,
-                )?;
-                (q8, q8_scales)
-            };
+        let (activation, scales) = if matches!(
+            bindings.weight_format(outputs.len())?,
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q6_K
+        ) {
+            self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
+            (q8k, q8k_scales)
+        } else {
+            self.record_quantize_q8_0(commands, input, q8, q8_scales, q4_1_input_sums, n_in)?;
+            (q8, q8_scales)
+        };
         self.record_q8_matvec_group(
             commands,
             bindings,
@@ -1410,7 +1419,7 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     for &format in formats {
         check_weight_format(context, format)?;
     }
-    if formats.contains(&"q6_k") {
+    if formats.contains(&"q4_k") || formats.contains(&"q6_k") {
         check_quantize_q8_k_exact(context)?;
     }
 
@@ -1844,12 +1853,14 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
     let format = match name {
         "q4_0" => GpuWeightFormat::Q4_0,
         "q4_1" => GpuWeightFormat::Q4_1,
+        "q4_k" => GpuWeightFormat::Q4_K,
         "q6_k" => GpuWeightFormat::Q6_K,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
     let n_in = match format {
         GpuWeightFormat::Q4_0 => 1024,
         GpuWeightFormat::Q4_1 => 3072,
+        GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::Q8_0 => unreachable!(),
     };
@@ -1896,13 +1907,18 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         commands
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
+        let tolerance = if format == GpuWeightFormat::Q4_K {
+            3e-3
+        } else {
+            2e-3
+        };
         check_close(
             name,
             ops.read_f32(layout.projection, n_out)
                 .map_err(|error| error.to_string())?,
             &expected,
-            2e-3,
-            2e-3,
+            tolerance,
+            tolerance,
         )
     })();
     unsafe { context.destroy_buffer(&buffer) };
@@ -1918,7 +1934,8 @@ fn check_q4_1_zero_scale_min_fixture(
     for row in 0..n_out {
         for block in 0..blocks {
             let offset = (row * blocks + block) * 20;
-            let d = crate::ops::f16_to_f32(u16::from_le_bytes([weight[offset], weight[offset + 1]]));
+            let d =
+                crate::ops::f16_to_f32(u16::from_le_bytes([weight[offset], weight[offset + 1]]));
             let m = crate::ops::f16_to_f32(u16::from_le_bytes([
                 weight[offset + 2],
                 weight[offset + 3],
@@ -1933,7 +1950,8 @@ fn check_q4_1_zero_scale_min_fixture(
 
 fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), String> {
     let count = input.len();
-    let layout = ArenaLayout::for_dims(count, count, 1, 1, count).map_err(|error| error.to_string())?;
+    let layout =
+        ArenaLayout::for_dims(count, count, 1, 1, count).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
     let mut expected_q8 = vec![0; count];
     let mut expected_scales = vec![0.0; count / 32];
@@ -1946,7 +1964,10 @@ fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), S
                 .iter()
                 .fold(0.0f32, |current, value| current.max(value.abs()));
             let raw_scale = if amax == 0.0 { 0.0 } else { amax / 127.0 };
-            let sum = quantized.iter().map(|&value| i32::from(value as i8)).sum::<i32>();
+            let sum = quantized
+                .iter()
+                .map(|&value| i32::from(value as i8))
+                .sum::<i32>();
             crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * raw_scale))
         })
         .collect();
@@ -1954,14 +1975,18 @@ fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), S
         .chunks_exact(32)
         .zip(&expected_scales)
         .map(|(quantized, &scale)| {
-            let sum = quantized.iter().map(|&value| i32::from(value as i8)).sum::<i32>();
+            let sum = quantized
+                .iter()
+                .map(|&value| i32::from(value as i8))
+                .sum::<i32>();
             crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * scale))
         })
         .collect();
     if expected == stored_scale_terms {
         return Err("Q4_1 input-sum fixture does not distinguish raw and stored scales".into());
     }
-    ops.write_f32(layout.x, input).map_err(|error| error.to_string())?;
+    ops.write_f32(layout.x, input)
+        .map_err(|error| error.to_string())?;
     let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
     ops.record_quantize_q8_0(
         &commands,
@@ -1972,7 +1997,9 @@ fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), S
         count,
     )
     .map_err(|error| error.to_string())?;
-    commands.submit_and_wait().map_err(|error| error.to_string())?;
+    commands
+        .submit_and_wait()
+        .map_err(|error| error.to_string())?;
     let actual = ops
         .read_f32(layout.q4_1_input_sums, count / 32)
         .map_err(|error| error.to_string())?;
@@ -2034,6 +2061,32 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     for (index, value) in data[offset + 4..offset + 20].iter_mut().enumerate() {
                         let low = ((row * 3 + block * 5 + index * 7 + 2) & 15) as u8;
                         let high = ((row * 13 + block * 11 + index * 2 + 4) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::Q4_K => {
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    data[offset + 2..offset + 4].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 2.0) / 96.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 4..offset + 16].iter_mut().enumerate() {
+                        *value = ((row * 31 + block * 17 + index * 37 + 11) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 16..offset + 144].iter_mut().enumerate() {
+                        let low = ((row * 7 + block * 13 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 11 + block * 5 + index * 9 + 6) & 15) as u8;
                         *value = low | (high << 4);
                     }
                 }
@@ -2109,6 +2162,16 @@ fn cpu_weight_matvec(
                 1,
             );
         }
+        GpuWeightFormat::Q4_K => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
+                *output = crate::ops::quant::vec_dot_q4k_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
         GpuWeightFormat::Q6_K => {
             let q8k = crate::ops::quant::quantize_row_q8_k(input);
             for (row, output) in output.iter_mut().enumerate() {
@@ -2125,21 +2188,24 @@ fn cpu_weight_matvec(
 }
 
 fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
-    const COUNT: usize = 512;
-    let layout = ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
+    const COUNT: usize = 16_384;
+    let layout =
+        ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
     let input: Vec<f32> = (0..COUNT)
         .map(|index| {
-            if index == 0 {
-                -3.75
-            } else if index == 255 {
-                3.75
-            } else if index == 256 {
-                0.0
-            } else if index == 511 {
-                -2.5
+            let block = index / 256;
+            let local = index % 256;
+            let magnitude = f32::from_bits(0x3f00_0001 + block as u32 * 0x0002_345);
+            let anchor = if block % 2 == 0 {
+                magnitude
             } else {
-                ((index * 47 % 509) as f32 - 254.0) / 83.0
+                -magnitude
+            };
+            if local == 0 {
+                anchor
+            } else {
+                anchor * (((local * 47 % 251) as f32 - 125.0) / 127.0)
             }
         })
         .collect();
@@ -2147,14 +2213,8 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
     let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
-    ops.record_quantize_q8_k(
-        &commands,
-        layout.x,
-        layout.q8k,
-        layout.q8k_scales,
-        COUNT,
-    )
-    .map_err(|error| error.to_string())?;
+    ops.record_quantize_q8_k(&commands, layout.x, layout.q8k, layout.q8k_scales, COUNT)
+        .map_err(|error| error.to_string())?;
     commands
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
@@ -2189,9 +2249,16 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
         .map(|(actual, expected)| actual.to_bits().abs_diff(expected.d.to_bits()))
         .max()
         .unwrap_or(0);
-    if max_scale_ulps > 1 {
+    if max_scale_ulps != 0 {
+        let index = actual_scales
+            .iter()
+            .zip(&expected)
+            .position(|(actual, expected)| actual.to_bits() != expected.d.to_bits())
+            .expect("nonzero max ULP difference has a differing scale");
         return Err(format!(
-            "quantize_q8_k scale differs by {max_scale_ulps} ULPs (expected at most 1)"
+            "quantize_q8_k scale differs by {max_scale_ulps} ULPs at {index}: gpu={:#010x} cpu={:#010x} (expected exact bits)",
+            actual_scales[index].to_bits(),
+            expected[index].d.to_bits(),
         ));
     }
     println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");

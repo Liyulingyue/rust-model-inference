@@ -8,12 +8,12 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 ## 支持范围
 
-- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1 和 Q6_K 文本模型支持完整 token Vulkan 执行。
+- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K 和 Q6_K 文本模型支持完整 token Vulkan 执行。
 - 权重、F32 activation 和 GPU KV cache 常驻设备；每个 token 只提交一次 command buffer、
   等待一次 fence。embedding lookup 和 greedy sampling 仍在 CPU，提交成功后同步 F16 shadow KV。
 - Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合资格的模型直接使用 CPU，
   不会静默混用不支持的 Vulkan 算子。
-- Q4_K、Q5_K、F16 和 BF16 权重尚未接入完整 Vulkan 模型路径；同一组 Q/K/V 或 gate/up 权重格式不一致时，模型整体回退 CPU。
+- Q5_K、F16 和 BF16 权重尚未接入完整 Vulkan 模型路径；同一组 Q/K/V 或 gate/up 权重格式不一致时，模型整体回退 CPU。
 
 ## 架构
 
