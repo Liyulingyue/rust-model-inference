@@ -28,7 +28,7 @@ use crate::parity_trace;
 use crate::vulkan::qwen3::{commit_shadow_kv, Qwen3VulkanSession};
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // =============================================================================
 // Qwen3Session struct (per-request decode state)
@@ -402,9 +402,12 @@ impl<'model> Qwen3Session<'model> {
             .try_reserve_exact(options.max_new_tokens)
             .map_err(|error| format!("Failed to allocate rendered tokens: {error}"))?;
         let mut decoder = model.tokenizer.streaming_decoder(false);
+        let mut prompt_duration = Duration::ZERO;
+        let mut decode_duration = Duration::ZERO;
 
         let decoder_steps = checked_decoder_steps(n_prompt, options.max_new_tokens, config.n_ctx)?;
         for step in 0..decoder_steps {
+            let eval_start = Instant::now();
             let position = if step < n_prompt {
                 input.positions[step]
             } else {
@@ -1051,6 +1054,12 @@ impl<'model> Qwen3Session<'model> {
                     );
                 });
             }
+            let elapsed = eval_start.elapsed();
+            if step < n_prompt {
+                prompt_duration += elapsed;
+            } else {
+                decode_duration += elapsed;
+            }
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint(
                 "result_output",
@@ -1109,6 +1118,8 @@ impl<'model> Qwen3Session<'model> {
             rendered_tokens,
             token_ids: generated_tokens,
             prompt_tokens: n_prompt,
+            prompt_duration,
+            decode_duration,
         })
     }
 }

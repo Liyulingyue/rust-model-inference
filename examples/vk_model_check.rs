@@ -1,12 +1,15 @@
 #[cfg(feature = "vulkan")]
 use rust_model_inference::{
     build_simple_prompt, open_model_source, qwen_text_positions, BPETokenizer, ComponentRole,
-    ComputePool, Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session, TensorSource,
+    ComputePool, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input, Qwen3Model, Qwen3Session,
+    TensorSource,
 };
 #[cfg(feature = "vulkan")]
 use std::path::PathBuf;
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
+#[cfg(feature = "vulkan")]
+use std::time::Duration;
 
 #[cfg(feature = "vulkan")]
 const PROMPT: &str = "法国的首都是";
@@ -50,21 +53,120 @@ fn generate(
     token_ids: &[u32],
     positions: &[[usize; 4]],
     max_new_tokens: usize,
-) -> Result<Vec<u32>, String> {
-    Ok(session
-        .generate(
-            Qwen3Input {
-                token_ids,
-                positions,
-                embeddings: None,
-                deepstack_embeddings: None,
-            },
-            Qwen3GenerateOptions {
-                max_new_tokens,
-                temperature: 0.0,
-            },
-        )?
-        .token_ids)
+) -> Result<Qwen3Generation, String> {
+    session.generate(
+        Qwen3Input {
+            token_ids,
+            positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        },
+        Qwen3GenerateOptions {
+            max_new_tokens,
+            temperature: 0.0,
+        },
+    )
+}
+
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy)]
+struct BenchmarkSample {
+    prompt: f64,
+    decode: f64,
+}
+
+#[cfg(feature = "vulkan")]
+fn per_second(tokens: usize, elapsed: Duration) -> f64 {
+    tokens as f64 / elapsed.as_secs_f64()
+}
+
+#[cfg(feature = "vulkan")]
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+#[cfg(feature = "vulkan")]
+fn benchmark_once(
+    session: &mut Qwen3Session<'_>,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+) -> Result<BenchmarkSample, String> {
+    session.reset_kv();
+    let generation = generate(session, token_ids, positions, GREEDY_TOKENS + 1)?;
+    generation
+        .token_ids
+        .get(..GREEDY_TOKENS)
+        .ok_or("benchmark stopped before 32 greedy tokens")?;
+    Ok(BenchmarkSample {
+        prompt: per_second(token_ids.len(), generation.prompt_duration),
+        decode: per_second(GREEDY_TOKENS, generation.decode_duration),
+    })
+}
+
+#[cfg(feature = "vulkan")]
+fn benchmark(
+    cpu: &mut Qwen3Session<'_>,
+    gpu: &mut Qwen3Session<'_>,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+) -> Result<(), String> {
+    benchmark_once(cpu, token_ids, positions)?;
+    benchmark_once(gpu, token_ids, positions)?;
+    println!("benchmark warmup=complete backends=cpu,gpu");
+
+    let mut cpu_samples = Vec::with_capacity(5);
+    let mut gpu_samples = Vec::with_capacity(5);
+    for sample in 1..=5 {
+        let cpu_sample = benchmark_once(cpu, token_ids, positions)?;
+        println!(
+            "benchmark sample={sample} backend=cpu prompt_tps={:.3} decode_tps={:.3}",
+            cpu_sample.prompt, cpu_sample.decode
+        );
+        cpu_samples.push(cpu_sample);
+
+        let gpu_sample = benchmark_once(gpu, token_ids, positions)?;
+        println!(
+            "benchmark sample={sample} backend=gpu prompt_tps={:.3} decode_tps={:.3}",
+            gpu_sample.prompt, gpu_sample.decode
+        );
+        gpu_samples.push(gpu_sample);
+    }
+
+    let cpu_prompt = median(
+        &cpu_samples
+            .iter()
+            .map(|sample| sample.prompt)
+            .collect::<Vec<_>>(),
+    );
+    let cpu_decode = median(
+        &cpu_samples
+            .iter()
+            .map(|sample| sample.decode)
+            .collect::<Vec<_>>(),
+    );
+    let gpu_prompt = median(
+        &gpu_samples
+            .iter()
+            .map(|sample| sample.prompt)
+            .collect::<Vec<_>>(),
+    );
+    let gpu_decode = median(
+        &gpu_samples
+            .iter()
+            .map(|sample| sample.decode)
+            .collect::<Vec<_>>(),
+    );
+    let prompt_speedup = gpu_prompt / cpu_prompt;
+    let decode_speedup = gpu_decode / cpu_decode;
+    println!("benchmark median backend=cpu prompt_tps={cpu_prompt:.3} decode_tps={cpu_decode:.3}");
+    println!("benchmark median backend=gpu prompt_tps={gpu_prompt:.3} decode_tps={gpu_decode:.3}");
+    println!(
+        "benchmark prompt_speedup={prompt_speedup:.3} decode_speedup={decode_speedup:.3} acceleration={}",
+        prompt_speedup > 1.0 && decode_speedup > 1.0
+    );
+    Ok(())
 }
 
 #[cfg(feature = "vulkan")]
@@ -119,7 +221,7 @@ fn run() -> Result<(), String> {
     generate(&mut cpu, &prompt_tokens, &positions, 1)?;
     let cpu_logits = cpu.last_logits().to_vec();
     cpu.reset_kv();
-    let cpu_tokens = generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
+    let cpu_tokens = generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?.token_ids;
 
     rust_model_inference::ops::enable_gpu();
     let context = rust_model_inference::ops::get_vulkan_context()
@@ -129,7 +231,7 @@ fn run() -> Result<(), String> {
     let gpu_logits = gpu.last_logits().to_vec();
     gpu.reset_kv();
     let before = context.submission_count();
-    let gpu_tokens = generate(&mut gpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
+    let gpu_tokens = generate(&mut gpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?.token_ids;
     let submissions = context.submission_count() - before;
 
     assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
@@ -158,7 +260,7 @@ fn run() -> Result<(), String> {
     );
     println!("tokens={gpu_tokens:?}");
     if arguments.benchmark {
-        return Err("benchmark mode is not implemented yet".into());
+        benchmark(&mut cpu, &mut gpu, &prompt_tokens, &positions)?;
     }
     Ok(())
 }
@@ -177,4 +279,16 @@ fn main() -> std::process::ExitCode {
 #[cfg(not(feature = "vulkan"))]
 fn main() {
     eprintln!("vk_model_check requires --features vulkan");
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::{median, per_second};
+    use std::time::Duration;
+
+    #[test]
+    fn benchmark_statistics_use_sorted_middle_and_elapsed_seconds() {
+        assert_eq!(median(&[9.0, 1.0, 5.0, 3.0, 7.0]), 5.0);
+        assert_eq!(per_second(8, Duration::from_millis(500)), 16.0);
+    }
 }

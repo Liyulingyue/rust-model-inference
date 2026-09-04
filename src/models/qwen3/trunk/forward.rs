@@ -30,7 +30,7 @@ use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(super) fn forward_moe_token(
     input: &[f32],
@@ -135,6 +135,8 @@ pub struct Qwen3Generation {
     pub rendered_tokens: Vec<String>,
     pub token_ids: Vec<u32>,
     pub prompt_tokens: usize,
+    pub prompt_duration: Duration,
+    pub decode_duration: Duration,
 }
 
 // =============================================================================
