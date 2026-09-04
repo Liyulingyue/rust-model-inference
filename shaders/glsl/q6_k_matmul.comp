@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; uint blocks_per_row; uint output0_word; uint rows0; uint output1_word; uint rows1; uint output2_word; uint rows2; uint group_count; uint unused; } pc;
+
+float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
+uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
+uint weight_byte(uint slot, uint index) { return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu; }
+int weight_i8(uint slot, uint index) { uint value = weight_byte(slot, index); return value >= 128u ? int(value) - 256 : int(value); }
+int q8(uint index) { uint value = (arena.data[pc.q8_word + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+void main() {
+    uint slot = gl_WorkGroupID.z;
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+    precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        uint offset = row * pc.blocks_per_row * 210u + block * 210u;
+        precise float q6_scale = f16_decode(weight_byte(slot, offset + 208u) | (weight_byte(slot, offset + 209u) << 8u));
+        precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
+        precise float scale = q6_scale * q8_scale;
+        int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
+        for (uint local = 0u; local < 256u; ++local) {
+            uint section = local / 128u;
+            uint quarter = (local % 128u) / 32u;
+            uint l = local % 32u;
+            uint ql = section * 64u + l + (quarter == 1u || quarter == 3u ? 32u : 0u);
+            uint qh = section * 32u + l;
+            uint low = quarter < 2u ? weight_byte(slot, offset + ql) & 15u : weight_byte(slot, offset + ql) >> 4u;
+            uint high = (weight_byte(slot, offset + 128u + qh) >> (quarter * 2u)) & 3u;
+            int value = int(low | (high << 4u)) - 32;
+            int weight_scale = weight_i8(slot, offset + 192u + section * 8u + (l / 16u) + quarter * 2u);
+            partial[local & 7u] += weight_scale * q8(block * 256u + local) * value;
+        }
+        for (uint lane = 0u; lane < 8u; ++lane) {
+            precise float term = scale * float(partial[lane]);
+            sums[lane] = sums[lane] + term;
+        }
+    }
+    precise float sum = 0.0;
+    for (uint lane = 0u; lane < 8u; ++lane) sum = sum + sums[lane];
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    arena.data[output_word + row] = floatBitsToUint(sum);
+}

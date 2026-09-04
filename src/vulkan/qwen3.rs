@@ -2,7 +2,9 @@ use crate::core::scratchpad::{KvCache, KvState};
 use crate::core::tensor::GGMLType;
 use crate::models::qwen3::trunk::{Qwen3Config, Qwen3Model, Qwen3Rope};
 
-use super::ops::{fill_rope_neox, ArenaLayout, OperatorBindings, Qwen3Ops, TokenCommands};
+use super::ops::{
+    fill_rope_neox, ArenaLayout, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+};
 use super::{GpuBuffer, VulkanContext, VulkanError};
 
 #[derive(Debug, Clone)]
@@ -35,9 +37,9 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
         || facts
             .weight_formats
             .iter()
-            .any(|format| !matches!(format, GGMLType::Q8_0))
+            .any(|&format| GpuWeightFormat::from_ggml_type(format).is_err())
     {
-        return Err("weight format must be Q8_0".into());
+        return Err("unsupported Vulkan weight format".into());
     }
     Ok(())
 }
@@ -278,7 +280,14 @@ impl Qwen3VulkanSession {
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_k.weight"))?,
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_v.weight"))?,
             ];
-            let qkv = ops.bind_buffers(&qkv_buffers)?;
+            let qkv = ops.bind_weight_buffers(
+                &qkv_buffers,
+                &[
+                    GpuWeightFormat::from_ggml_type(layer.wq.ggml_type)?,
+                    GpuWeightFormat::from_ggml_type(layer.wk.ggml_type)?,
+                    GpuWeightFormat::from_ggml_type(layer.wv.ggml_type)?,
+                ],
+            )?;
 
             let qk_norm = match (&layer.q_norm, &layer.k_norm) {
                 (Some(q_norm), Some(k_norm)) => {
@@ -296,7 +305,10 @@ impl Qwen3VulkanSession {
 
             let wo_buffer =
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.attn_output.weight"))?;
-            let wo = ops.bind_buffers(&[wo_buffer])?;
+            let wo = ops.bind_weight_buffers(
+                &[wo_buffer],
+                &[GpuWeightFormat::from_ggml_type(layer.wo.ggml_type)?],
+            )?;
 
             let ffn_norm_buffer = buffers.upload_f32(&layer.ffn_norm)?;
             let ffn_norm = ops.bind_buffers(&[ffn_norm_buffer])?;
@@ -305,11 +317,20 @@ impl Qwen3VulkanSession {
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_gate.weight"))?,
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_up.weight"))?,
             ];
-            let gate_up = ops.bind_buffers(&gate_up_buffers)?;
+            let gate_up = ops.bind_weight_buffers(
+                &gate_up_buffers,
+                &[
+                    GpuWeightFormat::from_ggml_type(layer.w_gate.ggml_type)?,
+                    GpuWeightFormat::from_ggml_type(layer.w_up.ggml_type)?,
+                ],
+            )?;
 
             let down_buffer =
                 buffers.upload_tensor(model, &format!("blk.{layer_index}.ffn_down.weight"))?;
-            let down = ops.bind_buffers(&[down_buffer])?;
+            let down = ops.bind_weight_buffers(
+                &[down_buffer],
+                &[GpuWeightFormat::from_ggml_type(layer.w_down.ggml_type)?],
+            )?;
             layers.push(LayerBindings {
                 attn_norm,
                 qkv,
@@ -325,7 +346,10 @@ impl Qwen3VulkanSession {
         let output_norm = ops.bind_buffers(&[output_norm_buffer])?;
         let output_name = output_tensor_name(model);
         let output_buffer = buffers.upload_tensor(model, output_name)?;
-        let output = ops.bind_buffers(&[output_buffer])?;
+        let output = ops.bind_weight_buffers(
+            &[output_buffer],
+            &[GpuWeightFormat::from_ggml_type(model.output.ggml_type)?],
+        )?;
         let kv_count = config
             .n_head_kv
             .checked_mul(config.n_embd_head_k)
@@ -395,7 +419,6 @@ impl Qwen3VulkanSession {
             .n_head
             .checked_mul(config.n_embd_head_v)
             .ok_or(VulkanError::OutOfMemory)?;
-
         self.ops.write_f32(self.layout.x, input)?;
         fill_rope_neox(&mut self.rope, position, config.freq_base);
         self.ops.write_f32(self.layout.logits, &self.rope)?;
@@ -409,18 +432,15 @@ impl Qwen3VulkanSession {
                 config.n_embd,
                 config.eps,
             )?;
-            self.ops.record_quantize_q8_0(
+            self.ops.record_weight_matvec_group(
                 &commands,
+                bindings.qkv,
                 self.layout.normed,
                 self.layout.q8,
                 self.layout.q8_scales,
-                config.n_embd,
-            )?;
-            self.ops.record_q8_matvec_group(
-                &commands,
-                bindings.qkv,
-                self.layout.q8,
-                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
                 &[
                     (self.layout.q, q_count),
                     (self.layout.k, kv_count),
@@ -470,18 +490,15 @@ impl Qwen3VulkanSession {
                 config.n_head_kv,
                 config.n_embd_head_k,
             )?;
-            self.ops.record_quantize_q8_0(
+            self.ops.record_weight_matvec(
                 &commands,
+                bindings.wo,
                 self.layout.attn,
                 self.layout.q8,
                 self.layout.q8_scales,
-                attn_count,
-            )?;
-            self.ops.record_q8_matvec(
-                &commands,
-                bindings.wo,
-                self.layout.q8,
-                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
                 self.layout.projection,
                 attn_count,
                 config.n_embd,
@@ -500,18 +517,15 @@ impl Qwen3VulkanSession {
                 config.n_embd,
                 config.eps,
             )?;
-            self.ops.record_quantize_q8_0(
+            self.ops.record_weight_matvec_group(
                 &commands,
+                bindings.gate_up,
                 self.layout.normed,
                 self.layout.q8,
                 self.layout.q8_scales,
-                config.n_embd,
-            )?;
-            self.ops.record_q8_matvec_group(
-                &commands,
-                bindings.gate_up,
-                self.layout.q8,
-                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
                 &[
                     (self.layout.gate, config.n_ff),
                     (self.layout.up, config.n_ff),
@@ -520,18 +534,15 @@ impl Qwen3VulkanSession {
             )?;
             self.ops
                 .record_silu_mul(&commands, self.layout.gate, self.layout.up, config.n_ff)?;
-            self.ops.record_quantize_q8_0(
+            self.ops.record_weight_matvec(
                 &commands,
+                bindings.down,
                 self.layout.gate,
                 self.layout.q8,
                 self.layout.q8_scales,
-                config.n_ff,
-            )?;
-            self.ops.record_q8_matvec(
-                &commands,
-                bindings.down,
-                self.layout.q8,
-                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
                 self.layout.down,
                 config.n_ff,
                 config.n_embd,
@@ -548,18 +559,15 @@ impl Qwen3VulkanSession {
             config.n_embd,
             config.eps,
         )?;
-        self.ops.record_quantize_q8_0(
+        self.ops.record_weight_matvec(
             &commands,
+            self.output,
             self.layout.normed,
             self.layout.q8,
             self.layout.q8_scales,
-            config.n_embd,
-        )?;
-        self.ops.record_q8_matvec(
-            &commands,
-            self.output,
-            self.layout.q8,
-            self.layout.q8_scales,
+            self.layout.q4_1_input_sums,
+            self.layout.q8k,
+            self.layout.q8k_scales,
             self.layout.logits,
             config.n_embd,
             config.vocab,

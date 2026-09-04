@@ -210,6 +210,21 @@ fn run() -> Result<(), String> {
         Arc::clone(&tokenizer),
         Arc::new(ComputePool::new(4)),
     )?;
+    println!(
+        "formats=blk.0:q={:?},k={:?},v={:?},o={:?},gate={:?},up={:?},down={:?};output={:?}",
+        model.layers()[0].wq.ggml_type,
+        model.layers()[0].wk.ggml_type,
+        model.layers()[0].wv.ggml_type,
+        model.layers()[0].wo.ggml_type,
+        model.layers()[0].w_gate.ggml_type,
+        model.layers()[0].w_up.ggml_type,
+        model.layers()[0].w_down.ggml_type,
+        source
+            .tensor_info("output.weight")
+            .or_else(|| source.tensor_info("token_embd.weight"))
+            .ok_or("missing output weight")?
+            .ggml_type,
+    );
     let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
     let positions = qwen_text_positions(prompt_tokens.len());
     let capacity = prompt_tokens

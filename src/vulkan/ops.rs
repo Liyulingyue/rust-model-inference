@@ -5,7 +5,11 @@ use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
 const QUANTIZE_Q8_0_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_0.spv");
+const QUANTIZE_Q8_K_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_k.spv");
 const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_matmul_grouped.spv");
+const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
+const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
+const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
@@ -16,18 +20,26 @@ const SILU_MUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/silu_mul.spv");
 const ADD_SHADER: &[u8] = include_bytes!("../../shaders/bin/add.spv");
 
 const QUANTIZE: usize = 0;
-const Q8_MATMUL_GROUPED: usize = 1;
-const RMS_NORM: usize = 2;
-const QK_NORM_ROPE: usize = 3;
-const KV_WRITE: usize = 4;
-const ATTENTION_SCORES: usize = 5;
-const SOFTMAX: usize = 6;
-const ATTENTION_VALUES: usize = 7;
-const SILU_MUL: usize = 8;
-const ADD: usize = 9;
-const OPERATOR_SHADERS: [&[u8]; 10] = [
+const QUANTIZE_K: usize = 1;
+const Q8_MATMUL_GROUPED: usize = 2;
+const Q4_0_MATMUL: usize = 3;
+const Q4_1_MATMUL: usize = 4;
+const Q6_K_MATMUL: usize = 5;
+const RMS_NORM: usize = 6;
+const QK_NORM_ROPE: usize = 7;
+const KV_WRITE: usize = 8;
+const ATTENTION_SCORES: usize = 9;
+const SOFTMAX: usize = 10;
+const ATTENTION_VALUES: usize = 11;
+const SILU_MUL: usize = 12;
+const ADD: usize = 13;
+const OPERATOR_SHADERS: [&[u8]; 14] = [
     QUANTIZE_Q8_0_SHADER,
+    QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
+    Q4_0_MATMUL_SHADER,
+    Q4_1_MATMUL_SHADER,
+    Q6_K_MATMUL_SHADER,
     RMS_NORM_SHADER,
     QK_NORM_ROPE_SHADER,
     KV_WRITE_SHADER,
@@ -37,6 +49,39 @@ const OPERATOR_SHADERS: [&[u8]; 10] = [
     SILU_MUL_SHADER,
     ADD_SHADER,
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GpuWeightFormat {
+    Q8_0,
+    Q4_0,
+    Q4_1,
+    Q6_K,
+}
+
+impl GpuWeightFormat {
+    pub(crate) fn from_ggml_type(
+        value: crate::core::tensor::GGMLType,
+    ) -> Result<Self, VulkanError> {
+        match value {
+            crate::core::tensor::GGMLType::Q8_0 => Ok(Self::Q8_0),
+            crate::core::tensor::GGMLType::Q4_0 => Ok(Self::Q4_0),
+            crate::core::tensor::GGMLType::Q4_1 => Ok(Self::Q4_1),
+            crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
+            value => Err(VulkanError::UnsupportedShape(format!(
+                "unsupported Vulkan weight format {value:?}"
+            ))),
+        }
+    }
+
+    fn layout(self) -> (usize, usize, usize) {
+        match self {
+            Self::Q8_0 => (32, 34, Q8_MATMUL_GROUPED),
+            Self::Q4_0 => (32, 18, Q4_0_MATMUL),
+            Self::Q4_1 => (32, 20, Q4_1_MATMUL),
+            Self::Q6_K => (256, 210, Q6_K_MATMUL),
+        }
+    }
+}
 
 pub(crate) fn fill_rope_neox(coefficients: &mut [f32], position: usize, freq_base: f32) {
     debug_assert!(!coefficients.is_empty() && coefficients.len() % 2 == 0);
@@ -78,6 +123,9 @@ pub(crate) struct ArenaLayout {
     pub(crate) logits: ArenaRegion,
     pub(crate) q8: ArenaRegion,
     pub(crate) q8_scales: ArenaRegion,
+    pub(crate) q4_1_input_sums: ArenaRegion,
+    pub(crate) q8k: ArenaRegion,
+    pub(crate) q8k_scales: ArenaRegion,
     pub(crate) scores: ArenaRegion,
     pub(crate) kv_k: ArenaRegion,
     pub(crate) kv_v: ArenaRegion,
@@ -158,6 +206,9 @@ impl ArenaLayout {
         let logits = f32_region(&mut cursor, vocab)?;
         let q8 = region(&mut cursor, q8_len)?;
         let q8_scales = f32_region(&mut cursor, q8_len.div_ceil(32))?;
+        let q4_1_input_sums = f32_region(&mut cursor, q8_len.div_ceil(32))?;
+        let q8k = region(&mut cursor, q8_len)?;
+        let q8k_scales = f32_region(&mut cursor, q8_len.div_ceil(256))?;
         let scores = f32_region(&mut cursor, score_len)?;
         let kv_k = f32_region(&mut cursor, kv_cache_len)?;
         let kv_v = f32_region(&mut cursor, kv_cache_len)?;
@@ -178,6 +229,9 @@ impl ArenaLayout {
             logits,
             q8,
             q8_scales,
+            q4_1_input_sums,
+            q8k,
+            q8k_scales,
             scores,
             kv_k,
             kv_v,
@@ -187,7 +241,7 @@ impl ArenaLayout {
         })
     }
 
-    pub(crate) fn regions(&self) -> [ArenaRegion; 18] {
+    pub(crate) fn regions(&self) -> [ArenaRegion; 21] {
         [
             self.x,
             self.normed,
@@ -202,6 +256,9 @@ impl ArenaLayout {
             self.logits,
             self.q8,
             self.q8_scales,
+            self.q4_1_input_sums,
+            self.q8k,
+            self.q8k_scales,
             self.scores,
             self.kv_k,
             self.kv_v,
@@ -369,6 +426,7 @@ impl<'a> TokenCommands<'a> {
 pub(crate) struct OperatorBindings {
     descriptor_set: vk::DescriptorSet,
     sizes: [u64; 3],
+    weight_formats: [Option<GpuWeightFormat>; 3],
 }
 
 impl OperatorBindings {
@@ -381,6 +439,21 @@ impl OperatorBindings {
             )));
         }
         Ok(())
+    }
+
+    fn weight_format(&self, count: usize) -> Result<GpuWeightFormat, VulkanError> {
+        let format = self.weight_formats[0].ok_or_else(|| {
+            VulkanError::UnsupportedShape("missing Vulkan weight format metadata".into())
+        })?;
+        if self.weight_formats[..count]
+            .iter()
+            .any(|&value| value != Some(format))
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "heterogeneous grouped Vulkan weight formats".into(),
+            ));
+        }
+        Ok(format)
     }
 }
 
@@ -456,7 +529,7 @@ impl<'a> Qwen3Ops<'a> {
                 return Err(VulkanError::InitFailed(error.to_string()));
             }
         };
-        let arena_bindings = match allocate_bindings(context, descriptor_pool, arena, &[]) {
+        let arena_bindings = match allocate_bindings(context, descriptor_pool, arena, &[], &[]) {
             Ok(bindings) => bindings,
             Err(error) => {
                 unsafe {
@@ -491,7 +564,26 @@ impl<'a> Qwen3Ops<'a> {
                 buffers.len()
             )));
         }
-        allocate_bindings(self.context, self.descriptor_pool, self.arena, buffers)
+        allocate_bindings(self.context, self.descriptor_pool, self.arena, buffers, &[])
+    }
+
+    pub(crate) fn bind_weight_buffers(
+        &mut self,
+        buffers: &[GpuBuffer],
+        formats: &[GpuWeightFormat],
+    ) -> Result<OperatorBindings, VulkanError> {
+        if buffers.len() != formats.len() {
+            return Err(VulkanError::UnsupportedShape(
+                "Vulkan weight buffers and formats differ in count".into(),
+            ));
+        }
+        allocate_bindings(
+            self.context,
+            self.descriptor_pool,
+            self.arena,
+            buffers,
+            formats,
+        )
     }
 
     pub(crate) fn write_f32(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
@@ -532,6 +624,7 @@ impl<'a> Qwen3Ops<'a> {
         input: ArenaRegion,
         q8: ArenaRegion,
         scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
         count: usize,
     ) -> Result<(), VulkanError> {
         if count == 0 || count % 32 != 0 {
@@ -543,12 +636,46 @@ impl<'a> Qwen3Ops<'a> {
             self.f32_word(input, count, "quantize input")?,
             self.byte_word(q8, count, "quantize output")?,
             self.f32_word(scales, count / 32, "quantize scales")?,
+            self.f32_word(q4_1_input_sums, count / 32, "Q4_1 input sums")?,
             as_u32(count, "quantize length")?,
         ];
         let (x, y) = super::dispatch_grid(count / 32, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[QUANTIZE],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, 1);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_quantize_q8_k(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        if count == 0 || count % 256 != 0 {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Q8_K activation length {count} is not a positive multiple of 256"
+            )));
+        }
+        let push = [
+            self.f32_word(input, count, "Q8_K quantize input")?,
+            self.byte_word(q8, count, "Q8_K quantize output")?,
+            self.f32_word(scales, count / 256, "Q8_K quantize scales")?,
+            as_u32(count, "Q8_K quantize length")?,
+        ];
+        let (x, y) = super::dispatch_grid(count / 256, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[QUANTIZE_K],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -600,7 +727,76 @@ impl<'a> Qwen3Ops<'a> {
         n_in: usize,
         n_out: usize,
     ) -> Result<(), VulkanError> {
-        self.record_q8_matvec_group(commands, bindings, q8, scales, &[(output, n_out)], n_in)
+        self.record_q8_matvec_group(commands, bindings, q8, scales, &[(output, n_out)], n_in, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matvec_group(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize)],
+        n_in: usize,
+    ) -> Result<(), VulkanError> {
+        let (activation, scales) =
+            if bindings.weight_format(outputs.len())? == GpuWeightFormat::Q6_K {
+                self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
+                (q8k, q8k_scales)
+            } else {
+                self.record_quantize_q8_0(
+                    commands,
+                    input,
+                    q8,
+                    q8_scales,
+                    q4_1_input_sums,
+                    n_in,
+                )?;
+                (q8, q8_scales)
+            };
+        self.record_q8_matvec_group(
+            commands,
+            bindings,
+            activation,
+            scales,
+            outputs,
+            n_in,
+            Some(q4_1_input_sums),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matvec(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        output: ArenaRegion,
+        n_in: usize,
+        n_out: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_weight_matvec_group(
+            commands,
+            bindings,
+            input,
+            q8,
+            q8_scales,
+            q4_1_input_sums,
+            q8k,
+            q8k_scales,
+            &[(output, n_out)],
+            n_in,
+        )
     }
 
     pub(crate) fn record_q8_matvec_group(
@@ -611,10 +807,13 @@ impl<'a> Qwen3Ops<'a> {
         scales: ArenaRegion,
         outputs: &[(ArenaRegion, usize)],
         n_in: usize,
+        q4_1_input_sums: Option<ArenaRegion>,
     ) -> Result<(), VulkanError> {
-        if n_in == 0 || n_in % 32 != 0 {
+        let format = bindings.weight_format(outputs.len())?;
+        let (block_elements, block_bytes, pipeline) = format.layout();
+        if n_in == 0 || n_in % block_elements != 0 {
             return Err(VulkanError::UnsupportedShape(format!(
-                "Q8_0 matvec input length {n_in} is not a positive multiple of 32"
+                "{format:?} matvec input length {n_in} is not a positive multiple of {block_elements}"
             )));
         }
         if outputs.is_empty() || outputs.len() > 3 {
@@ -623,16 +822,27 @@ impl<'a> Qwen3Ops<'a> {
                 outputs.len()
             )));
         }
-        let blocks_per_row = n_in / 32;
-        if blocks_per_row > 512 {
+        let blocks_per_row = n_in / block_elements;
+        if n_in / 32 > 512 {
             return Err(VulkanError::UnsupportedShape(format!(
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
         }
         self.byte_word(q8, n_in, "Q8_0 matvec input")?;
         self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?;
+        let q4_1_input_sum_word = if format == GpuWeightFormat::Q4_1 {
+            self.f32_word(
+                q4_1_input_sums.ok_or_else(|| {
+                    VulkanError::UnsupportedShape("Q4_1 input sums are required".into())
+                })?,
+                blocks_per_row,
+                "Q4_1 input sums",
+            )?
+        } else {
+            0
+        };
         let row_bytes = blocks_per_row
-            .checked_mul(34)
+            .checked_mul(block_bytes)
             .ok_or(VulkanError::OutOfMemory)?;
         let mut output_words = [0u32; 3];
         let mut rows = [0u32; 3];
@@ -648,7 +858,7 @@ impl<'a> Qwen3Ops<'a> {
                 row_count
                     .checked_mul(row_bytes)
                     .ok_or(VulkanError::OutOfMemory)?,
-                "Q8_0 weight",
+                "Vulkan weight",
             )?;
             output_words[index] = self.f32_word(region, row_count, "Q8_0 matvec output")?;
             rows[index] = as_u32(row_count, "Q8_0 output rows")?;
@@ -666,12 +876,12 @@ impl<'a> Qwen3Ops<'a> {
             output_words[2],
             rows[2],
             as_u32(outputs.len(), "Q8_0 group count")?,
-            0,
+            q4_1_input_sum_word,
         ];
         let (x, y) = super::dispatch_grid(max_rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[Q8_MATMUL_GROUPED],
+                self.pipelines[pipeline],
                 self.context.pipeline_layout,
                 &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -1102,7 +1312,13 @@ fn allocate_bindings(
     descriptor_pool: vk::DescriptorPool,
     arena: GpuBuffer,
     extras: &[GpuBuffer],
+    formats: &[GpuWeightFormat],
 ) -> Result<OperatorBindings, VulkanError> {
+    if extras.len() != formats.len() && !formats.is_empty() {
+        return Err(VulkanError::UnsupportedShape(
+            "Vulkan weight buffer and format counts differ".into(),
+        ));
+    }
     let layouts = [context.descriptor_set_layout];
     let descriptor_set = unsafe {
         context
@@ -1137,6 +1353,7 @@ fn allocate_bindings(
     Ok(OperatorBindings {
         descriptor_set,
         sizes,
+        weight_formats: std::array::from_fn(|index| formats.get(index).copied()),
     })
 }
 
@@ -1185,11 +1402,17 @@ fn validate_attention_shape(
     Ok(())
 }
 
-pub fn run_qwen3_operator_check(context: &VulkanContext) -> Result<(), String> {
+pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
     check_quantize_tie_even(context)?;
     check_attention_f16_fma(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
+    for &format in formats {
+        check_weight_format(context, format)?;
+    }
+    if formats.contains(&"q6_k") {
+        check_quantize_q8_k_exact(context)?;
+    }
 
     const N_EMBD: usize = 64;
     const N_FF: usize = 96;
@@ -1268,10 +1491,10 @@ pub fn run_qwen3_operator_check(context: &VulkanContext) -> Result<(), String> {
             .bind_buffers(&allocations[1..3])
             .map_err(|error| error.to_string())?;
         let grouped_bindings = ops
-            .bind_buffers(&allocations[3..6])
+            .bind_weight_buffers(&allocations[3..6], &[GpuWeightFormat::Q8_0; 3])
             .map_err(|error| error.to_string())?;
         let single_bindings = ops
-            .bind_buffers(&allocations[3..4])
+            .bind_weight_buffers(&allocations[3..4], &[GpuWeightFormat::Q8_0])
             .map_err(|error| error.to_string())?;
 
         ops.write_f32(layout.x, &input)
@@ -1377,6 +1600,7 @@ pub fn run_qwen3_operator_check(context: &VulkanContext) -> Result<(), String> {
             layout.normed,
             layout.q8,
             layout.q8_scales,
+            layout.q4_1_input_sums,
             N_EMBD,
         )
         .map_err(|error| error.to_string())?;
@@ -1391,6 +1615,7 @@ pub fn run_qwen3_operator_check(context: &VulkanContext) -> Result<(), String> {
                 (layout.v, KV_HEADS * HEAD_DIM),
             ],
             N_EMBD,
+            None,
         )
         .map_err(|error| error.to_string())?;
         ops.record_q8_matvec(
@@ -1615,6 +1840,333 @@ pub fn run_qwen3_operator_check(context: &VulkanContext) -> Result<(), String> {
     result
 }
 
+fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String> {
+    let format = match name {
+        "q4_0" => GpuWeightFormat::Q4_0,
+        "q4_1" => GpuWeightFormat::Q4_1,
+        "q6_k" => GpuWeightFormat::Q6_K,
+        _ => return Err(format!("unsupported Vulkan weight format {name}")),
+    };
+    let n_in = match format {
+        GpuWeightFormat::Q4_0 => 1024,
+        GpuWeightFormat::Q4_1 => 3072,
+        GpuWeightFormat::Q6_K => 1024,
+        GpuWeightFormat::Q8_0 => unreachable!(),
+    };
+    let n_out = 65;
+    let layout = ArenaLayout::for_dims(n_in.max(n_out), n_out, 1, 1, n_in)
+        .map_err(|error| error.to_string())?;
+    let input: Vec<f32> = (0..n_in)
+        .map(|index| ((index * 29 % 251) as f32 - 125.0) / 97.0)
+        .collect();
+    if format == GpuWeightFormat::Q4_1 {
+        check_q4_1_input_sums(context, &input)?;
+    }
+    let weight = synthetic_weight(format, n_in, n_out);
+    let mut q8 = vec![0; n_in];
+    let mut scales = vec![0.0; n_in / 32];
+    crate::ops::quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
+    let expected = cpu_weight_matvec(format, &weight, &input, &q8, &scales, n_in, n_out);
+    let buffer = unsafe { context.upload_static(&weight) }.map_err(|error| error.to_string())?;
+    let result = (|| -> Result<(), String> {
+        let mut ops = Qwen3Ops::new(context, layout, 2).map_err(|error| error.to_string())?;
+        let bindings = ops
+            .bind_weight_buffers(&[buffer], &[format])
+            .map_err(|error| error.to_string())?;
+        ops.write_f32(layout.x, &input)
+            .map_err(|error| error.to_string())?;
+        let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
+        ops.record_weight_matvec(
+            &commands,
+            bindings,
+            layout.x,
+            layout.q8,
+            layout.q8_scales,
+            layout.q4_1_input_sums,
+            layout.q8k,
+            layout.q8k_scales,
+            layout.projection,
+            n_in,
+            n_out,
+        )
+        .map_err(|error| error.to_string())?;
+        commands
+            .submit_and_wait()
+            .map_err(|error| error.to_string())?;
+        check_close(
+            name,
+            ops.read_f32(layout.projection, n_out)
+                .map_err(|error| error.to_string())?,
+            &expected,
+            2e-3,
+            2e-3,
+        )
+    })();
+    unsafe { context.destroy_buffer(&buffer) };
+    result
+}
+
+fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), String> {
+    let count = input.len();
+    let layout = ArenaLayout::for_dims(count, count, 1, 1, count).map_err(|error| error.to_string())?;
+    let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
+    let mut expected_q8 = vec![0; count];
+    let mut expected_scales = vec![0.0; count / 32];
+    crate::ops::quantize_q8_0_into(input, count, &mut expected_q8, &mut expected_scales);
+    let expected: Vec<f32> = input
+        .chunks_exact(32)
+        .zip(expected_q8.chunks_exact(32))
+        .map(|(values, quantized)| {
+            let amax = values
+                .iter()
+                .fold(0.0f32, |current, value| current.max(value.abs()));
+            let raw_scale = if amax == 0.0 { 0.0 } else { amax / 127.0 };
+            let sum = quantized.iter().map(|&value| i32::from(value as i8)).sum::<i32>();
+            crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * raw_scale))
+        })
+        .collect();
+    let stored_scale_terms: Vec<f32> = expected_q8
+        .chunks_exact(32)
+        .zip(&expected_scales)
+        .map(|(quantized, &scale)| {
+            let sum = quantized.iter().map(|&value| i32::from(value as i8)).sum::<i32>();
+            crate::ops::f16_to_f32(crate::ops::f32_to_f16(sum as f32 * scale))
+        })
+        .collect();
+    if expected == stored_scale_terms {
+        return Err("Q4_1 input-sum fixture does not distinguish raw and stored scales".into());
+    }
+    ops.write_f32(layout.x, input).map_err(|error| error.to_string())?;
+    let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
+    ops.record_quantize_q8_0(
+        &commands,
+        layout.x,
+        layout.q8,
+        layout.q8_scales,
+        layout.q4_1_input_sums,
+        count,
+    )
+    .map_err(|error| error.to_string())?;
+    commands.submit_and_wait().map_err(|error| error.to_string())?;
+    let actual = ops
+        .read_f32(layout.q4_1_input_sums, count / 32)
+        .map_err(|error| error.to_string())?;
+    if actual != expected {
+        let index = actual
+            .iter()
+            .zip(&expected)
+            .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+            .unwrap_or(0);
+        return Err(format!(
+            "Q4_1 input sum mismatch at {index}: gpu={} cpu={} stored_scale={}",
+            actual[index], expected[index], stored_scale_terms[index]
+        ));
+    }
+    println!("operator=q4_1_input_sums exact=true");
+    Ok(())
+}
+
+fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u8> {
+    let (elements, bytes, _) = format.layout();
+    let blocks = n_in / elements;
+    let mut data = vec![0; n_out * blocks * bytes];
+    for row in 0..n_out {
+        for block in 0..blocks {
+            let offset = (row * blocks + block) * bytes;
+            match format {
+                GpuWeightFormat::Q4_0 => {
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + 3.0) / (block as f32 + 11.0)
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 2..offset + 18].iter_mut().enumerate() {
+                        let low = ((row * 11 + block * 7 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 5 + block * 13 + index * 9 + 6) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::Q4_1 => {
+                    data[offset..offset + 2]
+                        .copy_from_slice(&crate::ops::f32_to_f16((row as f32 + 1.0) / 91.0).to_le_bytes());
+                    data[offset + 2..offset + 4].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            -(block as f32 + 2.0) / 53.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 4..offset + 20].iter_mut().enumerate() {
+                        let low = ((row * 3 + block * 5 + index * 7 + 2) & 15) as u8;
+                        let high = ((row * 13 + block * 11 + index * 2 + 4) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::Q6_K => {
+                    for index in 0..128 {
+                        let low = ((row * 17 + block * 29 + index * 7) & 15) as u8;
+                        let high = ((row * 11 + block * 13 + index * 5) & 15) as u8;
+                        data[offset + index] = low | (high << 4);
+                    }
+                    for index in 0..64 {
+                        data[offset + 128 + index] =
+                            ((row * 19 + block * 23 + index * 37) & 255) as u8;
+                    }
+                    for index in 0..16 {
+                        data[offset + 192 + index] =
+                            (row as i32 * 7 + block as i32 * 11 + index as i32 * 3 - 23) as i8
+                                as u8;
+                    }
+                    data[offset + 208..offset + 210].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                }
+                GpuWeightFormat::Q8_0 => unreachable!(),
+            }
+        }
+    }
+    data
+}
+
+fn cpu_weight_matvec(
+    format: GpuWeightFormat,
+    weight: &[u8],
+    input: &[f32],
+    q8: &[u8],
+    scales: &[f32],
+    n_in: usize,
+    n_out: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0; n_out];
+    match format {
+        GpuWeightFormat::Q4_0 => {
+            let kernel = crate::ops::kernel::q4_0::Q4_0Kernel::new(weight, n_in, n_out);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+        }
+        GpuWeightFormat::Q4_1 => {
+            let kernel = crate::ops::kernel::q4_1::Q4_1Kernel::new(weight, n_in, n_out);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+        }
+        GpuWeightFormat::Q6_K => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q6K_SIZE;
+                *output = crate::ops::quant::vec_dot_q6k_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::Q8_0 => unreachable!(),
+    }
+    output
+}
+
+fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
+    const COUNT: usize = 512;
+    let layout = ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
+    let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
+    let input: Vec<f32> = (0..COUNT)
+        .map(|index| {
+            if index == 0 {
+                -3.75
+            } else if index == 255 {
+                3.75
+            } else if index == 256 {
+                0.0
+            } else if index == 511 {
+                -2.5
+            } else {
+                ((index * 47 % 509) as f32 - 254.0) / 83.0
+            }
+        })
+        .collect();
+    let expected = crate::ops::quant::quantize_row_q8_k(&input);
+    ops.write_f32(layout.x, &input)
+        .map_err(|error| error.to_string())?;
+    let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
+    ops.record_quantize_q8_k(
+        &commands,
+        layout.x,
+        layout.q8k,
+        layout.q8k_scales,
+        COUNT,
+    )
+    .map_err(|error| error.to_string())?;
+    commands
+        .submit_and_wait()
+        .map_err(|error| error.to_string())?;
+    let actual_qs = ops
+        .read_bytes(layout.q8k, COUNT)
+        .map_err(|error| error.to_string())?;
+    let actual_scales = ops
+        .read_f32(layout.q8k_scales, COUNT / 256)
+        .map_err(|error| error.to_string())?;
+    let expected_qs: Vec<u8> = expected
+        .iter()
+        .flat_map(|block| block.qs.map(|value| value as u8))
+        .collect();
+    if actual_qs != expected_qs {
+        let index = actual_qs
+            .iter()
+            .zip(&expected_qs)
+            .position(|(actual, expected)| actual != expected)
+            .expect("different byte vectors have a differing index");
+        return Err(format!(
+            "quantize_q8_k byte mismatch at {index}: input={} gpu={} cpu={} gpu_scale_bits={:#010x} cpu_scale_bits={:#010x}",
+            input[index],
+            actual_qs[index] as i8,
+            expected_qs[index] as i8,
+            actual_scales[index / 256].to_bits(),
+            expected[index / 256].d.to_bits(),
+        ));
+    }
+    let max_scale_ulps = actual_scales
+        .iter()
+        .zip(&expected)
+        .map(|(actual, expected)| actual.to_bits().abs_diff(expected.d.to_bits()))
+        .max()
+        .unwrap_or(0);
+    if max_scale_ulps > 1 {
+        return Err(format!(
+            "quantize_q8_k scale differs by {max_scale_ulps} ULPs (expected at most 1)"
+        ));
+    }
+    println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
+    Ok(())
+}
+
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
@@ -1630,6 +2182,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
         layout.x,
         layout.q8,
         layout.q8_scales,
+        layout.q4_1_input_sums,
         input.len(),
     )
     .map_err(|error| error.to_string())?;

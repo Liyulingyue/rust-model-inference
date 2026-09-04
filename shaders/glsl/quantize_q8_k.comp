@@ -1,0 +1,56 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint output_word;
+    uint scales_word;
+    uint count;
+} pc;
+
+float value_at(uint index) {
+    return uintBitsToFloat(arena.data[pc.input_word + index]);
+}
+
+int nearest_int(float value) {
+    return int((floatBitsToUint(value + 12582912.0) & 0x007fffffu) - 0x00400000u);
+}
+
+void main() {
+    if (gl_LocalInvocationID.x != 0u) return;
+    uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint base = block * 256u;
+    if (base >= pc.count) return;
+    float amax = 0.0;
+    float max_value = 0.0;
+    for (uint index = 0u; index < 256u; ++index) {
+        float value = value_at(base + index);
+        float absolute = abs(value);
+        if (absolute > amax) {
+            amax = absolute;
+            max_value = value;
+        }
+    }
+    if (amax == 0.0) {
+        for (uint index = 0u; index < 64u; ++index) {
+            arena.data[pc.output_word + block * 64u + index] = 0u;
+        }
+        arena.data[pc.scales_word + block] = 0u;
+        return;
+    }
+    precise float iscale = -127.0 / max_value;
+    for (uint index = 0u; index < 64u; ++index) {
+        uint packed = 0u;
+        for (uint byte = 0u; byte < 4u; ++byte) {
+            precise float scaled = iscale * value_at(base + index * 4u + byte);
+            int quantized = min(nearest_int(scaled), 127);
+            packed |= uint(quantized & 255) << (byte * 8u);
+        }
+        arena.data[pc.output_word + block * 64u + index] = packed;
+    }
+    precise float scale = 1.0 / iscale;
+    precise float scale_error = fma(-iscale, scale, 1.0);
+    scale = fma(scale_error, scale, scale);
+    arena.data[pc.scales_word + block] = floatBitsToUint(scale);
+}
