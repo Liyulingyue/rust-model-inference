@@ -15,6 +15,7 @@ pub(crate) struct EligibilityFacts {
     pub(crate) has_qkv_bias: bool,
     pub(crate) rope: Qwen3Rope,
     pub(crate) weight_formats: Vec<GGMLType>,
+    pub(crate) gate_up_formats: Vec<[GGMLType; 2]>,
 }
 
 pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
@@ -40,6 +41,13 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
             .any(|&format| GpuWeightFormat::from_ggml_type(format).is_err())
     {
         return Err("unsupported Vulkan weight format".into());
+    }
+    if facts
+        .gate_up_formats
+        .iter()
+        .any(|formats| formats[0] != formats[1])
+    {
+        return Err("heterogeneous gate/up weight formats are not supported".into());
     }
     Ok(())
 }
@@ -655,6 +663,7 @@ impl Qwen3VulkanSession {
 
 fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
     let mut weight_formats = Vec::with_capacity(model.config.n_layer * 7 + 1);
+    let mut gate_up_formats = Vec::with_capacity(model.config.n_layer);
     for layer in 0..model.config.n_layer {
         for suffix in [
             "attn_q.weight",
@@ -672,6 +681,10 @@ fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
                 .ok_or_else(|| format!("missing Qwen3 tensor {name}"))?;
             weight_formats.push(info.ggml_type);
         }
+        gate_up_formats.push([
+            model.layers[layer].w_gate.ggml_type,
+            model.layers[layer].w_up.ggml_type,
+        ]);
     }
     let output_name = output_tensor_name(model);
     weight_formats.push(
@@ -688,6 +701,7 @@ fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
         has_qkv_bias: model.config.has_qkv_bias,
         rope: model.config.rope,
         weight_formats,
+        gate_up_formats,
     })
 }
 
@@ -715,6 +729,7 @@ mod tests {
             has_qkv_bias: false,
             rope: Qwen3Rope::Neox,
             weight_formats: vec![GGMLType::Q8_0; 198],
+            gate_up_formats: vec![[GGMLType::Q8_0, GGMLType::Q8_0]; 28],
         }
     }
 
@@ -722,6 +737,16 @@ mod tests {
     fn qwen3_q8_dense_is_eligible() {
         let facts = eligible_facts();
         assert_eq!(check_eligibility(&facts), Ok(()));
+    }
+
+    #[test]
+    fn heterogeneous_gate_up_stays_on_cpu_before_session_initialization() {
+        let mut facts = eligible_facts();
+        facts.gate_up_formats[7] = [GGMLType::Q4K, GGMLType::Q6K];
+
+        assert!(check_eligibility(&facts)
+            .expect_err("heterogeneous gate/up must be rejected by preflight")
+            .contains("heterogeneous gate/up"));
     }
 
     #[test]

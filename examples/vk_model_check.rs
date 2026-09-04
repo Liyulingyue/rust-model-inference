@@ -1,8 +1,8 @@
 #[cfg(feature = "vulkan")]
 use rust_model_inference::{
     build_simple_prompt, open_model_source, qwen_text_positions, BPETokenizer, ComponentRole,
-    ComputePool, EncodeOptions, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input, Qwen3Model,
-    Qwen3Session, TensorSource,
+    ComputePool, EncodeOptions, GGMLType, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,
+    Qwen3Model, Qwen3Session, TensorSource,
 };
 #[cfg(feature = "vulkan")]
 use std::path::PathBuf;
@@ -228,22 +228,63 @@ fn load_model(
 }
 
 #[cfg(feature = "vulkan")]
+fn format_summary(layer_formats: &[[GGMLType; 7]], output: GGMLType) -> Result<String, String> {
+    if layer_formats.is_empty() {
+        return Err("model has no layers".into());
+    }
+    let format_set = |operation: usize| {
+        let mut formats = Vec::new();
+        for layer in layer_formats {
+            let format = layer[operation];
+            if !formats.contains(&format) {
+                formats.push(format);
+            }
+        }
+        format!(
+            "{{{}}}",
+            formats
+                .iter()
+                .map(|format| format!("{format:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    Ok(format!(
+        "formats=layers={};q={},k={},v={},o={},gate={},up={},down={};output={output:?}",
+        layer_formats.len(),
+        format_set(0),
+        format_set(1),
+        format_set(2),
+        format_set(3),
+        format_set(4),
+        format_set(5),
+        format_set(6),
+    ))
+}
+
+#[cfg(feature = "vulkan")]
 fn print_formats(model: &Qwen3Model, source: &dyn TensorSource) -> Result<(), String> {
-    println!(
-        "formats=blk.0:q={:?},k={:?},v={:?},o={:?},gate={:?},up={:?},down={:?};output={:?}",
-        model.layers()[0].wq.ggml_type,
-        model.layers()[0].wk.ggml_type,
-        model.layers()[0].wv.ggml_type,
-        model.layers()[0].wo.ggml_type,
-        model.layers()[0].w_gate.ggml_type,
-        model.layers()[0].w_up.ggml_type,
-        model.layers()[0].w_down.ggml_type,
-        source
-            .tensor_info("output.weight")
-            .or_else(|| source.tensor_info("token_embd.weight"))
-            .ok_or("missing output weight")?
-            .ggml_type,
-    );
+    let layer_formats = model
+        .layers()
+        .iter()
+        .map(|layer| {
+            [
+                layer.wq.ggml_type,
+                layer.wk.ggml_type,
+                layer.wv.ggml_type,
+                layer.wo.ggml_type,
+                layer.w_gate.ggml_type,
+                layer.w_up.ggml_type,
+                layer.w_down.ggml_type,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let output = source
+        .tensor_info("output.weight")
+        .or_else(|| source.tensor_info("token_embd.weight"))
+        .ok_or("missing output weight")?
+        .ggml_type;
+    println!("{}", format_summary(&layer_formats, output)?);
     Ok(())
 }
 
@@ -451,8 +492,38 @@ fn main() {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use super::{median, per_second};
+    use super::{format_summary, median, per_second};
+    use rust_model_inference::GGMLType;
     use std::time::Duration;
+
+    #[test]
+    fn format_summary_reports_later_layer_formats() {
+        let layers = [
+            [
+                GGMLType::Q4K,
+                GGMLType::Q4K,
+                GGMLType::Q6K,
+                GGMLType::Q4K,
+                GGMLType::Q4K,
+                GGMLType::Q4K,
+                GGMLType::Q6K,
+            ],
+            [
+                GGMLType::F16,
+                GGMLType::Q4_0,
+                GGMLType::Q4_1,
+                GGMLType::Q8_0,
+                GGMLType::F16,
+                GGMLType::Q6K,
+                GGMLType::Q4K,
+            ],
+        ];
+
+        assert_eq!(
+            format_summary(&layers, GGMLType::F16).unwrap(),
+            "formats=layers=2;q={Q4K,F16},k={Q4K,Q4_0},v={Q6K,Q4_1},o={Q4K,Q8_0},gate={Q4K,F16},up={Q4K,Q6K},down={Q6K,Q4K};output=F16"
+        );
+    }
 
     #[test]
     fn benchmark_statistics_use_sorted_middle_and_elapsed_seconds() {
