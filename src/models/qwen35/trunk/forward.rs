@@ -399,6 +399,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
             kv_cache,
             il,
             cfg.n_layer_impl(),
+            n_head_kv,
+            n_embd_head,
             &scratch.k_buf[..n_tokens * k_dim],
             &scratch.v_buf[..n_tokens * v_dim],
             k_dim,
@@ -434,17 +436,23 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
                 softmax_inplace(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
+                // V cache layout is [layer, kv_head, head_dim, seq]; the column
+                // `v[il, kv_h, d, 0..capacity]` is contiguous in `seq`. Score is
+                // NEG_INFINITY-padded past `n_attend`, so the corresponding
+                // (zero-initialized) V tail contributes nothing after softmax.
+                let v_capacity = v_len / (n_head_kv * n_embd_head);
+                let v_layer_base = il * v_len + kv_h * (n_embd_head * v_capacity);
+                let v_col_end = kv_pos + t + 1;
+                let v_col_end_padded = v_col_end.div_ceil(256) * 256;
+                let v_col_end_padded = v_col_end_padded.min(v_capacity);
                 for d in 0..n_embd_head {
-                    for s in 0..n_attend {
-                        let v_row_base = il * v_len + s * v_dim + kv_h * n_embd_head;
-                        scratch.attention_value_buf[s] = v_cache[v_row_base + d];
-                    }
-                    scratch.attention_value_buf[n_attend..n_padded].fill(0.0);
+                    let v_col = v_col_end_padded;
+                    let v_col_start = v_layer_base + d * v_capacity;
                     scratch.attn_out_buf[out_base + d] = attention_value_f32(
-                        &scratch.attention_value_buf[..n_padded],
-                        &scratch.score_buf[..n_padded],
-                        n_attend,
-                        n_padded,
+                        &v_cache[v_col_start..v_col_start + v_col],
+                        &scratch.score_buf[..v_col],
+                        v_col_end,
+                        v_col,
                     );
                 }
             }
