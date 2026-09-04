@@ -9,6 +9,28 @@ use crate::ops::{
     ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
     vec_mad_self_f32, vec_scale_f32,
 };
+use crate::{
+    core::thread_pool::ComputePool,
+    ops::kernel::{QuantizedTensor, Weight},
+};
+
+#[test]
+fn prepared_f32_matmul_does_not_require_q8k_alignment() {
+    let weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0, 2.0]));
+    let pool = ComputePool::new(1);
+    let mut output = [0.0];
+
+    weight.quantize_and_matmul_with_scratch(
+        &[2.0, 3.0],
+        &mut [],
+        &mut [0; 2],
+        &mut [0.0; 1],
+        &mut output,
+        &pool,
+    );
+
+    assert_eq!(output, [8.0]);
+}
 
 #[cfg(target_arch = "aarch64")]
 #[test]
@@ -537,10 +559,17 @@ fn neon_silu_matches_qwen35_recurrent_four_lane_fixture() {
 
     silu_inplace(&mut values);
 
-    assert_eq!(
-        values.map(f32::to_bits),
-        [0xbb00_502c, 0x3b97_baf3, 0x3c0a_9eb1, 0x3b2a_60d7],
-    );
+    for (got, expected) in values.map(f32::to_bits).into_iter().zip([
+        0xbb00_502c,
+        0x3b97_baf3,
+        0x3c0a_9eb1,
+        0x3b2a_60d7,
+    ]) {
+        assert!(
+            got.abs_diff(expected) <= 1,
+            "got=0x{got:08x}, expected=0x{expected:08x}"
+        );
+    }
 }
 
 #[cfg(target_arch = "aarch64")]

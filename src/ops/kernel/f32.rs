@@ -36,6 +36,30 @@ impl Kernel for F32Kernel {
         matmul_f32_scalar_range(&self.weight, output, n_in, n_out, ith, nth);
     }
 
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let start = ith * n_out.div_ceil(nth);
+        let end = (start + n_out.div_ceil(nth)).min(n_out);
+        for out_idx in start..end {
+            let row_off = out_idx * n_in;
+            let mut sum = 0.0;
+            for col in 0..n_in {
+                sum += self.weight[row_off + col] * input_f32[col];
+            }
+            output[out_idx] = sum;
+        }
+    }
+
     /// F32 has a native f32-input path. The trait default impl quantizes
     /// the input to Q8 then calls `forward_prequantized` (zero for F32);
     /// we override here to do the real f32 matmul. Tests + any future
@@ -65,6 +89,11 @@ impl Kernel for F32Kernel {
                 n_out,
             );
         }
+    }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {
+        let offset = token_id as usize * n_embd;
+        output.copy_from_slice(&self.weight[offset..offset + n_embd]);
     }
 }
 

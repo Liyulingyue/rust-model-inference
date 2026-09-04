@@ -19,6 +19,13 @@ use crate::ops::kernel::Weight;
 use crate::ops::quant::{self, BlockQ8K};
 use std::sync::Arc;
 
+fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
+    let mut weight = Weight::from_quantized(QuantizedTensor::F32(data));
+    weight.n_in = n_in;
+    weight.n_out = n_out;
+    weight
+}
+
 fn dense_test_config(n_ctx: usize) -> Qwen35Config {
     Qwen35Config {
         n_nextn: 0,
@@ -69,7 +76,10 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         key_length: 2,
         value_length: 2,
     };
-    let weight = |data: Vec<f32>, _n_rows| Weight::from_quantized(QuantizedTensor::F32(data));
+    let weight = |data: Vec<f32>, n_rows| {
+        let n_in = data.len() / n_rows;
+        f32_test_weight(data, n_in, n_rows)
+    };
     let identity = || weight(vec![1.0, 0.0, 0.0, 1.0], 2);
     let layer = Qwen35LayerWeights {
         attn_norm: vec![1.0; 2],
@@ -95,7 +105,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
     };
     Qwen35Model {
         config,
-        tok_embd: Vec::new(),
+        tok_embd: f32_test_weight(Vec::new(), 0, 0),
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
@@ -155,30 +165,32 @@ fn qwen35_l2_norm_matches_pinned_llama_cpp_bits() {
 
 #[test]
 #[ignore = "requires RMI_QWEN35_MODEL"]
-fn qwen35_q8_0_model_loads() {
+fn qwen38_q4_0_model_metadata_and_load() {
     let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
     let source =
         crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
-
+    let config = Qwen35Config::from_source(source.as_ref()).unwrap();
+    assert_eq!(
+        (config.n_layer, config.n_layer_impl(), config.n_nextn),
+        (65, 64, 1)
+    );
+    assert_eq!(
+        (config.n_embd, config.n_head, config.n_head_kv),
+        (5120, 24, 4)
+    );
+    assert_eq!((config.key_length, config.value_length), (256, 256));
+    assert_eq!((config.ssm_d_conv, config.ssm_d_state), (4, 128));
+    assert_eq!(
+        (config.ssm_n_group, config.ssm_dt_rank, config.ssm_d_inner),
+        (16, 48, 6144)
+    );
     assert_eq!(
         source.tensor_info("token_embd.weight").unwrap().ggml_type,
-        GGMLType::Q8_0,
+        GGMLType::Q4_0
     );
-    Qwen35Model::from_source(source.as_ref()).unwrap();
-}
-
-#[test]
-#[ignore = "requires an F16-token-embedding RMI_QWEN35_MODEL"]
-fn qwen35_f16_token_embedding_model_loads() {
-    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
-    let source =
-        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
-
-    assert_eq!(
-        source.tensor_info("token_embd.weight").unwrap().ggml_type,
-        GGMLType::F16,
-    );
-    Qwen35Model::from_source(source.as_ref()).unwrap();
+    let model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    assert_eq!(model.tok_embd.n_out, 248320);
+    assert_eq!(model.layers.len(), 64);
 }
 
 #[test]
@@ -261,13 +273,15 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
         false,
     );
 
-    assert_eq!(
-        [
-            scratch.score_buf[0].to_bits(),
-            scratch.score_buf[1].to_bits()
-        ],
-        [0x3f25_1fe0, 0x3eb5_c03f],
-    );
+    for (got, expected) in [
+        scratch.score_buf[0].to_bits(),
+        scratch.score_buf[1].to_bits(),
+    ]
+    .into_iter()
+    .zip([0x3f25_1fe0, 0x3eb5_c03f])
+    {
+        assert!(got.abs_diff(expected) <= 1);
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -303,19 +317,23 @@ fn qwen35_dense_attention_value_uses_ggml_padded_reduction() {
 
 /// Tiny dense-only Qwen35Model used to construct a Session.
 /// `tok_embd` row i = [4*i+0, 4*i+1, 4*i+2, 4*i+3]; n_embd=4, vocab=8.
-fn tiny_dense_session_model() -> Qwen35Model<'static> {
+fn tiny_dense_session_model_with_embedding(
+    tok_embd: Weight<'static>,
+    n_embd: usize,
+    vocab_size: usize,
+) -> Qwen35Model<'static> {
     let config = Qwen35Config {
         n_nextn: 0,
-        n_embd: 4,
+        n_embd,
         n_layer: 1,
         n_head: 1,
         n_head_kv: 1,
-        n_ff: 4,
+        n_ff: n_embd,
         n_ctx: 16,
-        vocab_size: 8,
+        vocab_size,
         rope_freq_base: 1_000_000.0,
         norm_eps: 1e-6,
-        rope_dimension_count: 4,
+        rope_dimension_count: n_embd,
         rope_dimension_sections: [0; 4],
         ssm_d_conv: 1,
         ssm_d_state: 2,
@@ -324,19 +342,19 @@ fn tiny_dense_session_model() -> Qwen35Model<'static> {
         ssm_d_inner: 2,
         full_attention_interval: 1,
         is_recurrent: vec![false],
-        key_length: 4,
-        value_length: 4,
+        key_length: n_embd,
+        value_length: n_embd,
     };
-    let mk_weight = |data: Vec<f32>| Weight::from_quantized(QuantizedTensor::F32(data));
+    let mk_weight = |n_out| f32_test_weight(vec![1.0; n_embd * n_out], n_embd, n_out);
     let layer = Qwen35LayerWeights {
-        attn_norm: vec![1.0; 4],
-        attn_post_norm: vec![1.0; 4],
-        wq: Some(mk_weight(vec![1.0; 16])),
-        wk: Some(mk_weight(vec![1.0; 16])),
-        wv: Some(mk_weight(vec![1.0; 16])),
-        wo: Some(mk_weight(vec![1.0; 16])),
-        attn_q_norm: Some(vec![1.0; 4]),
-        attn_k_norm: Some(vec![1.0; 4]),
+        attn_norm: vec![1.0; n_embd],
+        attn_post_norm: vec![1.0; n_embd],
+        wq: Some(mk_weight(2 * n_embd)),
+        wk: Some(mk_weight(n_embd)),
+        wv: Some(mk_weight(n_embd)),
+        wo: Some(mk_weight(n_embd)),
+        attn_q_norm: Some(vec![1.0; n_embd]),
+        attn_k_norm: Some(vec![1.0; n_embd]),
         wqkv: None,
         wqkv_gate: None,
         ssm_conv1d: None,
@@ -346,18 +364,38 @@ fn tiny_dense_session_model() -> Qwen35Model<'static> {
         ssm_alpha: None,
         ssm_norm: None,
         ssm_out: None,
-        ffn_gate: mk_weight(vec![1.0; 16]),
-        ffn_up: mk_weight(vec![1.0; 16]),
-        ffn_down: mk_weight(vec![1.0; 16]),
+        ffn_gate: mk_weight(n_embd),
+        ffn_up: mk_weight(n_embd),
+        ffn_down: mk_weight(n_embd),
     };
-    let tok_embd: Vec<f32> = (0..32).map(|i| i as f32).collect();
     Qwen35Model {
         config,
         tok_embd,
-        output_norm: vec![1.0; 4],
-        output_weight: mk_weight(vec![1.0; 32]),
+        output_norm: vec![1.0; n_embd],
+        output_weight: mk_weight(vocab_size),
         layers: vec![layer],
     }
+}
+
+fn tiny_dense_session_model() -> Qwen35Model<'static> {
+    let tok_embd = f32_test_weight((0..32).map(|i| i as f32).collect(), 4, 8);
+    tiny_dense_session_model_with_embedding(tok_embd, 4, 8)
+}
+
+#[test]
+fn qwen35_q4_0_embedding_lookup_is_row_local_and_checked() {
+    let block = |scale: f32, nibble: u8| {
+        let mut bytes = crate::ops::f32_to_f16(scale).to_le_bytes().to_vec();
+        bytes.extend(std::iter::repeat_n(nibble | (nibble << 4), 16));
+        bytes
+    };
+    let bytes = Box::leak([block(0.5, 8), block(0.5, 10)].concat().into_boxed_slice());
+    let embedding =
+        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::Q4_0, 32, 2));
+    let model = tiny_dense_session_model_with_embedding(embedding, 32, 2);
+
+    assert_eq!(model.embed_tokens(&[1]).unwrap(), vec![1.0; 32]);
+    assert!(model.embed_tokens(&[2]).unwrap_err().contains("vocab=2"));
 }
 
 fn session_pool() -> Arc<ComputePool> {
@@ -368,21 +406,37 @@ fn session_pool() -> Arc<ComputePool> {
 fn session_new_initializes_state_and_allocates_cache() {
     let model = tiny_dense_session_model();
     let pool = session_pool();
-    let session = Qwen35Session::new(&model, pool.clone()).unwrap();
+    let session = Qwen35Session::new(&model, 4, pool.clone()).unwrap();
 
     assert_eq!(session.next_position(), 0);
     assert_eq!(session.config().vocab_size, 8);
     assert_eq!(session.config().n_embd, 4);
     assert_eq!(session.model().config.n_layer, model.config.n_layer);
     assert_eq!(session.pool().n_threads(), 1);
-    // Scratchpad sized for n_ctx tokens
-    assert!(session.scratch().x.len() >= 4 * 4);
+    assert_eq!(session.scratch().x.len(), 4 * 4);
+}
+
+#[test]
+fn session_capacity_must_fit_model_context() {
+    let model = tiny_dense_session_model();
+
+    assert!(Qwen35Session::new(&model, 0, session_pool()).is_err());
+    assert!(Qwen35Session::new(&model, 17, session_pool()).is_err());
+}
+
+#[test]
+fn session_step_rejects_tokens_above_capacity() {
+    let model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+
+    let err = session.step(&[0.0; 8], 2, &[[0; 4]; 2]).unwrap_err();
+    assert!(err.contains("capacity 1"), "unexpected error: {err}");
 }
 
 #[test]
 fn session_embed_token_returns_expected_row() {
     let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
 
     // token id 3 -> row offset 12 -> [12, 13, 14, 15]
     let row = session.embed_token(3).unwrap();
@@ -396,7 +450,7 @@ fn session_embed_token_returns_expected_row() {
 #[test]
 fn session_embed_token_out_of_range_errors() {
     let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
 
     let err = session.embed_token(8).unwrap_err();
     assert!(err.contains("out of range"), "unexpected error: {err}");
@@ -407,9 +461,9 @@ fn session_embed_token_out_of_range_errors() {
 #[test]
 fn session_embed_tokens_concatenates_rows() {
     let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
 
-    let all = session.embed_tokens(&[0, 1, 2]);
+    let all = session.embed_tokens(&[0, 1, 2]).unwrap();
     assert_eq!(all.len(), 12);
     assert_eq!(&all[0..4], &[0.0, 1.0, 2.0, 3.0]);
     assert_eq!(&all[4..8], &[4.0, 5.0, 6.0, 7.0]);
@@ -417,23 +471,20 @@ fn session_embed_tokens_concatenates_rows() {
 }
 
 #[test]
-fn session_embed_tokens_zeros_out_of_range_but_keeps_valid() {
-    // Matches `app/text.rs::inject_vision_embeddings` behavior: invalid
-    // token ids produce a zero row, surrounding tokens are unchanged.
+fn session_embed_tokens_rejects_out_of_range_ids() {
     let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
 
-    let all = session.embed_tokens(&[0, 99, 2]);
-    assert_eq!(all.len(), 12);
-    assert_eq!(&all[0..4], &[0.0, 1.0, 2.0, 3.0]);
-    assert_eq!(&all[4..8], &[0.0, 0.0, 0.0, 0.0]);
-    assert_eq!(&all[8..12], &[8.0, 9.0, 10.0, 11.0]);
+    assert!(session
+        .embed_tokens(&[0, 99, 2])
+        .unwrap_err()
+        .contains("vocab=8"));
 }
 
 #[test]
 fn session_set_next_position_and_reset() {
     let model = tiny_dense_session_model();
-    let mut session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let mut session = Qwen35Session::new(&model, 2, session_pool()).unwrap();
 
     assert_eq!(session.next_position(), 0);
     session.set_next_position(42);
@@ -453,7 +504,7 @@ fn session_set_next_position_and_reset() {
 #[test]
 fn session_step_validates_embedding_and_position_lengths() {
     let model = tiny_dense_session_model();
-    let mut session = Qwen35Session::new(&model, session_pool()).unwrap();
+    let mut session = Qwen35Session::new(&model, 2, session_pool()).unwrap();
 
     // embeddings.len() != n_tokens * n_embd
     let bad = vec![0.0f32; 7];

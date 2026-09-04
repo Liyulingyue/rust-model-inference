@@ -33,6 +33,7 @@ use crate::core::thread_pool::ComputePool;
 /// the cache and scratchpad sized for `model.config.n_ctx`.
 pub struct Qwen35Session<'a> {
     model: &'a Qwen35Model<'a>,
+    capacity: usize,
     kv_cache: KvCache,
     scratch: Qwen35Scratchpad,
     pool: Arc<ComputePool>,
@@ -48,16 +49,23 @@ impl<'a> Qwen35Session<'a> {
     /// Build a session with cache and scratch sized for `model.config.n_ctx`.
     /// `pool` is shared across sessions (typical) so a single `Arc<ComputePool>`
     /// is sufficient.
-    pub fn new(model: &'a Qwen35Model<'a>, pool: Arc<ComputePool>) -> Result<Self, String> {
+    pub fn new(
+        model: &'a Qwen35Model<'a>,
+        capacity: usize,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
         let cfg = &model.config;
-        let kv_cache = KvCache::new_f32(
-            cfg.n_layer_impl(),
-            cfg.n_ctx,
-            cfg.n_embd_head() * cfg.n_head_kv,
-        );
-        let scratch = Qwen35Scratchpad::new(cfg, cfg.n_ctx);
+        if capacity == 0 || capacity > cfg.n_ctx {
+            return Err(format!(
+                "Qwen3.5 session capacity {capacity} must be within 1..={}",
+                cfg.n_ctx
+            ));
+        }
+        let kv_cache = KvCache::new_f32(cfg.n_layer_impl(), capacity, cfg.n_embd_gqa());
+        let scratch = Qwen35Scratchpad::new(cfg, capacity);
         Ok(Self {
             model,
+            capacity,
             kv_cache,
             scratch,
             pool,
@@ -98,12 +106,8 @@ impl<'a> Qwen35Session<'a> {
     /// (just zeros in place).
     pub fn reset(&mut self) {
         let cfg = &self.model.config;
-        self.kv_cache = KvCache::new_f32(
-            cfg.n_layer_impl(),
-            cfg.n_ctx,
-            cfg.n_embd_head() * cfg.n_head_kv,
-        );
-        let mut fresh = Qwen35Scratchpad::new(cfg, cfg.n_ctx);
+        self.kv_cache = KvCache::new_f32(cfg.n_layer_impl(), self.capacity, cfg.n_embd_gqa());
+        let mut fresh = Qwen35Scratchpad::new(cfg, self.capacity);
         std::mem::swap(&mut self.scratch, &mut fresh);
         // `fresh` is dropped here, freeing its buffers
         self.next_position = 0;
@@ -112,33 +116,11 @@ impl<'a> Qwen35Session<'a> {
     /// Look up a single token's embedding row. Returns an error if the token
     /// id exceeds the embedding table.
     pub fn embed_token(&self, token_id: u32) -> Result<Vec<f32>, String> {
-        let n_embd = self.model.config.n_embd;
-        let row = token_id as usize;
-        let vocab = self.model.tok_embd.len() / n_embd;
-        if row >= vocab {
-            return Err(format!(
-                "Qwen3.5 token id {token_id} out of range (vocab={vocab})"
-            ));
-        }
-        let off = row * n_embd;
-        Ok(self.model.tok_embd[off..off + n_embd].to_vec())
+        self.model.embed_tokens(&[token_id])
     }
 
-    /// Look up token embeddings for a slice of token ids. Tokens whose id
-    /// exceeds the embedding table are silently zeroed (matches the
-    /// behavior of `app/text.rs::inject_vision_embeddings`).
-    pub fn embed_tokens(&self, token_ids: &[u32]) -> Vec<f32> {
-        let n_embd = self.model.config.n_embd;
-        let mut out = vec![0.0f32; token_ids.len() * n_embd];
-        for (i, &tok) in token_ids.iter().enumerate() {
-            let tok_off = tok as usize * n_embd;
-            let dst_off = i * n_embd;
-            if tok_off + n_embd <= self.model.tok_embd.len() {
-                out[dst_off..dst_off + n_embd]
-                    .copy_from_slice(&self.model.tok_embd[tok_off..tok_off + n_embd]);
-            }
-        }
-        out
+    pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
+        self.model.embed_tokens(token_ids)
     }
 
     /// Run one forward pass over pre-computed embeddings of shape
@@ -156,6 +138,12 @@ impl<'a> Qwen35Session<'a> {
     ) -> Result<Vec<f32>, String> {
         let cfg = &self.model.config;
         let n_embd = cfg.n_embd;
+        if n_tokens > self.capacity {
+            return Err(format!(
+                "Qwen3.5 token count {n_tokens} exceeds session capacity {}",
+                self.capacity
+            ));
+        }
         if embeddings.len() != n_tokens * n_embd {
             return Err(format!(
                 "Qwen3.5 embeddings length {} != n_tokens * n_embd = {}",
@@ -194,7 +182,7 @@ impl<'a> Qwen35Session<'a> {
         token_ids: &[u32],
         positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
-        let embeddings = self.embed_tokens(token_ids);
+        let embeddings = self.embed_tokens(token_ids)?;
         self.step(&embeddings, token_ids.len(), positions)
     }
 }

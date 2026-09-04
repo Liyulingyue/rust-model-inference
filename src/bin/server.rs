@@ -1063,26 +1063,14 @@ fn generate_qwen35_streaming(
         } else {
             &all_tokens[all_tokens.len() - 1..]
         };
-        if step == 0 {
-            for t in 0..n_prompt {
-                let embd_off = t * model.config.n_embd;
-                let tok = prompt_tokens[t] as usize;
-                let tok_off = tok * model.config.n_embd;
-                for e in 0..model.config.n_embd {
-                    if tok_off + e < model.tok_embd.len() {
-                        llm_scratch.x[embd_off + e] = model.tok_embd[tok_off + e];
-                    }
-                }
-            }
-        } else {
-            let tok = tokens[0] as usize;
-            let tok_off = tok * model.config.n_embd;
-            for e in 0..model.config.n_embd {
-                if tok_off + e < model.tok_embd.len() {
-                    llm_scratch.x[e] = model.tok_embd[tok_off + e];
-                }
-            }
-        }
+        let token_ids = tokens
+            .iter()
+            .map(|&token| {
+                u32::try_from(token).map_err(|_| format!("invalid negative token id {token}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let embeddings = model.embed_tokens(&token_ids)?;
+        llm_scratch.x[..embeddings.len()].copy_from_slice(&embeddings);
         let decode_position = [[
             next_text_position,
             next_text_position,
