@@ -1,8 +1,8 @@
 #[cfg(feature = "vulkan")]
 use rust_model_inference::{
     build_simple_prompt, open_model_source, qwen_text_positions, BPETokenizer, ComponentRole,
-    ComputePool, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input, Qwen3Model, Qwen3Session,
-    TensorSource,
+    ComputePool, EncodeOptions, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input, Qwen3Model,
+    Qwen3Session, TensorSource,
 };
 #[cfg(feature = "vulkan")]
 use std::path::PathBuf;
@@ -22,26 +22,39 @@ const LOGIT_REL: f32 = 2e-3;
 
 #[cfg(feature = "vulkan")]
 struct Arguments {
+    mode: Mode,
     model: PathBuf,
     benchmark: bool,
 }
 
 #[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Qwen3,
+    Embedding,
+}
+
+#[cfg(feature = "vulkan")]
 fn arguments() -> Result<Arguments, String> {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("qwen3") {
-        return Err("usage: vk_model_check qwen3 --model PATH [--benchmark]".into());
-    }
+    let mode = match args.next().as_deref() {
+        Some("qwen3") => Mode::Qwen3,
+        Some("embedding") => Mode::Embedding,
+        _ => {
+            return Err("usage: vk_model_check <qwen3|embedding> --model PATH [--benchmark]".into())
+        }
+    };
     let mut model = None;
     let mut benchmark = false;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
-            "--benchmark" => benchmark = true,
+            "--benchmark" if mode == Mode::Qwen3 => benchmark = true,
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
     Ok(Arguments {
+        mode,
         model: model.ok_or("--model is required")?,
         benchmark,
     })
@@ -196,8 +209,9 @@ fn assert_close(name: &str, gpu: &[f32], cpu: &[f32]) -> Result<(), String> {
 }
 
 #[cfg(feature = "vulkan")]
-fn run() -> Result<(), String> {
-    let arguments = arguments()?;
+fn load_model(
+    arguments: &Arguments,
+) -> Result<(Arc<dyn TensorSource>, Arc<BPETokenizer>, Qwen3Model), String> {
     let source: Arc<dyn TensorSource> = Arc::from(
         open_model_source(&arguments.model, ComponentRole::Llm)
             .map_err(|error| error.to_string())?,
@@ -210,6 +224,11 @@ fn run() -> Result<(), String> {
         Arc::clone(&tokenizer),
         Arc::new(ComputePool::new(4)),
     )?;
+    Ok((source, tokenizer, model))
+}
+
+#[cfg(feature = "vulkan")]
+fn print_formats(model: &Qwen3Model, source: &dyn TensorSource) -> Result<(), String> {
     println!(
         "formats=blk.0:q={:?},k={:?},v={:?},o={:?},gate={:?},up={:?},down={:?};output={:?}",
         model.layers()[0].wq.ggml_type,
@@ -225,6 +244,13 @@ fn run() -> Result<(), String> {
             .ok_or("missing output weight")?
             .ggml_type,
     );
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
+fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
+    let (source, tokenizer, model) = load_model(arguments)?;
+    print_formats(&model, source.as_ref())?;
     let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
     let positions = qwen_text_positions(prompt_tokens.len());
     let capacity = prompt_tokens
@@ -278,6 +304,133 @@ fn run() -> Result<(), String> {
         benchmark(&mut cpu, &mut gpu, &prompt_tokens, &positions)?;
     }
     Ok(())
+}
+
+#[cfg(feature = "vulkan")]
+fn normalize(mut values: Vec<f32>) -> Result<Vec<f32>, String> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("embedding contains a non-finite value".into());
+    }
+    let sum = values
+        .iter()
+        .map(|&value| f64::from(value * value))
+        .sum::<f64>();
+    let scale = if sum > 0.0 {
+        (1.0 / sum.sqrt()) as f32
+    } else {
+        0.0
+    };
+    for value in &mut values {
+        *value *= scale;
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "vulkan")]
+fn embed_text(
+    model: &Qwen3Model,
+    tokenizer: &BPETokenizer,
+    text: &str,
+) -> Result<(Vec<f32>, usize), String> {
+    let tokens = tokenizer.encode(
+        text,
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    if tokens.is_empty() {
+        return Err("embedding fixture produced no tokens".into());
+    }
+    let hidden = model.text_encode(&tokens, &qwen_text_positions(tokens.len()))?;
+    let width = model.config().n_embd;
+    let last = hidden
+        .get(
+            hidden
+                .len()
+                .checked_sub(width)
+                .ok_or("missing final hidden row")?..,
+        )
+        .ok_or("missing final hidden row")?
+        .to_vec();
+    Ok((normalize(last)?, tokens.len()))
+}
+
+#[cfg(feature = "vulkan")]
+fn cosine(left: &[f32], right: &[f32]) -> f64 {
+    left.iter()
+        .zip(right)
+        .map(|(&left, &right)| f64::from(left * right))
+        .sum()
+}
+
+#[cfg(feature = "vulkan")]
+fn ranking(scores: [f64; 2]) -> [usize; 2] {
+    let mut order = [0, 1];
+    order.sort_by(|&left, &right| scores[right].total_cmp(&scores[left]));
+    order
+}
+
+#[cfg(feature = "vulkan")]
+fn run_embedding(arguments: &Arguments) -> Result<(), String> {
+    const TEXTS: [&str; 3] = [
+        "What is the capital of France?",
+        "Paris is the capital of France.",
+        "Photosynthesis converts light energy into chemical energy.",
+    ];
+
+    let (source, tokenizer, model) = load_model(arguments)?;
+    print_formats(&model, source.as_ref())?;
+    let mut cpu = Vec::with_capacity(TEXTS.len());
+    let mut expected_submissions = 0usize;
+    for text in TEXTS {
+        let (embedding, tokens) = embed_text(&model, &tokenizer, text)?;
+        cpu.push(embedding);
+        expected_submissions += tokens;
+    }
+
+    rust_model_inference::ops::enable_gpu();
+    let context = rust_model_inference::ops::get_vulkan_context()
+        .ok_or("Vulkan backend did not initialize")?;
+    let before = context.submission_count();
+    let mut gpu = Vec::with_capacity(TEXTS.len());
+    for (index, text) in TEXTS.into_iter().enumerate() {
+        let (embedding, _) = embed_text(&model, &tokenizer, text)?;
+        assert_close(&format!("embedding_{index}"), &embedding, &cpu[index])?;
+        gpu.push(embedding);
+    }
+    let submissions = context.submission_count() - before;
+    if submissions != expected_submissions as u64 {
+        return Err(format!(
+            "expected one submission per embedding token ({expected_submissions}), got {submissions}"
+        ));
+    }
+
+    let cpu_scores = [cosine(&cpu[0], &cpu[1]), cosine(&cpu[0], &cpu[2])];
+    let gpu_scores = [cosine(&gpu[0], &gpu[1]), cosine(&gpu[0], &gpu[2])];
+    let cpu_ranking = ranking(cpu_scores);
+    let gpu_ranking = ranking(gpu_scores);
+    if gpu_ranking != cpu_ranking {
+        return Err(format!(
+            "embedding ranking mismatch: gpu={gpu_ranking:?} cpu={cpu_ranking:?}"
+        ));
+    }
+    println!("check=embedding_ranking cpu={cpu_scores:?} gpu={gpu_scores:?} order={gpu_ranking:?}");
+    println!(
+        "device={} texts={} submissions={submissions}",
+        context.device_name(),
+        TEXTS.len()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
+fn run() -> Result<(), String> {
+    let arguments = arguments()?;
+    match arguments.mode {
+        Mode::Qwen3 => run_qwen3(&arguments),
+        Mode::Embedding => run_embedding(&arguments),
+    }
 }
 
 #[cfg(feature = "vulkan")]

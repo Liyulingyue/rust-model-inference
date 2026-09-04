@@ -399,7 +399,7 @@ impl Qwen3VulkanSession {
         self.commit_state
             .begin(position)
             .map_err(VulkanError::UnsupportedShape)?;
-        if let Err(error) = self.forward_token_inner(input, position) {
+        if let Err(error) = self.forward_token_inner(input, position, true) {
             self.commit_state.abort();
             return Err(error);
         }
@@ -410,7 +410,27 @@ impl Qwen3VulkanSession {
         })
     }
 
-    fn forward_token_inner(&mut self, input: &[f32], position: usize) -> Result<(), VulkanError> {
+    pub(crate) fn forward_hidden_token<'a>(
+        &'a mut self,
+        input: &[f32],
+        position: usize,
+    ) -> Result<&'a [f32], VulkanError> {
+        self.commit_state
+            .begin(position)
+            .map_err(VulkanError::UnsupportedShape)?;
+        if let Err(error) = self.forward_token_inner(input, position, false) {
+            self.commit_state.abort();
+            return Err(error);
+        }
+        self.ops.read_f32(self.layout.normed, self.config.n_embd)
+    }
+
+    fn forward_token_inner(
+        &mut self,
+        input: &[f32],
+        position: usize,
+        project_logits: bool,
+    ) -> Result<(), VulkanError> {
         let config = &self.config;
         if input.len() != config.n_embd || position >= self.capacity {
             return Err(VulkanError::UnsupportedShape(format!(
@@ -591,23 +611,27 @@ impl Qwen3VulkanSession {
             config.n_embd,
             config.eps,
         )?;
-        self.ops.record_weight_matvec(
-            &commands,
-            self.output,
-            self.layout.normed,
-            self.layout.q8,
-            self.layout.q8_scales,
-            self.layout.q4_1_input_sums,
-            self.layout.q8k,
-            self.layout.q8k_scales,
-            self.layout.logits,
-            config.n_embd,
-            config.vocab,
-        )?;
+        if project_logits {
+            self.ops.record_weight_matvec(
+                &commands,
+                self.output,
+                self.layout.normed,
+                self.layout.q8,
+                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
+                self.layout.logits,
+                config.n_embd,
+                config.vocab,
+            )?;
+        }
         commands.submit_and_wait()?;
 
-        self.logits
-            .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab)?);
+        if project_logits {
+            self.logits
+                .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab)?);
+        }
         let delta_count = self.k_delta.len();
         self.k_delta
             .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);

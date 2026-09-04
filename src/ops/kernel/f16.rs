@@ -37,6 +37,21 @@ impl<'a> F16Kernel<'a> {
         scale: f32,
         input_f16: &mut Vec<u16>,
     ) {
+        self.forward_scaled_rows(input, output, n_in, n_out, scale, input_f16, 0, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_scaled_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        scale: f32,
+        input_f16: &mut Vec<u16>,
+        ith: usize,
+        nth: usize,
+    ) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
         debug_assert!(input.len() >= n_in);
         debug_assert!(output.len() >= n_out);
@@ -52,9 +67,11 @@ impl<'a> F16Kernel<'a> {
         }
 
         let inverse_scale = scale.recip();
-        for (out_idx, row) in (0..n_out).enumerate() {
+        let start = n_out.saturating_mul(ith) / nth.max(1);
+        let end = n_out.saturating_mul(ith.saturating_add(1)) / nth.max(1);
+        for row in start..end {
             let row_off = row * n_in * 2;
-            output[out_idx] = crate::ops::dot_f16_f16_bytes(
+            output[row] = crate::ops::dot_f16_f16_bytes(
                 input_f16.as_slice(),
                 &self.weight[row_off..row_off + n_in * 2],
                 n_in,
@@ -84,6 +101,30 @@ impl<'a> Kernel for F16Kernel<'a> {
         }
     }
 
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        self.forward_scaled_rows(
+            input_f32,
+            output,
+            n_in,
+            n_out,
+            1.0,
+            &mut Vec::new(),
+            ith,
+            nth,
+        );
+    }
+
     /// F16 converts the input to F16 before the dot product, matching ggml's
     /// `vec_dot_type = GGML_TYPE_F16` contract.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
@@ -104,6 +145,16 @@ impl<'a> Kernel for F16Kernel<'a> {
                 n_in,
                 n_out,
             );
+        }
+    }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        let start = token_id as usize * n_embd * 2;
+        for (output, bytes) in out
+            .iter_mut()
+            .zip(self.weight[start..start + n_embd * 2].chunks_exact(2))
+        {
+            *output = crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
         }
     }
 }
@@ -168,6 +219,44 @@ mod tests {
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [6.0, 15.0]);
+    }
+
+    #[test]
+    fn f16_kernel_embedding_lookup_decodes_selected_row() {
+        let weight = f16_bytes(&[
+            f16::from_f32(1.0),
+            f16::from_f32(-2.0),
+            f16::from_bits(0x0001),
+            f16::from_f32(4.0),
+            f16::from_f32(5.0),
+            f16::from_f32(6.0),
+        ]);
+        let kernel = F16Kernel::new(&weight);
+        let mut output = [0.0f32; 3];
+
+        kernel.embedding_lookup(1, 3, &mut output);
+
+        assert_eq!(output, [4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn f16_kernel_prepared_path_computes_only_assigned_rows() {
+        let weight = f16_bytes(&[
+            f16::from_f32(1.0),
+            f16::from_f32(1.0),
+            f16::from_f32(2.0),
+            f16::from_f32(2.0),
+            f16::from_f32(3.0),
+            f16::from_f32(3.0),
+            f16::from_f32(4.0),
+            f16::from_f32(4.0),
+        ]);
+        let kernel = F16Kernel::new(&weight);
+        let mut output = [0.0f32; 4];
+
+        kernel.forward_prepared(&[1.0, 2.0], &[], &[], None, &mut output, 2, 4, 1, 2);
+
+        assert_eq!(output, [0.0, 0.0, 9.0, 12.0]);
     }
 
     #[test]

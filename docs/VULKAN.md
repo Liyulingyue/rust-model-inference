@@ -8,17 +8,21 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 
 ## 支持范围
 
-- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K 和 Q6_K 文本模型支持完整 token Vulkan 执行。
+- dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K、Q6_K 和 F16 模型支持完整 token Vulkan 执行。
 - 权重、F32 activation 和 GPU KV cache 常驻设备；每个 token 只提交一次 command buffer、
   等待一次 fence。embedding lookup 和 greedy sampling 仍在 CPU，提交成功后同步 F16 shadow KV。
+- `text_encode` 对整模符合资格、标准递增位置的模型逐 token 返回最终 RMSNorm hidden row，
+  不录制 logits matvec；初始化或执行失败时丢弃 GPU 结果并用原 CPU 路径重算完整序列。
 - Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合资格的模型直接使用 CPU，
   不会静默混用不支持的 Vulkan 算子。
-- Q5_K、F16 和 BF16 权重尚未接入完整 Vulkan 模型路径；同一组 Q/K/V 或 gate/up 权重格式不一致时，模型整体回退 CPU。
+- Q5_K 和 BF16 权重尚未接入完整 Vulkan 模型路径；同一组 gate/up 权重格式不一致时，模型整体回退 CPU。
 
 ## 架构
 
 - **完整 token 提交**：每层的 RMSNorm、动态 Q8_0 activation 量化、Q/K/V、RoPE、KV 写入、
   attention、FFN 和 residual add 依次录入同一 command buffer，最终 logits 后统一提交。
+- **F16 权重**：activation 先按 CPU contract 舍入为 F16，shader 从 `uint` storage buffer
+  解包权重并复现 ARM64 FP16 累加/归约顺序，不要求 `storageBuffer16BitAccess`。
 - **常驻资源**：模型权重只上传一次；session arena、activation、完整 GPU KV 和 token delta
   在 session 创建时分配，算子之间不回传 activation。
 - **设备优选**：先按 shader 的 workgroup / shared-memory 要求过滤，再按
@@ -48,6 +52,21 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 完整 prefill logits 在 `abs <= 2e-3 + 2e-3 * abs(cpu)` 门限内，实测最大绝对/相对误差均为
 0；32/32 greedy token ID 相同；5 个 prompt token 加 32 个 decode token 共 37 次 Vulkan
 submission。
+
+## Qwen3 F16 embedding 实机门禁（2026-09-04）
+
+模型：`/Users/gouzi/Documents/git/rust-model-inference/models/qwen-embedding/Qwen3-Embedding-0.6B-f16.gguf`。
+
+```bash
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  embedding \
+  --model /Users/gouzi/Documents/git/rust-model-inference/models/qwen-embedding/Qwen3-Embedding-0.6B-f16.gguf
+```
+
+三个固定文本先在 CPU 计算完整 hidden rows，再启用 Vulkan 通过同一 `text_encode` API 计算；
+均取最后一行并按相同 F32/F64 contract 做 L2 归一化。全向量满足
+`abs <= 2e-3 + 2e-3 * abs(cpu)`，查询对两个文档的 cosine 排序相同；26 个输入 token
+对应 26 次 Vulkan submission。
 
 ## 交替基准
 

@@ -12,6 +12,7 @@ shader_names=(
     q4_1_matmul
     q4_k_matmul
     q6_k_matmul
+    f16_matmul
     rms_norm
     qk_norm_rope
     kv_write

@@ -11,6 +11,7 @@ const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
+const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
@@ -27,15 +28,16 @@ const Q4_0_MATMUL: usize = 3;
 const Q4_1_MATMUL: usize = 4;
 const Q4_K_MATMUL: usize = 5;
 const Q6_K_MATMUL: usize = 6;
-const RMS_NORM: usize = 7;
-const QK_NORM_ROPE: usize = 8;
-const KV_WRITE: usize = 9;
-const ATTENTION_SCORES: usize = 10;
-const SOFTMAX: usize = 11;
-const ATTENTION_VALUES: usize = 12;
-const SILU_MUL: usize = 13;
-const ADD: usize = 14;
-const OPERATOR_SHADERS: [&[u8]; 15] = [
+const F16_MATMUL: usize = 7;
+const RMS_NORM: usize = 8;
+const QK_NORM_ROPE: usize = 9;
+const KV_WRITE: usize = 10;
+const ATTENTION_SCORES: usize = 11;
+const SOFTMAX: usize = 12;
+const ATTENTION_VALUES: usize = 13;
+const SILU_MUL: usize = 14;
+const ADD: usize = 15;
+const OPERATOR_SHADERS: [&[u8]; 16] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -43,6 +45,7 @@ const OPERATOR_SHADERS: [&[u8]; 15] = [
     Q4_1_MATMUL_SHADER,
     Q4_K_MATMUL_SHADER,
     Q6_K_MATMUL_SHADER,
+    F16_MATMUL_SHADER,
     RMS_NORM_SHADER,
     QK_NORM_ROPE_SHADER,
     KV_WRITE_SHADER,
@@ -60,6 +63,7 @@ pub(crate) enum GpuWeightFormat {
     Q4_1,
     Q4_K,
     Q6_K,
+    F16,
 }
 
 impl GpuWeightFormat {
@@ -72,6 +76,7 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q4_1 => Ok(Self::Q4_1),
             crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
+            crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             value => Err(VulkanError::UnsupportedShape(format!(
                 "unsupported Vulkan weight format {value:?}"
             ))),
@@ -85,6 +90,7 @@ impl GpuWeightFormat {
             Self::Q4_1 => (32, 20, Q4_1_MATMUL),
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
+            Self::F16 => (1, 2, F16_MATMUL),
         }
     }
 }
@@ -758,15 +764,17 @@ impl<'a> Qwen3Ops<'a> {
         outputs: &[(ArenaRegion, usize)],
         n_in: usize,
     ) -> Result<(), VulkanError> {
-        let (activation, scales) = if matches!(
-            bindings.weight_format(outputs.len())?,
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q6_K
-        ) {
-            self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
-            (q8k, q8k_scales)
-        } else {
-            self.record_quantize_q8_0(commands, input, q8, q8_scales, q4_1_input_sums, n_in)?;
-            (q8, q8_scales)
+        let format = bindings.weight_format(outputs.len())?;
+        let (activation, scales) = match format {
+            GpuWeightFormat::F16 => (input, q8_scales),
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q6_K => {
+                self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
+                (q8k, q8k_scales)
+            }
+            _ => {
+                self.record_quantize_q8_0(commands, input, q8, q8_scales, q4_1_input_sums, n_in)?;
+                (q8, q8_scales)
+            }
         };
         self.record_q8_matvec_group(
             commands,
@@ -837,8 +845,16 @@ impl<'a> Qwen3Ops<'a> {
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
         }
-        self.byte_word(q8, n_in, "Q8_0 matvec input")?;
-        self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?;
+        let input_word = if format == GpuWeightFormat::F16 {
+            self.f32_word(q8, n_in, "F16 matvec input")?
+        } else {
+            self.byte_word(q8, n_in, "Q8_0 matvec input")?
+        };
+        let scales_word = if format == GpuWeightFormat::F16 {
+            0
+        } else {
+            self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?
+        };
         let q4_1_input_sum_word = if format == GpuWeightFormat::Q4_1 {
             self.f32_word(
                 q4_1_input_sums.ok_or_else(|| {
@@ -874,8 +890,8 @@ impl<'a> Qwen3Ops<'a> {
             max_rows = max_rows.max(row_count);
         }
         let push = [
-            self.byte_word(q8, n_in, "Q8_0 matvec input")?,
-            self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?,
+            input_word,
+            scales_word,
             as_u32(n_in, "Q8_0 input length")?,
             as_u32(blocks_per_row, "Q8_0 blocks per row")?,
             output_words[0],
@@ -1855,6 +1871,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         "q4_1" => GpuWeightFormat::Q4_1,
         "q4_k" => GpuWeightFormat::Q4_K,
         "q6_k" => GpuWeightFormat::Q6_K,
+        "f16" => GpuWeightFormat::F16,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
     let n_in = match format {
@@ -1862,13 +1879,21 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_1 => 3072,
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
+        GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::Q8_0 => unreachable!(),
     };
     let n_out = 65;
     let layout = ArenaLayout::for_dims(n_in.max(n_out), n_out, 1, 1, n_in)
         .map_err(|error| error.to_string())?;
     let input: Vec<f32> = (0..n_in)
-        .map(|index| ((index * 29 % 251) as f32 - 125.0) / 97.0)
+        .map(|index| {
+            let divisor = if format == GpuWeightFormat::F16 {
+                131_072.0
+            } else {
+                97.0
+            };
+            ((index * 29 % 251) as f32 - 125.0) / divisor
+        })
         .collect();
     if format == GpuWeightFormat::Q4_1 {
         check_q4_1_input_sums(context, &input)?;
@@ -1907,10 +1932,10 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         commands
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
-        let tolerance = if format == GpuWeightFormat::Q4_K {
-            3e-3
-        } else {
-            2e-3
+        let tolerance = match format {
+            GpuWeightFormat::Q4_K => 3e-3,
+            GpuWeightFormat::F16 => 2e-4,
+            _ => 2e-3,
         };
         check_close(
             name,
@@ -2114,6 +2139,22 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         .to_le_bytes(),
                     );
                 }
+                GpuWeightFormat::F16 => {
+                    let bits = match block {
+                        0 => 0x0000,
+                        1 => 0x8000,
+                        2 => 0x0001,
+                        3 => 0x03ff,
+                        4 => 0x0400,
+                        5 => 0x3c00,
+                        6 => 0x7bff,
+                        7 => 0xfbff,
+                        _ => crate::ops::f32_to_f16(
+                            ((row * 17 + block * 31) % 257) as f32 / 64.0 - 2.0,
+                        ),
+                    };
+                    data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
+                }
                 GpuWeightFormat::Q8_0 => unreachable!(),
             }
         }
@@ -2181,6 +2222,10 @@ fn cpu_weight_matvec(
                     &q8k,
                 );
             }
+        }
+        GpuWeightFormat::F16 => {
+            let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
+            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
         GpuWeightFormat::Q8_0 => unreachable!(),
     }
