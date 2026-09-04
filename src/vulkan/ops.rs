@@ -1863,6 +1863,9 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         check_q4_1_input_sums(context, &input)?;
     }
     let weight = synthetic_weight(format, n_in, n_out);
+    if format == GpuWeightFormat::Q4_1 {
+        check_q4_1_zero_scale_min_fixture(&weight, n_in, n_out)?;
+    }
     let mut q8 = vec![0; n_in];
     let mut scales = vec![0.0; n_in / 32];
     crate::ops::quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
@@ -1904,6 +1907,28 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
     })();
     unsafe { context.destroy_buffer(&buffer) };
     result
+}
+
+fn check_q4_1_zero_scale_min_fixture(
+    weight: &[u8],
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), String> {
+    let blocks = n_in / 32;
+    for row in 0..n_out {
+        for block in 0..blocks {
+            let offset = (row * blocks + block) * 20;
+            let d = crate::ops::f16_to_f32(u16::from_le_bytes([weight[offset], weight[offset + 1]]));
+            let m = crate::ops::f16_to_f32(u16::from_le_bytes([
+                weight[offset + 2],
+                weight[offset + 3],
+            ]));
+            if d == 0.0 && m != 0.0 {
+                return Ok(());
+            }
+        }
+    }
+    Err("Q4_1 fixture is missing a d=0,m!=0 block".into())
 }
 
 fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), String> {
@@ -1990,11 +2015,17 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     }
                 }
                 GpuWeightFormat::Q4_1 => {
-                    data[offset..offset + 2]
-                        .copy_from_slice(&crate::ops::f32_to_f16((row as f32 + 1.0) / 91.0).to_le_bytes());
-                    data[offset + 2..offset + 4].copy_from_slice(
+                    data[offset..offset + 2].copy_from_slice(
                         &crate::ops::f32_to_f16(if row == 0 && block == 0 {
                             0.0
+                        } else {
+                            (row as f32 + 1.0) / 91.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    data[offset + 2..offset + 4].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            -0.25
                         } else {
                             -(block as f32 + 2.0) / 53.0
                         })
