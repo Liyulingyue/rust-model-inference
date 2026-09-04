@@ -11,6 +11,7 @@ shader_names=(
     q4_0_matmul
     q4_1_matmul
     q4_k_matmul
+    q5_k_matmul
     q6_k_matmul
     f16_matmul
     bf16_matmul

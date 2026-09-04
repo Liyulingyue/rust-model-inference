@@ -38,7 +38,7 @@ fn formats() -> Result<Vec<String>, String> {
         .next()
         .ok_or("--formats needs a comma-separated list")?;
     if flag != "--formats" || args.next().is_some() {
-        return Err("usage: vk_ops_check [--formats q4_0,q4_1,q4_k,q6_k,f16,bf16]".into());
+        return Err("usage: vk_ops_check [--formats q4_0,q4_1,q4_k,q5_k,q6_k,f16,bf16]".into());
     }
     Ok(value
         .split(',')

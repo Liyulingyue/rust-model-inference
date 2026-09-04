@@ -10,6 +10,7 @@ const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_mat
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
+const Q5_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_k_matmul.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
@@ -50,7 +51,8 @@ const QWEN35_DENSE_PREPARE: usize = 17;
 const QWEN35_ATTENTION: usize = 18;
 const QWEN35_RECURRENT_CONV: usize = 19;
 const QWEN35_RECURRENT_SSM: usize = 20;
-const OPERATOR_SHADERS: [&[u8]; 21] = [
+const Q5_K_MATMUL: usize = 21;
+const OPERATOR_SHADERS: [&[u8]; 22] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -72,6 +74,7 @@ const OPERATOR_SHADERS: [&[u8]; 21] = [
     QWEN35_ATTENTION_SHADER,
     QWEN35_RECURRENT_CONV_SHADER,
     QWEN35_RECURRENT_SSM_SHADER,
+    Q5_K_MATMUL_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +83,7 @@ pub(crate) enum GpuWeightFormat {
     Q4_0,
     Q4_1,
     Q4_K,
+    Q5_K,
     Q6_K,
     F16,
     BF16,
@@ -94,6 +98,7 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q4_0 => Ok(Self::Q4_0),
             crate::core::tensor::GGMLType::Q4_1 => Ok(Self::Q4_1),
             crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
+            crate::core::tensor::GGMLType::Q5K => Ok(Self::Q5_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
@@ -109,6 +114,7 @@ impl GpuWeightFormat {
             Self::Q4_0 => (32, 18, Q4_0_MATMUL),
             Self::Q4_1 => (32, 20, Q4_1_MATMUL),
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
+            Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
             Self::BF16 => (1, 2, BF16_MATMUL),
@@ -801,7 +807,7 @@ impl<'a> Qwen3Ops<'a> {
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales) = match format {
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => (input, q8_scales),
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q6_K => {
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
                 self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
                 (q8k, q8k_scales)
             }
@@ -1814,7 +1820,7 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     for &format in formats {
         check_weight_format(context, format)?;
     }
-    if formats.contains(&"q4_k") || formats.contains(&"q6_k") {
+    if formats.contains(&"q4_k") || formats.contains(&"q5_k") || formats.contains(&"q6_k") {
         check_quantize_q8_k_exact(context)?;
     }
 
@@ -2249,6 +2255,8 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         "q4_0" => GpuWeightFormat::Q4_0,
         "q4_1" => GpuWeightFormat::Q4_1,
         "q4_k" => GpuWeightFormat::Q4_K,
+        "q5_k" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::Q5K)
+            .map_err(|error| error.to_string())?,
         "q6_k" => GpuWeightFormat::Q6_K,
         "f16" => GpuWeightFormat::F16,
         "bf16" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::BF16)
@@ -2259,6 +2267,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_0 => 1024,
         GpuWeightFormat::Q4_1 => 3072,
         GpuWeightFormat::Q4_K => 1024,
+        GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::BF16 => 1024,
@@ -2315,7 +2324,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
         let tolerance = match format {
-            GpuWeightFormat::Q4_K => 3e-3,
+            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K => 3e-3,
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
         };
@@ -2497,6 +2506,35 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         *value = low | (high << 4);
                     }
                 }
+                GpuWeightFormat::Q5_K => {
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    data[offset + 2..offset + 4].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 2.0) / 96.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 4..offset + 16].iter_mut().enumerate() {
+                        *value = ((row * 31 + block * 17 + index * 37 + 11) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 16..offset + 48].iter_mut().enumerate() {
+                        *value = ((row * 13 + block * 19 + index * 37 + 5) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 48..offset + 176].iter_mut().enumerate() {
+                        let low = ((row * 7 + block * 13 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 11 + block * 5 + index * 9 + 6) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
                 GpuWeightFormat::Q6_K => {
                     for index in 0..128 {
                         let low = ((row * 17 + block * 29 + index * 7) & 15) as u8;
@@ -2606,6 +2644,16 @@ fn cpu_weight_matvec(
             for (row, output) in output.iter_mut().enumerate() {
                 let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
                 *output = crate::ops::quant::vec_dot_q4k_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::Q5_K => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q5K_SIZE;
+                *output = crate::ops::quant::vec_dot_q5k_q8k(
                     &weight[row * row_bytes..(row + 1) * row_bytes],
                     &q8k,
                 );

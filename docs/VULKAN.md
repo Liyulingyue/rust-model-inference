@@ -18,7 +18,8 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
   不录制 logits matvec；初始化或执行失败时丢弃 GPU 结果并用原 CPU 路径重算完整序列。
 - Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合资格的模型直接使用 CPU，
   不会静默混用不支持的 Vulkan 算子。
-- Q5_K 尚未接入；同一组 gate/up 权重格式不一致，或 Qwen3.5 存在未录制算子时，模型整体回退 CPU。
+- Q5_K 目前只完成合成 kernel parity，尚未纳入端到端模型支持矩阵；同一组 gate/up 权重格式不一致，
+  或 Qwen3.5 存在未录制算子时，模型整体回退 CPU。
 
 ## 架构
 
