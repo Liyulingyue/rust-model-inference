@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = 64) in;
 
@@ -15,6 +16,14 @@ layout(push_constant) uniform PC {
     uint head_dim;
 } pc;
 
+float round_f16(float value) {
+    return unpackHalf2x16(packHalf2x16(vec2(value, 0.0))).x;
+}
+
+float fma_f16(float a, float b, float c) {
+    return float(fma(float16_t(a), float16_t(b), float16_t(c)));
+}
+
 void main() {
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
@@ -23,7 +32,8 @@ void main() {
     uint head = index / pc.head_dim;
     uint dimension = index - head * pc.head_dim;
     uint kv_head = head / (pc.q_heads / pc.kv_heads);
-    float sum = 0.0;
+    float partial[32];
+    for (uint slot = 0u; slot < 32u; slot++) partial[slot] = 0.0;
     for (uint token = 0u; token < pc.sequence_length; token++) {
         float score = uintBitsToFloat(
             arena.data[pc.scores_word + head * pc.sequence_length + token]
@@ -32,7 +42,17 @@ void main() {
             + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
             + kv_head * pc.head_dim + dimension;
         float value = uintBitsToFloat(arena.data[value_index]);
-        sum = fma(score, value, sum);
+        uint slot = token & 31u;
+        partial[slot] = fma_f16(score, value, partial[slot]);
     }
+    float lanes[8];
+    for (uint lane = 0u; lane < 8u; lane++) {
+        float low = round_f16(partial[lane] + partial[16u + lane]);
+        float high = round_f16(partial[8u + lane] + partial[24u + lane]);
+        lanes[lane] = round_f16(low + high);
+    }
+    precise float sum01 = (lanes[0] + lanes[4]) + (lanes[1] + lanes[5]);
+    precise float sum23 = (lanes[2] + lanes[6]) + (lanes[3] + lanes[7]);
+    precise float sum = sum01 + sum23;
     arena.data[pc.output_word + index] = floatBitsToUint(sum);
 }

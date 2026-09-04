@@ -242,6 +242,10 @@ impl<'model> Qwen3Session<'model> {
         &self.kv_state
     }
 
+    pub fn last_logits(&self) -> &[f32] {
+        &self.scratch.logits
+    }
+
     /// 重置 KV 缓存（用于多轮对话中的上下文清理）。
     pub fn reset_kv(&mut self) {
         self.kv_state.reset();

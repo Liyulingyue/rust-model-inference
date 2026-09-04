@@ -13,7 +13,6 @@ layout(push_constant) uniform PC {
     float eps;
 } pc;
 
-shared float partial[64];
 shared float inverse_rms;
 
 void main() {
@@ -21,18 +20,26 @@ void main() {
     if (vector_index >= pc.vectors) return;
     uint lane = gl_LocalInvocationID.x;
     uint base = vector_index * pc.count;
-    float sum = 0.0;
-    for (uint index = lane; index < pc.count; index += 64u) {
-        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
-        sum = fma(value, value, sum);
+    if (lane == 0u) {
+        precise float sum = 0.0;
+        precise float correction = 0.0;
+        for (uint index = 0u; index < pc.count; index++) {
+            float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+            float square = value * value;
+            precise float next = sum + square;
+            correction += sum >= square
+                ? (sum - next) + square
+                : (square - next) + sum;
+            sum = next;
+        }
+        precise float mean_square = (sum + correction) / float(pc.count) + pc.eps;
+        precise float root = sqrt(mean_square);
+        precise float root_residual = fma(-root, root, mean_square);
+        root = fma(root_residual, 0.5 / root, root);
+        precise float reciprocal = 1.0 / root;
+        precise float reciprocal_residual = fma(-root, reciprocal, 1.0);
+        inverse_rms = fma(reciprocal_residual, reciprocal, reciprocal);
     }
-    partial[lane] = sum;
-    barrier();
-    for (uint step = 32u; step > 0u; step >>= 1u) {
-        if (lane < step) partial[lane] += partial[lane + step];
-        barrier();
-    }
-    if (lane == 0u) inverse_rms = inversesqrt(partial[0] / float(pc.count) + pc.eps);
     barrier();
     for (uint index = lane; index < pc.count; index += 64u) {
         float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);

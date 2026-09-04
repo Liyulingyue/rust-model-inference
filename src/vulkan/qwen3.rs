@@ -2,7 +2,7 @@ use crate::core::scratchpad::{KvCache, KvState};
 use crate::core::tensor::GGMLType;
 use crate::models::qwen3::trunk::{Qwen3Config, Qwen3Model, Qwen3Rope};
 
-use super::ops::{ArenaLayout, OperatorBindings, Qwen3Ops, TokenCommands};
+use super::ops::{fill_rope_neox, ArenaLayout, OperatorBindings, Qwen3Ops, TokenCommands};
 use super::{GpuBuffer, VulkanContext, VulkanError};
 
 #[derive(Debug, Clone)]
@@ -225,6 +225,7 @@ pub(crate) struct Qwen3VulkanSession {
     config: Qwen3Config,
     capacity: usize,
     commit_state: TokenCommitState,
+    rope: Vec<f32>,
     logits: Vec<f32>,
     k_delta: Vec<f32>,
     v_delta: Vec<f32>,
@@ -334,6 +335,7 @@ impl Qwen3VulkanSession {
             .checked_mul(kv_count)
             .ok_or(VulkanError::OutOfMemory)?;
         let vocab = config.vocab;
+        let head_dim = config.n_embd_head_k;
 
         Ok(Some(Self {
             context,
@@ -346,6 +348,7 @@ impl Qwen3VulkanSession {
             config,
             capacity,
             commit_state: TokenCommitState::new(0),
+            rope: vec![0.0; head_dim],
             logits: vec![0.0; vocab],
             k_delta: vec![0.0; delta_count],
             v_delta: vec![0.0; delta_count],
@@ -394,6 +397,8 @@ impl Qwen3VulkanSession {
             .ok_or(VulkanError::OutOfMemory)?;
 
         self.ops.write_f32(self.layout.x, input)?;
+        fill_rope_neox(&mut self.rope, position, config.freq_base);
+        self.ops.write_f32(self.layout.logits, &self.rope)?;
         let commands = TokenCommands::begin(self.context)?;
         for (layer_index, bindings) in self.layers.iter().enumerate() {
             self.ops.record_rms_norm(
@@ -431,9 +436,8 @@ impl Qwen3VulkanSession {
                 config.n_head,
                 config.n_head_kv,
                 config.n_embd_head_k,
-                position,
+                self.layout.logits,
                 config.eps,
-                config.freq_base,
                 config.has_qk_norm,
                 config.has_qk_norm,
             )?;

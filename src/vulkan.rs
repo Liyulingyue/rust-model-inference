@@ -120,6 +120,7 @@ struct DeviceCandidate {
     limits: vk::PhysicalDeviceLimits,
     portability_subset: bool,
     integer_dot_product: bool,
+    shader_float16: bool,
 }
 
 #[cfg(feature = "vulkan")]
@@ -642,14 +643,25 @@ impl VulkanContext {
                     extension_available(&extensions, vk::KhrPortabilitySubsetFn::name());
                 let integer_dot_extension =
                     extension_available(&extensions, vk::KhrShaderIntegerDotProductFn::name());
+                let float16_extension =
+                    extension_available(&extensions, vk::KhrShaderFloat16Int8Fn::name());
                 let api_version = props.api_version.min(instance_api_version);
                 let can_use_integer_dot =
                     api_version >= vk::API_VERSION_1_3 || integer_dot_extension;
+                let can_use_float16 = api_version >= vk::API_VERSION_1_2 || float16_extension;
                 let can_query_features2 =
                     instance_api_version >= vk::API_VERSION_1_1 || properties2_extension;
                 let integer_dot_product = can_use_integer_dot
                     && can_query_features2
                     && Self::integer_dot_product_supported(
+                        entry,
+                        instance,
+                        device,
+                        instance_api_version,
+                    );
+                let shader_float16 = can_use_float16
+                    && can_query_features2
+                    && Self::shader_float16_supported(
                         entry,
                         instance,
                         device,
@@ -665,6 +677,7 @@ impl VulkanContext {
                     limits: props.limits,
                     portability_subset,
                     integer_dot_product,
+                    shader_float16,
                 });
             }
             Ok(candidates)
@@ -688,6 +701,25 @@ impl VulkanContext {
                 .get_physical_device_features2(physical_device, &mut features);
         }
         integer_dot.shader_integer_dot_product == vk::TRUE
+    }
+
+    unsafe fn shader_float16_supported(
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        instance_api_version: u32,
+    ) -> bool {
+        let mut float16 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::builder()
+            .push_next(&mut float16)
+            .build();
+        if instance_api_version >= vk::API_VERSION_1_1 {
+            instance.get_physical_device_features2(physical_device, &mut features);
+        } else {
+            ash::extensions::khr::GetPhysicalDeviceProperties2::new(entry, instance)
+                .get_physical_device_features2(physical_device, &mut features);
+        }
+        float16.shader_float16 == vk::TRUE
     }
 
     unsafe fn create_candidate_resources(
@@ -796,21 +828,32 @@ impl VulkanContext {
             shader_integer_dot_product: candidate.integer_dot_product.into(),
             ..Default::default()
         };
-        let mut extension_names = Vec::with_capacity(2);
+        let mut float16 = vk::PhysicalDeviceShaderFloat16Int8Features {
+            shader_float16: candidate.shader_float16.into(),
+            ..Default::default()
+        };
+        let mut next: *mut std::os::raw::c_void = std::ptr::null_mut();
+        if candidate.integer_dot_product {
+            next = &mut integer_dot as *mut _ as *mut std::os::raw::c_void;
+        }
+        if candidate.shader_float16 {
+            float16.p_next = next;
+            next = &mut float16 as *mut _ as *mut std::os::raw::c_void;
+        }
+        let mut extension_names = Vec::with_capacity(3);
         if candidate.portability_subset {
             extension_names.push(vk::KhrPortabilitySubsetFn::name().as_ptr());
         }
         if candidate.integer_dot_product && candidate.api_version < vk::API_VERSION_1_3 {
             extension_names.push(vk::KhrShaderIntegerDotProductFn::name().as_ptr());
         }
+        if candidate.shader_float16 && candidate.api_version < vk::API_VERSION_1_2 {
+            extension_names.push(vk::KhrShaderFloat16Int8Fn::name().as_ptr());
+        }
 
         let device_info = vk::DeviceCreateInfo {
             s_type: vk::StructureType::DEVICE_CREATE_INFO,
-            p_next: if candidate.integer_dot_product {
-                &mut integer_dot as *mut _ as *const std::os::raw::c_void
-            } else {
-                std::ptr::null()
-            },
+            p_next: next.cast_const(),
             flags: Default::default(),
             queue_create_info_count: 1,
             p_queue_create_infos: &queue_info,
@@ -1317,6 +1360,7 @@ mod tests {
             limits,
             portability_subset: false,
             integer_dot_product,
+            shader_float16: false,
         }
     }
 

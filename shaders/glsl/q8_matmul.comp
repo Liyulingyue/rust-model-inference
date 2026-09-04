@@ -16,7 +16,6 @@ layout(std430, binding = 3) writeonly buffer OU { float o_data[]; };
 layout(push_constant) uniform PC { uvec4 dims; };
 
 shared uint s_input[4096];  // up to 512 blocks -> n_in <= 16384
-shared float s_red[64];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -51,11 +50,12 @@ void main() {
 
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (row >= dims.y) return;
+    if (lid != 0u) return;
 
     uint row_off = row * dims.w;
     float acc = 0.0;
 
-    for (uint block = lid; block < bpr; block += 64u) {
+    for (uint block = 0u; block < bpr; block++) {
         uint w_off = row_off + block * 34u;
         uint s_word = w_data[w_off >> 2u];
         uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
@@ -76,16 +76,9 @@ void main() {
                  + i8_of(packed, 2u)        * i8_of(i_word, 2u)
                  + i8_of(packed, 3u)        * i8_of(i_word, 3u);
         }
-        acc += w_scale * i_scales[block] * float(dot);
+        float scale = w_scale * i_scales[block];
+        acc = fma(float(dot), scale, acc);
     }
 
-    s_red[lid] = acc;
-    barrier();
-    for (uint s = 32u; s > 0u; s >>= 1u) {
-        if (lid < s) { s_red[lid] += s_red[lid + s]; }
-        barrier();
-    }
-    if (lid == 0u) {
-        o_data[row] = s_red[0];
-    }
+    o_data[row] = acc;
 }

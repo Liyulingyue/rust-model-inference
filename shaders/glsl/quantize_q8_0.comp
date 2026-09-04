@@ -31,8 +31,12 @@ void main() {
     }
 
     if (lane == 0u) {
-        float scale = partial[0] == 0.0 ? 0.0 : partial[0] / 127.0;
-        inverse_scale = scale == 0.0 ? 0.0 : 1.0 / scale;
+        precise float scale = partial[0] == 0.0 ? 0.0 : partial[0] / 127.0;
+        precise float scale_error = fma(-scale, 127.0, partial[0]);
+        scale += scale_error / 127.0;
+        precise float inverse = scale == 0.0 ? 0.0 : 1.0 / scale;
+        precise float inverse_error = fma(-scale, inverse, 1.0);
+        inverse_scale = fma(inverse_error, inverse, inverse);
         float stored_scale = unpackHalf2x16(packHalf2x16(vec2(scale, 0.0))).x;
         arena.data[pc.scales_word + block] = floatBitsToUint(stored_scale);
     }
@@ -42,7 +46,8 @@ void main() {
         uint packed = 0u;
         for (uint byte_index = 0u; byte_index < 4u; byte_index++) {
             uint value_index = lane * 4u + byte_index;
-            int quantized = int(roundEven(values[value_index] * inverse_scale));
+            precise float scaled = values[value_index] * inverse_scale;
+            int quantized = int(roundEven(scaled));
             quantized = clamp(quantized, -128, 127);
             packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);
         }

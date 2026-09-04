@@ -10,8 +10,48 @@ layout(push_constant) uniform PC {
 } pc;
 
 shared float partial[64];
+shared float partial_error[64];
 shared float row_max;
 shared float inverse_sum;
+
+float exp_accurate(float x) {
+    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
+    precise float n = z - uintBitsToFloat(0x4b400000u);
+    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
+    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
+    uint exponent = floatBitsToUint(z) << 23u;
+    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
+    precise float polynomial = uintBitsToFloat(0x39500d01u);
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3ab60b61u));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3c088889u));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3d2aaaabu));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3e2aaaabu));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f000000u));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
+    polynomial = fma(polynomial, reduced, uintBitsToFloat(0x3f800000u));
+    if (abs(n) <= 126.0) return scale * polynomial;
+
+    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
+    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
+    precise float scale2 = uintBitsToFloat(exponent - adjust);
+    if (abs(n) > 192.0) return scale1 * scale1;
+    return scale2 * polynomial * scale1;
+}
+
+void add_pair(
+    inout float high,
+    inout float low,
+    float other_high,
+    float other_low
+) {
+    precise float sum = high + other_high;
+    precise float other_virtual = sum - high;
+    precise float error =
+        (high - (sum - other_virtual)) + (other_high - other_virtual);
+    error += low + other_low;
+    high = sum + error;
+    low = error - (high - sum);
+}
 
 void main() {
     uint head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -32,21 +72,35 @@ void main() {
     barrier();
 
     float sum = 0.0;
+    float sum_error = 0.0;
     for (uint index = lane; index < pc.sequence_length; index += 64u) {
-        float value = exp(uintBitsToFloat(arena.data[base + index]) - row_max);
+        float value = exp_accurate(uintBitsToFloat(arena.data[base + index]) - row_max);
         arena.data[base + index] = floatBitsToUint(value);
-        sum += value;
+        add_pair(sum, sum_error, value, 0.0);
     }
     partial[lane] = sum;
+    partial_error[lane] = sum_error;
     barrier();
     for (uint step = 32u; step > 0u; step >>= 1u) {
-        if (lane < step) partial[lane] += partial[lane + step];
+        if (lane < step) {
+            float high = partial[lane];
+            float low = partial_error[lane];
+            add_pair(high, low, partial[lane + step], partial_error[lane + step]);
+            partial[lane] = high;
+            partial_error[lane] = low;
+        }
         barrier();
     }
-    if (lane == 0u) inverse_sum = 1.0 / partial[0];
+    if (lane == 0u) {
+        precise float inverse = 1.0 / partial[0];
+        precise float residual = fma(-partial[0], inverse, 1.0);
+        residual = fma(-partial_error[0], inverse, residual);
+        inverse_sum = fma(residual, inverse, inverse);
+    }
     barrier();
     for (uint index = lane; index < pc.sequence_length; index += 64u) {
         float value = uintBitsToFloat(arena.data[base + index]);
-        arena.data[base + index] = floatBitsToUint(value * inverse_sum);
+        value = unpackHalf2x16(packHalf2x16(vec2(value * inverse_sum, 0.0))).x;
+        arena.data[base + index] = floatBitsToUint(value);
     }
 }

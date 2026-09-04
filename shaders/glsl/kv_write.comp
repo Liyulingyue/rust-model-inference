@@ -22,8 +22,10 @@ void main() {
     if (index >= pc.kv_count) return;
     uint cache_index = (pc.layer * pc.capacity + pc.position) * pc.kv_count + index;
     uint delta_index = pc.layer * pc.kv_count + index;
-    uint key = arena.data[pc.k_word + index];
-    uint value = arena.data[pc.v_word + index];
+    float key_f32 = uintBitsToFloat(arena.data[pc.k_word + index]);
+    float value_f32 = uintBitsToFloat(arena.data[pc.v_word + index]);
+    uint key = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(key_f32, 0.0))).x);
+    uint value = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(value_f32, 0.0))).x);
     arena.data[pc.cache_k_word + cache_index] = key;
     arena.data[pc.cache_v_word + cache_index] = value;
     arena.data[pc.delta_k_word + delta_index] = key;

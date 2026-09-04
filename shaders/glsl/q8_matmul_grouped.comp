@@ -22,7 +22,6 @@ layout(push_constant) uniform PC {
 } pc;
 
 shared uint input_words[4096];
-shared float partial[64];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -63,10 +62,11 @@ void main() {
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (row >= rows) return;
+    if (lane != 0u) return;
 
     uint row_offset = row * pc.blocks_per_row * 34u;
     float sum = 0.0;
-    for (uint block = lane; block < pc.blocks_per_row; block += 64u) {
+    for (uint block = 0u; block < pc.blocks_per_row; block++) {
         uint byte_offset = row_offset + block * 34u;
         uint scale_word = weight_word(slot, byte_offset >> 2u);
         uint scale_bits = (byte_offset & 3u) == 0u
@@ -88,19 +88,12 @@ void main() {
                 + i8_of(packed, 3u) * i8_of(input_value, 3u);
         }
         float input_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
-        sum += weight_scale * input_scale * float(dot);
+        float scale = weight_scale * input_scale;
+        sum = fma(float(dot), scale, sum);
     }
 
-    partial[lane] = sum;
-    barrier();
-    for (uint step = 32u; step > 0u; step >>= 1u) {
-        if (lane < step) partial[lane] += partial[lane + step];
-        barrier();
-    }
-    if (lane == 0u) {
-        uint output_word = slot == 0u
-            ? pc.output0_word
-            : (slot == 1u ? pc.output1_word : pc.output2_word);
-        arena.data[output_word + row] = floatBitsToUint(partial[0]);
-    }
+    uint output_word = slot == 0u
+        ? pc.output0_word
+        : (slot == 1u ? pc.output1_word : pc.output2_word);
+    arena.data[output_word + row] = floatBitsToUint(sum);
 }

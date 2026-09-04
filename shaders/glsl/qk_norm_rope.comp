@@ -13,13 +13,11 @@ layout(push_constant) uniform PC {
     uint q_heads;
     uint k_heads;
     uint head_dim;
-    uint position;
+    uint rope_word;
     uint norm_flags;
     float eps;
-    float freq_base;
 } pc;
 
-shared float partial[64];
 shared float inverse_rms;
 
 float norm_weight(uint kind, uint index) {
@@ -38,18 +36,27 @@ void main() {
     bool normalize = (pc.norm_flags & (1u << kind)) != 0u;
 
     if (normalize) {
-        float sum = 0.0;
-        for (uint index = lane; index < pc.head_dim; index += 64u) {
-            float value = uintBitsToFloat(arena.data[base + index]);
-            sum = fma(value, value, sum);
+        // ponytail: serial reduction preserves CPU rounding; parallelize only with exact parity proof.
+        if (lane == 0u) {
+            precise float sum = 0.0;
+            precise float correction = 0.0;
+            for (uint index = 0u; index < pc.head_dim; index++) {
+                float value = uintBitsToFloat(arena.data[base + index]);
+                float square = value * value;
+                precise float next = sum + square;
+                correction += sum >= square
+                    ? (sum - next) + square
+                    : (square - next) + sum;
+                sum = next;
+            }
+            precise float mean_square = (sum + correction) / float(pc.head_dim) + pc.eps;
+            precise float root = sqrt(mean_square);
+            precise float root_residual = fma(-root, root, mean_square);
+            root = fma(root_residual, 0.5 / root, root);
+            precise float reciprocal = 1.0 / root;
+            precise float reciprocal_residual = fma(-root, reciprocal, 1.0);
+            inverse_rms = fma(reciprocal_residual, reciprocal, reciprocal);
         }
-        partial[lane] = sum;
-        barrier();
-        for (uint step = 32u; step > 0u; step >>= 1u) {
-            if (lane < step) partial[lane] += partial[lane + step];
-            barrier();
-        }
-        if (lane == 0u) inverse_rms = inversesqrt(partial[0] / float(pc.head_dim) + pc.eps);
         barrier();
         for (uint index = lane; index < pc.head_dim; index += 64u) {
             float value = uintBitsToFloat(arena.data[base + index]);
@@ -60,11 +67,8 @@ void main() {
 
     uint half_dim = pc.head_dim / 2u;
     if (lane < half_dim) {
-        float theta_scale = pow(pc.freq_base, -2.0 / float(pc.head_dim));
-        float theta = float(pc.position);
-        for (uint index = 0u; index < lane; index++) theta *= theta_scale;
-        float cosine = cos(theta);
-        float sine = sin(theta);
+        float cosine = uintBitsToFloat(arena.data[pc.rope_word + lane]);
+        float sine = uintBitsToFloat(arena.data[pc.rope_word + lane + half_dim]);
         float first = uintBitsToFloat(arena.data[base + lane]);
         float second = uintBitsToFloat(arena.data[base + lane + half_dim]);
         arena.data[base + lane] = floatBitsToUint(fma(first, cosine, -second * sine));

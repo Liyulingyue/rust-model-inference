@@ -9,11 +9,48 @@ layout(push_constant) uniform PC {
     uint count;
 } pc;
 
+float exp_approx(float x) {
+    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
+    precise float n = z - uintBitsToFloat(0x4b400000u);
+    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
+    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
+    uint exponent = floatBitsToUint(z) << 23u;
+    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
+    precise float square = reduced * reduced;
+    precise float low = fma(
+        uintBitsToFloat(0x3e2aaf33u),
+        reduced,
+        uintBitsToFloat(0x3efffedbu)
+    );
+    precise float high = fma(
+        uintBitsToFloat(0x3c072010u),
+        reduced,
+        uintBitsToFloat(0x3d2b9f17u)
+    );
+    precise float polynomial = fma(high, square, low);
+    polynomial = fma(
+        polynomial,
+        square,
+        uintBitsToFloat(0x3f7ffff6u) * reduced
+    );
+    if (abs(n) <= 126.0) return fma(scale, polynomial, scale);
+
+    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
+    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
+    precise float scale2 = uintBitsToFloat(exponent - adjust);
+    if (abs(n) > 192.0) return scale1 * scale1;
+    return fma(scale2, polynomial, scale2) * scale1;
+}
+
 void main() {
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     if (index >= pc.count) return;
     float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
     float up = uintBitsToFloat(arena.data[pc.up_word + index]);
-    arena.data[pc.gate_word + index] = floatBitsToUint((gate / (1.0 + exp(-gate))) * up);
+    precise float denominator = 1.0 + exp_approx(0.0 - gate);
+    precise float activated = gate / denominator;
+    precise float residual = fma(-denominator, activated, gate);
+    activated = fma(residual, 1.0 / denominator, activated);
+    arena.data[pc.gate_word + index] = floatBitsToUint(activated * up);
 }
