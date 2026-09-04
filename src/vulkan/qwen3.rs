@@ -35,10 +35,17 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
         return Err("rope layout is not supported".into());
     }
     if facts.weight_formats.is_empty()
-        || facts
-            .weight_formats
-            .iter()
-            .any(|&format| GpuWeightFormat::from_ggml_type(format).is_err())
+        || facts.weight_formats.iter().any(|&format| {
+            !matches!(
+                format,
+                GGMLType::Q8_0
+                    | GGMLType::Q4_0
+                    | GGMLType::Q4_1
+                    | GGMLType::Q4K
+                    | GGMLType::Q6K
+                    | GGMLType::F16
+            )
+        })
     {
         return Err("unsupported Vulkan weight format".into());
     }
@@ -187,26 +194,26 @@ struct LayerBindings {
     down: OperatorBindings,
 }
 
-struct UploadedBuffers {
+pub(crate) struct UploadedBuffers {
     context: &'static VulkanContext,
     values: Vec<GpuBuffer>,
 }
 
 impl UploadedBuffers {
-    fn new(context: &'static VulkanContext) -> Self {
+    pub(crate) fn new(context: &'static VulkanContext) -> Self {
         Self {
             context,
             values: Vec::new(),
         }
     }
 
-    fn upload(&mut self, bytes: &[u8]) -> Result<GpuBuffer, VulkanError> {
+    pub(crate) fn upload(&mut self, bytes: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let buffer = unsafe { self.context.upload_static(bytes)? };
         self.values.push(buffer);
         Ok(buffer)
     }
 
-    fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
+    pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
         self.upload(bytemuck::cast_slice(values))
     }
 
@@ -787,6 +794,13 @@ mod tests {
                         sections: [16, 24, 24, 0],
                         n_dims: 64,
                     },
+                    ..eligible_facts()
+                },
+            ),
+            (
+                "weight format",
+                EligibilityFacts {
+                    weight_formats: vec![GGMLType::BF16],
                     ..eligible_facts()
                 },
             ),

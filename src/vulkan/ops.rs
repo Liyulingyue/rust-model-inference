@@ -12,6 +12,7 @@ const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
+const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
@@ -20,6 +21,13 @@ const SOFTMAX_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax.spv");
 const ATTENTION_VALUES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_values.spv");
 const SILU_MUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/silu_mul.spv");
 const ADD_SHADER: &[u8] = include_bytes!("../../shaders/bin/add.spv");
+const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qwen35_dense_prepare.spv");
+const QWEN35_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_attention.spv");
+const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qwen35_recurrent_conv.spv");
+const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qwen35_recurrent_ssm.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -29,15 +37,20 @@ const Q4_1_MATMUL: usize = 4;
 const Q4_K_MATMUL: usize = 5;
 const Q6_K_MATMUL: usize = 6;
 const F16_MATMUL: usize = 7;
-const RMS_NORM: usize = 8;
-const QK_NORM_ROPE: usize = 9;
-const KV_WRITE: usize = 10;
-const ATTENTION_SCORES: usize = 11;
-const SOFTMAX: usize = 12;
-const ATTENTION_VALUES: usize = 13;
-const SILU_MUL: usize = 14;
-const ADD: usize = 15;
-const OPERATOR_SHADERS: [&[u8]; 16] = [
+const BF16_MATMUL: usize = 8;
+const RMS_NORM: usize = 9;
+const QK_NORM_ROPE: usize = 10;
+const KV_WRITE: usize = 11;
+const ATTENTION_SCORES: usize = 12;
+const SOFTMAX: usize = 13;
+const ATTENTION_VALUES: usize = 14;
+const SILU_MUL: usize = 15;
+const ADD: usize = 16;
+const QWEN35_DENSE_PREPARE: usize = 17;
+const QWEN35_ATTENTION: usize = 18;
+const QWEN35_RECURRENT_CONV: usize = 19;
+const QWEN35_RECURRENT_SSM: usize = 20;
+const OPERATOR_SHADERS: [&[u8]; 21] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -46,6 +59,7 @@ const OPERATOR_SHADERS: [&[u8]; 16] = [
     Q4_K_MATMUL_SHADER,
     Q6_K_MATMUL_SHADER,
     F16_MATMUL_SHADER,
+    BF16_MATMUL_SHADER,
     RMS_NORM_SHADER,
     QK_NORM_ROPE_SHADER,
     KV_WRITE_SHADER,
@@ -54,6 +68,10 @@ const OPERATOR_SHADERS: [&[u8]; 16] = [
     ATTENTION_VALUES_SHADER,
     SILU_MUL_SHADER,
     ADD_SHADER,
+    QWEN35_DENSE_PREPARE_SHADER,
+    QWEN35_ATTENTION_SHADER,
+    QWEN35_RECURRENT_CONV_SHADER,
+    QWEN35_RECURRENT_SSM_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +82,7 @@ pub(crate) enum GpuWeightFormat {
     Q4_K,
     Q6_K,
     F16,
+    BF16,
 }
 
 impl GpuWeightFormat {
@@ -77,6 +96,7 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
+            crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
             value => Err(VulkanError::UnsupportedShape(format!(
                 "unsupported Vulkan weight format {value:?}"
             ))),
@@ -91,6 +111,7 @@ impl GpuWeightFormat {
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
+            Self::BF16 => (1, 2, BF16_MATMUL),
         }
     }
 }
@@ -483,6 +504,19 @@ impl<'a> Qwen3Ops<'a> {
         layout: ArenaLayout,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
+        Self::new_with_size(context, layout.total_size(), descriptor_capacity)
+    }
+
+    pub(crate) fn new_with_size(
+        context: &'a VulkanContext,
+        arena_size: usize,
+        descriptor_capacity: usize,
+    ) -> Result<Self, VulkanError> {
+        if arena_size == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Vulkan arena must not be empty".into(),
+            ));
+        }
         let descriptor_capacity = descriptor_capacity.max(1);
         let descriptor_count = descriptor_capacity
             .checked_mul(4)
@@ -505,7 +539,7 @@ impl<'a> Qwen3Ops<'a> {
         }
         let pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()] = pipelines.try_into().unwrap();
 
-        let arena = match unsafe { context.allocate_session_buffer(layout.total_size()) } {
+        let arena = match unsafe { context.allocate_session_buffer(arena_size) } {
             Ok(arena) => arena,
             Err(error) => {
                 unsafe {
@@ -516,7 +550,7 @@ impl<'a> Qwen3Ops<'a> {
                 return Err(error);
             }
         };
-        unsafe { std::ptr::write_bytes(arena.mapped, 0, layout.total_size()) };
+        unsafe { std::ptr::write_bytes(arena.mapped, 0, arena_size) };
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -766,7 +800,7 @@ impl<'a> Qwen3Ops<'a> {
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales) = match format {
-            GpuWeightFormat::F16 => (input, q8_scales),
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 => (input, q8_scales),
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q6_K => {
                 self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
                 (q8k, q8k_scales)
@@ -845,12 +879,12 @@ impl<'a> Qwen3Ops<'a> {
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
         }
-        let input_word = if format == GpuWeightFormat::F16 {
-            self.f32_word(q8, n_in, "F16 matvec input")?
+        let input_word = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) {
+            self.f32_word(q8, n_in, "floating-point matvec input")?
         } else {
             self.byte_word(q8, n_in, "Q8_0 matvec input")?
         };
-        let scales_word = if format == GpuWeightFormat::F16 {
+        let scales_word = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) {
             0
         } else {
             self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?
@@ -1241,6 +1275,335 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_dense_prepare(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        raw_q: ArenaRegion,
+        raw_k: ArenaRegion,
+        v: ArenaRegion,
+        q: ArenaRegion,
+        gate: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        rope: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rope_dim: usize,
+        eps: f32,
+    ) -> Result<(), VulkanError> {
+        if layer >= layer_count
+            || position >= capacity
+            || q_heads == 0
+            || kv_heads == 0
+            || q_heads % kv_heads != 0
+            || head_dim == 0
+            || rope_dim == 0
+            || rope_dim > head_dim
+            || rope_dim % 2 != 0
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid Qwen3.5 dense prepare layer={layer}/{layer_count} position={position}/{capacity} heads={q_heads}/{kv_heads} dims={head_dim}/{rope_dim}"
+            )));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let raw_q_count = q_count.checked_mul(2).ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|count| count.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let delta_count = layer_count
+            .checked_mul(kv_count)
+            .ok_or(VulkanError::OutOfMemory)?;
+        bindings.require(0, f32_bytes(head_dim)?, "Qwen3.5 Q norm")?;
+        bindings.require(1, f32_bytes(head_dim)?, "Qwen3.5 K norm")?;
+        let push = [
+            self.f32_word(raw_q, raw_q_count, "Qwen3.5 raw Q/gate")?,
+            self.f32_word(raw_k, kv_count, "Qwen3.5 raw K")?,
+            self.f32_word(v, kv_count, "Qwen3.5 V")?,
+            self.f32_word(q, q_count, "Qwen3.5 Q")?,
+            self.f32_word(gate, q_count, "Qwen3.5 attention gate")?,
+            self.f32_word(cache_k, cache_count, "Qwen3.5 K cache")?,
+            self.f32_word(cache_v, cache_count, "Qwen3.5 V cache")?,
+            self.f32_word(delta_k, delta_count, "Qwen3.5 K delta")?,
+            self.f32_word(delta_v, delta_count, "Qwen3.5 V delta")?,
+            self.f32_word(rope, rope_dim, "Qwen3.5 mRoPE coefficients")?,
+            as_u32(layer, "Qwen3.5 dense layer")?,
+            as_u32(position, "Qwen3.5 dense position")?,
+            as_u32(capacity, "Qwen3.5 dense capacity")?,
+            pack_u16_pair(q_heads, kv_heads, "Qwen3.5 dense heads")?,
+            pack_u16_pair(head_dim, rope_dim, "Qwen3.5 dense dimensions")?,
+            eps.to_bits(),
+        ];
+        let group_count = q_heads.max(kv_heads);
+        if group_count > self.context.limits.max_compute_work_group_count[0] as usize
+            || self.context.limits.max_compute_work_group_count[1] < 2
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 dense head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QWEN35_DENSE_PREPARE],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(group_count as u32, 2, 1);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        gate: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        output: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        sequence_length: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), VulkanError> {
+        validate_attention_shape(
+            layer,
+            layer_count,
+            sequence_length,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+        )?;
+        if capacity > 4096 {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Qwen3.5 Vulkan capacity {capacity} exceeds attention shader limit 4096"
+            )));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|count| count.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_word(q, q_count, "Qwen3.5 attention Q")?,
+            self.f32_word(gate, q_count, "Qwen3.5 attention gate")?,
+            self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?,
+            self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?,
+            self.f32_word(output, q_count, "Qwen3.5 attention output")?,
+            as_u32(layer, "Qwen3.5 attention layer")?,
+            as_u32(sequence_length, "Qwen3.5 attention sequence length")?,
+            as_u32(capacity, "Qwen3.5 attention capacity")?,
+            as_u32(q_heads, "Qwen3.5 attention Q heads")?,
+            as_u32(kv_heads, "Qwen3.5 attention KV heads")?,
+            as_u32(head_dim, "Qwen3.5 attention head dimension")?,
+        ];
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 attention head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QWEN35_ATTENTION],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(q_heads as u32, 1, 1);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_recurrent_conv(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        qkv: ArenaRegion,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        state: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        conv_dim: usize,
+        key_dim: usize,
+        value_dim: usize,
+        d_conv: usize,
+        k_heads: usize,
+        v_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Result<(), VulkanError> {
+        let expected_key = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let expected_value = v_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let expected_conv = key_dim
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(value_dim))
+            .ok_or(VulkanError::OutOfMemory)?;
+        if layer >= layer_count
+            || d_conv == 0
+            || k_heads == 0
+            || v_heads == 0
+            || head_dim == 0
+            || key_dim != expected_key
+            || value_dim != expected_value
+            || conv_dim != expected_conv
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid Qwen3.5 recurrent convolution layer={layer}/{layer_count} conv={conv_dim}/{expected_conv} key={key_dim}/{expected_key} value={value_dim}/{expected_value} taps={d_conv}"
+            )));
+        }
+        let state_count = layer_count
+            .checked_mul(d_conv)
+            .and_then(|count| count.checked_mul(conv_dim))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let weight_count = conv_dim
+            .checked_mul(d_conv)
+            .ok_or(VulkanError::OutOfMemory)?;
+        bindings.require(0, f32_bytes(weight_count)?, "Qwen3.5 convolution weight")?;
+        let mut push = [
+            self.f32_word(qkv, conv_dim, "Qwen3.5 recurrent QKV")?,
+            self.f32_word(q, key_dim, "Qwen3.5 recurrent Q")?,
+            self.f32_word(k, key_dim, "Qwen3.5 recurrent K")?,
+            self.f32_word(v, value_dim, "Qwen3.5 recurrent V")?,
+            self.f32_word(state, state_count, "Qwen3.5 convolution state")?,
+            as_u32(layer, "Qwen3.5 recurrent layer")?,
+            as_u32(conv_dim, "Qwen3.5 convolution width")?,
+            as_u32(key_dim, "Qwen3.5 recurrent key width")?,
+            as_u32(value_dim, "Qwen3.5 recurrent value width")?,
+            as_u32(d_conv, "Qwen3.5 convolution taps")?,
+            as_u32(k_heads, "Qwen3.5 recurrent key heads")?,
+            as_u32(v_heads, "Qwen3.5 recurrent value heads")?,
+            as_u32(head_dim, "Qwen3.5 recurrent head dimension")?,
+            eps.to_bits(),
+            0,
+        ];
+        let (x, y) = dispatch_invocations(conv_dim, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[QWEN35_RECURRENT_CONV],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, 1);
+            commands.barrier();
+        }
+        push[14] = 1;
+        let (x, y) = super::dispatch_grid(k_heads.max(v_heads), &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[QWEN35_RECURRENT_CONV],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, 1);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_recurrent_ssm(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        gate: ArenaRegion,
+        beta: ArenaRegion,
+        alpha: ArenaRegion,
+        output: ArenaRegion,
+        state: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        k_heads: usize,
+        v_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Result<(), VulkanError> {
+        if layer >= layer_count || k_heads == 0 || v_heads == 0 || head_dim == 0 || head_dim > 128 {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid Qwen3.5 recurrent SSM layer={layer}/{layer_count} heads={k_heads}/{v_heads} dim={head_dim}"
+            )));
+        }
+        let key_count = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let value_count = v_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let state_count = layer_count
+            .checked_mul(v_heads)
+            .and_then(|count| count.checked_mul(head_dim))
+            .and_then(|count| count.checked_mul(head_dim))
+            .ok_or(VulkanError::OutOfMemory)?;
+        bindings.require(0, f32_bytes(v_heads)?, "Qwen3.5 SSM dt bias")?;
+        bindings.require(1, f32_bytes(v_heads)?, "Qwen3.5 SSM A")?;
+        bindings.require(2, f32_bytes(head_dim)?, "Qwen3.5 SSM norm")?;
+        let push = [
+            self.f32_word(q, key_count, "Qwen3.5 SSM Q")?,
+            self.f32_word(k, key_count, "Qwen3.5 SSM K")?,
+            self.f32_word(v, value_count, "Qwen3.5 SSM V")?,
+            self.f32_word(gate, value_count, "Qwen3.5 SSM gate")?,
+            self.f32_word(beta, v_heads, "Qwen3.5 SSM beta")?,
+            self.f32_word(alpha, v_heads, "Qwen3.5 SSM alpha")?,
+            self.f32_word(output, value_count, "Qwen3.5 SSM output")?,
+            self.f32_word(state, state_count, "Qwen3.5 SSM state")?,
+            as_u32(layer, "Qwen3.5 SSM layer")?,
+            as_u32(k_heads, "Qwen3.5 SSM key heads")?,
+            as_u32(v_heads, "Qwen3.5 SSM value heads")?,
+            as_u32(head_dim, "Qwen3.5 SSM head dimension")?,
+            eps.to_bits(),
+        ];
+        let (x, y) = super::dispatch_grid(v_heads, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[QWEN35_RECURRENT_SSM],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, 1);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
     pub(crate) fn record_silu_mul(
         &self,
         commands: &TokenCommands<'_>,
@@ -1290,6 +1653,12 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
+        Ok(())
+    }
+
+    pub(crate) fn zero_region(&self, region: ArenaRegion) -> Result<(), VulkanError> {
+        self.byte_word(region, region.size, "zeroed Vulkan arena region")?;
+        unsafe { std::ptr::write_bytes(self.arena.mapped.add(region.offset), 0, region.size) };
         Ok(())
     }
 
@@ -1385,6 +1754,16 @@ fn allocate_bindings(
 fn as_u32(value: usize, label: &str) -> Result<u32, VulkanError> {
     u32::try_from(value)
         .map_err(|_| VulkanError::UnsupportedShape(format!("{label} value {value} exceeds u32")))
+}
+
+fn pack_u16_pair(low: usize, high: usize, label: &str) -> Result<u32, VulkanError> {
+    let low = u16::try_from(low).map_err(|_| {
+        VulkanError::UnsupportedShape(format!("{label} low value {low} exceeds u16"))
+    })?;
+    let high = u16::try_from(high).map_err(|_| {
+        VulkanError::UnsupportedShape(format!("{label} high value {high} exceeds u16"))
+    })?;
+    Ok(u32::from(low) | (u32::from(high) << 16))
 }
 
 fn f32_bytes(count: usize) -> Result<usize, VulkanError> {
@@ -1872,6 +2251,8 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         "q4_k" => GpuWeightFormat::Q4_K,
         "q6_k" => GpuWeightFormat::Q6_K,
         "f16" => GpuWeightFormat::F16,
+        "bf16" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::BF16)
+            .map_err(|error| error.to_string())?,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
     let n_in = match format {
@@ -1880,6 +2261,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::F16 => 1024,
+        GpuWeightFormat::BF16 => 1024,
         GpuWeightFormat::Q8_0 => unreachable!(),
     };
     let n_out = 65;
@@ -1887,7 +2269,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         .map_err(|error| error.to_string())?;
     let input: Vec<f32> = (0..n_in)
         .map(|index| {
-            let divisor = if format == GpuWeightFormat::F16 {
+            let divisor = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) {
                 131_072.0
             } else {
                 97.0
@@ -1934,7 +2316,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
             .map_err(|error| error.to_string())?;
         let tolerance = match format {
             GpuWeightFormat::Q4_K => 3e-3,
-            GpuWeightFormat::F16 => 2e-4,
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
         };
         check_close(
@@ -2155,6 +2537,22 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     };
                     data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
                 }
+                GpuWeightFormat::BF16 => {
+                    let bits: u16 = match block {
+                        0 => 0x0000,
+                        1 => 0x8000,
+                        2 => 0x0001,
+                        3 => 0x007f,
+                        4 => 0x0080,
+                        5 => 0x3f80,
+                        6 => 0x7f7f,
+                        7 => 0xff7f,
+                        _ => crate::ops::f32_to_bf16(
+                            ((row * 17 + block * 31) % 257) as f32 / 64.0 - 2.0,
+                        ),
+                    };
+                    data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
+                }
                 GpuWeightFormat::Q8_0 => unreachable!(),
             }
         }
@@ -2225,6 +2623,10 @@ fn cpu_weight_matvec(
         }
         GpuWeightFormat::F16 => {
             let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
+            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
+        GpuWeightFormat::BF16 => {
+            let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
         GpuWeightFormat::Q8_0 => unreachable!(),

@@ -9,13 +9,16 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 ## 支持范围
 
 - dense、Neox RoPE、无 QKV bias 的 Qwen3 Q8_0、Q4_0、Q4_1、Q4_K、Q6_K 和 F16 模型支持完整 token Vulkan 执行。
+- Qwen3.5 BF16 文本模型使用独立 executor，覆盖 dense attention、recurrent convolution/SSM、
+  mRoPE、FFN 和 logits；BF16 matmul 权重与 F32 辅助张量均在 Vulkan 路径执行。
 - 权重、F32 activation 和 GPU KV cache 常驻设备；每个 token 只提交一次 command buffer、
-  等待一次 fence。embedding lookup 和 greedy sampling 仍在 CPU，提交成功后同步 F16 shadow KV。
+  等待一次 fence。embedding lookup 和 greedy sampling 仍在 CPU；提交成功后，Qwen3 同步 F16
+  shadow KV，Qwen3.5 同步 F32 shadow KV 与 recurrent state。
 - `text_encode` 对整模符合资格、标准递增位置的模型逐 token 返回最终 RMSNorm hidden row，
   不录制 logits matvec；初始化或执行失败时丢弃 GPU 结果并用原 CPU 路径重算完整序列。
 - Vulkan token 失败时从上一个已提交 KV 状态在 CPU 重算；不符合资格的模型直接使用 CPU，
   不会静默混用不支持的 Vulkan 算子。
-- Q5_K 和 BF16 权重尚未接入完整 Vulkan 模型路径；同一组 gate/up 权重格式不一致时，模型整体回退 CPU。
+- Q5_K 尚未接入；同一组 gate/up 权重格式不一致，或 Qwen3.5 存在未录制算子时，模型整体回退 CPU。
 
 ## 架构
 
@@ -23,6 +26,10 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
   attention、FFN 和 residual add 依次录入同一 command buffer，最终 logits 后统一提交。
 - **F16 权重**：activation 先按 CPU contract 舍入为 F16，shader 从 `uint` storage buffer
   解包权重并复现 ARM64 FP16 累加/归约顺序，不要求 `storageBuffer16BitAccess`。
+- **BF16 权重**：shader 从 `uint` storage buffer 解包 16-bit lane，并按
+  `uintBitsToFloat(bits << 16)` 还原 BF16，不要求 16-bit storage feature。
+- **Qwen3.5 token 事务**：dense KV delta、recurrent convolution state 和 SSM state 只在
+  GPU token 成功后一起提交到 CPU shadow；失败 token 从上一个完整提交点在 CPU 重算。
 - **常驻资源**：模型权重只上传一次；session arena、activation、完整 GPU KV 和 token delta
   在 session 创建时分配，算子之间不回传 activation。
 - **设备优选**：先按 shader 的 workgroup / shared-memory 要求过滤，再按
@@ -67,6 +74,26 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 均取最后一行并按相同 F32/F64 contract 做 L2 归一化。全向量满足
 `abs <= 2e-3 + 2e-3 * abs(cpu)`，查询对两个文档的 cosine 排序相同；26 个输入 token
 对应 26 次 Vulkan submission。
+
+## Qwen3.5 BF16 实机门禁（2026-09-04）
+
+设备：Apple M3 Max（MoltenVK）。
+
+模型：`/Users/gouzi/Documents/git/rust-model-inference/models/qwen3.5-0.8B/Qwen3.5-0.8B-BF16.gguf`
+（1,516,744,736 bytes，SHA-256
+`cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5`）。
+
+```bash
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen35 \
+  --model /Users/gouzi/Documents/git/rust-model-inference/models/qwen3.5-0.8B/Qwen3.5-0.8B-BF16.gguf
+```
+
+固定 prompt 为 4 tokens；prefill logits 满足
+`abs <= 2e-3 + 2e-3 * abs(cpu)`，实测最大绝对误差 `2.956e-5`、最大相对误差
+`1.830e0`（相对误差峰值对应接近零的参考值）；32/32 greedy token ID 相同；4 个
+prompt token 加 32 个 decode token 共 36 次 Vulkan submission。输出格式摘要为
+`matmul={BF16};auxiliary={F32};backend=vulkan`。
 
 ## 交替基准
 

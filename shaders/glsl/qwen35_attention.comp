@@ -1,0 +1,76 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint gate_word;
+    uint cache_k_word;
+    uint cache_v_word;
+    uint output_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+} pc;
+
+shared float scores[4096];
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    if (head >= pc.q_heads) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint kv_count = pc.kv_heads * pc.head_dim;
+    uint q_base = pc.q_word + head * pc.head_dim;
+
+    if (lane == 0u) {
+        float maximum = -3.402823466e+38;
+        float scale = inversesqrt(float(pc.head_dim));
+        for (uint token = 0u; token < pc.sequence_length; token++) {
+            uint k_base = pc.cache_k_word
+                + (pc.layer * pc.capacity + token) * kv_count
+                + kv_head * pc.head_dim;
+            precise float dot = 0.0;
+            for (uint index = 0u; index < pc.head_dim; index++) {
+                dot = fma(
+                    uintBitsToFloat(arena.data[q_base + index]),
+                    uintBitsToFloat(arena.data[k_base + index]),
+                    dot
+                );
+            }
+            float score = dot * scale;
+            scores[token] = score;
+            maximum = max(maximum, score);
+        }
+        precise float sum = 0.0;
+        for (uint token = 0u; token < pc.sequence_length; token++) {
+            float value = exp(scores[token] - maximum);
+            scores[token] = value;
+            sum += value;
+        }
+        float inverse_sum = 1.0 / sum;
+        for (uint token = 0u; token < pc.sequence_length; token++) {
+            scores[token] *= inverse_sum;
+        }
+    }
+    barrier();
+
+    for (uint index = lane; index < pc.head_dim; index += 64u) {
+        precise float value = 0.0;
+        for (uint token = 0u; token < pc.sequence_length; token++) {
+            uint v_index = pc.cache_v_word
+                + (pc.layer * pc.capacity + token) * kv_count
+                + kv_head * pc.head_dim + index;
+            value = fma(scores[token], uintBitsToFloat(arena.data[v_index]), value);
+        }
+        float gate = uintBitsToFloat(
+            arena.data[pc.gate_word + head * pc.head_dim + index]
+        );
+        value *= 1.0 / (1.0 + exp(-gate));
+        arena.data[pc.output_word + head * pc.head_dim + index] = floatBitsToUint(value);
+    }
+}

@@ -1,8 +1,10 @@
 #[cfg(feature = "vulkan")]
+use rust_model_inference::models::qwen35::Qwen35Session;
+#[cfg(feature = "vulkan")]
 use rust_model_inference::{
     build_simple_prompt, open_model_source, qwen_text_positions, BPETokenizer, ComponentRole,
-    ComputePool, EncodeOptions, GGMLType, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,
-    Qwen3Model, Qwen3Session, TensorSource,
+    ComputePool, EncodeOptions, GGMLType, Qwen35Model, Qwen3GenerateOptions, Qwen3Generation,
+    Qwen3Input, Qwen3Model, Qwen3Session, TensorSource,
 };
 #[cfg(feature = "vulkan")]
 use std::path::PathBuf;
@@ -31,6 +33,7 @@ struct Arguments {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Qwen3,
+    Qwen35,
     Embedding,
 }
 
@@ -39,9 +42,12 @@ fn arguments() -> Result<Arguments, String> {
     let mut args = std::env::args().skip(1);
     let mode = match args.next().as_deref() {
         Some("qwen3") => Mode::Qwen3,
+        Some("qwen35") => Mode::Qwen35,
         Some("embedding") => Mode::Embedding,
         _ => {
-            return Err("usage: vk_model_check <qwen3|embedding> --model PATH [--benchmark]".into())
+            return Err(
+                "usage: vk_model_check <qwen3|qwen35|embedding> --model PATH [--benchmark]".into(),
+            )
         }
     };
     let mut model = None;
@@ -348,6 +354,91 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
 }
 
 #[cfg(feature = "vulkan")]
+fn qwen35_generate(
+    session: &mut Qwen35Session<'_>,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+    max_new_tokens: usize,
+) -> Result<Vec<u32>, String> {
+    let mut logits = session.step_with_tokens(token_ids, positions)?;
+    let mut generated = Vec::with_capacity(max_new_tokens);
+    for index in 0..max_new_tokens {
+        let token = logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index as u32)
+            .ok_or("Qwen3.5 produced empty logits")?;
+        generated.push(token);
+        if index + 1 < max_new_tokens {
+            let position = session.next_position();
+            logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
+        }
+    }
+    Ok(generated)
+}
+
+#[cfg(feature = "vulkan")]
+fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
+    let source: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(&arguments.model, ComponentRole::Llm)
+            .map_err(|error| error.to_string())?,
+    );
+    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
+    let model = Qwen35Model::from_source(source.as_ref())?;
+    let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
+    let positions = qwen_text_positions(prompt_tokens.len());
+    let capacity = prompt_tokens
+        .len()
+        .checked_add(GREEDY_TOKENS + 1)
+        .ok_or("session capacity overflow")?;
+    let pool = Arc::new(ComputePool::new(4));
+
+    let mut cpu = Qwen35Session::new_with_capacity(&model, Arc::clone(&pool), capacity)?;
+    let cpu_logits = cpu.step_with_tokens(&prompt_tokens, &positions)?;
+    cpu.reset();
+    let cpu_tokens = qwen35_generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
+
+    rust_model_inference::ops::enable_gpu();
+    let context = rust_model_inference::ops::get_vulkan_context()
+        .ok_or("Vulkan backend did not initialize")?;
+    let mut gpu = Qwen35Session::new_with_capacity(&model, pool, capacity)?;
+    let gpu_logits = gpu.step_with_tokens(&prompt_tokens, &positions)?;
+    assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
+    gpu.reset();
+    let before = context.submission_count();
+    let gpu_tokens = qwen35_generate(&mut gpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
+    let submissions = context.submission_count() - before;
+
+    let cpu_tokens = cpu_tokens
+        .get(..GREEDY_TOKENS)
+        .ok_or("CPU stopped before 32 greedy tokens")?;
+    let gpu_tokens = gpu_tokens
+        .get(..GREEDY_TOKENS)
+        .ok_or("Vulkan stopped before 32 greedy tokens")?;
+    if gpu_tokens != cpu_tokens {
+        return Err(format!(
+            "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
+        ));
+    }
+    let expected_submissions = prompt_tokens.len() + GREEDY_TOKENS;
+    if submissions != expected_submissions as u64 {
+        return Err(format!(
+            "expected one submission per token ({expected_submissions}), got {submissions}"
+        ));
+    }
+    println!("formats=matmul={{BF16}};auxiliary={{F32}};backend=vulkan");
+    println!(
+        "device={} prompt_tokens={} greedy_tokens={} submissions={submissions}",
+        context.device_name(),
+        prompt_tokens.len(),
+        GREEDY_TOKENS
+    );
+    println!("tokens={gpu_tokens:?}");
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
 fn normalize(mut values: Vec<f32>) -> Result<Vec<f32>, String> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err("embedding contains a non-finite value".into());
@@ -470,6 +561,7 @@ fn run() -> Result<(), String> {
     let arguments = arguments()?;
     match arguments.mode {
         Mode::Qwen3 => run_qwen3(&arguments),
+        Mode::Qwen35 => run_qwen35(&arguments),
         Mode::Embedding => run_embedding(&arguments),
     }
 }

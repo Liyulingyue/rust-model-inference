@@ -9,7 +9,7 @@
 //! - dense-attention softmax + value reduction (aarch64 NEON pinned)
 //! - `Qwen35Session` state management + embed-lookup helpers
 
-use super::session::Qwen35Session;
+use super::session::{required_token_count, Qwen35Session};
 use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
@@ -377,6 +377,91 @@ fn session_new_initializes_state_and_allocates_cache() {
     assert_eq!(session.pool().n_threads(), 1);
     // Scratchpad sized for n_ctx tokens
     assert!(session.scratch().x.len() >= 4 * 4);
+}
+
+#[test]
+fn session_new_with_capacity_sizes_state_to_requested_limit() {
+    let model = tiny_dense_session_model();
+    let session = Qwen35Session::new_with_capacity(&model, session_pool(), 4).unwrap();
+
+    assert_eq!(session.scratch().x.len(), 4 * model.config.n_embd);
+    let KvCache::F32(cache) = session.kv_cache() else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert_eq!(
+        cache.k.len(),
+        model.config.n_layer_impl() * 4 * model.config.n_embd_head()
+    );
+    assert_eq!(cache.v.len(), cache.k.len());
+}
+
+#[test]
+fn session_new_with_capacity_rejects_out_of_range_limits() {
+    let model = tiny_dense_session_model();
+
+    let zero = Qwen35Session::new_with_capacity(&model, session_pool(), 0)
+        .err()
+        .unwrap();
+    assert!(zero.contains("within 1..=16"), "unexpected error: {zero}");
+
+    let oversized = Qwen35Session::new_with_capacity(&model, session_pool(), 17)
+        .err()
+        .unwrap();
+    assert!(
+        oversized.contains("within 1..=16"),
+        "unexpected error: {oversized}"
+    );
+}
+
+#[test]
+fn session_step_rejects_tokens_beyond_requested_capacity() {
+    let model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new_with_capacity(&model, session_pool(), 1).unwrap();
+
+    let error = session
+        .step(&[0.0; 8], 2, &[[0; 4], [1, 1, 1, 0]])
+        .unwrap_err();
+
+    assert!(
+        error.contains("requires 2 tokens; session capacity is 1"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn session_step_rejects_empty_token_batches() {
+    let model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new_with_capacity(&model, session_pool(), 1).unwrap();
+
+    let error = session.step(&[], 0, &[]).unwrap_err();
+
+    assert!(
+        error.contains("requires at least one token"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn session_step_rejects_embedding_length_overflow() {
+    let model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new_with_capacity(&model, session_pool(), 1).unwrap();
+
+    let error = session.step(&[], usize::MAX, &[]).unwrap_err();
+
+    assert!(
+        error.contains("embedding length overflow"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn session_step_enforces_capacity_across_calls() {
+    let error = required_token_count(1, 1, 1).unwrap_err();
+
+    assert!(
+        error.contains("requires 2 tokens; session capacity is 1"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
