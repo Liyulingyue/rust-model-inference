@@ -42,6 +42,77 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
   内层 60 s）。超时/错误时标记 GPU broken → 该次 matmul 由线程 0 全量 CPU 重算
   （其余线程已返回，必须全量而非按行区间，否则留下未计算的行）→ 后续调用走 CPU。
 
+## 跨厂商统一验收流程
+
+MoltenVK、Intel ANV、AMD RADV 和 NVIDIA 使用同一套命令，不为某个驱动放宽误差门限或删减
+case。先把下面五个变量指向与模型清单 SHA-256 一致的本地文件；驱动选择只通过运行环境完成，
+不修改命令本身。
+
+```bash
+VULKAN_Q8_0_MODEL=/path/to/Qwen3-0.6B-Q8_0.gguf
+VULKAN_Q4_0_MODEL=/path/to/Qwen3-0.6B-Q4_0.gguf
+VULKAN_Q4_K_M_MODEL=/path/to/Qwen3-0.6B-Q4_K_M.gguf
+VULKAN_F16_EMBED_MODEL=/path/to/Qwen3-Embedding-0.6B-f16.gguf
+VULKAN_QWEN35_BF16_MODEL=/path/to/Qwen3.5-0.8B-BF16.gguf
+
+vulkaninfo --summary
+bash scripts/vulkan-shaders.sh check
+cargo fmt --check
+cargo check --locked --features vulkan --lib
+cargo check --locked --features vulkan --bin rust-model-inference
+cargo check --locked --features vulkan --bin server
+cargo check --locked --features vulkan --examples
+
+cargo run --release --locked --features vulkan --example vk_check
+cargo run --release --locked --features vulkan --example vk_ops_check -- \
+  --formats q4_0,q4_1,q4_k,q5_k,q6_k,f16,bf16
+
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen3 --model "$VULKAN_Q8_0_MODEL"
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen3 --model "$VULKAN_Q4_0_MODEL"
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen3 --model "$VULKAN_Q4_K_M_MODEL"
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  embedding --model "$VULKAN_F16_EMBED_MODEL"
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen35 --model "$VULKAN_QWEN35_BF16_MODEL"
+
+cargo run --release --locked --features vulkan --example vk_model_check -- \
+  qwen3 --model "$VULKAN_Q8_0_MODEL" --benchmark
+```
+
+`vk_check` 必须完成五种 shape，完整 `vk_ops_check` 必须覆盖上面列出的全部权重格式；Q5_K
+在这里仍只代表合成 kernel parity。五个 `vk_model_check` 都成功且 benchmark 输出五轮交替样本
+及中位数后，才可把对应硬件行标成“已验证”。仓库级
+`cargo test --all-targets --locked --features vulkan` 也要运行，但其与硬件验收分开记账，避免既有
+集成测试编译失败掩盖或冒充 Vulkan 结果。
+
+验收模型清单：
+
+| 模型 | bytes | SHA-256 |
+|---|---:|---|
+| Qwen3-0.6B-Q8_0.gguf | 639,446,688 | `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031` |
+| Qwen3-0.6B-Q4_0.gguf | 382,156,480 | `33bcc57074ec7b6eada5a90651ee546ec0c2b271002c22baf9f1b2dd1e8f75cb` |
+| Qwen3-0.6B-Q4_K_M.gguf | 396,705,472 | `ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a` |
+| Qwen3-Embedding-0.6B-f16.gguf | 1,197,629,632 | `421a27e58d165478cc7acb984a688c2aa41404968b0203e7cd743ece44c54340` |
+| Qwen3.5-0.8B-BF16.gguf | 1,516,744,736 | `cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5` |
+
+## 硬件矩阵（2026-09-04）
+
+| Vulkan 栈 | GPU | shader / 五 shape | 完整算子 | 五模型 | 交替基准中位数（CPU → GPU，prompt/decode） | 状态 |
+|---|---|---|---|---|---|---|
+| MoltenVK 1.4.2，driver 0.2.2210 | Apple M3 Max | 通过 / 5/5 | 全部通过；Q5_K 仅合成 | 5/5 | 20.704/20.401 → 6.048/6.031 tok/s | **已验证** |
+| Intel ANV | 未采集 | 未运行 | 未运行 | 未运行 | 未运行 | 未验证 |
+| AMD RADV | 未采集 | 未运行 | 未运行 | 未运行 | 未运行 | 未验证 |
+| NVIDIA Vulkan | 未采集 | 未运行 | 未运行 | 未运行 | 未运行 | 未验证 |
+
+Apple 行的 `vulkaninfo --summary` 为 Vulkan API 1.4.357、integrated GPU、driver ID
+`DRIVER_ID_MOLTENVK`。本次五模型结果为：Q8_0、Q4_0、Q4_K_M 的 prefill 最大绝对误差均为
+0，且各自 32/32 greedy token 相同（submission 分别为 37、36、36）；F16 embedding 的三个
+向量最大绝对误差为 `4.267e-4`、`4.156e-4`、`6.245e-4`，排序一致且共 26 submissions；
+Qwen3.5 BF16 prefill 最大绝对误差为 `2.956e-5`，32/32 token 相同，共 36 submissions。
+
 ## Qwen3 Q8_0 实机门禁（2026-09-04）
 
 设备：Apple M3 Max；Vulkan Loader/API 1.4.357；MoltenVK 1.4.2，driver 0.2.2210。
@@ -109,15 +180,27 @@ cargo run --release --locked --features vulkan --example vk_model_check -- \
 
 | 样本 | CPU prompt | CPU decode | Vulkan prompt | Vulkan decode |
 |---:|---:|---:|---:|---:|
-| 1 | 21.176 | 17.748 | 5.944 | 6.030 |
-| 2 | 21.136 | 17.949 | 5.977 | 5.999 |
-| 3 | 20.666 | 17.457 | 5.964 | 5.962 |
-| 4 | 21.637 | 17.815 | 6.001 | 6.033 |
-| 5 | 19.659 | 18.023 | 5.956 | 5.897 |
-| **中位数** | **21.136** | **17.815** | **5.964** | **5.999** |
+| 1 | 20.742 | 20.535 | 6.057 | 6.031 |
+| 2 | 20.686 | 21.217 | 5.970 | 6.032 |
+| 3 | 20.979 | 17.800 | 6.060 | 5.791 |
+| 4 | 17.683 | 20.251 | 6.048 | 6.046 |
+| 5 | 20.704 | 20.401 | 6.042 | 6.023 |
+| **中位数** | **20.704** | **20.401** | **6.048** | **6.031** |
 
-prompt speedup 0.282×，decode speedup 0.337×，`acceleration=false`。当前 M3 Max 上的
+prompt speedup 0.292×，decode speedup 0.296×，`acceleration=false`。当前 M3 Max 上的
 MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
+
+## 仓库测试边界（2026-09-04）
+
+`cargo test --all-targets --locked --features vulkan` 在运行测试前以 101 退出，原因是三个既有
+集成测试没有跟上当前公开接口：
+
+- `tests/gemma4_reference.rs` 导入不存在的 `app::run_gemma4` 和 `Gemma4Request`；
+- `tests/parity_trace.rs` 未启用 `parity-trace` feature，却直接引用受该 feature 保护的模块；
+- `tests/q8_0_parallel_matmul.rs` 导入已不存在的 `ops::matmul_q8_0_quantized`。
+
+因此不宣称全仓测试通过；该结果与本页明确列出的 shader、build、合成算子和五个实模门禁
+分开报告。
 
 ## 已知问题与调试开关
 
