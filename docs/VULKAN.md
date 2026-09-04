@@ -192,12 +192,14 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
 
 ## 仓库测试边界（2026-09-04）
 
-`cargo test --all-targets --locked --features vulkan` 在运行测试前以 101 退出，原因是三个既有
+`cargo test --all-targets --locked --features vulkan` 在运行测试前以 101 退出，原因是四个既有
 集成测试没有跟上当前公开接口：
 
 - `tests/gemma4_reference.rs` 导入不存在的 `app::run_gemma4` 和 `Gemma4Request`；
 - `tests/parity_trace.rs` 未启用 `parity-trace` feature，却直接引用受该 feature 保护的模块；
 - `tests/q8_0_parallel_matmul.rs` 导入已不存在的 `ops::matmul_q8_0_quantized`。
+- `tests/quantized_inference.rs` 仍使用已移除的 `Q4_KWeight`、旧版单参数 kernel 构造器和
+  缺少 Q8_K 输入参数的 `forward_prepared` 调用，共产生 10 个编译错误。
 
 因此不宣称全仓测试通过；该结果与本页明确列出的 shader、build、合成算子和五个实模门禁
 分开报告。
