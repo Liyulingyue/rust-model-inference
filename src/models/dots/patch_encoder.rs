@@ -59,18 +59,90 @@ pub(crate) fn linear_forward(
     out_dim: usize,
     output: &mut [f32],
 ) {
-    for row in 0..out_dim {
-        let mut sum = bias.map_or(0.0, |b| b[row]);
-        let w = &weight[row * in_dim..(row + 1) * in_dim];
-        for (wi, &xi) in w.iter().zip(input.iter()) {
-            sum = wi.mul_add(xi, sum);
+    #[cfg(target_os = "macos")]
+    if let Some(bias) = bias {
+        let rows = output.len() / out_dim;
+        debug_assert_eq!(input.len(), rows * in_dim);
+        for row in output.chunks_exact_mut(out_dim) {
+            row.copy_from_slice(bias);
         }
-        output[row] = sum;
+        unsafe {
+            cblas_sgemm(
+                101,
+                111,
+                112,
+                rows as i32,
+                out_dim as i32,
+                in_dim as i32,
+                1.0,
+                input.as_ptr(),
+                in_dim as i32,
+                weight.as_ptr(),
+                in_dim as i32,
+                1.0,
+                output.as_mut_ptr(),
+                out_dim as i32,
+            );
+        }
+        return;
+    }
+    let rows = output.len() / out_dim;
+    debug_assert_eq!(input.len(), rows * in_dim);
+    for input_row in 0..rows {
+        for output_feature in 0..out_dim {
+            let mut sum = bias.map_or(0.0, |b| b[output_feature]);
+            let w = &weight[output_feature * in_dim..(output_feature + 1) * in_dim];
+            for (wi, &xi) in w
+                .iter()
+                .zip(&input[input_row * in_dim..(input_row + 1) * in_dim])
+            {
+                sum = wi.mul_add(xi, sum);
+            }
+            output[input_row * out_dim + output_feature] = sum;
+        }
     }
 }
 
-/// Reference rotary: freqs repeat across the two halves, so element `d` is
-/// paired with `d+half` and rotated by `pos / theta^(2*(d%half)/head_dim)`.
+#[cfg(target_os = "macos")]
+fn linear_forward_transposed_input_then_bias(
+    weight: &[f32],
+    bias: &[f32],
+    input: &[f32],
+    rows: usize,
+    in_dim: usize,
+    out_dim: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(input.len(), rows * in_dim);
+    debug_assert_eq!(weight.len(), out_dim * in_dim);
+    debug_assert_eq!(bias.len(), out_dim);
+    debug_assert_eq!(output.len(), rows * out_dim);
+    unsafe {
+        cblas_sgemm(
+            101,
+            112,
+            112,
+            rows as i32,
+            out_dim as i32,
+            in_dim as i32,
+            1.0,
+            input.as_ptr(),
+            rows as i32,
+            weight.as_ptr(),
+            in_dim as i32,
+            0.0,
+            output.as_mut_ptr(),
+            out_dim as i32,
+        );
+    }
+    for row in output.chunks_exact_mut(out_dim) {
+        for (value, &bias) in row.iter_mut().zip(bias) {
+            *value += bias;
+        }
+    }
+}
+
+/// Rotary helper shared by DiT; PatchEncoder's pinned Oracle does not apply it.
 pub(crate) fn dots_rotary(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     for i in 0..half {
@@ -87,9 +159,29 @@ const ENC_HEADS: usize = 16;
 const ENC_HEAD_DIM: usize = 64;
 const ENC_HIDDEN: usize = 1024;
 const ENC_FFN: usize = 4096;
-const ENC_ROPE_THETA: f32 = 10_000.0;
 const ENC_NORM_EPS: f32 = 1e-5;
 const ENC_TOKENS_PER_PATCH: usize = 2; // patch_size 4 / in_ds_rate 2
+
+#[cfg(target_os = "macos")]
+#[link(name = "Accelerate", kind = "framework")]
+unsafe extern "C" {
+    fn cblas_sgemm(
+        order: i32,
+        transpose_a: i32,
+        transpose_b: i32,
+        rows: i32,
+        columns: i32,
+        reduction: i32,
+        alpha: f32,
+        left: *const f32,
+        left_stride: i32,
+        right: *const f32,
+        right_stride: i32,
+        beta: f32,
+        output: *mut f32,
+        output_stride: i32,
+    );
+}
 
 pub(crate) struct PatchLayerWeights {
     pub(crate) attn_norm: Vec<f32>,
@@ -135,15 +227,50 @@ impl PatchEncoderState {
     }
 }
 
+fn online_attention_head(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    keys: usize,
+    head_offset: usize,
+) -> [f32; ENC_HEAD_DIM] {
+    debug_assert_eq!(q.len(), ENC_HEAD_DIM);
+    let scale = 1.0 / (ENC_HEAD_DIM as f32).sqrt();
+    let mut acc = [0.0f32; ENC_HEAD_DIM];
+    let mut sum = 0.0f32;
+    let mut max = f32::NEG_INFINITY;
+    for key in 0..keys {
+        let offset = key * ENC_HIDDEN + head_offset;
+        let score = dot_f32(q, &k_cache[offset..offset + ENC_HEAD_DIM], ENC_HEAD_DIM) * scale;
+        let is_new_max = score > max;
+        let weight = if is_new_max {
+            let rescale = (max - score).exp();
+            max = score;
+            for value in &mut acc {
+                *value *= rescale;
+            }
+            sum = sum.mul_add(rescale, 1.0);
+            1.0
+        } else {
+            (score - max).exp()
+        };
+        let vrow = &v_cache[offset..offset + ENC_HEAD_DIM];
+        for (value, &vv) in acc.iter_mut().zip(vrow) {
+            *value += vv * weight;
+        }
+        if !is_new_max {
+            sum += weight;
+        }
+    }
+    let recip = if sum == 0.0 { 0.0 } else { sum.recip() };
+    acc.map(|value| value * recip)
+}
+
 impl PatchEncoder {
     pub fn from_source(source: &dyn TensorSource, config: DotsTtsConfig) -> Result<Self, String> {
         let d = config.latent_dim as u64;
         let enc_hid = ENC_HIDDEN as u64;
-        let ds = load_f16_f32(
-            source,
-            "dotstts.patch_encoder.ds_proj.weight",
-            &[2, d, d],
-        )?;
+        let ds = load_f16_f32(source, "dotstts.patch_encoder.ds_proj.weight", &[2, d, d])?;
         let ds_bias = load_f16_f32(source, "dotstts.patch_encoder.ds_proj.bias", &[d])?;
         let in_proj = load_f16_f32(
             source,
@@ -163,9 +290,8 @@ impl PatchEncoder {
         )?;
         let mut layers = Vec::with_capacity(config.patch_encoder_layers);
         for layer in 0..config.patch_encoder_layers {
-            let name = |suffix: &str| {
-                format!("dotstts.patch_encoder.encoder.layers.{layer}.{suffix}")
-            };
+            let name =
+                |suffix: &str| format!("dotstts.patch_encoder.encoder.layers.{layer}.{suffix}");
             let hid = [ENC_HIDDEN as u64];
             let hid2 = [ENC_HIDDEN as u64; 2];
             layers.push(PatchLayerWeights {
@@ -225,6 +351,15 @@ impl PatchEncoder {
         let tokens = self.downsample(latents, state)?;
         let hidden = self.transformer(&tokens, state.seq_len, state)?;
         let embeddings = self.project(&hidden, patches)?;
+        #[cfg(feature = "parity-trace")]
+        for embedding in embeddings.chunks_exact(self.config.llm_hidden_size) {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dots.patch.embedding",
+                None,
+                &[1, embedding.len()],
+                embedding,
+            ));
+        }
         state.seq_len += tokens.len() / ENC_HIDDEN;
         Ok(embeddings)
     }
@@ -241,12 +376,19 @@ impl PatchEncoder {
         let tokens = self.downsample(patch, state)?;
         let hidden = self.transformer(&tokens, state.seq_len, state)?;
         let embeddings = self.project(&hidden, 1)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.patch.embedding",
+            None,
+            &[1, embeddings.len()],
+            &embeddings,
+        ));
         state.seq_len += ENC_TOKENS_PER_PATCH;
         Ok(embeddings)
     }
 
     /// Causal Conv1d(k2, s2, left pad 1) downsample + in_proj.
-    /// Input frames `[frames, 128]` (raw latent space); output `[tokens, 1024]`.
+/// Input frames `[frames, 128]` (raw latent space); output `[tokens, 1024]`.
     fn downsample(
         &self,
         frames: &[f32],
@@ -255,37 +397,113 @@ impl PatchEncoder {
         let n_frames = frames.len() / 128;
         let n_tokens = n_frames / 2;
         let mut tokens = vec![0.0f32; n_tokens * ENC_HIDDEN];
-        for token in 0..n_tokens {
-            let mut projected = vec![0.0f32; 128];
-            for out in 0..128 {
-                let mut sum = self.ds_bias[out];
-                // two taps: input positions 2*token + {0, 1} over the padded stream
-                for tap in 0..2 {
-                    let in_pos = 2 * token + tap;
-                    let frame = if in_pos == 0 {
-                        &state.conv_tail
-                    } else {
-                        &frames[(in_pos - 1) * 128..in_pos * 128]
-                    };
-                    for inp in 0..128 {
-                        let w = self.ds_proj[tap * 128 * 128 + inp * 128 + out];
-                        sum = w.mul_add(frame[inp], sum);
-                    }
-                }
-                projected[out] = sum;
-            }
+        #[cfg(target_os = "macos")]
+        {
+            let projected = self.downsample_projection_channel_major(frames, &state.conv_tail);
+            linear_forward_transposed_input_then_bias(
+                &self.in_proj,
+                &self.in_bias,
+                &projected,
+                n_tokens,
+                128,
+                ENC_HIDDEN,
+                &mut tokens,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let projected = self.downsample_projection(frames, &state.conv_tail);
             linear_forward(
                 &self.in_proj,
                 Some(&self.in_bias),
                 &projected,
                 128,
                 ENC_HIDDEN,
-                &mut tokens[token * ENC_HIDDEN..(token + 1) * ENC_HIDDEN],
+                &mut tokens,
             );
         }
         // carry the last 1 frame as the next left-pad slot
-        state.conv_tail.copy_from_slice(&frames[(n_frames - 1) * 128..]);
+        state
+            .conv_tail
+            .copy_from_slice(&frames[(n_frames - 1) * 128..]);
         Ok(tokens)
+    }
+
+    fn downsample_projection(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
+        let n_tokens = frames.len() / (2 * 128);
+        let mut projected = vec![0.0f32; n_tokens * 128];
+        #[cfg(target_os = "macos")]
+        {
+            let channel_major = self.downsample_projection_channel_major(frames, conv_tail);
+            for out in 0..128 {
+                for token in 0..n_tokens {
+                    projected[token * 128 + out] = channel_major[out * n_tokens + token];
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        for token in 0..n_tokens {
+            for out in 0..128 {
+                let mut sum = self.ds_bias[out];
+                for tap in 0..2 {
+                    let in_pos = 2 * token + tap;
+                    let frame = if in_pos == 0 {
+                        conv_tail
+                    } else {
+                        &frames[(in_pos - 1) * 128..in_pos * 128]
+                    };
+                    for inp in 0..128 {
+                        let weight = self.ds_proj[(out * 128 + inp) * 2 + tap];
+                        sum = weight.mul_add(frame[inp], sum);
+                    }
+                }
+                projected[token * 128 + out] = sum;
+            }
+        }
+        projected
+    }
+
+    #[cfg(target_os = "macos")]
+    fn downsample_projection_channel_major(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
+        let n_tokens = frames.len() / (2 * 128);
+        let mut columns = vec![0.0f32; 2 * 128 * n_tokens];
+        let mut channel_major = vec![0.0f32; 128 * n_tokens];
+        for out in 0..128 {
+            channel_major[out * n_tokens..(out + 1) * n_tokens].fill(self.ds_bias[out]);
+        }
+        for inp in 0..128 {
+            for tap in 0..2 {
+                let column = (inp * 2 + tap) * n_tokens;
+                for token in 0..n_tokens {
+                    let in_pos = 2 * token + tap;
+                    let frame = if in_pos == 0 {
+                        conv_tail
+                    } else {
+                        &frames[(in_pos - 1) * 128..in_pos * 128]
+                    };
+                    columns[column + token] = frame[inp];
+                }
+            }
+        }
+        unsafe {
+            cblas_sgemm(
+                102,
+                111,
+                111,
+                n_tokens as i32,
+                128,
+                256,
+                1.0,
+                columns.as_ptr(),
+                n_tokens as i32,
+                self.ds_proj.as_ptr(),
+                256,
+                1.0,
+                channel_major.as_mut_ptr(),
+                n_tokens as i32,
+            );
+        }
+        channel_major
     }
 
     /// Run the 24-layer transformer with KV caching. `start` is the absolute
@@ -340,32 +558,6 @@ impl PatchEncoder {
                     &mut v[i * ENC_HIDDEN..(i + 1) * ENC_HIDDEN],
                 );
             }
-            // rotary (per token position) then weight-free RMS q/k norms
-            for i in 0..t {
-                let pos = start + i;
-                for head in 0..ENC_HEADS {
-                    dots_rotary(
-                        &mut q[i * ENC_HIDDEN + head * ENC_HEAD_DIM
-                            ..i * ENC_HIDDEN + (head + 1) * ENC_HEAD_DIM],
-                        pos,
-                        ENC_HEAD_DIM,
-                        ENC_ROPE_THETA,
-                    );
-                    dots_rotary(
-                        &mut k[i * ENC_HIDDEN + head * ENC_HEAD_DIM
-                            ..i * ENC_HIDDEN + (head + 1) * ENC_HEAD_DIM],
-                        pos,
-                        ENC_HEAD_DIM,
-                        ENC_ROPE_THETA,
-                    );
-                }
-            }
-            for chunk in q.chunks_exact_mut(ENC_HEAD_DIM) {
-                rms_norm_ones(chunk, ENC_NORM_EPS);
-            }
-            for chunk in k.chunks_exact_mut(ENC_HEAD_DIM) {
-                rms_norm_ones(chunk, ENC_NORM_EPS);
-            }
             // write new K/V into the cache
             {
                 let end = start + t;
@@ -380,45 +572,22 @@ impl PatchEncoder {
                 let _ = end;
             }
             // attention: query i sees keys 0 .. start+i+1 (causal)
-            let scale = 1.0 / (ENC_HEAD_DIM as f32).sqrt();
             attn.fill(0.0);
             for i in 0..t {
                 let keys = start + i + 1;
                 for head in 0..ENC_HEADS {
                     let qh = &q[i * ENC_HIDDEN + head * ENC_HEAD_DIM
                         ..i * ENC_HIDDEN + (head + 1) * ENC_HEAD_DIM];
-                    // online softmax over keys
-                    let mut acc = [0.0f32; ENC_HEAD_DIM];
-                    let mut sum = 0.0f32;
-                    let mut max = f32::NEG_INFINITY;
-                    for key in 0..keys {
-                        let koff = key * ENC_HIDDEN + head * ENC_HEAD_DIM;
-                        let krow = &state.k_cache[layer_idx][koff..koff + ENC_HEAD_DIM];
-                        let score = dot_f32(qh, krow, ENC_HEAD_DIM) * scale;
-                        if score > max {
-                            let rescale = (max - score).exp();
-                            max = score;
-                            for value in acc.iter_mut() {
-                                *value *= rescale;
-                            }
-                            sum = sum.mul_add(rescale, 1.0);
-                        } else {
-                            let weight = (score - max).exp();
-                            sum += weight;
-                            let voff = key * ENC_HIDDEN + head * ENC_HEAD_DIM;
-                            let vrow = &state.v_cache[layer_idx][voff..voff + ENC_HEAD_DIM];
-                            for (value, &vv) in acc.iter_mut().zip(vrow.iter()) {
-                                *value += vv * weight;
-                            }
-                        }
-                    }
-                    let recip = if sum == 0.0 { 0.0 } else { sum.recip() };
+                    let acc = online_attention_head(
+                        qh,
+                        &state.k_cache[layer_idx],
+                        &state.v_cache[layer_idx],
+                        keys,
+                        head * ENC_HEAD_DIM,
+                    );
                     let dst = i * ENC_HIDDEN + head * ENC_HEAD_DIM;
-                    for (slot, &value) in attn[dst..dst + ENC_HEAD_DIM]
-                        .iter_mut()
-                        .zip(acc.iter())
-                    {
-                        *slot = value * recip;
+                    for (slot, &value) in attn[dst..dst + ENC_HEAD_DIM].iter_mut().zip(acc.iter()) {
+                        *slot = value;
                     }
                 }
             }
@@ -469,9 +638,8 @@ impl PatchEncoder {
         let mut embeddings = vec![0.0f32; patches * self.config.llm_hidden_size];
         for p in 0..patches {
             let mut concat = vec![0.0f32; ENC_HIDDEN * 2];
-            concat[..ENC_HIDDEN].copy_from_slice(
-                &hidden[p * 2 * ENC_HIDDEN..p * 2 * ENC_HIDDEN + ENC_HIDDEN],
-            );
+            concat[..ENC_HIDDEN]
+                .copy_from_slice(&hidden[p * 2 * ENC_HIDDEN..p * 2 * ENC_HIDDEN + ENC_HIDDEN]);
             concat[ENC_HIDDEN..].copy_from_slice(
                 &hidden[p * 2 * ENC_HIDDEN + ENC_HIDDEN..(p + 1) * 2 * ENC_HIDDEN],
             );
@@ -481,24 +649,11 @@ impl PatchEncoder {
                 &concat,
                 ENC_HIDDEN * 2,
                 self.config.llm_hidden_size,
-                &mut embeddings[p * self.config.llm_hidden_size
-                    ..(p + 1) * self.config.llm_hidden_size],
+                &mut embeddings
+                    [p * self.config.llm_hidden_size..(p + 1) * self.config.llm_hidden_size],
             );
         }
         Ok(embeddings)
-    }
-}
-
-/// RMSNorm with a weight of all ones (the checkpoint has no q/k norm weights).
-fn rms_norm_ones(x: &mut [f32], eps: f32) {
-    let mut mean_sq = 0.0f64;
-    for &value in x.iter() {
-        mean_sq += (value as f64) * (value as f64);
-    }
-    mean_sq /= x.len() as f64;
-    let inv = 1.0 / (mean_sq + eps as f64).sqrt();
-    for value in x.iter_mut() {
-        *value = (*value as f64 * inv) as f32;
     }
 }
 
@@ -565,5 +720,85 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0x3f80_0000, 0xc020_0000],
         );
+    }
+
+    #[test]
+    fn online_attention_includes_value_when_score_sets_new_maximum() {
+        let q = [0.0f32; ENC_HEAD_DIM];
+        let keys = vec![0.0f32; ENC_HIDDEN];
+        let mut values = vec![0.0f32; ENC_HIDDEN];
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = index as f32 + 1.0;
+        }
+        let actual = online_attention_head(&q, &keys, &values, 1, 0);
+        assert_eq!(actual, values[..ENC_HEAD_DIM]);
+    }
+
+    #[test]
+    #[ignore = "requires DOTS_PATCH_MMPROJ, DOTS_PATCH_RAW_INPUT, and DOTS_PATCH_DS_PROJ"]
+    fn causal_downsample_projection_matches_pinned_torch_bitwise() {
+        use crate::{open_model_source, ComponentRole};
+
+        let read = |name: &str| {
+            std::fs::read(std::env::var_os(name).unwrap())
+                .unwrap()
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let source = open_model_source(
+            std::path::Path::new(&std::env::var_os("DOTS_PATCH_MMPROJ").unwrap()),
+            ComponentRole::Mmproj,
+        )
+        .unwrap();
+        let config = DotsTtsConfig::from_source(source.as_ref()).unwrap();
+        let encoder = PatchEncoder::from_source(source.as_ref(), config).unwrap();
+        let input = read("DOTS_PATCH_RAW_INPUT");
+        let expected = read("DOTS_PATCH_DS_PROJ");
+
+        let actual = encoder.downsample_projection(&input[..144 * 128], &[0.0; 128]);
+
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "patch_encoder.ds_proj[{index}]"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DOTS_PATCH_MMPROJ, DOTS_PATCH_RAW_INPUT, and DOTS_PATCH_IN_PROJ"]
+    fn input_projection_matches_pinned_torch_bmm_then_bias_bitwise() {
+        use crate::{open_model_source, ComponentRole};
+
+        let read = |name: &str| {
+            std::fs::read(std::env::var_os(name).unwrap())
+                .unwrap()
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let source = open_model_source(
+            std::path::Path::new(&std::env::var_os("DOTS_PATCH_MMPROJ").unwrap()),
+            ComponentRole::Mmproj,
+        )
+        .unwrap();
+        let config = DotsTtsConfig::from_source(source.as_ref()).unwrap();
+        let encoder = PatchEncoder::from_source(source.as_ref(), config).unwrap();
+        let input = read("DOTS_PATCH_RAW_INPUT");
+        let expected = read("DOTS_PATCH_IN_PROJ");
+        let mut state = encoder.new_state(input.len() / (2 * 128));
+
+        let actual = encoder.downsample(&input[..144 * 128], &mut state).unwrap();
+
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "patch_encoder.in_proj[{index}]"
+            );
+        }
     }
 }
