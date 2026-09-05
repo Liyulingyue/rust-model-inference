@@ -1,0 +1,33 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint k_word;
+    uint v_word;
+    uint cache_k_word;
+    uint cache_v_word;
+    uint delta_k_word;
+    uint delta_v_word;
+    uint layer;
+    uint position;
+    uint capacity;
+    uint kv_count;
+} pc;
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.kv_count) return;
+    uint cache_index = (pc.layer * pc.capacity + pc.position) * pc.kv_count + index;
+    uint delta_index = pc.layer * pc.kv_count + index;
+    float key_f32 = uintBitsToFloat(arena.data[pc.k_word + index]);
+    float value_f32 = uintBitsToFloat(arena.data[pc.v_word + index]);
+    uint key = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(key_f32, 0.0))).x);
+    uint value = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(value_f32, 0.0))).x);
+    arena.data[pc.cache_k_word + cache_index] = key;
+    arena.data[pc.cache_v_word + cache_index] = value;
+    arena.data[pc.delta_k_word + delta_index] = key;
+    arena.data[pc.delta_v_word + delta_index] = value;
+}

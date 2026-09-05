@@ -1,0 +1,74 @@
+#version 450
+
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint q8_word;
+    uint scales_word;
+    uint input_sums_word;
+    uint count;
+} pc;
+
+shared float values[32];
+shared float partial[32];
+shared int quantized_values[32];
+shared int partial_sum[32];
+shared float inverse_scale;
+shared float raw_scale;
+
+void main() {
+    uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint blocks = pc.count / 32u;
+    if (block >= blocks) return;
+
+    uint lane = gl_LocalInvocationID.x;
+    float value = uintBitsToFloat(arena.data[pc.input_word + block * 32u + lane]);
+    values[lane] = value;
+    partial[lane] = abs(value);
+    barrier();
+
+    for (uint step = 16u; step > 0u; step >>= 1u) {
+        if (lane < step) partial[lane] = max(partial[lane], partial[lane + step]);
+        barrier();
+    }
+
+    if (lane == 0u) {
+        precise float scale = partial[0] == 0.0 ? 0.0 : partial[0] / 127.0;
+        raw_scale = scale;
+        precise float scale_error = fma(-scale, 127.0, partial[0]);
+        scale += scale_error / 127.0;
+        precise float inverse = scale == 0.0 ? 0.0 : 1.0 / scale;
+        precise float inverse_error = fma(-scale, inverse, 1.0);
+        inverse_scale = fma(inverse_error, inverse, inverse);
+        float stored_scale = unpackHalf2x16(packHalf2x16(vec2(scale, 0.0))).x;
+        arena.data[pc.scales_word + block] = floatBitsToUint(stored_scale);
+    }
+    barrier();
+
+    if (lane < 8u) {
+        uint packed = 0u;
+        for (uint byte_index = 0u; byte_index < 4u; byte_index++) {
+            uint value_index = lane * 4u + byte_index;
+            precise float scaled = values[value_index] * inverse_scale;
+            int quantized = int(roundEven(scaled));
+            quantized = clamp(quantized, -128, 127);
+            quantized_values[value_index] = quantized;
+            packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);
+        }
+        arena.data[pc.q8_word + block * 8u + lane] = packed;
+    }
+    barrier();
+
+    partial_sum[lane] = quantized_values[lane];
+    barrier();
+    for (uint step = 16u; step > 0u; step >>= 1u) {
+        if (lane < step) partial_sum[lane] += partial_sum[lane + step];
+        barrier();
+    }
+    if (lane == 0u) {
+        float input_sum = unpackHalf2x16(packHalf2x16(vec2(float(partial_sum[0]) * raw_scale, 0.0))).x;
+        arena.data[pc.input_sums_word + block] = floatBitsToUint(input_sum);
+    }
+}

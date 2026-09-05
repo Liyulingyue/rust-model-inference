@@ -1,0 +1,59 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint cache_k_word;
+    uint scores_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    float scale;
+} pc;
+
+float round_f16(float value) {
+    return unpackHalf2x16(packHalf2x16(vec2(value, 0.0))).x;
+}
+
+float fma_f16(float a, float b, float c) {
+    return float(fma(float16_t(a), float16_t(b), float16_t(c)));
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    uint total = pc.q_heads * pc.sequence_length;
+    if (index >= total) return;
+    uint head = index / pc.sequence_length;
+    uint token = index - head * pc.sequence_length;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint q_base = pc.q_word + head * pc.head_dim;
+    uint key_base = pc.cache_k_word
+        + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+        + kv_head * pc.head_dim;
+    float partial[32];
+    for (uint index = 0u; index < 32u; index++) partial[index] = 0.0;
+    for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
+        float query = uintBitsToFloat(arena.data[q_base + dimension]);
+        query = round_f16(query);
+        float key = uintBitsToFloat(arena.data[key_base + dimension]);
+        uint slot = dimension & 31u;
+        partial[slot] = fma_f16(query, key, partial[slot]);
+    }
+    float lanes[8];
+    for (uint lane = 0u; lane < 8u; lane++) {
+        float low = round_f16(partial[lane] + partial[16u + lane]);
+        float high = round_f16(partial[8u + lane] + partial[24u + lane]);
+        lanes[lane] = round_f16(low + high);
+    }
+    float sum01 = (lanes[0] + lanes[4]) + (lanes[1] + lanes[5]);
+    float sum23 = (lanes[2] + lanes[6]) + (lanes[3] + lanes[7]);
+    float sum = sum01 + sum23;
+    arena.data[pc.scores_word + index] = floatBitsToUint(sum * pc.scale);
+}

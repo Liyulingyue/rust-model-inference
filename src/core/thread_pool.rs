@@ -1,6 +1,37 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "vulkan")]
+thread_local! {
+    static GPU_MATMUL_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn gpu_matmul_disabled() -> bool {
+    GPU_MATMUL_DISABLED.get()
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) struct GpuMatmulScope {
+    previous: bool,
+}
+
+#[cfg(feature = "vulkan")]
+impl GpuMatmulScope {
+    fn set(disabled: bool) -> Self {
+        Self {
+            previous: GPU_MATMUL_DISABLED.replace(disabled),
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl Drop for GpuMatmulScope {
+    fn drop(&mut self) {
+        GPU_MATMUL_DISABLED.set(self.previous);
+    }
+}
+
 // ============================================================================
 // TODO(architecture): Two-pool concurrency model — see below for unification
 // direction. Currently the codebase uses two distinct thread scheduling
@@ -63,6 +94,10 @@ struct Inner {
     chunk_counter: AtomicI32,
     chunk_barrier: std::sync::atomic::AtomicUsize,
     chunk_n_chunks: std::sync::atomic::AtomicI32,
+    #[cfg(feature = "vulkan")]
+    gpu_matmul_disabled: AtomicBool,
+    #[cfg(all(test, feature = "vulkan"))]
+    gpu_disabled_workers: AtomicUsize,
 }
 
 type CallFn = unsafe fn(usize, usize, usize);
@@ -81,6 +116,10 @@ impl ComputePool {
                     chunk_counter: AtomicI32::new(0),
                     chunk_barrier: AtomicUsize::new(0),
                     chunk_n_chunks: AtomicI32::new(0),
+                    #[cfg(feature = "vulkan")]
+                    gpu_matmul_disabled: AtomicBool::new(false),
+                    #[cfg(all(test, feature = "vulkan"))]
+                    gpu_disabled_workers: AtomicUsize::new(0),
                 }),
                 threads: Vec::new(),
             };
@@ -95,6 +134,10 @@ impl ComputePool {
             chunk_counter: AtomicI32::new(0),
             chunk_barrier: AtomicUsize::new(0),
             chunk_n_chunks: AtomicI32::new(0),
+            #[cfg(feature = "vulkan")]
+            gpu_matmul_disabled: AtomicBool::new(false),
+            #[cfg(all(test, feature = "vulkan"))]
+            gpu_disabled_workers: AtomicUsize::new(0),
         });
 
         let mut threads = Vec::with_capacity(n_threads - 1);
@@ -122,8 +165,29 @@ impl ComputePool {
         self.n_threads
     }
 
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn disable_gpu_matmul_for_scope() -> GpuMatmulScope {
+        GpuMatmulScope::set(true)
+    }
+
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(crate) fn clear_gpu_disabled_workers_for_test(&self) {
+        self.inner.gpu_disabled_workers.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(crate) fn gpu_disabled_workers_for_test(&self) -> usize {
+        self.inner.gpu_disabled_workers.load(Ordering::Relaxed)
+    }
+
     pub fn compute<F: Fn(usize, usize)>(&self, f: F) {
         if self.n_threads <= 1 {
+            #[cfg(all(test, feature = "vulkan"))]
+            if gpu_matmul_disabled() {
+                self.inner
+                    .gpu_disabled_workers
+                    .fetch_or(1, Ordering::Relaxed);
+            }
             f(0, 1);
             return;
         }
@@ -148,12 +212,22 @@ impl ComputePool {
         self.inner.n_complete.store(0, Ordering::Relaxed);
         self.inner.call_fn.store(call_fn, Ordering::Relaxed);
         self.inner.call_data.store(data_ptr, Ordering::Relaxed);
+        #[cfg(feature = "vulkan")]
+        self.inner
+            .gpu_matmul_disabled
+            .store(gpu_matmul_disabled(), Ordering::Relaxed);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         // Publish: epoch increment signals workers to start
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
 
         // Main thread does its share
+        #[cfg(all(test, feature = "vulkan"))]
+        if gpu_matmul_disabled() {
+            self.inner
+                .gpu_disabled_workers
+                .fetch_or(1, Ordering::Relaxed);
+        }
         unsafe {
             call_closure::<F>(0, self.n_threads, data_ptr);
         }
@@ -297,6 +371,18 @@ fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
         let call_fn = inner.call_fn.load(Ordering::Acquire);
         let call_data = inner.call_data.load(Ordering::Acquire);
         if call_fn != 0 {
+            #[cfg(feature = "vulkan")]
+            let gpu_matmul_disabled = inner.gpu_matmul_disabled.load(Ordering::Acquire);
+            #[cfg(all(test, feature = "vulkan"))]
+            if gpu_matmul_disabled {
+                if let Some(worker_bit) = 1usize.checked_shl(tid as u32) {
+                    inner
+                        .gpu_disabled_workers
+                        .fetch_or(worker_bit, Ordering::Relaxed);
+                }
+            }
+            #[cfg(feature = "vulkan")]
+            let _gpu_matmul_scope = GpuMatmulScope::set(gpu_matmul_disabled);
             let f: CallFn = unsafe { std::mem::transmute(call_fn) };
             unsafe {
                 f(tid, n_threads, call_data);

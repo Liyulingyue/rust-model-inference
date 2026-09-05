@@ -28,9 +28,11 @@ use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
+#[cfg(feature = "vulkan")]
+use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(super) fn forward_moe_token(
     input: &[f32],
@@ -135,6 +137,8 @@ pub struct Qwen3Generation {
     pub rendered_tokens: Vec<String>,
     pub token_ids: Vec<u32>,
     pub prompt_tokens: usize,
+    pub prompt_duration: Duration,
+    pub decode_duration: Duration,
 }
 
 // =============================================================================
@@ -203,6 +207,32 @@ pub fn text_encode(
         return Ok(Vec::new());
     }
 
+    let embeddings = model.embed_tokens(token_ids)?;
+    #[cfg(feature = "vulkan")]
+    let mut full_model_gpu_failed = false;
+    #[cfg(feature = "vulkan")]
+    if positions
+        .iter()
+        .enumerate()
+        .all(|(index, position)| position[0] == index)
+    {
+        if let Some(context) = crate::ops::get_vulkan_context() {
+            match text_encode_vulkan(model, &embeddings, n_tokens, context) {
+                Ok(Some(hidden)) => return Ok(hidden),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "[GPU] Qwen3 Vulkan embedding executor disabled after error: {error}. Falling back to CPU."
+                    );
+                    full_model_gpu_failed = true;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    let _gpu_matmul_scope = full_model_gpu_failed.then(ComputePool::disable_gpu_matmul_for_scope);
+
     let cfg = &model.config;
     let n_embd_q = checked_product("query width", cfg.n_head, cfg.n_embd_head_k)?;
     let n_embd_k = checked_product("key width", cfg.n_head_kv, cfg.n_embd_head_k)?;
@@ -211,7 +241,6 @@ pub fn text_encode(
     let group_size = cfg.n_head / cfg.n_head_kv;
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
-    let embeddings = model.embed_tokens(token_ids)?;
     let mut hidden = embeddings;
 
     for layer_idx in 0..cfg.n_layer {
@@ -522,6 +551,25 @@ pub fn text_encode(
     }
 
     Ok(output)
+}
+
+#[cfg(feature = "vulkan")]
+fn text_encode_vulkan(
+    model: &Qwen3Model,
+    embeddings: &[f32],
+    n_tokens: usize,
+    context: &'static crate::vulkan::VulkanContext,
+) -> Result<Option<Vec<f32>>, crate::vulkan::VulkanError> {
+    let Some(mut session) = Qwen3VulkanSession::try_new(model, n_tokens, context)? else {
+        return Ok(None);
+    };
+    let width = model.config.n_embd;
+    let mut hidden = Vec::with_capacity(n_tokens * width);
+    for (position, input) in embeddings.chunks_exact(width).enumerate() {
+        hidden.extend_from_slice(session.forward_hidden_token(input, position)?);
+        session.commit_token();
+    }
+    Ok(Some(hidden))
 }
 
 fn apply_qk_norms(

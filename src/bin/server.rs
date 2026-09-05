@@ -1235,6 +1235,12 @@ fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
 // main
 // =============================================================================
 
+fn configure_gpu(options: &CliOptions) {
+    if options.gpu {
+        rust_model_inference::ops::enable_gpu();
+    }
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
 
@@ -1303,6 +1309,7 @@ fn main() {
         std::process::exit(1);
     }
 
+    configure_gpu(&options);
     let backend = match build_backend(&options) {
         Ok(value) => value,
         Err(error) => {
@@ -1367,4 +1374,21 @@ fn main() {
     runtime.block_on(async {
         axum::serve(listener, app).await.unwrap();
     });
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::{configure_gpu, CliOptions};
+
+    #[test]
+    fn gpu_flag_reaches_shared_switch() {
+        let options = CliOptions {
+            gpu: true,
+            ..CliOptions::default()
+        };
+
+        configure_gpu(&options);
+
+        assert!(rust_model_inference::ops::float::gpu_requested());
+    }
 }

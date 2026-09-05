@@ -1,0 +1,100 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer QNorm { uint data[]; } q_norm;
+layout(std430, binding = 2) readonly buffer KNorm { uint data[]; } k_norm;
+layout(push_constant) uniform PC {
+    uint raw_q_word;
+    uint raw_k_word;
+    uint v_word;
+    uint q_word;
+    uint gate_word;
+    uint cache_k_word;
+    uint cache_v_word;
+    uint delta_k_word;
+    uint delta_v_word;
+    uint rope_word;
+    uint layer;
+    uint position;
+    uint capacity;
+    uint packed_heads;
+    uint packed_dims;
+    float eps;
+} pc;
+
+shared float inverse_rms;
+
+void main() {
+    uint kind = gl_WorkGroupID.y;
+    uint head = gl_WorkGroupID.x;
+    uint q_heads = pc.packed_heads & 0xffffu;
+    uint kv_heads = pc.packed_heads >> 16u;
+    uint head_dim = pc.packed_dims & 0xffffu;
+    uint rope_dim = pc.packed_dims >> 16u;
+    uint heads = kind == 0u ? q_heads : kv_heads;
+    if (kind > 1u || head >= heads) return;
+
+    uint lane = gl_LocalInvocationID.x;
+    uint raw_base = kind == 0u
+        ? pc.raw_q_word + head * head_dim * 2u
+        : pc.raw_k_word + head * head_dim;
+    if (lane == 0u) {
+        precise float sum = 0.0;
+        precise float correction = 0.0;
+        for (uint index = 0u; index < head_dim; index++) {
+            float value = uintBitsToFloat(arena.data[raw_base + index]);
+            float square = value * value;
+            precise float next = sum + square;
+            correction += sum >= square
+                ? (sum - next) + square
+                : (square - next) + sum;
+            sum = next;
+        }
+        precise float mean_square = (sum + correction) / float(head_dim) + pc.eps;
+        inverse_rms = inversesqrt(mean_square);
+    }
+    barrier();
+
+    uint output_base = kind == 0u ? pc.q_word + head * head_dim : raw_base;
+    for (uint index = lane; index < head_dim; index += 64u) {
+        float value = uintBitsToFloat(arena.data[raw_base + index]);
+        float scale = kind == 0u
+            ? uintBitsToFloat(q_norm.data[index])
+            : uintBitsToFloat(k_norm.data[index]);
+        arena.data[output_base + index] = floatBitsToUint(value * inverse_rms * scale);
+        if (kind == 0u) {
+            arena.data[pc.gate_word + head * head_dim + index] =
+                arena.data[raw_base + head_dim + index];
+        }
+    }
+    barrier();
+
+    uint half_rope = rope_dim / 2u;
+    for (uint index = lane; index < half_rope; index += 64u) {
+        float cosine = uintBitsToFloat(arena.data[pc.rope_word + index]);
+        float sine = uintBitsToFloat(arena.data[pc.rope_word + half_rope + index]);
+        float first = uintBitsToFloat(arena.data[output_base + index]);
+        float second = uintBitsToFloat(arena.data[output_base + half_rope + index]);
+        arena.data[output_base + index] = floatBitsToUint(fma(first, cosine, -second * sine));
+        arena.data[output_base + half_rope + index] =
+            floatBitsToUint(fma(first, sine, second * cosine));
+    }
+    barrier();
+
+    if (kind == 1u) {
+        uint kv_count = kv_heads * head_dim;
+        for (uint index = lane; index < head_dim; index += 64u) {
+            uint within_kv = head * head_dim + index;
+            uint cache_index = (pc.layer * pc.capacity + pc.position) * kv_count + within_kv;
+            uint delta_index = pc.layer * kv_count + within_kv;
+            uint key = arena.data[output_base + index];
+            uint value = arena.data[pc.v_word + within_kv];
+            arena.data[pc.cache_k_word + cache_index] = key;
+            arena.data[pc.cache_v_word + cache_index] = value;
+            arena.data[pc.delta_k_word + delta_index] = key;
+            arena.data[pc.delta_v_word + delta_index] = value;
+        }
+    }
+}

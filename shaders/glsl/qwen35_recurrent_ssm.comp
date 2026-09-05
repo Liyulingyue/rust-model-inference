@@ -1,0 +1,125 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer DtBias { uint data[]; } dt_bias;
+layout(std430, binding = 2) readonly buffer AWeight { uint data[]; } a_weight;
+layout(std430, binding = 3) readonly buffer NormWeight { uint data[]; } norm_weight;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint k_word;
+    uint v_word;
+    uint z_word;
+    uint beta_word;
+    uint alpha_word;
+    uint output_word;
+    uint state_word;
+    uint layer;
+    uint k_heads;
+    uint v_heads;
+    uint head_dim;
+    float eps;
+} pc;
+
+shared float output_values[128];
+shared float inverse_rms;
+shared float decay;
+shared float beta_value;
+
+float exp_approx(float x) {
+    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
+    precise float n = z - uintBitsToFloat(0x4b400000u);
+    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
+    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
+    uint exponent = floatBitsToUint(z) << 23u;
+    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
+    precise float square = reduced * reduced;
+    precise float low = fma(uintBitsToFloat(0x3e2aaf33u), reduced, uintBitsToFloat(0x3efffedbu));
+    precise float high = fma(uintBitsToFloat(0x3c072010u), reduced, uintBitsToFloat(0x3d2b9f17u));
+    precise float polynomial = fma(high, square, low);
+    polynomial = fma(polynomial, square, uintBitsToFloat(0x3f7ffff6u) * reduced);
+    if (abs(n) <= 126.0) return fma(scale, polynomial, scale);
+    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
+    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
+    precise float scale2 = uintBitsToFloat(exponent - adjust);
+    if (abs(n) > 192.0) return scale1 * scale1;
+    return fma(scale2, polynomial, scale2) * scale1;
+}
+
+void main() {
+    uint value_head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (value_head >= pc.v_heads) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint key_head = value_head % pc.k_heads;
+
+    if (lane == 0u) {
+        float beta_raw = uintBitsToFloat(arena.data[pc.beta_word + value_head]);
+        beta_value = 1.0 / (1.0 + exp(-beta_raw));
+        float alpha_raw = uintBitsToFloat(arena.data[pc.alpha_word + value_head]);
+        float biased = alpha_raw + uintBitsToFloat(dt_bias.data[value_head]);
+        float softplus = biased > 20.0 ? biased : log(1.0 + exp(biased));
+        decay = exp(softplus * uintBitsToFloat(a_weight.data[value_head]));
+    }
+    barrier();
+
+    for (uint row = lane; row < pc.head_dim; row += 64u) {
+        uint state_head = pc.state_word
+            + (pc.layer * pc.v_heads + value_head) * pc.head_dim * pc.head_dim;
+        uint row_base = state_head + row * pc.head_dim;
+        uint key_base = pc.k_word + key_head * pc.head_dim;
+        precise float state_key = 0.0;
+        for (uint column = 0u; column < pc.head_dim; column++) {
+            float state = uintBitsToFloat(arena.data[row_base + column]) * decay;
+            arena.data[row_base + column] = floatBitsToUint(state);
+            state_key = fma(state, uintBitsToFloat(arena.data[key_base + column]), state_key);
+        }
+        float value = uintBitsToFloat(
+            arena.data[pc.v_word + value_head * pc.head_dim + row]
+        );
+        float delta = (value - state_key) * beta_value;
+        precise float output_value = 0.0;
+        uint q_base = pc.q_word + key_head * pc.head_dim;
+        for (uint column = 0u; column < pc.head_dim; column++) {
+            float state = fma(
+                uintBitsToFloat(arena.data[key_base + column]),
+                delta,
+                uintBitsToFloat(arena.data[row_base + column])
+            );
+            arena.data[row_base + column] = floatBitsToUint(state);
+            output_value = fma(
+                state,
+                uintBitsToFloat(arena.data[q_base + column]),
+                output_value
+            );
+        }
+        output_values[row] = output_value * inversesqrt(float(pc.head_dim));
+    }
+    barrier();
+
+    if (lane == 0u) {
+        precise float sum = 0.0;
+        precise float correction = 0.0;
+        for (uint index = 0u; index < pc.head_dim; index++) {
+            float square = output_values[index] * output_values[index];
+            precise float next = sum + square;
+            correction += sum >= square
+                ? (sum - next) + square
+                : (square - next) + sum;
+            sum = next;
+        }
+        inverse_rms = inversesqrt((sum + correction) / float(pc.head_dim) + pc.eps);
+    }
+    barrier();
+
+    for (uint row = lane; row < pc.head_dim; row += 64u) {
+        float normalized = output_values[row] * inverse_rms
+            * uintBitsToFloat(norm_weight.data[row]);
+        float gate = uintBitsToFloat(
+            arena.data[pc.z_word + value_head * pc.head_dim + row]
+        );
+        float activated = gate / (1.0 + exp_approx(-gate));
+        arena.data[pc.output_word + value_head * pc.head_dim + row] =
+            floatBitsToUint(normalized * activated);
+    }
+}

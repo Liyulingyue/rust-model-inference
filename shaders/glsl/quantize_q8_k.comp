@@ -1,0 +1,105 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint output_word;
+    uint scales_word;
+    uint count;
+} pc;
+
+float value_at(uint index) {
+    return uintBitsToFloat(arena.data[pc.input_word + index]);
+}
+
+int nearest_int(float value) {
+    return int((floatBitsToUint(value + 12582912.0) & 0x007fffffu) - 0x00400000u);
+}
+
+float divide_finite_normal(float numerator, float denominator) {
+    uint numerator_bits = floatBitsToUint(numerator);
+    uint denominator_bits = floatBitsToUint(denominator);
+    uint sign = (numerator_bits ^ denominator_bits) & 0x80000000u;
+    uint numerator_exponent = (numerator_bits >> 23u) & 0xffu;
+    uint denominator_exponent = (denominator_bits >> 23u) & 0xffu;
+    if (numerator_exponent == 0u || numerator_exponent == 0xffu
+        || denominator_exponent == 0u || denominator_exponent == 0xffu) {
+        return numerator / denominator;
+    }
+
+    uint numerator_mantissa = (numerator_bits & 0x007fffffu) | 0x00800000u;
+    uint denominator_mantissa = (denominator_bits & 0x007fffffu) | 0x00800000u;
+    int exponent = int(numerator_exponent) - int(denominator_exponent);
+    if (numerator_mantissa < denominator_mantissa) {
+        numerator_mantissa <<= 1u;
+        exponent -= 1;
+    }
+
+    uint quotient = 1u;
+    uint remainder = numerator_mantissa - denominator_mantissa;
+    for (uint bit = 0u; bit < 23u; ++bit) {
+        quotient <<= 1u;
+        remainder <<= 1u;
+        if (remainder >= denominator_mantissa) {
+            remainder -= denominator_mantissa;
+            quotient |= 1u;
+        }
+    }
+
+    remainder <<= 1u;
+    bool guard = remainder >= denominator_mantissa;
+    if (guard) remainder -= denominator_mantissa;
+    bool sticky = remainder != 0u;
+    if (guard && (sticky || (quotient & 1u) != 0u)) {
+        quotient += 1u;
+        if (quotient == 0x01000000u) {
+            quotient >>= 1u;
+            exponent += 1;
+        }
+    }
+
+    int result_exponent = exponent + 127;
+    if (result_exponent <= 0 || result_exponent >= 255) {
+        return numerator / denominator;
+    }
+    return uintBitsToFloat(
+        sign | (uint(result_exponent) << 23u) | (quotient & 0x007fffffu)
+    );
+}
+
+void main() {
+    if (gl_LocalInvocationID.x != 0u) return;
+    uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint base = block * 256u;
+    if (base >= pc.count) return;
+    float amax = 0.0;
+    float max_value = 0.0;
+    for (uint index = 0u; index < 256u; ++index) {
+        float value = value_at(base + index);
+        float absolute = abs(value);
+        if (absolute > amax) {
+            amax = absolute;
+            max_value = value;
+        }
+    }
+    if (amax == 0.0) {
+        for (uint index = 0u; index < 64u; ++index) {
+            arena.data[pc.output_word + block * 64u + index] = 0u;
+        }
+        arena.data[pc.scales_word + block] = 0u;
+        return;
+    }
+    precise float iscale = divide_finite_normal(-127.0, max_value);
+    for (uint index = 0u; index < 64u; ++index) {
+        uint packed = 0u;
+        for (uint byte = 0u; byte < 4u; ++byte) {
+            precise float scaled = iscale * value_at(base + index * 4u + byte);
+            int quantized = min(nearest_int(scaled), 127);
+            packed |= uint(quantized & 255) << (byte * 8u);
+        }
+        arena.data[pc.output_word + block * 64u + index] = packed;
+    }
+    precise float scale = divide_finite_normal(1.0, iscale);
+    arena.data[pc.scales_word + block] = floatBitsToUint(scale);
+}
