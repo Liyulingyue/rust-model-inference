@@ -3,6 +3,9 @@
 use std::sync::atomic::Ordering;
 
 #[cfg(target_arch = "x86_64")]
+use std::sync::atomic::AtomicBool;
+
+#[cfg(target_arch = "x86_64")]
 static GPU_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(target_arch = "x86_64"))]
