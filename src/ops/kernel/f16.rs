@@ -1,9 +1,8 @@
 //! F16 matmul kernel implementation.
 //!
-//! Phase 2.4 + 2.7-final: Reserved interface for F16 matmul. The
-//! `F16Kernel` exists to lock the contract for the F16 variant of
-//! `QuantizedTensor`. Production F16 weights are rare; this kernel is
-//! mostly a placeholder until the AVX2/NEON F16 path lands.
+//! F16 weights use the ggml F16 × F16 dot contract. `forward_prepared`
+//! converts the original F32 activation to F16 before computing each row;
+//! the prequantized-only entry cannot reconstruct that activation.
 
 use super::Kernel;
 
@@ -81,10 +80,9 @@ impl<'a> F16Kernel<'a> {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
-    /// Hot path. F16 weights are dequantized to f32 per row before the dot
-    /// product. For now this ignores the prequantized Q8 input and falls
-    /// back to a scalar f32 dot — F16 weights are not yet on the Qwen3
-    /// hot path, so this is acceptable until the AVX2/NEON F16 kernel lands.
+    /// The prequantized-only interface has no original F32 activation to
+    /// convert to F16, so it produces zeros. Production callers use
+    /// `forward_prepared`, which receives that original activation.
     fn forward_prequantized(
         &self,
         _input_q8: &[u8],
@@ -131,9 +129,8 @@ impl<'a> Kernel for F16Kernel<'a> {
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
-    /// F16's `forward_batched` goes through `forward` (f32 path) rather
-    /// than the default impl (which quantizes input then calls
-    /// `forward_prequantized`, a placeholder for F16).
+    /// F16's `forward_batched` goes through `forward` so each F32 input row
+    /// is converted to F16 instead of using the prequantized-only entry.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);

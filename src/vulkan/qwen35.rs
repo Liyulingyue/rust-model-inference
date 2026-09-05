@@ -33,6 +33,12 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
     Ok(())
 }
 
+fn check_device_eligibility(shader_float16: bool) -> Result<(), String> {
+    shader_float16
+        .then_some(())
+        .ok_or_else(|| "selected Vulkan device does not support shaderFloat16".into())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn commit_shadow_state(
     kv_cache: &mut KvCache,
@@ -408,6 +414,10 @@ impl Qwen35VulkanSession {
         capacity: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
+        if let Err(reason) = check_device_eligibility(context.supports_shader_float16()) {
+            eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
+            return Ok(None);
+        }
         let facts = eligibility_facts(model);
         if let Err(reason) = check_eligibility(&facts) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
@@ -1062,7 +1072,8 @@ fn validate_executor_shape(config: &Qwen35Config, capacity: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        check_eligibility, commit_shadow_state, fill_mrope, EligibilityFacts, Qwen35ArenaLayout,
+        check_device_eligibility, check_eligibility, commit_shadow_state, fill_mrope,
+        EligibilityFacts, Qwen35ArenaLayout,
     };
     use crate::core::scratchpad::KvCache;
     use crate::core::tensor::GGMLType;
@@ -1085,6 +1096,13 @@ mod tests {
         assert!(check_eligibility(&facts)
             .expect_err("an unrecorded operation must reject the whole model")
             .contains("ssm_state_update"));
+    }
+
+    #[test]
+    fn qwen35_full_model_requires_shader_float16() {
+        assert!(check_device_eligibility(false)
+            .expect_err("full-model Qwen3.5 must stay on CPU without shaderFloat16")
+            .contains("shaderFloat16"));
     }
 
     #[test]

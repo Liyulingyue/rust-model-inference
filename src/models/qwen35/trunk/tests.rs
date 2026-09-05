@@ -360,6 +360,80 @@ fn tiny_dense_session_model() -> Qwen35Model<'static> {
     }
 }
 
+fn tiny_q8_session_model() -> Qwen35Model<'static> {
+    fn q8_weight(n_rows: usize) -> Weight<'static> {
+        const N_COLS: usize = 256;
+        let mut data = Vec::with_capacity(n_rows * N_COLS / 32 * quant::BLOCK_Q80_SIZE);
+        for _ in 0..n_rows {
+            for _ in 0..N_COLS / 32 {
+                data.extend_from_slice(&crate::ops::f32_to_f16(0.01).to_le_bytes());
+                data.extend(std::iter::repeat_n(1, 32));
+            }
+        }
+        let data = Box::leak(data.into_boxed_slice());
+        Weight::from_quantized(QuantizedTensor::Q8_0 {
+            data,
+            n_cols: N_COLS,
+            n_rows,
+        })
+    }
+
+    let config = Qwen35Config {
+        n_nextn: 0,
+        n_embd: 256,
+        n_layer: 1,
+        n_head: 1,
+        n_head_kv: 1,
+        n_ff: 256,
+        n_ctx: 3,
+        vocab_size: 32,
+        rope_freq_base: 1_000_000.0,
+        norm_eps: 1e-6,
+        rope_dimension_count: 256,
+        rope_dimension_sections: [0; 4],
+        ssm_d_conv: 1,
+        ssm_d_state: 2,
+        ssm_n_group: 1,
+        ssm_dt_rank: 1,
+        ssm_d_inner: 2,
+        full_attention_interval: 1,
+        is_recurrent: vec![false],
+        key_length: 256,
+        value_length: 256,
+    };
+    let layer = Qwen35LayerWeights {
+        attn_norm: vec![1.0; 256],
+        attn_post_norm: vec![1.0; 256],
+        wq: Some(q8_weight(512)),
+        wk: Some(q8_weight(256)),
+        wv: Some(q8_weight(256)),
+        wo: Some(q8_weight(256)),
+        attn_q_norm: Some(vec![1.0; 256]),
+        attn_k_norm: Some(vec![1.0; 256]),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: q8_weight(256),
+        ffn_up: q8_weight(256),
+        ffn_down: q8_weight(256),
+    };
+    Qwen35Model {
+        config,
+        tok_embd: (0..32 * 256)
+            .map(|index| (index % 17 + 1) as f32 * 0.01)
+            .collect(),
+        output_norm: vec![1.0; 256],
+        output_weight: q8_weight(32),
+        layers: vec![layer],
+    }
+}
+
 fn session_pool() -> Arc<ComputePool> {
     Arc::new(ComputePool::new(1))
 }
@@ -462,6 +536,79 @@ fn session_step_enforces_capacity_across_calls() {
         error.contains("requires 2 tokens; session capacity is 1"),
         "unexpected error: {error}"
     );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local() {
+    let model = tiny_q8_session_model();
+    let fallback_pool = Arc::new(ComputePool::new(2));
+    let mut fallback = Qwen35Session::new_with_capacity(&model, fallback_pool.clone(), 3).unwrap();
+    let mut cpu =
+        Qwen35Session::new_with_capacity(&model, Arc::new(ComputePool::new(2)), 3).unwrap();
+
+    let first = fallback.embed_tokens(&[0]);
+    let second = fallback.embed_tokens(&[1]);
+    let third = fallback.embed_tokens(&[2]);
+    fallback.step(&first, 1, &[[0; 4]]).unwrap();
+    cpu.step(&first, 1, &[[0; 4]]).unwrap();
+    let KvCache::F32(committed) = fallback.kv_cache() else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert!(committed
+        .k
+        .iter()
+        .chain(&committed.v)
+        .any(|value| *value != 0.0));
+
+    fallback.fail_gpu_once_for_test("later token failure");
+    assert!(fallback.gpu_enabled_for_test());
+    assert!(!crate::vulkan::gpu_broken());
+    fallback_pool.clear_gpu_disabled_workers_for_test();
+
+    let actual = fallback.step(&second, 1, &[[1; 4]]).unwrap();
+    let expected = cpu.step(&second, 1, &[[1; 4]]).unwrap();
+
+    assert_eq!(
+        actual.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
+        expected
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+    assert!(!fallback.gpu_enabled_for_test());
+    assert!(!crate::vulkan::gpu_broken());
+    assert_eq!(
+        fallback_pool.gpu_disabled_workers_for_test() & 0b11,
+        0b11,
+        "the failed Q8_0 token must keep every worker out of legacy Vulkan",
+    );
+    fallback_pool.clear_gpu_disabled_workers_for_test();
+
+    let actual = fallback.step(&third, 1, &[[2; 4]]).unwrap();
+    let expected = cpu.step(&third, 1, &[[2; 4]]).unwrap();
+    assert_eq!(
+        actual.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
+        expected
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fallback_pool.gpu_disabled_workers_for_test() & 0b11,
+        0b11,
+        "subsequent Q8_0 tokens must keep every worker out of legacy Vulkan",
+    );
+    assert!(!crate::vulkan::gpu_broken());
+    let (KvCache::F32(actual_cache), KvCache::F32(expected_cache)) =
+        (fallback.kv_cache(), cpu.kv_cache())
+    else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert_eq!(actual_cache.k, expected_cache.k);
+    assert_eq!(actual_cache.v, expected_cache.v);
 }
 
 #[test]

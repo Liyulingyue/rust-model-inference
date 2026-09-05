@@ -41,6 +41,8 @@ pub struct Qwen3Session<'model> {
     pub(crate) capacity: usize,
     #[cfg(feature = "vulkan")]
     pub(crate) gpu: Option<Qwen3VulkanSession>,
+    #[cfg(feature = "vulkan")]
+    pub(crate) full_model_gpu_failed: bool,
 }
 
 /// 携带格式信息的 KV cache 指针。
@@ -177,16 +179,18 @@ impl<'model> Qwen3Session<'model> {
         let _ = kv_bytes; // 当前未直接使用，保留用于将来分配校验
 
         #[cfg(feature = "vulkan")]
-        let gpu =
-            crate::ops::get_vulkan_context().and_then(|context| match Qwen3VulkanSession::try_new(
-                model, capacity, context,
-            ) {
-                Ok(gpu) => gpu,
+        let (gpu, full_model_gpu_failed) = match crate::ops::get_vulkan_context() {
+            Some(context) => match Qwen3VulkanSession::try_new(model, capacity, context) {
+                Ok(gpu) => (gpu, false),
                 Err(error) => {
-                    crate::ops::mark_gpu_broken(&error.to_string());
-                    None
+                    eprintln!(
+                        "[GPU] Qwen3 Vulkan session unavailable: {error}. Falling back to CPU."
+                    );
+                    (None, true)
                 }
-            });
+            },
+            None => (None, false),
+        };
 
         Ok(Self {
             model,
@@ -234,6 +238,8 @@ impl<'model> Qwen3Session<'model> {
             capacity,
             #[cfg(feature = "vulkan")]
             gpu,
+            #[cfg(feature = "vulkan")]
+            full_model_gpu_failed,
         })
     }
 
@@ -453,11 +459,13 @@ impl<'model> Qwen3Session<'model> {
                                 result.v_delta,
                             ) {
                                 gpu.abort_token();
-                                return Err(error);
+                                disable_reason = Some(error);
+                                false
+                            } else {
+                                self.scratch.logits.copy_from_slice(result.logits);
+                                gpu.commit_token();
+                                true
                             }
-                            self.scratch.logits.copy_from_slice(result.logits);
-                            gpu.commit_token();
-                            true
                         }
                         Err(error) => {
                             disable_reason = Some(error.to_string());
@@ -467,8 +475,11 @@ impl<'model> Qwen3Session<'model> {
                     None => false,
                 };
                 if let Some(reason) = disable_reason {
-                    crate::ops::mark_gpu_broken(&reason);
+                    eprintln!(
+                        "[GPU] Qwen3 Vulkan session disabled after error: {reason}. Falling back to CPU."
+                    );
                     self.gpu = None;
+                    self.full_model_gpu_failed = true;
                 }
                 used
             };
@@ -476,6 +487,10 @@ impl<'model> Qwen3Session<'model> {
             let used_vulkan = false;
 
             if !used_vulkan {
+                #[cfg(feature = "vulkan")]
+                let _gpu_matmul_scope = self
+                    .full_model_gpu_failed
+                    .then(ComputePool::disable_gpu_matmul_for_scope);
                 for layer in 0..config.n_layer {
                     let weights = &model.layers[layer];
                     let x_ptr = self.scratch.x.as_mut_ptr();

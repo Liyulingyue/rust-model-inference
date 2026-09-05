@@ -209,6 +209,8 @@ pub fn text_encode(
 
     let embeddings = model.embed_tokens(token_ids)?;
     #[cfg(feature = "vulkan")]
+    let mut full_model_gpu_failed = false;
+    #[cfg(feature = "vulkan")]
     if positions
         .iter()
         .enumerate()
@@ -218,10 +220,18 @@ pub fn text_encode(
             match text_encode_vulkan(model, &embeddings, n_tokens, context) {
                 Ok(Some(hidden)) => return Ok(hidden),
                 Ok(None) => {}
-                Err(error) => crate::ops::mark_gpu_broken(&error.to_string()),
+                Err(error) => {
+                    eprintln!(
+                        "[GPU] Qwen3 Vulkan embedding executor disabled after error: {error}. Falling back to CPU."
+                    );
+                    full_model_gpu_failed = true;
+                }
             }
         }
     }
+
+    #[cfg(feature = "vulkan")]
+    let _gpu_matmul_scope = full_model_gpu_failed.then(ComputePool::disable_gpu_matmul_for_scope);
 
     let cfg = &model.config;
     let n_embd_q = checked_product("query width", cfg.n_head, cfg.n_embd_head_k)?;

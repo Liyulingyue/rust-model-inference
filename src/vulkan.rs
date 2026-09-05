@@ -76,6 +76,7 @@ pub struct VulkanContext {
     io_state: Mutex<IoState>,
     mutex: Mutex<()>,
     device_name: String,
+    shader_float16: bool,
     limits: vk::PhysicalDeviceLimits,
     submission_count: std::sync::atomic::AtomicU64,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
@@ -207,6 +208,7 @@ impl VulkanContext {
                             io_state: Mutex::new(IoState::default()),
                             mutex: Mutex::new(()),
                             device_name: candidate.name,
+                            shader_float16: candidate.shader_float16,
                             limits: candidate.limits,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
@@ -227,6 +229,10 @@ impl VulkanContext {
 
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    pub(crate) fn supports_shader_float16(&self) -> bool {
+        self.shader_float16
     }
 
     pub fn submission_count(&self) -> u64 {
@@ -1334,10 +1340,11 @@ impl std::fmt::Display for VulkanError {
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::{
-        dispatch_grid, rank_supported, rejection_reason, DeviceCandidate, PipelineVariant,
-        VulkanContext,
+        dispatch_grid, gpu_broken, rank_supported, rejection_reason, DeviceCandidate,
+        PipelineVariant, VulkanContext, GPU_BROKEN,
     };
     use ash::vk;
+    use std::sync::atomic::Ordering;
 
     fn candidate_for_test(
         device_type: vk::PhysicalDeviceType,
@@ -1383,6 +1390,40 @@ mod tests {
             .map(|value| value.name)
             .collect();
         assert_eq!(names, ["test-integrated"]);
+    }
+
+    #[test]
+    fn prebroken_legacy_q8_uses_every_cpu_worker_partition() {
+        GPU_BROKEN.store(false, Ordering::Relaxed);
+        crate::ops::mark_gpu_broken("test pre-broken legacy Q8 state");
+        assert!(
+            gpu_broken(),
+            "Q8 dispatch must share the public GPU breaker"
+        );
+
+        let mut weight = Vec::new();
+        for value in 1i8..=4 {
+            weight.extend_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+            weight.extend(std::iter::repeat_n(value as u8, 32));
+        }
+        let input_q8 = [1u8; 32];
+        let input_scales = [1.0f32];
+        let mut output = [0.0f32; 4];
+        for worker in 0..2 {
+            crate::ops::matmul_q8_0_quantized_parallel_rows(
+                &weight,
+                &input_q8,
+                &input_scales,
+                &mut output,
+                32,
+                4,
+                worker,
+                2,
+            );
+        }
+        GPU_BROKEN.store(false, Ordering::Relaxed);
+
+        assert_eq!(output, [32.0, 64.0, 96.0, 128.0]);
     }
 
     #[test]

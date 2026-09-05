@@ -59,6 +59,12 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
     Ok(())
 }
 
+fn check_device_eligibility(shader_float16: bool) -> Result<(), String> {
+    shader_float16
+        .then_some(())
+        .ok_or_else(|| "selected Vulkan device does not support shaderFloat16".into())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TokenCommitState {
     committed_len: usize,
@@ -260,6 +266,10 @@ impl Qwen3VulkanSession {
         capacity: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
+        if let Err(reason) = check_device_eligibility(context.supports_shader_float16()) {
+            eprintln!("[GPU] Qwen3 Vulkan unavailable: {reason}. Falling back to CPU.");
+            return Ok(None);
+        }
         let facts = match eligibility_facts(model) {
             Ok(facts) => facts,
             Err(reason) => {
@@ -744,6 +754,13 @@ mod tests {
     fn qwen3_q8_dense_is_eligible() {
         let facts = eligible_facts();
         assert_eq!(check_eligibility(&facts), Ok(()));
+    }
+
+    #[test]
+    fn qwen3_full_model_requires_shader_float16() {
+        assert!(check_device_eligibility(false)
+            .expect_err("full-model Qwen3 must stay on CPU without shaderFloat16")
+            .contains("shaderFloat16"));
     }
 
     #[test]
