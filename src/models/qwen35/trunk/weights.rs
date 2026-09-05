@@ -14,7 +14,6 @@ use super::util::f16_at;
 use crate::core::tensor::GGMLType;
 use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::quant;
 
 // =============================================================================
 // Model + Layer-weight structs
@@ -57,7 +56,7 @@ pub struct Qwen35LayerWeights<'a> {
 /// call sites.
 pub struct Qwen35Model<'a> {
     pub config: Qwen35Config,
-    pub tok_embd: Vec<f32>,
+    pub tok_embd: Weight<'a>,
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
@@ -93,12 +92,17 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
         | GGMLType::Q4_1
         | GGMLType::Q4K
         | GGMLType::Q5K
-        | GGMLType::Q6K => Some(Weight::from_quantized(QuantizedTensor::from_bytes(
-            data,
-            ti.ggml_type,
-            n_cols,
-            n_rows,
-        ))),
+        | GGMLType::Q6K => {
+            let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                data,
+                ti.ggml_type,
+                n_cols,
+                n_rows,
+            ));
+            weight.n_in = n_cols;
+            weight.n_out = n_rows;
+            Some(weight)
+        }
         _ => {
             eprintln!(
                 "WARNING: unsupported quant type {:?} for tensor {}",
@@ -166,25 +170,27 @@ impl<'a> Qwen35Model<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let config = Qwen35Config::from_source(source)?;
 
-        let tok_embd = {
-            let ti = source
-                .tensor_info("token_embd.weight")
-                .ok_or("Missing token_embd.weight")?;
-            let data = source.tensor_slice("token_embd.weight").unwrap();
-            let n_cols = ti.dims[0] as usize;
-            let n_rows = ti.dims[1] as usize;
-            match ti.ggml_type {
-                GGMLType::F16 => (0..n_cols * n_rows).map(|i| f16_at(data, i)).collect(),
-                GGMLType::BF16 => (0..n_cols * n_rows)
-                    .map(|i| {
-                        crate::ops::bf16_to_f32(u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]))
-                    })
-                    .collect(),
-                GGMLType::Q8_0 => quant::dequant_q80_weight(data, n_cols, n_rows),
-                GGMLType::Q6K => quant::dequant_q6k_weight(data, n_cols, n_rows),
-                _ => return Err("Unsupported token_embd type".into()),
-            }
-        };
+        let token_info = source
+            .tensor_info("token_embd.weight")
+            .ok_or("Missing token_embd.weight")?;
+        let actual = token_info
+            .dims
+            .iter()
+            .map(|value| *value as usize)
+            .collect::<Vec<_>>();
+        let expected = vec![config.n_embd, config.vocab_size];
+        if actual != expected {
+            return Err(format!(
+                "token_embd.weight shape mismatch: expected {expected:?}, got {actual:?}, dtype={:?}",
+                token_info.ggml_type
+            ));
+        }
+        let tok_embd = load_weight(source, "token_embd.weight").ok_or_else(|| {
+            format!(
+                "Unsupported token_embd.weight dtype: {:?}",
+                token_info.ggml_type
+            )
+        })?;
 
         let output_norm =
             load_weight_f32(source, "output_norm.weight").ok_or("Missing output_norm.weight")?;
@@ -284,5 +290,29 @@ impl<'a> Qwen35Model<'a> {
             output_weight,
             layers,
         })
+    }
+
+    pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
+        if let Some(&token_id) = token_ids
+            .iter()
+            .find(|&&token_id| token_id as usize >= self.tok_embd.n_out)
+        {
+            return Err(format!(
+                "Qwen3.5 token id {token_id} out of range (vocab={})",
+                self.tok_embd.n_out
+            ));
+        }
+        let len = token_ids
+            .len()
+            .checked_mul(self.config.n_embd)
+            .ok_or("Qwen3.5 token embedding length overflow")?;
+        let mut embeddings = vec![0.0; len];
+        for (row, &token_id) in embeddings
+            .chunks_exact_mut(self.config.n_embd)
+            .zip(token_ids)
+        {
+            self.tok_embd.embedding_lookup(token_id, row);
+        }
+        Ok(embeddings)
     }
 }

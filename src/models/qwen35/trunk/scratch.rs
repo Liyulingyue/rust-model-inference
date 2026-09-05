@@ -123,10 +123,20 @@ pub(crate) fn kv_cache_pos(cache: &KvCache, il: usize, k_dim: usize, n_layer: us
 }
 
 /// Append `n_tokens` rows of K/V data starting at `pos` for layer `il`.
+///
+/// V cache is stored in `[layer, kv_head, head_dim, seq]` layout (column-major
+/// along `seq`) so the dense-attention value step can read a contiguous slice
+/// `v[kv_h, d, 0..capacity]` instead of gathering strided rows.
+///
+/// Inner stride (`capacity`) is derived from the cache size, not from
+/// `cfg.n_ctx`, because callers (see `app/text.rs`) size the cache to
+/// `max_seq = (prompt + max_tokens).min(n_ctx)` rather than the full context.
 pub(crate) fn kv_cache_store(
     cache: &mut KvCache,
     il: usize,
     n_layer: usize,
+    n_head_kv: usize,
+    n_embd_head: usize,
     k_data: &[f32],
     v_data: &[f32],
     k_dim: usize,
@@ -136,12 +146,22 @@ pub(crate) fn kv_cache_store(
     if let KvCache::F32(c) = cache {
         let k_len = c.k.len() / n_layer;
         let v_len = c.v.len() / n_layer;
+        let capacity = v_len / (n_head_kv * n_embd_head);
         let n_tokens = k_data.len() / k_dim;
+        let v_col_stride = n_embd_head * capacity;
+        let v_layer_base = il * v_len;
         for t in 0..n_tokens {
             let k_dst = il * k_len + (pos + t) * k_dim;
-            let v_dst = il * v_len + (pos + t) * v_dim;
             c.k[k_dst..k_dst + k_dim].copy_from_slice(&k_data[t * k_dim..(t + 1) * k_dim]);
-            c.v[v_dst..v_dst + v_dim].copy_from_slice(&v_data[t * v_dim..(t + 1) * v_dim]);
+            let token_row = &v_data[t * v_dim..(t + 1) * v_dim];
+            let seq_idx = pos + t;
+            for kv_h in 0..n_head_kv {
+                let kv_base = v_layer_base + kv_h * v_col_stride;
+                let src_base = kv_h * n_embd_head;
+                for d in 0..n_embd_head {
+                    c.v[kv_base + d * capacity + seq_idx] = token_row[src_base + d];
+                }
+            }
         }
     }
 }

@@ -77,26 +77,51 @@ impl<'a> Weight<'a> {
         output: &mut [f32],
         pool: &crate::core::thread_pool::ComputePool,
     ) {
+        use crate::core::tensor::GGMLType;
+
         let n_in = input.len();
         let n_out = self.n_out;
-        let q8_blocks = n_in.div_ceil(32);
-        let q8k_blocks = n_in.div_ceil(crate::ops::quant::QK_K);
-        crate::ops::quantize_q8_0_into(
-            input,
-            n_in,
-            &mut q8_buf[..n_in],
-            &mut scale_buf[..q8_blocks],
-        );
-        crate::ops::quant::quantize_row_q8_k_into(input, &mut q8k_buf[..q8k_blocks]);
+        let (input_q8, input_scales, q8_k) = match self.ggml_type {
+            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 => (&[][..], &[][..], None),
+            GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 => {
+                let blocks = n_in.div_ceil(32);
+                crate::ops::quantize_q8_0_into(
+                    input,
+                    n_in,
+                    &mut q8_buf[..n_in],
+                    &mut scale_buf[..blocks],
+                );
+                (&q8_buf[..n_in], &scale_buf[..blocks], None)
+            }
+            GGMLType::Q2K
+            | GGMLType::Q3K
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+            | GGMLType::IQ1_S
+            | GGMLType::IQ1_M
+            | GGMLType::IQ2_XXS
+            | GGMLType::IQ2_XS
+            | GGMLType::IQ2_S
+            | GGMLType::IQ3_XXS
+            | GGMLType::IQ3_S
+            | GGMLType::IQ4_NL
+            | GGMLType::IQ4_XS => {
+                let blocks = n_in / crate::ops::quant::QK_K;
+                crate::ops::quant::quantize_row_q8_k_into(input, &mut q8k_buf[..blocks]);
+                (&[][..], &[][..], Some(&q8k_buf[..blocks]))
+            }
+            other => panic!("prepared matmul does not support {other:?}"),
+        };
 
         let output_ptr = output.as_mut_ptr();
         pool.compute(|ith, nth| {
             let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out) };
             self.kernel.forward_prepared(
                 input,
-                &q8_buf[..n_in],
-                &scale_buf[..q8_blocks],
-                Some(&q8k_buf[..q8k_blocks]),
+                input_q8,
+                input_scales,
+                q8_k,
                 output,
                 n_in,
                 n_out,

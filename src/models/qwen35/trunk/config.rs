@@ -157,12 +157,39 @@ impl Qwen35Config {
             .metadata("qwen35.nextn_predict_layers")
             .and_then(unsigned_u64)
             .unwrap_or(0) as usize;
-        let is_recurrent = recurrent_layer_mask(
+        let n_layer_impl = base
+            .n_layer
+            .checked_sub(n_nextn)
+            .filter(|&layers| layers > 0)
+            .ok_or_else(|| {
+                format!(
+                    "Invalid qwen35 nextn layer split: blocks={}, nextn={n_nextn}",
+                    base.n_layer
+                )
+            })?;
+        if key_length == 0 || value_length == 0 || key_length != value_length {
+            return Err(format!(
+                "Invalid qwen35 attention head lengths: key_length={key_length}, value_length={value_length}"
+            ));
+        }
+        if ssm_d_conv == 0
+            || ssm_d_state == 0
+            || ssm_n_group == 0
+            || ssm_dt_rank == 0
+            || ssm_d_inner == 0
+            || ssm_d_inner % ssm_dt_rank != 0
+        {
+            return Err(format!(
+                "Invalid qwen35 SSM inner/rank dimensions: conv={ssm_d_conv}, state={ssm_d_state}, groups={ssm_n_group}, inner_size={ssm_d_inner}, time_step_rank={ssm_dt_rank}"
+            ));
+        }
+        let mut is_recurrent = recurrent_layer_mask(
             base.n_layer,
             n_nextn,
             source.metadata("qwen35.attention.recurrent_layers"),
             full_attention_interval_raw,
         )?;
+        is_recurrent.truncate(n_layer_impl);
         let full_attention_interval = usize::try_from(full_attention_interval_raw.unwrap_or(4))
             .map_err(|_| "qwen35.full_attention_interval does not fit usize")?;
 
@@ -219,7 +246,66 @@ impl Qwen35Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::tensor::MetaValueType;
+    use crate::core::tensor::{MetaValueType, TensorInfo};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct ConfigSource {
+        metadata: HashMap<String, MetaValue>,
+    }
+
+    impl TensorSource for ConfigSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    fn qwen38_config_source() -> ConfigSource {
+        use MetaValue::{Array, Float32, String as Text, Uint32};
+
+        ConfigSource {
+            metadata: HashMap::from([
+                ("general.architecture".into(), Text("qwen35".into())),
+                ("qwen35.embedding_length".into(), Uint32(5120)),
+                ("qwen35.block_count".into(), Uint32(65)),
+                ("qwen35.attention.head_count".into(), Uint32(24)),
+                ("qwen35.attention.head_count_kv".into(), Uint32(4)),
+                ("qwen35.attention.key_length".into(), Uint32(256)),
+                ("qwen35.attention.value_length".into(), Uint32(256)),
+                ("qwen35.feed_forward_length".into(), Uint32(17408)),
+                ("qwen35.context_length".into(), Uint32(262144)),
+                ("qwen35.vocab_size".into(), Uint32(248320)),
+                ("qwen35.rope.freq_base".into(), Float32(10_000_000.0)),
+                (
+                    "qwen35.attention.layer_norm_rms_epsilon".into(),
+                    Float32(1e-6),
+                ),
+                ("qwen35.rope.dimension_count".into(), Uint32(64)),
+                (
+                    "qwen35.rope.dimension_sections".into(),
+                    Array(
+                        MetaValueType::Uint32,
+                        vec![Uint32(11), Uint32(11), Uint32(10), Uint32(0)],
+                    ),
+                ),
+                ("qwen35.ssm.conv_kernel".into(), Uint32(4)),
+                ("qwen35.ssm.state_size".into(), Uint32(128)),
+                ("qwen35.ssm.group_count".into(), Uint32(16)),
+                ("qwen35.ssm.time_step_rank".into(), Uint32(48)),
+                ("qwen35.ssm.inner_size".into(), Uint32(6144)),
+                ("qwen35.full_attention_interval".into(), Uint32(4)),
+                ("qwen35.nextn_predict_layers".into(), Uint32(1)),
+            ]),
+        }
+    }
 
     #[test]
     fn qwen35_recurrent_layers_metadata_is_authoritative() {
@@ -280,6 +366,46 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_config_accepts_qwen38_dimensions() {
+        let config = Qwen35Config::from_source(&qwen38_config_source()).unwrap();
+
+        assert_eq!(
+            (config.n_layer, config.n_layer_impl(), config.n_nextn),
+            (65, 64, 1)
+        );
+        assert_eq!((config.n_embd_head(), config.n_embd_gqa()), (256, 1024));
+        assert_eq!((config.key_dim(), config.value_dim()), (2048, 6144));
+        assert_eq!((config.conv_dim(), config.head_v_dim()), (10240, 128));
+        assert_eq!(config.is_recurrent.len(), 64);
+        assert_eq!(
+            config
+                .is_recurrent
+                .iter()
+                .filter(|&&recurrent| !recurrent)
+                .count(),
+            16
+        );
+        assert_eq!(config.rope_dimension_sections, [11, 11, 10, 0]);
+    }
+
+    #[test]
+    fn qwen35_config_rejects_invalid_tensor_dimensions() {
+        for (key, value, expected) in [
+            ("qwen35.attention.key_length", 0, "head lengths"),
+            ("qwen35.attention.value_length", 0, "head lengths"),
+            ("qwen35.attention.value_length", 128, "head lengths"),
+            ("qwen35.ssm.time_step_rank", 0, "inner/rank"),
+            ("qwen35.ssm.inner_size", 6145, "inner/rank"),
+            ("qwen35.nextn_predict_layers", 65, "nextn layer split"),
+        ] {
+            let mut source = qwen38_config_source();
+            source.metadata.insert(key.into(), MetaValue::Uint32(value));
+            let error = Qwen35Config::from_source(&source).unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
     #[ignore = "requires RMI_QWEN35_MODEL"]
     fn qwen35_config_uses_real_layer_selection_metadata() {
         let path = std::env::var("RMI_QWEN35_MODEL").unwrap();
@@ -294,6 +420,6 @@ mod tests {
             full_attention_interval(source.metadata("qwen35.full_attention_interval")).unwrap(),
         )
         .unwrap();
-        assert_eq!(config.is_recurrent, expected);
+        assert_eq!(config.is_recurrent, expected[..config.n_layer_impl()]);
     }
 }

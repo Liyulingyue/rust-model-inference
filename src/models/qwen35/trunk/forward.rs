@@ -16,8 +16,8 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
-    vec_mad_f32,
+    attention_value_f32, dot_f32, rope_mrope, rope_neox, silu_approx_inplace,
+    silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -47,7 +47,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
         #[cfg(feature = "parity-trace")]
         let first_dense_layer = self.config.is_recurrent.iter().position(|value| !*value);
         #[cfg(feature = "parity-trace")]
-        let first_recurrent_layer = self.config.is_recurrent.iter().position(|value| *value);
+        let trace_layer =
+            |layer: usize| layer == 0 || first_dense_layer == Some(layer) || layer + 1 == n_layer;
 
         for il in 0..n_layer {
             let layer = &self.layers[il];
@@ -64,7 +65,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 );
             }
             #[cfg(feature = "parity-trace")]
-            if first_dense_layer == Some(il) {
+            if !is_recr && trace_layer(il) {
                 parity_trace::report(parity_trace::checkpoint(
                     &format!("attn_norm-{il}"),
                     Some(il),
@@ -86,7 +87,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         n_tokens,
                         scratch,
                         pool,
-                        first_recurrent_layer == Some(il),
+                        trace_layer(il),
                     )
                 }
                 #[cfg(not(feature = "parity-trace"))]
@@ -105,7 +106,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         scratch,
                         pool,
                         mrope_positions,
-                        first_dense_layer == Some(il),
+                        trace_layer(il),
                     )
                 }
                 #[cfg(not(feature = "parity-trace"))]
@@ -155,6 +156,15 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     &mut scratch.x[off..off + n_embd],
                 );
             }
+            #[cfg(feature = "parity-trace")]
+            if trace_layer(il) {
+                parity_trace::report(parity_trace::checkpoint(
+                    &format!("layer_output-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.x[..n_tokens * n_embd],
+                ));
+            }
         }
 
         if profile {
@@ -176,6 +186,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
 
         let last_normed = &normed[(n_tokens - 1) * n_embd..n_tokens * n_embd];
+        #[cfg(feature = "parity-trace")]
+        parity_trace::report(parity_trace::checkpoint(
+            "result_norm",
+            None,
+            &[n_embd],
+            last_normed,
+        ));
         self.output_weight.quantize_and_matmul_with_scratch(
             last_normed,
             &mut scratch.q8k_buf,
@@ -382,6 +399,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
             kv_cache,
             il,
             cfg.n_layer_impl(),
+            n_head_kv,
+            n_embd_head,
             &scratch.k_buf[..n_tokens * k_dim],
             &scratch.v_buf[..n_tokens * v_dim],
             k_dim,
@@ -417,15 +436,23 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
                 softmax_inplace(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
-                scratch.attn_out_buf[out_base..out_base + n_embd_head].fill(0.0);
-                for s in 0..n_attend {
-                    let v_row_base = il * v_len + s * v_dim + kv_h * n_embd_head;
-                    let score = scratch.score_buf[s];
-                    let v_row = &v_cache[v_row_base..v_row_base + n_embd_head];
-                    vec_mad_f32(
-                        &mut scratch.attn_out_buf[out_base..out_base + n_embd_head],
-                        v_row,
-                        score,
+                // V cache layout is [layer, kv_head, head_dim, seq]; the column
+                // `v[il, kv_h, d, 0..capacity]` is contiguous in `seq`. Score is
+                // NEG_INFINITY-padded past `n_attend`, so the corresponding
+                // (zero-initialized) V tail contributes nothing after softmax.
+                let v_capacity = v_len / (n_head_kv * n_embd_head);
+                let v_layer_base = il * v_len + kv_h * (n_embd_head * v_capacity);
+                let v_col_end = kv_pos + t + 1;
+                let v_col_end_padded = v_col_end.div_ceil(256) * 256;
+                let v_col_end_padded = v_col_end_padded.min(v_capacity);
+                for d in 0..n_embd_head {
+                    let v_col = v_col_end_padded;
+                    let v_col_start = v_layer_base + d * v_capacity;
+                    scratch.attn_out_buf[out_base + d] = attention_value_f32(
+                        &v_cache[v_col_start..v_col_start + v_col],
+                        &scratch.score_buf[..v_col],
+                        v_col_end,
+                        v_col,
                     );
                 }
             }

@@ -446,13 +446,23 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         .map_err(|_| format!("{prefix}.embedding_length does not fit usize"))?;
     let n_head = usize::try_from(get_u64(&format!("{prefix}.attention.head_count"))?)
         .map_err(|_| format!("{prefix}.attention.head_count does not fit usize"))?;
-    if n_head == 0 || n_embd % n_head != 0 {
-        return Err(format!(
-            "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
-        ));
-    }
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
+    };
+    let n_embd_head = if arch == "qwen35" {
+        if n_head == 0 {
+            return Err(format!(
+                "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
+            ));
+        }
+        as_usize(format!("{prefix}.attention.key_length"))?
+    } else {
+        if n_head == 0 || n_embd % n_head != 0 {
+            return Err(format!(
+                "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
+            ));
+        }
+        n_embd / n_head
     };
 
     Ok(ModelConfig {
@@ -483,7 +493,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         } else {
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
-        n_embd_head: n_embd / n_head,
+        n_embd_head,
         n_ff: as_usize(format!("{prefix}.feed_forward_length"))?,
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
         vocab_size: match get_u64(&format!("{prefix}.vocab_size")) {
@@ -1128,6 +1138,44 @@ mod tests {
         assert_eq!((config.n_ff, config.n_ctx), (3072, 65536));
         assert_eq!(config.rope_freq_base, 1_000_000.0);
         assert_eq!(config.norm_eps, 1e-6);
+    }
+
+    #[test]
+    fn qwen35_uses_explicit_head_width() {
+        let metadata = std::collections::HashMap::from([
+            (
+                "general.architecture".into(),
+                MetaValue::String("qwen35".into()),
+            ),
+            ("qwen35.embedding_length".into(), MetaValue::Uint32(5120)),
+            ("qwen35.block_count".into(), MetaValue::Uint32(65)),
+            ("qwen35.attention.head_count".into(), MetaValue::Uint32(24)),
+            (
+                "qwen35.attention.head_count_kv".into(),
+                MetaValue::Uint32(4),
+            ),
+            ("qwen35.attention.key_length".into(), MetaValue::Uint32(256)),
+            (
+                "qwen35.feed_forward_length".into(),
+                MetaValue::Uint32(17408),
+            ),
+            ("qwen35.context_length".into(), MetaValue::Uint32(262144)),
+            (
+                "qwen35.attention.layer_norm_rms_epsilon".into(),
+                MetaValue::Float32(1e-6),
+            ),
+            ("qwen35.vocab_size".into(), MetaValue::Uint32(248320)),
+        ]);
+        let config = model_config_from_source(&MapTensorSource {
+            metadata,
+            tensors: std::collections::HashMap::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            (config.n_embd, config.n_head, config.n_embd_head),
+            (5120, 24, 256)
+        );
     }
 
     #[test]
