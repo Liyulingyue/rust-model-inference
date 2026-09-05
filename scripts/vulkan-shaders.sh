@@ -100,7 +100,16 @@ case "${1:-check}" in
             rebuilt="$temp_dir/$name.spv"
             spirv-val --target-env vulkan1.1 "$checked_in"
             check_workgroup_limit "$checked_in"
-            compile_shader "$name" "$rebuilt"
+            compile_log="$temp_dir/$name.log"
+            if ! compile_shader "$name" "$rebuilt" >"$compile_log" 2>&1; then
+                if [[ "$name" == q8_matmul_dp4a ]] &&
+                    grep -Fq "extension not supported: GL_EXT_integer_dot_product" "$compile_log"; then
+                    echo "$name: source rebuild skipped (compiler lacks GL_EXT_integer_dot_product)"
+                    continue
+                fi
+                cat "$compile_log" >&2
+                exit 1
+            fi
             spirv-val --target-env vulkan1.1 "$rebuilt"
             cmp "$rebuilt" "$checked_in"
         done
