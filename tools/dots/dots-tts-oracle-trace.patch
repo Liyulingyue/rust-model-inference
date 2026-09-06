@@ -1,0 +1,533 @@
+diff --git a/src/dots_tts/edit_runtime.py b/src/dots_tts/edit_runtime.py
+index 8a5304d..c82a3ba 100644
+--- a/src/dots_tts/edit_runtime.py
++++ b/src/dots_tts/edit_runtime.py
+@@ -18,6 +18,7 @@ from dots_tts.data.edit_instruction import (
+ from dots_tts.data.pipelines.tokenizing import build_edit_generation_schedule
+ from dots_tts.models.dots_tts.edit_model import DotsTtsEditModel
+ from dots_tts.runtime import DEFAULT_MAX_SEQUENCE_LENGTH, DotsTtsRuntime
++from dots_tts.oracle_trace import tensor, token_ids
+ from dots_tts.utils.audio import prepare_edit_source_audio
+ from dots_tts.utils.logging import categorized_log as logc
+ from dots_tts.utils.profiling import inference_profiling, log_inference_profile
+@@ -306,6 +307,8 @@ class DotsTtsEditRuntime(DotsTtsRuntime):
+             dtype=torch.long,
+             device=self.device,
+         )
++        token_ids("dots.schedule.ids", schedule.unsqueeze(0))
++        tensor("dots.audio.input48k", source_audio)
+         self._validate_generation_schedule_length(schedule.numel())
+         request_payload = {
+             "source_audio_path": source_audio_path,
+diff --git a/src/dots_tts/models/dots_tts/edit_model.py b/src/dots_tts/models/dots_tts/edit_model.py
+index b574c6d..ddfdddc 100644
+--- a/src/dots_tts/models/dots_tts/edit_model.py
++++ b/src/dots_tts/models/dots_tts/edit_model.py
+@@ -11,6 +11,7 @@ from safetensors.torch import load_file
+ 
+ from dots_tts.models.dots_tts.core import DotsTtsCore
+ from dots_tts.models.dots_tts.model import DotsTtsModel
++from dots_tts.oracle_trace import fixed_noise, tensor
+ from dots_tts.utils.logging import categorized_log as logc
+ from dots_tts.utils.profiling import measure_inference
+ from dots_tts.utils.util import get_dtype
+@@ -116,6 +117,7 @@ class DotsTtsEditModel(DotsTtsModel):
+             g_cond = self.core.xvec_proj(
+                 speaker_embedding * float(speaker_scale)
+             )
++            tensor("dots.condition.g_cond", g_cond)
+ 
+         if not fill_llm:
+             self._store_prompt_feature_cache_entry(cache_key, cache_entry)
+@@ -150,7 +152,10 @@ class DotsTtsEditModel(DotsTtsModel):
+                 sample_count,
+             )
+         self._store_prompt_feature_cache_entry(cache_key, cache_entry)
+-        latents = self.core.io_helper.sample_from_latent(latent_distribution)
++        tensor("dots.prompt.distribution", latent_distribution)
++        mean, log_std = latent_distribution.chunk(2, 1)
++        latents = (mean + fixed_noise("latent", mean) * torch.exp(log_std)).transpose(1, 2)
++        tensor("dots.prompt.latents", latents)
+         if drop_tail_patch_count > 0:
+             drop_tail_latent_count = drop_tail_patch_count * self.config.patch_size
+             if drop_tail_latent_count >= latents.size(1):
+@@ -261,6 +266,8 @@ class DotsTtsEditModel(DotsTtsModel):
+                     dtype=state_dtype,
+                 )
+             )
++        for row in patch_embeddings.unbind(dim=1):
++            tensor("dots.patch.embedding", row)
+         return patch_embeddings
+ 
+     def _locate_edit_prefill_boundary(
+@@ -355,6 +362,8 @@ class DotsTtsEditModel(DotsTtsModel):
+                 optimize=self._optimize_enabled,
+                 max_sequence_length=self._llm_max_sequence_length,
+             )
++        for row in llm_hiddens.unbind(dim=1):
++            tensor("dots.llm.hidden", row)
+         state.llm_hiddens = llm_hiddens[:, -1:, :]
+ 
+         cursor = 0
+@@ -598,7 +607,9 @@ class DotsTtsEditModel(DotsTtsModel):
+                         ),
+                         payload_patch_count,
+                     )
+-                yield self.core.io_helper.denormalize(audio_patch)
++                payload = self.core.io_helper.denormalize(audio_patch)
++                tensor("dots.latent.payload", payload)
++                yield payload
+ 
+             if payload_patch_count == 0:
+                 if int(data.get("drop_num_gen_head_patch", 0)) > 0:
+diff --git a/src/dots_tts/models/dots_tts/model.py b/src/dots_tts/models/dots_tts/model.py
+index 98c6cc2..3f7138a 100644
+--- a/src/dots_tts/models/dots_tts/model.py
++++ b/src/dots_tts/models/dots_tts/model.py
+@@ -37,6 +37,7 @@ from dots_tts.utils.logging import categorized_log as logc
+ from dots_tts.utils.profiling import measure_inference
+ from dots_tts.utils.tokenizer import AUDIO_GEN_START_TOKEN, require_token_id
+ from dots_tts.utils.util import get_dtype
++from dots_tts.oracle_trace import fixed_noise, tensor
+ 
+ 
+ @dataclass
+@@ -896,6 +897,7 @@ class DotsTtsModel(nn.Module):
+                 prompt_sample_count,
+             )
+         g_cond = self.core.xvec_proj(speaker_embedding * float(speaker_scale))
++        tensor("dots.condition.g_cond", g_cond)
+         if not use_prompt_prefill:
+             self._store_prompt_feature_cache_entry(cache_key, cache_entry)
+             logger.debug(
+@@ -926,7 +928,12 @@ class DotsTtsModel(nn.Module):
+                 prompt_sample_count,
+             )
+         self._store_prompt_feature_cache_entry(cache_key, cache_entry)
+-        prompt_latents_sampled = self.core.io_helper.sample_from_latent(prompt_latents)
++        tensor("dots.prompt.distribution", prompt_latents)
++        mean, log_std = prompt_latents.chunk(2, 1)
++        prompt_latents_sampled = (
++            mean + fixed_noise("latent", mean) * torch.exp(log_std)
++        ).transpose(1, 2)
++        tensor("dots.prompt.latents", prompt_latents_sampled)
+         prompt_latents_sampled = prompt_latents_sampled[:, : -self.config.patch_size]
+         prompt_patches = rearrange(
+             self.core.io_helper.normalize(prompt_latents_sampled),
+@@ -994,6 +1001,8 @@ class DotsTtsModel(nn.Module):
+                     dtype=state_dtype,
+                 )
+             )
++        for row in prompt_patch_embeddings.unbind(dim=1):
++            tensor("dots.patch.embedding", row)
+         return prompt_patch_embeddings
+ 
+     def _append_to_fm_buffer(
+@@ -1170,6 +1179,8 @@ class DotsTtsModel(nn.Module):
+                 optimize=self._optimize_enabled,
+                 max_sequence_length=self._llm_max_sequence_length,
+             )
++        for row in llm_hiddens.unbind(dim=1):
++            tensor("dots.llm.hidden", row)
+         state.llm_hiddens = llm_hiddens[:, -1:, :]
+ 
+         cursor = 0
+@@ -1236,6 +1247,7 @@ class DotsTtsModel(nn.Module):
+                 ode_method=ode_method,
+                 guidance_scale=guidance_scale,
+             )
++            tensor("dots.latent.consumed", audio_patch)
+             return audio_patch
+ 
+     def _consume_audio_patch(
+@@ -1265,6 +1277,7 @@ class DotsTtsModel(nn.Module):
+                     dtype=state_dtype,
+                 )
+             )
++        tensor("dots.patch.embedding", llm_embedding[:, -1])
+         with measure_inference("LLM", phase="decode", step=profile_step):
+             _, state.llm_hiddens, _logits = self._get_llm_inference().step(
+                 state.llm_state,
+@@ -1274,6 +1287,7 @@ class DotsTtsModel(nn.Module):
+                 optimize=self._optimize_enabled,
+                 max_sequence_length=self._llm_max_sequence_length,
+             )
++        tensor("dots.llm.hidden", state.llm_hiddens[:, -1])
+ 
+     def _decode(
+         self,
+@@ -1482,7 +1496,9 @@ class DotsTtsModel(nn.Module):
+                         ),
+                         payload_patch_count,
+                     )
+-                yield self.core.io_helper.denormalize(audio_patch)
++                payload = self.core.io_helper.denormalize(audio_patch)
++                tensor("dots.latent.payload", payload)
++                yield payload
+ 
+             if payload_patch_count == 0:
+                 if has_prompt_prefill:
+@@ -1613,6 +1629,7 @@ class DotsTtsModel(nn.Module):
+         audio = self._get_vocoder_inference().decode_latents(
+             torch.cat(latent_patches, dim=1)
+         )
++        tensor("dots.vocoder.waveform", audio.reshape(-1))
+         logger.debug(
+             logc("vocoder", "Vocoder decode completed: waveform_samples={}"),
+             audio.shape[-1],
+diff --git a/src/dots_tts/modules/backbone/dit_inference.py b/src/dots_tts/modules/backbone/dit_inference.py
+index c029996..700ca4e 100644
+--- a/src/dots_tts/modules/backbone/dit_inference.py
++++ b/src/dots_tts/modules/backbone/dit_inference.py
+@@ -43,6 +43,7 @@ from dots_tts.modules.backbone.inference_utils import (
+     project_attention,
+ )
+ from dots_tts.modules.backbone.layers import _compiled_create_block_mask
++from dots_tts.oracle_trace import fixed_noise, tensor
+ 
+ # --------------------------------------------------------------------------- #
+ # Section 1. Free math helpers shared across every inference path.
+@@ -249,6 +250,10 @@ class FusedAdaLNDiT(nn.Module):
+         """
+         block_mods, final_mod = self.split_mods(all_mods)
+         x = self.input_layer(x)
++        traced_block_forwards = getattr(self, "_rmi_traced_block_forwards", 0)
++        trace_blocks = traced_block_forwards < 2
++        if trace_blocks:
++            tensor("dots.dit.block_mods", block_mods[0].reshape(x.size(0), 6, -1))
+         for layer_idx, (block, block_mod) in enumerate(
+             zip(self.blocks, block_mods, strict=True)
+         ):
+@@ -258,6 +260,9 @@ class FusedAdaLNDiT(nn.Module):
+             x = x + gate_attn.unsqueeze(1) * attention(layer_idx, block, attn_in)
+             ffn_in = modulate(block.norm2(x), shift_ffn, scale_ffn)
+             x = x + gate_ffn.unsqueeze(1) * block.ffn(ffn_in)
++            if trace_blocks:
++                tensor("dots.dit.block", x)
++        self._rmi_traced_block_forwards = traced_block_forwards + 1
+         return x, final_mod
+ 
+     def apply_final_layer(
+@@ -1049,6 +1050,7 @@ class EagerDiTRunner:
+         pos_ids: torch.Tensor,
+         g_cond: torch.Tensor,
+         guidance_scale: torch.Tensor,
++        trace_step: int | None = None,
+     ) -> torch.Tensor:
+         if input_sequence.shape != cfg_sequence.shape:
+             raise ValueError(
+@@ -1068,6 +1070,7 @@ class EagerDiTRunner:
+             ],
+             dim=0,
+         )
++        tensor("dots.dit.input", x, step=trace_step)
+         timesteps = t.reshape(1).expand(x.size(0))
+         g_cond = g_cond.to(device=x.device, dtype=x.dtype)
+         g_cond_branches = torch.cat([g_cond, torch.zeros_like(g_cond)], dim=0)
+@@ -1079,7 +1082,10 @@ class EagerDiTRunner:
+             g_cond=g_cond_branches,
+         )[:, latent_start:]
++        tensor("dots.dit.raw_velocity", pred, step=trace_step)
+         del t
+-        return apply_cfg(pred, batch_size=batch_size, guidance=guidance_scale)
++        velocity = apply_cfg(pred, batch_size=batch_size, guidance=guidance_scale)
++        tensor("dots.dit.velocity", velocity, step=trace_step)
++        return velocity
+ 
+     def _decode_flow_matching(
+         self,
+@@ -1110,11 +1115,29 @@ class EagerDiTRunner:
+                 guidance_scale=guidance,
+             )
+ 
+-        noise = torch.randn(
++        noise = fixed_noise("dit", torch.empty(
+             (sequence.size(0), self.latent_patch_size, self.latent_dim),
+             dtype=sequence.dtype,
+             device=sequence.device,
+-        )
++        ))
++        tensor("dots.fm.sequence", sequence[:, :fm_seq_len])
++        if ode_method == "euler":
++            z = noise
++            for step in range(int(nfe)):
++                velocity = self._flow_matching_velocity(
++                    z.new_tensor(step / int(nfe)),
++                    z,
++                    input_sequence=input_sequence,
++                    cfg_sequence=cfg_input_sequence,
++                    attn_mask=attn_mask,
++                    pos_ids=pos_ids,
++                    g_cond=g_cond,
++                    guidance_scale=guidance,
++                    trace_step=step,
++                )
++                z = z + velocity / int(nfe)
++                tensor("dots.dit.z", z, step=step)
++            return z
+         times = torch.tensor([0.0, 1.0], dtype=sequence.dtype, device=sequence.device)
+         if ode_method in {"euler", "midpoint", "rk4"}:
+             options = {"step_size": 1.0 / int(nfe)}
+diff --git a/src/dots_tts/modules/speaker/encoder.py b/src/dots_tts/modules/speaker/encoder.py
+index b1f2e0e..428a487 100644
+--- a/src/dots_tts/modules/speaker/encoder.py
++++ b/src/dots_tts/modules/speaker/encoder.py
+@@ -12,6 +12,7 @@ from dots_tts.modules.speaker.fbank import (
+     _SPEAKER_FBANK_SAMPLE_RATE,
+     extract_speaker_fbank,
+ )
++from dots_tts.oracle_trace import tensor
+ 
+ 
+ class SpeakerXVectorFeatures(nn.Module):
+@@ -152,6 +153,7 @@ class SpeakerXVectorFeatures(nn.Module):
+                 audio_lengths.float()
+                 * (_SPEAKER_FBANK_SAMPLE_RATE / self.sample_rate)
+             ).long()
++        tensor("dots.speaker.input16k", audio)
+ 
+         audio_cpu = audio.detach().cpu()
+         features = []
+@@ -178,6 +180,7 @@ class SpeakerXVectorFeatures(nn.Module):
+             batch_first=True,
+             padding_value=0.0,
+         ).to(device=audio.device, dtype=audio.dtype)
++        tensor("dots.speaker.fbank", fbank)
+         return fbank, fbank_lengths
+ 
+     @torch.no_grad()
+@@ -223,4 +226,6 @@ class SpeakerXVectorFeatures(nn.Module):
+                 starts,
+             )
+ 
+-        return self.model(fbank, lengths=fbank_lengths)
++        xvector = self.model(fbank, lengths=fbank_lengths)
++        tensor("dots.speaker.xvector", xvector)
++        return xvector
+diff --git a/src/dots_tts/modules/vocoder/bigvgan.py b/src/dots_tts/modules/vocoder/bigvgan.py
+index 6fd9bf1..06e3f11 100644
+--- a/src/dots_tts/modules/vocoder/bigvgan.py
++++ b/src/dots_tts/modules/vocoder/bigvgan.py
+@@ -11,6 +11,7 @@ import torch.nn.functional as F
+ from torch.nn.utils import remove_weight_norm, weight_norm
+ 
+ from dots_tts.modules.backbone.layers import Conv1d, ConvTranspose1d
++from dots_tts.oracle_trace import tensor
+ from dots_tts.modules.vocoder.alias_free_act import Activation1d, Snake, SnakeBeta
+ from dots_tts.modules.vocoder.config import AudioVAEConfig
+ 
+@@ -508,22 +509,54 @@ class Decoder(nn.Module):
+     def forward(self, z):
+         # pre conv
+         x = self.conv_pre(z)
++        tensor("dots.vocoder.decoder.conv_pre", x)
+ 
+         for i in range(self.num_upsamples):
+             # upsampling
+             for i_up in range(len(self.ups[i])):
+                 x = self.ups[i][i_up](x)
++            tensor("dots.vocoder.decoder.up", x)
+             # AMP blocks
+             xs = None
+             for j in range(self.num_kernels):
++                module = self.resblocks[i * self.num_kernels + j]
++                if i == 0 and j == 0:
++                    block = x
++                    acts1, acts2 = module.activations[::2], module.activations[1::2]
++                    for c1, c2, a1, a2 in zip(
++                        module.convs1, module.convs2, acts1, acts2, strict=True
++                    ):
++                        xt = a1.upsample(block)
++                        tensor("dots.vocoder.decoder.resblock0.activation0.upsample", xt)
++                        xt = a1.act(xt)
++                        tensor("dots.vocoder.decoder.resblock0.activation0.snakebeta", xt)
++                        xt = a1.downsample(xt)
++                        tensor("dots.vocoder.decoder.resblock0.act1", xt)
++                        xt = c1(xt)
++                        tensor("dots.vocoder.decoder.resblock0.conv1", xt)
++                        xt = a2(xt)
++                        tensor("dots.vocoder.decoder.resblock0.act2", xt)
++                        xt = c2(xt)
++                        tensor("dots.vocoder.decoder.resblock0.conv2", xt)
++                        block = xt + block
++                        tensor("dots.vocoder.decoder.resblock0.residual", block)
++                else:
++                    block = module(x)
++                tensor("dots.vocoder.decoder.resblock", block)
+                 if xs is None:
+-                    xs = self.resblocks[i * self.num_kernels + j](x)
++                    xs = block
+                 else:
+-                    xs += self.resblocks[i * self.num_kernels + j](x)
++                    xs += block
+             x = xs / self.num_kernels
++            tensor("dots.vocoder.decoder.stage", x)
+ 
+         # post conv
+-        x = self.activation_post(x)
++        x = self.activation_post.upsample(x)
++        tensor("dots.vocoder.decoder.activation_post.upsample", x)
++        x = self.activation_post.act(x)
++        tensor("dots.vocoder.decoder.activation_post.snakebeta", x)
++        x = self.activation_post.downsample(x)
++        tensor("dots.vocoder.decoder.activation_post", x)
+         x = self.conv_post(x)
+         if self.h.get("use_tanh_at_final", True):
+             x = torch.tanh(x)
+diff --git a/src/dots_tts/modules/vocoder/vocoder_inference.py b/src/dots_tts/modules/vocoder/vocoder_inference.py
+index 115eb14..c82162a 100644
+--- a/src/dots_tts/modules/vocoder/vocoder_inference.py
++++ b/src/dots_tts/modules/vocoder/vocoder_inference.py
+@@ -14,6 +14,7 @@ from dots_tts.modules.vocoder.alias_free_act import Activation1d
+ from dots_tts.modules.vocoder.bigvgan import AMPBlock1, AMPBlock2, AudioVAE
+ from dots_tts.utils.logging import categorized_log as logc
+ from dots_tts.utils.profiling import measure_inference
++from dots_tts.oracle_trace import tensor
+ 
+ 
+ @dataclass(slots=True)
+@@ -83,8 +84,18 @@ class VocoderInference:
+                     f"AudioVAE latent channel count must be {self.vocoder.h.latent_dim}, got {x.size(1)}."
+                 )
+             x = self.vocoder.post_proj(x)
++            tensor("dots.vocoder.post_proj", x)
+             x = x.permute(0, 2, 1)
+-            x = self.vocoder.dec_mi_layer(x)
++            x = self.vocoder.dec_mi_layer[0](x)
++            tensor("dots.vocoder.dec_mi.linear0", x)
++            residual = x
++            x, _ = self.vocoder.dec_mi_layer[1].lstm(x)
++            tensor("dots.vocoder.dec_mi.lstm", x)
++            x = x + residual
++            tensor("dots.vocoder.dec_mi.residual", x)
++            x = self.vocoder.dec_mi_layer[2](x)
++            tensor("dots.vocoder.dec_mi.linear2", x)
++            tensor("dots.vocoder.dec_mi", x)
+             x = x.permute(0, 2, 1)
+             return self.vocoder.decoder(x)
+ 
+diff --git a/src/dots_tts/runtime.py b/src/dots_tts/runtime.py
+index d353586..cc1d713 100644
+--- a/src/dots_tts/runtime.py
++++ b/src/dots_tts/runtime.py
+@@ -19,6 +19,7 @@ from dots_tts.data.pipelines.tts_pipeline import (
+     DEFAULT_TRAIN_TEMPLATE,
+ )
+ from dots_tts.models.dots_tts.model import DotsTtsModel
++from dots_tts.oracle_trace import tensor, token_ids
+ from dots_tts.utils.audio import high_quality_resample
+ from dots_tts.utils.logging import categorized_log as logc
+ from dots_tts.utils.profiling import (
+@@ -638,6 +639,9 @@ class DotsTtsRuntime:
+         )
+         self._validate_generation_schedule_length(schedule.numel())
+         inputs["generation_schedule"] = schedule.unsqueeze(0)
++        token_ids("dots.schedule.ids", inputs["generation_schedule"])
++        if "prompt_audio" in inputs:
++            tensor("dots.audio.input48k", inputs["prompt_audio"])
+         logger.debug(
+             logc(
+                 "request",
+diff --git a/src/dots_tts/oracle_trace.py b/src/dots_tts/oracle_trace.py
+new file mode 100644
+index 0000000..a2bb11e
+--- /dev/null
++++ b/src/dots_tts/oracle_trace.py
+@@ -0,0 +1,77 @@
++from __future__ import annotations
++
++import json
++import os
++from collections import defaultdict
++from pathlib import Path
++
++import numpy as np
++import torch
++
++_COUNTS: dict[str, int] = defaultdict(int)
++_NOISE: dict[str, tuple[np.ndarray, int]] = {}
++
++
++def _trace_path() -> Path | None:
++    value = os.environ.get("DOTS_TTS_ORACLE_TRACE")
++    return None if value is None else Path(value)
++
++
++def tensor(name: str, value: torch.Tensor, *, step: int | None = None) -> None:
++    trace_path = _trace_path()
++    if trace_path is None:
++        return
++    directory = trace_path.parent
++    occurrence = _COUNTS[name]
++    _COUNTS[name] += 1
++    array = value.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy()
++    array = np.asarray(array, dtype="<f4")
++    path = directory / f"{trace_path.name}.{name}.{occurrence}.f32"
++    array.tofile(path)
++    with trace_path.open("a", encoding="utf-8") as stream:
++        stream.write(json.dumps({
++            "name": name,
++            "occurrence": occurrence,
++            "step": step,
++            "shape": list(array.shape),
++            "path": str(path),
++        }, separators=(",", ":")) + "\n")
++
++
++def token_ids(name: str, value: torch.Tensor) -> None:
++    trace_path = _trace_path()
++    if trace_path is None:
++        return
++    values = [int(item) for item in value.detach().cpu().reshape(-1).tolist()]
++    with trace_path.open("a", encoding="utf-8") as stream:
++        stream.write(json.dumps({
++            "name": name,
++            "shape": [len(values)],
++            "len": len(values),
++            "token_ids": values,
++        }, separators=(",", ":")) + "\n")
++
++
++def fixed_noise(kind: str, like: torch.Tensor) -> torch.Tensor:
++    if kind not in _NOISE:
++        env_name = f"DOTS_TTS_ORACLE_{kind.upper()}_NOISE"
++        path = os.environ.get(env_name)
++        if path is None:
++            return torch.randn_like(like)
++        _NOISE[kind] = (np.fromfile(path, dtype="<f4"), 0)
++    values, offset = _NOISE[kind]
++    end = offset + like.numel()
++    if end > values.size:
++        raise RuntimeError(f"{kind} noise is short: need {end}, have {values.size}")
++    _NOISE[kind] = (values, end)
++    return torch.from_numpy(values[offset:end].copy()).reshape(like.shape).to(
++        device=like.device, dtype=like.dtype
++    )
++
++
++def assert_noise_consumed() -> None:
++    for kind, (values, offset) in _NOISE.items():
++        if offset != values.size:
++            raise RuntimeError(
++                f"{kind} noise has trailing values: consumed {offset}, have {values.size}"
++            )
+diff --git a/src/dots_tts/modules/backbone/llm_inference.py b/src/dots_tts/modules/backbone/llm_inference.py
+--- a/src/dots_tts/modules/backbone/llm_inference.py
++++ b/src/dots_tts/modules/backbone/llm_inference.py
+@@ -1,4 +1,6 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++import os
++import sys
+ from typing import Any, Callable
+@@ -121,7 +123,9 @@ class LLMInference:
+         inputs_embeds: torch.Tensor,
+         past_key_values: Any | None,
+         *,
+         request_logits: bool,
+         cache_position: torch.Tensor | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | None, Any | None]:
++        if os.environ.get("DOTS_TTS_ORACLE_LLM_DEBUG"):
++            print(f"DOTS_LLM_CALL shape={tuple(inputs_embeds.shape)} dtype={inputs_embeds.dtype} past_none={past_key_values is None} cache_position={None if cache_position is None else cache_position.tolist()}", file=sys.stderr)
+         outputs = self.core._llm_base_model()(

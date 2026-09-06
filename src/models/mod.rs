@@ -1,4 +1,5 @@
 pub mod diffusion;
+pub mod dots;
 pub mod gemma4;
 pub mod lfm2;
 pub mod lfm25;
