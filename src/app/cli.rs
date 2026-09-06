@@ -46,7 +46,7 @@ pub struct CliOptions {
     pub target_text: Option<String>,
     pub instruction: Option<String>,
     pub use_xvector: XVectorMode,
-    use_xvector_supplied: bool,
+    pub use_xvector_supplied: bool,
     pub out: Option<PathBuf>,
 }
 

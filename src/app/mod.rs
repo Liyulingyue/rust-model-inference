@@ -1,6 +1,6 @@
 pub(crate) mod audio;
-pub(crate) mod dots;
 pub mod cli;
+pub(crate) mod dots;
 pub(crate) mod embedding;
 pub(crate) mod image;
 pub(crate) mod omni;

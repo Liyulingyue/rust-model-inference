@@ -95,10 +95,8 @@ impl<'a> Kernel for F16Kernel<'a> {
             let mut sum = 0.0f32;
             for k in 0..n_in {
                 let bits = u16::from_le_bytes([row[k * 2], row[k * 2 + 1]]);
-                sum = crate::ops::f16_to_f32(bits).mul_add(
-                    dequant_q8(input_q8, input_scales, k),
-                    sum,
-                );
+                sum = crate::ops::f16_to_f32(bits)
+                    .mul_add(dequant_q8(input_q8, input_scales, k), sum);
             }
             output[i] = sum;
         }

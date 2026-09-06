@@ -16,7 +16,8 @@ use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::dit::DiT;
 use crate::models::dots::llm::{DotsLlm, DotsLlmSession, LlmInputRow};
 use crate::models::dots::patch_encoder::{
-    linear_forward, load_f16_f32, PatchEncoder, PatchEncoderState,
+    linear_forward, linear_forward_transposed_input_then_bias, load_f16_f32, PatchEncoder,
+    PatchEncoderState,
 };
 use crate::models::dots::schedule::{
     build_edit_generation_schedule, build_generation_schedule, DotsSchedule,
@@ -29,6 +30,27 @@ pub const DEFAULT_GUIDANCE: f32 = 1.2;
 pub const DEFAULT_SPEAKER_SCALE: f32 = 1.5;
 pub const DEFAULT_EOS_THRESHOLD: f32 = 0.8;
 pub const LN_EPS: f32 = 1e-5;
+
+#[cfg(target_os = "macos")]
+#[link(name = "Accelerate", kind = "framework")]
+unsafe extern "C" {
+    fn cblas_sgemm(
+        order: i32,
+        transpose_a: i32,
+        transpose_b: i32,
+        rows: i32,
+        columns: i32,
+        reduction: i32,
+        alpha: f32,
+        left: *const f32,
+        left_stride: i32,
+        right: *const f32,
+        right_stride: i32,
+        beta: f32,
+        output: *mut f32,
+        output_stride: i32,
+    );
+}
 
 pub struct DotsTtsModel {
     pub config: DotsTtsConfig,
@@ -127,34 +149,14 @@ impl DotsTtsModel {
         if xvec.len() != self.config.xvec_dim {
             return Err("speaker x-vector width mismatch".into());
         }
-        let scaled: Vec<f32> = xvec.iter().map(|&v| v * scale).collect();
-        let mut out = vec![0.0f32; self.config.fm_hidden_size];
-        linear_forward(
+        Ok(speaker_condition_forward(
+            xvec,
+            scale,
             &self.xvec_proj.0,
-            Some(&self.xvec_proj.1),
-            &scaled,
-            self.config.xvec_dim,
-            self.config.fm_hidden_size,
-            &mut out,
-        );
-        // LayerNorm
-        let mut mean = 0.0f64;
-        for &v in out.iter() {
-            mean += v as f64;
-        }
-        mean /= out.len() as f64;
-        let mut var = 0.0f64;
-        for &v in out.iter() {
-            let d = v as f64 - mean;
-            var += d * d;
-        }
-        var /= out.len() as f64;
-        let inv = 1.0 / (var + LN_EPS as f64).sqrt();
-        for i in 0..out.len() {
-            out[i] =
-                ((out[i] as f64 - mean) * inv) as f32 * self.xvec_proj.2[i] + self.xvec_proj.3[i];
-        }
-        Ok(out)
+            &self.xvec_proj.1,
+            &self.xvec_proj.2,
+            &self.xvec_proj.3,
+        ))
     }
 
     pub fn eos_probability(&self, hidden: &[f32]) -> Result<f32, String> {
@@ -189,9 +191,177 @@ impl DotsTtsModel {
     }
 }
 
+fn combine_moments(
+    incoming_count: i32,
+    incoming_mean: f32,
+    incoming_m2: f32,
+    count: &mut i32,
+    mean: &mut f32,
+    m2: &mut f32,
+) {
+    let total = *count + incoming_count;
+    let factor = if total == 0 {
+        0.0
+    } else {
+        incoming_count as f32 / total as f32
+    };
+    let delta = incoming_mean - *mean;
+    *mean += factor * delta;
+    *m2 += incoming_m2 + delta * delta * factor * *count as f32;
+    *count = total;
+}
+
+fn sample_latent_distribution(
+    distribution: &[f32],
+    noise: &[f32],
+    frames: usize,
+    latent_dim: usize,
+) -> Result<Vec<f32>, String> {
+    let sampled_len = frames
+        .checked_mul(latent_dim)
+        .ok_or_else(|| "prompt latent sample length overflow".to_string())?;
+    if distribution.len() != sampled_len * 2 || noise.len() != sampled_len {
+        return Err("prompt latent sampling shape mismatch".into());
+    }
+    let mut sampled = vec![0.0f32; sampled_len];
+    for t in 0..frames {
+        for c in 0..latent_dim {
+            let mean = distribution[c * frames + t];
+            let log_std = distribution[(latent_dim + c) * frames + t];
+            sampled[t * latent_dim + c] =
+                mean + noise[c * frames + t] * super::speaker::exp::torch28_exp(log_std);
+        }
+    }
+    Ok(sampled)
+}
+
+fn torch28_rowwise_moments_1024(input: &[f32]) -> (f32, f32) {
+    debug_assert_eq!(input.len(), 1024);
+    let mut counts = [[0i32; 4]; 4];
+    let mut means = [[0.0f32; 4]; 4];
+    let mut m2s = [[0.0f32; 4]; 4];
+    for block in 0..16 {
+        let mut block_mean = [0.0f32; 4];
+        let mut block_m2 = [0.0f32; 4];
+        for index in 0..16 {
+            let reciprocal = 1.0 / (index + 1) as f32;
+            for lane in 0..4 {
+                let value = input[block * 64 + index * 4 + lane];
+                let delta = value - block_mean[lane];
+                block_mean[lane] += delta * reciprocal;
+                block_m2[lane] += delta * (value - block_mean[lane]);
+            }
+        }
+        for lane in 0..4 {
+            combine_moments(
+                16,
+                block_mean[lane],
+                block_m2[lane],
+                &mut counts[0][lane],
+                &mut means[0][lane],
+                &mut m2s[0][lane],
+            );
+        }
+        let mut mask = block + 1;
+        for depth in 1..4 {
+            if mask & 1 != 0 {
+                break;
+            }
+            for lane in 0..4 {
+                combine_moments(
+                    counts[depth - 1][lane],
+                    means[depth - 1][lane],
+                    m2s[depth - 1][lane],
+                    &mut counts[depth][lane],
+                    &mut means[depth][lane],
+                    &mut m2s[depth][lane],
+                );
+            }
+            counts[depth - 1] = [0; 4];
+            means[depth - 1] = [0.0; 4];
+            m2s[depth - 1] = [0.0; 4];
+            mask >>= 1;
+        }
+    }
+    for depth in 1..4 {
+        for lane in 0..4 {
+            combine_moments(
+                counts[depth][lane],
+                means[depth][lane],
+                m2s[depth][lane],
+                &mut counts[0][lane],
+                &mut means[0][lane],
+                &mut m2s[0][lane],
+            );
+        }
+    }
+    let (mut count, mut mean, mut m2) = (0i32, 0.0f32, 0.0f32);
+    for lane in 0..4 {
+        combine_moments(
+            256,
+            means[0][lane],
+            m2s[0][lane],
+            &mut count,
+            &mut mean,
+            &mut m2,
+        );
+    }
+    (mean, m2 / 1024.0)
+}
+
+fn speaker_condition_forward(
+    xvector: &[f32],
+    scale: f32,
+    weight: &[f32],
+    bias: &[f32],
+    norm_weight: &[f32],
+    norm_bias: &[f32],
+) -> Vec<f32> {
+    debug_assert_eq!(xvector.len(), 512);
+    debug_assert_eq!(weight.len(), 1024 * 512);
+    debug_assert_eq!(bias.len(), 1024);
+    let scaled = xvector
+        .iter()
+        .map(|&value| value * scale)
+        .collect::<Vec<_>>();
+    let mut output = bias.to_vec();
+    #[cfg(target_os = "macos")]
+    unsafe {
+        cblas_sgemm(
+            101,
+            111,
+            111,
+            1024,
+            1,
+            512,
+            1.0,
+            weight.as_ptr(),
+            512,
+            scaled.as_ptr(),
+            1,
+            1.0,
+            output.as_mut_ptr(),
+            1,
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    for out in 0..1024 {
+        for input in 0..512 {
+            output[out] = weight[out * 512 + input].mul_add(scaled[input], output[out]);
+        }
+    }
+    let (mean, variance) = torch28_rowwise_moments_1024(&output);
+    let reciprocal_std = 1.0 / (variance + LN_EPS).sqrt();
+    for index in 0..1024 {
+        output[index] =
+            ((output[index] - mean) * reciprocal_std) * norm_weight[index] + norm_bias[index];
+    }
+    output
+}
+
 /// Prompt audio conditioning (voice cloning).
 pub struct PromptConditioning {
-    /// Normalized prompt patches `[P, 4, 128]` for the FM history.
+    /// Raw prompt patches `[P, 4, 128]` for PatchEncoder prefill.
     pub patches: Vec<f32>,
     /// g_cond from the speaker x-vector.
     pub g_cond: Vec<f32>,
@@ -218,7 +388,30 @@ impl DotsTtsModel {
             return Err("prompt audio too short for the speaker encoder".into());
         }
         let mel = kaldi_fbank(&wav16k);
-        self.speaker.encode(&mel)
+        #[cfg(feature = "parity-trace")]
+        {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dots.speaker.input16k",
+                None,
+                &[1, wav16k.len()],
+                &wav16k,
+            ));
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dots.speaker.fbank",
+                None,
+                &[1, mel.len() / 80, 80],
+                &mel,
+            ));
+        }
+        let xvector = self.speaker.encode(&mel)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.speaker.xvector",
+            None,
+            &[1, xvector.len()],
+            &xvector,
+        ));
+        Ok(xvector)
     }
 
     /// Full prompt conditioning: speaker vector + sampled prompt latents.
@@ -289,12 +482,13 @@ impl DotsTtsModel {
         if !wav48k.iter().any(|value| value.is_finite()) {
             return Err("prompt waveform contains no finite samples".into());
         }
-        let g_cond = if use_xvector {
-            let xvec = self.encode_speaker(wav48k)?;
-            self.speaker_condition(&xvec, speaker_scale)?
-        } else {
-            vec![0.0; self.config.fm_hidden_size]
-        };
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.audio.input48k",
+            None,
+            &[1, wav48k.len()],
+            wav48k,
+        ));
         let samples_per_patch = self.config.samples_per_patch();
         let target = wav48k
             .len()
@@ -303,6 +497,19 @@ impl DotsTtsModel {
             .ok_or_else(|| "prompt waveform padded length overflow".to_string())?;
         let mut padded = wav48k.to_vec();
         padded.resize(target, 0.0);
+        let g_cond = if use_xvector {
+            let xvec = self.encode_speaker(&padded)?;
+            self.speaker_condition(&xvec, speaker_scale)?
+        } else {
+            vec![0.0; self.config.fm_hidden_size]
+        };
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.condition.g_cond",
+            None,
+            &[1, g_cond.len()],
+            &g_cond,
+        ));
         let dist = self.vocoder.extract_latent_distribution(&padded)?;
         let frames = target / self.config.hop_size;
         let sampled_len = frames
@@ -315,17 +522,23 @@ impl DotsTtsModel {
                 dist.len()
             ));
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.prompt.distribution",
+            None,
+            &[1, self.config.latent_dim * 2, frames],
+            &dist,
+        ));
         let mut noise = vec![0.0f32; sampled_len];
         fill_noise(&mut noise)?;
-        let mut sampled = vec![0.0f32; sampled_len];
-        for t in 0..frames {
-            for c in 0..self.config.latent_dim {
-                let mean = dist[c * frames + t];
-                let log_std = dist[(self.config.latent_dim + c) * frames + t];
-                let index = t * self.config.latent_dim + c;
-                sampled[index] = mean + noise[index] * log_std.exp();
-            }
-        }
+        let sampled = sample_latent_distribution(&dist, &noise, frames, self.config.latent_dim)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.prompt.latents",
+            None,
+            &[1, frames, self.config.latent_dim],
+            &sampled,
+        ));
         let drop_frames = drop_tail_patch_count
             .checked_mul(self.config.patch_size)
             .ok_or_else(|| "prompt tail-drop length overflow".to_string())?;
@@ -343,10 +556,6 @@ impl DotsTtsModel {
             .zip(sampled.chunks_exact(self.config.latent_dim))
         {
             dst.copy_from_slice(src);
-        }
-        // normalize in place
-        for chunk in patches.chunks_exact_mut(self.config.latent_dim) {
-            self.normalize(chunk);
         }
         Ok(PromptConditioning { patches, g_cond })
     }
@@ -518,9 +727,9 @@ impl<'a> DotsGenerateSession<'a> {
         );
         let start = self.fm_seq_len * fm;
         self.fm[start..start + fm].copy_from_slice(&projected);
-        // CFG branch: null projection (zeros)
+        // CFG branch: hidden_proj(zeros) is the projection bias.
         let start_cfg = self.fm_seq_len * fm;
-        self.fm_cfg[start_cfg..start_cfg + fm].fill(0.0);
+        self.fm_cfg[start_cfg..start_cfg + fm].copy_from_slice(&self.model.hidden_proj.1);
         self.fm_seq_len += 1;
         Ok(())
     }
@@ -530,22 +739,51 @@ impl<'a> DotsGenerateSession<'a> {
         let fm = self.model.config.fm_hidden_size;
         let p = self.model.config.patch_size;
         let d = self.model.config.latent_dim;
-        for i in 0..p {
-            let mut projected = vec![0.0f32; fm];
-            linear_forward(
-                &self.model.latent_proj.0,
-                Some(&self.model.latent_proj.1),
-                &latents[i * d..(i + 1) * d],
-                d,
-                fm,
-                &mut projected,
-            );
-            let start = self.fm_seq_len * fm;
-            self.fm[start..start + fm].copy_from_slice(&projected);
-            self.fm_cfg[start..start + fm].copy_from_slice(&projected);
-            self.fm_seq_len += 1;
-        }
+        let mut projected = vec![0.0f32; p * fm];
+        linear_forward(
+            &self.model.latent_proj.0,
+            Some(&self.model.latent_proj.1),
+            latents,
+            d,
+            fm,
+            &mut projected,
+        );
+        self.append_projected_history(&projected);
         Ok(())
+    }
+
+    fn append_prompt_history_chunk(&mut self, latents: &[f32]) -> Result<(), String> {
+        let fm = self.model.config.fm_hidden_size;
+        let p = self.model.config.patch_size;
+        let d = self.model.config.latent_dim;
+        let mut transposed = vec![0.0f32; p * d];
+        for frame in 0..p {
+            for channel in 0..d {
+                transposed[channel * p + frame] = latents[frame * d + channel];
+            }
+        }
+        let mut projected = vec![0.0f32; p * fm];
+        linear_forward_transposed_input_then_bias(
+            &self.model.latent_proj.0,
+            &self.model.latent_proj.1,
+            &transposed,
+            p,
+            d,
+            fm,
+            &mut projected,
+        );
+        self.append_projected_history(&projected);
+        Ok(())
+    }
+
+    fn append_projected_history(&mut self, projected: &[f32]) {
+        let fm = self.model.config.fm_hidden_size;
+        let rows = projected.len() / fm;
+        let start = self.fm_seq_len * fm;
+        let end = start + projected.len();
+        self.fm[start..end].copy_from_slice(projected);
+        self.fm_cfg[start..end].copy_from_slice(projected);
+        self.fm_seq_len += rows;
     }
 
     fn decode_next_patch(
@@ -559,6 +797,13 @@ impl<'a> DotsGenerateSession<'a> {
         let seq = &self.fm[..self.fm_seq_len * self.model.config.fm_hidden_size];
         let cfg = &self.fm_cfg[..self.fm_seq_len * self.model.config.fm_hidden_size];
         let mut patch = vec![0.0f32; p * d];
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.fm.sequence",
+            None,
+            &[1, self.fm_seq_len, self.model.config.fm_hidden_size],
+            seq,
+        ));
         self.model.dit.solve_patch(
             seq,
             cfg,
@@ -601,6 +846,7 @@ pub fn generate_latents_with_noise<R: Rng + ?Sized>(
     _rng: &mut R,
     fixed_noise: &[f32],
 ) -> Result<Vec<f32>, String> {
+    crate::models::dots::dit::reset_internal_trace();
     let patch_len = model
         .config
         .patch_size
@@ -677,18 +923,18 @@ where
                 fill_patch_count,
                 decode_plan.scheduled_patch_count,
             )?;
-            (
-                Some(source),
-                fill_policy,
-                decode_plan,
-                schedule,
-            )
+            (Some(source), fill_policy, decode_plan, schedule)
         }
     };
     let fill_patch_count = conditioning.map_or(0, |value| value.patches.len() / patch_len);
     let span_ids = DotsSchedule::audio_span_ids(tokenizer)?;
     let fill_span_positions = &schedule.fill_span_positions;
     let decode_span_positions = &schedule.decode_span_positions;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "dots.schedule.ids",
+        &schedule.ids,
+    ));
 
     let prefill_end = *decode_span_positions
         .first()
@@ -710,26 +956,29 @@ where
     // ---- LLM prefill -------------------------------------------------- //
     let mut hiddens: Vec<Vec<f32>> = Vec::with_capacity(prefill_end);
     let prompt_embeds = if let Some(conditioning) = conditioning {
-        let raw_patches = denormalize_patches(model, &conditioning.patches);
         model
             .patch_encoder
-            .prefill(&raw_patches, &mut session.patch_encoder_state)?
+            .prefill(&conditioning.patches, &mut session.patch_encoder_state)?
     } else {
         Vec::new()
     };
     let mut fill_cursor = 0usize;
+    let mut prefill_rows = Vec::with_capacity(prefill_end);
     for pos in 0..prefill_end {
         let id = schedule.ids[pos];
-        let row = if fill_cursor < fill_span_positions.len()
-            && fill_span_positions[fill_cursor] == pos
-        {
-            let start = fill_cursor * model.config.llm_hidden_size;
-            fill_cursor += 1;
-            LlmInputRow::Embedding(&prompt_embeds[start..start + model.config.llm_hidden_size])
-        } else {
-            LlmInputRow::Token(id)
-        };
-        hiddens.push(session.llm.step_row(row)?);
+        let row =
+            if fill_cursor < fill_span_positions.len() && fill_span_positions[fill_cursor] == pos {
+                let start = fill_cursor * model.config.llm_hidden_size;
+                fill_cursor += 1;
+                LlmInputRow::Embedding(&prompt_embeds[start..start + model.config.llm_hidden_size])
+            } else {
+                LlmInputRow::Token(id)
+            };
+        prefill_rows.push(row);
+    }
+    let prefill_hidden = session.llm.prefill_rows(&prefill_rows)?;
+    for row in prefill_hidden.chunks_exact(model.config.llm_hidden_size) {
+        hiddens.push(row.to_vec());
     }
 
     // ---- FM buffer assembly from the prefill --------------------------- //
@@ -740,9 +989,12 @@ where
                 if span_position > cursor {
                     session.append_hidden_chunk(&hiddens[span_position - 1])?;
                 }
-                let patch = &conditioning.patches
-                    [span_idx * patch_len..(span_idx + 1) * patch_len];
-                session.append_history_chunk(patch)?;
+                let patch = &conditioning.patches[span_idx * patch_len..(span_idx + 1) * patch_len];
+                let mut normalized = patch.to_vec();
+                for frame in normalized.chunks_exact_mut(model.config.latent_dim) {
+                    model.normalize(frame);
+                }
+                session.append_prompt_history_chunk(&normalized)?;
                 if span_position + 1 < schedule.ids.len()
                     && span_ids.contains(&schedule.ids[span_position + 1])
                 {
@@ -766,7 +1018,6 @@ where
     }
     let mut raw_patches: Vec<f32> = Vec::new();
     let mut position = prefill_end;
-    let mut stopped = false;
     for (decoded_index, &decode_position) in decode_span_positions.iter().enumerate() {
         let decode_step = decode_plan.step(decoded_index);
         if decode_position < position {
@@ -789,6 +1040,13 @@ where
         let mut z0 = vec![0.0f32; patch_len];
         fill_noise(decode_step.noise_patch_index, &mut z0)?;
         let patch = session.decode_next_patch(&g_cond, options, &z0)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dots.latent.consumed",
+            None,
+            &[1, model.config.patch_size, model.config.latent_dim],
+            &patch,
+        ));
         session.append_history_chunk(&patch)?;
         let raw = model.denormalize(&patch);
         let embedding = model
@@ -796,31 +1054,24 @@ where
             .encode_patch(&raw, &mut session.patch_encoder_state)?;
         session.llm.step_row(LlmInputRow::Embedding(&embedding))?;
         if decode_step.should_emit {
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dots.latent.payload",
+                None,
+                &[1, model.config.patch_size, model.config.latent_dim],
+                &raw,
+            ));
             raw_patches.extend_from_slice(&raw);
         }
         position += 1;
         if stop_after {
-            stopped = true;
             break;
-        }
-    }
-    if !stopped {
-        while position < schedule.ids.len() {
-            if span_ids.contains(&schedule.ids[position]) {
-                return Err("generation schedule contains an unscheduled audio span".into());
-            }
-            session.llm.step_row(LlmInputRow::Token(schedule.ids[position]))?;
-            position += 1;
         }
     }
     if raw_patches.is_empty() {
         return Err("generation produced no latent patches (EOS before the first patch)".into());
     }
     Ok(raw_patches)
-}
-
-fn denormalize_patches(model: &DotsTtsModel, patches: &[f32]) -> Vec<f32> {
-    model.denormalize(patches)
 }
 
 /// Full synthesis: text → latent patches → 48 kHz mono waveform.
@@ -856,12 +1107,80 @@ pub fn synthesize_request_with_noise<R: Rng + ?Sized>(
     model.vocoder.decode_latents(&latents)
 }
 
+#[cfg(feature = "parity-trace")]
+#[doc(hidden)]
+pub fn read_dots_wav_for_parity(
+    path: &std::path::Path,
+    edit: bool,
+    samples_per_patch: usize,
+) -> Result<Vec<f32>, String> {
+    crate::app::dots::read_dots_wav_for_parity(path, edit, samples_per_patch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        fixed_noise_patch, FillPolicy, GenerateOptions, GenerationRequest, PromptConditioning,
+        fixed_noise_patch, sample_latent_distribution, speaker_condition_forward, FillPolicy,
+        GenerateOptions, GenerationRequest, PromptConditioning,
     };
     use crate::models::dots::config::DotsTtsConfig;
+
+    #[test]
+    #[ignore = "requires DOTS_PROMPT_DISTRIBUTION, DOTS_PROMPT_NOISE, and DOTS_PROMPT_LATENTS"]
+    fn prompt_latent_sampling_matches_pinned_torch_bitwise() {
+        let read = |name: &str| {
+            std::fs::read(std::env::var_os(name).unwrap())
+                .unwrap()
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let distribution = read("DOTS_PROMPT_DISTRIBUTION");
+        let noise = read("DOTS_PROMPT_NOISE");
+        let expected = read("DOTS_PROMPT_LATENTS");
+
+        let actual = sample_latent_distribution(&distribution, &noise, 148, 128).unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "dots.prompt.latents[{index}]"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DOTS_GCOND_MMPROJ, DOTS_GCOND_XVECTOR, and DOTS_GCOND_ORACLE"]
+    fn real_xvector_projection_matches_pinned_oracle_bitwise() {
+        use crate::{open_model_source, ComponentRole};
+
+        let read = |name: &str| {
+            std::fs::read(std::env::var_os(name).unwrap())
+                .unwrap()
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let path = std::path::PathBuf::from(std::env::var_os("DOTS_GCOND_MMPROJ").unwrap());
+        let source = open_model_source(&path, ComponentRole::Mmproj).unwrap();
+        let load =
+            |name: &str, dims: &[u64]| super::load_f16_f32(source.as_ref(), name, dims).unwrap();
+        let xvector = read("DOTS_GCOND_XVECTOR");
+        let expected = read("DOTS_GCOND_ORACLE");
+        let actual = speaker_condition_forward(
+            &xvector,
+            1.5,
+            &load("dotstts.xvec_proj.0.weight", &[512, 1024]),
+            &load("dotstts.xvec_proj.0.bias", &[1024]),
+            &load("dotstts.xvec_proj.1.weight", &[1024]),
+            &load("dotstts.xvec_proj.1.bias", &[1024]),
+        );
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "g_cond[{index}]");
+        }
+    }
 
     #[test]
     fn generation_requests_borrow_the_exact_base_and_edit_inputs() {
@@ -879,8 +1198,20 @@ mod tests {
             target_text: "new",
             source: &source,
         };
-        assert!(matches!(base, GenerationRequest::Base { text: "[EN]hello", .. }));
-        assert!(matches!(edit, GenerationRequest::Edit { target_text: "new", .. }));
+        assert!(matches!(
+            base,
+            GenerationRequest::Base {
+                text: "[EN]hello",
+                ..
+            }
+        ));
+        assert!(matches!(
+            edit,
+            GenerationRequest::Edit {
+                target_text: "new",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -921,7 +1252,10 @@ mod tests {
             &[10.0, 11.0]
         );
         let payload = conditioned_base.step(1);
-        assert_eq!((payload.should_check_eos, payload.should_emit), (true, true));
+        assert_eq!(
+            (payload.should_check_eos, payload.should_emit),
+            (true, true)
+        );
         assert_eq!(
             fixed_noise_patch(&fixed_noise, payload.noise_patch_index, 2).unwrap(),
             &[20.0, 21.0]
@@ -931,7 +1265,10 @@ mod tests {
             let plan = policy.decode_plan(1).unwrap();
             assert_eq!(plan.scheduled_patch_count, 1);
             let payload = plan.step(0);
-            assert_eq!((payload.should_check_eos, payload.should_emit), (true, true));
+            assert_eq!(
+                (payload.should_check_eos, payload.should_emit),
+                (true, true)
+            );
             assert_eq!(
                 fixed_noise_patch(&fixed_noise, payload.noise_patch_index, 2).unwrap(),
                 &[10.0, 11.0]

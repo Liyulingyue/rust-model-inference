@@ -131,7 +131,11 @@ pub fn run_dots_tts_cli(options: &CliOptions) -> Result<(), String> {
             .filter(|prompt| !prompt.trim().is_empty())
             .ok_or_else(|| "--tts requires --prompt".to_string())?;
         let language = normalize_tts_language(options.language.as_deref())?;
-        let reference_text = options.ref_text.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let reference_text = options
+            .ref_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
         let prompt = if let Some(ref_audio) = options.ref_audio.as_deref() {
             eprintln!("Encoding prompt reference from {}", ref_audio.display());
             let wav = read_dots_wav(ref_audio, DotsWavMode::Base)?;
@@ -312,19 +316,15 @@ fn trim_edge_silence_frame_rms(wav: &[f32], top_db: f32) -> Result<Vec<f32>, Str
 fn read_dots_wav(path: &Path, mode: DotsWavMode) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read WAV {}: {error}", path.display()))?;
-    let decoded =
-        crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes).map_err(|e| {
-            format!("Failed to decode WAV {}: {e:?}", path.display())
-        })?;
+    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
+        .map_err(|e| format!("Failed to decode WAV {}: {e:?}", path.display()))?;
     let mut mono: Vec<f32> = if decoded.channels == 1 {
         decoded.samples
     } else {
         decoded
             .samples
             .chunks_exact(decoded.channels as usize)
-            .map(|frame| {
-                frame.iter().map(|&s| s as f64).sum::<f64>() / frame.len() as f64
-            })
+            .map(|frame| frame.iter().map(|&s| s as f64).sum::<f64>() / frame.len() as f64)
             .map(|v| v as f32)
             .collect()
     };
@@ -342,12 +342,9 @@ fn read_dots_wav(path: &Path, mode: DotsWavMode) -> Result<Vec<f32>, String> {
             DotsWavMode::Base => 64,
             DotsWavMode::Edit { .. } => 128,
         };
-        mono = crate::models::dots::speaker::Resampler::with_width(
-            decoded.sample_rate,
-            48_000,
-            width,
-        )
-        .resample(&mono);
+        mono =
+            crate::models::dots::speaker::Resampler::with_width(decoded.sample_rate, 48_000, width)
+                .resample(&mono);
     }
     if let DotsWavMode::Edit { samples_per_patch } = mode {
         let mut normalized = normalize_edge_silence(&mono, 48_000, 30.0, 250)?;
@@ -361,6 +358,20 @@ fn read_dots_wav(path: &Path, mode: DotsWavMode) -> Result<Vec<f32>, String> {
         return Ok(normalized);
     }
     Ok(mono)
+}
+
+#[cfg(feature = "parity-trace")]
+pub(crate) fn read_dots_wav_for_parity(
+    path: &Path,
+    edit: bool,
+    samples_per_patch: usize,
+) -> Result<Vec<f32>, String> {
+    let mode = if edit {
+        DotsWavMode::Edit { samples_per_patch }
+    } else {
+        DotsWavMode::Base
+    };
+    read_dots_wav(path, mode)
 }
 
 #[cfg(test)]

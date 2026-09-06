@@ -167,6 +167,62 @@ def f32_values(data: bytes) -> list:
     return list(struct.unpack(f"<{len(data) // 4}f", data))
 
 
+def _fold_weight_norm_dim0_f32(
+    g_raw: bytes, v_raw: bytes, out_channels: int
+) -> tuple[bytes, bytes]:
+    """Materialize legacy dim-0 weight norm like pinned Torch 2.8 ARM F32."""
+    from array import array
+
+    if out_channels < 1 or len(g_raw) != out_channels * 4:
+        raise ValueError("weight_g must contain one F32 value per output channel")
+    if len(v_raw) % (out_channels * 4):
+        raise ValueError("weight_v rows must have a non-zero uniform width")
+    row_width = len(v_raw) // (out_channels * 4)
+    if row_width < 1:
+        raise ValueError("weight_v rows must have a non-zero uniform width")
+
+    g = array("f")
+    g.frombytes(g_raw)
+    v = array("f")
+    v.frombytes(v_raw)
+    norms = array("f", [0.0]) * out_channels
+    weight = array("f", [0.0]) * len(v)
+    rounded = array("f", [0.0])
+
+    for row in range(out_channels):
+        start = row * row_width
+        if row_width < 4:
+            rounded[0] = v[start] * v[start]
+            sum_sq = rounded[0]
+            for column in range(1, row_width):
+                rounded[0] = v[start + column] * v[start + column]
+                rounded[0] = sum_sq + rounded[0]
+                sum_sq = rounded[0]
+        else:
+            lanes = array("f", [0.0, 0.0, 0.0, 0.0])
+            full_width = row_width - row_width % 4
+            for column in range(full_width):
+                lane = column % 4
+                rounded[0] = v[start + column] * v[start + column]
+                lanes[lane] = lanes[lane] + rounded[0]
+            for lane in range(row_width % 4):
+                rounded[0] = v[start + full_width + lane] * v[start + full_width + lane]
+                lanes[lane] = lanes[lane] + rounded[0]
+            rounded[0] = lanes[0] + lanes[2]
+            left = rounded[0]
+            rounded[0] = lanes[1] + lanes[3]
+            rounded[0] = left + rounded[0]
+            sum_sq = rounded[0]
+
+        norms[row] = math.sqrt(sum_sq)
+        rounded[0] = g[row] / norms[row]
+        scale = rounded[0]
+        for column in range(row_width):
+            weight[start + column] = scale * v[start + column]
+
+    return norms.tobytes(), weight.tobytes()
+
+
 # --------------------------------------------------------------------------- #
 # latent_stats.pt — torch.save(zip) that here holds plain numpy arrays
 # --------------------------------------------------------------------------- #
@@ -506,55 +562,6 @@ def gguf_dims(torch_dims: tuple) -> tuple:
 
 
 # --------------------------------------------------------------------------- #
-# kaiser-sinc filter (alias-free activations, fixed_filter=True paths)
-# --------------------------------------------------------------------------- #
-
-
-def kaiser_sinc_filter1d(cutoff: float, half_width: float, kernel_size: int) -> list:
-    """Port of alias_free_filter.py kaiser_sinc_filter1d; normalizes to sum 1."""
-    even = kernel_size % 2 == 0
-    half_size = kernel_size // 2
-    delta_f = 4 * half_width
-    a = 2.285 * (half_size - 1) * math.pi * delta_f + 7.95
-    if a > 50.0:
-        beta = 0.1102 * (a - 8.7)
-    elif a >= 21.0:
-        beta = 0.5842 * (a - 21.0) ** 0.4 + 0.07886 * (a - 21.0)
-    else:
-        beta = 0.0
-    i0_beta = _i0(beta)
-    window = []
-    for n in range(kernel_size):
-        t = 2 * n / (kernel_size - 1) - 1
-        window.append(_i0(beta * math.sqrt(max(0.0, 1 - t * t))) / i0_beta)
-    if even:
-        times = [i + 0.5 for i in range(-half_size, half_size)]
-    else:
-        times = [i - half_size for i in range(kernel_size)]
-    filt = []
-    for w, t in zip(window, times):
-        arg = 2 * cutoff * t
-        sinc = 1.0 if t == 0 else math.sin(math.pi * arg) / (math.pi * arg)
-        filt.append(2 * cutoff * w * sinc)
-    total = sum(filt)
-    return [x / total for x in filt]
-
-
-def _i0(x: float) -> float:
-    """Modified Bessel I0 via series (matches torch.kaiser_window numerics)."""
-    if x == 0.0:
-        return 1.0
-    sum_, term, k = 1.0, 1.0, 0
-    while True:
-        k += 1
-        term *= (x / 2) ** 2 / (k * k)
-        sum_ += term
-        if term < 1e-18 * sum_ or k > 200:
-            break
-    return sum_
-
-
-# --------------------------------------------------------------------------- #
 # main conversion
 # --------------------------------------------------------------------------- #
 
@@ -682,6 +689,9 @@ def _export_open_model(
         "self_attn.q_proj.weight": "attn_q.weight",
         "self_attn.k_proj.weight": "attn_k.weight",
         "self_attn.v_proj.weight": "attn_v.weight",
+        "self_attn.q_proj.bias": "attn_q.bias",
+        "self_attn.k_proj.bias": "attn_k.bias",
+        "self_attn.v_proj.bias": "attn_v.bias",
         "self_attn.o_proj.weight": "attn_output.weight",
         "mlp.gate_proj.weight": "ffn_gate.weight",
         "mlp.up_proj.weight": "ffn_up.weight",
@@ -693,6 +703,9 @@ def _export_open_model(
         "self_attn.q_proj.weight": (n_embd, n_embd),
         "self_attn.k_proj.weight": (n_kv_embd, n_embd),
         "self_attn.v_proj.weight": (n_kv_embd, n_embd),
+        "self_attn.q_proj.bias": (n_embd,),
+        "self_attn.k_proj.bias": (n_kv_embd,),
+        "self_attn.v_proj.bias": (n_kv_embd,),
         "self_attn.o_proj.weight": (n_embd, n_embd),
         "mlp.gate_proj.weight": (llm_cfg["intermediate_size"], n_embd),
         "mlp.up_proj.weight": (llm_cfg["intermediate_size"], n_embd),
@@ -892,17 +905,10 @@ def _export_open_model(
         if isinstance(pair, dict):
             g_t = vocoder.tensor(pair["g"])
             v_t = vocoder.tensor(pair["v"])
-            g = f32_values(g_t.raw)
-            v = f32_values(v_t.raw)
             out_c = g_t.shape[0]
-            per_c = len(v) // out_c
-            w = []
-            for c in range(out_c):
-                vv = v[c * per_c:(c + 1) * per_c]
-                norm = math.sqrt(sum(x * x for x in vv)) + 1e-12
-                w.extend(g[c] * x / norm for x in vv)
+            _, weight = _fold_weight_norm_dim0_f32(g_t.raw, v_t.raw, out_c)
             gguf.add_tensor(f"dotstts.vocoder.{base}.weight", GGML_F32, gguf_dims(v_t.shape),
-                            struct.pack(f"<{len(w)}f", *w))
+                            weight)
             folded_bases.add(base)
     for name, dst in remaining.items():
         if name in folded_bases or dst in folded_bases:
@@ -914,15 +920,6 @@ def _export_open_model(
                 gguf.add_tensor(f"dotstts.vocoder.{dst}", GGML_I64, gguf_dims(shape), t.raw)
             else:
                 emit(vocoder, dst, f"dotstts.vocoder.{dst}", GGML_F32)
-
-    # fixed kaiser filters for the AMP-block activations (fixed_filter=True)
-    n_resblocks = 6 * len(cfg["vocoder"]["resblock_kernel_sizes"])
-    for b in range(n_resblocks):
-        for a in range(6):
-            for tag in ("up_filter", "down_filter"):
-                filt = kaiser_sinc_filter1d(0.25, 0.3, 12)
-                gguf.add_tensor(f"dotstts.vocoder.decoder.resblocks.{b}.activations.{a}.{tag}",
-                                GGML_F32, (12,), struct.pack("<12f", *filt))
 
     gguf.write(overwrite=overwrite)
     print(f"wrote {mmproj_path} ({len(gguf.tensors)} tensors)")

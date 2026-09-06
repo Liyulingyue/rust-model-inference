@@ -91,12 +91,15 @@ impl DotsTtsConfig {
         let dimension = |key: &str, expected: u64| -> Result<usize, String> {
             match source.metadata(key) {
                 Some(MetaValue::Uint64(value)) if *value == expected => Ok(expected as usize),
-                _ => Err(format!("Invalid metadata: {key}; expected Uint64({expected})")),
+                _ => Err(format!(
+                    "Invalid metadata: {key}; expected Uint64({expected})"
+                )),
             }
         };
         let nfe = match source.metadata("dotstts.sampling.nfe") {
-            Some(MetaValue::Uint64(value)) if *value > 0 => usize::try_from(*value)
-                .map_err(|_| "Invalid metadata: dotstts.sampling.nfe does not fit usize".to_string()),
+            Some(MetaValue::Uint64(value)) if *value > 0 => usize::try_from(*value).map_err(|_| {
+                "Invalid metadata: dotstts.sampling.nfe does not fit usize".to_string()
+            }),
             _ => Err("Invalid metadata: dotstts.sampling.nfe; expected positive Uint64".into()),
         }?;
         let sampling = |key: &str| -> Result<f32, String> {
@@ -106,7 +109,9 @@ impl DotsTtsConfig {
                 {
                     Ok(*value as f32)
                 }
-                _ => Err(format!("Invalid metadata: {key}; expected positive finite Float64")),
+                _ => Err(format!(
+                    "Invalid metadata: {key}; expected positive finite Float64"
+                )),
             }
         };
         let eos_threshold = match source.metadata("dotstts.sampling.eos_threshold") {
@@ -244,10 +249,22 @@ mod tests {
     #[test]
     fn config_rejects_invalid_dimension_and_sampling_metadata() {
         for (name, key, value) in [
-            ("dimension type", "dotstts.patch_size", MetaValue::Float64(4.0)),
-            ("fixed dimension", "dotstts.sample_rate", MetaValue::Uint64(1)),
+            (
+                "dimension type",
+                "dotstts.patch_size",
+                MetaValue::Float64(4.0),
+            ),
+            (
+                "fixed dimension",
+                "dotstts.sample_rate",
+                MetaValue::Uint64(1),
+            ),
             ("zero nfe", "dotstts.sampling.nfe", MetaValue::Uint64(0)),
-            ("nan float", "dotstts.sampling.guidance", MetaValue::Float64(f64::NAN)),
+            (
+                "nan float",
+                "dotstts.sampling.guidance",
+                MetaValue::Float64(f64::NAN),
+            ),
             (
                 "nonpositive float",
                 "dotstts.sampling.speaker_scale",
