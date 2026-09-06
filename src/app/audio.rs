@@ -11,6 +11,20 @@ use std::time::Instant;
 
 pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
     let started = Instant::now();
+    // VibeVoice ASR ships an arch-qwen2 LLM gguf + a vibevoice_asr mmproj;
+    // dispatch on the projector metadata before the qwen3vl path.
+    if let Some(mmproj_path) = options
+        .mmproj
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        let probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
+        let is_vibevoice = crate::models::vibevoice_asr::is_vibevoice_asr_mmproj(probe.as_ref());
+        drop(probe);
+        if is_vibevoice {
+            return crate::app::vibevoice::run_vibevoice_asr_cli(options);
+        }
+    }
     let llm_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = llm_source

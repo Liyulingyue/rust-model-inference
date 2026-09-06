@@ -31,7 +31,9 @@ enum AudioRoute {
 
 fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
     match arch {
-        "qwen3vl" => Ok(AudioRoute::Asr),
+        // qwen2 covers VibeVoice ASR (routed on the mmproj probe inside
+        // run_asr_cli) and plain qwen2 text models, which reject --audio later
+        "qwen3vl" | "qwen2" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(

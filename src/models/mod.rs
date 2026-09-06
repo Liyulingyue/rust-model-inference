@@ -8,3 +8,4 @@ pub mod llama;
 pub mod qwen3;
 pub mod qwen35;
 pub mod spark;
+pub mod vibevoice_asr;
