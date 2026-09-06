@@ -368,8 +368,8 @@ mod parity_support {
     }
 
     pub fn load_dots(directory: &Path, variant: &str) -> LoadedDots {
-        let llm_path = directory.join(format!("dots-tts-{variant}.gguf"));
-        let mmproj_path = directory.join(format!("dots-tts-{variant}-mmproj.gguf"));
+        let llm_path = directory.join(format!("dots-tts-{variant}-BF16.gguf"));
+        let mmproj_path = directory.join(format!("dots-tts-{variant}-mmproj-BF16.gguf"));
         let llm_source: Arc<dyn TensorSource> =
             Arc::from(open_model_source(&llm_path, ComponentRole::Llm).unwrap());
         let tokenizer =

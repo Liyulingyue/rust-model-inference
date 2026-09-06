@@ -11,6 +11,7 @@ from convert_dots_tts import (
     GgufWriter,
     Tensor,
     _fold_weight_norm_dim0_f32,
+    _output_paths,
     _require_tensor,
     export_model,
     read_gguf_directory,
@@ -226,7 +227,7 @@ class ExportContractTest(unittest.TestCase):
             for name in required:
                 (model / name).touch()
             sources = [Mock(), Mock(), Mock()]
-            expected = (out / "dots-tts-base.gguf", out / "dots-tts-base-mmproj.gguf")
+            expected = (out / "dots-tts-base-BF16.gguf", out / "dots-tts-base-mmproj-BF16.gguf")
             with patch("convert_dots_tts.open_safetensors", side_effect=sources) as opened:
                 with patch("convert_dots_tts._export_open_model", return_value=expected) as inner:
                     actual = export_model(model, "base", out, False)
@@ -239,6 +240,14 @@ class ExportContractTest(unittest.TestCase):
             self.assertIs(actual, expected)
             for source in sources:
                 source.close.assert_called_once_with()
+
+    def test_output_paths_include_primary_precision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            self.assertEqual(_output_paths(out, "base"), (
+                out / "dots-tts-base-BF16.gguf",
+                out / "dots-tts-base-mmproj-BF16.gguf",
+            ))
 
     def test_weight_norm_norms_match_pinned_torch_for_row_lengths_1_through_32(self):
         expected_norms = (
