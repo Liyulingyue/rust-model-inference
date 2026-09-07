@@ -21,7 +21,14 @@ pub fn rms_norm_grouped(
     eps: f32,
 ) {
     let n = input.len().min(weight.len()).min(output.len());
-    assert!(groups > 0 && n.is_multiple_of(groups));
+    assert!(groups > 0, "groups must be greater than zero");
+    if n == 0 {
+        return;
+    }
+    assert!(
+        n.is_multiple_of(groups),
+        "normalized length {n} must be divisible by {groups} groups"
+    );
     let group_size = n / groups;
     for group in 0..groups {
         let range = group * group_size..(group + 1) * group_size;
@@ -123,5 +130,16 @@ mod tests {
         for (actual, expected) in output.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn grouped_rms_norm_accepts_empty_input() {
+        rms_norm_grouped(&[], &[], &mut [], 1, 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "groups must be greater than zero")]
+    fn grouped_rms_norm_rejects_zero_groups() {
+        rms_norm_grouped(&[], &[], &mut [], 0, 1e-5);
     }
 }

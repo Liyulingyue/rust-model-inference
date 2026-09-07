@@ -517,7 +517,7 @@ pub fn run_inference_tokens(
 
                 // LLaMA does not have QK norm.
                 // The `llama` GGUF arch uses interleaved ("normal"-style)
-                // RoPE 鈥?the converter permutes HF rotate_half weights into
+                // RoPE - the converter permutes HF rotate_half weights into
                 // adjacent-pair layout (MiniCPM5 ships this arch too).
                 for h in 0..n_head {
                     apply_rope(
