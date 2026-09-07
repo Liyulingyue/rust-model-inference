@@ -1,5 +1,6 @@
 pub mod audio_vae;
 pub mod config;
+pub mod creator;
 pub mod kernels;
 pub mod text;
 pub mod video_vae;
