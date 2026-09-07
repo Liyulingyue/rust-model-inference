@@ -2,11 +2,11 @@
 """Export dots.tts-base / dots.tts.edit (ModelScope dots-studio) to GGUF + mmproj.
 
 Produces, per variant:
-  dots-tts-<variant>.gguf          — Qwen2 LLM (arch "qwen2", standard llama.cpp names)
-  dots-tts-<variant>-mmproj.gguf   — everything else (arch "dotstts", dotstts.* rules)
+  dots-tts-<variant>-BF16.gguf          — Qwen2 LLM (arch "qwen2", standard llama.cpp names)
+  dots-tts-<variant>-mmproj-BF16.gguf   — everything else (arch "dotstts", dotstts.* rules)
 
 Torch-free: safetensors read via mmap, latent_stats.pt via a tiny pickle unstub,
-and a GGUF v3 writer (F16 for BF16 sources, F32 kept as F32; convs are stored
+and a GGUF v3 writer (BF16 sources stay BF16, F32 stays F32; convs are stored
 with weight-norm already folded, and the fixed kaiser filters are emitted too).
 Tensor naming rules follow docs/superpowers/specs/2026-09-01-dots-tts-gguf-rust-design.md.
 
@@ -572,6 +572,11 @@ def validate_variant(value: str) -> str:
     return value
 
 
+def _output_paths(out_dir: Path, variant: str) -> tuple[Path, Path]:
+    prefix = f"dots-tts-{variant}"
+    return out_dir / f"{prefix}-BF16.gguf", out_dir / f"{prefix}-mmproj-BF16.gguf"
+
+
 def export_model(model_dir: Path, variant: str, out_dir: Path, overwrite: bool) -> tuple[Path, Path]:
     variant = validate_variant(variant)
     model_dir = Path(model_dir).resolve()
@@ -585,9 +590,7 @@ def export_model(model_dir: Path, variant: str, out_dir: Path, overwrite: bool) 
     if missing:
         raise FileNotFoundError(f"missing required input paths: {', '.join(missing)}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = f"dots-tts-{variant}"
-    llm_path = out_dir / f"{prefix}.gguf"
-    mmproj_path = out_dir / f"{prefix}-mmproj.gguf"
+    llm_path, mmproj_path = _output_paths(out_dir, variant)
     if not overwrite and (llm_path.exists() or mmproj_path.exists()):
         existing = llm_path if llm_path.exists() else mmproj_path
         raise FileExistsError(f"output already exists: {existing}")
@@ -614,9 +617,7 @@ def _export_open_model(
     speaker: Safetensors,
     vocoder: Safetensors,
 ) -> tuple[Path, Path]:
-    prefix = f"dots-tts-{variant}"
-    llm_path = out_dir / f"{prefix}.gguf"
-    mmproj_path = out_dir / f"{prefix}-mmproj.gguf"
+    llm_path, mmproj_path = _output_paths(out_dir, variant)
     llm_cfg = json.loads((model_dir / "llm_config.json").read_text())
     cfg = json.loads((model_dir / "config.json").read_text())
     tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
