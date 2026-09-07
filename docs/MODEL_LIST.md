@@ -19,7 +19,7 @@
 | Qwen2.5-VL                    |            | 多模态               |                                       |              | 待核验 |
 | Qwen3                         | 0.6B       | 文本                 |                                       |              | 待核验 |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
-| Qwen3-ASR                     | 0.6B       | ASR                  |                                       |              | 待核验 |
+| Qwen3-ASR                     | 0.6B       | ASR                  |                                       |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | 待核验 |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |
 | Qwen3-TTS                     | 12Hz-1.7B-Base | TTS        | llama.cpp @ `201e50c`                 |              | 待核验 |
 | Qwen3-VL                      | 0.6B / 2B  | 多模态               |                                       |              | 待核验 |
