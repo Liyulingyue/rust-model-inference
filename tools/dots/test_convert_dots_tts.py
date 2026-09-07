@@ -5,17 +5,24 @@ import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
+import numpy as np
+
 from convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
+    GGML_Q8_0,
     GgufWriter,
     Tensor,
     _fold_weight_norm_dim0_f32,
     _output_paths,
     _require_tensor,
+    _tensor_nbytes,
+    bf16_bytes_to_q8_0,
     export_model,
+    quantize_q8_0,
     read_gguf_directory,
     read_gguf_tensor_bytes,
+    validate_quant,
     validate_variant,
 )
 
@@ -230,13 +237,15 @@ class ExportContractTest(unittest.TestCase):
             expected = (out / "dots-tts-base-BF16.gguf", out / "dots-tts-base-mmproj-BF16.gguf")
             with patch("convert_dots_tts.open_safetensors", side_effect=sources) as opened:
                 with patch("convert_dots_tts._export_open_model", return_value=expected) as inner:
-                    actual = export_model(model, "base", out, False)
+                    actual = export_model(model, "base", out, False, "bf16")
             self.assertEqual([call.args[0] for call in opened.call_args_list], [
                 model.resolve() / "model.safetensors",
                 model.resolve() / "speaker_encoder.safetensors",
                 model.resolve() / "vocoder.safetensors",
             ])
-            inner.assert_called_once_with(model.resolve(), "base", out.resolve(), False, *sources)
+            inner.assert_called_once_with(
+                model.resolve(), "base", out.resolve(), False, "bf16", *sources
+            )
             self.assertIs(actual, expected)
             for source in sources:
                 source.close.assert_called_once_with()
@@ -244,10 +253,16 @@ class ExportContractTest(unittest.TestCase):
     def test_output_paths_include_primary_precision(self):
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary)
-            self.assertEqual(_output_paths(out, "base"), (
+            self.assertEqual(_output_paths(out, "base", "bf16"), (
                 out / "dots-tts-base-BF16.gguf",
                 out / "dots-tts-base-mmproj-BF16.gguf",
             ))
+            self.assertEqual(_output_paths(out, "edit", "q8_0"), (
+                out / "dots-tts-edit-Q8_0.gguf",
+                out / "dots-tts-edit-mmproj-BF16.gguf",
+            ))
+            with self.assertRaises(ValueError):
+                _output_paths(out, "base", "q4_k")
 
     def test_weight_norm_norms_match_pinned_torch_for_row_lengths_1_through_32(self):
         expected_norms = (
@@ -312,6 +327,51 @@ class ExportContractTest(unittest.TestCase):
         self.assertEqual(validate_variant("edit"), "edit")
         with self.assertRaises(ValueError):
             validate_variant("experimental")
+
+    def test_quant_is_explicitly_bounded(self):
+        self.assertEqual(validate_quant("bf16"), "bf16")
+        self.assertEqual(validate_quant("q8_0"), "q8_0")
+        with self.assertRaises(ValueError):
+            validate_quant("q4_k")
+
+    def test_q8_0_rounds_half_away_from_zero_and_encodes_zero_block(self):
+        values = np.zeros(64, dtype=np.float32)
+        values[:5] = [-127.0, -0.5, 0.5, 1.5, 127.0]
+        raw = quantize_q8_0(values)
+        blocks = np.frombuffer(raw, dtype=np.uint8).reshape(2, 34)
+        self.assertEqual(blocks[0, :2].copy().view(np.float16)[0], np.float16(1.0))
+        self.assertEqual(blocks[0, 2:7].view(np.int8).tolist(), [-127, -1, 1, 2, 127])
+        self.assertEqual(blocks[1, :2].copy().view(np.float16)[0], np.float16(0.0))
+        self.assertEqual(blocks[1, 2:].view(np.int8).tolist(), [0] * 32)
+
+    def test_q8_0_rejects_payload_not_multiple_of_block(self):
+        with self.assertRaisesRegex(ValueError, "not a multiple of block size"):
+            quantize_q8_0(np.zeros(33, dtype=np.float32))
+        with self.assertRaisesRegex(ValueError, "odd byte length"):
+            bf16_bytes_to_q8_0(b"\x00\x00\x80")
+
+    def test_tensor_nbytes_handles_block_quants_and_rejects_unaligned(self):
+        self.assertEqual(_tensor_nbytes(GGML_Q8_0, (32,)), 34)
+        self.assertEqual(_tensor_nbytes(GGML_Q8_0, (1024, 1024)), 1024 * 1024 // 32 * 34)
+        self.assertEqual(_tensor_nbytes(GGML_F32, (3,)), 12)
+        self.assertEqual(_tensor_nbytes(GGML_BF16, (4,)), 8)
+        with self.assertRaisesRegex(ValueError, "not a multiple of block size"):
+            _tensor_nbytes(GGML_Q8_0, (33,))
+
+    def test_q8_0_payload_survives_atomic_gguf_readback(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "tiny.gguf"
+            payload = quantize_q8_0(np.arange(32, dtype=np.float32))
+            writer = GgufWriter(path)
+            writer.add_meta("general.architecture", "qwen2")
+            writer.add_meta("general.file_type", 7)
+            writer.add_tensor("weight", GGML_Q8_0, (32, 1), payload)
+            writer.write()
+
+            metadata, tensors = read_gguf_directory(path)
+            self.assertEqual(metadata["general.file_type"], 7)
+            self.assertEqual(tensors, {"weight": (GGML_Q8_0, (32, 1), 34)})
+            self.assertEqual(read_gguf_tensor_bytes(path, "weight"), payload)
 
     def test_llm_norm_must_be_bf16(self):
         norm = Tensor("llm.model.norm.weight", "F16", (4,), bytes(8))

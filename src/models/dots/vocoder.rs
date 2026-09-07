@@ -15,28 +15,12 @@ const RESSTACK_LEAKY: f32 = 0.01;
 const SNAKE_EPS: f32 = 1e-9;
 const HOP: usize = 1920; // product of decoder upsample rates
 
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
-}
+use super::blas::sys;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
 fn conv1d_sgemm(
     weight: &[f32],
     bias: &[f32],
@@ -50,7 +34,7 @@ fn conv1d_sgemm(
         out[oc * out_len..(oc + 1) * out_len].fill(bias[oc]);
     }
     unsafe {
-        cblas_sgemm(
+        sys::cblas_sgemm(
             102,
             111,
             111,
@@ -85,7 +69,10 @@ fn conv1d_causal(
     dilation: usize,
     left_pad: usize,
 ) -> Vec<f32> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         let reduction = in_ch * kernel;
         let mut columns = vec![0.0f32; reduction * length];
@@ -102,7 +89,10 @@ fn conv1d_causal(
         }
         conv1d_sgemm(weight, bias, &columns, reduction, out_ch, length)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     {
         let mut out = vec![0.0f32; out_ch * length];
         for oc in 0..out_ch {
@@ -137,7 +127,10 @@ fn conv1d_causal_strided(
     left_pad: usize,
 ) -> Vec<f32> {
     let out_len = (length + left_pad).saturating_sub(kernel) / stride + 1;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         let reduction = in_ch * kernel;
         let mut columns = vec![0.0f32; reduction * out_len];
@@ -154,7 +147,10 @@ fn conv1d_causal_strided(
         }
         conv1d_sgemm(weight, bias, &columns, reduction, out_ch, out_len)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     {
         let mut out = vec![0.0f32; out_ch * out_len];
         for oc in 0..out_ch {
@@ -186,7 +182,10 @@ fn conv1d_pad2(
     kernel: usize,
     pad: usize,
 ) -> Vec<f32> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         let reduction = in_ch * kernel;
         let mut columns = vec![0.0f32; reduction * length];
@@ -203,7 +202,10 @@ fn conv1d_pad2(
         }
         conv1d_sgemm(weight, bias, &columns, reduction, out_ch, length)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     {
         let mut out = vec![0.0f32; out_ch * length];
         for oc in 0..out_ch {
@@ -240,11 +242,14 @@ fn conv_transpose1d_causal(
     // last `stride` samples so the result is exactly length*stride
     let raw_len = (length - 1) * stride + kernel;
     let out_len = length * stride;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     let mut raw = {
         let mut columns = vec![0.0f32; out_ch * kernel * length];
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 101,
                 112,
                 111,
@@ -271,7 +276,10 @@ fn conv_transpose1d_causal(
         }
         raw
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     let mut raw = {
         let mut raw = vec![0.0f32; out_ch * raw_len];
         for ic in 0..in_ch {
@@ -346,9 +354,12 @@ fn linear_affine(
     for _ in 0..rows {
         output.extend_from_slice(bias);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     unsafe {
-        cblas_sgemm(
+        sys::cblas_sgemm(
             101,
             111,
             112,
@@ -365,7 +376,10 @@ fn linear_affine(
             output_features as i32,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     for row in 0..rows {
         for output_feature in 0..output_features {
             for input_feature in 0..input_features {
@@ -390,9 +404,12 @@ fn linear_affine_transposed_input(
     debug_assert_eq!(bias.len(), output_features);
     debug_assert_eq!(input.len(), rows * input_features);
     let mut output = vec![0.0f32; rows * output_features];
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     unsafe {
-        cblas_sgemm(
+        sys::cblas_sgemm(
             101,
             112,
             112,
@@ -409,7 +426,10 @@ fn linear_affine_transposed_input(
             output_features as i32,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     for row in 0..rows {
         for output_feature in 0..output_features {
             for input_feature in 0..input_features {
@@ -494,7 +514,10 @@ fn linear_affine_channel_major(
     for output_feature in 0..output_features {
         output.resize(output.len() + rows, bias[output_feature]);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     unsafe {
         let mut channel_major = vec![0.0f32; input_features * rows];
         for input_feature in 0..input_features {
@@ -503,7 +526,7 @@ fn linear_affine_channel_major(
                     input[row * input_features + input_feature];
             }
         }
-        cblas_sgemm(
+        sys::cblas_sgemm(
             101,
             111,
             111,
@@ -520,7 +543,10 @@ fn linear_affine_channel_major(
             rows as i32,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     for output_feature in 0..output_features {
         for row in 0..rows {
             for input_feature in 0..input_features {
@@ -1044,7 +1070,10 @@ impl AmpBlock {
         }
         // downsample: replicate pad 11 left, conv1d stride 2
         let mut down = vec![0.0f32; self.ch * length];
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         {
             let mut columns = vec![0.0f32; self.ch * 12 * length];
             for c in 0..self.ch {
@@ -1056,7 +1085,7 @@ impl AmpBlock {
                     }
                 }
                 unsafe {
-                    cblas_sgemm(
+                    sys::cblas_sgemm(
                         102,
                         111,
                         111,
@@ -1075,7 +1104,10 @@ impl AmpBlock {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for c in 0..self.ch {
             for n in 0..length {
                 let mut acc = 0.0f32;
@@ -1307,7 +1339,10 @@ impl BigVganDecoder {
             &snake,
         ));
         let mut down = vec![0.0f32; ch * length];
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         {
             let mut columns = vec![0.0f32; ch * 12 * length];
             for c in 0..ch {
@@ -1319,7 +1354,7 @@ impl BigVganDecoder {
                     }
                 }
                 unsafe {
-                    cblas_sgemm(
+                    sys::cblas_sgemm(
                         102,
                         111,
                         111,
@@ -1338,7 +1373,10 @@ impl BigVganDecoder {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for c in 0..ch {
             for n in 0..length {
                 let mut acc = 0.0f32;
