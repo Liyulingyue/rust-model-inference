@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+use super::blas::sys;
+
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::models::dots::config::DotsTtsConfig;
@@ -30,27 +32,6 @@ pub const DEFAULT_GUIDANCE: f32 = 1.2;
 pub const DEFAULT_SPEAKER_SCALE: f32 = 1.5;
 pub const DEFAULT_EOS_THRESHOLD: f32 = 0.8;
 pub const LN_EPS: f32 = 1e-5;
-
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
-}
 
 pub struct DotsTtsModel {
     pub config: DotsTtsConfig,
@@ -325,9 +306,12 @@ fn speaker_condition_forward(
         .map(|&value| value * scale)
         .collect::<Vec<_>>();
     let mut output = bias.to_vec();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     unsafe {
-        cblas_sgemm(
+        sys::cblas_sgemm(
             101,
             111,
             111,
@@ -344,7 +328,10 @@ fn speaker_condition_forward(
             1,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     for out in 0..1024 {
         for input in 0..512 {
             output[out] = weight[out * 512 + input].mul_add(scaled[input], output[out]);

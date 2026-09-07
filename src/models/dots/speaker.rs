@@ -6,6 +6,8 @@
 //!   mean-normalized) → CAM++ (FCM stem, TDNN, 3 dense blocks, masked
 //!   statistics pooling, dense → 512-dim x-vector).
 
+use super::blas::sys;
+
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
 
@@ -25,27 +27,6 @@ const BN_EPS: f32 = 1e-5;
 unsafe extern "C" {
     fn hypotf(x: f32, y: f32) -> f32;
     fn powf(x: f32, y: f32) -> f32;
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1772,11 +1753,14 @@ impl CamPlus {
     fn dense_projection(&self, stats: &[f32]) -> Vec<f32> {
         debug_assert_eq!(stats.len(), 1024);
         let mut dense = vec![0.0f32; 512];
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         unsafe {
             const CBLAS_ROW_MAJOR: i32 = 101;
             const CBLAS_NO_TRANSPOSE: i32 = 111;
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 CBLAS_ROW_MAJOR,
                 CBLAS_NO_TRANSPOSE,
                 CBLAS_NO_TRANSPOSE,
@@ -1793,7 +1777,10 @@ impl CamPlus {
                 1,
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for output in 0..512 {
             for input in 0..1024 {
                 dense[output] =
@@ -2304,7 +2291,10 @@ fn cam_gate_linear(
         output[out_channel * time..(out_channel + 1) * time].fill(bias[out_channel]);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         let mut channel_major = vec![0.0f32; input.len()];
         for frame in 0..time {
@@ -2315,7 +2305,7 @@ fn cam_gate_linear(
         const CBLAS_ROW_MAJOR: i32 = 101;
         const CBLAS_NO_TRANSPOSE: i32 = 111;
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 CBLAS_ROW_MAJOR,
                 CBLAS_NO_TRANSPOSE,
                 CBLAS_NO_TRANSPOSE,
@@ -2334,7 +2324,10 @@ fn cam_gate_linear(
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     {
         for out_channel in 0..out_channels {
             for frame in 0..time {

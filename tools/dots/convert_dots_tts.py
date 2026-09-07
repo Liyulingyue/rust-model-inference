@@ -2,8 +2,12 @@
 """Export dots.tts-base / dots.tts.edit (ModelScope dots-studio) to GGUF + mmproj.
 
 Produces, per variant:
-  dots-tts-<variant>-BF16.gguf          — Qwen2 LLM (arch "qwen2", standard llama.cpp names)
-  dots-tts-<variant>-mmproj-BF16.gguf   — everything else (arch "dotstts", dotstts.* rules)
+  dots-tts-<variant>-<quant>.gguf       — Qwen2 LLM (arch "qwen2", standard llama.cpp names)
+  dots-tts-<variant>-mmproj-BF16.gguf   — everything else (arch "clip", dotstts.* rules)
+
+`--quant bf16` (default) keeps the LLM in BF16; `--quant q8_0` quantizes the
+2-D linear weights (attn q/k/v/o + ffn gate/up/down) to GGML Q8_0, leaving
+embeddings, biases, and norms at BF16/F32. mmproj is always BF16/F32.
 
 Torch-free: safetensors read via mmap, latent_stats.pt via a tiny pickle unstub,
 and a GGUF v3 writer (BF16 sources stay BF16, F32 stays F32; convs are stored
@@ -11,8 +15,8 @@ with weight-norm already folded, and the fixed kaiser filters are emitted too).
 Tensor naming rules follow docs/superpowers/specs/2026-09-01-dots-tts-gguf-rust-design.md.
 
 Usage:
-  python3 tools/dots/convert_dots_tts.py models/dots.tts-base [--variant base] [--out-dir DIR]
-  python3 tools/dots/convert_dots_tts.py models/dots.tts.edit [--variant edit] [--out-dir DIR]
+  python3 tools/dots/convert_dots_tts.py models/dots.tts-base [--variant base] [--out-dir DIR] [--quant bf16|q8_0]
+  python3 tools/dots/convert_dots_tts.py models/dots.tts.edit [--variant edit] [--out-dir DIR] [--quant bf16|q8_0]
 """
 
 from __future__ import annotations
@@ -29,12 +33,20 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 ALIGNMENT = 32
 
 GGML_F32 = 0
 GGML_F16 = 1
+GGML_Q8_0 = 8
 GGML_I64 = 27
 GGML_BF16 = 30
+
+Q8_0_BLOCK = 32
+Q8_0_BLOCK_BYTES = 34  # f16 scale + 32 x int8
+
+_QUANT_FILE_TYPE = {"bf16": 32, "q8_0": 7}
 
 # GGUF metadata value types
 _T_UINT8, _T_INT8, _T_UINT16, _T_INT16 = 0, 1, 2, 3
@@ -165,6 +177,39 @@ def f32_to_f16(data: bytes) -> bytes:
 
 def f32_values(data: bytes) -> list:
     return list(struct.unpack(f"<{len(data) // 4}f", data))
+
+
+def quantize_q8_0(values: np.ndarray) -> bytes:
+    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
+
+    Rounding is round-half-away-from-zero to match ggml's roundf, and a zero
+    block is emitted as a zero scale + all-zero payload (avoids div-by-zero
+    while keeping the byte layout identical to llama.cpp)."""
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if flat.size % Q8_0_BLOCK:
+        raise ValueError(
+            f"q8_0 payload {flat.size} elements is not a multiple of block size {Q8_0_BLOCK}"
+        )
+    blocks = flat.reshape(-1, Q8_0_BLOCK)
+    amax = np.max(np.abs(blocks), axis=1)
+    scale = (amax / 127.0).astype(np.float16)
+    scale_f32 = scale.astype(np.float32)
+    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
+    scaled = blocks / safe[:, None]
+    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
+    out = np.empty((blocks.shape[0], Q8_0_BLOCK_BYTES), dtype=np.uint8)
+    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_0_BLOCK)
+    return out.tobytes()
+
+
+def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
+    """Convert an interleaved BF16 payload (little-endian) to Q8_0 bytes."""
+    if len(raw_bf16) % 2:
+        raise ValueError(f"bf16 payload has odd byte length {len(raw_bf16)}")
+    words = np.frombuffer(raw_bf16, dtype=np.uint16)
+    f32 = (words.astype(np.uint32) << np.uint32(16)).view(np.float32)
+    return quantize_q8_0(f32)
 
 
 def _fold_weight_norm_dim0_f32(
@@ -343,10 +388,25 @@ def _gguf_array(values: list) -> bytes:
 def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
     if any(dim <= 0 for dim in dims):
         raise ValueError(f"invalid tensor dimensions: {dims}")
+    elements = math.prod(dims)
+    quant = _QUANT_BLOCK_BYTES.get(ggml_type)
+    if quant is not None:
+        block_size, block_bytes = quant
+        if elements % block_size:
+            raise ValueError(
+                f"GGML type {ggml_type} tensor dims {dims} have {elements} elements, "
+                f"not a multiple of block size {block_size}"
+            )
+        return elements // block_size * block_bytes
     size = {GGML_F32: 4, GGML_F16: 2, GGML_BF16: 2, GGML_I64: 8}.get(ggml_type)
     if size is None:
         raise ValueError(f"unsupported GGML type {ggml_type}")
-    return math.prod(dims) * size
+    return elements * size
+
+
+_QUANT_BLOCK_BYTES: dict[int, tuple[int, int]] = {
+    GGML_Q8_0: (Q8_0_BLOCK, Q8_0_BLOCK_BYTES),
+}
 
 
 def _read_gguf(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tuple[int, ...], int, int]]]:
@@ -572,13 +632,27 @@ def validate_variant(value: str) -> str:
     return value
 
 
-def _output_paths(out_dir: Path, variant: str) -> tuple[Path, Path]:
+def validate_quant(value: str) -> str:
+    if value not in _QUANT_FILE_TYPE:
+        raise ValueError(f"unsupported LLM quantization: {value}")
+    return value
+
+
+_QUANT_SUFFIX = {"bf16": "BF16", "q8_0": "Q8_0"}
+
+
+def _output_paths(out_dir: Path, variant: str, quant: str) -> tuple[Path, Path]:
+    validate_quant(quant)
+    suffix = _QUANT_SUFFIX[quant]
     prefix = f"dots-tts-{variant}"
-    return out_dir / f"{prefix}-BF16.gguf", out_dir / f"{prefix}-mmproj-BF16.gguf"
+    return out_dir / f"{prefix}-{suffix}.gguf", out_dir / f"{prefix}-mmproj-BF16.gguf"
 
 
-def export_model(model_dir: Path, variant: str, out_dir: Path, overwrite: bool) -> tuple[Path, Path]:
+def export_model(
+    model_dir: Path, variant: str, out_dir: Path, overwrite: bool, quant: str
+) -> tuple[Path, Path]:
     variant = validate_variant(variant)
+    quant = validate_quant(quant)
     model_dir = Path(model_dir).resolve()
     out_dir = Path(out_dir).resolve()
     required = (
@@ -590,18 +664,18 @@ def export_model(model_dir: Path, variant: str, out_dir: Path, overwrite: bool) 
     if missing:
         raise FileNotFoundError(f"missing required input paths: {', '.join(missing)}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_path, mmproj_path = _output_paths(out_dir, variant)
+    llm_path, mmproj_path = _output_paths(out_dir, variant, quant)
     if not overwrite and (llm_path.exists() or mmproj_path.exists()):
         existing = llm_path if llm_path.exists() else mmproj_path
         raise FileExistsError(f"output already exists: {existing}")
 
-    print(f"exporting variant={variant} from {model_dir}")
+    print(f"exporting variant={variant} quant={quant} from {model_dir}")
     core = speaker = vocoder = None
     try:
         core = open_safetensors(model_dir / "model.safetensors")
         speaker = open_safetensors(model_dir / "speaker_encoder.safetensors")
         vocoder = open_safetensors(model_dir / "vocoder.safetensors")
-        return _export_open_model(model_dir, variant, out_dir, overwrite, core, speaker, vocoder)
+        return _export_open_model(model_dir, variant, out_dir, overwrite, quant, core, speaker, vocoder)
     finally:
         for source in (core, speaker, vocoder):
             if source is not None:
@@ -613,11 +687,12 @@ def _export_open_model(
     variant: str,
     out_dir: Path,
     overwrite: bool,
+    quant: str,
     core: Safetensors,
     speaker: Safetensors,
     vocoder: Safetensors,
 ) -> tuple[Path, Path]:
-    llm_path, mmproj_path = _output_paths(out_dir, variant)
+    llm_path, mmproj_path = _output_paths(out_dir, variant, quant)
     llm_cfg = json.loads((model_dir / "llm_config.json").read_text())
     cfg = json.loads((model_dir / "config.json").read_text())
     tok_cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
@@ -637,7 +712,7 @@ def _export_open_model(
     gguf = GgufWriter(llm_path)
     gguf.add_meta("general.architecture", "qwen2")
     gguf.add_meta("general.name", f"dots.tts-{variant}")
-    gguf.add_meta("general.file_type", 32)
+    gguf.add_meta("general.file_type", _QUANT_FILE_TYPE[quant])
     gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta("qwen2.block_count", n_layer)
     gguf.add_meta("qwen2.context_length", llm_cfg["max_position_embeddings"])
@@ -677,8 +752,10 @@ def _export_open_model(
         t = _require_tensor(core.tensor(src_name), "BF16", shape)
         if dst_name.endswith("norm.weight"):
             gguf.add_tensor(dst_name, GGML_F32, gguf_dims(t.shape), bf16_to_f32(t.raw))
-        else:
+        elif dst_name.endswith(".bias") or quant == "bf16":
             gguf.add_tensor(dst_name, GGML_BF16, gguf_dims(t.shape), t.raw)
+        else:
+            gguf.add_tensor(dst_name, GGML_Q8_0, gguf_dims(t.shape), bf16_bytes_to_q8_0(t.raw))
 
     embed = _require_tensor(core.tensor("llm.model.embed_tokens.weight"), "BF16", (llm_cfg["vocab_size"], n_embd))
     gguf.add_tensor("token_embd.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)
@@ -932,13 +1009,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="export dots.tts to GGUF + mmproj")
     parser.add_argument("model_dir", type=str, help="models/dots.tts-base or models/dots.tts.edit")
     parser.add_argument("--variant", default=None, help="base|edit (default: from dir name)")
+    parser.add_argument("--quant", default="bf16", choices=("bf16", "q8_0"),
+                        help="LLM linear-weight precision (default: bf16)")
     parser.add_argument("--out-dir", default=None, help="output directory (default: model dir parent)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing output files")
     args = parser.parse_args()
     model_dir = validated_dir(args.model_dir, must_exist=True)
     variant = args.variant or ("edit" if "edit" in model_dir.name else "base")
     out_dir = validated_dir(args.out_dir or str(model_dir.parent), must_exist=False)
-    export_model(model_dir, variant, out_dir, args.overwrite)
+    export_model(model_dir, variant, out_dir, args.overwrite, args.quant)
 
 
 if __name__ == "__main__":
