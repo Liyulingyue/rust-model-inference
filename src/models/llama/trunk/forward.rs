@@ -1,4 +1,4 @@
-﻿//! # LLaMA Text Inference
+//! # LLaMA Text Inference
 //!
 //! LLaMA-family text generation, aligning with llama.cpp's forward pass and
 //! sample/decode path. Standard LLaMA has no Q/K per-head RMSNorm.
@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    attention_value_f32, dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm,
-    rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
-    vec_scale_f32,
+    attention_value_f32, dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into,
+    rms_norm_grouped, rope_neox, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
+    vec_mad_f16_f32, vec_scale_f32,
 };
 
 use std::io::{self, Write};
@@ -130,6 +130,49 @@ fn dbg_full(step: usize, label: &'static str, il: usize, buf: &[f32], n: usize) 
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
+fn format_prompt_text(arch: &str, prompt: &str) -> String {
+    match arch {
+        "granite" => format!(
+            "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+        ),
+        "nanbeige" => prompt.to_string(),
+        "k2-horizon" => format!(
+            "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        ),
+        _ => format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"),
+    }
+}
+
+fn normalization_groups(
+    source: &dyn TensorSource,
+    arch: &str,
+    n_embd: usize,
+) -> Result<usize, String> {
+    if arch != "k2-horizon" {
+        return Ok(1);
+    }
+
+    let groups = source
+        .metadata("k2-horizon.attention.group_norm_groups")
+        .and_then(|value| value.to_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    if !n_embd.is_multiple_of(groups) {
+        return Err(format!(
+            "K2-Horizon embedding length {n_embd} is not divisible by {groups} normalization groups"
+        ));
+    }
+    Ok(groups)
+}
+
+fn apply_rope(arch: &str, values: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+    if arch == "k2-horizon" {
+        rope_neox(values, pos, head_dim, freq_base);
+    } else {
+        rope_norm(values, pos, head_dim, freq_base);
+    }
+}
+
 pub fn run_inference(
     source: &dyn TensorSource,
     prompt: &str,
@@ -156,29 +199,7 @@ pub fn run_inference(
         // `<|im_start|>{role}\n{content}<|im_end|>\n` template. Nanbeige is
         // a base model with no chat template — feed the prompt as-is and let
         // the BOS token mark the start of generation.
-        let prompt_text = if arch == "granite" {
-            // Granite chat template (Jinja):
-            //   "<|start_of_role|>user<|end_of_role|>{content}<|end_of_text|>\n
-            //    <|start_of_role|>assistant<|end_of_role|>"
-            format!(
-                "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
-            )
-        } else if arch == "nanbeige" {
-            // Base model: no chat wrapping. The SPM tokenizer prepends BOS
-            // when add_special=true is passed below.
-            prompt.to_string()
-        } else {
-            // MiniCPM5/Qwen2-style template. The rendered format for a
-            // single user message is:
-            //
-            //     <s><|im_start|>user\n{prompt}<|im_end|>\n
-            //     <|im_start|>assistant\n<think>\n
-            //
-            // (BOS is added because the chat template explicitly emits `<s>`.)
-            let im_start_str = "<|im_start|>";
-            let im_end_str = "<|im_end|>";
-            format!("{im_start_str}user\n{prompt}{im_end_str}\n{im_start_str}assistant\n<think>\n")
-        };
+        let prompt_text = format_prompt_text(&arch, prompt);
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
         // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
         // expects no BOS since add_bos_token=false), so add_special=false
@@ -262,6 +283,7 @@ pub fn run_inference_tokens(
     let n_ff = config.n_ff;
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
+    let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     // Granite-specific scaling factors. Zero means "not used" (no-op).
     let arch_prefix = &arch;
@@ -431,7 +453,7 @@ pub fn run_inference_tokens(
             let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
             let t0 = Instant::now();
-            rms_norm(x, &lw.attn_norm, normed, eps);
+            rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             dbg_tensor(step, "attn_norm", layer, normed);
             quantize_q8_0_into(
                 normed,
@@ -498,7 +520,8 @@ pub fn run_inference_tokens(
                 // RoPE 鈥?the converter permutes HF rotate_half weights into
                 // adjacent-pair layout (MiniCPM5 ships this arch too).
                 for h in 0..n_head {
-                    rope_norm(
+                    apply_rope(
+                        &arch,
                         &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                         pos,
                         n_embd_head_k,
@@ -506,7 +529,8 @@ pub fn run_inference_tokens(
                     );
                 }
                 for h in 0..n_head_kv {
-                    rope_norm(
+                    apply_rope(
+                        &arch,
                         &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
                         pos,
                         n_embd_head_k,
@@ -710,7 +734,7 @@ pub fn run_inference_tokens(
                 dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
                 dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
             }
-            rms_norm(x, &lw.ffn_norm, normed, eps);
+            rms_norm_grouped(x, &lw.ffn_norm, normed, norm_groups, eps);
             dbg_tensor(step, "ffn_norm", layer, normed);
             dbg_full(step, "ffn_norm", layer, normed, n_embd);
             dbg_tensor(
@@ -892,7 +916,7 @@ pub fn run_inference_tokens(
             let q8k_buf = &mut scratch.q8k_buf;
 
             let t0 = Instant::now();
-            rms_norm(x, &output_norm, normed, eps);
+            rms_norm_grouped(x, &output_norm, normed, norm_groups, eps);
             dbg_tensor(step, "output_norm", 0, normed);
             t_norm += t0.elapsed().as_secs_f64();
 
@@ -1059,4 +1083,55 @@ pub fn run_inference_tokens(
         infer_ms
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_rope, format_prompt_text, normalization_groups};
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    use std::collections::HashMap;
+
+    struct MetadataSource(HashMap<String, MetaValue>);
+
+    impl TensorSource for MetadataSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.0.get(key)
+        }
+
+        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
+            None
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn k2_horizon_prompt_matches_reference_template() {
+        assert_eq!(
+            format_prompt_text("k2-horizon", "Hello"),
+            "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        );
+    }
+
+    #[test]
+    fn k2_horizon_uses_grouped_norm_and_neox_rope() {
+        let source = MetadataSource(HashMap::from([(
+            "k2-horizon.attention.group_norm_groups".into(),
+            MetaValue::Uint32(4),
+        )]));
+        assert_eq!(
+            normalization_groups(&source, "k2-horizon", 4096).unwrap(),
+            4
+        );
+        assert_eq!(normalization_groups(&source, "llama", 4096).unwrap(), 1);
+        assert!(normalization_groups(&source, "k2-horizon", 4095).is_err());
+
+        let mut actual = [1.0, 2.0, 3.0, 4.0];
+        let mut expected = actual;
+        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0);
+        crate::ops::rope_neox(&mut expected, 7, 4, 10_000_000.0);
+        assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+    }
 }

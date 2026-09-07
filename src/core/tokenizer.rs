@@ -28,6 +28,7 @@ enum PreTokenizer {
     Lfm2,
     LlamaBpe,
     Gemma4,
+    K2Horizon,
     /// Xunfei Spark 2.5 (and other Chinese-tokenizer dialects that share
     /// the same byte-level BPE setup but use a different regex split).
     /// Differs from `Qwen2` in that punctuation immediately preceding a
@@ -354,9 +355,10 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, or llama-bpe"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, llama-bpe, or k2-horizon"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -1527,7 +1529,9 @@ fn hex_byte(piece: &str) -> Option<u8> {
 }
 
 fn is_word_char(value: char, pre: PreTokenizer) -> bool {
-    value.is_letter() || (pre == PreTokenizer::Qwen35 && value.is_mark())
+    value.is_letter()
+        || (matches!(pre, PreTokenizer::Qwen35 | PreTokenizer::K2Horizon) && value.is_mark())
+        || (pre == PreTokenizer::K2Horizon && matches!(value, '\u{200c}' | '\u{200d}'))
 }
 
 fn is_number(value: char) -> bool {
@@ -1625,6 +1629,11 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
 
         if is_number(current) {
             pos += 1;
+            if pre == PreTokenizer::K2Horizon {
+                while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
+                    pos += 1;
+                }
+            }
             ranges.push(byte_at(start)..byte_at(pos));
             continue;
         }
@@ -1845,6 +1854,19 @@ mod tests {
             scan_qwen_words("e\u{301}", PreTokenizer::Qwen2),
             vec!["e", "\u{301}"]
         );
+    }
+
+    #[test]
+    fn k2_horizon_scanner_matches_reference_boundaries() {
+        assert_eq!(
+            scan_qwen_words("abc1234", PreTokenizer::K2Horizon),
+            vec!["abc", "123", "4"]
+        );
+        assert_eq!(
+            scan_qwen_words("re\u{301}sume\u{200d}now", PreTokenizer::K2Horizon),
+            vec!["re\u{301}sume\u{200d}now"]
+        );
+        assert!(tokenizer_with_pre(Some("k2-horizon")).is_ok());
     }
 
     #[test]

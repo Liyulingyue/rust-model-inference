@@ -12,6 +12,8 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 pub mod scalar;
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +56,19 @@ impl<'a> BF16Kernel<'a> {
                         avx2::matmul_bf16_vs_f32_avx2(self.weight, input, my_out, n_in, start, end);
                         return;
                     }
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::ops::has_neon() {
+                let (start, end) = Self::row_range(n_out, ith, nth);
+                if end > start {
+                    let my_out = &mut output[start..end];
+                    unsafe {
+                        neon::matmul_bf16_vs_f32_neon(self.weight, input, my_out, n_in, start, end);
+                    }
+                    return;
                 }
             }
         }
