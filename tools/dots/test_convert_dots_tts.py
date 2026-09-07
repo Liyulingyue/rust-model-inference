@@ -292,6 +292,32 @@ class ExportContractTest(unittest.TestCase):
             self.assertEqual(tensors["bf16.weight"], (GGML_BF16, (2,), 4))
             self.assertEqual(read_gguf_tensor_bytes(path, "bf16.weight"), bf16)
 
+    def test_streamed_tensor_round_trips(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "stream.gguf"
+            writer = GgufWriter(path)
+            writer.add_meta("general.architecture", "test")
+            writer.add_tensor_chunks(
+                "weight",
+                GGML_F32,
+                (2,),
+                8,
+                lambda: iter((b"\x00\x00\x80?", b"\x00\x00\x00@")),
+            )
+            writer.write()
+
+            self.assertEqual(
+                read_gguf_tensor_bytes(path, "weight"),
+                b"\x00\x00\x80?\x00\x00\x00@",
+            )
+
+    def test_streamed_tensor_rejects_declared_size_mismatch(self):
+        writer = GgufWriter(Path("unused.gguf"))
+        with self.assertRaisesRegex(ValueError, "expected 8 bytes"):
+            writer.add_tensor_chunks(
+                "weight", GGML_F32, (2,), 7, lambda: iter((b"x" * 7,))
+            )
+
     def test_duplicate_names_and_implicit_overwrite_are_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "tiny.gguf"

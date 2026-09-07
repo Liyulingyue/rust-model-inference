@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -26,6 +27,7 @@ import pickle
 import struct
 import tempfile
 import zipfile
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -449,6 +451,12 @@ def read_gguf_tensor_bytes(path: Path, name: str) -> bytes:
         return fh.read(length)
 
 
+@dataclass(frozen=True)
+class TensorPayload:
+    nbytes: int
+    chunks: Callable[[], Iterable[bytes]]
+
+
 class GgufWriter:
     """Two-pass GGUF v3 writer: header (metadata + tensor info) then aligned data.
 
@@ -459,7 +467,7 @@ class GgufWriter:
     def __init__(self, path: Path):
         self.path = path
         self.metadata: list[tuple[str, object]] = []
-        self.tensors: list[tuple[str, int, tuple, bytes]] = []  # name, ggml_type, gguf_dims, raw
+        self.tensors: list[tuple[str, int, tuple, TensorPayload]] = []
         self._metadata_keys: set[str] = set()
         self._tensor_names: set[str] = set()
 
@@ -469,14 +477,42 @@ class GgufWriter:
         self._metadata_keys.add(key)
         self.metadata.append((key, value))
 
-    def add_tensor(self, name: str, ggml_type: int, gguf_dims: tuple, raw: bytes) -> None:
+    def _add_tensor_payload(
+        self,
+        name: str,
+        ggml_type: int,
+        gguf_dims: tuple,
+        payload: TensorPayload,
+    ) -> None:
         if name in self._tensor_names:
             raise ValueError(f"duplicate output tensor {name}")
-        expected = _tensor_nbytes(ggml_type, gguf_dims)
-        if len(raw) != expected:
-            raise ValueError(f"{name}: {len(raw)} bytes, expected {expected}")
         self._tensor_names.add(name)
-        self.tensors.append((name, ggml_type, gguf_dims, raw))
+        self.tensors.append((name, ggml_type, gguf_dims, payload))
+
+    def add_tensor_chunks(
+        self,
+        name: str,
+        ggml_type: int,
+        gguf_dims: tuple,
+        nbytes: int,
+        chunks: Callable[[], Iterable[bytes]],
+    ) -> None:
+        expected = _tensor_nbytes(ggml_type, gguf_dims)
+        if nbytes != expected:
+            raise ValueError(f"{name}: expected {expected} bytes, got {nbytes}")
+        self._add_tensor_payload(
+            name, ggml_type, gguf_dims, TensorPayload(nbytes, chunks)
+        )
+
+    def add_tensor(self, name: str, ggml_type: int, gguf_dims: tuple, raw: bytes) -> None:
+        payload = bytes(raw)
+        self.add_tensor_chunks(
+            name,
+            ggml_type,
+            gguf_dims,
+            len(payload),
+            lambda payload=payload: iter((payload,)),
+        )
 
     def _build_header(self, offsets: list) -> bytes:
         buf = io.BytesIO()
@@ -489,7 +525,7 @@ class GgufWriter:
             buf.write(_gguf_meta_value(value))
         # GGUF spec: metadata section is followed directly by tensor infos
         # (the total tensor count was already written up front).
-        for (name, ggml_type, dims, _raw), offset in zip(self.tensors, offsets):
+        for (name, ggml_type, dims, _payload), offset in zip(self.tensors, offsets):
             buf.write(_gguf_str(name))
             buf.write(struct.pack("<I", len(dims)))
             for dim in dims:
@@ -501,15 +537,15 @@ class GgufWriter:
         # derives the data region as align_up(end-of-header).
         return buf.getvalue()
 
-    def _write_file(self, path: Path) -> None:
+    def _write_file(self, path: Path) -> dict[str, bytes]:
         placeholder = self._build_header([0] * len(self.tensors))
         data_start = (len(placeholder) + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
         # relative offsets the reader adds to its own padded data offset
         rel_offsets = []
         pos = data_start
-        for _name, _t, _dims, raw in self.tensors:
+        for _name, _t, _dims, payload in self.tensors:
             rel_offsets.append(pos - data_start)
-            size = (len(raw) + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
+            size = (payload.nbytes + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
             pos += size
         header = self._build_header(rel_offsets)
         if len(header) != len(placeholder):
@@ -517,19 +553,36 @@ class GgufWriter:
         with open(path, "wb") as fh:
             fh.write(header)
             fh.write(b"\x00" * (data_start - len(header)))
-            for rel, (_name, _t, _dims, raw) in zip(rel_offsets, self.tensors):
+            digests = {}
+            for rel, (name, _t, _dims, payload) in zip(rel_offsets, self.tensors):
                 assert fh.tell() == data_start + rel
-                fh.write(raw)
-                pad = (ALIGNMENT - (len(raw) % ALIGNMENT)) % ALIGNMENT
+                digest = hashlib.sha256()
+                written = 0
+                for chunk in payload.chunks():
+                    view = memoryview(chunk)
+                    if written + len(view) > payload.nbytes:
+                        raise ValueError(
+                            f"{name}: streamed more than {payload.nbytes} bytes"
+                        )
+                    fh.write(view)
+                    digest.update(view)
+                    written += len(view)
+                if written != payload.nbytes:
+                    raise ValueError(
+                        f"{name}: streamed {written} bytes, expected {payload.nbytes}"
+                    )
+                digests[name] = digest.digest()
+                pad = (ALIGNMENT - (payload.nbytes % ALIGNMENT)) % ALIGNMENT
                 if pad:
                     fh.write(b"\x00" * pad)
+        return digests
 
     def _validate_readback(self, metadata: dict[str, object], tensors: dict[str, tuple[int, tuple[int, ...], int]]) -> None:
         if metadata != dict(self.metadata):
             raise ValueError("GGUF metadata readback mismatch")
         expected = {
-            name: (ggml_type, dims, len(raw))
-            for name, ggml_type, dims, raw in self.tensors
+            name: (ggml_type, dims, payload.nbytes)
+            for name, ggml_type, dims, payload in self.tensors
         }
         if tensors != expected:
             raise ValueError("GGUF tensor directory readback mismatch")
@@ -541,12 +594,24 @@ class GgufWriter:
         os.close(fd)
         tmp = Path(raw_tmp)
         try:
-            self._write_file(tmp)
-            metadata, tensors = read_gguf_directory(tmp)
+            expected_digests = self._write_file(tmp)
+            metadata, directory = _read_gguf(tmp)
+            tensors = {name: entry[:3] for name, entry in directory.items()}
             self._validate_readback(metadata, tensors)
-            for name, _ggml_type, _dims, raw in self.tensors:
-                if read_gguf_tensor_bytes(tmp, name) != raw:
-                    raise ValueError(f"GGUF tensor payload readback mismatch: {name}")
+            with tmp.open("rb") as fh:
+                for name, _ggml_type, _dims, _payload in self.tensors:
+                    _kind, _shape, length, offset = directory[name]
+                    fh.seek(offset)
+                    digest = hashlib.sha256()
+                    remaining = length
+                    while remaining:
+                        chunk = fh.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError(f"GGUF tensor payload truncated: {name}")
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if digest.digest() != expected_digests[name]:
+                        raise ValueError(f"GGUF tensor payload readback mismatch: {name}")
             if overwrite:
                 os.replace(tmp, self.path)
             else:
