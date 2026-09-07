@@ -111,6 +111,14 @@ impl<'a> Linear<'a> {
         self.weight.n_out
     }
 
+    pub fn embedding_lookup(&self, token_id: u32, output: &mut [f32]) -> Result<(), String> {
+        if token_id as usize >= self.n_out() || output.len() != self.n_in() {
+            return Err("Invalid DreamX embedding lookup".into());
+        }
+        self.weight.embedding_lookup(token_id, output);
+        Ok(())
+    }
+
     pub fn forward(
         &self,
         pool: &ComputePool,
@@ -168,15 +176,31 @@ fn load_float_tensor(
     name: &str,
     expected_len: usize,
 ) -> Result<Vec<f32>, String> {
+    load_float_values(source, name, &[expected_len as u64])
+}
+
+pub fn load_float_values(
+    source: &dyn TensorSource,
+    name: &str,
+    expected_dims: &[u64],
+) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != [expected_len as u64] {
+    if info.dims != expected_dims {
         return Err(format!(
-            "Invalid tensor {name}: shape {:?}; expected [{expected_len}]",
-            info.dims
+            "Invalid tensor {name}: shape {:?}; expected {expected_dims:?}",
+            info.dims,
         ));
     }
+    let expected_len = expected_dims
+        .iter()
+        .try_fold(1usize, |length, &dimension| {
+            usize::try_from(dimension)
+                .ok()
+                .and_then(|dimension| length.checked_mul(dimension))
+                .ok_or_else(|| format!("Invalid tensor shape: {name}"))
+        })?;
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
@@ -501,6 +525,63 @@ pub fn attention_online(
                     &key[key_start..key_start + spec.head_dim],
                     spec.head_dim,
                 ) * spec.scale;
+                let new_max = running_max.max(score);
+                let old_scale = (running_max - new_max).exp();
+                let new_scale = (score - new_max).exp();
+                normalizer = normalizer * old_scale + new_scale;
+                let value_start = (key_token * spec.key_value_heads + key_head) * spec.head_dim;
+                for dimension in 0..spec.head_dim {
+                    output_row[dimension] = output_row[dimension] * old_scale
+                        + new_scale * value[value_start + dimension];
+                }
+                running_max = new_max;
+            }
+            for value in output_row {
+                *value /= normalizer;
+            }
+        }
+    }
+    Ok(output)
+}
+
+pub fn attention_online_with_bias(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    bias: &[f32],
+    spec: AttentionSpec,
+) -> Result<Vec<f32>, String> {
+    spec.validate(query, key, value)?;
+    if bias.len()
+        != checked_len(
+            "DreamX attention bias",
+            &[spec.query_heads, spec.query_tokens, spec.key_tokens],
+        )?
+    {
+        return Err("Invalid DreamX attention bias shape".into());
+    }
+    let mut output = vec![0.0; query.len()];
+    let group_size = spec.query_heads / spec.key_value_heads;
+    for query_token in 0..spec.query_tokens {
+        for query_head in 0..spec.query_heads {
+            let query_start = (query_token * spec.query_heads + query_head) * spec.head_dim;
+            let output_row = &mut output[query_start..query_start + spec.head_dim];
+            let key_head = query_head / group_size;
+            let mut running_max = f32::NEG_INFINITY;
+            let mut normalizer = 0.0;
+            for key_token in 0..spec.key_tokens {
+                if !spec.key_visible(query_token, key_token) {
+                    continue;
+                }
+                let key_start = (key_token * spec.key_value_heads + key_head) * spec.head_dim;
+                let bias_index =
+                    (query_head * spec.query_tokens + query_token) * spec.key_tokens + key_token;
+                let score = dot_f32(
+                    &query[query_start..query_start + spec.head_dim],
+                    &key[key_start..key_start + spec.head_dim],
+                    spec.head_dim,
+                ) * spec.scale
+                    + bias[bias_index];
                 let new_max = running_max.max(score);
                 let old_scale = (running_max - new_max).exp();
                 let new_scale = (score - new_max).exp();

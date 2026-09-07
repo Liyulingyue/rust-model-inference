@@ -1,5 +1,6 @@
 pub mod config;
 pub mod kernels;
+pub mod text;
 
 pub use config::DreamXConfig;
 
