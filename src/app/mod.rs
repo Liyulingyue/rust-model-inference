@@ -7,6 +7,7 @@ pub(crate) mod omni;
 pub(crate) mod selftest;
 pub(crate) mod text;
 pub mod tts;
+pub(crate) mod vibevoice;
 
 pub use audio::run_asr_cli;
 pub use cli::{
