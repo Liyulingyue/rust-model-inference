@@ -876,6 +876,22 @@ struct Decoder {
 impl Decoder {
     fn load(source: &dyn TensorSource, dimensions: VaeDimensions) -> Result<Self, String> {
         let dims = dimensions.decoder_dims();
+        Self::load_with_dims(
+            source,
+            dims,
+            dimensions.latent_channels,
+            dimensions.residual_blocks,
+            dimensions.temporal_down,
+        )
+    }
+
+    fn load_with_dims(
+        source: &dyn TensorSource,
+        dims: [usize; 5],
+        latent_channels: usize,
+        residual_blocks: usize,
+        temporal_down: [bool; 3],
+    ) -> Result<Self, String> {
         let channels = dims[0];
         let mut stages = Vec::with_capacity(4);
         for index in 0..4 {
@@ -884,9 +900,8 @@ impl Decoder {
                 index,
                 dims[index],
                 dims[index + 1],
-                dimensions.residual_blocks + 1,
-                dimensions
-                    .temporal_down
+                residual_blocks + 1,
+                temporal_down
                     .iter()
                     .rev()
                     .copied()
@@ -899,7 +914,7 @@ impl Decoder {
             input: Conv3::load(
                 source,
                 "decoder.conv1",
-                dimensions.latent_channels,
+                latent_channels,
                 channels,
                 [3; 3],
                 [1; 3],
@@ -944,6 +959,106 @@ impl Decoder {
         data = channel_rms_norm(&data, &self.norm)?;
         silu_inplace(&mut data.data);
         self.output.forward(source, pool, &data, Some(cache))
+    }
+}
+
+struct PrefixSource {
+    source: Arc<dyn TensorSource>,
+    actual_prefix: &'static str,
+}
+
+impl PrefixSource {
+    fn mapped(&self, name: &str) -> String {
+        name.strip_prefix(PREFIX)
+            .map(|suffix| format!("{}{suffix}", self.actual_prefix))
+            .unwrap_or_else(|| name.to_owned())
+    }
+}
+
+impl TensorSource for PrefixSource {
+    fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+        self.source.metadata(key)
+    }
+
+    fn tensor_info(&self, name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+        self.source.tensor_info(&self.mapped(name))
+    }
+
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        self.source.tensor_slice(&self.mapped(name))
+    }
+}
+
+pub(crate) struct LightVaeDecoderCore {
+    source: Arc<dyn TensorSource>,
+    pool: Arc<ComputePool>,
+    latent_input: Conv3,
+    decoder: Decoder,
+}
+
+impl LightVaeDecoderCore {
+    pub(crate) fn load(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+        dims: [usize; 5],
+    ) -> Result<Self, String> {
+        let source: Arc<dyn TensorSource> = Arc::new(PrefixSource {
+            source,
+            actual_prefix: "dreamx.refiner.lightvae",
+        });
+        let latent_input = Conv3::load(
+            source.as_ref(),
+            "conv2",
+            LATENT_CHANNELS,
+            LATENT_CHANNELS,
+            [1; 3],
+            [1; 3],
+            [0; 3],
+        )?;
+        let decoder = Decoder::load_with_dims(
+            source.as_ref(),
+            dims,
+            LATENT_CHANNELS,
+            2,
+            [false, true, true],
+        )?;
+        Ok(Self {
+            source,
+            pool,
+            latent_input,
+            decoder,
+        })
+    }
+
+    pub(crate) fn decode_frames(&self, latent: &VideoLatent) -> Result<Vec<RgbImage>, String> {
+        let [channels, depth, height, width] = latent.shape;
+        let raw = Feature::new(
+            denormalize_latent(&latent.values)?,
+            [channels, depth, height, width],
+        )?;
+        let input = self
+            .latent_input
+            .forward(self.source.as_ref(), &self.pool, &raw, None)?;
+        let mut cache = CausalCache::default();
+        let mut decoded: Option<Feature> = None;
+        for frame in 0..depth {
+            cache.begin_chunk();
+            let output = self.decoder.forward(
+                self.source.as_ref(),
+                &self.pool,
+                &slice_time(&input, frame, frame + 1)?,
+                &mut cache,
+                frame == 0,
+            )?;
+            cache.finish_chunk()?;
+            decoded = Some(match decoded {
+                Some(ref current) => concat_time(current, &output)?,
+                None => output,
+            });
+        }
+        feature_to_rgb(&unpatchify(
+            &decoded.ok_or("DreamX LightVAE produced no frames")?,
+        )?)
     }
 }
 

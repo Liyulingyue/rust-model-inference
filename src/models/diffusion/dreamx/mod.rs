@@ -2,8 +2,10 @@ pub mod audio_vae;
 pub mod config;
 pub mod creator;
 pub mod kernels;
+pub mod lightvae;
 pub mod media;
 pub mod text;
+pub mod upsampler;
 pub mod video_vae;
 
 pub use config::DreamXConfig;
