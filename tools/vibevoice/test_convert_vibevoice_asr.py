@@ -17,7 +17,11 @@ from tools.vibevoice.convert_vibevoice_asr import (
     quantize_q8_0,
     require_tensor,
 )
-from tools.vibevoice.vibevoice_llm_oracle import assemble_input_rows
+from tools.vibevoice.vibevoice_llm_oracle import (
+    assemble_input_rows,
+    safetensors_name,
+    tensor_to_f32,
+)
 
 
 class FakeReader:
@@ -91,6 +95,28 @@ class ConverterContractTests(unittest.TestCase):
             np.vstack([token_embeddings[[2, 3, 7]], embeddings, token_embeddings[[8]]]),
         )
         np.testing.assert_array_equal(positions, np.arange(7))
+
+    def test_llm_safetensors_source_maps_names_and_preserves_matrix_layout(self):
+        self.assertEqual(
+            safetensors_name("token_embd.weight"),
+            "model.language_model.embed_tokens.weight",
+        )
+        self.assertEqual(safetensors_name("output.weight"), "lm_head.weight")
+        self.assertEqual(
+            safetensors_name("blk.12.attn_output.weight"),
+            "model.language_model.layers.12.self_attn.o_proj.weight",
+        )
+        self.assertEqual(
+            safetensors_name("blk.27.ffn_norm.weight"),
+            "model.language_model.layers.27.post_attention_layernorm.weight",
+        )
+        with self.assertRaisesRegex(KeyError, "unsupported canonical tensor"):
+            safetensors_name("blk.0.unknown.weight")
+
+        values = np.array([[1.0, -2.0], [3.5, 0.25]], dtype=np.float32)
+        raw = (values.view(np.uint32) >> np.uint32(16)).astype("<u2").tobytes()
+        tensor = Tensor("matrix", "BF16", values.shape, raw)
+        np.testing.assert_array_equal(tensor_to_f32(tensor), values)
 
 
 if __name__ == "__main__":

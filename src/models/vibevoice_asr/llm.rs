@@ -180,6 +180,8 @@ pub struct AsrLlmSession<'model> {
     q8_buf: Vec<u8>,
     scale_buf: Vec<f32>,
     logits: Vec<f32>,
+    #[cfg(feature = "parity-trace")]
+    layer_hidden_trace: Vec<f32>,
     next_step: usize,
     capacity: usize,
 }
@@ -214,6 +216,8 @@ impl<'model> AsrLlmSession<'model> {
             q8_buf: vec![0; max_n_in],
             scale_buf: vec![0.0; max_n_in / 32],
             logits: Vec::new(),
+            #[cfg(feature = "parity-trace")]
+            layer_hidden_trace: Vec::with_capacity(config.n_layer * config.n_embd),
             next_step: 0,
             capacity,
         })
@@ -256,6 +260,8 @@ impl<'model> AsrLlmSession<'model> {
                 self.x.copy_from_slice(embedding);
             }
         }
+        #[cfg(feature = "parity-trace")]
+        self.layer_hidden_trace.clear();
 
         let n_embd_q = config.n_head * config.n_embd_head_k;
         let n_embd_k = config.n_head_kv * config.n_embd_head_k;
@@ -570,6 +576,8 @@ impl<'model> AsrLlmSession<'model> {
                 let head: Vec<String> = self.x.iter().take(4).map(|v| format!("{v:.4}")).collect();
                 eprintln!("layer {layer}: hidden_norm {norm:.4} head {head:?}");
             }
+            #[cfg(feature = "parity-trace")]
+            self.layer_hidden_trace.extend_from_slice(&self.x);
         }
 
         rms_norm(
@@ -580,6 +588,16 @@ impl<'model> AsrLlmSession<'model> {
         );
         self.next_step += 1;
         Ok(())
+    }
+
+    #[cfg(feature = "parity-trace")]
+    pub fn layer_hidden_trace(&self) -> &[f32] {
+        &self.layer_hidden_trace
+    }
+
+    #[cfg(feature = "parity-trace")]
+    pub fn normalized_hidden(&self) -> &[f32] {
+        &self.normed
     }
 
     /// Run the untied LM head on the last hidden state; returns the logits

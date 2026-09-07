@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Numpy oracle for the VibeVoice ASR LLM half (Qwen2.5-7B from the exported
-gguf, Q8_0 dequantized). Prefills the exact prompt tokens and prints the
-last-position logits so the Rust session can be compared.
+"""NumPy oracle for the VibeVoice ASR Qwen2.5 decoder.
+
+The source may be the original sharded BF16 safetensors directory or the
+exported Q8_0 GGUF. It prefills the exact prompt/audio rows and can dump each
+layer's last-row hidden state plus the final normalized hidden and logits.
 
 Usage:
   python3 tools/vibevoice/vibevoice_llm_oracle.py models/VibeVoice-ASR-Streaming-7B.gguf \
@@ -18,9 +20,11 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
 import convert_dots_tts as _dots  # noqa: E402
 from convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes  # noqa: E402
+from tools.vibevoice.convert_vibevoice_asr import ShardedSafetensors  # noqa: E402
 
 # the shared reader predates Q8_0; extend its byte-size table
 _orig_tensor_nbytes = _dots._tensor_nbytes
@@ -47,8 +51,7 @@ def dequant_q8_0(raw: bytes, count: int) -> np.ndarray:
     return values[:count]
 
 
-def load_tensor(model_path: Path, name: str) -> np.ndarray:
-    _metadata, directory = read_gguf_directory(model_path)
+def load_gguf_tensor(model_path: Path, directory: dict, name: str) -> np.ndarray:
     ggml_type, dims, length = directory[name]
     raw = read_gguf_tensor_bytes(model_path, name)
     count = int(np.prod(dims))
@@ -62,6 +65,86 @@ def load_tensor(model_path: Path, name: str) -> np.ndarray:
     if len(dims) == 1:
         return values
     return values.reshape(dims[1], dims[0])
+
+
+_TOP_LEVEL_SAFETENSORS = {
+    "token_embd.weight": "model.language_model.embed_tokens.weight",
+    "output_norm.weight": "model.language_model.norm.weight",
+    "output.weight": "lm_head.weight",
+}
+
+_LAYER_SAFETENSORS = {
+    "attn_norm.weight": "input_layernorm.weight",
+    "ffn_norm.weight": "post_attention_layernorm.weight",
+    "attn_q.weight": "self_attn.q_proj.weight",
+    "attn_q.bias": "self_attn.q_proj.bias",
+    "attn_k.weight": "self_attn.k_proj.weight",
+    "attn_k.bias": "self_attn.k_proj.bias",
+    "attn_v.weight": "self_attn.v_proj.weight",
+    "attn_v.bias": "self_attn.v_proj.bias",
+    "attn_output.weight": "self_attn.o_proj.weight",
+    "ffn_gate.weight": "mlp.gate_proj.weight",
+    "ffn_up.weight": "mlp.up_proj.weight",
+    "ffn_down.weight": "mlp.down_proj.weight",
+}
+
+
+def safetensors_name(name: str) -> str:
+    if name in _TOP_LEVEL_SAFETENSORS:
+        return _TOP_LEVEL_SAFETENSORS[name]
+    parts = name.split(".", 2)
+    if len(parts) == 3 and parts[0] == "blk" and parts[1].isdigit():
+        suffix = _LAYER_SAFETENSORS.get(parts[2])
+        if suffix is not None:
+            return f"model.language_model.layers.{parts[1]}.{suffix}"
+    raise KeyError(f"unsupported canonical tensor: {name}")
+
+
+def tensor_to_f32(tensor) -> np.ndarray:
+    if tensor.dtype != "BF16":
+        raise ValueError(f"{tensor.name}: expected BF16, got {tensor.dtype}")
+    raw = np.frombuffer(tensor.raw, dtype="<u2").astype(np.uint32)
+    return (raw << np.uint32(16)).view(np.float32).reshape(tensor.shape)
+
+
+class GgufSource:
+    def __init__(self, path: Path):
+        self.path = path
+        metadata, self.directory = read_gguf_directory(path)
+        self.config = {
+            "hidden_size": int(metadata["qwen2.embedding_length"]),
+            "num_attention_heads": int(metadata["qwen2.attention.head_count"]),
+            "num_key_value_heads": int(metadata["qwen2.attention.head_count_kv"]),
+            "intermediate_size": int(metadata["qwen2.feed_forward_length"]),
+            "rms_norm_eps": float(metadata["qwen2.attention.layer_norm_rms_epsilon"]),
+            "rope_theta": float(metadata["qwen2.rope.freq_base"]),
+            "num_hidden_layers": int(metadata["qwen2.block_count"]),
+        }
+
+    def tensor(self, name: str) -> np.ndarray:
+        return load_gguf_tensor(self.path, self.directory, name)
+
+    def close(self) -> None:
+        pass
+
+
+class SafetensorsSource:
+    def __init__(self, model_dir: Path):
+        self.path = model_dir
+        self.config = json.loads((model_dir / "config.json").read_text())["decoder_config"]
+        self.reader = ShardedSafetensors(model_dir)
+
+    def tensor(self, name: str) -> np.ndarray:
+        return tensor_to_f32(self.reader.tensor(safetensors_name(name)))
+
+    def close(self) -> None:
+        self.reader.close()
+
+
+def open_source(path: Path):
+    if path.is_dir():
+        return SafetensorsSource(path)
+    return GgufSource(path)
 
 
 def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
@@ -109,30 +192,35 @@ def assemble_input_rows(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("gguf", type=str)
+    parser.add_argument("model", type=str)
     parser.add_argument("--prompt-ids", type=str, required=True)
     parser.add_argument("--dump", type=str, default=None)
     parser.add_argument("--layers", type=int, default=28)
     parser.add_argument("--embedding-dump", type=str, default=None)
     parser.add_argument("--speech-start-id", type=int, default=None)
     parser.add_argument("--speech-end-id", type=int, default=None)
+    parser.add_argument("--dump-dir", type=str, default=None)
     args = parser.parse_args()
-    model_path = Path(args.gguf)
+    model_path = Path(args.model)
+    source = open_source(model_path)
     ids = [int(v) for v in args.prompt_ids.split(",")]
-    metadata, directory = read_gguf_directory(model_path)
-    n_embd = int(metadata["qwen2.embedding_length"])
-    n_head = int(metadata["qwen2.attention.head_count"])
-    n_kv = int(metadata["qwen2.attention.head_count_kv"])
-    n_ff = int(metadata["qwen2.feed_forward_length"])
-    eps = float(metadata["qwen2.attention.layer_norm_rms_epsilon"])
-    theta = float(metadata["qwen2.rope.freq_base"])
-    n_layer = int(metadata["qwen2.block_count"])
+    config = source.config
+    n_embd = int(config["hidden_size"])
+    n_head = int(config["num_attention_heads"])
+    n_kv = int(config["num_key_value_heads"])
+    n_ff = int(config["intermediate_size"])
+    eps = float(config["rms_norm_eps"])
+    theta = float(config.get("rope_theta", 1_000_000.0))
+    n_layer = int(config["num_hidden_layers"])
     head_dim = n_embd // n_head
     group = n_head // n_kv
     print(f"n_embd={n_embd} n_head={n_head} n_kv={n_kv} n_ff={n_ff} eps={eps} theta={theta}")
 
     # embeddings only for the ids we need
-    embed_all = load_tensor(model_path, "token_embd.weight")
+    dump_dir = Path(args.dump_dir) if args.dump_dir else None
+    if dump_dir is not None:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+    embed_all = source.tensor("token_embd.weight")
     audio_embeddings = None
     if args.embedding_dump:
         values = np.fromfile(args.embedding_dump, dtype="<f4")
@@ -154,15 +242,15 @@ def main() -> None:
 
     for layer in range(min(n_layer, args.layers)):
         prefix = f"blk.{layer}."
-        attn_norm = load_tensor(model_path, prefix + "attn_norm.weight").reshape(-1)
-        ffn_norm = load_tensor(model_path, prefix + "ffn_norm.weight").reshape(-1)
-        wq = load_tensor(model_path, prefix + "attn_q.weight")
-        wk = load_tensor(model_path, prefix + "attn_k.weight")
-        wv = load_tensor(model_path, prefix + "attn_v.weight")
-        wo = load_tensor(model_path, prefix + "attn_output.weight")
-        q_bias = load_tensor(model_path, prefix + "attn_q.bias").reshape(-1)
-        k_bias = load_tensor(model_path, prefix + "attn_k.bias").reshape(-1)
-        v_bias = load_tensor(model_path, prefix + "attn_v.bias").reshape(-1)
+        attn_norm = source.tensor(prefix + "attn_norm.weight").reshape(-1)
+        ffn_norm = source.tensor(prefix + "ffn_norm.weight").reshape(-1)
+        wq = source.tensor(prefix + "attn_q.weight")
+        wk = source.tensor(prefix + "attn_k.weight")
+        wv = source.tensor(prefix + "attn_v.weight")
+        wo = source.tensor(prefix + "attn_output.weight")
+        q_bias = source.tensor(prefix + "attn_q.bias").reshape(-1)
+        k_bias = source.tensor(prefix + "attn_k.bias").reshape(-1)
+        v_bias = source.tensor(prefix + "attn_v.bias").reshape(-1)
 
         normed = rms_norm(x, attn_norm, eps)
         q = normed @ wq.T + q_bias
@@ -190,29 +278,47 @@ def main() -> None:
         x = x + attn @ wo.T
 
         normed = rms_norm(x, ffn_norm, eps)
-        w_gate = load_tensor(model_path, prefix + "ffn_gate.weight")
-        w_up = load_tensor(model_path, prefix + "ffn_up.weight")
+        w_gate = source.tensor(prefix + "ffn_gate.weight")
+        w_up = source.tensor(prefix + "ffn_up.weight")
         gate = normed @ w_gate.T
         up = normed @ w_up.T
         del w_gate, w_up, normed
         ff = gate / (1.0 + np.exp(-gate)) * up
         del gate, up
-        w_down = load_tensor(model_path, prefix + "ffn_down.weight")
+        w_down = source.tensor(prefix + "ffn_down.weight")
         x = x + ff @ w_down.T
         del w_down, ff
+        if dump_dir is not None:
+            x[-1].astype(np.float32).tofile(dump_dir / f"vibevoice_llm_layer_{layer:02d}.f32")
         print(f"layer {layer}: hidden_norm {np.linalg.norm(x[-1]):.4f} "
               f"head {np.array2string(x[-1][:4], precision=4)}")
 
-    output_norm = load_tensor(model_path, "output_norm.weight").reshape(-1)
+    output_norm = source.tensor("output_norm.weight").reshape(-1)
     hidden = rms_norm(x, output_norm, eps)
     if args.dump:
         Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
         hidden.astype(np.float32).tofile(args.dump)
         print(f"dumped final hidden {hidden.shape} to {args.dump}")
-    lm_head = load_tensor(model_path, "output.weight")
+    if dump_dir is not None:
+        hidden[-1].astype(np.float32).tofile(dump_dir / "vibevoice_llm_normed.f32")
+    lm_head = source.tensor("output.weight")
     logits = hidden[-1] @ lm_head.T
+    if dump_dir is not None:
+        logits.astype(np.float32).tofile(dump_dir / "vibevoice_llm_logits.f32")
     top = np.argsort(logits)[::-1][:8]
     print("top8:", [(int(i), round(float(logits[i]), 3)) for i in top])
+    if dump_dir is not None:
+        manifest = {
+            "source": str(model_path.resolve()),
+            "source_kind": "safetensors-bf16" if model_path.is_dir() else "gguf-q8_0",
+            "layers": min(n_layer, args.layers),
+            "hidden_size": n_embd,
+            "vocab_size": int(logits.size),
+            "sequence_rows": t,
+            "top8": [int(index) for index in top],
+        }
+        (dump_dir / "vibevoice_llm_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    source.close()
 
 
 if __name__ == "__main__":
