@@ -1,11 +1,13 @@
 pub(crate) mod audio;
 pub mod cli;
+pub(crate) mod dots;
 pub(crate) mod embedding;
 pub(crate) mod image;
 pub(crate) mod omni;
 pub(crate) mod selftest;
 pub(crate) mod text;
 pub mod tts;
+pub(crate) mod vibevoice;
 
 pub use audio::run_asr_cli;
 pub use cli::{

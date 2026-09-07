@@ -12,7 +12,7 @@
 4. **Trait 架构** — 算子和内存通过 trait 解耦
 5. **无 C/C++ FFI** — 100% 纯 Rust，包括量化 kernel
 
-**支持的模型**：Qwen3-0.6B、Qwen3-Embedding、Qwen3-ASR、Qwen3-TTS、Qwen3.5-VL、MiniCPM5-1B、Hunyuan-MT2、Nanbeige
+**支持的模型**：见 [模型支持清单](SUPPORTED_MODELS.md)。清单区分 `Verified`、`Supported`、`Experimental` 和 `Unsupported`，避免把架构已接入误写成具体型号已验证。外部参考源码及固定 Oracle 见 [参考实现清单](REFERENCE_IMPLEMENTATIONS.md)。
 
 ## 快速开始
 

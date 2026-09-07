@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 default = []
 parity-trace = []
+openblas = []
 vulkan = ["dep:ash", "dep:raw-window-handle"]
 wgpu = ["dep:wgpu"]
 

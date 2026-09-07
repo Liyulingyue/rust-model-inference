@@ -1,4 +1,5 @@
 pub mod diffusion;
+pub mod dots;
 pub mod gemma4;
 pub mod lfm2;
 pub mod lfm25;
@@ -7,3 +8,4 @@ pub mod llama;
 pub mod qwen3;
 pub mod qwen35;
 pub mod spark;
+pub mod vibevoice_asr;

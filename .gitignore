@@ -10,5 +10,11 @@
 references/
 reference/
 /models/
+.venv/
 
 __pycache__/
+
+.mimosa/
+.omo/
+.DS_Store
+

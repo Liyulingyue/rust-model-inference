@@ -79,6 +79,7 @@ src/models/{model_name}/
 | **lfm25** | 同上 + trunk/scratch.rs | 无 | 同上 |
 | **qwen3** | 同 llama + trunk/scratch.rs | `asr/`、`tts/` | 当前 `base.rs` 1971 行需拆分 |
 | **qwen35** | 同 llama + trunk/positions.rs（RoPE 工具单独） | `vision/`（含 clip_config） | 当前已按职责拆分，仅需对齐命名 |
+| **dots** | 不适用（LLM 部分为 arch=`qwen2` 的独立 gguf，由元数据驱动加载） | `src/models/dots/`（config, schedule, llm, patch_encoder, dit, speaker, vocoder, generate） | TTS：`tools/dots/convert_dots_tts.py` 导出 LLM gguf（arch=qwen2, 255 tensors）+ mmproj（arch=dotstts）；推理入口 `--tts --model … --mmproj … [--ref-audio] [--ref-text]` |
 | **diffusion** | 不适用 | — | 不是 LLM，维持现有 `pig.rs / dit.rs / vae.rs` |
 
 ---

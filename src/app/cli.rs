@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 pub use crate::core::scratchpad::KvFormat;
+use crate::models::dots::XVectorMode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EmbeddingOutput {
@@ -16,6 +18,7 @@ pub struct CliOptions {
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
+    pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
     pub video: Option<PathBuf>,
     pub vae: Option<PathBuf>,
@@ -37,6 +40,13 @@ pub struct CliOptions {
     pub kv_format: KvFormat,
     pub gpu: bool,
     pub tts: bool,
+    pub edit: bool,
+    pub source_audio: Option<PathBuf>,
+    pub source_text: Option<String>,
+    pub target_text: Option<String>,
+    pub instruction: Option<String>,
+    pub use_xvector: XVectorMode,
+    pub use_xvector_supplied: bool,
     pub out: Option<PathBuf>,
 }
 
@@ -285,6 +295,52 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.ref_audio = Some(value.as_str().into());
                 i += 1;
             }
+            "--ref-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --ref-text")?;
+                options.ref_text = Some(value.clone());
+                i += 1;
+            }
+            "--source-audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --source-audio")?;
+                options.source_audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--source-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --source-text")?;
+                options.source_text = Some(value.clone());
+                i += 1;
+            }
+            "--target-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --target-text")?;
+                options.target_text = Some(value.clone());
+                i += 1;
+            }
+            "--instruction" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --instruction")?;
+                options.instruction = Some(value.clone());
+                i += 1;
+            }
+            "--use-xvector" => {
+                let value = args.get(i + 1).ok_or("Missing value for --use-xvector")?;
+                options.use_xvector = XVectorMode::from_str(value)?;
+                options.use_xvector_supplied = true;
+                i += 1;
+            }
             "--language" => {
                 let value = args
                     .get(i + 1)
@@ -294,6 +350,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--tts" => options.tts = true,
+            "--edit" => options.edit = true,
             "--out" => {
                 let value = args
                     .get(i + 1)
@@ -315,8 +372,8 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
 
 pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
     if options.text_encoder.is_none() && options.vae.is_none() {
-        return if options.seed.is_some() {
-            Err("--seed requires Z-Image components".into())
+        return if options.seed.is_some() && !options.tts {
+            Err("--seed requires Z-Image components or --tts".into())
         } else {
             Ok(None)
         };
@@ -398,14 +455,22 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if !options.edit
+        && (options.source_audio.is_some()
+            || options.source_text.is_some()
+            || options.target_text.is_some()
+            || options.instruction.is_some()
+            || options.use_xvector_supplied)
+    {
+        return Err("--source-audio, --source-text, --target-text, --instruction, and --use-xvector require --tts --edit".into());
+    }
+    if options.edit && !options.tts {
+        return Err("--edit requires --tts".into());
+    }
     z_image_cli_options(options)?;
     if options.tts {
-        if options
-            .prompt
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err("--tts requires a non-empty --prompt".into());
+        if options.model.as_os_str().is_empty() {
+            return Err("--tts requires --model".into());
         }
         if options
             .mmproj
@@ -423,6 +488,9 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         if options.max_tokens == Some(0) {
             return Err("--tts requires --max-tokens greater than 0".into());
+        }
+        if options.steps == Some(0) {
+            return Err("--tts requires --steps greater than 0".into());
         }
         let conflict = if options.audio.is_some() {
             Some("--audio")
@@ -444,11 +512,48 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if let Some(conflict) = conflict {
             return Err(format!("--tts cannot be used with {conflict}"));
         }
-        normalize_tts_language(options.language.as_deref())?;
+        if options.edit {
+            if options.source_audio.is_none() {
+                return Err("--tts --edit requires --source-audio".into());
+            }
+            if options
+                .instruction
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err("--tts --edit requires a non-empty --instruction".into());
+            }
+            let conflict = if options.prompt.is_some() {
+                Some("--prompt")
+            } else if options.ref_audio.is_some() {
+                Some("--ref-audio")
+            } else if options.ref_text.is_some() {
+                Some("--ref-text")
+            } else if options.language.is_some() {
+                Some("--language")
+            } else {
+                None
+            };
+            if let Some(conflict) = conflict {
+                return Err(format!("--tts --edit cannot be used with {conflict}"));
+            }
+        } else {
+            if options
+                .prompt
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err("--tts requires a non-empty --prompt".into());
+            }
+            normalize_tts_language(options.language.as_deref())?;
+            if options.ref_text.is_some() && options.ref_audio.is_none() {
+                return Err("--ref-text requires --ref-audio".into());
+            }
+        }
         return Ok(());
     }
-    if options.ref_audio.is_some() {
-        return Err("--ref-audio requires --tts".into());
+    if options.ref_audio.is_some() || options.ref_text.is_some() {
+        return Err("--ref-audio/--ref-text require --tts".into());
     }
     let media_count = usize::from(options.image.is_some())
         + usize::from(options.video.is_some())
@@ -720,6 +825,107 @@ mod tests {
     fn seed_requires_a_signed_i64_value() {
         assert!(parse_cli_options(&args(&["rmi", "--seed"])).is_err());
         assert!(parse_cli_options(&args(&["rmi", "--seed", "nan"])).is_err());
+    }
+
+    #[test]
+    fn dots_edit_cli_parses_and_validates_before_model_loading() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--tts",
+            "--edit",
+            "--model",
+            "edit.gguf",
+            "--mmproj",
+            "edit-mmproj.gguf",
+            "--source-audio",
+            "source.wav",
+            "--instruction",
+            "<del>旧</del><ins>新</ins>",
+            "--use-xvector",
+            "auto",
+            "--max-tokens",
+            "8",
+            "--steps",
+            "2",
+            "--seed",
+            "42",
+            "--out",
+            "edited.wav",
+        ]))
+        .unwrap();
+        assert!(options.edit);
+        assert_eq!(
+            options.source_audio.as_deref(),
+            Some(Path::new("source.wav"))
+        );
+        assert_eq!(options.use_xvector, XVectorMode::Auto);
+        assert!(validate_cli_options(&options).is_ok());
+    }
+
+    #[test]
+    fn dots_edit_cli_rejects_incomplete_or_cross_mode_inputs() {
+        let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
+        for invalid in [
+            vec!["rmi", "--source-audio", "source.wav"],
+            vec!["rmi", "--use-xvector", "auto"],
+            vec![
+                "rmi",
+                "--tts",
+                "--edit",
+                "--mmproj",
+                "m",
+                "--out",
+                "o",
+                "--instruction",
+                "x",
+            ],
+            vec![
+                "rmi",
+                "--tts",
+                "--edit",
+                "--mmproj",
+                "m",
+                "--out",
+                "o",
+                "--source-audio",
+                "s.wav",
+            ],
+            vec![
+                "rmi",
+                "--tts",
+                "--edit",
+                "--mmproj",
+                "m",
+                "--out",
+                "o",
+                "--source-audio",
+                "s.wav",
+                "--instruction",
+                "x",
+                "--ref-audio",
+                "r.wav",
+            ],
+        ] {
+            assert!(
+                validate_cli_options(&parse(&invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(parse_cli_options(&args(&["rmi", "--use-xvector", "maybe"])).is_err());
+    }
+
+    #[test]
+    fn seed_is_valid_for_tts_but_still_rejected_for_unscoped_model_mode() {
+        let tts = parse_cli_options(&args(&[
+            "rmi", "--tts", "--model", "m", "--mmproj", "p", "--prompt", "hello", "--seed", "7",
+            "--out", "o.wav",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&tts).is_ok());
+        let plain = parse_cli_options(&args(&["rmi", "--seed", "7"])).unwrap();
+        assert!(validate_cli_options(&plain)
+            .unwrap_err()
+            .contains("Z-Image"));
     }
 
     #[test]
