@@ -1,6 +1,7 @@
 pub mod config;
 pub mod kernels;
 pub mod text;
+pub mod video_vae;
 
 pub use config::DreamXConfig;
 
