@@ -1,3 +1,4 @@
+pub mod audio_vae;
 pub mod config;
 pub mod kernels;
 pub mod text;

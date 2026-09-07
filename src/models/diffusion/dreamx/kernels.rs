@@ -264,7 +264,7 @@ fn linear_bf16(
     });
 }
 
-fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
+pub(crate) fn dot_bf16_f32(weight: &[u8], input: &[f32]) -> f32 {
     #[cfg(target_arch = "aarch64")]
     if crate::ops::has_neon() {
         return unsafe { dot_bf16_f32_neon(weight, input) };
