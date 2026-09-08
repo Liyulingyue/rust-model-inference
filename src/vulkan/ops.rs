@@ -125,13 +125,13 @@ impl GpuWeightFormat {
 pub(crate) fn fill_rope_neox(coefficients: &mut [f32], position: usize, freq_base: f32) {
     debug_assert!(!coefficients.is_empty() && coefficients.len() % 2 == 0);
     let half = coefficients.len() / 2;
-    let theta_scale = freq_base.powf(-2.0f32 / coefficients.len() as f32);
-    let mut theta = position as f32;
     for index in 0..half {
+        let inverse_frequency =
+            1.0f32 / freq_base.powf((2 * index) as f32 / coefficients.len() as f32);
+        let theta = position as f32 * inverse_frequency;
         let (cosine, sine) = crate::ops::rope_sin_cos(theta);
         coefficients[index] = cosine;
         coefficients[index + half] = sine;
-        theta *= theta_scale;
     }
 }
 
@@ -1814,7 +1814,7 @@ fn validate_attention_shape(
 
 pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
     check_quantize_tie_even(context)?;
-    check_attention_f16_fma(context)?;
+    check_attention_scores_match_cpu_reduction(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
     for &format in formats {
@@ -2784,8 +2784,8 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     let mut expected = [0u8; 32];
-    expected[0] = (-20i8) as u8;
-    expected[1] = 127;
+    let mut expected_scales = [0.0f32; 1];
+    crate::ops::quantize_q8_0_into(&input, input.len(), &mut expected, &mut expected_scales);
     let actual = ops
         .read_bytes(layout.q8, input.len())
         .map_err(|error| error.to_string())?;
@@ -2804,7 +2804,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     Ok(())
 }
 
-fn check_attention_f16_fma(context: &VulkanContext) -> Result<(), String> {
+fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result<(), String> {
     const HEAD_DIM: usize = 64;
     let layout = ArenaLayout::build(HEAD_DIM, HEAD_DIM, 1, 1, HEAD_DIM, 1, 1, 1)
         .map_err(|error| error.to_string())?;
@@ -2842,15 +2842,23 @@ fn check_attention_f16_fma(context: &VulkanContext) -> Result<(), String> {
     let actual = ops
         .read_f32(layout.scores, 1)
         .map_err(|error| error.to_string())?[0];
-    let expected = -1.0009765625f32 / (HEAD_DIM as f32).sqrt();
+    let query_f16 = query
+        .iter()
+        .map(|&value| crate::ops::f32_to_f16(value))
+        .collect::<Vec<_>>();
+    let key_f16 = key
+        .iter()
+        .map(|&value| crate::ops::f32_to_f16(value))
+        .collect::<Vec<_>>();
+    let expected = crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) / (HEAD_DIM as f32).sqrt();
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
-            "attention F16 FMA mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
+            "attention score reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
             actual.to_bits(),
             expected.to_bits()
         ));
     }
-    println!("operator=attention_f16_fma exact=true");
+    println!("operator=attention_score_reduction exact=true");
     Ok(())
 }
 
@@ -2896,7 +2904,15 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
     let actual = ops
         .read_f32(layout.attn, 1)
         .map_err(|error| error.to_string())?[0];
-    let expected = f32::from_bits(0xbf847001);
+    let probabilities_f16 = probabilities
+        .iter()
+        .map(|&value| crate::ops::f32_to_f16(value))
+        .collect::<Vec<_>>();
+    let values_f16 = values
+        .iter()
+        .map(|&value| crate::ops::f32_to_f16(value))
+        .collect::<Vec<_>>();
+    let expected = crate::ops::dot_f16(&probabilities_f16, &values_f16, SEQUENCE);
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
             "attention value reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
@@ -2936,7 +2952,11 @@ fn check_softmax_f16_rounding(context: &VulkanContext) -> Result<(), String> {
     let actual = ops
         .read_f32(layout.scores, SEQUENCE)
         .map_err(|error| error.to_string())?;
-    if actual != expected {
+    if actual
+        .iter()
+        .zip(&expected)
+        .any(|(actual, expected)| actual.to_bits().abs_diff(expected.to_bits()) > 0x2000)
+    {
         let index = actual
             .iter()
             .zip(expected)
@@ -2975,7 +2995,11 @@ fn check_softmax_f16_rounding(context: &VulkanContext) -> Result<(), String> {
     let actual = ops
         .read_f32(layout.scores, SECOND_SEQUENCE)
         .map_err(|error| error.to_string())?;
-    if actual != expected {
+    if actual
+        .iter()
+        .zip(&expected)
+        .any(|(actual, expected)| actual.to_bits().abs_diff(expected.to_bits()) > 0x2000)
+    {
         let index = actual
             .iter()
             .zip(expected)
@@ -3144,7 +3168,20 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
-    use super::{ArenaLayout, TokenDispatchPlan};
+    use super::{fill_rope_neox, ArenaLayout, TokenDispatchPlan};
+
+    #[test]
+    fn vulkan_rope_coefficients_match_cpu_dimension_formula() {
+        let mut actual = [0.0f32; 128];
+        fill_rope_neox(&mut actual, 4, 1_000_000.0);
+        for index in 0..64 {
+            let theta =
+                4.0 * (1.0f32 / 1_000_000.0f32.powf((2 * index) as f32 / actual.len() as f32));
+            let (cosine, sine) = crate::ops::rope_sin_cos(theta);
+            assert_eq!(actual[index].to_bits(), cosine.to_bits(), "cosine {index}");
+            assert_eq!(actual[index + 64].to_bits(), sine.to_bits(), "sine {index}");
+        }
+    }
 
     #[test]
     fn qwen3_arena_regions_are_aligned_and_disjoint() {

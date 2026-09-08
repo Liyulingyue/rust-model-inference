@@ -20,27 +20,42 @@ void main() {
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
     precise float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    precise float sum = 0.0;
+    precise float minimum_sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
     for (uint block = 0u; block < pc.blocks_per_row; ++block) {
         uint offset = row * pc.blocks_per_row * 144u + block * 144u;
         precise float q4_scale = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
         precise float q4_min = f16_decode(weight_byte(slot, offset + 2u) | (weight_byte(slot, offset + 3u) << 8u));
         precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
         int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
-        int min_sum = 0;
+        int minimum_partial[4] = int[4](0, 0, 0, 0);
         for (uint local = 0u; local < 256u; ++local) {
             uint group = local >> 5u;
             uint packed = weight_byte(slot, offset + 16u + (group >> 1u) * 32u + (local & 31u));
             int value = int((group & 1u) == 0u ? packed & 15u : packed >> 4u);
             int activation = q8(block * 256u + local);
-            partial[local & 7u] += int(scale(slot, offset, group)) * activation * value;
-            min_sum += int(minimum(slot, offset, group)) * activation;
+            partial[(local & 31u) >> 2u] += int(scale(slot, offset, group)) * activation * value;
+            minimum_partial[group >> 1u] += int(minimum(slot, offset, group)) * activation;
         }
         precise float factor = q8_scale * q4_scale;
-        for (uint lane = 0u; lane < 8u; ++lane) sums[lane] = sums[lane] + factor * float(partial[lane]);
-        sum = sum - (q8_scale * q4_min) * float(min_sum);
+        for (uint lane = 0u; lane < 8u; ++lane) {
+            sums[lane] = fma(factor, float(partial[lane]), sums[lane]);
+        }
+        precise float minimum_factor = -q4_min * q8_scale;
+        for (uint lane = 0u; lane < 4u; ++lane) {
+            minimum_sums[lane] = fma(
+                minimum_factor,
+                float(minimum_partial[lane]),
+                minimum_sums[lane]
+            );
+        }
     }
-    for (uint lane = 0u; lane < 8u; ++lane) sum = sum + sums[lane];
+    precise float main01 = (sums[0] + sums[4]) + (sums[1] + sums[5]);
+    precise float main23 = (sums[2] + sums[6]) + (sums[3] + sums[7]);
+    precise float main_sum = main01 + main23;
+    precise float minimum02 = minimum_sums[0] + minimum_sums[2];
+    precise float minimum13 = minimum_sums[1] + minimum_sums[3];
+    precise float minimum_sum = minimum02 + minimum13;
+    precise float sum = main_sum + minimum_sum;
     uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
     arena.data[output_word + row] = floatBitsToUint(sum);
 }

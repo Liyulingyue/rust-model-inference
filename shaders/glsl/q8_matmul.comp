@@ -53,7 +53,8 @@ void main() {
     if (lid != 0u) return;
 
     uint row_off = row * dims.w;
-    float acc = 0.0;
+    precise float acc[8];
+    for (uint lane = 0u; lane < 8u; lane++) acc[lane] = 0.0;
 
     for (uint block = 0u; block < bpr; block++) {
         uint w_off = row_off + block * 34u;
@@ -61,7 +62,6 @@ void main() {
         uint s_bits = ((w_off & 3u) == 0u) ? (s_word & 0xFFFFu) : ((s_word >> 16u) & 0xFFFFu);
         float w_scale = f16_decode(s_bits);
 
-        int dot = 0;
         uint w_body = w_off + 2u;
         uint in_base = block * 32u;
         for (uint g = 0u; g < 8u; g++) {
@@ -71,14 +71,16 @@ void main() {
             uint sh = (g_off & 3u) * 8u;
             uint packed = (sh == 0u) ? w0 : ((w0 >> sh) | (w1 << (32u - sh)));
             uint i_word = s_input[(in_base + g * 4u) >> 2u];
-            dot += i8_of(packed, 0u)        * i8_of(i_word, 0u)
-                 + i8_of(packed, 1u)        * i8_of(i_word, 1u)
-                 + i8_of(packed, 2u)        * i8_of(i_word, 2u)
-                 + i8_of(packed, 3u)        * i8_of(i_word, 3u);
+            int dot = i8_of(packed, 0u) * i8_of(i_word, 0u)
+                + i8_of(packed, 1u) * i8_of(i_word, 1u)
+                + i8_of(packed, 2u) * i8_of(i_word, 2u)
+                + i8_of(packed, 3u) * i8_of(i_word, 3u);
+            float scale = w_scale * i_scales[block];
+            acc[g] = fma(float(dot), scale, acc[g]);
         }
-        float scale = w_scale * i_scales[block];
-        acc = fma(float(dot), scale, acc);
     }
 
-    o_data[row] = acc;
+    precise float sum01 = (acc[0] + acc[4]) + (acc[1] + acc[5]);
+    precise float sum23 = (acc[2] + acc[6]) + (acc[3] + acc[7]);
+    o_data[row] = sum01 + sum23;
 }

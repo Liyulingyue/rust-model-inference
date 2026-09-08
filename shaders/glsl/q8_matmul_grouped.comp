@@ -65,7 +65,8 @@ void main() {
     if (lane != 0u) return;
 
     uint row_offset = row * pc.blocks_per_row * 34u;
-    float sum = 0.0;
+    precise float sums[8];
+    for (uint lane_index = 0u; lane_index < 8u; lane_index++) sums[lane_index] = 0.0;
     for (uint block = 0u; block < pc.blocks_per_row; block++) {
         uint byte_offset = row_offset + block * 34u;
         uint scale_word = weight_word(slot, byte_offset >> 2u);
@@ -73,7 +74,6 @@ void main() {
             ? scale_word & 0xffffu
             : (scale_word >> 16u) & 0xffffu;
         float weight_scale = f16_decode(scale_bits);
-        int dot = 0;
         uint body = byte_offset + 2u;
         for (uint group = 0u; group < 8u; group++) {
             uint group_offset = body + group * 4u;
@@ -82,16 +82,19 @@ void main() {
             uint shift = (group_offset & 3u) * 8u;
             uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
             uint input_value = input_words[block * 8u + group];
-            dot += i8_of(packed, 0u) * i8_of(input_value, 0u)
+            int dot = i8_of(packed, 0u) * i8_of(input_value, 0u)
                 + i8_of(packed, 1u) * i8_of(input_value, 1u)
                 + i8_of(packed, 2u) * i8_of(input_value, 2u)
                 + i8_of(packed, 3u) * i8_of(input_value, 3u);
+            float input_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
+            float scale = weight_scale * input_scale;
+            sums[group] = fma(float(dot), scale, sums[group]);
         }
-        float input_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
-        float scale = weight_scale * input_scale;
-        sum = fma(float(dot), scale, sum);
     }
 
+    precise float sum01 = (sums[0] + sums[4]) + (sums[1] + sums[5]);
+    precise float sum23 = (sums[2] + sums[6]) + (sums[3] + sums[7]);
+    precise float sum = sum01 + sum23;
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);

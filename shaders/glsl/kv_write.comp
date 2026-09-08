@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -24,8 +26,8 @@ void main() {
     uint delta_index = pc.layer * pc.kv_count + index;
     float key_f32 = uintBitsToFloat(arena.data[pc.k_word + index]);
     float value_f32 = uintBitsToFloat(arena.data[pc.v_word + index]);
-    uint key = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(key_f32, 0.0))).x);
-    uint value = floatBitsToUint(unpackHalf2x16(packHalf2x16(vec2(value_f32, 0.0))).x);
+    uint key = floatBitsToUint(round_f16_rte(key_f32));
+    uint value = floatBitsToUint(round_f16_rte(value_f32));
     arena.data[pc.cache_k_word + cache_index] = key;
     arena.data[pc.cache_v_word + cache_index] = value;
     arena.data[pc.delta_k_word + delta_index] = key;

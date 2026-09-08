@@ -24,6 +24,7 @@ void main() {
         precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
         precise float scale = q6_scale * q8_scale;
         int partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
+        int offset_partial[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
         for (uint local = 0u; local < 256u; ++local) {
             uint section = local / 128u;
             uint quarter = (local % 128u) / 32u;
@@ -32,17 +33,20 @@ void main() {
             uint qh = section * 32u + l;
             uint low = quarter < 2u ? weight_byte(slot, offset + ql) & 15u : weight_byte(slot, offset + ql) >> 4u;
             uint high = (weight_byte(slot, offset + 128u + qh) >> (quarter * 2u)) & 3u;
-            int value = int(low | (high << 4u)) - 32;
+            int value = int(low | (high << 4u));
             int weight_scale = weight_i8(slot, offset + 192u + section * 8u + (l / 16u) + quarter * 2u);
-            partial[local & 7u] += weight_scale * q8(block * 256u + local) * value;
+            int activation = q8(block * 256u + local);
+            partial[(local & 31u) >> 2u] += weight_scale * activation * value;
+            offset_partial[local >> 5u] += weight_scale * activation;
         }
         for (uint lane = 0u; lane < 8u; ++lane) {
-            precise float term = scale * float(partial[lane]);
-            sums[lane] = sums[lane] + term;
+            partial[lane] -= offset_partial[lane] << 5;
+            sums[lane] = fma(scale, float(partial[lane]), sums[lane]);
         }
     }
-    precise float sum = 0.0;
-    for (uint lane = 0u; lane < 8u; ++lane) sum = sum + sums[lane];
+    precise float sum01 = (sums[0] + sums[4]) + (sums[1] + sums[5]);
+    precise float sum23 = (sums[2] + sums[6]) + (sums[3] + sums[7]);
+    precise float sum = sum01 + sum23;
     uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
     arena.data[output_word + row] = floatBitsToUint(sum);
 }

@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
 
 layout(local_size_x = 32) in;
 
@@ -17,6 +19,57 @@ shared int quantized_values[32];
 shared int partial_sum[32];
 shared float inverse_scale;
 shared float raw_scale;
+
+float divide_finite_normal(float numerator, float denominator) {
+    uint numerator_bits = floatBitsToUint(numerator);
+    uint denominator_bits = floatBitsToUint(denominator);
+    uint sign = (numerator_bits ^ denominator_bits) & 0x80000000u;
+    uint numerator_exponent = (numerator_bits >> 23u) & 0xffu;
+    uint denominator_exponent = (denominator_bits >> 23u) & 0xffu;
+    if (numerator_exponent == 0u || numerator_exponent == 0xffu
+        || denominator_exponent == 0u || denominator_exponent == 0xffu) {
+        return numerator / denominator;
+    }
+
+    uint numerator_mantissa = (numerator_bits & 0x007fffffu) | 0x00800000u;
+    uint denominator_mantissa = (denominator_bits & 0x007fffffu) | 0x00800000u;
+    int exponent = int(numerator_exponent) - int(denominator_exponent);
+    if (numerator_mantissa < denominator_mantissa) {
+        numerator_mantissa <<= 1u;
+        exponent -= 1;
+    }
+
+    uint quotient = 1u;
+    uint remainder = numerator_mantissa - denominator_mantissa;
+    for (uint bit = 0u; bit < 23u; ++bit) {
+        quotient <<= 1u;
+        remainder <<= 1u;
+        if (remainder >= denominator_mantissa) {
+            remainder -= denominator_mantissa;
+            quotient |= 1u;
+        }
+    }
+
+    remainder <<= 1u;
+    bool guard = remainder >= denominator_mantissa;
+    if (guard) remainder -= denominator_mantissa;
+    bool sticky = remainder != 0u;
+    if (guard && (sticky || (quotient & 1u) != 0u)) {
+        quotient += 1u;
+        if (quotient == 0x01000000u) {
+            quotient >>= 1u;
+            exponent += 1;
+        }
+    }
+
+    int result_exponent = exponent + 127;
+    if (result_exponent <= 0 || result_exponent >= 255) {
+        return numerator / denominator;
+    }
+    return uintBitsToFloat(
+        sign | (uint(result_exponent) << 23u) | (quotient & 0x007fffffu)
+    );
+}
 
 void main() {
     uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
@@ -37,12 +90,10 @@ void main() {
     if (lane == 0u) {
         precise float scale = partial[0] == 0.0 ? 0.0 : partial[0] / 127.0;
         raw_scale = scale;
-        precise float scale_error = fma(-scale, 127.0, partial[0]);
-        scale += scale_error / 127.0;
-        precise float inverse = scale == 0.0 ? 0.0 : 1.0 / scale;
-        precise float inverse_error = fma(-scale, inverse, 1.0);
-        inverse_scale = fma(inverse_error, inverse, inverse);
-        float stored_scale = unpackHalf2x16(packHalf2x16(vec2(scale, 0.0))).x;
+        inverse_scale = partial[0] == 0.0
+            ? 0.0
+            : divide_finite_normal(127.0, partial[0]);
+        float stored_scale = round_f16_rte(scale);
         arena.data[pc.scales_word + block] = floatBitsToUint(stored_scale);
     }
     barrier();
@@ -68,7 +119,7 @@ void main() {
         barrier();
     }
     if (lane == 0u) {
-        float input_sum = unpackHalf2x16(packHalf2x16(vec2(float(partial_sum[0]) * raw_scale, 0.0))).x;
+        float input_sum = round_f16_rte(float(partial_sum[0]) * raw_scale);
         arena.data[pc.input_sums_word + block] = floatBitsToUint(input_sum);
     }
 }

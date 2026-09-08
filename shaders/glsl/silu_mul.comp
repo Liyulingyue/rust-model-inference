@@ -10,36 +10,21 @@ layout(push_constant) uniform PC {
 } pc;
 
 float exp_approx(float x) {
-    precise float z = fma(x, uintBitsToFloat(0x3fb8aa3bu), uintBitsToFloat(0x4b400000u));
+    x = max(min(x, uintBitsToFloat(0x42b0c0a5u)), -uintBitsToFloat(0x42b0c0a5u));
+    precise float z = x * uintBitsToFloat(0x3fb8aa3cu) + uintBitsToFloat(0x4b400000u);
     precise float n = z - uintBitsToFloat(0x4b400000u);
-    precise float reduced = fma(-n, uintBitsToFloat(0x3f317200u), x);
-    reduced = fma(-n, uintBitsToFloat(0x35bfbe8eu), reduced);
+    precise float reduced = x - n * uintBitsToFloat(0x3f318000u);
+    reduced = reduced - n * uintBitsToFloat(0xb95e8083u);
     uint exponent = floatBitsToUint(z) << 23u;
-    precise float scale = uintBitsToFloat(exponent + floatBitsToUint(1.0));
+    precise float scale = uintBitsToFloat(exponent + 0x3f800000u);
     precise float square = reduced * reduced;
-    precise float low = fma(
-        uintBitsToFloat(0x3e2aaf33u),
-        reduced,
-        uintBitsToFloat(0x3efffedbu)
-    );
-    precise float high = fma(
-        uintBitsToFloat(0x3c072010u),
-        reduced,
-        uintBitsToFloat(0x3d2b9f17u)
-    );
-    precise float polynomial = fma(high, square, low);
-    polynomial = fma(
-        polynomial,
-        square,
-        uintBitsToFloat(0x3f7ffff6u) * reduced
-    );
-    if (abs(n) <= 126.0) return fma(scale, polynomial, scale);
-
-    uint adjust = n <= 0.0 ? 0x82000000u : 0u;
-    precise float scale1 = uintBitsToFloat(adjust + 0x7f000000u);
-    precise float scale2 = uintBitsToFloat(exponent - adjust);
-    if (abs(n) > 192.0) return scale1 * scale1;
-    return fma(scale2, polynomial, scale2) * scale1;
+    precise float low = uintBitsToFloat(0x3efffedbu)
+        + uintBitsToFloat(0x3e2aaf33u) * reduced;
+    precise float high = uintBitsToFloat(0x3d2b9f17u)
+        + uintBitsToFloat(0x3c072010u) * reduced;
+    precise float polynomial = uintBitsToFloat(0x3f7ffff6u) * reduced
+        + (low + high * square) * square;
+    return (1.0 + polynomial) * scale;
 }
 
 void main() {

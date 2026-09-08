@@ -71,7 +71,11 @@ void main() {
         float sine = uintBitsToFloat(arena.data[pc.rope_word + lane + half_dim]);
         float first = uintBitsToFloat(arena.data[base + lane]);
         float second = uintBitsToFloat(arena.data[base + lane + half_dim]);
-        arena.data[base + lane] = floatBitsToUint(fma(first, cosine, -second * sine));
-        arena.data[base + lane + half_dim] = floatBitsToUint(fma(first, sine, second * cosine));
+        precise float first_cosine = first * cosine;
+        precise float second_sine = second * sine;
+        precise float first_sine = first * sine;
+        precise float second_cosine = second * cosine;
+        arena.data[base + lane] = floatBitsToUint(first_cosine - second_sine);
+        arena.data[base + lane + half_dim] = floatBitsToUint(first_sine + second_cosine);
     }
 }

@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
 
 layout(local_size_x = 64) in;
 
@@ -100,7 +102,7 @@ void main() {
     barrier();
     for (uint index = lane; index < pc.sequence_length; index += 64u) {
         float value = uintBitsToFloat(arena.data[base + index]);
-        value = unpackHalf2x16(packHalf2x16(vec2(value * inverse_sum, 0.0))).x;
+        value = round_f16_rte(value * inverse_sum);
         arena.data[base + index] = floatBitsToUint(value);
     }
 }
