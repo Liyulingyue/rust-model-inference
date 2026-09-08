@@ -8,6 +8,7 @@
 | Granite                       |            | 文本                 |                                       |              | 待核验 |
 | Hy-MT2                       | 1.8B | 文本                 |                                       |              | 待核验 |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
+| K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp/tree/model/K2Horizon | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
 | LFM2                          | 8B-A1B     | 文本          |                                       |              | 待核验 |
 | LFM2.5                        | 230M       | 文本                 | llama.cpp                             |              | 待核验 |
 | LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             |              | 待核验 |
@@ -18,7 +19,7 @@
 | Qwen2.5-VL                    |            | 多模态               |                                       |              | 待核验 |
 | Qwen3                         | 0.6B       | 文本                 |                                       |              | 待核验 |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
-| Qwen3-ASR                     | 0.6B       | ASR                  |                                       |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | 待核验 |
+| Qwen3-ASR                     | 0.6B       | ASR                  | llama.cpp                                      |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | √ |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |
 | Qwen3-TTS                     | 12Hz-1.7B-Base | TTS        | llama.cpp @ `201e50c`                 |              | 待核验 |
 | Qwen3-VL                      | 0.6B / 2B  | 多模态               |                                       |              | 待核验 |
@@ -28,4 +29,4 @@
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |
 | NVIDIA-Nemotron-3-Nano        | 4B         | 文本                 |                                      |              | 待核验 |
-| MiniCPM5                      | 1B         | 文本                 |                                       |              | 待核验 |
+| MiniCPM5                      | 1B         | 文本                 | llama.cpp                                      |              | 待核验 |

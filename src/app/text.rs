@@ -32,6 +32,10 @@ fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Result<(), Strin
     Ok(())
 }
 
+fn uses_llama_trunk(arch: &str) -> bool {
+    matches!(arch, "llama" | "k2-horizon" | "granite" | "nanbeige")
+}
+
 pub fn run_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -96,7 +100,7 @@ pub fn run_inference(
             profile,
             kv_format,
         )
-    } else if arch == "llama" || arch == "granite" || arch == "nanbeige" {
+    } else if uses_llama_trunk(&arch) {
         crate::models::llama::run_inference(
             source.as_ref(),
             prompt,
@@ -1296,7 +1300,7 @@ fn run_multimodal_with_video_ref(
 mod tests {
     use super::{
         build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
-        run_multimodal, validate_single_qwen_media,
+        run_multimodal, uses_llama_trunk, validate_single_qwen_media,
     };
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::models::qwen35::{Qwen35Config, Qwen35Model};
@@ -1356,6 +1360,11 @@ mod tests {
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
         }
+    }
+
+    #[test]
+    fn k2_horizon_uses_llama_trunk() {
+        assert!(uses_llama_trunk("k2-horizon"));
     }
 
     #[test]

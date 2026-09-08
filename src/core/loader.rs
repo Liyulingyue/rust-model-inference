@@ -399,6 +399,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen35"
             | "qwen3tts"
             | "llama"
+            | "k2-horizon"
             | "granite"
             | "hunyuan-dense"
             | "pig"
@@ -1090,6 +1091,67 @@ mod tests {
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
         }
+    }
+
+    #[test]
+    fn k2_horizon_uses_its_metadata_prefix() {
+        let metadata = std::collections::HashMap::from([
+            (
+                "general.architecture".into(),
+                MetaValue::String("k2-horizon".into()),
+            ),
+            (
+                "k2-horizon.embedding_length".into(),
+                MetaValue::Uint32(4096),
+            ),
+            ("k2-horizon.block_count".into(), MetaValue::Uint32(36)),
+            (
+                "k2-horizon.attention.head_count".into(),
+                MetaValue::Uint32(32),
+            ),
+            (
+                "k2-horizon.attention.head_count_kv".into(),
+                MetaValue::Uint32(8),
+            ),
+            (
+                "k2-horizon.feed_forward_length".into(),
+                MetaValue::Uint32(12288),
+            ),
+            (
+                "k2-horizon.context_length".into(),
+                MetaValue::Uint32(524288),
+            ),
+            (
+                "k2-horizon.rope.freq_base".into(),
+                MetaValue::Float32(10_000_000.0),
+            ),
+            (
+                "k2-horizon.attention.layer_norm_rms_epsilon".into(),
+                MetaValue::Float32(1e-6),
+            ),
+            ("k2-horizon.vocab_size".into(), MetaValue::Uint32(250624)),
+        ]);
+
+        let config = model_config_from_source(&MapTensorSource {
+            metadata,
+            tensors: std::collections::HashMap::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv,
+                config.n_ff,
+                config.n_ctx,
+                config.vocab_size,
+            ),
+            (4096, 36, 32, 8, 12288, 524288, 250624)
+        );
+        assert_eq!(config.rope_freq_base, 10_000_000.0);
+        assert_eq!(config.norm_eps, 1e-6);
     }
 
     #[test]

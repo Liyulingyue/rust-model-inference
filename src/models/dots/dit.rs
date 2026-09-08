@@ -699,9 +699,9 @@ impl DiT {
         mask: &[bool],
     ) {
         #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        ))]
         {
             const QUERY_BLOCK: usize = 32;
             let scale = 1.0 / (DIT_HEAD_DIM as f32).sqrt();
@@ -800,9 +800,9 @@ impl DiT {
         }
 
         #[cfg(not(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-)))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        )))]
         {
             let scale = 1.0 / (DIT_HEAD_DIM as f32).sqrt();
             out.fill(0.0);
@@ -1165,9 +1165,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch time-embedding sidecar"]
     fn production_time_mlp_matches_pinned_oracle_bitwise() {
@@ -1204,9 +1204,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT sidecars"]
     fn production_block_mods_match_pinned_oracle_bitwise() {
@@ -1250,9 +1250,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed Torch DiT LayerNorm sidecars"]
     fn production_layernorm_matches_pinned_oracle_bitwise() {
@@ -1288,9 +1288,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT RMSNorm sidecars"]
     fn production_rms_norm_matches_pinned_oracle_bitwise() {
@@ -1340,9 +1340,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed Torch DiT RoPE sidecars"]
     fn production_dots_rotary_matches_pinned_oracle_bitwise() {
@@ -1391,9 +1391,9 @@ mod tests {
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT attention sidecars"]
     fn production_attention_matches_pinned_oracle_bitwise() {

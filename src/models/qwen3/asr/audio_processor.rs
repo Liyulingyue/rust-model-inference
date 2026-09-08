@@ -16,49 +16,6 @@ unsafe extern "C" {
     fn cosf(value: f32) -> f32;
     fn erff(value: f32) -> f32;
     fn log10(value: f64) -> f64;
-    #[cfg(target_os = "macos")]
-    fn __sincosf_stret(value: f32) -> SinCos;
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct SinCos {
-    sin: f32,
-    cos: f32,
-}
-
-#[cfg(target_os = "macos")]
-fn sin_cos(value: f32) -> (f32, f32) {
-    let values = unsafe { __sincosf_stret(value) };
-    (values.sin, values.cos)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sin_cos(value: f32) -> (f32, f32) {
-    value.sin_cos()
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    pub(super) fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
-    pub(super) fn vDSP_vsadd(
-        input: *const f32,
-        input_stride: isize,
-        scalar: *const f32,
-        output: *mut f32,
-        output_stride: isize,
-        count: usize,
-    );
-    pub(super) fn vDSP_measqv(input: *const f32, stride: isize, result: *mut f32, count: usize);
-    pub(super) fn vDSP_vsmul(
-        input: *const f32,
-        input_stride: isize,
-        scalar: *const f32,
-        output: *mut f32,
-        output_stride: isize,
-        count: usize,
-    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,7 +317,7 @@ impl RealFft {
             .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
         for index in 0..size {
             let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
-            let (sine, cosine) = sin_cos(angle);
+            let (sine, cosine) = angle.sin_cos();
             sin.push(sine);
             cos.push(cosine);
         }
