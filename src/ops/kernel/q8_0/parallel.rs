@@ -35,8 +35,10 @@ pub fn matmul_q8_0_quantized_parallel_rows(
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
-        let gpu_takes_this =
-            !crate::vulkan::gpu_broken() && n_in <= MAX_GPU_N_IN && n_out <= max_rows;
+        let gpu_takes_this = !crate::core::thread_pool::gpu_matmul_disabled()
+            && !crate::vulkan::gpu_broken()
+            && n_in <= MAX_GPU_N_IN
+            && n_out <= max_rows;
         if gpu_takes_this {
             if let Some(ctx) = get_vulkan_context() {
                 if ith == 0 {

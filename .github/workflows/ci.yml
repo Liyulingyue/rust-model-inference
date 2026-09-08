@@ -14,3 +14,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
+
+  vulkan:
+    name: Vulkan compile and shaders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools
+      - run: bash scripts/vulkan-shaders.sh check
+      - run: cargo check --locked --features vulkan --lib
+      - run: cargo check --locked --features vulkan --bin rust-model-inference
+      - run: cargo check --locked --features vulkan --bin server
+      - run: cargo check --locked --features vulkan --examples

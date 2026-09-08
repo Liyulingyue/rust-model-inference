@@ -5,14 +5,11 @@
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
-    quantize_q8_0_into, vec_mad_f32,
+    attention_value_f32, bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32,
+    matmul_q8_0_quantized_parallel, quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -21,8 +18,6 @@ use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
-#[cfg(all(feature = "accelerate", target_os = "macos"))]
-use super::audio_processor::{vDSP_measqv, vDSP_sve, vDSP_vsadd, vDSP_vsmul};
 
 unsafe extern "C" {
     fn erff(value: f32) -> f32;
@@ -1095,71 +1090,23 @@ fn layer_norm(
         return Err("Invalid layer norm tensors".into());
     }
 
-    #[cfg(all(feature = "accelerate", target_os = "macos"))]
-    {
-        let mut sum = 0.0;
-        unsafe { vDSP_sve(input.as_ptr(), 1, &mut sum, input.len()) };
-        let negative_mean = -(sum / input.len() as f32);
-        unsafe {
-            vDSP_vsadd(
-                input.as_ptr(),
-                1,
-                &negative_mean,
-                output.as_mut_ptr(),
-                1,
-                input.len(),
-            )
-        };
-        let mut variance = 0.0;
-        unsafe { vDSP_measqv(output.as_ptr(), 1, &mut variance, output.len()) };
-        let inverse = 1.0 / (variance + epsilon).sqrt();
-        unsafe {
-            vDSP_vsmul(
-                output.as_ptr(),
-                1,
-                &inverse,
-                output.as_mut_ptr(),
-                1,
-                output.len(),
-            )
-        };
-        for (output, weight) in output.iter_mut().zip(weight) {
-            *output *= weight;
-        }
-        for (output, bias) in output.iter_mut().zip(bias) {
-            *output += bias;
-        }
-        if output.iter().any(|value| !value.is_finite()) {
-            return Err("Non-finite layer norm output".into());
-        }
-        return Ok(());
+    let n = input.len();
+    let sum = sum_f32(input);
+    let mean = (sum / n as f64) as f32;
+    let variance = (sum_sq_centered_f32(input, mean) / n as f64) as f32;
+    let inverse_std = 1.0 / (variance + epsilon).sqrt();
+    if !inverse_std.is_finite() {
+        return Err("Non-finite layer norm statistics".into());
     }
-
-    #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
+    for ((output, input), (weight, bias)) in
+        output.iter_mut().zip(input).zip(weight.iter().zip(bias))
     {
-        let count = input.len() as f64;
-        let mean = input.iter().map(|&value| f64::from(value)).sum::<f64>() / count;
-        let variance = input
-            .iter()
-            .map(|&value| {
-                let centered = f64::from(value) - mean;
-                centered * centered
-            })
-            .sum::<f64>()
-            / count;
-        let mean = mean as f32;
-        let inverse = (1.0 / (variance + f64::from(epsilon)).sqrt()) as f32;
-        if !mean.is_finite() || !inverse.is_finite() {
-            return Err("Non-finite layer norm statistics".into());
-        }
-        for (((value, weight), bias), output) in input.iter().zip(weight).zip(bias).zip(output) {
-            *output = (*value - mean) * inverse * *weight + *bias;
-            if !output.is_finite() {
-                return Err("Non-finite layer norm output".into());
-            }
-        }
-        Ok(())
+        *output = (*input - mean) * inverse_std * weight + bias;
     }
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite layer norm output".into());
+    }
+    Ok(())
 }
 
 pub(in crate::models::qwen3) fn layer_norm_rows(
@@ -1267,6 +1214,7 @@ pub(in crate::models::qwen3) fn full_attention_into(
     }
     resize_f32(scores, "attention scores", tokens)?;
     resize_f32(output, "attention output", len)?;
+    let mut value_column = reserved_f32("attention value column", tokens)?;
     output.fill(0.0);
     let scale = 1.0 / (head_dim as f32).sqrt();
     for query_token in 0..tokens {
@@ -1287,12 +1235,12 @@ pub(in crate::models::qwen3) fn full_attention_into(
             attention_softmax(&mut scores[..tokens])?;
             let output_start = query_token * width + head * head_dim;
             let output_row = &mut output[output_start..output_start + head_dim];
-            output_row.fill(0.0);
-
-            for key_token in 0..tokens {
-                let value_row = &value[key_token * width + head * head_dim..][..head_dim];
-
-                vec_mad_f32(output_row, value_row, scores[key_token]);
+            for dimension in 0..head_dim {
+                for key_token in 0..tokens {
+                    value_column[key_token] =
+                        value[key_token * width + head * head_dim + dimension];
+                }
+                output_row[dimension] = attention_value_f32(&value_column, scores, tokens, tokens);
             }
         }
     }
