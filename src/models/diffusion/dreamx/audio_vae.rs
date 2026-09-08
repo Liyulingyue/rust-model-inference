@@ -5,11 +5,11 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 
 const PREFIX: &str = "dreamx.audio_vae";
-const SAMPLE_RATE: usize = 48_000;
+pub const SAMPLE_RATE: usize = 48_000;
 const LATENT_CHANNELS: usize = 128;
 const DECODER_CHANNELS: usize = 2048;
 const RATES: [usize; 5] = [8, 5, 4, 3, 2];
-const HOP_LENGTH: usize = 960;
+pub const HOP_LENGTH: usize = 960;
 
 struct Conv1 {
     weight: String,

@@ -30,6 +30,7 @@ const MMPROJ_COMPONENTS: [&str; 6] = [
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DreamXConfig {
     pub pair_id: String,
+    pub main_outtype: String,
     pub video_embedding_length: usize,
     pub video_feed_forward_length: usize,
     pub video_head_count: usize,
@@ -69,6 +70,13 @@ impl DreamXConfig {
 
         require_string(main, "dreamx.file_role", "main")?;
         require_string(mmproj, "dreamx.file_role", "mmproj")?;
+        let main_outtype = metadata_string(main, "dreamx.outtype")?;
+        if !matches!(main_outtype.as_str(), "q8_0" | "bf16") {
+            return Err(format!(
+                "Invalid DreamX metadata dreamx.outtype: unsupported {main_outtype:?}"
+            ));
+        }
+        require_string(mmproj, "dreamx.outtype", "bf16")?;
         require_string(main, "dreamx.source_model", "GD-ML/DreamX-Creator")?;
         require_string(mmproj, "dreamx.source_model", "GD-ML/DreamX-Creator")?;
         require_u64(main, "dreamx.exporter_version", 1)?;
@@ -111,6 +119,7 @@ impl DreamXConfig {
 
         Ok(Self {
             pair_id,
+            main_outtype,
             video_embedding_length: 3072,
             video_feed_forward_length: 14336,
             video_head_count: 24,

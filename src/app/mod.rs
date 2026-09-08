@@ -1,6 +1,7 @@
 pub(crate) mod audio;
 pub mod cli;
 pub(crate) mod dots;
+pub(crate) mod dreamx;
 pub(crate) mod embedding;
 pub(crate) mod image;
 pub(crate) mod omni;
@@ -18,6 +19,7 @@ pub use cli::{
     EmbeddingOutput, KvFormat, LatentUpsampleKind, RefinerDecoderKind, ZImageCliOptions,
     DEFAULT_THREAD_CAP,
 };
+pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
 pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};

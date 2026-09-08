@@ -314,20 +314,21 @@ pub struct DreamXRefiner {
 
 impl DreamXRefiner {
     pub fn load(
-        source: Arc<dyn TensorSource>,
+        main: Arc<dyn TensorSource>,
+        mmproj: Arc<dyn TensorSource>,
         pool: Arc<ComputePool>,
         options: DreamXRefinerOptions,
     ) -> Result<Self, String> {
         if options.kv_len == 0 {
             return Err("DreamX refiner KV length must be non-zero".into());
         }
-        let model = RefinerModel::load(source.clone(), pool.clone(), options.kv_len)?;
-        let vae = Wan22Vae::load(source.clone(), pool.clone())?;
+        let model = RefinerModel::load(main, pool.clone(), options.kv_len)?;
+        let vae = Wan22Vae::load(mmproj.clone(), pool.clone())?;
         let upsampler =
-            LatentUpsampler::load(options.latent_upsample, source.clone(), pool.clone())?;
+            LatentUpsampler::load(options.latent_upsample, mmproj.clone(), pool.clone())?;
         let decoder = match options.decoder {
             RefinerDecoderKind::Wan => Decoder::Wan,
-            RefinerDecoderKind::LightVae => Decoder::Light(LightVae::load(source, pool)?),
+            RefinerDecoderKind::LightVae => Decoder::Light(LightVae::load(mmproj, pool)?),
         };
         Ok(Self {
             model,
