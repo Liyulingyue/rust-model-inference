@@ -17,6 +17,7 @@ use crate::ops::{
     rms_norm_grouped, rope_neox, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
     vec_mad_f16_f32, vec_scale_f32,
 };
+use crate::prompt::format_k2_horizon_chat_prompt;
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -130,19 +131,6 @@ fn dbg_full(step: usize, label: &'static str, il: usize, buf: &[f32], n: usize) 
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-fn format_prompt_text(arch: &str, prompt: &str) -> String {
-    match arch {
-        "granite" => format!(
-            "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
-        ),
-        "nanbeige" => prompt.to_string(),
-        "k2-horizon" => format!(
-            "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
-        ),
-        _ => format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"),
-    }
-}
-
 fn normalization_groups(
     source: &dyn TensorSource,
     arch: &str,
@@ -199,7 +187,17 @@ pub fn run_inference(
         // `<|im_start|>{role}\n{content}<|im_end|>\n` template. Nanbeige is
         // a base model with no chat template — feed the prompt as-is and let
         // the BOS token mark the start of generation.
-        let prompt_text = format_prompt_text(&arch, prompt);
+        let prompt_text = if arch == "k2-horizon" {
+            format_k2_horizon_chat_prompt(prompt)
+        } else if arch == "granite" {
+            format!(
+                "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+            )
+        } else if arch == "nanbeige" {
+            prompt.to_string()
+        } else {
+            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n")
+        };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
         // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
         // expects no BOS since add_bos_token=false), so add_special=false
@@ -1087,7 +1085,7 @@ pub fn run_inference_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rope, format_prompt_text, normalization_groups};
+    use super::{apply_rope, normalization_groups};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::collections::HashMap;
 
@@ -1105,14 +1103,6 @@ mod tests {
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
         }
-    }
-
-    #[test]
-    fn k2_horizon_prompt_matches_reference_template() {
-        assert_eq!(
-            format_prompt_text("k2-horizon", "Hello"),
-            "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
-        );
     }
 
     #[test]
