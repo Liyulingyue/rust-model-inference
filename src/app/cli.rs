@@ -641,7 +641,7 @@ pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOption
 
 pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
     if options.text_encoder.is_none() && options.vae.is_none() {
-        return if options.seed.is_some() && !options.tts {
+        return if options.seed.is_some() && !options.tts && !options.dreamx {
             Err("--seed requires Z-Image components or --tts".into())
         } else {
             Ok(None)
@@ -1242,6 +1242,12 @@ mod tests {
         assert!(dreamx.dry_run);
         assert!(dreamx.overwrite);
         assert!(dreamx.allow_memory_overcommit);
+    }
+
+    #[test]
+    fn dreamx_seed_is_not_claimed_by_z_image() {
+        let options = parse_cli_options(&args(&["rmi", "--dreamx", "--seed", "-7"])).unwrap();
+        assert!(z_image_cli_options(&options).unwrap().is_none());
     }
 
     #[test]
