@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::models::dots::blas::sys;
 use crate::models::dots::patch_encoder::torch_rms_norm_with_eps;
 use crate::models::dots::speaker::exp::torch28_exp;
 use crate::ops::kernel::Weight;
-use crate::models::dots::blas::sys;
 use crate::ops::{dot_f32, vec_mad_f32};
 
 #[derive(Debug, Clone)]
@@ -123,9 +123,9 @@ impl DotsLinear {
             output.fill(0.0);
         }
         #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        ))]
         unsafe {
             sys::cblas_sgemm(
                 101,
@@ -145,9 +145,9 @@ impl DotsLinear {
             );
         }
         #[cfg(not(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-)))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        )))]
         for row in 0..self.n_out {
             let row_start = row * self.n_in;
             let mut sum = bias.map_or(0.0, |values| values[row]);
@@ -162,9 +162,9 @@ impl DotsLinear {
         debug_assert_eq!(input.len(), rows * self.n_in);
         debug_assert_eq!(output.len(), rows * self.n_out);
         #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        ))]
         {
             if let Some(bias) = bias {
                 for row in output.chunks_exact_mut(self.n_out) {
@@ -194,9 +194,9 @@ impl DotsLinear {
             return;
         }
         #[cfg(not(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-)))]
+            target_os = "macos",
+            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+        )))]
         for row in 0..rows {
             self.matmul(
                 &input[row * self.n_in..(row + 1) * self.n_in],
@@ -427,9 +427,9 @@ fn attention_head(
     }
 
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     {
         const CBLAS_ROW_MAJOR: i32 = 101;
         const CBLAS_COL_MAJOR: i32 = 102;
@@ -588,9 +588,9 @@ fn attention_head(
     }
 
     #[cfg(not(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-)))]
+        target_os = "macos",
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    )))]
     {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let mut scores = vec![0.0f32; keys];
