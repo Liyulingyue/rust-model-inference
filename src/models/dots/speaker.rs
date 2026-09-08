@@ -29,11 +29,6 @@ const PREEMPH: f32 = 0.97;
 const MEL_FLOOR: f32 = f32::EPSILON;
 const BN_EPS: f32 = 1e-5;
 
-unsafe extern "C" {
-    fn hypotf(x: f32, y: f32) -> f32;
-    fn powf(x: f32, y: f32) -> f32;
-}
-
 // ---------------------------------------------------------------------------
 // Generic high-quality resampler (kaiser-windowed sinc, 64 taps, rolloff 0.95)
 // ---------------------------------------------------------------------------
@@ -1503,8 +1498,8 @@ fn torch28_rfft_power_512(input: &[f32; FFT_SIZE]) -> ([f32; 257], [f32; 257], [
         imag[bin] = scratch[2 * bin];
     }
     for bin in 0..257 {
-        let magnitude = unsafe { hypotf(real[bin], imag[bin]) };
-        power[bin] = unsafe { powf(magnitude, 2.0) };
+        let magnitude = f32::hypot(real[bin], imag[bin]);
+        power[bin] = magnitude * magnitude;
     }
     (real, imag, power)
 }

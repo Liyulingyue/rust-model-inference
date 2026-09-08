@@ -1,9 +1,8 @@
 //! F16 matmul kernel implementation.
 //!
-//! Phase 2.4 + 2.7-final: Reserved interface for F16 matmul. The
-//! `F16Kernel` exists to lock the contract for the F16 variant of
-//! `QuantizedTensor`. Production F16 weights are rare; this kernel is
-//! mostly a placeholder until the AVX2/NEON F16 path lands.
+//! F16 weights use the ggml F16 × F16 dot contract. `forward_prepared`
+//! converts the original F32 activation to F16 before computing each row;
+//! direct prequantized callers dequantize their Q8 input to F32.
 
 use super::Kernel;
 
@@ -37,6 +36,21 @@ impl<'a> F16Kernel<'a> {
         scale: f32,
         input_f16: &mut Vec<u16>,
     ) {
+        self.forward_scaled_rows(input, output, n_in, n_out, scale, input_f16, 0, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_scaled_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        scale: f32,
+        input_f16: &mut Vec<u16>,
+        ith: usize,
+        nth: usize,
+    ) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
         debug_assert!(input.len() >= n_in);
         debug_assert!(output.len() >= n_out);
@@ -52,9 +66,11 @@ impl<'a> F16Kernel<'a> {
         }
 
         let inverse_scale = scale.recip();
-        for (out_idx, row) in (0..n_out).enumerate() {
+        let start = n_out.saturating_mul(ith) / nth.max(1);
+        let end = n_out.saturating_mul(ith.saturating_add(1)) / nth.max(1);
+        for row in start..end {
             let row_off = row * n_in * 2;
-            output[out_idx] = crate::ops::dot_f16_f16_bytes(
+            output[row] = crate::ops::dot_f16_f16_bytes(
                 input_f16.as_slice(),
                 &self.weight[row_off..row_off + n_in * 2],
                 n_in,
@@ -68,49 +84,7 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
-    /// Prepared matmuls retain F32 activations, as the BF16/F32 kernels do.
-    /// The Q8 buffers may be empty; only quantized weight kernels need them.
-    fn forward_prepared(
-        &self,
-        input_f32: &[f32],
-        _input_q8: &[u8],
-        _input_scales: &[f32],
-        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
-        output: &mut [f32],
-        n_in: usize,
-        n_out: usize,
-        ith: usize,
-        nth: usize,
-    ) {
-        debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
-        // The SIMD dot uses raw loads; validate the activation extent first.
-        let input_f32 = &input_f32[..n_in];
-        let per_thread = n_out.div_ceil(nth);
-        let start = ith * per_thread;
-        let end = (start + per_thread).min(n_out);
-        for row in start..end {
-            let bytes = &self.weight[row * n_in * 2..(row + 1) * n_in * 2];
-            #[cfg(target_endian = "little")]
-            {
-                // SAFETY: u16 accepts every bit pattern. align_to checks alignment;
-                // byte-offset sources take the portable conversion below.
-                let (prefix, halves, suffix) = unsafe { bytes.align_to::<u16>() };
-                if prefix.is_empty() && suffix.is_empty() {
-                    output[row] = crate::ops::dot_f16_f32(input_f32, halves, n_in);
-                    continue;
-                }
-            }
-            output[row] = bytes
-                .chunks_exact(2)
-                .zip(&input_f32[..n_in])
-                .map(|(bytes, value)| {
-                    crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]])) * value
-                })
-                .sum();
-        }
-    }
-
-    /// Row-partitioned F16 matmul for callers supplying Q8 activations only.
+    /// Row-partitioned scalar F16×F32 matmul for direct prequantized callers.
     fn forward_prequantized(
         &self,
         input_q8: &[u8],
@@ -141,15 +115,38 @@ impl<'a> Kernel for F16Kernel<'a> {
         }
     }
 
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        self.forward_scaled_rows(
+            input_f32,
+            output,
+            n_in,
+            n_out,
+            1.0,
+            &mut Vec::new(),
+            ith,
+            nth,
+        );
+    }
+
     /// F16 converts the input to F16 before the dot product, matching ggml's
     /// `vec_dot_type = GGML_TYPE_F16` contract.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
-    /// F16's `forward_batched` goes through `forward` (f32 path) rather
-    /// than the default impl (which quantizes input then calls
-    /// `forward_prequantized`, a placeholder for F16).
+    /// F16's `forward_batched` goes through `forward` so each F32 input row
+    /// is converted to F16 instead of using the prequantized-only entry.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
@@ -185,7 +182,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn prepared_f16_rejects_short_activations_before_simd() {
-        let bytes = f16_bytes(&vec![f16::ONE; 32]);
+        let bytes = f16_bytes(&[f16::ONE; 32]);
         F16Kernel::new(&bytes).forward_prepared(
             &[1.0; 31],
             &[],
@@ -214,15 +211,20 @@ mod tests {
             let kernel = F16Kernel::new(bytes);
             let mut output = [f32::NAN; 5];
             kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, 1, 3);
-            assert!(output[..2].iter().chain(&output[4..]).all(|v| v.is_nan()));
+            // Main partitions rows by floor(n_out * ith / nth): rows 1..3.
+            assert!(output[..1].iter().chain(&output[3..]).all(|v| v.is_nan()));
             for thread in [0, 2] {
                 kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, thread, 3);
             }
+            let mut sequential = [0.0; 5];
+            kernel.forward(&input, &mut sequential, 7, 5);
+            assert_eq!(output.map(f32::to_bits), sequential.map(f32::to_bits));
             for (row, &actual) in output.iter().enumerate() {
                 let expected = values[row * 7..(row + 1) * 7]
                     .iter()
                     .zip(input)
-                    .map(|(w, x)| w.to_f64() * f64::from(x))
+                    // Prepared and ordinary paths both round activations to F16.
+                    .map(|(w, x)| w.to_f64() * f16::from_f32(x).to_f64())
                     .sum::<f64>() as f32;
                 assert!(
                     (actual - expected).abs() < 1e-6,
@@ -279,6 +281,44 @@ mod tests {
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [6.0, 15.0]);
+    }
+
+    #[test]
+    fn f16_kernel_embedding_lookup_decodes_selected_row() {
+        let weight = f16_bytes(&[
+            f16::from_f32(1.0),
+            f16::from_f32(-2.0),
+            f16::from_bits(0x0001),
+            f16::from_f32(4.0),
+            f16::from_f32(5.0),
+            f16::from_f32(6.0),
+        ]);
+        let kernel = F16Kernel::new(&weight);
+        let mut output = [0.0f32; 3];
+
+        kernel.embedding_lookup(1, 3, &mut output);
+
+        assert_eq!(output, [4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn f16_kernel_prepared_path_computes_only_assigned_rows() {
+        let weight = f16_bytes(&[
+            f16::from_f32(1.0),
+            f16::from_f32(1.0),
+            f16::from_f32(2.0),
+            f16::from_f32(2.0),
+            f16::from_f32(3.0),
+            f16::from_f32(3.0),
+            f16::from_f32(4.0),
+            f16::from_f32(4.0),
+        ]);
+        let kernel = F16Kernel::new(&weight);
+        let mut output = [0.0f32; 4];
+
+        kernel.forward_prepared(&[1.0, 2.0], &[], &[], None, &mut output, 2, 4, 1, 2);
+
+        assert_eq!(output, [0.0, 0.0, 9.0, 12.0]);
     }
 
     #[test]

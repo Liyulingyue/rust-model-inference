@@ -1247,12 +1247,17 @@ mod tests {
                 if dtype == GGMLType::BF16 && threads == 1 {
                     dense_reference = actual.clone();
                 }
-                // Q8 weights are exactly represented; activation quantization adds bounded error.
-                assert_close(
-                    &actual,
-                    &dense_reference,
-                    if dtype == GGMLType::Q8_0 { 0.025 } else { 1e-6 },
-                );
+                // F16 now rounds activations before each dot, unlike BF16/F32.
+                // Its rounding is covered by the F16 kernel's scalar-reference
+                // test; prefill/decode and thread equivalence still apply above.
+                if dtype != GGMLType::F16 {
+                    // Q8 weights are exact here; activation quantization adds error.
+                    assert_close(
+                        &actual,
+                        &dense_reference,
+                        if dtype == GGMLType::Q8_0 { 0.025 } else { 1e-6 },
+                    );
+                }
                 drop(sequential);
                 drop(batch);
                 drop(model);
