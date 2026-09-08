@@ -31,7 +31,7 @@ MoltenVK. Format coverage then expands using the models already present under
 - Device selection ranks device type before checking actual shader
   requirements, then unconditionally requests Vulkan 1.3, `shaderInt64`, and
   integer dot product even though the baseline shader does not require them.
-- `docs/VULKAN.md` says `vk_check` covers five shapes, while the example
+- `docs/develop/VULKAN.md` says `vk_check` covers five shapes, while the example
   currently runs one 1024 x 1024 case.
 
 ## Verified Model Matrix

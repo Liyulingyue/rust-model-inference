@@ -173,7 +173,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json vulkaninfo --summary
 ```
 
 **注意**：当前仍是实验性 Q8_0 matmul offload；完整模型算子和更多权重格式的 Vulkan
-覆盖见 [VULKAN.md](./docs/VULKAN.md)。未传 `--gpu` 时保持纯 CPU 路径。
+覆盖见 [VULKAN.md](./docs/develop/VULKAN.md)。未传 `--gpu` 时保持纯 CPU 路径。
 
 ### CLI 选项
 

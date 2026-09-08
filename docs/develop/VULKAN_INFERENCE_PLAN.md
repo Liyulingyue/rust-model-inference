@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, `ash` 0.37, Vulkan compute, GLSL 450, SPIR-V, GGUF tensor storage, existing scalar/SIMD CPU kernels.
 
-**Spec:** `docs/VULKAN_INFERENCE_DESIGN.md`
+**Spec:** `docs/develop/VULKAN_INFERENCE_DESIGN.md`
 
 ## Global Constraints
 
@@ -29,7 +29,7 @@
 - `src/vulkan/qwen3.rs`: Qwen3 eligibility, weight upload table, per-session GPU buffers/KV, full-token recording, commit, and reset.
 - `src/models/qwen3/trunk/session.rs`: Select GPU versus CPU once per session, keep the CPU token implementation as fallback, and commit GPU logits/KV deltas.
 - `src/ops/float.rs`: Process-wide opt-in/failed state and lazy `VulkanContext` construction.
-- `src/bin/server.rs`, `README.md`, `docs/VULKAN.md`: User entry points and truthful support documentation.
+- `src/bin/server.rs`, `README.md`, `docs/develop/VULKAN.md`: User entry points and truthful support documentation.
 - `shaders/glsl/*.comp`, `shaders/bin/*.spv`, `shaders/manifest.sha256`: Authoritative kernels, checked-in binaries, and their hashes.
 - `scripts/vulkan-shaders.sh`: One command for shader regeneration and one command for deterministic validation.
 - `examples/vk_check.rs`: Synthetic matvec shape and scalar-parity gate.
@@ -467,7 +467,7 @@ git commit -m "fix: select capable Vulkan devices"
 
 **Files:**
 - Modify: `examples/vk_check.rs`
-- Modify: `docs/VULKAN.md`
+- Modify: `docs/develop/VULKAN.md`
 
 **Interfaces:**
 - Produces: deterministic cases `(1024, 1024)`, `(1024, 3072)`, `(3072, 1024)`, `(1024, 151936)`, `(16384, 32)`
@@ -503,12 +503,12 @@ Run: `cargo run --release --locked --features vulkan --example vk_check`
 
 Expected: five passing shapes and process exit 0.
 
-Update `docs/VULKAN.md` with the five exact shapes and the implemented tolerance `abs <= 1e-4 + 1e-4 * abs(cpu)`; remove the old blanket `rel <= 3e-7` claim.
+Update `docs/develop/VULKAN.md` with the five exact shapes and the implemented tolerance `abs <= 1e-4 + 1e-4 * abs(cpu)`; remove the old blanket `rel <= 3e-7` claim.
 
 - [ ] **Step 4: Commit the shape gate**
 
 ```bash
-git add examples/vk_check.rs docs/VULKAN.md
+git add examples/vk_check.rs docs/develop/VULKAN.md
 git commit -m "test: cover Vulkan model matvec shapes"
 ```
 
@@ -822,7 +822,7 @@ git commit -m "feat: execute Qwen3 Q8 tokens on Vulkan"
 **Files:**
 - Create: `examples/vk_model_check.rs`
 - Modify: `src/models/qwen3/trunk/session.rs`
-- Modify: `docs/VULKAN.md`
+- Modify: `docs/develop/VULKAN.md`
 
 **Interfaces:**
 - Produces: `pub fn Qwen3Session::last_logits(&self) -> &[f32]`
@@ -869,10 +869,10 @@ Run the command twice: once for correctness and once with `--benchmark`.
 
 - [ ] **Step 5: Document measured facts and commit the model gate**
 
-Record the model path, file size/hash, device/driver from `vulkaninfo --summary`, exact command, tolerances, token match, submission count, five timings, and medians in `docs/VULKAN.md`.
+Record the model path, file size/hash, device/driver from `vulkaninfo --summary`, exact command, tolerances, token match, submission count, five timings, and medians in `docs/develop/VULKAN.md`.
 
 ```bash
-git add examples/vk_model_check.rs src/models/qwen3/trunk/session.rs docs/VULKAN.md
+git add examples/vk_model_check.rs src/models/qwen3/trunk/session.rs docs/develop/VULKAN.md
 git commit -m "test: validate Qwen3 Q8 Vulkan inference"
 ```
 
@@ -890,7 +890,7 @@ git commit -m "test: validate Qwen3 Q8 Vulkan inference"
 - Create: corresponding `shaders/bin/*.spv`
 - Modify: `scripts/vulkan-shaders.sh`
 - Modify: `shaders/manifest.sha256`
-- Modify: `docs/VULKAN.md`
+- Modify: `docs/develop/VULKAN.md`
 
 **Interfaces:**
 - Extends: `GpuWeightFormat::{Q4_0, Q4_1, Q6_K}`
@@ -934,7 +934,7 @@ git add src/vulkan/qwen3.rs src/vulkan/ops.rs examples/vk_ops_check.rs \
   shaders/glsl/q4_0_matmul.comp shaders/glsl/q4_1_matmul.comp \
   shaders/glsl/q6_k_matmul.comp shaders/bin/q4_0_matmul.spv \
   shaders/bin/q4_1_matmul.spv shaders/bin/q6_k_matmul.spv \
-  shaders/manifest.sha256 docs/VULKAN.md
+  shaders/manifest.sha256 docs/develop/VULKAN.md
 git commit -m "feat: add Vulkan Q4_0 model support"
 ```
 
@@ -950,7 +950,7 @@ git commit -m "feat: add Vulkan Q4_0 model support"
 - Create: corresponding `shaders/bin/*.spv`
 - Modify: `scripts/vulkan-shaders.sh`
 - Modify: `shaders/manifest.sha256`
-- Modify: `docs/VULKAN.md`
+- Modify: `docs/develop/VULKAN.md`
 
 **Interfaces:**
 - Extends: `GpuWeightFormat::{Q4_K, F16}`
@@ -995,13 +995,13 @@ For embedding, compare the entire vector with `abs/rel = 2e-3/2e-3` and require 
 git add src/vulkan/qwen3.rs src/vulkan/ops.rs src/models/qwen3/trunk/forward.rs \
   examples/vk_ops_check.rs \
   examples/vk_model_check.rs scripts/vulkan-shaders.sh shaders/glsl/q4_k_matmul.comp \
-  shaders/bin/q4_k_matmul.spv shaders/manifest.sha256 docs/VULKAN.md
+  shaders/bin/q4_k_matmul.spv shaders/manifest.sha256 docs/develop/VULKAN.md
 git commit -m "feat: add Vulkan Q4_K model support"
 
 git add src/vulkan/qwen3.rs src/vulkan/ops.rs src/models/qwen3/trunk/forward.rs \
   examples/vk_ops_check.rs \
   examples/vk_model_check.rs scripts/vulkan-shaders.sh shaders/glsl/f16_matmul.comp \
-  shaders/bin/f16_matmul.spv shaders/manifest.sha256 docs/VULKAN.md
+  shaders/bin/f16_matmul.spv shaders/manifest.sha256 docs/develop/VULKAN.md
 git commit -m "feat: add Vulkan F16 embedding support"
 ```
 
@@ -1020,7 +1020,7 @@ git commit -m "feat: add Vulkan F16 embedding support"
 - Create: corresponding `shaders/bin/q5_k_matmul.spv`
 - Modify: `scripts/vulkan-shaders.sh`
 - Modify: `shaders/manifest.sha256`
-- Modify: `docs/VULKAN.md`
+- Modify: `docs/develop/VULKAN.md`
 
 **Interfaces:**
 - Extends: `GpuWeightFormat::BF16`
@@ -1062,7 +1062,7 @@ git add src/vulkan.rs src/vulkan/ops.rs src/vulkan/qwen35.rs \
   src/models/qwen35/trunk/session.rs examples/vk_ops_check.rs \
   examples/vk_model_check.rs scripts/vulkan-shaders.sh \
   shaders/glsl/bf16_matmul.comp shaders/bin/bf16_matmul.spv \
-  shaders/manifest.sha256 docs/VULKAN.md
+  shaders/manifest.sha256 docs/develop/VULKAN.md
 git commit -m "feat: add Vulkan BF16 inference support"
 ```
 
@@ -1080,7 +1080,7 @@ The support table labels Q5_K `synthetic kernel parity only`; it remains absent 
 ```bash
 git add src/vulkan/ops.rs examples/vk_ops_check.rs scripts/vulkan-shaders.sh \
   shaders/glsl/q5_k_matmul.comp shaders/bin/q5_k_matmul.spv \
-  shaders/manifest.sha256 docs/VULKAN.md
+  shaders/manifest.sha256 docs/develop/VULKAN.md
 git commit -m "feat: add Vulkan Q5_K kernel parity"
 ```
 
@@ -1108,6 +1108,6 @@ Then run `vk_model_check` for the five supplied models named in Tasks 9-12. Run 
 - [ ] **Step 9: Commit the final measured support matrix**
 
 ```bash
-git add docs/VULKAN.md
+git add docs/develop/VULKAN.md
 git commit -m "docs: record Vulkan hardware matrix"
 ```
