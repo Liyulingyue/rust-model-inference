@@ -28,7 +28,7 @@ const CONV_KERNEL: usize = 5;
 const EPS: f32 = 1e-6;
 const SOFTCAP: f32 = 50.0;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
     fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
@@ -738,7 +738,7 @@ fn layer_norm_row(row: &mut [f32], weight: &[f32]) -> Result<(), String> {
     if row.is_empty() || row.len() != weight.len() {
         return Err("Invalid Gemma4 convolution norm shape".into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     {
         let mut sum = 0.0;
         unsafe { vDSP_sve(row.as_ptr(), 1, &mut sum, row.len()) };
@@ -762,7 +762,7 @@ fn layer_norm_row(row: &mut [f32], weight: &[f32]) -> Result<(), String> {
         }
         return validate_finite("Gemma4 convolution norm", row);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
     {
         let mean = row.iter().sum::<f32>() / row.len() as f32;
         let variance = row
@@ -1509,7 +1509,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     #[test]
     fn frontend_layer_norm_matches_oracle_accelerate_sum() {
         let mut row = [

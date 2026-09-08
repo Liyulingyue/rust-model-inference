@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+#[cfg(any(
+    all(feature = "accelerate", target_os = "macos"),
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
 use super::blas::sys;
 
 use crate::core::tensor::TensorSource;
@@ -307,9 +311,9 @@ fn speaker_condition_forward(
         .collect::<Vec<_>>();
     let mut output = bias.to_vec();
     #[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
+        all(feature = "accelerate", target_os = "macos"),
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    ))]
     unsafe {
         sys::cblas_sgemm(
             101,
@@ -329,9 +333,9 @@ fn speaker_condition_forward(
         );
     }
     #[cfg(not(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-)))]
+        all(feature = "accelerate", target_os = "macos"),
+        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+    )))]
     for out in 0..1024 {
         for input in 0..512 {
             output[out] = weight[out * 512 + input].mul_add(scaled[input], output[out]);

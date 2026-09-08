@@ -38,7 +38,7 @@ fn sin_cos(value: f32) -> (f32, f32) {
     value.sin_cos()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
     pub(super) fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);

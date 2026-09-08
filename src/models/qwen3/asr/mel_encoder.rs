@@ -21,7 +21,7 @@ use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
 use super::audio_processor::{vDSP_measqv, vDSP_sve, vDSP_vsadd, vDSP_vsmul};
 
 unsafe extern "C" {
@@ -1095,7 +1095,7 @@ fn layer_norm(
         return Err("Invalid layer norm tensors".into());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     {
         let mut sum = 0.0;
         unsafe { vDSP_sve(input.as_ptr(), 1, &mut sum, input.len()) };
@@ -1135,7 +1135,7 @@ fn layer_norm(
         return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
     {
         let count = input.len() as f64;
         let mean = input.iter().map(|&value| f64::from(value)).sum::<f64>() / count;

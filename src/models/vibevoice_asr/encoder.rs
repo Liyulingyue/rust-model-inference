@@ -12,7 +12,7 @@
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::ops::{rms_norm, rms_norm_inplace};
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
     fn cblas_sgemm(
@@ -133,7 +133,7 @@ impl Dense {
         for row in output.chunks_exact_mut(self.n_out) {
             row.copy_from_slice(bias);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(feature = "accelerate", target_os = "macos"))]
         unsafe {
             cblas_sgemm(
                 101, // row major
@@ -152,7 +152,7 @@ impl Dense {
                 self.n_out as i32,
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
         {
             for (in_row, out_row) in input
                 .chunks_exact(self.n_in)
@@ -246,7 +246,7 @@ impl Conv1d {
     }
 
     /// output += patches · Wᵀ (accumulates over the bias-seeded output).
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     fn gemm_rows(&self, patches: &[f32], t_out: usize, output: &mut [f32]) {
         unsafe {
             cblas_sgemm(
@@ -268,7 +268,7 @@ impl Conv1d {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
     fn gemm_rows(&self, patches: &[f32], t_out: usize, output: &mut [f32]) {
         let row_width = self.n_in * self.kernel;
         for (patch_row, out_row) in patches
