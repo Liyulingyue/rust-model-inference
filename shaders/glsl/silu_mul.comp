@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint gate_word;
+    uint up_word;
+    uint count;
+} pc;
+
+float exp_approx(float x) {
+    x = max(min(x, uintBitsToFloat(0x42b0c0a5u)), -uintBitsToFloat(0x42b0c0a5u));
+    precise float z = x * uintBitsToFloat(0x3fb8aa3cu) + uintBitsToFloat(0x4b400000u);
+    precise float n = z - uintBitsToFloat(0x4b400000u);
+    precise float reduced = x - n * uintBitsToFloat(0x3f318000u);
+    reduced = reduced - n * uintBitsToFloat(0xb95e8083u);
+    uint exponent = floatBitsToUint(z) << 23u;
+    precise float scale = uintBitsToFloat(exponent + 0x3f800000u);
+    precise float square = reduced * reduced;
+    precise float low = uintBitsToFloat(0x3efffedbu)
+        + uintBitsToFloat(0x3e2aaf33u) * reduced;
+    precise float high = uintBitsToFloat(0x3d2b9f17u)
+        + uintBitsToFloat(0x3c072010u) * reduced;
+    precise float polynomial = uintBitsToFloat(0x3f7ffff6u) * reduced
+        + (low + high * square) * square;
+    return (1.0 + polynomial) * scale;
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+    float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
+    float up = uintBitsToFloat(arena.data[pc.up_word + index]);
+    precise float denominator = 1.0 + exp_approx(0.0 - gate);
+    precise float activated = gate / denominator;
+    precise float residual = fma(-denominator, activated, gate);
+    activated = fma(residual, 1.0 / denominator, activated);
+    arena.data[pc.gate_word + index] = floatBitsToUint(activated * up);
+}

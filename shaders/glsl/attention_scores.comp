@@ -1,0 +1,50 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint cache_k_word;
+    uint scores_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    float scale;
+} pc;
+
+void add_pair(inout float high, inout float low, float value) {
+    precise float sum = high + value;
+    precise float value_virtual = sum - high;
+    precise float error = (high - (sum - value_virtual)) + (value - value_virtual) + low;
+    high = sum + error;
+    low = error - (high - sum);
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    uint total = pc.q_heads * pc.sequence_length;
+    if (index >= total) return;
+    uint head = index / pc.sequence_length;
+    uint token = index - head * pc.sequence_length;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint q_base = pc.q_word + head * pc.head_dim;
+    uint key_base = pc.cache_k_word
+        + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+        + kv_head * pc.head_dim;
+    precise float sum = 0.0;
+    precise float correction = 0.0;
+    for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
+        float query = uintBitsToFloat(arena.data[q_base + dimension]);
+        query = round_f16_rte(query);
+        float key = round_f16_rte(uintBitsToFloat(arena.data[key_base + dimension]));
+        precise float product = query * key;
+        add_pair(sum, correction, product);
+    }
+    arena.data[pc.scores_word + index] = floatBitsToUint((sum + correction) * pc.scale);
+}

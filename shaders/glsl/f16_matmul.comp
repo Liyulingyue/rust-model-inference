@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint unused_scales_word;
+    uint n_in;
+    uint elements_per_row;
+    uint output0_word;
+    uint rows0;
+    uint output1_word;
+    uint rows1;
+    uint output2_word;
+    uint rows2;
+    uint group_count;
+    uint unused;
+} pc;
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+
+uint weight_f16(uint slot, uint index) {
+    uint word = weight_word(slot, index >> 1u);
+    return (index & 1u) == 0u ? word & 0xffffu : word >> 16u;
+}
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 0x1fu);
+    uint mantissa = bits & 0x3ffu;
+    float value = exponent == 0
+        ? float(mantissa) * exp2(-24.0)
+        : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15)));
+    return sign == 0u ? value : -value;
+}
+
+void main() {
+    uint slot = gl_WorkGroupID.z;
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (slot >= pc.group_count || row >= rows || gl_LocalInvocationID.x != 0u) return;
+
+    precise float sum = 0.0;
+    uint row_base = row * pc.elements_per_row;
+    for (uint index = 0u; index < pc.n_in; index++) {
+        float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + index]));
+        float weight_value = f16_decode(weight_f16(slot, row_base + index));
+        sum += input_value * weight_value;
+    }
+
+    uint output_word = slot == 0u
+        ? pc.output0_word
+        : (slot == 1u ? pc.output1_word : pc.output2_word);
+    arena.data[output_word + row] = floatBitsToUint(sum);
+}
