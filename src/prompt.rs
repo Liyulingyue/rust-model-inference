@@ -25,6 +25,10 @@ const WITH_SPECIAL: EncodeOptions = EncodeOptions {
     parse_special: true,
 };
 
+pub fn format_k2_horizon_chat_prompt(prompt: &str) -> String {
+    format!("<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n")
+}
+
 pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
     let mut tokens = Vec::new();
     if let Some(bos_id) = tokenizer.bos_id() {
@@ -237,5 +241,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("<|im_end|>"), "{error}");
+    }
+
+    #[test]
+    fn k2_horizon_prompt_matches_reference_template() {
+        assert_eq!(
+            format_k2_horizon_chat_prompt("Hello"),
+            "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        );
     }
 }

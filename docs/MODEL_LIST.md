@@ -8,6 +8,7 @@
 | Granite                       |            | 文本                 |                                       |              | 待核验 |
 | Hy-MT2                       | 1.8B | 文本                 |                                       |              | 待核验 |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
+| K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp/tree/model/K2Horizon | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
 | LFM2                          | 8B-A1B     | 文本          |                                       |              | 待核验 |
 | LFM2.5                        | 230M       | 文本                 | llama.cpp                             |              | 待核验 |
 | LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             |              | 待核验 |
