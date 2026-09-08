@@ -5,9 +5,6 @@
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
