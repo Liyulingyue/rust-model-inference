@@ -3,11 +3,12 @@
 
 Produces, per variant:
   dots-tts-<variant>-<quant>.gguf       — Qwen2 LLM (arch "qwen2", standard llama.cpp names)
-  dots-tts-<variant>-mmproj-BF16.gguf   — everything else (arch "clip", dotstts.* rules)
+  dots-tts-<variant>-mmproj-<quant>.gguf — everything else (arch "clip", dotstts.* rules)
 
-`--quant bf16` (default) keeps the LLM in BF16; `--quant q8_0` quantizes the
-2-D linear weights (attn q/k/v/o + ffn gate/up/down) to GGML Q8_0, leaving
-embeddings, biases, and norms at BF16/F32. mmproj is always BF16/F32.
+`--quant bf16` (default) preserves BF16/F32 sources. `--quant q8_0` quantizes
+learned matrices in both files, including embeddings, convolutions and LSTMs.
+Each output row must contain a multiple of 32 values; other weights, norms,
+biases, statistics and fixed filters retain their source precision.
 
 Torch-free: safetensors read via mmap, latent_stats.pt via a tiny pickle unstub,
 and a GGUF v3 writer (BF16 sources stay BF16, F32 stays F32; convs are stored
@@ -190,13 +191,24 @@ def quantize_q8_0(values: np.ndarray) -> bytes:
         raise ValueError(
             f"q8_0 payload {flat.size} elements is not a multiple of block size {Q8_0_BLOCK}"
         )
+    if not np.isfinite(flat).all():
+        raise ValueError("q8_0 input must contain only finite F32 values")
     blocks = flat.reshape(-1, Q8_0_BLOCK)
     amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 127.0).astype(np.float16)
-    scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
-    scaled = blocks / safe[:, None]
-    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
+    scale_f32 = amax / np.float32(127.0)
+    with np.errstate(over="ignore", divide="ignore"):
+        scale = scale_f32.astype("<f2")
+        inverse = np.divide(np.float32(1.0), scale_f32,
+                            out=np.zeros_like(scale_f32), where=scale_f32 != 0)
+    if not np.isfinite(scale).all() or not np.isfinite(inverse).all() or np.any((amax != 0) & (scale_f32 == 0)):
+        raise ValueError("q8_0 scale is outside the finite F16/F32 range")
+    # ggml quantize_row_q8_0_ref uses the F32 reciprocal, before storing F16 d.
+    scaled = blocks * inverse[:, None]
+    integral = np.trunc(scaled)
+    rounded = integral + np.copysign((np.abs(scaled - integral) >= 0.5).astype(np.float32), scaled)
+    if np.any(np.abs(rounded) > 127):
+        raise ValueError("q8_0 quantized value is outside the int8 range")
+    q = rounded.astype(np.int8)
     out = np.empty((blocks.shape[0], Q8_0_BLOCK_BYTES), dtype=np.uint8)
     out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
     out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_0_BLOCK)
@@ -207,7 +219,7 @@ def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
     """Convert an interleaved BF16 payload (little-endian) to Q8_0 bytes."""
     if len(raw_bf16) % 2:
         raise ValueError(f"bf16 payload has odd byte length {len(raw_bf16)}")
-    words = np.frombuffer(raw_bf16, dtype=np.uint16)
+    words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = (words.astype(np.uint32) << np.uint32(16)).view(np.float32)
     return quantize_q8_0(f32)
 
@@ -397,6 +409,8 @@ def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
                 f"GGML type {ggml_type} tensor dims {dims} have {elements} elements, "
                 f"not a multiple of block size {block_size}"
             )
+        if not dims or dims[0] % block_size:
+            raise ValueError(f"GGML type {ggml_type} row width must be a multiple of {block_size}: {dims}")
         return elements // block_size * block_bytes
     size = {GGML_F32: 4, GGML_F16: 2, GGML_BF16: 2, GGML_I64: 8}.get(ggml_type)
     if size is None:
@@ -621,6 +635,30 @@ def gguf_dims(torch_dims: tuple) -> tuple:
     return tuple(reversed(torch_dims))
 
 
+def emit_tensor(gguf: GgufWriter, name: str, tensor: Tensor, quant: str) -> None:
+    """Quantize learned output rows; preserve source precision for other tensors."""
+    ggml_type = {"BF16": GGML_BF16, "F32": GGML_F32}[tensor.dtype]
+    dims = gguf_dims(tensor.shape)
+    expected = _tensor_nbytes(ggml_type, dims)
+    if len(tensor.raw) != expected:
+        raise ValueError(f"{name}: {len(tensor.raw)} bytes, expected {expected}")
+    leaf = name.rsplit(".", 1)[-1]
+    learned = leaf == "weight" or leaf.startswith(("weight_ih_l", "weight_hh_l"))
+    row_width = math.prod(tensor.shape[1:])
+    if quant == "q8_0" and learned and len(tensor.shape) >= 2 and row_width % Q8_0_BLOCK == 0:
+        values = np.frombuffer(tensor.raw, dtype="<u2" if tensor.dtype == "BF16" else "<f4")
+        parts = []
+        # Bound temporary arrays when quantizing the tied vocabulary matrix.
+        for start in range(0, values.size, 1 << 23):
+            chunk = values[start:start + (1 << 23)]
+            if tensor.dtype == "BF16":
+                chunk = (chunk.astype(np.uint32) << np.uint32(16)).view(np.float32)
+            parts.append(quantize_q8_0(chunk))
+        gguf.add_tensor(name, GGML_Q8_0, (row_width, tensor.shape[0]), b"".join(parts))
+    else:
+        gguf.add_tensor(name, ggml_type, dims, tensor.raw)
+
+
 # --------------------------------------------------------------------------- #
 # main conversion
 # --------------------------------------------------------------------------- #
@@ -634,7 +672,7 @@ def validate_variant(value: str) -> str:
 
 def validate_quant(value: str) -> str:
     if value not in _QUANT_FILE_TYPE:
-        raise ValueError(f"unsupported LLM quantization: {value}")
+        raise ValueError(f"unsupported quantization: {value}")
     return value
 
 
@@ -645,7 +683,7 @@ def _output_paths(out_dir: Path, variant: str, quant: str) -> tuple[Path, Path]:
     validate_quant(quant)
     suffix = _QUANT_SUFFIX[quant]
     prefix = f"dots-tts-{variant}"
-    return out_dir / f"{prefix}-{suffix}.gguf", out_dir / f"{prefix}-mmproj-BF16.gguf"
+    return out_dir / f"{prefix}-{suffix}.gguf", out_dir / f"{prefix}-mmproj-{suffix}.gguf"
 
 
 def export_model(
@@ -752,14 +790,13 @@ def _export_open_model(
         t = _require_tensor(core.tensor(src_name), "BF16", shape)
         if dst_name.endswith("norm.weight"):
             gguf.add_tensor(dst_name, GGML_F32, gguf_dims(t.shape), bf16_to_f32(t.raw))
-        elif dst_name.endswith(".bias") or quant == "bf16":
-            gguf.add_tensor(dst_name, GGML_BF16, gguf_dims(t.shape), t.raw)
         else:
-            gguf.add_tensor(dst_name, GGML_Q8_0, gguf_dims(t.shape), bf16_bytes_to_q8_0(t.raw))
+            emit_tensor(gguf, dst_name, t, quant)
 
     embed = _require_tensor(core.tensor("llm.model.embed_tokens.weight"), "BF16", (llm_cfg["vocab_size"], n_embd))
-    gguf.add_tensor("token_embd.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)
-    gguf.add_tensor("output.weight", GGML_BF16, gguf_dims(embed.shape), embed.raw)  # tied
+    emit_tensor(gguf, "token_embd.weight", embed, quant)
+    _, embed_type, embed_dims, embed_raw = gguf.tensors[-1]
+    gguf.add_tensor("output.weight", embed_type, embed_dims, embed_raw)  # tied
     emit_llm("llm.model.norm.weight", "output_norm.weight", (n_embd,))
     layer_map = {
         "input_layernorm.weight": "attn_norm.weight",
@@ -799,7 +836,9 @@ def _export_open_model(
     gguf = GgufWriter(mmproj_path)
     gguf.add_meta("general.architecture", "clip")
     gguf.add_meta("general.name", f"dots.tts-{variant}-mmproj")
-    gguf.add_meta("general.file_type", 32)
+    gguf.add_meta("general.file_type", _QUANT_FILE_TYPE[quant])
+    if quant == "q8_0":
+        gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta("clip.has_vision_encoder", False)
     gguf.add_meta("clip.has_audio_encoder", True)
     gguf.add_meta("clip.has_gen_audio_encoder", True)
@@ -828,15 +867,7 @@ def _export_open_model(
                 raise ValueError(f"{src_name}: expected {expected_dtype}, got {t.dtype}")
         else:
             _require_tensor(t, expected_dtype, shape)
-        if ggml_type == GGML_BF16:
-            raw = t.raw
-        elif ggml_type == GGML_F16:
-            raw = bf16_to_f16(t.raw) if t.dtype == "BF16" else (t.raw if t.dtype == "F16" else f32_to_f16(t.raw))
-        elif ggml_type == GGML_F32:
-            raw = t.raw
-        else:
-            raw = t.raw
-        gguf.add_tensor(dst_name, ggml_type, gguf_dims(t.shape), raw)
+        emit_tensor(gguf, dst_name, t, quant)
 
     patch_cfg = cfg["PatchEncoder"]
     dit_cfg = cfg["DiT"]
@@ -985,8 +1016,8 @@ def _export_open_model(
             v_t = vocoder.tensor(pair["v"])
             out_c = g_t.shape[0]
             _, weight = _fold_weight_norm_dim0_f32(g_t.raw, v_t.raw, out_c)
-            gguf.add_tensor(f"dotstts.vocoder.{base}.weight", GGML_F32, gguf_dims(v_t.shape),
-                            weight)
+            dst = f"dotstts.vocoder.{base}.weight"
+            emit_tensor(gguf, dst, Tensor(dst, "F32", v_t.shape, weight), quant)
             folded_bases.add(base)
     for name, dst in remaining.items():
         if name in folded_bases or dst in folded_bases:
@@ -1010,7 +1041,7 @@ def main() -> None:
     parser.add_argument("model_dir", type=str, help="models/dots.tts-base or models/dots.tts.edit")
     parser.add_argument("--variant", default=None, help="base|edit (default: from dir name)")
     parser.add_argument("--quant", default="bf16", choices=("bf16", "q8_0"),
-                        help="LLM linear-weight precision (default: bf16)")
+                        help="LLM and mmproj learned-weight precision (default: bf16)")
     parser.add_argument("--out-dir", default=None, help="output directory (default: model dir parent)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing output files")
     args = parser.parse_args()

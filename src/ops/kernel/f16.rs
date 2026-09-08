@@ -68,10 +68,49 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
-    /// Row-partitioned scalar F16×F32 matmul. The default
-    /// `forward_prepared` routes here with the Q8-quantized input; dequantize
-    /// those rows to f32 and dot against the F16 weight rows so F16 models
-    /// get real math (this path is used by the dots.tts LLM).
+    /// Prepared matmuls retain F32 activations, as the BF16/F32 kernels do.
+    /// The Q8 buffers may be empty; only quantized weight kernels need them.
+    fn forward_prepared(
+        &self,
+        input_f32: &[f32],
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
+        // The SIMD dot uses raw loads; validate the activation extent first.
+        let input_f32 = &input_f32[..n_in];
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        for row in start..end {
+            let bytes = &self.weight[row * n_in * 2..(row + 1) * n_in * 2];
+            #[cfg(target_endian = "little")]
+            {
+                // SAFETY: u16 accepts every bit pattern. align_to checks alignment;
+                // byte-offset sources take the portable conversion below.
+                let (prefix, halves, suffix) = unsafe { bytes.align_to::<u16>() };
+                if prefix.is_empty() && suffix.is_empty() {
+                    output[row] = crate::ops::dot_f16_f32(input_f32, halves, n_in);
+                    continue;
+                }
+            }
+            output[row] = bytes
+                .chunks_exact(2)
+                .zip(&input_f32[..n_in])
+                .map(|(bytes, value)| {
+                    crate::ops::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]])) * value
+                })
+                .sum();
+        }
+    }
+
+    /// Row-partitioned F16 matmul for callers supplying Q8 activations only.
     fn forward_prequantized(
         &self,
         input_q8: &[u8],
@@ -141,6 +180,56 @@ mod tests {
             bytes.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    #[should_panic]
+    fn prepared_f16_rejects_short_activations_before_simd() {
+        let bytes = f16_bytes(&vec![f16::ONE; 32]);
+        F16Kernel::new(&bytes).forward_prepared(
+            &[1.0; 31],
+            &[],
+            &[],
+            None,
+            &mut [0.0],
+            32,
+            1,
+            0,
+            1,
+        );
+    }
+
+    #[test]
+    fn prepared_f16_accepts_empty_q8_and_preserves_partitioned_rows() {
+        let values: Vec<_> = (0..35)
+            .map(|i| f16::from_f32((i as f32 - 17.0) / 8.0))
+            .collect();
+        let bytes = f16_bytes(&values);
+        let input = [
+            0.10001, -0.20002, 0.30003, -0.40004, 0.50005, -0.60006, 0.70007,
+        ];
+        let mut unaligned = vec![0u8];
+        unaligned.extend_from_slice(&bytes);
+        for bytes in [bytes.as_slice(), &unaligned[1..]] {
+            let kernel = F16Kernel::new(bytes);
+            let mut output = [f32::NAN; 5];
+            kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, 1, 3);
+            assert!(output[..2].iter().chain(&output[4..]).all(|v| v.is_nan()));
+            for thread in [0, 2] {
+                kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, thread, 3);
+            }
+            for (row, &actual) in output.iter().enumerate() {
+                let expected = values[row * 7..(row + 1) * 7]
+                    .iter()
+                    .zip(input)
+                    .map(|(w, x)| w.to_f64() * f64::from(x))
+                    .sum::<f64>() as f32;
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "row {row}: {actual} != {expected}"
+                );
+            }
+        }
     }
 
     #[test]

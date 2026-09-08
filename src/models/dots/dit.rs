@@ -6,22 +6,13 @@
 //! (default NFE=10). The DiT is conditioned on time + speaker and attends to
 //! the accumulated FM sequence with the reference mask/positions.
 
-use super::blas::sys;
-
+use super::weights::load_weight;
 use crate::core::tensor::TensorSource;
 use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::patch_encoder::{dots_rotary, linear_forward, load_f16_f32};
 use crate::models::dots::speaker::exp::{torch28_exp, torch28_tanh};
+use crate::ops::kernel::Weight;
 use crate::ops::{dot_f32, rope_sin_cos_sleef};
-
-#[cfg(any(
-    target_os = "macos",
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
-#[inline(always)]
-fn torch28_sum4(values: &[f32; 4]) -> f32 {
-    (values[0] + values[2]) + (values[1] + values[3])
-}
 
 #[cfg(feature = "parity-trace")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,60 +72,64 @@ pub(crate) fn build_decode_mask_positions(
     Ok((mask, (0..total).collect()))
 }
 
-pub(crate) struct DitBlockWeights {
-    pub(crate) q: Vec<f32>,
-    pub(crate) k: Vec<f32>,
-    pub(crate) v: Vec<f32>,
-    pub(crate) o: Vec<f32>,
+pub(crate) struct DitBlockWeights<'a> {
+    pub(crate) q: Weight<'a>,
+    pub(crate) k: Weight<'a>,
+    pub(crate) v: Weight<'a>,
+    pub(crate) o: Weight<'a>,
     pub(crate) o_bias: Vec<f32>,
     pub(crate) q_norm: Vec<f32>,
     pub(crate) k_norm: Vec<f32>,
-    pub(crate) fc1: Vec<f32>,
+    pub(crate) fc1: Weight<'a>,
     pub(crate) fc1_bias: Vec<f32>,
-    pub(crate) fc2: Vec<f32>,
+    pub(crate) fc2: Weight<'a>,
     pub(crate) fc2_bias: Vec<f32>,
 }
 
-pub struct DiT {
+pub struct DiT<'a> {
     pub n_latent: usize,
-    pub input_w: Vec<f32>,
+    pub input_w: Weight<'a>,
     pub input_b: Vec<f32>,
-    pub time_w0: Vec<f32>,
+    pub time_w0: Weight<'a>,
     pub time_b0: Vec<f32>,
-    pub time_w2: Vec<f32>,
+    pub time_w2: Weight<'a>,
     pub time_b2: Vec<f32>,
-    pub(crate) blocks: Vec<DitBlockWeights>,
-    fused_adaln_w: Vec<f32>,
+    pub(crate) blocks: Vec<DitBlockWeights<'a>>,
+    adaln_weights: Vec<Weight<'a>>,
     fused_adaln_b: Vec<f32>,
-    pub out_linear_w: Vec<f32>,
+    pub out_linear_w: Weight<'a>,
     pub out_linear_b: Vec<f32>,
 }
 
-impl DiT {
-    pub fn from_source(source: &dyn TensorSource, config: DotsTtsConfig) -> Result<Self, String> {
+impl<'a> DiT<'a> {
+    pub fn from_source(
+        source: &'a dyn TensorSource,
+        config: DotsTtsConfig,
+    ) -> Result<Self, String> {
         let w = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
-        let input_w = w("dotstts.dit.input_layer.weight", &[DIT_HIDDEN as u64; 2])?;
+        let matrix = |name: &str, dims: &[u64]| load_weight(source, name, dims);
+        let input_w = matrix("dotstts.dit.input_layer.weight", &[DIT_HIDDEN as u64; 2])?;
         let input_b = w("dotstts.dit.input_layer.bias", &[DIT_HIDDEN as u64])?;
-        let time_w0 = w(
+        let time_w0 = matrix(
             "dotstts.dit.time_embedder.mlp.0.weight",
             &[TIME_EMBED_DIM as u64, DIT_HIDDEN as u64],
         )?;
         let time_b0 = w("dotstts.dit.time_embedder.mlp.0.bias", &[DIT_HIDDEN as u64])?;
-        let time_w2 = w(
+        let time_w2 = matrix(
             "dotstts.dit.time_embedder.mlp.2.weight",
             &[DIT_HIDDEN as u64; 2],
         )?;
         let time_b2 = w("dotstts.dit.time_embedder.mlp.2.bias", &[DIT_HIDDEN as u64])?;
         let fused_adaln_dim = (6 * config.dit_layers + 2) * DIT_HIDDEN;
-        let mut fused_adaln_w = Vec::with_capacity(DIT_HIDDEN * fused_adaln_dim);
+        let mut adaln_weights = Vec::with_capacity(config.dit_layers + 1);
         let mut fused_adaln_b = Vec::with_capacity(fused_adaln_dim);
         let mut blocks = Vec::with_capacity(config.dit_layers);
         for layer in 0..config.dit_layers {
             let name = |suffix: &str| format!("dotstts.dit.blocks.{layer}.{suffix}");
             let hid2 = [DIT_HIDDEN as u64; 2];
-            fused_adaln_w.extend(w(
+            adaln_weights.push(matrix(
                 &name("adaLN_modulation.1.weight"),
                 &[DIT_HIDDEN as u64, (6 * DIT_HIDDEN) as u64],
             )?);
@@ -143,26 +138,26 @@ impl DiT {
                 &[(6 * DIT_HIDDEN) as u64],
             )?);
             blocks.push(DitBlockWeights {
-                q: w(&name("attn.q.weight"), &hid2)?,
-                k: w(&name("attn.k.weight"), &hid2)?,
-                v: w(&name("attn.v.weight"), &hid2)?,
-                o: w(&name("attn.o.weight"), &hid2)?,
+                q: matrix(&name("attn.q.weight"), &hid2)?,
+                k: matrix(&name("attn.k.weight"), &hid2)?,
+                v: matrix(&name("attn.v.weight"), &hid2)?,
+                o: matrix(&name("attn.o.weight"), &hid2)?,
                 o_bias: w(&name("attn.o.bias"), &[DIT_HIDDEN as u64])?,
                 q_norm: w(&name("attn.q_norm.weight"), &[DIT_HEAD_DIM as u64])?,
                 k_norm: w(&name("attn.k_norm.weight"), &[DIT_HEAD_DIM as u64])?,
-                fc1: w(
+                fc1: matrix(
                     &name("ffn.fc1.weight"),
                     &[DIT_HIDDEN as u64, DIT_FFN as u64],
                 )?,
                 fc1_bias: w(&name("ffn.fc1.bias"), &[DIT_FFN as u64])?,
-                fc2: w(
+                fc2: matrix(
                     &name("ffn.fc2.weight"),
                     &[DIT_FFN as u64, DIT_HIDDEN as u64],
                 )?,
                 fc2_bias: w(&name("ffn.fc2.bias"), &[DIT_HIDDEN as u64])?,
             });
         }
-        fused_adaln_w.extend(w(
+        adaln_weights.push(matrix(
             "dotstts.dit.output_layer.adaLN_modulation.1.weight",
             &[DIT_HIDDEN as u64, (2 * DIT_HIDDEN) as u64],
         )?);
@@ -170,7 +165,7 @@ impl DiT {
             "dotstts.dit.output_layer.adaLN_modulation.1.bias",
             &[(2 * DIT_HIDDEN) as u64],
         )?);
-        let out_linear_w = w(
+        let out_linear_w = matrix(
             "dotstts.dit.output_layer.linear.weight",
             &[DIT_HIDDEN as u64, config.latent_dim as u64],
         )?;
@@ -187,7 +182,7 @@ impl DiT {
             time_w2,
             time_b2,
             blocks,
-            fused_adaln_w,
+            adaln_weights,
             fused_adaln_b,
             out_linear_w,
             out_linear_b,
@@ -302,14 +297,22 @@ impl DiT {
             ));
         }
         let mut mods = vec![0.0; 2 * self.fused_adaln_b.len()];
-        linear_forward(
-            &self.fused_adaln_w,
-            Some(&self.fused_adaln_b),
-            &condition,
-            DIT_HIDDEN,
-            self.fused_adaln_b.len(),
-            &mut mods,
-        );
+        for (branch, input) in condition.chunks_exact(DIT_HIDDEN).enumerate() {
+            let mut offset = 0;
+            for weight in &self.adaln_weights {
+                let end = offset + weight.n_out;
+                let start = branch * self.fused_adaln_b.len();
+                linear_forward(
+                    weight,
+                    Some(&self.fused_adaln_b[offset..end]),
+                    input,
+                    DIT_HIDDEN,
+                    weight.n_out,
+                    &mut mods[start + offset..start + end],
+                );
+                offset = end;
+            }
+        }
         mods
     }
 
@@ -698,111 +701,6 @@ impl DiT {
         branch_len: usize,
         mask: &[bool],
     ) {
-        #[cfg(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            const QUERY_BLOCK: usize = 32;
-            let scale = 1.0 / (DIT_HEAD_DIM as f32).sqrt();
-            let mut qk = vec![0.0f32; QUERY_BLOCK * branch_len];
-            let mut dst = vec![0.0f32; QUERY_BLOCK * DIT_HEAD_DIM];
-            let mut sums = [0.0f32; QUERY_BLOCK];
-            out.fill(0.0);
-
-            for branch in 0..rows / branch_len {
-                let branch_offset = branch * branch_len * DIT_HIDDEN;
-                for head in 0..DIT_HEADS {
-                    let head_offset = branch_offset + head * DIT_HEAD_DIM;
-                    for query_start in (0..branch_len).step_by(QUERY_BLOCK) {
-                        let queries = QUERY_BLOCK.min(branch_len - query_start);
-                        unsafe {
-                            sys::cblas_sgemm(
-                                102,
-                                112,
-                                111,
-                                branch_len as i32,
-                                queries as i32,
-                                DIT_HEAD_DIM as i32,
-                                1.0,
-                                k.as_ptr().add(head_offset),
-                                DIT_HIDDEN as i32,
-                                q.as_ptr().add(head_offset + query_start * DIT_HIDDEN),
-                                DIT_HIDDEN as i32,
-                                0.0,
-                                qk.as_mut_ptr(),
-                                branch_len as i32,
-                            );
-                        }
-
-                        for query in 0..queries {
-                            let row = &mut qk[query * branch_len..(query + 1) * branch_len];
-                            let mask_row = &mask[(query_start + query) * branch_len
-                                ..(query_start + query + 1) * branch_len];
-                            let mut max = f32::NEG_INFINITY;
-                            for (score, &allowed) in row.iter_mut().zip(mask_row) {
-                                *score = if allowed {
-                                    *score * scale
-                                } else {
-                                    f32::NEG_INFINITY
-                                };
-                                max = max.max(*score);
-                            }
-
-                            let mut lanes = [0.0f32; 4];
-                            let vector_end = branch_len - branch_len % 4;
-                            for key in 0..vector_end {
-                                let weight = torch28_exp(row[key] - max);
-                                row[key] = weight;
-                                lanes[key % 4] += weight;
-                            }
-                            let mut sum = torch28_sum4(&lanes);
-                            for score in &mut row[vector_end..] {
-                                *score = (*score - max).exp();
-                                sum += *score;
-                            }
-                            sums[query] = sum;
-                        }
-
-                        unsafe {
-                            sys::cblas_sgemm(
-                                102,
-                                111,
-                                111,
-                                DIT_HEAD_DIM as i32,
-                                queries as i32,
-                                branch_len as i32,
-                                1.0,
-                                v.as_ptr().add(head_offset),
-                                DIT_HIDDEN as i32,
-                                qk.as_ptr(),
-                                branch_len as i32,
-                                0.0,
-                                dst.as_mut_ptr(),
-                                DIT_HEAD_DIM as i32,
-                            );
-                        }
-                        for query in 0..queries {
-                            let reciprocal = sums[query].recip();
-                            let source = &dst[query * DIT_HEAD_DIM..(query + 1) * DIT_HEAD_DIM];
-                            let output_start = head_offset + (query_start + query) * DIT_HIDDEN;
-                            for (output, &value) in out[output_start..output_start + DIT_HEAD_DIM]
-                                .iter_mut()
-                                .zip(source)
-                            {
-                                *output = value * reciprocal;
-                            }
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        #[cfg(not(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
         {
             let scale = 1.0 / (DIT_HEAD_DIM as f32).sqrt();
             out.fill(0.0);
@@ -866,7 +764,7 @@ impl DiT {
         cfg_sequence: &[f32],
         fm_seq_len: usize,
         g_cond: &[f32],
-        coordinate_proj: &[f32],
+        coordinate_proj: &Weight<'_>,
         coordinate_bias: &[f32],
         guidance: f32,
         nfe: usize,
@@ -1148,6 +1046,52 @@ fn gelu_tanh(x: f32) -> f32 {
 mod tests {
     use super::*;
 
+    fn constant_weight(n_in: usize, n_out: usize, value: f32) -> Weight<'static> {
+        let values = vec![value; n_in * n_out];
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(values));
+        weight.n_in = n_in;
+        weight.n_out = n_out;
+        weight
+    }
+
+    #[test]
+    fn separate_adaln_matrices_preserve_branch_and_block_offsets() {
+        let hidden = DIT_HIDDEN;
+        let mut dit = DiT {
+            n_latent: 128,
+            input_w: constant_weight(hidden, hidden, 0.0),
+            input_b: vec![0.0; hidden],
+            time_w0: constant_weight(TIME_EMBED_DIM, hidden, 0.0),
+            time_b0: vec![0.0; hidden],
+            time_w2: constant_weight(hidden, hidden, 0.0),
+            time_b2: vec![0.0; hidden],
+            blocks: Vec::new(),
+            adaln_weights: vec![
+                constant_weight(hidden, 6 * hidden, 0.0),
+                constant_weight(hidden, 2 * hidden, 0.0),
+            ],
+            fused_adaln_b: [vec![3.0; 6 * hidden], vec![7.0; 2 * hidden]].concat(),
+            out_linear_w: constant_weight(hidden, 128, 0.0),
+            out_linear_b: vec![0.0; 128],
+        };
+        // One selected input distinguishes the conditioned branch from CFG.
+        let mut data = vec![0.0; 2 * hidden * hidden];
+        data[0] = 1.0;
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(data));
+        weight.n_in = hidden;
+        weight.n_out = 2 * hidden;
+        dit.adaln_weights[1] = weight;
+        let mut condition = vec![0.0; hidden];
+        condition[0] = 1.0;
+        let actual = dit.prepare_flow_matching_mods(&condition, 0, 10, false);
+        assert_eq!(actual.len(), 16 * hidden);
+        assert_eq!(actual[0], 3.0);
+        assert_eq!(actual[6 * hidden], 7.0 + torch28_silu(1.0));
+        assert_eq!(actual[8 * hidden], 3.0);
+        assert_eq!(actual[14 * hidden], 7.0);
+        assert_eq!(actual[16 * hidden - 1], 7.0);
+    }
+
     #[test]
     fn time_embedding_has_reference_shape_and_finiteness() {
         let emb = DiT::time_embedding(0.0);
@@ -1164,10 +1108,6 @@ mod tests {
         assert_eq!(emb[128 + 13].to_bits(), 0x3d20_b18e);
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch time-embedding sidecar"]
     fn production_time_mlp_matches_pinned_oracle_bitwise() {
@@ -1203,10 +1143,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT sidecars"]
     fn production_block_mods_match_pinned_oracle_bitwise() {
@@ -1249,10 +1185,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed Torch DiT LayerNorm sidecars"]
     fn production_layernorm_matches_pinned_oracle_bitwise() {
@@ -1287,10 +1219,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT RMSNorm sidecars"]
     fn production_rms_norm_matches_pinned_oracle_bitwise() {
@@ -1339,10 +1267,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed Torch DiT RoPE sidecars"]
     fn production_dots_rotary_matches_pinned_oracle_bitwise() {
@@ -1390,10 +1314,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed dots mmproj and Torch DiT attention sidecars"]
     fn production_attention_matches_pinned_oracle_bitwise() {
@@ -1482,8 +1402,8 @@ mod tests {
 
     #[test]
     fn rms_norm_weighted_matches_definition() {
-        let mut x = vec![1.0f32, 2.0, 3.0, 4.0];
-        let w = vec![2.0f32; 4];
+        let mut x = [1.0f32, 2.0, 3.0, 4.0].repeat(DIT_HEAD_DIM / 4);
+        let w = vec![2.0f32; DIT_HEAD_DIM];
         rms_norm_weighted(&mut x, &w, 1e-5);
         let mean_sq = (1.0f64 + 4.0 + 9.0 + 16.0) / 4.0;
         let inv = 1.0 / (mean_sq + 1e-5).sqrt();

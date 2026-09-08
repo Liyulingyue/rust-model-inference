@@ -9,9 +9,9 @@ use std::sync::Arc;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::models::dots::blas::sys;
 use crate::models::dots::patch_encoder::torch_rms_norm_with_eps;
 use crate::models::dots::speaker::exp::torch28_exp;
+use crate::models::dots::weights::load_weight;
 use crate::ops::kernel::Weight;
 use crate::ops::{dot_f32, vec_mad_f32};
 
@@ -32,11 +32,28 @@ pub struct DotsLlmConfig {
 impl DotsLlmConfig {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let cfg = crate::models::qwen3::Qwen3Config::from_source(source)?;
+        if cfg.architecture != "qwen2" {
+            return Err(format!(
+                "dots LLM requires qwen2, found {}",
+                cfg.architecture
+            ));
+        }
         let vocab_size = source
             .metadata("tokenizer.ggml.tokens")
             .and_then(|v| v.to_arr())
             .map(Vec::len)
             .unwrap_or(0);
+        if vocab_size == 0 || cfg.n_layer == 0 || cfg.n_ff == 0 || cfg.n_ctx == 0 {
+            return Err("dots LLM requires nonzero vocabulary, layers, FFN and context".into());
+        }
+        if cfg.n_head_kv == 0
+            || cfg.n_head % cfg.n_head_kv != 0
+            || cfg.n_embd_head_k != cfg.n_embd_head_v
+            || cfg.n_embd_head_k % 2 != 0
+            || cfg.n_head.checked_mul(cfg.n_embd_head_k).is_none()
+        {
+            return Err("dots LLM has invalid grouped attention or rotary head dimensions".into());
+        }
         Ok(Self {
             n_embd: cfg.n_embd,
             n_layer: cfg.n_layer,
@@ -52,185 +69,30 @@ impl DotsLlmConfig {
     }
 }
 
-pub(crate) struct DotsLinear {
-    pub(crate) data: Vec<f32>,
-    pub(crate) n_in: usize,
-    pub(crate) n_out: usize,
-}
-
-impl DotsLinear {
-    fn from_source(
-        source: &dyn TensorSource,
-        name: &str,
-        n_in: usize,
-        n_out: usize,
-    ) -> Result<Self, String> {
-        let info = source
-            .tensor_info(name)
-            .ok_or_else(|| format!("Missing tensor: {name}"))?;
-        let expected_dims = [n_in as u64, n_out as u64];
-        if info.dims != expected_dims {
-            return Err(format!(
-                "Invalid tensor {name}: shape {:?}; expected {:?}",
-                info.dims, expected_dims
-            ));
-        }
-        let bytes = source
-            .tensor_slice(name)
-            .ok_or_else(|| format!("Missing tensor: {name}"))?;
-        let bytes_per_element = match info.ggml_type {
-            crate::core::tensor::GGMLType::BF16 => 2,
-            crate::core::tensor::GGMLType::F32 => 4,
-            other => {
-                return Err(format!(
-                    "Invalid tensor {name}: type {other:?}; expected BF16 or F32"
-                ))
-            }
-        };
-        let expected_bytes = n_in
-            .checked_mul(n_out)
-            .and_then(|count| count.checked_mul(bytes_per_element))
-            .ok_or_else(|| format!("Tensor byte size overflow: {name}"))?;
-        if bytes.len() != expected_bytes {
-            return Err(format!(
-                "Invalid tensor data length for {name}: {}; expected {expected_bytes}",
-                bytes.len()
-            ));
-        }
-        let data = match info.ggml_type {
-            crate::core::tensor::GGMLType::BF16 => bytes
-                .chunks_exact(2)
-                .map(|chunk| {
-                    crate::core::tensor::bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]))
-                })
-                .collect(),
-            crate::core::tensor::GGMLType::F32 => bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect(),
-            _ => unreachable!("tensor type checked above"),
-        };
-        Ok(Self { data, n_in, n_out })
-    }
-
-    fn matmul(&self, input: &[f32], bias: Option<&[f32]>, output: &mut [f32]) {
-        debug_assert_eq!(input.len(), self.n_in);
-        debug_assert_eq!(output.len(), self.n_out);
-        if let Some(bias) = bias {
-            debug_assert_eq!(bias.len(), self.n_out);
-            output.copy_from_slice(bias);
-        } else {
-            output.fill(0.0);
-        }
-        #[cfg(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        unsafe {
-            sys::cblas_sgemm(
-                101,
-                111,
-                112,
-                1,
-                self.n_out as i32,
-                self.n_in as i32,
-                1.0,
-                input.as_ptr(),
-                self.n_in as i32,
-                self.data.as_ptr(),
-                self.n_in as i32,
-                if bias.is_some() { 1.0 } else { 0.0 },
-                output.as_mut_ptr(),
-                self.n_out as i32,
-            );
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
-        for row in 0..self.n_out {
-            let row_start = row * self.n_in;
-            let mut sum = bias.map_or(0.0, |values| values[row]);
-            for index in 0..self.n_in {
-                sum = self.data[row_start + index].mul_add(input[index], sum);
-            }
-            output[row] = sum;
-        }
-    }
-
-    fn matmul_batch(&self, input: &[f32], bias: Option<&[f32]>, rows: usize, output: &mut [f32]) {
-        debug_assert_eq!(input.len(), rows * self.n_in);
-        debug_assert_eq!(output.len(), rows * self.n_out);
-        #[cfg(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            if let Some(bias) = bias {
-                for row in output.chunks_exact_mut(self.n_out) {
-                    row.copy_from_slice(bias);
-                }
-            } else {
-                output.fill(0.0);
-            }
-            unsafe {
-                sys::cblas_sgemm(
-                    101,
-                    111,
-                    112,
-                    rows as i32,
-                    self.n_out as i32,
-                    self.n_in as i32,
-                    1.0,
-                    input.as_ptr(),
-                    self.n_in as i32,
-                    self.data.as_ptr(),
-                    self.n_in as i32,
-                    if bias.is_some() { 1.0 } else { 0.0 },
-                    output.as_mut_ptr(),
-                    self.n_out as i32,
-                );
-            }
-            return;
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
-        for row in 0..rows {
-            self.matmul(
-                &input[row * self.n_in..(row + 1) * self.n_in],
-                bias,
-                &mut output[row * self.n_out..(row + 1) * self.n_out],
-            );
-        }
-    }
-}
-
-pub(crate) struct DotsLayerWeights {
-    pub(crate) attn_norm: Vec<f32>,
-    pub(crate) ffn_norm: Vec<f32>,
-    pub(crate) q_bias: Vec<f32>,
-    pub(crate) k_bias: Vec<f32>,
-    pub(crate) v_bias: Vec<f32>,
-    pub(crate) wq: DotsLinear,
-    pub(crate) wk: DotsLinear,
-    pub(crate) wv: DotsLinear,
-    pub(crate) wo: DotsLinear,
-    pub(crate) w_gate: DotsLinear,
-    pub(crate) w_up: DotsLinear,
-    pub(crate) w_down: DotsLinear,
+struct DotsLayerWeights {
+    attn_norm: Vec<f32>,
+    ffn_norm: Vec<f32>,
+    q_bias: Vec<f32>,
+    k_bias: Vec<f32>,
+    v_bias: Vec<f32>,
+    wq: Weight<'static>,
+    wk: Weight<'static>,
+    wv: Weight<'static>,
+    wo: Weight<'static>,
+    w_gate: Weight<'static>,
+    w_up: Weight<'static>,
+    w_down: Weight<'static>,
 }
 
 /// Loaded Qwen2 LLM for dots.tts.
 pub struct DotsLlm {
-    /// Keep the source alive: all weights are 'static views into its mmap.
-    pub source: Arc<dyn TensorSource>,
     pub pool: Arc<ComputePool>,
     pub config: DotsLlmConfig,
     pub output_norm: Vec<f32>,
-    pub(crate) layers: Vec<DotsLayerWeights>,
-    pub token_embedding: Weight<'static>,
+    layers: Vec<DotsLayerWeights>,
+    token_embedding: Weight<'static>,
+    /// Dropped after the private weight views, which cannot escape this owner.
+    _source: Arc<dyn TensorSource>,
 }
 
 impl DotsLlm {
@@ -246,12 +108,12 @@ impl DotsLlm {
             "output_norm.weight",
             &[config.n_embd as u64],
         )?;
-        let token_embedding = crate::models::qwen3::static_weight(
-            source.as_ref(),
-            "token_embd.weight",
-            config.n_embd,
-            config.vocab_size,
-        );
+        let linear = |name: &str, n_in: usize, n_out: usize| -> Result<Weight<'static>, String> {
+            let weight = load_weight(source.as_ref(), name, &[n_in as u64, n_out as u64])?;
+            // SAFETY: all borrowed views stay private and are dropped before _source.
+            Ok(unsafe { std::mem::transmute::<Weight<'_>, Weight<'static>>(weight) })
+        };
+        let token_embedding = linear("token_embd.weight", config.n_embd, config.vocab_size)?;
         let mut layers = Vec::with_capacity(config.n_layer);
         for layer in 0..config.n_layer {
             let name = |suffix: &str| format!("blk.{layer}.{suffix}");
@@ -282,52 +144,17 @@ impl DotsLlm {
                     &name("attn_v.bias"),
                     &[n_embd_k as u64],
                 )?,
-                wq: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("attn_q.weight"),
-                    config.n_embd,
-                    n_embd_q,
-                )?,
-                wk: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("attn_k.weight"),
-                    config.n_embd,
-                    n_embd_k,
-                )?,
-                wv: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("attn_v.weight"),
-                    config.n_embd,
-                    n_embd_k,
-                )?,
-                wo: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("attn_output.weight"),
-                    n_embd_q,
-                    config.n_embd,
-                )?,
-                w_gate: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("ffn_gate.weight"),
-                    config.n_embd,
-                    config.n_ff,
-                )?,
-                w_up: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("ffn_up.weight"),
-                    config.n_embd,
-                    config.n_ff,
-                )?,
-                w_down: DotsLinear::from_source(
-                    source.as_ref(),
-                    &name("ffn_down.weight"),
-                    config.n_ff,
-                    config.n_embd,
-                )?,
+                wq: linear(&name("attn_q.weight"), config.n_embd, n_embd_q)?,
+                wk: linear(&name("attn_k.weight"), config.n_embd, n_embd_k)?,
+                wv: linear(&name("attn_v.weight"), config.n_embd, n_embd_k)?,
+                wo: linear(&name("attn_output.weight"), n_embd_q, config.n_embd)?,
+                w_gate: linear(&name("ffn_gate.weight"), config.n_embd, config.n_ff)?,
+                w_up: linear(&name("ffn_up.weight"), config.n_embd, config.n_ff)?,
+                w_down: linear(&name("ffn_down.weight"), config.n_ff, config.n_embd)?,
             });
         }
         Ok(Self {
-            source,
+            _source: source,
             pool,
             config,
             output_norm,
@@ -348,8 +175,7 @@ pub enum LlmInputRow<'a> {
     Embedding(&'a [f32]),
 }
 
-/// One LLM step with hidden-state capture. Safe single-threaded matmuls
-/// (correctness-first; parallelizing is a later optimization).
+/// One LLM step with hidden-state capture and pooled native weight kernels.
 pub struct DotsLlmSession<'model> {
     model: &'model DotsLlm,
     kv: KvCache,
@@ -360,7 +186,9 @@ pub struct DotsLlmSession<'model> {
     k: Vec<f32>,
     v: Vec<f32>,
     attn_out: Vec<f32>,
-    acc: Vec<f32>,
+    attention_scratch: Vec<f32>,
+    input_q8: Vec<u8>,
+    input_scales: Vec<f32>,
     gate: Vec<f32>,
     up: Vec<f32>,
     down: Vec<f32>,
@@ -368,13 +196,41 @@ pub struct DotsLlmSession<'model> {
     capacity: usize,
 }
 
-fn matmul(weight: &DotsLinear, input: &[f32], output: &mut [f32], bias: Option<&[f32]>) {
-    weight.matmul(input, bias, output);
+fn matmul(
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+    bias: Option<&[f32]>,
+    input_q8: &mut [u8],
+    input_scales: &mut [f32],
+    pool: &ComputePool,
+) {
+    debug_assert_eq!(input.len() % weight.n_in, 0);
+    debug_assert_eq!(output.len(), input.len() / weight.n_in * weight.n_out);
+    if weight.ggml_type == crate::core::tensor::GGMLType::F32 {
+        super::weights::linear_forward(weight, bias, input, weight.n_in, weight.n_out, output);
+        return;
+    }
+    for (input, output) in input
+        .chunks_exact(weight.n_in)
+        .zip(output.chunks_exact_mut(weight.n_out))
+    {
+        weight.quantize_and_matmul_with_scratch(
+            input,
+            &mut [],
+            input_q8,
+            input_scales,
+            output,
+            pool,
+        );
+        if let Some(bias) = bias {
+            vec_mad_f32(output, bias, 1.0);
+        }
+    }
 }
 
-/// Match Torch 2.8 CPU SDPA on macOS: Accelerate SGEMMs around the same
-/// four-lane softmax used by the dots patch encoder. `q`/`output` may point at
-/// one head inside a wider row; their strides retain the full row width.
+/// Causal SIMD attention with Torch's operand scaling and four-lane softmax.
+/// Head slices retain the full [token, head, dim] row stride.
 #[allow(clippy::too_many_arguments)]
 fn attention_head(
     q: &[f32],
@@ -384,12 +240,12 @@ fn attention_head(
     v_cache: &[f32],
     keys: usize,
     first_query: usize,
-    query_head: usize,
     head_offset: usize,
     head_dim: usize,
     cache_stride: usize,
     output: &mut [f32],
     output_stride: usize,
+    scratch: &mut [f32],
 ) -> Result<(), String> {
     if rows == 0 {
         return Ok(());
@@ -413,10 +269,17 @@ fn attention_head(
         .and_then(|last| last.checked_mul(output_stride))
         .and_then(|start| start.checked_add(head_dim))
         .ok_or_else(|| "dots LLM attention output span overflow".to_string())?;
+    let head_end = head_offset
+        .checked_add(head_dim)
+        .ok_or_else(|| "dots LLM attention head span overflow".to_string())?;
+    let scratch_len = head_dim
+        .checked_mul(2)
+        .and_then(|width| width.checked_add(keys))
+        .ok_or_else(|| "dots LLM attention scratch length overflow".to_string())?;
     let cache_span = keys
         .checked_sub(1)
         .and_then(|last| last.checked_mul(cache_stride))
-        .and_then(|start| start.checked_add(head_offset + head_dim))
+        .and_then(|start| start.checked_add(head_end))
         .ok_or_else(|| "dots LLM attention cache span overflow".to_string())?;
     if q.len() < q_span
         || output.len() < output_span
@@ -426,205 +289,50 @@ fn attention_head(
         return Err("dots LLM attention buffer is shorter than its declared shape".into());
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        const CBLAS_ROW_MAJOR: i32 = 101;
-        const CBLAS_COL_MAJOR: i32 = 102;
-        const CBLAS_NO_TRANSPOSE: i32 = 111;
-        const CBLAS_TRANSPOSE: i32 = 112;
-        let output_stride_i32 = i32::try_from(output_stride)
-            .map_err(|_| "dots LLM attention output stride exceeds BLAS limits")?;
-        let q_stride_i32 = i32::try_from(q_stride)
-            .map_err(|_| "dots LLM attention query stride exceeds BLAS limits")?;
-        let head_dim_i32 = i32::try_from(head_dim)
-            .map_err(|_| "dots LLM attention head dimension exceeds BLAS limits")?;
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let scale_sqrt = scale.sqrt();
-        // Torch's math SDPA scales both operands by sqrt(scale) before its
-        // addmm. Keep the query's [token, head, dim] stride in that addmm.
-        let mut q_layout = vec![0.0f32; q_span];
-        for row in 0..rows {
-            let start = row * q_stride;
-            q_layout[start..start + head_dim].copy_from_slice(&q[start..start + head_dim]);
-            for value in &mut q_layout[start..start + head_dim] {
-                *value *= scale_sqrt;
-            }
+    if cache_stride < head_end || scratch.len() < scratch_len {
+        return Err("dots LLM attention cache stride or scratch is too small".into());
+    }
+    let (query, scratch) = scratch.split_at_mut(head_dim);
+    let (key_scaled, scores) = scratch.split_at_mut(head_dim);
+    let scale_sqrt = (1.0 / (head_dim as f32).sqrt()).sqrt();
+    for row in 0..rows {
+        let valid = first_query + row + 1;
+        for (scaled, value) in query
+            .iter_mut()
+            .zip(&q[row * q_stride..row * q_stride + head_dim])
+        {
+            *scaled = *value * scale_sqrt;
         }
-        let mut k_contiguous = vec![0.0f32; keys * head_dim];
-        let mut v_contiguous = vec![0.0f32; keys * head_dim];
-        for key in 0..keys {
+        let mut max = f32::NEG_INFINITY;
+        for (key, score) in scores[..valid].iter_mut().enumerate() {
             let offset = key * cache_stride + head_offset;
-            k_contiguous[key * head_dim..(key + 1) * head_dim]
-                .copy_from_slice(&k_cache[offset..offset + head_dim]);
-            for value in &mut k_contiguous[key * head_dim..(key + 1) * head_dim] {
-                *value *= scale_sqrt;
+            for (scaled, value) in key_scaled
+                .iter_mut()
+                .zip(&k_cache[offset..offset + head_dim])
+            {
+                *scaled = *value * scale_sqrt;
             }
-            v_contiguous[key * head_dim..(key + 1) * head_dim]
-                .copy_from_slice(&v_cache[offset..offset + head_dim]);
+            *score = dot_f32(query, key_scaled, head_dim);
+            max = max.max(*score);
         }
-
-        for block_start in [0usize] {
-            let block_rows = rows;
-            let max_keys = keys;
-            let mut scores = vec![0.0f32; block_rows * max_keys];
-            if block_rows == 1 {
-                unsafe {
-                    sys::cblas_sgemm(
-                        CBLAS_ROW_MAJOR,
-                        CBLAS_NO_TRANSPOSE,
-                        CBLAS_TRANSPOSE,
-                        1,
-                        max_keys as i32,
-                        head_dim_i32,
-                        1.0,
-                        q_layout.as_ptr().add(block_start * q_stride),
-                        q_stride_i32,
-                        k_contiguous.as_ptr(),
-                        head_dim_i32,
-                        0.0,
-                        scores.as_mut_ptr(),
-                        max_keys as i32,
-                    );
-                }
-            } else {
-                let mut k_transposed = vec![0.0f32; max_keys * head_dim];
-                for key in 0..max_keys {
-                    for index in 0..head_dim {
-                        k_transposed[index * max_keys + key] = k_contiguous[key * head_dim + index];
-                    }
-                }
-                unsafe {
-                    sys::cblas_sgemm(
-                        CBLAS_COL_MAJOR,
-                        CBLAS_NO_TRANSPOSE,
-                        CBLAS_NO_TRANSPOSE,
-                        max_keys as i32,
-                        block_rows as i32,
-                        head_dim_i32,
-                        1.0,
-                        k_transposed.as_ptr(),
-                        max_keys as i32,
-                        q_layout.as_ptr().add(block_start * q_stride),
-                        q_stride_i32,
-                        0.0,
-                        scores.as_mut_ptr(),
-                        max_keys as i32,
-                    );
-                }
-            }
-            let mut reciprocals = vec![0.0f32; block_rows];
-            for row in 0..block_rows {
-                let valid = (first_query + block_start + row + 1).min(max_keys);
-                let row_scores = &mut scores[row * max_keys..(row + 1) * max_keys];
-                let mut max4 = [f32::NEG_INFINITY; 4];
-                let vector_end = max_keys / 4 * 4;
-                for column in (0..vector_end).step_by(4) {
-                    for lane in 0..4 {
-                        let index = column + lane;
-                        let score = if index < valid {
-                            row_scores[index]
-                        } else {
-                            f32::NEG_INFINITY
-                        };
-                        row_scores[index] = score;
-                        max4[lane] = max4[lane].max(score);
-                    }
-                }
-                let mut max = max4[0].max(max4[2]).max(max4[1].max(max4[3]));
-                for index in vector_end..max_keys {
-                    let score = if index < valid {
-                        row_scores[index]
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                    row_scores[index] = score;
-                    max = max.max(score);
-                }
-                let mut sum4 = [0.0f32; 4];
-                for column in (0..max_keys).step_by(4) {
-                    for lane in 0..4 {
-                        let index = column + lane;
-                        let weight = if index < max_keys {
-                            let weight = torch28_exp(row_scores[index] - max);
-                            row_scores[index] = weight;
-                            weight
-                        } else {
-                            0.0
-                        };
-                        sum4[lane] += weight;
-                    }
-                }
-                // Torch includes the zero-padded tail in its four-lane reduction.
-                let sum = (sum4[0] + sum4[2]) + (sum4[1] + sum4[3]);
-                reciprocals[row] = sum.recip();
-                for weight in row_scores.iter_mut() {
-                    *weight *= reciprocals[row];
-                }
-            }
-
-            unsafe {
-                sys::cblas_sgemm(
-                    CBLAS_ROW_MAJOR,
-                    CBLAS_NO_TRANSPOSE,
-                    CBLAS_NO_TRANSPOSE,
-                    block_rows as i32,
-                    head_dim_i32,
-                    max_keys as i32,
-                    1.0,
-                    scores.as_ptr(),
-                    max_keys as i32,
-                    v_contiguous.as_ptr(),
-                    head_dim_i32,
-                    0.0,
-                    output.as_mut_ptr().add(block_start * output_stride),
-                    output_stride_i32,
-                );
-            }
+        let mut sum4 = [0.0f32; 4];
+        for (key, score) in scores[..valid].iter_mut().enumerate() {
+            *score = torch28_exp(*score - max);
+            sum4[key % 4] += *score;
         }
-        return Ok(());
+        let reciprocal = ((sum4[0] + sum4[2]) + (sum4[1] + sum4[3])).recip();
+        let out = &mut output[row * output_stride..row * output_stride + head_dim];
+        out.fill(0.0);
+        for (key, score) in scores[..valid].iter().enumerate() {
+            let offset = key * cache_stride + head_offset;
+            vec_mad_f32(
+                out,
+                &v_cache[offset..offset + head_dim],
+                *score * reciprocal,
+            );
+        }
     }
-
-    #[cfg(not(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let mut scores = vec![0.0f32; keys];
-        let mut weights = vec![0.0f32; keys];
-        for row in 0..rows {
-            let valid = first_query + row + 1;
-            let query = &q[row * q_stride..row * q_stride + head_dim];
-            let mut max = f32::NEG_INFINITY;
-            for key in 0..valid {
-                let offset = key * cache_stride + head_offset;
-                let score = dot_f32(query, &k_cache[offset..offset + head_dim], head_dim) * scale;
-                scores[key] = score;
-                max = max.max(score);
-            }
-            let mut sum = 0.0f32;
-            for key in 0..valid {
-                let weight = torch28_exp(scores[key] - max);
-                weights[key] = weight;
-                sum += weight;
-            }
-            let out = &mut output[row * output_stride..row * output_stride + head_dim];
-            out.fill(0.0);
-            let reciprocal = sum.recip();
-            for key in 0..valid {
-                let offset = key * cache_stride + head_offset;
-                vec_mad_f32(
-                    out,
-                    &v_cache[offset..offset + head_dim],
-                    weights[key] * reciprocal,
-                );
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(feature = "parity-trace")]
@@ -682,7 +390,9 @@ impl<'model> DotsLlmSession<'model> {
             k: vec![0.0; n_embd_kv],
             v: vec![0.0; n_embd_kv],
             attn_out: vec![0.0; n_embd_q],
-            acc: vec![0.0; cfg.n_embd_head],
+            attention_scratch: vec![0.0; capacity + 2 * cfg.n_embd_head],
+            input_q8: vec![0; cfg.n_embd.max(n_embd_q).max(cfg.n_ff)],
+            input_scales: vec![0.0; cfg.n_embd.max(n_embd_q).max(cfg.n_ff).div_ceil(32)],
             gate: vec![0.0; cfg.n_ff],
             up: vec![0.0; cfg.n_ff],
             down: vec![0.0; cfg.n_embd],
@@ -698,8 +408,17 @@ impl<'model> DotsLlmSession<'model> {
 
     /// Embed + run one forward; returns the final normalized hidden row.
     pub fn step_row(&mut self, row: LlmInputRow<'_>) -> Result<Vec<f32>, String> {
+        if self.step >= self.capacity {
+            return Err(format!(
+                "dotstts LLM session exceeds context {}",
+                self.capacity
+            ));
+        }
         match row {
             LlmInputRow::Token(id) => {
+                if id as usize >= self.model.config.vocab_size {
+                    return Err(format!("dotstts LLM token {id} is outside the vocabulary"));
+                }
                 self.model.token_embedding.embedding_lookup(id, &mut self.x);
             }
             LlmInputRow::Embedding(embedding) => {
@@ -725,7 +444,7 @@ impl<'model> DotsLlmSession<'model> {
         Ok(self.x.clone())
     }
 
-    /// Run the initial prefill as one batched Torch-compatible forward.
+    /// Run the initial prefill as one batched causal forward.
     pub fn prefill_rows(&mut self, rows: &[LlmInputRow<'_>]) -> Result<Vec<f32>, String> {
         if rows.is_empty() {
             return Ok(Vec::new());
@@ -757,13 +476,18 @@ impl<'model> DotsLlmSession<'model> {
         let n_embd_q = cfg.n_head * cfg.n_embd_head;
         let n_embd_kv = cfg.n_head_kv * cfg.n_embd_head;
         let group_size = cfg.n_head / cfg.n_head_kv;
-        let kq_scale = 1.0 / (cfg.n_embd_head as f32).sqrt();
-        if self.step >= self.capacity {
-            return Err(format!(
-                "dotstts LLM session exceeds context {}",
-                self.capacity
-            ));
-        }
+        let mut matmul =
+            |weight: &Weight<'_>, input: &[f32], output: &mut [f32], bias: Option<&[f32]>| {
+                matmul(
+                    weight,
+                    input,
+                    output,
+                    bias,
+                    &mut self.input_q8,
+                    &mut self.input_scales,
+                    &self.model.pool,
+                );
+            };
         let kv_stride = n_embd_kv;
         let (k_cache, v_cache) = match &mut self.kv {
             KvCache::F32(cache) => (&mut cache.k, &mut cache.v),
@@ -877,12 +601,12 @@ impl<'model> DotsLlmSession<'model> {
                     &v_cache[layer_base..layer_base + self.capacity * kv_stride],
                     self.step + 1,
                     self.step,
-                    head,
                     kv_head * cfg.n_embd_head,
                     cfg.n_embd_head,
                     kv_stride,
                     &mut self.attn_out[out_offset..],
                     n_embd_q,
+                    &mut self.attention_scratch,
                 )?;
             }
             if layer == 0 {
@@ -965,7 +689,6 @@ impl<'model> DotsLlmSession<'model> {
         let n_embd_q = cfg.n_head * cfg.n_embd_head;
         let n_embd_kv = cfg.n_head_kv * cfg.n_embd_head;
         let group_size = cfg.n_head / cfg.n_head_kv;
-        let kq_scale = 1.0 / (cfg.n_embd_head as f32).sqrt();
         if rows_len > self.capacity {
             return Err(format!(
                 "dotstts LLM prefill exceeds context {}",
@@ -973,11 +696,28 @@ impl<'model> DotsLlmSession<'model> {
             ));
         }
 
+        let mut matmul =
+            |weight: &Weight<'_>, input: &[f32], output: &mut [f32], bias: Option<&[f32]>| {
+                matmul(
+                    weight,
+                    input,
+                    output,
+                    bias,
+                    &mut self.input_q8,
+                    &mut self.input_scales,
+                    &self.model.pool,
+                );
+            };
         let mut x = vec![0.0f32; rows_len * cfg.n_embd];
         for (row_index, row) in rows.iter().enumerate() {
             let dst = &mut x[row_index * cfg.n_embd..(row_index + 1) * cfg.n_embd];
             match row {
-                LlmInputRow::Token(id) => self.model.token_embedding.embedding_lookup(*id, dst),
+                LlmInputRow::Token(id) => {
+                    if *id as usize >= cfg.vocab_size {
+                        return Err(format!("dotstts LLM token {id} is outside the vocabulary"));
+                    }
+                    self.model.token_embedding.embedding_lookup(*id, dst);
+                }
                 LlmInputRow::Embedding(embedding) => {
                     if embedding.len() != cfg.n_embd {
                         return Err(format!(
@@ -997,7 +737,6 @@ impl<'model> DotsLlmSession<'model> {
         let mut k = vec![0.0f32; rows_len * n_embd_kv];
         let mut v = vec![0.0f32; rows_len * n_embd_kv];
         let mut attn_out = vec![0.0f32; rows_len * n_embd_q];
-        let mut acc = vec![0.0f32; cfg.n_embd_head];
         let mut down = vec![0.0f32; rows_len * cfg.n_embd];
         let mut gate = vec![0.0f32; rows_len * cfg.n_ff];
         let mut up = vec![0.0f32; rows_len * cfg.n_ff];
@@ -1012,15 +751,9 @@ impl<'model> DotsLlmSession<'model> {
                     cfg.eps,
                 );
             }
-            weights
-                .wq
-                .matmul_batch(&normed, Some(&weights.q_bias), rows_len, &mut q);
-            weights
-                .wk
-                .matmul_batch(&normed, Some(&weights.k_bias), rows_len, &mut k);
-            weights
-                .wv
-                .matmul_batch(&normed, Some(&weights.v_bias), rows_len, &mut v);
+            matmul(&weights.wq, &normed, &mut q, Some(&weights.q_bias));
+            matmul(&weights.wk, &normed, &mut k, Some(&weights.k_bias));
+            matmul(&weights.wv, &normed, &mut v, Some(&weights.v_bias));
             dump_stage("batch_q", 0, layer, &q);
             dump_stage("batch_k", 0, layer, &k);
             dump_stage("batch_v", 0, layer, &v);
@@ -1125,12 +858,12 @@ impl<'model> DotsLlmSession<'model> {
                     &v_cache[layer_base..layer_base + self.capacity * n_embd_kv],
                     rows_len,
                     0,
-                    head,
                     kv_head * cfg.n_embd_head,
                     cfg.n_embd_head,
                     n_embd_kv,
                     &mut attn_out[offset..],
                     n_embd_q,
+                    &mut self.attention_scratch,
                 )?;
             }
             #[cfg(feature = "parity-trace")]
@@ -1153,9 +886,7 @@ impl<'model> DotsLlmSession<'model> {
                     );
                 }
             }
-            weights
-                .wo
-                .matmul_batch(&attn_out, None, rows_len, &mut down);
+            matmul(&weights.wo, &attn_out, &mut down, None);
             dump_stage("batch_attn", 0, layer, &attn_out);
             dump_stage("batch_o", 0, layer, &down);
             #[cfg(feature = "parity-trace")]
@@ -1201,10 +932,8 @@ impl<'model> DotsLlmSession<'model> {
                     &normed[cfg.n_embd..2 * cfg.n_embd],
                 );
             }
-            weights
-                .w_gate
-                .matmul_batch(&normed, None, rows_len, &mut gate);
-            weights.w_up.matmul_batch(&normed, None, rows_len, &mut up);
+            matmul(&weights.w_gate, &normed, &mut gate, None);
+            matmul(&weights.w_up, &normed, &mut up, None);
             dump_stage("batch_gate", 0, layer, &gate);
             dump_stage("batch_up", 0, layer, &up);
             for (gate_value, up_value) in gate.iter_mut().zip(up.iter()) {
@@ -1226,9 +955,7 @@ impl<'model> DotsLlmSession<'model> {
                     &gate[cfg.n_ff..2 * cfg.n_ff],
                 );
             }
-            weights
-                .w_down
-                .matmul_batch(&gate, None, rows_len, &mut down);
+            matmul(&weights.w_down, &gate, &mut down, None);
             dump_stage("batch_ffn_down", 0, layer, &down);
             #[cfg(feature = "parity-trace")]
             if std::env::var_os("DOTS_LLM_DEBUG_BATCH").is_some() && layer <= 1 {
@@ -1292,5 +1019,397 @@ impl<'model> DotsLlmSession<'model> {
             self.model.config.eps,
         );
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo};
+    use std::collections::BTreeMap;
+
+    struct Source {
+        metadata: BTreeMap<String, MetaValue>,
+        tensors: BTreeMap<String, (TensorInfo, Vec<u8>)>,
+    }
+
+    impl TensorSource for Source {
+        fn metadata(&self, name: &str) -> Option<&MetaValue> {
+            self.metadata.get(name)
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.tensors.get(name).map(|tensor| &tensor.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.tensors.get(name).map(|tensor| tensor.1.as_slice())
+        }
+    }
+
+    impl Source {
+        fn insert(&mut self, name: &str, dims: &[u64], dtype: GGMLType, values: &[f32]) {
+            let bytes = match dtype {
+                GGMLType::BF16 => values
+                    .iter()
+                    .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+                    .collect(),
+                GGMLType::F16 => values
+                    .iter()
+                    .flat_map(|value| half::f16::from_f32(*value).to_le_bytes())
+                    .collect(),
+                GGMLType::F32 => values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+                GGMLType::Q8_0 => {
+                    let mut bytes = Vec::new();
+                    for block in values.chunks_exact(32) {
+                        // Fixture values are exact multiples of this binary scale.
+                        bytes.extend_from_slice(&half::f16::from_f32(1.0 / 128.0).to_le_bytes());
+                        bytes.extend(block.iter().map(|value| (value * 128.0) as i8 as u8));
+                    }
+                    bytes
+                }
+                _ => unreachable!(),
+            };
+            self.tensors.insert(
+                name.into(),
+                (
+                    TensorInfo {
+                        name: name.into(),
+                        dims: dims.into(),
+                        ggml_type: dtype,
+                        offset: 0,
+                    },
+                    bytes,
+                ),
+            );
+        }
+    }
+
+    fn tiny_source(dtype: GGMLType) -> Source {
+        let mut source = Source {
+            metadata: BTreeMap::new(),
+            tensors: BTreeMap::new(),
+        };
+        source.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen2".into()),
+        );
+        for (key, value) in [
+            ("embedding_length", 64),
+            ("block_count", 2),
+            ("attention.head_count", 4),
+            ("attention.head_count_kv", 2),
+            ("feed_forward_length", 96),
+            ("context_length", 8),
+        ] {
+            source
+                .metadata
+                .insert(format!("qwen2.{key}"), MetaValue::Uint32(value));
+        }
+        source.metadata.insert(
+            "qwen2.attention.layer_norm_rms_epsilon".into(),
+            MetaValue::Float32(1e-6),
+        );
+        source
+            .metadata
+            .insert("qwen2.rope.freq_base".into(), MetaValue::Float32(10_000.0));
+        source.metadata.insert(
+            "tokenizer.ggml.tokens".into(),
+            MetaValue::Array(
+                MetaValueType::String,
+                (0..8).map(|i| MetaValue::String(format!("t{i}"))).collect(),
+            ),
+        );
+        source.insert("output_norm.weight", &[64], GGMLType::F32, &[1.0; 64]);
+        let embedding: Vec<_> = (0..64 * 8)
+            .map(|i| ((i * 13 % 61) as f32 - 30.0) / 128.0)
+            .collect();
+        source.insert("token_embd.weight", &[64, 8], dtype, &embedding);
+        for layer in 0..2 {
+            for suffix in ["attn_norm.weight", "ffn_norm.weight"] {
+                source.insert(
+                    &format!("blk.{layer}.{suffix}"),
+                    &[64],
+                    GGMLType::F32,
+                    &[1.0; 64],
+                );
+            }
+            for (suffix, width) in [
+                ("attn_q.bias", 64),
+                ("attn_k.bias", 32),
+                ("attn_v.bias", 32),
+            ] {
+                let values: Vec<_> = (0..width).map(|i| (i as f32 - 16.0) / 1024.0).collect();
+                source.insert(
+                    &format!("blk.{layer}.{suffix}"),
+                    &[width],
+                    GGMLType::F32,
+                    &values,
+                );
+            }
+            for (index, (suffix, n_in, n_out)) in [
+                ("attn_q.weight", 64, 64),
+                ("attn_k.weight", 64, 32),
+                ("attn_v.weight", 64, 32),
+                ("attn_output.weight", 64, 64),
+                ("ffn_gate.weight", 64, 96),
+                ("ffn_up.weight", 64, 96),
+                ("ffn_down.weight", 96, 64),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let values: Vec<_> = (0..n_in * n_out)
+                    .map(|i| {
+                        let row = i / n_in;
+                        (((i * 7 + row * 3 + index * 5 + layer * 11) % 17) as f32 - 8.0) / 128.0
+                    })
+                    .collect();
+                source.insert(
+                    &format!("blk.{layer}.{suffix}"),
+                    &[n_in as u64, n_out as u64],
+                    dtype,
+                    &values,
+                );
+            }
+        }
+        source
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (i, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                actual.is_finite() && (actual - expected).abs() <= tolerance,
+                "element {i}: {actual} != {expected}, tolerance {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_weights_prefill_decode_match_sequential_and_threads() {
+        let embedding: Vec<_> = (0..64).map(|i| (i as f32 - 31.0) / 64.0).collect();
+        let rows = [
+            LlmInputRow::Token(2),
+            LlmInputRow::Embedding(&embedding),
+            LlmInputRow::Token(5),
+        ];
+        let mut dense_reference = Vec::new();
+        for dtype in [GGMLType::BF16, GGMLType::F32, GGMLType::Q8_0, GGMLType::F16] {
+            let mut threaded_reference = Vec::new();
+            for threads in [1, 3] {
+                let source = Arc::new(tiny_source(dtype));
+                let source_lifetime = Arc::downgrade(&source);
+                let model =
+                    DotsLlm::from_source(source.clone(), Arc::new(ComputePool::new(threads)))
+                        .unwrap();
+                drop(source);
+                assert!(source_lifetime.upgrade().is_some());
+                assert_eq!(model.token_embedding.ggml_type, dtype);
+                for layer in &model.layers {
+                    for weight in [
+                        &layer.wq,
+                        &layer.wk,
+                        &layer.wv,
+                        &layer.wo,
+                        &layer.w_gate,
+                        &layer.w_up,
+                        &layer.w_down,
+                    ] {
+                        assert_eq!(weight.ggml_type, dtype);
+                    }
+                }
+                let mut batch = model.new_session().unwrap();
+                let q8_buffer = batch.input_q8.as_ptr();
+                let scale_buffer = batch.input_scales.as_ptr();
+                let mut actual = batch.prefill_rows(&rows).unwrap();
+                actual.extend(batch.step_row(LlmInputRow::Token(7)).unwrap());
+                assert_eq!(batch.position(), 4);
+                assert_eq!(batch.last_hidden(), &actual[3 * 64..]);
+                assert_eq!(batch.input_q8.as_ptr(), q8_buffer);
+                assert_eq!(batch.input_scales.as_ptr(), scale_buffer);
+                let mut sequential = model.new_session().unwrap();
+                let mut expected = Vec::new();
+                for row in [
+                    LlmInputRow::Token(2),
+                    LlmInputRow::Embedding(&embedding),
+                    LlmInputRow::Token(5),
+                    LlmInputRow::Token(7),
+                ] {
+                    expected.extend(sequential.step_row(row).unwrap());
+                }
+                assert_close(&actual, &expected, 0.0);
+                if threads == 1 {
+                    threaded_reference = actual.clone();
+                }
+                assert_close(&actual, &threaded_reference, 1e-6);
+                if dtype == GGMLType::BF16 && threads == 1 {
+                    dense_reference = actual.clone();
+                }
+                // Q8 weights are exactly represented; activation quantization adds bounded error.
+                assert_close(
+                    &actual,
+                    &dense_reference,
+                    if dtype == GGMLType::Q8_0 { 0.025 } else { 1e-6 },
+                );
+                drop(sequential);
+                drop(batch);
+                drop(model);
+                assert!(source_lifetime.upgrade().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn weight_loading_rejects_malformed_matrices_before_forward() {
+        for name in [
+            "token_embd.weight",
+            "blk.0.attn_q.weight",
+            "blk.1.ffn_down.weight",
+        ] {
+            for dtype in [GGMLType::BF16, GGMLType::Q8_0] {
+                for bad_shape in [false, true] {
+                    let mut source = tiny_source(dtype);
+                    let (info, bytes) = source.tensors.get_mut(name).unwrap();
+                    if bad_shape {
+                        info.dims[0] -= 1;
+                    } else {
+                        bytes.pop();
+                    }
+                    let error =
+                        DotsLlm::from_source(Arc::new(source), Arc::new(ComputePool::new(1)))
+                            .err()
+                            .expect("malformed matrix accepted");
+                    assert!(error.contains(name), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_rows_and_exhausted_context_preserve_session() {
+        let model = DotsLlm::from_source(
+            Arc::new(tiny_source(GGMLType::Q8_0)),
+            Arc::new(ComputePool::new(1)),
+        )
+        .unwrap();
+        let mut session = model.new_session().unwrap();
+        assert!(session.prefill_rows(&[LlmInputRow::Token(8)]).is_err());
+        assert_eq!(session.position(), 0);
+        session.prefill_rows(&[LlmInputRow::Token(1)]).unwrap();
+        let hidden = session.last_hidden().to_vec();
+        assert!(session.step_row(LlmInputRow::Token(8)).is_err());
+        assert!(session.step_row(LlmInputRow::Embedding(&[1.0])).is_err());
+        assert!(session.prefill_rows(&[LlmInputRow::Token(1)]).is_err());
+        assert_eq!(session.last_hidden(), hidden);
+        assert_eq!(session.position(), 1);
+        for _ in 1..8 {
+            session.step_row(LlmInputRow::Token(1)).unwrap();
+        }
+        let hidden = session.last_hidden().to_vec();
+        assert!(session.step_row(LlmInputRow::Token(2)).is_err());
+        assert_eq!(session.last_hidden(), hidden);
+        assert_eq!(session.position(), 8);
+    }
+
+    #[test]
+    fn strided_causal_attention_matches_independent_scalar_reference() {
+        let (rows, keys, head_dim, q_stride, cache_stride) = (3, 6, 4, 12, 8);
+        let q: Vec<_> = (0..rows * q_stride)
+            .map(|i| (i as f32 - 13.0) / 32.0)
+            .collect();
+        let mut k: Vec<_> = (0..keys * cache_stride)
+            .map(|i| (i as f32 - 23.0) / 64.0)
+            .collect();
+        let mut v: Vec<_> = (0..keys * cache_stride)
+            .map(|i| ((i * 7 % 19) as f32 - 9.0) / 8.0)
+            .collect();
+        // The last key is future padding for every query and must never be read.
+        k[5 * cache_stride..].fill(f32::NAN);
+        v[5 * cache_stride..].fill(f32::NAN);
+        for head_offset in [0, 4] {
+            let mut output = vec![1234.5; rows * q_stride];
+            attention_head(
+                &q[4..],
+                rows,
+                q_stride,
+                &k,
+                &v,
+                keys,
+                2,
+                head_offset,
+                head_dim,
+                cache_stride,
+                &mut output[8..],
+                q_stride,
+                &mut vec![0.0; keys + 2 * head_dim],
+            )
+            .unwrap();
+            for row in 0..rows {
+                let scores: Vec<_> = (0..row + 3)
+                    .map(|key| {
+                        (0..head_dim)
+                            .map(|d| {
+                                q[row * q_stride + 4 + d] as f64
+                                    * k[key * cache_stride + head_offset + d] as f64
+                            })
+                            .sum::<f64>()
+                            / (head_dim as f64).sqrt()
+                    })
+                    .collect();
+                let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let exp: Vec<_> = scores.iter().map(|score| (score - max).exp()).collect();
+                let sum: f64 = exp.iter().sum();
+                let expected: Vec<_> = (0..head_dim)
+                    .map(|d| {
+                        exp.iter()
+                            .enumerate()
+                            .map(|(key, p)| {
+                                p / sum * v[key * cache_stride + head_offset + d] as f64
+                            })
+                            .sum::<f64>() as f32
+                    })
+                    .collect();
+                assert_close(
+                    &output[row * q_stride + 8..(row + 1) * q_stride],
+                    &expected,
+                    2e-6,
+                );
+                assert_eq!(&output[row * q_stride..row * q_stride + 8], &[1234.5; 8]);
+            }
+        }
+        assert!(attention_head(
+            &q,
+            1,
+            q_stride,
+            &k,
+            &v,
+            keys,
+            6,
+            0,
+            head_dim,
+            cache_stride,
+            &mut [0.0; 4],
+            4,
+            &mut [0.0; 14]
+        )
+        .is_err());
+        assert!(attention_head(
+            &q,
+            1,
+            q_stride,
+            &k,
+            &v,
+            keys,
+            0,
+            usize::MAX,
+            head_dim,
+            cache_stride,
+            &mut [0.0; 4],
+            4,
+            &mut [0.0; 14]
+        )
+        .is_err());
     }
 }
