@@ -253,36 +253,64 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let inp_off = t * n_embd;
             let t0 = std::time::Instant::now();
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wq.quantize_and_matmul_with_scratch(
+            // Quantize the shared input ONCE per token. The previous code
+            // called quantize_and_matmul_with_scratch three times (once per
+            // WQ/WK/WV), re-quantizing the same F32 input into Q8_0 + scales
+            // each time. For 27B-class models this is ~3× the AVX2
+            // quantize cost per layer per token.
+            crate::ops::quantize_q8_0_into(
                 inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+                n_embd,
+                &mut scratch.q8_buf[..n_embd],
+                &mut scratch.scale_buf[..n_embd / 32],
             );
+            crate::ops::quantize_row_q8_k_into(
+                inp_slice,
+                &mut scratch.q8k_buf[..n_embd / 256],
+            );
+            let q8_ptr = scratch.q8_buf.as_ptr();
+            let sc_ptr = scratch.scale_buf.as_ptr();
+            let q8k_ptr = scratch.q8k_buf.as_ptr();
+            let q_dim_q8 = q_dim;
+            let k_dim_q8 = k_dim;
+            let v_dim_q8 = v_dim;
+            let n_embd_q8 = n_embd;
+            let n_embd_head_q = n_embd_head;
+            let matmul_out_ptr = scratch.matmul_out.as_mut_ptr();
+            let inp_ptr = inp_slice.as_ptr();
+            let q8k_len = n_embd / 256;
+            pool.compute(move |ith: usize, nth: usize| {
+                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q8) };
+                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q8 / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
+                let inp = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_q8) };
+                let q_out = unsafe { std::slice::from_raw_parts_mut(matmul_out_ptr, q_dim_q8) };
+                wq.kernel.forward_prepared(
+                    inp, q8, sc, Some(q8k), q_out, n_embd_q8, q_dim_q8, ith, nth,
+                );
+                let k_out = unsafe {
+                    std::slice::from_raw_parts_mut(matmul_out_ptr.add(q_dim_q8), k_dim_q8)
+                };
+                wk.kernel.forward_prepared(
+                    inp, q8, sc, Some(q8k), k_out, n_embd_q8, k_dim_q8, ith, nth,
+                );
+                let v_out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        matmul_out_ptr.add(q_dim_q8 + k_dim_q8),
+                        v_dim_q8,
+                    )
+                };
+                wv.kernel.forward_prepared(
+                    inp, q8, sc, Some(q8k), v_out, n_embd_q8, v_dim_q8, ith, nth,
+                );
+                let _ = n_embd_head_q;
+            });
             scratch.q_buf[t * q_dim..t * q_dim + q_dim]
                 .copy_from_slice(&scratch.matmul_out[..q_dim]);
-            wk.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
             scratch.k_buf[t * k_dim..t * k_dim + k_dim]
-                .copy_from_slice(&scratch.matmul_out[..k_dim]);
-            wv.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
+                .copy_from_slice(&scratch.matmul_out[q_dim..q_dim + k_dim]);
             scratch.v_buf[t * v_dim..t * v_dim + v_dim]
-                .copy_from_slice(&scratch.matmul_out[..v_dim]);
+                .copy_from_slice(&scratch.matmul_out[q_dim + k_dim..q_dim + k_dim + v_dim]);
             t_qkv += t0.elapsed().as_secs_f64();
         }
 
@@ -812,26 +840,52 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let inp = &hidden[off..off + n_embd];
-            layer.ffn_gate.quantize_and_matmul_with_scratch(
+            // Quantize shared FFN input ONCE per token (was 2x: gate + up).
+            crate::ops::quantize_q8_0_into(
                 inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+                n_embd,
+                &mut scratch.q8_buf[..n_embd],
+                &mut scratch.scale_buf[..n_embd / 32],
             );
-            scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff]
-                .copy_from_slice(&scratch.matmul_out[..n_ff]);
-            layer.ffn_up.quantize_and_matmul_with_scratch(
+            crate::ops::quantize_row_q8_k_into(
                 inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+                &mut scratch.q8k_buf[..n_embd / 256],
             );
-            scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff]
-                .copy_from_slice(&scratch.matmul_out[..n_ff]);
+            let q8_ptr = scratch.q8_buf.as_ptr();
+            let sc_ptr = scratch.scale_buf.as_ptr();
+            let q8k_ptr = scratch.q8k_buf.as_ptr();
+            let q8k_len = n_embd / 256;
+            let ffn_gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
+            let ffn_up_buf_ptr = scratch.ffn_up_buf.as_mut_ptr();
+            let inp_ptr = inp.as_ptr();
+            let n_ff_local = n_ff;
+            let n_embd_local = n_embd;
+            pool.compute(move |ith: usize, nth: usize| {
+                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_local) };
+                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_local / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
+                let inp_local = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_local) };
+                let gate_out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        ffn_gate_buf_ptr.add(t * n_ff_local),
+                        n_ff_local,
+                    )
+                };
+                layer.ffn_gate.kernel.forward_prepared(
+                    inp_local, q8, sc, Some(q8k), gate_out, n_embd_local, n_ff_local, ith, nth,
+                );
+                let up_out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        ffn_up_buf_ptr.add(t * n_ff_local),
+                        n_ff_local,
+                    )
+                };
+                layer.ffn_up.kernel.forward_prepared(
+                    inp_local, q8, sc, Some(q8k), up_out, n_embd_local, n_ff_local, ith, nth,
+                );
+            });
+            // copy_from_slice skipped: kernel wrote directly into
+            // ffn_gate_buf[t*n_ff..(t+1)*n_ff] / ffn_up_buf[t*n_ff..(t+1)*n_ff].
         }
 
         silu_mul_approx_inplace(
