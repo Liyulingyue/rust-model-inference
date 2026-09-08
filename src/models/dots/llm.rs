@@ -12,28 +12,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::dots::patch_encoder::torch_rms_norm_with_eps;
 use crate::models::dots::speaker::exp::torch28_exp;
 use crate::ops::kernel::Weight;
+use crate::models::dots::blas::sys;
 use crate::ops::{dot_f32, vec_mad_f32};
-
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
-}
 
 #[derive(Debug, Clone)]
 pub struct DotsLlmConfig {
@@ -142,9 +122,12 @@ impl DotsLinear {
         } else {
             output.fill(0.0);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 101,
                 111,
                 112,
@@ -161,7 +144,10 @@ impl DotsLinear {
                 self.n_out as i32,
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for row in 0..self.n_out {
             let row_start = row * self.n_in;
             let mut sum = bias.map_or(0.0, |values| values[row]);
@@ -175,7 +161,10 @@ impl DotsLinear {
     fn matmul_batch(&self, input: &[f32], bias: Option<&[f32]>, rows: usize, output: &mut [f32]) {
         debug_assert_eq!(input.len(), rows * self.n_in);
         debug_assert_eq!(output.len(), rows * self.n_out);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         {
             if let Some(bias) = bias {
                 for row in output.chunks_exact_mut(self.n_out) {
@@ -185,7 +174,7 @@ impl DotsLinear {
                 output.fill(0.0);
             }
             unsafe {
-                cblas_sgemm(
+                sys::cblas_sgemm(
                     101,
                     111,
                     112,
@@ -204,7 +193,10 @@ impl DotsLinear {
             }
             return;
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for row in 0..rows {
             self.matmul(
                 &input[row * self.n_in..(row + 1) * self.n_in],
@@ -434,7 +426,10 @@ fn attention_head(
         return Err("dots LLM attention buffer is shorter than its declared shape".into());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         const CBLAS_ROW_MAJOR: i32 = 101;
         const CBLAS_COL_MAJOR: i32 = 102;
@@ -477,7 +472,7 @@ fn attention_head(
             let mut scores = vec![0.0f32; block_rows * max_keys];
             if block_rows == 1 {
                 unsafe {
-                    cblas_sgemm(
+                    sys::cblas_sgemm(
                         CBLAS_ROW_MAJOR,
                         CBLAS_NO_TRANSPOSE,
                         CBLAS_TRANSPOSE,
@@ -502,7 +497,7 @@ fn attention_head(
                     }
                 }
                 unsafe {
-                    cblas_sgemm(
+                    sys::cblas_sgemm(
                         CBLAS_COL_MAJOR,
                         CBLAS_NO_TRANSPOSE,
                         CBLAS_NO_TRANSPOSE,
@@ -571,7 +566,7 @@ fn attention_head(
             }
 
             unsafe {
-                cblas_sgemm(
+                sys::cblas_sgemm(
                     CBLAS_ROW_MAJOR,
                     CBLAS_NO_TRANSPOSE,
                     CBLAS_NO_TRANSPOSE,
@@ -592,7 +587,10 @@ fn attention_head(
         return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let mut scores = vec![0.0f32; keys];

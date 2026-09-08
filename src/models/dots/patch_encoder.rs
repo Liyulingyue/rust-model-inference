@@ -7,9 +7,10 @@
 //!   transformer with KV cache (causal RMSNorm self-attention) → concat the two
 //!   tokens → out_proj Linear(2048→1536) → [1,1536].
 
+use super::blas::sys;
+
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::dots::config::DotsTtsConfig;
-#[cfg(target_os = "macos")]
 use crate::models::dots::speaker::exp::torch28_exp;
 use crate::ops::dot_f32;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -62,7 +63,10 @@ pub(crate) fn linear_forward(
     out_dim: usize,
     output: &mut [f32],
 ) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     {
         let rows = output.len() / out_dim;
         debug_assert_eq!(input.len(), rows * in_dim);
@@ -74,7 +78,7 @@ pub(crate) fn linear_forward(
             output.fill(0.0);
         }
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 101,
                 111,
                 112,
@@ -123,9 +127,12 @@ pub(crate) fn linear_forward_transposed_input_then_bias(
     debug_assert_eq!(weight.len(), out_dim * in_dim);
     debug_assert_eq!(bias.len(), out_dim);
     debug_assert_eq!(output.len(), rows * out_dim);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     unsafe {
-        cblas_sgemm(
+        sys::cblas_sgemm(
             101,
             112,
             112,
@@ -142,7 +149,10 @@ pub(crate) fn linear_forward_transposed_input_then_bias(
             out_dim as i32,
         );
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
     for row in 0..rows {
         for output_feature in 0..out_dim {
             let mut sum = 0.0f32;
@@ -282,27 +292,6 @@ fn torch_sum_squares(values: &[f32]) -> f32 {
     total
 }
 
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
-}
-
 pub(crate) struct PatchLayerWeights {
     pub(crate) attn_norm: Vec<f32>,
     pub(crate) ffn_norm: Vec<f32>,
@@ -390,7 +379,10 @@ fn online_attention_head(
 /// Match Torch 2.8 CPU FlashAttention's macOS path: row-major Accelerate
 /// SGEMMs around four-lane SLEEF softmax. The query/output slices may start
 /// at a head offset; their row strides keep the full hidden width.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
 #[allow(clippy::too_many_arguments)]
 fn torch28_flash_attention_head(
     q: &[f32],
@@ -470,7 +462,7 @@ fn torch28_flash_attention_head(
         let block_rows = (rows - block_start).min(QUERY_BLOCK);
         let block_rows_i32 = i32::try_from(block_rows).expect("query block fits i32");
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 CBLAS_ROW_MAJOR,
                 CBLAS_NO_TRANSPOSE,
                 CBLAS_TRANSPOSE,
@@ -532,7 +524,7 @@ fn torch28_flash_attention_head(
             reciprocals[row] = sum.recip();
         }
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 CBLAS_ROW_MAJOR,
                 CBLAS_NO_TRANSPOSE,
                 CBLAS_NO_TRANSPOSE,
@@ -702,7 +694,10 @@ impl PatchEncoder {
         let n_frames = frames.len() / 128;
         let n_tokens = n_frames / 2;
         let mut tokens = vec![0.0f32; n_tokens * ENC_HIDDEN];
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         {
             let projected = self.downsample_projection_channel_major(frames, &state.conv_tail);
             linear_forward_transposed_input_then_bias(
@@ -715,7 +710,10 @@ impl PatchEncoder {
                 &mut tokens,
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         {
             let projected = self.downsample_projection(frames, &state.conv_tail);
             linear_forward(
@@ -737,7 +735,10 @@ impl PatchEncoder {
     fn downsample_projection(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
         let n_tokens = frames.len() / (2 * 128);
         let mut projected = vec![0.0f32; n_tokens * 128];
-        #[cfg(target_os = "macos")]
+        #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
         {
             let channel_major = self.downsample_projection_channel_major(frames, conv_tail);
             for out in 0..128 {
@@ -746,7 +747,10 @@ impl PatchEncoder {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
         for token in 0..n_tokens {
             for out in 0..128 {
                 let mut sum = self.ds_bias[out];
@@ -768,7 +772,10 @@ impl PatchEncoder {
         projected
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     fn downsample_projection_channel_major(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
         let n_tokens = frames.len() / (2 * 128);
         let mut columns = vec![0.0f32; 2 * 128 * n_tokens];
@@ -791,7 +798,7 @@ impl PatchEncoder {
             }
         }
         unsafe {
-            cblas_sgemm(
+            sys::cblas_sgemm(
                 102,
                 111,
                 111,
@@ -902,7 +909,10 @@ impl PatchEncoder {
             }
             // attention: query i sees keys 0 .. start+i+1 (causal)
             attn.fill(0.0);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
             for head in 0..ENC_HEADS {
                 let offset = head * ENC_HEAD_DIM;
                 torch28_flash_attention_head(
@@ -918,7 +928,10 @@ impl PatchEncoder {
                     ENC_HIDDEN,
                 )?;
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+)))]
             for i in 0..t {
                 let keys = start + i + 1;
                 for head in 0..ENC_HEADS {
@@ -1225,7 +1238,10 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     fn flash_fixture_value(kind: u32, row: u32, column: u32) -> f32 {
         let mut mixed = kind.wrapping_mul(0x9e37_79b9)
             ^ row.wrapping_mul(0x85eb_ca6b)
@@ -1236,7 +1252,10 @@ mod tests {
         ((mixed & 0x3fff) as i32 - 8192) as f32 / 2048.0
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     fn flash_fixture_qkv(tokens: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut q = vec![0.0f32; tokens * ENC_HEAD_DIM];
         let mut k = vec![0.0f32; tokens * ENC_HIDDEN];
@@ -1253,6 +1272,9 @@ mod tests {
 
     /// Torch 2.8 CPU FlashAttention / Accelerate C oracle, generated from the
     /// identical integer fixture. Values are raw F32 words, not tolerances.
+    // The pinned bit patterns in `EXPECTED` were captured against Apple's
+    // Accelerate sgemm; OpenBLAS's reduction order produces different bits
+    // in the same ULP range, so this test is restricted to macOS-Accelerate.
     #[cfg(target_os = "macos")]
     #[test]
     fn attention_72_token_fixture_matches_torch28_flash_oracle() {
@@ -1306,6 +1328,9 @@ mod tests {
     }
 
     /// The final key is a scalar Torch tail after the four-lane reduction.
+    // Pinned against Apple's Accelerate sgemm; see the comment on
+    // `attention_72_token_fixture_matches_torch28_flash_oracle` for why this
+    // is macOS-only.
     #[cfg(target_os = "macos")]
     #[test]
     fn attention_scalar_tail_matches_torch28_flash_oracle() {
@@ -1340,7 +1365,10 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+    target_os = "macos",
+    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
+))]
     #[test]
     #[ignore = "requires fixed Torch/C layer-0 Q/K/V and attention sidecars"]
     fn production_flash_attention_matches_pinned_layer0_sidecar_bitwise() {

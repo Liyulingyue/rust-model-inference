@@ -10,6 +10,7 @@
 references/
 reference/
 /models/
+.venv/
 
 __pycache__/
 

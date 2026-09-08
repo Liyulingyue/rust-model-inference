@@ -18,6 +18,7 @@
 //! continues until the EOS head fires. The patch stream is decoded to 48 kHz
 //! mono by the AudioVAE vocoder.
 
+pub mod blas;
 pub mod config;
 pub mod dit;
 pub mod edit;
