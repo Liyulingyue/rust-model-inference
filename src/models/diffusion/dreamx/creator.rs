@@ -48,7 +48,7 @@ pub struct CreatorOutput {
 }
 
 #[derive(Clone, Copy)]
-struct BranchDimensions {
+pub(super) struct BranchDimensions {
     dim: usize,
     ffn: usize,
     heads: usize,
@@ -56,7 +56,7 @@ struct BranchDimensions {
 }
 
 impl BranchDimensions {
-    const VIDEO: Self = Self {
+    pub(super) const VIDEO: Self = Self {
         dim: VIDEO_DIM,
         ffn: VIDEO_FFN,
         heads: VIDEO_HEADS,
@@ -71,12 +71,12 @@ impl BranchDimensions {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BranchKind {
+pub(super) enum BranchKind {
     Video,
     Audio,
 }
 
-struct Projection {
+pub(super) struct Projection {
     weight: String,
     bias: Option<String>,
     n_in: usize,
@@ -102,7 +102,7 @@ impl Projection {
         })
     }
 
-    fn forward(
+    pub(super) fn forward(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -120,22 +120,23 @@ impl Projection {
     }
 }
 
-struct Attention {
-    q: Projection,
-    k: Projection,
-    v: Projection,
-    o: Projection,
-    norm_q: Vec<f32>,
-    norm_k: Vec<f32>,
+pub(super) struct Attention {
+    pub(super) q: Projection,
+    pub(super) k: Projection,
+    pub(super) v: Projection,
+    pub(super) o: Projection,
+    pub(super) norm_q: Vec<f32>,
+    pub(super) norm_k: Vec<f32>,
     heads: usize,
 }
 
 #[derive(Clone, Copy)]
-enum Rope<'a> {
+pub(super) enum Rope<'a> {
     None,
     Sequential,
     Positions(&'a [f32]),
     Video([usize; 3]),
+    VideoOffset([usize; 3], usize),
 }
 
 impl Attention {
@@ -161,7 +162,7 @@ impl Attention {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn forward(
+    pub(super) fn forward(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -197,14 +198,14 @@ impl Attention {
     }
 }
 
-struct TransformerBlock {
-    self_attention: Attention,
-    text_attention: Attention,
-    norm3_weight: Vec<f32>,
-    norm3_bias: Vec<f32>,
+pub(super) struct TransformerBlock {
+    pub(super) self_attention: Attention,
+    pub(super) text_attention: Attention,
+    pub(super) norm3_weight: Vec<f32>,
+    pub(super) norm3_bias: Vec<f32>,
     ffn_in: Projection,
     ffn_out: Projection,
-    modulation: Vec<f32>,
+    pub(super) modulation: Vec<f32>,
     dimensions: BranchDimensions,
 }
 
@@ -325,7 +326,7 @@ impl TransformerBlock {
         add_residual(hidden, &residual)
     }
 
-    fn feed_forward(
+    pub(super) fn feed_forward(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -360,7 +361,7 @@ impl TransformerBlock {
     }
 }
 
-struct OutputHead {
+pub(super) struct OutputHead {
     projection: Projection,
     modulation: Vec<f32>,
     dim: usize,
@@ -390,7 +391,7 @@ impl OutputHead {
         })
     }
 
-    fn forward(
+    pub(super) fn forward(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -418,7 +419,7 @@ impl OutputHead {
     }
 }
 
-struct Branch {
+pub(super) struct Branch {
     kind: BranchKind,
     dimensions: BranchDimensions,
     patch_weight: Vec<f32>,
@@ -428,12 +429,12 @@ struct Branch {
     time_in: Projection,
     time_out: Projection,
     time_projection: Projection,
-    blocks: Vec<TransformerBlock>,
-    head: OutputHead,
+    pub(super) blocks: Vec<TransformerBlock>,
+    pub(super) head: OutputHead,
 }
 
 impl Branch {
-    fn load(
+    pub(super) fn load(
         source: &dyn TensorSource,
         prefix: &str,
         kind: BranchKind,
@@ -510,7 +511,7 @@ impl Branch {
         })
     }
 
-    fn embed_context(
+    pub(super) fn embed_context(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -524,7 +525,7 @@ impl Branch {
         self.text_out.forward(source, pool, &hidden, TEXT_TOKENS)
     }
 
-    fn time_embeddings(
+    pub(super) fn time_embeddings(
         &self,
         source: &dyn TensorSource,
         pool: &ComputePool,
@@ -543,7 +544,7 @@ impl Branch {
         Ok((embedding, modulation))
     }
 
-    fn patch_video(
+    pub(super) fn patch_video(
         &self,
         pool: &ComputePool,
         latent: &[f32],
@@ -623,7 +624,11 @@ impl Branch {
         Ok(output)
     }
 
-    fn unpatch_video(&self, patches: &[f32], shape: [usize; 4]) -> Result<VideoLatent, String> {
+    pub(super) fn unpatch_video(
+        &self,
+        patches: &[f32],
+        shape: [usize; 4],
+    ) -> Result<VideoLatent, String> {
         let [channels, frames, height, width] = shape;
         let patch_height = height / 2;
         let patch_width = width / 2;
@@ -1273,7 +1278,7 @@ fn layer_norm_no_affine(input: &[f32], rows: usize, width: usize) -> Result<Vec<
 }
 
 #[allow(clippy::too_many_arguments)]
-fn modulated_layer_norm(
+pub(super) fn modulated_layer_norm(
     input: &[f32],
     rows: usize,
     width: usize,
@@ -1305,7 +1310,7 @@ fn modulated_layer_norm(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn gated_residual(
+pub(super) fn gated_residual(
     hidden: &mut [f32],
     residual: &[f32],
     rows: usize,
@@ -1335,7 +1340,7 @@ fn gated_residual(
     Ok(())
 }
 
-fn add_residual(output: &mut [f32], residual: &[f32]) -> Result<(), String> {
+pub(super) fn add_residual(output: &mut [f32], residual: &[f32]) -> Result<(), String> {
     if output.len() != residual.len() {
         return Err("DreamX Creator residual length mismatch".into());
     }
@@ -1365,7 +1370,7 @@ fn sinusoidal_embedding(positions: &[f32], dim: usize) -> Result<Vec<f32>, Strin
     Ok(output)
 }
 
-fn apply_rope(
+pub(super) fn apply_rope(
     values: &mut [f32],
     tokens: usize,
     heads: usize,
@@ -1382,7 +1387,9 @@ fn apply_rope(
             return Err("Invalid DreamX Creator temporal positions".into());
         }
     }
-    if let Rope::Video([frames, height, width]) = rope {
+    if let Rope::Video([frames, height, width]) | Rope::VideoOffset([frames, height, width], _) =
+        rope
+    {
         if frames * height * width != tokens {
             return Err("Invalid DreamX Creator video RoPE grid".into());
         }
@@ -1404,6 +1411,20 @@ fn apply_rope(
                         let x = token % width;
                         let y = (token / width) % height;
                         let frame = token / (height * width);
+                        if pair < 22 {
+                            frame as f64 * 10000.0f64.powf(-((2 * pair) as f64) / 44.0)
+                        } else if pair < 43 {
+                            let axis_pair = pair - 22;
+                            y as f64 * 10000.0f64.powf(-((2 * axis_pair) as f64) / 42.0)
+                        } else {
+                            let axis_pair = pair - 43;
+                            x as f64 * 10000.0f64.powf(-((2 * axis_pair) as f64) / 42.0)
+                        }
+                    }
+                    Rope::VideoOffset([_, height, width], offset) => {
+                        let x = token % width;
+                        let y = (token / width) % height;
+                        let frame = token / (height * width) + offset;
                         if pair < 22 {
                             frame as f64 * 10000.0f64.powf(-((2 * pair) as f64) / 44.0)
                         } else if pair < 43 {

@@ -4,11 +4,13 @@ pub mod creator;
 pub mod kernels;
 pub mod lightvae;
 pub mod media;
+pub mod refiner;
 pub mod text;
 pub mod upsampler;
 pub mod video_vae;
 
 pub use config::DreamXConfig;
+pub use refiner::DreamXRefiner;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatentUpsampleKind {
