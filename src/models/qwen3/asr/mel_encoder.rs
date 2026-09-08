@@ -21,8 +21,9 @@ use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
-#[cfg(target_os = "macos")]
-use super::audio_processor::{vDSP_measqv, vDSP_sve, vDSP_vsadd, vDSP_vsmul};
+use super::audio_processor::{
+    simd_add_scalar_f32, simd_mean_square_f32, simd_mul_scalar_inplace_f32, simd_sum_f32,
+};
 
 unsafe extern "C" {
     fn erff(value: f32) -> f32;
@@ -1095,71 +1096,32 @@ fn layer_norm(
         return Err("Invalid layer norm tensors".into());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let mut sum = 0.0;
-        unsafe { vDSP_sve(input.as_ptr(), 1, &mut sum, input.len()) };
-        let negative_mean = -(sum / input.len() as f32);
-        unsafe {
-            vDSP_vsadd(
-                input.as_ptr(),
-                1,
-                &negative_mean,
-                output.as_mut_ptr(),
-                1,
-                input.len(),
-            )
-        };
-        let mut variance = 0.0;
-        unsafe { vDSP_measqv(output.as_ptr(), 1, &mut variance, output.len()) };
-        let inverse = 1.0 / (variance + epsilon).sqrt();
-        unsafe {
-            vDSP_vsmul(
-                output.as_ptr(),
-                1,
-                &inverse,
-                output.as_mut_ptr(),
-                1,
-                output.len(),
-            )
-        };
-        for (output, weight) in output.iter_mut().zip(weight) {
-            *output *= weight;
-        }
-        for (output, bias) in output.iter_mut().zip(bias) {
-            *output += bias;
-        }
-        if output.iter().any(|value| !value.is_finite()) {
-            return Err("Non-finite layer norm output".into());
-        }
-        return Ok(());
+    // As of 2026 we no longer link Apple's Accelerate framework. The
+    // portable SIMD-friendly helpers in `audio_processor` (`simd_sum_f32`,
+    // `simd_add_scalar_f32`, `simd_mean_square_f32`, `simd_mul_scalar_f32`)
+    // operate in f32 to match the previous macOS path's numerical behavior.
+    // LLVM auto-vectorizes the inner loops to SSE2/AVX2/NEON depending on
+    // the host. Previously the non-macOS path ran in f64 for extra
+    // numerical stability; we unify both paths in f32 here.
+    let sum = simd_sum_f32(input);
+    let negative_mean = -(sum / input.len() as f32);
+    simd_add_scalar_f32(input, negative_mean, output);
+    let variance = simd_mean_square_f32(output);
+    let inverse = 1.0 / (variance + epsilon).sqrt();
+    if !inverse.is_finite() {
+        return Err("Non-finite layer norm statistics".into());
     }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let count = input.len() as f64;
-        let mean = input.iter().map(|&value| f64::from(value)).sum::<f64>() / count;
-        let variance = input
-            .iter()
-            .map(|&value| {
-                let centered = f64::from(value) - mean;
-                centered * centered
-            })
-            .sum::<f64>()
-            / count;
-        let mean = mean as f32;
-        let inverse = (1.0 / (variance + f64::from(epsilon)).sqrt()) as f32;
-        if !mean.is_finite() || !inverse.is_finite() {
-            return Err("Non-finite layer norm statistics".into());
-        }
-        for (((value, weight), bias), output) in input.iter().zip(weight).zip(bias).zip(output) {
-            *output = (*value - mean) * inverse * *weight + *bias;
-            if !output.is_finite() {
-                return Err("Non-finite layer norm output".into());
-            }
-        }
-        Ok(())
+    simd_mul_scalar_inplace_f32(output, inverse);
+    for (output, weight) in output.iter_mut().zip(weight) {
+        *output *= weight;
     }
+    for (output, bias) in output.iter_mut().zip(bias) {
+        *output += bias;
+    }
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite layer norm output".into());
+    }
+    Ok(())
 }
 
 pub(in crate::models::qwen3) fn layer_norm_rows(

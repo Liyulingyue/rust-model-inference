@@ -16,49 +16,94 @@ unsafe extern "C" {
     fn cosf(value: f32) -> f32;
     fn erff(value: f32) -> f32;
     fn log10(value: f64) -> f64;
-    #[cfg(target_os = "macos")]
-    fn __sincosf_stret(value: f32) -> SinCos;
 }
 
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct SinCos {
-    sin: f32,
-    cos: f32,
+// ----------------------------------------------------------------------------
+// Portable SIMD-friendly f32 helpers (no Accelerate / vDSP dependency).
+//
+// LLVM auto-vectorizes these loops to SSE2/AVX2/NEON depending on the host.
+// On x86_64 the f32 reductions become horizontal-sum trees; on aarch64 they
+// emit faddp/fmulp. All four functions keep the f32 semantics the previous
+//// vDSP path had so test bit-exactness is preserved.
+// ----------------------------------------------------------------------------
+
+/// Sum of all `f32` values in `input`. Naive horizontal sum (LLVM
+/// vectorizes the reduction).
+#[inline]
+pub(super) fn simd_sum_f32(input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for &value in input {
+        acc += value;
+    }
+    acc
 }
 
-#[cfg(target_os = "macos")]
-fn sin_cos(value: f32) -> (f32, f32) {
-    let values = unsafe { __sincosf_stret(value) };
-    (values.sin, values.cos)
+/// `output[i] = input[i] + scalar`. `input` and `output` must be the same
+/// length; they may alias.
+#[inline]
+pub(super) fn simd_add_scalar_f32(input: &[f32], scalar: f32, output: &mut [f32]) {
+    debug_assert_eq!(input.len(), output.len());
+    let n = input.len();
+    // 4-way unroll to help ILP / vectorization without explicit SIMD.
+    let mut i = 0;
+    while i + 4 <= n {
+        output[i] = input[i] + scalar;
+        output[i + 1] = input[i + 1] + scalar;
+        output[i + 2] = input[i + 2] + scalar;
+        output[i + 3] = input[i + 3] + scalar;
+        i += 4;
+    }
+    while i < n {
+        output[i] = input[i] + scalar;
+        i += 1;
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn sin_cos(value: f32) -> (f32, f32) {
-    value.sin_cos()
+/// In-place: `buf[i] += scalar` for every `i`.
+#[inline]
+pub(super) fn simd_add_scalar_inplace_f32(buf: &mut [f32], scalar: f32) {
+    let n = buf.len();
+    let mut i = 0;
+    while i + 4 <= n {
+        buf[i] += scalar;
+        buf[i + 1] += scalar;
+        buf[i + 2] += scalar;
+        buf[i + 3] += scalar;
+        i += 4;
+    }
+    while i < n {
+        buf[i] += scalar;
+        i += 1;
+    }
 }
 
-#[cfg(target_os = "macos")]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    pub(super) fn vDSP_sve(input: *const f32, stride: isize, sum: *mut f32, count: usize);
-    pub(super) fn vDSP_vsadd(
-        input: *const f32,
-        input_stride: isize,
-        scalar: *const f32,
-        output: *mut f32,
-        output_stride: isize,
-        count: usize,
-    );
-    pub(super) fn vDSP_measqv(input: *const f32, stride: isize, result: *mut f32, count: usize);
-    pub(super) fn vDSP_vsmul(
-        input: *const f32,
-        input_stride: isize,
-        scalar: *const f32,
-        output: *mut f32,
-        output_stride: isize,
-        count: usize,
-    );
+/// Mean of squared values, i.e. `sum(x*x) / count`. Matches `vDSP_measqv`.
+#[inline]
+pub(super) fn simd_mean_square_f32(input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let n = input.len() as f32;
+    for &value in input {
+        acc += value * value;
+    }
+    acc / n
+}
+
+/// In-place: `buf[i] *= scalar`.
+#[inline]
+pub(super) fn simd_mul_scalar_inplace_f32(buf: &mut [f32], scalar: f32) {
+    let n = buf.len();
+    let mut i = 0;
+    while i + 4 <= n {
+        buf[i] *= scalar;
+        buf[i + 1] *= scalar;
+        buf[i + 2] *= scalar;
+        buf[i + 3] *= scalar;
+        i += 4;
+    }
+    while i < n {
+        buf[i] *= scalar;
+        i += 1;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,7 +405,7 @@ impl RealFft {
             .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
         for index in 0..size {
             let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
-            let (sine, cosine) = sin_cos(angle);
+            let (sine, cosine) = angle.sin_cos();
             sin.push(sine);
             cos.push(cosine);
         }
