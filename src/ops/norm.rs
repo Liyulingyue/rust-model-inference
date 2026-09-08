@@ -13,6 +13,34 @@ pub fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
     }
 }
 
+pub fn rms_norm_grouped(
+    input: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    groups: usize,
+    eps: f32,
+) {
+    let n = input.len().min(weight.len()).min(output.len());
+    assert!(groups > 0, "groups must be greater than zero");
+    if n == 0 {
+        return;
+    }
+    assert!(
+        n.is_multiple_of(groups),
+        "normalized length {n} must be divisible by {groups} groups"
+    );
+    let group_size = n / groups;
+    for group in 0..groups {
+        let range = group * group_size..(group + 1) * group_size;
+        rms_norm(
+            &input[range.clone()],
+            &weight[range.clone()],
+            &mut output[range],
+            eps,
+        );
+    }
+}
+
 pub fn rms_norm_inplace(x: &mut [f32], weight: &[f32], eps: f32) {
     let n = x.len().min(weight.len());
     let sum_sq = super::sum_sq_f32(&x[..n]);
@@ -83,5 +111,35 @@ unsafe fn scale_mul_avx2(scale: f32, weight: &[f32], x: &mut [f32]) {
     while i < n {
         x[i] = x[i] * scale * weight[i];
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rms_norm_grouped;
+
+    #[test]
+    fn grouped_rms_norm_normalizes_contiguous_groups() {
+        let input = [3.0, 4.0, 0.0, 5.0];
+        let weight = [1.0, 1.0, 2.0, 2.0];
+        let mut output = [0.0; 4];
+
+        rms_norm_grouped(&input, &weight, &mut output, 2, 0.0);
+
+        let expected: [f32; 4] = [0.848_528_15, 1.131_370_9, 0.0, 2.828_427];
+        for (actual, expected) in output.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn grouped_rms_norm_accepts_empty_input() {
+        rms_norm_grouped(&[], &[], &mut [], 1, 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "groups must be greater than zero")]
+    fn grouped_rms_norm_rejects_zero_groups() {
+        rms_norm_grouped(&[], &[], &mut [], 0, 1e-5);
     }
 }
