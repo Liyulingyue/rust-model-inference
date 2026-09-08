@@ -4,6 +4,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -27,6 +28,17 @@ from tools.dreamx.convert_dreamx_creator import (
     read_safetensor_sources,
     should_quantize,
 )
+
+
+class DreamXOracleTraceTest(unittest.TestCase):
+    def test_cuda_requirement_fails_before_upstream_load(self):
+        from tools.dreamx.dreamx_oracle_trace import require_cuda
+
+        torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+        )
+        with self.assertRaisesRegex(RuntimeError, "CUDA"):
+            require_cuda(torch)
 
 
 VIDEO_CONFIG = {

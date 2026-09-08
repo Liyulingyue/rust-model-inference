@@ -12,7 +12,7 @@
 4. **Trait 架构** — 算子和内存通过 trait 解耦
 5. **无 C/C++ FFI** — 100% 纯 Rust，包括量化 kernel
 
-**支持的模型**：见 [模型支持清单](SUPPORTED_MODELS.md)。清单区分 `Verified`、`Supported`、`Experimental` 和 `Unsupported`，避免把架构已接入误写成具体型号已验证。外部参考源码及固定 Oracle 见 [参考实现清单](REFERENCE_IMPLEMENTATIONS.md)。
+**支持的模型**：见 [模型支持清单](docs/SUPPORTED_MODELS.md)。清单区分 `Verified`、`Supported`、`Experimental` 和 `Unsupported`，避免把架构已接入误写成具体型号已验证。外部参考源码及固定 Oracle 见 [参考实现清单](docs/REFERENCE_IMPLEMENTATIONS.md)。
 
 ## 快速开始
 
@@ -91,6 +91,38 @@ cargo run --release --bin rust-model-inference -- \
 ```
 
 参考音频必须是 PCM16 WAV；Base 模型不支持 `--ref-text`。输出固定为单声道 24 kHz PCM16 WAV。语言支持 `cn/en/ge/it/po/sp/ja/ko/fr/ru`、对应英文全名，以及 `zh/de/pt/es` 别名。
+
+### DreamX-Creator
+
+先把 [GD-ML/DreamX-Creator](https://modelscope.cn/models/GD-ML/DreamX-Creator) 的原始目录导出成匹配的 `DreamX-Creator-Q8_0.gguf` 和 `mmproj-DreamX-Creator-BF16.gguf`：
+
+```bash
+python3 tools/dreamx/convert_dreamx_creator.py \
+  models/DreamX-Creator \
+  --out-dir models/DreamX-Creator \
+  --outtype q8_0
+```
+
+原生 Rust CPU 推理：
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --dreamx \
+  --model models/DreamX-Creator/DreamX-Creator-Q8_0.gguf \
+  --mmproj models/DreamX-Creator/mmproj-DreamX-Creator-BF16.gguf \
+  --image models/DreamX-Creator/dreamx-creator_teaser.png \
+  --prompt "A man speaking while seated on a yellow couch." \
+  --negative-prompt "low quality" \
+  --duration 5 --fps 24 --steps 50 --seed 0 \
+  --target-spatial-tokens 880 \
+  --refine --refiner-kv-len 9 \
+  --latent-upsample flash --refiner-decoder lightvae \
+  --threads 8 --out dreamx.mp4
+```
+
+`--refine`/`--no-refine` 控制 2x refiner；`--latent-upsample` 可选 `bilinear`、`flash`、`causal2d`，`--refiner-decoder` 可选 `wan`、`lightvae`。`--dry-run` 只校验模型对并报告内存，`--overwrite` 允许覆盖五个同名前缀产物，内存估算超过物理内存时只能显式传 `--allow-memory-overcommit`。完整运行会生成 base video、48 kHz WAV、base mux，以及 refined video/refined mux。
+
+Rust 运行时不链接 OpenBLAS、BLIS、MKL、Accelerate、oneDNN、llama.cpp 或 libtorch；计算使用仓库内的标量/AArch64 NEON 算子和 `ComputePool`。当前验证范围是 64×64、1 帧、1 step 的缩小 CPU 全链路，不代表官方 2K 质量或 CUDA Python Oracle 数值对齐；精确证据见 [模型支持清单](docs/SUPPORTED_MODELS.md)。
 
 ### Z-Image Turbo
 

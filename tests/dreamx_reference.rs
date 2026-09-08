@@ -1,8 +1,10 @@
 use image::RgbImage;
 use rust_model_inference::models::diffusion::dreamx::{
-    resolve_spatial_size, DreamXOptions, DreamXPipeline, DreamXRequest,
+    resize_to_token_budget, resolve_spatial_size, DreamXOptions, DreamXPipeline, DreamXRequest,
 };
-use rust_model_inference::{MetaValue, MetaValueType, TensorInfo, TensorSource};
+use rust_model_inference::{
+    open_model_source, ComponentRole, MetaValue, MetaValueType, TensorInfo, TensorSource,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,4 +181,48 @@ fn spatial_budget_matches_upstream_integer_grid_search() {
         (704, 1248, 858)
     );
     assert_eq!(resolve_spatial_size(360, 640, 4).unwrap(), (64, 64, 4));
+}
+
+#[test]
+#[ignore = "requires exported DreamX-Creator GGUF pair"]
+fn dreamx_real_pair_preflight_and_dry_run() {
+    let root = std::env::var_os("DREAMX_MODEL_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("/Users/gouzi/Documents/git/rust-model-inference/models/DreamX-Creator")
+        });
+    let main: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(&root.join("DreamX-Creator-Q8_0.gguf"), ComponentRole::Llm).unwrap(),
+    );
+    let mmproj: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(
+            &root.join("mmproj-DreamX-Creator-BF16.gguf"),
+            ComponentRole::Mmproj,
+        )
+        .unwrap(),
+    );
+    let image = image::open(root.join("dreamx-creator_teaser.png"))
+        .unwrap()
+        .into_rgb8();
+    let image = resize_to_token_budget(&image, 4).unwrap();
+    let pipeline = DreamXPipeline::load(main, mmproj, 2).unwrap();
+    let estimate = pipeline
+        .estimate(&DreamXRequest {
+            image,
+            prompt: "A man speaking while seated on a yellow couch.".into(),
+            negative_prompt: String::new(),
+            output: std::env::temp_dir().join("dreamx-preflight.mp4"),
+            options: DreamXOptions {
+                duration_seconds: 0.2,
+                fps: 5,
+                steps: 1,
+                target_spatial_tokens: 4,
+                ..DreamXOptions::default()
+            },
+            overwrite: true,
+            allow_memory_overcommit: true,
+        })
+        .unwrap();
+    assert_eq!(estimate.spatial_tokens, 4);
+    assert_eq!(estimate.audio_sample_rate, 48_000);
 }
