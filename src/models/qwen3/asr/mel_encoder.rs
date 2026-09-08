@@ -12,7 +12,7 @@ use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
     bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
-    quantize_q8_0_into, vec_mad_f32,
+    quantize_q8_0_into, sum_f32, sum_sq_centered_f32, vec_mad_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -20,9 +20,6 @@ use std::sync::Arc;
 use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
-};
-use super::audio_processor::{
-    simd_add_scalar_f32, simd_mean_square_f32, simd_mul_scalar_inplace_f32, simd_sum_f32,
 };
 
 unsafe extern "C" {
@@ -1096,27 +1093,18 @@ fn layer_norm(
         return Err("Invalid layer norm tensors".into());
     }
 
-    // As of 2026 we no longer link Apple's Accelerate framework. The
-    // portable SIMD-friendly helpers in `audio_processor` (`simd_sum_f32`,
-    // `simd_add_scalar_f32`, `simd_mean_square_f32`, `simd_mul_scalar_f32`)
-    // operate in f32 to match the previous macOS path's numerical behavior.
-    // LLVM auto-vectorizes the inner loops to SSE2/AVX2/NEON depending on
-    // the host. Previously the non-macOS path ran in f64 for extra
-    // numerical stability; we unify both paths in f32 here.
-    let sum = simd_sum_f32(input);
-    let negative_mean = -(sum / input.len() as f32);
-    simd_add_scalar_f32(input, negative_mean, output);
-    let variance = simd_mean_square_f32(output);
-    let inverse = 1.0 / (variance + epsilon).sqrt();
-    if !inverse.is_finite() {
+    let n = input.len();
+    let sum = sum_f32(input);
+    let mean = (sum / n as f64) as f32;
+    let variance = (sum_sq_centered_f32(input, mean) / n as f64) as f32;
+    let inverse_std = 1.0 / (variance + epsilon).sqrt();
+    if !inverse_std.is_finite() {
         return Err("Non-finite layer norm statistics".into());
     }
-    simd_mul_scalar_inplace_f32(output, inverse);
-    for (output, weight) in output.iter_mut().zip(weight) {
-        *output *= weight;
-    }
-    for (output, bias) in output.iter_mut().zip(bias) {
-        *output += bias;
+    for ((output, input), (weight, bias)) in
+        output.iter_mut().zip(input).zip(weight.iter().zip(bias))
+    {
+        *output = (*input - mean) * inverse_std * weight + bias;
     }
     if output.iter().any(|value| !value.is_finite()) {
         return Err("Non-finite layer norm output".into());
