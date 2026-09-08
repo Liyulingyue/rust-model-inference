@@ -21,10 +21,12 @@ use crate::ops::{
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
+#[cfg(feature = "vulkan")]
+use crate::vulkan::qwen35::Qwen35VulkanSession;
 
 impl<'a> super::weights::Qwen35Model<'a> {
     pub fn forward(
-        &self,
+        &mut self,
         n_tokens: usize,
         kv_cache: &mut KvCache,
         scratch: &mut super::scratch::Qwen35Scratchpad,
@@ -37,6 +39,111 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 mrope_positions.len()
             ));
         }
+
+        // ---- GPU dispatch (decode-only; prefill falls through to CPU) ----
+        // `forward_token` is single-token; the multimodal/text path's first
+        // call is the prefill (n_tokens > 1), subsequent calls decode
+        // (n_tokens == 1). We lazily build the session on the first decode.
+        #[cfg(feature = "vulkan")]
+        if n_tokens == 1 && self.gpu.is_none() {
+            if let Some(context) = crate::ops::get_vulkan_context() {
+                let cfg_probe = &self.config;
+                let n_layer = cfg_probe.n_layer_impl();
+                let stride = cfg_probe.n_head_kv
+                    * cfg_probe.key_length.max(cfg_probe.value_length);
+                let capacity = match kv_cache {
+                    KvCache::F32(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
+                    KvCache::F16(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
+                    _ => 0,
+                };
+                if capacity > 0 {
+                    match Qwen35VulkanSession::try_new(self, capacity, context) {
+                        Ok(Some(gpu)) => {
+                            eprintln!(
+                                "[GPU] Qwen3.5 Vulkan session ready (capacity={capacity})"
+                            );
+                            self.gpu = Some(gpu);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU] Qwen3.5 Vulkan session init failed: {error}. Falling back to CPU."
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "vulkan")]
+        if n_tokens == 1 {
+            if let Some(gpu) = self.gpu.as_mut() {
+                let gpu_capacity = gpu.capacity;
+                let cache_position = mrope_positions[0][0];
+                let mrope_pos = mrope_positions[0];
+                let cfg = &self.config;
+                let stride = cfg.n_head_kv * cfg.key_length.max(cfg.value_length);
+                let input = &scratch.x[..cfg.n_embd];
+                enum DispatchOutcome {
+                    Logits(Vec<f32>),
+                    Failed,
+                }
+                let outcome = {
+                    let result = gpu.forward_token(input, cache_position, mrope_pos);
+                    match result {
+                        Ok(result) => {
+                            let commit_result = crate::vulkan::qwen35::commit_shadow_state(
+                                kv_cache,
+                                &mut scratch.conv_states,
+                                &mut scratch.ssm_states,
+                                cache_position,
+                                gpu_capacity,
+                                stride,
+                                result.k_delta,
+                                result.v_delta,
+                                result.conv_state,
+                                result.ssm_state,
+                            );
+                            if let Err(error) = commit_result {
+                                eprintln!(
+                                    "[GPU] Qwen3.5 Vulkan commit failed: {error}. Falling back to CPU."
+                                );
+                                DispatchOutcome::Failed
+                            } else {
+                                let mut out = vec![0.0f32; cfg.vocab_size];
+                                let n = result.logits.len().min(cfg.vocab_size);
+                                out[..n].copy_from_slice(&result.logits[..n]);
+                                DispatchOutcome::Logits(out)
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU] Qwen3.5 Vulkan forward_token failed: {error}. Falling back to CPU."
+                            );
+                            DispatchOutcome::Failed
+                        }
+                    }
+                };
+                match outcome {
+                    DispatchOutcome::Logits(out) => {
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.commit_token();
+                        }
+                        return Ok(out);
+                    }
+                    DispatchOutcome::Failed => {
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.abort_token();
+                        }
+                        self.gpu = None;
+                        // fall through to CPU
+                    }
+                }
+            }
+        }
+        // ---- end GPU dispatch ----
+
+        let cfg = &self.config;
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_layer = cfg.n_layer_impl();

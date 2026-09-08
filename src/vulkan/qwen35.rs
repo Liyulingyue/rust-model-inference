@@ -155,7 +155,7 @@ struct Qwen35ArenaLayout {
 }
 
 impl Qwen35ArenaLayout {
-    fn new(config: &Qwen35Config, capacity: usize) -> Result<Self, crate::vulkan::VulkanError> {
+    pub(crate) fn new(config: &Qwen35Config, capacity: usize) -> Result<Self, crate::vulkan::VulkanError> {
         let layer_count = config.n_layer_impl();
         let head_dim = config.n_embd_head();
         let value_heads = config.ssm_dt_rank;
@@ -398,7 +398,7 @@ pub(crate) struct Qwen35VulkanSession {
     output: OperatorBindings,
     layout: Qwen35ArenaLayout,
     config: Qwen35Config,
-    capacity: usize,
+    pub(crate) capacity: usize,
     commit_state: TokenCommitState,
     rope: Vec<f32>,
     logits: Vec<f32>,
