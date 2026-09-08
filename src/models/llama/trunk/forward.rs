@@ -1022,7 +1022,8 @@ pub fn run_inference_tokens(
         let chosen = crate::ops::sample_llama_cpp(logits, top_k, top_p, temperature, rng_u64);
 
         let chosen_id = chosen as u32;
-        if !bench && eos_id == Some(chosen_id) {
+        let im_end_id = tokenizer.special_token_id("im_end");
+        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
             break;
         }
         if generated_tokens.len() >= max_tokens {

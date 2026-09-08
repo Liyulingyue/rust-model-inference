@@ -459,21 +459,40 @@ impl BPETokenizer {
                 })
             })
             .collect();
-        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
 
-        let semantic_tokens = match pre {
+        // Some GGUFs (notably MiniCPM5) tag chat-marker tokens like
+        // `<|im_end|>` as `token_type = Normal` instead of Control. The
+        // semantic-token list below is the source of truth for which
+        // literals count as "stop here", so re-scan the vocab and pull
+        // any literal in that list into `special_tokens` regardless of
+        // its declared type.
+        let semantic_literals: &[(&str, &str)] = match pre {
             PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
             PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
+        };
+        for (literal, _) in semantic_literals {
+            if let Some(&id) = token_to_id.get(*literal) {
+                if !special_tokens.iter().any(|t| t.text == *literal) {
+                    special_tokens.push(SpecialToken {
+                        text: (*literal).into(),
+                        id,
+                        kind: TokenType::Control,
+                    });
+                }
+            }
         }
-        .iter()
-        .filter_map(|(literal, name)| {
-            special_tokens
-                .iter()
-                .find(|token| token.text == *literal)
-                .map(|token| ((*name).to_string(), token.id))
-        })
-        .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+
+        let semantic_tokens = semantic_literals
+            .iter()
+            .filter_map(|(literal, name)| {
+                special_tokens
+                    .iter()
+                    .find(|token| token.text == *literal)
+                    .map(|token| ((*name).to_string(), token.id))
+            })
+            .collect();
 
         let byte_fallback = match get_meta("tokenizer.ggml.byte_fallback") {
             Some(MetaValue::Bool(value)) => value,
