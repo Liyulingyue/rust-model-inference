@@ -92,6 +92,32 @@ cargo run --release --bin rust-model-inference -- \
 
 参考音频必须是 PCM16 WAV；Base 模型不支持 `--ref-text`。输出固定为单声道 24 kHz PCM16 WAV。语言支持 `cn/en/ge/it/po/sp/ja/ko/fr/ru`、对应英文全名，以及 `zh/de/pt/es` 别名。
 
+### dots.tts Base / Edit（Q8_0）
+
+从官方 checkpoint 导出，LLM 和 mmproj 同时量化：
+
+```bash
+python3 tools/dots/convert_dots_tts.py models/dots.tts-base \
+  --variant base --quant q8_0 --out-dir models/dots-base-q8
+python3 tools/dots/convert_dots_tts.py models/dots.tts.edit \
+  --variant edit --quant q8_0 --out-dir models/dots-edit-q8
+
+cargo run --release --bin rust-model-inference -- \
+  --tts --model models/dots-base-q8/dots-tts-base-Q8_0.gguf \
+  --mmproj models/dots-base-q8/dots-tts-base-mmproj-Q8_0.gguf \
+  --prompt "你好，这是语音合成测试。" --language cn --out base.wav
+
+cargo run --release --bin rust-model-inference -- \
+  --tts --edit --model models/dots-edit-q8/dots-tts-edit-Q8_0.gguf \
+  --mmproj models/dots-edit-q8/dots-tts-edit-mmproj-Q8_0.gguf \
+  --source-audio source.wav --source-text "你好。" --target-text "大家好。" \
+  --instruction "将原文替换为目标文本，保持音色。" --use-xvector on --out edit.wav
+```
+
+两份 GGUF 必须来自同一 variant。量化覆盖 embedding、线性层、DiT、PatchEncoder、Speaker 和 Vocoder 的可学习矩阵（含折叠后的卷积、LSTM）；每个展平权重行需为 32 的倍数，不满足的小卷积、norm、bias、统计量和固定滤波器保留源精度。高阶 Q8 卷积张量以二维展平行保存，旧 BF16/F32 文件仍可加载。
+
+Dots 推理复用 `Weight` 和原生 AVX2/NEON/标量内核，不链接 OpenBLAS/CBLAS，也无需 BLAS feature。BF16/F16/Q8 权重保留 mmap 存储；转置卷积仅逐行解码后做 SIMD 累加。原生归约顺序不同于原 Python/BLAS 路径，不承诺 checkpoint 或 PCM 逐位一致；外部 Oracle 审计测试仍保留为 opt-in。
+
 ### Z-Image Turbo
 
 ```bash

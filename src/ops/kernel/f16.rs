@@ -180,6 +180,61 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn prepared_f16_rejects_short_activations_before_simd() {
+        let bytes = f16_bytes(&[f16::ONE; 32]);
+        F16Kernel::new(&bytes).forward_prepared(
+            &[1.0; 31],
+            &[],
+            &[],
+            None,
+            &mut [0.0],
+            32,
+            1,
+            0,
+            1,
+        );
+    }
+
+    #[test]
+    fn prepared_f16_accepts_empty_q8_and_preserves_partitioned_rows() {
+        let values: Vec<_> = (0..35)
+            .map(|i| f16::from_f32((i as f32 - 17.0) / 8.0))
+            .collect();
+        let bytes = f16_bytes(&values);
+        let input = [
+            0.10001, -0.20002, 0.30003, -0.40004, 0.50005, -0.60006, 0.70007,
+        ];
+        let mut unaligned = vec![0u8];
+        unaligned.extend_from_slice(&bytes);
+        for bytes in [bytes.as_slice(), &unaligned[1..]] {
+            let kernel = F16Kernel::new(bytes);
+            let mut output = [f32::NAN; 5];
+            kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, 1, 3);
+            // Main partitions rows by floor(n_out * ith / nth): rows 1..3.
+            assert!(output[..1].iter().chain(&output[3..]).all(|v| v.is_nan()));
+            for thread in [0, 2] {
+                kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, thread, 3);
+            }
+            let mut sequential = [0.0; 5];
+            kernel.forward(&input, &mut sequential, 7, 5);
+            assert_eq!(output.map(f32::to_bits), sequential.map(f32::to_bits));
+            for (row, &actual) in output.iter().enumerate() {
+                let expected = values[row * 7..(row + 1) * 7]
+                    .iter()
+                    .zip(input)
+                    // Prepared and ordinary paths both round activations to F16.
+                    .map(|(w, x)| w.to_f64() * f16::from_f32(x).to_f64())
+                    .sum::<f64>() as f32;
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "row {row}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn f16_kernel_one_row_one_input() {
         // 1x3 weight: [1, 2, 3] (f16)
         let weight = f16_bytes(&[f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(3.0)]);
