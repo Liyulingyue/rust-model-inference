@@ -15,7 +15,10 @@
 
 use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::{gelu, softmax_inplace};
+use crate::ops::{
+    dot_f32_exact, gelu, gelu_inplace, rms_norm, softmax_inplace, vec_add, vec_add_into,
+    vec_mad_f32, vec_mul_inplace,
+};
 
 use super::trunk::forward::{run_inference_stream, Lfm2StreamItem};
 use crate::core::scratchpad::KvFormat;
@@ -536,37 +539,68 @@ impl<'a> VisionModel<'a> {
         let kq_scale = 1.0 / (d_head as f32).sqrt();
 
         // ---- patch conv 16x16 stride 16 ----
-        let mut inp = vec![0.0f32; n_patches * ne];
+        // Build im2col: [n_patches × 768] matrix where each row is the 768
+        // pixels of one patch in [ic][kh][kw] order — matches the layout of
+        // `patch_embd` ([oc][ic][kh][kw]). Output[oc, patch] is then a
+        // single dot product of length 768, dispatched via SIMD `dot_f32`.
         let p = cfg.patch_size;
+        let patch_dim = 3 * p * p;
         let inp_chw = &entry.data;
+        let mut patches = vec![0.0f32; n_patches * patch_dim];
         for ph in 0..h_patches {
             for pw in 0..w_patches {
                 let tok = ph * w_patches + pw;
-                for oc in 0..ne {
-                    let mut sum = self.patch_bias[oc];
-                    let w_base = oc * 3 * p * p;
-                    for ic in 0..3 {
-                        let i_base = ic * width * height;
-                        let w_off = w_base + ic * p * p;
-                        for kh in 0..p {
-                            let row = (ph * p + kh) * width + pw * p;
-                            for kw in 0..p {
-                                sum += inp_chw[i_base + row + kw]
-                                    * self.patch_embd[w_off + kh * p + kw];
-                            }
+                let mut dst = tok * patch_dim;
+                for ic in 0..3 {
+                    let i_base = ic * width * height;
+                    for kh in 0..p {
+                        let row = (ph * p + kh) * width + pw * p;
+                        let p_base = i_base + row;
+                        for kw in 0..p {
+                            patches[dst] = inp_chw[p_base + kw];
+                            dst += 1;
                         }
                     }
-                    inp[tok * ne + oc] = sum;
                 }
             }
         }
+        let mut inp = vec![0.0f32; n_patches * ne];
+        // Parallel matmul over patches; each thread handles a row range,
+        // running dot_f32 (AVX2 FMA) per output channel.
+        let patch_embd = &self.patch_embd;
+        let patch_bias = &self.patch_bias;
+        let patches_ptr = patches.as_ptr();
+        let patch_embd_ptr = patch_embd.as_ptr();
+        let patch_bias_ptr = patch_bias.as_ptr();
+        let inp_ptr = inp.as_mut_ptr();
+        pool.compute(|ith, nth| {
+            let per = n_patches.div_ceil(nth);
+            let start = ith * per;
+            let end = (start + per).min(n_patches);
+            for patch_idx in start..end {
+                let patch_row = unsafe {
+                    std::slice::from_raw_parts(patches_ptr.add(patch_idx * patch_dim), patch_dim)
+                };
+                let out_row = unsafe {
+                    std::slice::from_raw_parts_mut(inp_ptr.add(patch_idx * ne), ne)
+                };
+                for oc in 0..ne {
+                    let weight_row = unsafe {
+                        std::slice::from_raw_parts(
+                            patch_embd_ptr.add(oc * patch_dim),
+                            patch_dim,
+                        )
+                    };
+                    out_row[oc] = dot_f32_exact(patch_row, weight_row, patch_dim)
+                        + unsafe { *patch_bias_ptr.add(oc) };
+                }
+            }
+        });
 
         // ---- position embedding ----
         let pos = self.resized_pos_embd(w_patches, h_patches);
         for i in 0..n_patches {
-            for c in 0..ne {
-                inp[i * ne + c] += pos[i * ne + c];
-            }
+            vec_add_into(&pos[i * ne..(i + 1) * ne], &mut inp[i * ne..(i + 1) * ne]);
         }
 
         // ---- ViT blocks ----
@@ -582,53 +616,42 @@ impl<'a> VisionModel<'a> {
                     cfg.eps,
                 );
             }
-            // q/k/v
+            // q/k/v — per-token matmul (existing SIMD via Q8) + SIMD bias add
             let mut q = vec![0.0f32; n_patches * ne];
             let mut k = vec![0.0f32; n_patches * ne];
             let mut v = vec![0.0f32; n_patches * ne];
             for t in 0..n_patches {
                 let i = &normed[t * ne..(t + 1) * ne];
-                layer
-                    .wq
-                    .kernel
-                    .forward(i, &mut q[t * ne..(t + 1) * ne], ne, ne);
-                layer
-                    .wk
-                    .kernel
-                    .forward(i, &mut k[t * ne..(t + 1) * ne], ne, ne);
-                layer
-                    .wv
-                    .kernel
-                    .forward(i, &mut v[t * ne..(t + 1) * ne], ne, ne);
-                for c in 0..ne {
-                    q[t * ne + c] += layer.bq[c];
-                    k[t * ne + c] += layer.bk[c];
-                    v[t * ne + c] += layer.bv[c];
-                }
+                let q_row = &mut q[t * ne..(t + 1) * ne];
+                let k_row = &mut k[t * ne..(t + 1) * ne];
+                let v_row = &mut v[t * ne..(t + 1) * ne];
+                layer.wq.kernel.forward(i, q_row, ne, ne);
+                layer.wk.kernel.forward(i, k_row, ne, ne);
+                layer.wv.kernel.forward(i, v_row, ne, ne);
+                vec_add_into(&layer.bq, q_row);
+                vec_add_into(&layer.bk, k_row);
+                vec_add_into(&layer.bv, v_row);
             }
-            // attention per head (bidirectional, no mask)
+            // attention per head (bidirectional, no mask) — dot_f32 +
+            // vec_mad_f32 replace the 4-level scalar loop.
             let mut attn_out = vec![0.0f32; n_patches * ne];
             for h in 0..cfg.n_head {
                 let dh = h * d_head;
                 for t in 0..n_patches {
-                    let q_off = t * ne + dh;
+                    let q_row = &q[t * ne + dh..t * ne + dh + d_head];
                     let mut scores = vec![0.0f32; n_patches];
                     for s in 0..n_patches {
-                        let k_off = s * ne + dh;
-                        let mut dot = 0.0f32;
-                        for d in 0..d_head {
-                            dot += q[q_off + d] * k[k_off + d];
-                        }
-                        scores[s] = dot * kq_scale;
+                        let k_row = &k[s * ne + dh..s * ne + dh + d_head];
+                        scores[s] = dot_f32_exact(q_row, k_row, d_head) * kq_scale;
                     }
                     softmax_inplace(&mut scores);
-                    for d in 0..d_head {
-                        let mut acc = 0.0f32;
-                        for s in 0..n_patches {
-                            acc += scores[s] * v[s * ne + dh + d];
-                        }
-                        attn_out[t * ne + dh + d] = acc;
+                    // output[t, dh + d] = sum_s scores[s] * v[s, dh + d]
+                    let mut out = vec![0.0f32; d_head];
+                    for s in 0..n_patches {
+                        let v_row = &v[s * ne + dh..s * ne + dh + d_head];
+                        vec_mad_f32(&mut out, v_row, scores[s]);
                     }
+                    attn_out[t * ne + dh..t * ne + dh + d_head].copy_from_slice(&out);
                 }
             }
             // out proj + residual
@@ -640,13 +663,9 @@ impl<'a> VisionModel<'a> {
                     ne,
                     ne,
                 );
-                for c in 0..ne {
-                    attn_proj[t * ne + c] += layer.bo[c];
-                }
+                vec_add_into(&layer.bo, &mut attn_proj[t * ne..(t + 1) * ne]);
             }
-            for i in 0..n_patches * ne {
-                hidden[i] += attn_proj[i];
-            }
+            vec_add_into(&attn_proj, &mut hidden);
 
             // LN2 + MLP(gelu)
             let mut normed2 = hidden.clone();
@@ -666,13 +685,9 @@ impl<'a> VisionModel<'a> {
                     ne,
                     cfg.n_ff,
                 );
-                for c in 0..cfg.n_ff {
-                    up[t * cfg.n_ff + c] += layer.ffn_up_b[c];
-                }
+                vec_add_into(&layer.ffn_up_b, &mut up[t * cfg.n_ff..(t + 1) * cfg.n_ff]);
             }
-            for v in up.iter_mut() {
-                *v = gelu(*v);
-            }
+            gelu_inplace(&mut up);
             let mut down = vec![0.0f32; n_patches * ne];
             for t in 0..n_patches {
                 layer.ffn_down.kernel.forward(
@@ -681,13 +696,9 @@ impl<'a> VisionModel<'a> {
                     cfg.n_ff,
                     ne,
                 );
-                for c in 0..ne {
-                    down[t * ne + c] += layer.ffn_down_b[c];
-                }
+                vec_add_into(&layer.ffn_down_b, &mut down[t * ne..(t + 1) * ne]);
             }
-            for i in 0..n_patches * ne {
-                hidden[i] += down[i];
-            }
+            vec_add_into(&down, &mut hidden);
         }
 
         // ---- post LN ----
@@ -733,13 +744,9 @@ impl<'a> VisionModel<'a> {
                 merged_dim,
                 cfg.projection_dim,
             );
-            for c in 0..cfg.projection_dim {
-                mid[t * cfg.projection_dim + c] += self.mm1_b[c];
-            }
+            vec_add_into(&self.mm1_b, &mut mid[t * cfg.projection_dim..(t + 1) * cfg.projection_dim]);
         }
-        for v in mid.iter_mut() {
-            *v = gelu(*v);
-        }
+        gelu_inplace(&mut mid);
         let mut out = vec![0.0f32; n_tok * cfg.projection_dim];
         for t in 0..n_tok {
             self.mm2.kernel.forward(
@@ -748,9 +755,7 @@ impl<'a> VisionModel<'a> {
                 cfg.projection_dim,
                 cfg.projection_dim,
             );
-            for c in 0..cfg.projection_dim {
-                out[t * cfg.projection_dim + c] += self.mm2_b[c];
-            }
+            vec_add_into(&self.mm2_b, &mut out[t * cfg.projection_dim..(t + 1) * cfg.projection_dim]);
         }
         Ok(out)
     }
