@@ -745,9 +745,7 @@ fn forward_attention(
                         let out_base = h * n_embd_head_v;
                         let mut ms = 0.0f32;
                         let mut s_sum = 0.0f32;
-                        for d in 0..n_embd_head_v {
-                            attn_out[out_base + d] = 0.0;
-                        }
+                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
                         for t in 0..pos + 1 {
                             let score = dot_f16_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -822,9 +820,7 @@ fn forward_attention(
                                 n_embd_head_k,
                             ) * kq_scale;
                         }
-                        for v in &mut scores[n_cached..n_padded] {
-                            *v = f32::NEG_INFINITY;
-                        }
+                        scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[..n_padded]);
                         let mut values = [0.0f32; 512];
                         for d in 0..n_embd_head_v {
