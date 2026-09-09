@@ -24,6 +24,12 @@ pub trait Kernel: Send + Sync {
         None
     }
 
+    /// Returns the original GGUF storage bytes when the kernel keeps a
+    /// borrowed weight representation that can be uploaded unchanged.
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Hot-path matmul: pre-quantized Q8_0 input, partitioned by row.
     ///
     /// Each call computes `output[i] = sum_k weight[i, k] * dequant(input_q8[k], input_scales[k/32])`

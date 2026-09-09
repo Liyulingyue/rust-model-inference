@@ -18,10 +18,17 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
         return Err(format!("unsupported architecture {}", facts.architecture));
     }
     if facts.weight_formats.is_empty()
-        || facts
-            .weight_formats
-            .iter()
-            .any(|&format| format != GGMLType::BF16)
+        || facts.weight_formats.iter().any(|&format| {
+            !matches!(
+                format,
+                GGMLType::BF16
+                    | GGMLType::Q8_0
+                    | GGMLType::Q4_0
+                    | GGMLType::Q4_1
+                    | GGMLType::Q4K
+                    | GGMLType::Q6K
+            )
+        })
     {
         return Err("unsupported Qwen3.5 Vulkan weight format".into());
     }
@@ -194,6 +201,7 @@ impl Qwen35ArenaLayout {
         let value_dim = config.value_dim();
         let conv_dim = config.conv_dim();
         let head_v_dim = config.head_v_dim();
+        let quant_len = config.n_embd.max(config.n_ff).max(dense_q).max(value_dim);
         let kv_cache = qwen35_product("KV cache", &[layer_count, capacity, dense_kv])?;
         let kv_delta = qwen35_product("KV delta", &[layer_count, dense_kv])?;
         let conv_state = qwen35_product(
@@ -222,11 +230,11 @@ impl Qwen35ArenaLayout {
         let down = qwen35_f32_region(&mut cursor, config.n_embd)?;
         let logits = qwen35_f32_region(&mut cursor, config.vocab_size)?;
         let rope = qwen35_f32_region(&mut cursor, config.rope_dimension_count)?;
-        let q8 = qwen35_region(&mut cursor, 4)?;
-        let q8_scales = qwen35_f32_region(&mut cursor, 1)?;
-        let q4_1_input_sums = qwen35_f32_region(&mut cursor, 1)?;
-        let q8k = qwen35_region(&mut cursor, 4)?;
-        let q8k_scales = qwen35_f32_region(&mut cursor, 1)?;
+        let q8 = qwen35_region(&mut cursor, quant_len)?;
+        let q8_scales = qwen35_f32_region(&mut cursor, quant_len.div_ceil(32))?;
+        let q4_1_input_sums = qwen35_f32_region(&mut cursor, quant_len.div_ceil(32))?;
+        let q8k = qwen35_region(&mut cursor, quant_len)?;
+        let q8k_scales = qwen35_f32_region(&mut cursor, quant_len.div_ceil(256))?;
         let kv_k = qwen35_f32_region(&mut cursor, kv_cache)?;
         let kv_v = qwen35_f32_region(&mut cursor, kv_cache)?;
         let kv_delta_k = qwen35_f32_region(&mut cursor, kv_delta)?;
@@ -354,15 +362,21 @@ fn fill_mrope(
 }
 
 #[derive(Clone, Copy)]
+enum WeightBindings<const N: usize> {
+    Grouped(OperatorBindings),
+    Split([OperatorBindings; N]),
+}
+
+#[derive(Clone, Copy)]
 struct DenseBindings {
-    qkv: OperatorBindings,
+    qkv: WeightBindings<3>,
     prepare: OperatorBindings,
     output: OperatorBindings,
 }
 
 #[derive(Clone, Copy)]
 struct RecurrentBindings {
-    qkv_gate_beta: OperatorBindings,
+    qkv_gate_beta: WeightBindings<3>,
     alpha: OperatorBindings,
     convolution: OperatorBindings,
     ssm: OperatorBindings,
@@ -380,7 +394,7 @@ struct LayerBindings {
     attention_norm: OperatorBindings,
     attention: AttentionBindings,
     post_attention_norm: OperatorBindings,
-    gate_up: OperatorBindings,
+    gate_up: WeightBindings<2>,
     down: OperatorBindings,
 }
 
@@ -435,7 +449,7 @@ impl Qwen35VulkanSession {
         let layer_count = config.n_layer_impl();
         let layout = Qwen35ArenaLayout::new(&config, capacity)?;
         let descriptor_capacity = layer_count
-            .checked_mul(10)
+            .checked_mul(12)
             .and_then(|count| count.checked_add(3))
             .ok_or(VulkanError::OutOfMemory)?;
         let mut ops = Qwen3Ops::new_with_size(context, layout.total_size(), descriptor_capacity)?;
@@ -452,14 +466,16 @@ impl Qwen35VulkanSession {
                 let beta = required_weight(layer.ssm_beta.as_ref(), layer_index, "ssm_beta")?;
                 let alpha = required_weight(layer.ssm_alpha.as_ref(), layer_index, "ssm_alpha")?;
                 let output = required_weight(layer.ssm_out.as_ref(), layer_index, "ssm_out")?;
-                let projection_buffers = [
-                    upload_bf16(&mut buffers, wqkv, "Qwen3.5 recurrent QKV")?,
-                    upload_bf16(&mut buffers, gate, "Qwen3.5 recurrent gate")?,
-                    upload_bf16(&mut buffers, beta, "Qwen3.5 recurrent beta")?,
-                ];
-                let qkv_gate_beta = bind_bf16(&mut ops, &projection_buffers)?;
-                let alpha_buffer = upload_bf16(&mut buffers, alpha, "Qwen3.5 recurrent alpha")?;
-                let alpha = bind_bf16(&mut ops, &[alpha_buffer])?;
+                let qkv_gate_beta = bind_weight_group(
+                    &mut ops,
+                    &mut buffers,
+                    [
+                        (wqkv, "Qwen3.5 recurrent QKV"),
+                        (gate, "Qwen3.5 recurrent gate"),
+                        (beta, "Qwen3.5 recurrent beta"),
+                    ],
+                )?;
+                let alpha = bind_weight(&mut ops, &mut buffers, alpha, "Qwen3.5 recurrent alpha")?;
                 let conv_weight = layer.ssm_conv1d.as_ref().ok_or_else(|| {
                     VulkanError::UnsupportedShape(format!(
                         "missing Qwen3.5 layer {layer_index} convolution weight"
@@ -488,8 +504,8 @@ impl Qwen35VulkanSession {
                     buffers.upload_f32(norm)?,
                 ];
                 let ssm = ops.bind_buffers(&ssm_buffers)?;
-                let output_buffer = upload_bf16(&mut buffers, output, "Qwen3.5 recurrent output")?;
-                let output = bind_bf16(&mut ops, &[output_buffer])?;
+                let output =
+                    bind_weight(&mut ops, &mut buffers, output, "Qwen3.5 recurrent output")?;
                 AttentionBindings::Recurrent(RecurrentBindings {
                     qkv_gate_beta,
                     alpha,
@@ -502,12 +518,15 @@ impl Qwen35VulkanSession {
                 let wk = required_weight(layer.wk.as_ref(), layer_index, "attn_k")?;
                 let wv = required_weight(layer.wv.as_ref(), layer_index, "attn_v")?;
                 let wo = required_weight(layer.wo.as_ref(), layer_index, "attn_output")?;
-                let qkv_buffers = [
-                    upload_bf16(&mut buffers, wq, "Qwen3.5 dense Q")?,
-                    upload_bf16(&mut buffers, wk, "Qwen3.5 dense K")?,
-                    upload_bf16(&mut buffers, wv, "Qwen3.5 dense V")?,
-                ];
-                let qkv = bind_bf16(&mut ops, &qkv_buffers)?;
+                let qkv = bind_weight_group(
+                    &mut ops,
+                    &mut buffers,
+                    [
+                        (wq, "Qwen3.5 dense Q"),
+                        (wk, "Qwen3.5 dense K"),
+                        (wv, "Qwen3.5 dense V"),
+                    ],
+                )?;
                 let q_norm = layer.attn_q_norm.as_ref().ok_or_else(|| {
                     VulkanError::UnsupportedShape(format!(
                         "missing Qwen3.5 layer {layer_index} Q norm"
@@ -520,8 +539,7 @@ impl Qwen35VulkanSession {
                 })?;
                 let prepare_buffers = [buffers.upload_f32(q_norm)?, buffers.upload_f32(k_norm)?];
                 let prepare = ops.bind_buffers(&prepare_buffers)?;
-                let output_buffer = upload_bf16(&mut buffers, wo, "Qwen3.5 dense output")?;
-                let output = bind_bf16(&mut ops, &[output_buffer])?;
+                let output = bind_weight(&mut ops, &mut buffers, wo, "Qwen3.5 dense output")?;
                 AttentionBindings::Dense(DenseBindings {
                     qkv,
                     prepare,
@@ -531,13 +549,15 @@ impl Qwen35VulkanSession {
 
             let post_norm_buffer = buffers.upload_f32(&layer.attn_post_norm)?;
             let post_attention_norm = ops.bind_buffers(&[post_norm_buffer])?;
-            let gate_up_buffers = [
-                upload_bf16(&mut buffers, &layer.ffn_gate, "Qwen3.5 FFN gate")?,
-                upload_bf16(&mut buffers, &layer.ffn_up, "Qwen3.5 FFN up")?,
-            ];
-            let gate_up = bind_bf16(&mut ops, &gate_up_buffers)?;
-            let down_buffer = upload_bf16(&mut buffers, &layer.ffn_down, "Qwen3.5 FFN down")?;
-            let down = bind_bf16(&mut ops, &[down_buffer])?;
+            let gate_up = bind_weight_group(
+                &mut ops,
+                &mut buffers,
+                [
+                    (&layer.ffn_gate, "Qwen3.5 FFN gate"),
+                    (&layer.ffn_up, "Qwen3.5 FFN up"),
+                ],
+            )?;
+            let down = bind_weight(&mut ops, &mut buffers, &layer.ffn_down, "Qwen3.5 FFN down")?;
             layers.push(LayerBindings {
                 attention_norm,
                 attention,
@@ -549,8 +569,12 @@ impl Qwen35VulkanSession {
 
         let output_norm_buffer = buffers.upload_f32(&model.output_norm)?;
         let output_norm = ops.bind_buffers(&[output_norm_buffer])?;
-        let output_buffer = upload_bf16(&mut buffers, &model.output_weight, "Qwen3.5 output")?;
-        let output = bind_bf16(&mut ops, &[output_buffer])?;
+        let output = bind_weight(
+            &mut ops,
+            &mut buffers,
+            &model.output_weight,
+            "Qwen3.5 output",
+        )?;
         let dense_kv = config
             .n_head_kv
             .checked_mul(config.n_embd_head())
@@ -612,6 +636,49 @@ impl Qwen35VulkanSession {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn record_weight_group<const N: usize>(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: WeightBindings<N>,
+        input: ArenaRegion,
+        outputs: [(ArenaRegion, usize); N],
+        n_in: usize,
+    ) -> Result<(), VulkanError> {
+        match bindings {
+            WeightBindings::Grouped(bindings) => self.ops.record_weight_matvec_group(
+                commands,
+                bindings,
+                input,
+                self.layout.q8,
+                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
+                &outputs,
+                n_in,
+            ),
+            WeightBindings::Split(bindings) => {
+                for (bindings, (output, n_out)) in bindings.into_iter().zip(outputs) {
+                    self.ops.record_weight_matvec(
+                        commands,
+                        bindings,
+                        input,
+                        self.layout.q8,
+                        self.layout.q8_scales,
+                        self.layout.q4_1_input_sums,
+                        self.layout.q8k,
+                        self.layout.q8k_scales,
+                        output,
+                        n_in,
+                        n_out,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn forward_token_inner(
         &mut self,
         input: &[f32],
@@ -665,16 +732,11 @@ impl Qwen35VulkanSession {
             )?;
             match bindings.attention {
                 AttentionBindings::Dense(dense) => {
-                    self.ops.record_weight_matvec_group(
+                    self.record_weight_group(
                         &commands,
                         dense.qkv,
                         self.layout.normed,
-                        self.layout.q8,
-                        self.layout.q8_scales,
-                        self.layout.q4_1_input_sums,
-                        self.layout.q8k,
-                        self.layout.q8k_scales,
-                        &[
+                        [
                             (self.layout.raw_qkv, dense_raw_q),
                             (self.layout.raw_k, dense_kv),
                             (self.layout.v, dense_kv),
@@ -734,16 +796,11 @@ impl Qwen35VulkanSession {
                     )?;
                 }
                 AttentionBindings::Recurrent(recurrent) => {
-                    self.ops.record_weight_matvec_group(
+                    self.record_weight_group(
                         &commands,
                         recurrent.qkv_gate_beta,
                         self.layout.normed,
-                        self.layout.q8,
-                        self.layout.q8_scales,
-                        self.layout.q4_1_input_sums,
-                        self.layout.q8k,
-                        self.layout.q8k_scales,
-                        &[
+                        [
                             (self.layout.raw_qkv, conv_dim),
                             (self.layout.z, value_dim),
                             (self.layout.beta, value_heads),
@@ -829,16 +886,11 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.norm_eps,
             )?;
-            self.ops.record_weight_matvec_group(
+            self.record_weight_group(
                 &commands,
                 bindings.gate_up,
                 self.layout.normed,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                &[
+                [
                     (self.layout.ffn_gate, config.n_ff),
                     (self.layout.ffn_up, config.n_ff),
                 ],
@@ -940,40 +992,83 @@ fn required_weight<'a>(
     })
 }
 
-fn upload_bf16(
+fn upload_weight(
     buffers: &mut UploadedBuffers,
     weight: &Weight<'_>,
     label: &str,
-) -> Result<GpuBuffer, VulkanError> {
-    if weight.ggml_type != GGMLType::BF16 {
-        return Err(VulkanError::UnsupportedShape(format!(
-            "{label} has unsupported Vulkan format {:?}",
+) -> Result<(GpuBuffer, GpuWeightFormat), VulkanError> {
+    let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
+    let bytes = validated_weight_bytes(weight, label)?;
+    Ok((buffers.upload(bytes)?, format))
+}
+
+fn validated_weight_bytes<'a>(
+    weight: &'a Weight<'_>,
+    label: &str,
+) -> Result<&'a [u8], VulkanError> {
+    let bytes = weight.kernel.weight_bytes().ok_or_else(|| {
+        VulkanError::UnsupportedShape(format!(
+            "{label} does not expose {:?} storage bytes",
             weight.ggml_type
-        )));
-    }
-    let bytes = weight.kernel.bf16_bytes().ok_or_else(|| {
-        VulkanError::UnsupportedShape(format!("{label} does not expose BF16 bytes"))
+        ))
     })?;
-    let expected = weight
+    let elements = weight
         .n_in
         .checked_mul(weight.n_out)
-        .and_then(|count| count.checked_mul(2))
+        .ok_or(VulkanError::OutOfMemory)?;
+    let (block_elements, block_bytes) = weight.ggml_type.type_traits();
+    let expected = elements
+        .div_ceil(block_elements)
+        .checked_mul(block_bytes)
         .ok_or(VulkanError::OutOfMemory)?;
     if bytes.len() != expected {
         return Err(VulkanError::UnsupportedShape(format!(
-            "{label} has {} BF16 bytes, expected {expected}",
-            bytes.len()
+            "{label} has {} {:?} bytes, expected {expected}",
+            bytes.len(),
+            weight.ggml_type
         )));
     }
-    buffers.upload(bytes)
+    Ok(bytes)
 }
 
-fn bind_bf16(
+fn bind_weight(
     ops: &mut Qwen3Ops<'_>,
-    buffers: &[GpuBuffer],
+    buffers: &mut UploadedBuffers,
+    weight: &Weight<'_>,
+    label: &str,
 ) -> Result<OperatorBindings, VulkanError> {
-    let formats = vec![GpuWeightFormat::BF16; buffers.len()];
-    ops.bind_weight_buffers(buffers, &formats)
+    let (buffer, format) = upload_weight(buffers, weight, label)?;
+    ops.bind_weight_buffers(std::slice::from_ref(&buffer), std::slice::from_ref(&format))
+}
+
+fn bind_weight_group<const N: usize>(
+    ops: &mut Qwen3Ops<'_>,
+    buffers: &mut UploadedBuffers,
+    weights: [(&Weight<'_>, &str); N],
+) -> Result<WeightBindings<N>, VulkanError> {
+    let mut gpu_buffers = Vec::with_capacity(N);
+    let mut formats = Vec::with_capacity(N);
+    for (weight, label) in weights {
+        let (buffer, format) = upload_weight(buffers, weight, label)?;
+        gpu_buffers.push(buffer);
+        formats.push(format);
+    }
+    if formats.iter().all(|format| *format == formats[0]) {
+        return ops
+            .bind_weight_buffers(&gpu_buffers, &formats)
+            .map(WeightBindings::Grouped);
+    }
+
+    let split = gpu_buffers
+        .iter()
+        .zip(&formats)
+        .map(|(buffer, format)| {
+            ops.bind_weight_buffers(std::slice::from_ref(buffer), std::slice::from_ref(format))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| VulkanError::OutOfMemory)?;
+    Ok(WeightBindings::Split(split))
 }
 
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
@@ -1076,11 +1171,12 @@ fn validate_executor_shape(config: &Qwen35Config, capacity: usize) -> Result<(),
 mod tests {
     use super::{
         check_device_eligibility, check_eligibility, commit_shadow_state, fill_mrope,
-        EligibilityFacts, Qwen35ArenaLayout,
+        validated_weight_bytes, EligibilityFacts, Qwen35ArenaLayout,
     };
     use crate::core::scratchpad::KvCache;
     use crate::core::tensor::GGMLType;
     use crate::models::qwen35::Qwen35Config;
+    use crate::ops::kernel::{QuantizedTensor, Weight};
 
     fn eligible_facts() -> EligibilityFacts {
         EligibilityFacts {
@@ -1099,6 +1195,80 @@ mod tests {
         assert!(check_eligibility(&facts)
             .expect_err("an unrecorded operation must reject the whole model")
             .contains("ssm_state_update"));
+    }
+
+    #[test]
+    fn qwen35_q4_q8_weight_formats_are_vulkan_eligible() {
+        for formats in [
+            vec![GGMLType::Q8_0],
+            vec![GGMLType::Q4_0, GGMLType::Q4_1, GGMLType::Q6K],
+            vec![GGMLType::Q4K, GGMLType::Q6K],
+        ] {
+            let facts = EligibilityFacts {
+                architecture: "qwen35".into(),
+                weight_formats: formats,
+                unrecorded_operations: Vec::new(),
+            };
+            assert_eq!(check_eligibility(&facts), Ok(()));
+        }
+    }
+
+    #[test]
+    fn qwen35_quantized_weights_expose_gpu_upload_bytes() {
+        let q8 = [0u8; 34];
+        let q4_0 = [0u8; 18];
+        let q4_1 = [0u8; 20];
+        let q4_k = [0u8; 144];
+        let q6_k = [0u8; 210];
+        let weights = [
+            Weight::from_quantized(QuantizedTensor::Q8_0 {
+                data: &q8,
+                n_cols: 32,
+                n_rows: 1,
+            }),
+            Weight::from_quantized(QuantizedTensor::Q4_0 {
+                data: &q4_0,
+                n_cols: 32,
+                n_rows: 1,
+            }),
+            Weight::from_quantized(QuantizedTensor::Q4_1 {
+                data: &q4_1,
+                n_cols: 32,
+                n_rows: 1,
+            }),
+            Weight::from_quantized(QuantizedTensor::Q4_K {
+                data: &q4_k,
+                n_cols: 256,
+                n_rows: 1,
+            }),
+            Weight::from_quantized(QuantizedTensor::Q6_K {
+                data: &q6_k,
+                n_cols: 256,
+                n_rows: 1,
+            }),
+        ];
+
+        for (weight, expected) in
+            weights
+                .iter()
+                .zip([&q8[..], &q4_0[..], &q4_1[..], &q4_k[..], &q6_k[..]])
+        {
+            assert_eq!(weight.kernel.weight_bytes(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn qwen35_rejects_malformed_weight_storage() {
+        let data = [0u8; 1];
+        let weight = Weight::from_quantized(QuantizedTensor::Q8_0 {
+            data: &data,
+            n_cols: 32,
+            n_rows: 1,
+        });
+
+        let error = validated_weight_bytes(&weight, "test weight")
+            .expect_err("short Q8_0 storage must be rejected");
+        assert!(format!("{error:?}").contains("expected 34"));
     }
 
     #[test]
@@ -1202,6 +1372,8 @@ mod tests {
         assert_eq!(layout.kv_v.size, 2 * capacity * 4 * 4);
         assert_eq!(layout.conv_state.size, 2 * 2 * 16 * 4);
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
+        assert_eq!(layout.q8.size, config.n_ff);
+        assert_eq!(layout.q8k.size, config.n_ff);
         assert!(layout.total_size() >= layout.ssm_state.end());
     }
 

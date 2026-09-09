@@ -42,6 +42,10 @@ mod tests {
 }
 
 impl<'a> Kernel for Q4_KKernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         crate::ops::embedding::embedding_lookup_q4_k(self.weight, token_id, n_embd, out);
     }

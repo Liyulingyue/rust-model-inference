@@ -30,6 +30,10 @@ impl<'a> Q4_0Kernel<'a> {
 }
 
 impl<'a> Kernel for Q4_0Kernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     fn forward_prequantized(
         &self,
         input_q8: &[u8],
