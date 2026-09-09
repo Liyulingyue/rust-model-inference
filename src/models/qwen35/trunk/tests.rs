@@ -26,6 +26,39 @@ fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static>
     weight
 }
 
+#[test]
+fn qwen35_bf16_matmul_rounds_activations_before_dot() {
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    struct Source(TensorInfo, Vec<u8>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+            Some(&self.0)
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            Some(&self.1)
+        }
+    }
+    let source = Source(
+        TensorInfo {
+            name: "blk.0.attn_qkv.weight".into(),
+            dims: vec![3, 1],
+            ggml_type: GGMLType::BF16,
+            offset: 0,
+        },
+        [1.0f32, 2.0, -1.0]
+            .into_iter()
+            .flat_map(|x| crate::ops::f32_to_bf16(x).to_le_bytes())
+            .collect(),
+    );
+    let weight = super::weights::load_weight(&source, &source.0.name).unwrap();
+    let input = [1.00390625, 1.01171875, 0.501953125];
+    // RNE BF16 inputs are 1.0, 1.015625, 0.5; llama.cpp's scalar dot = 2.53125.
+    assert_eq!(weight.matmul(&input)[0].to_bits(), 2.53125f32.to_bits());
+}
+
 fn dense_test_config(n_ctx: usize) -> Qwen35Config {
     Qwen35Config {
         n_nextn: 0,
@@ -282,7 +315,7 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
     .into_iter()
     .zip([0x3f25_1fe0, 0x3eb5_c03f])
     {
-        assert!(got.abs_diff(expected) <= 1);
+        assert_eq!(got, expected);
     }
 }
 
@@ -291,26 +324,28 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
 fn qwen35_dense_attention_value_uses_ggml_padded_reduction() {
     let model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
     let n_tokens = 18;
-    let mut scratch = Qwen35Scratchpad::new(&model.config, n_tokens);
-    let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
-    let pool = ComputePool::new(1);
-    let input: Vec<f32> = std::iter::repeat_n([1.0, 0.0], n_tokens)
-        .flatten()
-        .collect();
+    for capacity in [n_tokens, model.config.n_ctx] {
+        let mut scratch = Qwen35Scratchpad::new(&model.config, n_tokens);
+        let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, capacity, 2);
+        let pool = ComputePool::new(1);
+        let input: Vec<f32> = std::iter::repeat_n([1.0, 0.0], n_tokens)
+            .flatten()
+            .collect();
 
-    let output = model.forward_dense_attn_layer(
-        0,
-        &input,
-        n_tokens,
-        &mut kv_cache,
-        &mut scratch,
-        &pool,
-        &vec![[0; 4]; n_tokens],
-        #[cfg(feature = "parity-trace")]
-        false,
-    );
+        let output = model.forward_dense_attn_layer(
+            0,
+            &input,
+            n_tokens,
+            &mut kv_cache,
+            &mut scratch,
+            &pool,
+            &vec![[0; 4]; n_tokens],
+            #[cfg(feature = "parity-trace")]
+            false,
+        );
 
-    assert_eq!(output[(n_tokens - 1) * 2].to_bits(), 0x3f00_0000);
+        assert_eq!(output[(n_tokens - 1) * 2].to_bits(), 0x3f00_0000);
+    }
 }
 
 // ------------------------------------------------------------------

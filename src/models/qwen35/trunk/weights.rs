@@ -108,6 +108,10 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
             ));
             weight.n_in = n_cols;
             weight.n_out = n_rows;
+            if ti.ggml_type == GGMLType::BF16 {
+                weight.kernel =
+                    Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(data));
+            }
             Some(weight)
         }
         _ => {

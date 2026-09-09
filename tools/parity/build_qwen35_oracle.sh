@@ -27,6 +27,7 @@ cmake -S "$clone_dir" -B "$build_dir" \
     -DGGML_ACCELERATE=OFF \
     -DGGML_BLAS=OFF \
     -DGGML_CCACHE=OFF \
+    -DGGML_LLAMAFILE=OFF \
     -DGGML_METAL=OFF \
     -DGGML_NATIVE=OFF \
     -DGGML_OPENMP=OFF \

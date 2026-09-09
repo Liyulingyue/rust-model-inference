@@ -19,11 +19,23 @@ pub mod scalar;
 #[derive(Debug, Clone, Copy)]
 pub struct BF16Kernel<'a> {
     pub weight: &'a [u8],
+    bf16_input: bool,
 }
 
 impl<'a> BF16Kernel<'a> {
     pub fn new(weight: &'a [u8]) -> Self {
-        Self { weight }
+        Self {
+            weight,
+            bf16_input: false,
+        }
+    }
+
+    /// Use the scalar llama.cpp BF16 activation and accumulation contract.
+    pub(crate) fn with_bf16_input(weight: &'a [u8]) -> Self {
+        Self {
+            weight,
+            bf16_input: true,
+        }
     }
 
     pub fn element_count(&self) -> usize {
@@ -46,6 +58,19 @@ impl<'a> BF16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        if self.bf16_input {
+            // ponytail: per-worker scratch; share prepared BF16 input if conversion becomes costly.
+            let rounded: Vec<u8> = input[..n_in]
+                .iter()
+                .flat_map(|&x| crate::ops::f32_to_bf16(x).to_le_bytes())
+                .collect();
+            let (start, end) = Self::row_range(n_out, ith, nth);
+            for row in start..end {
+                output[row] =
+                    scalar::dot_bf16(&self.weight[row * n_in * 2..(row + 1) * n_in * 2], &rounded);
+            }
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         {
             if n_in % 8 == 0 && crate::ops::has_avx2_fma() {

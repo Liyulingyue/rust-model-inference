@@ -16,7 +16,8 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox_inplace, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_neox_inplace, silu_approx_inplace, silu_mul_approx_inplace,
+    softmax_approx_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -260,7 +261,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 );
             }
             #[cfg(feature = "parity-trace")]
-            if trace_layer(il) {
+            {
                 parity_trace::report(parity_trace::checkpoint(
                     &format!("layer_output-{il}"),
                     Some(il),
@@ -367,7 +368,9 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 &mut scratch.q8_buf[..n_embd],
                 &mut scratch.scale_buf[..n_embd / 32],
             );
-            crate::ops::quantize_row_q8_k_into(inp_slice, &mut scratch.q8k_buf[..n_embd / 256]);
+            if n_embd % 256 == 0 {
+                crate::ops::quantize_row_q8_k_into(inp_slice, &mut scratch.q8k_buf[..n_embd / 256]);
+            }
             let q8_ptr = scratch.q8_buf.as_ptr();
             let sc_ptr = scratch.scale_buf.as_ptr();
             let q8k_ptr = scratch.q8k_buf.as_ptr();
@@ -586,24 +589,22 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     scratch.score_buf[s] = dot * scale;
                 }
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
-                softmax_inplace(&mut scratch.score_buf[..n_padded]);
+                softmax_approx_inplace(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
-                // V cache layout is [layer, kv_head, head_dim, seq]; the column
-                // `v[il, kv_h, d, 0..capacity]` is contiguous in `seq`. Score is
-                // NEG_INFINITY-padded past `n_attend`, so the corresponding
-                // (zero-initialized) V tail contributes nothing after softmax.
+                // Pad the reduction even when the physical cache is shorter than
+                // ggml's row. Otherwise changing the generation limit changes
+                // the SIMD reduction order and therefore the prompt logits.
                 let v_capacity = v_len / (n_head_kv * n_embd_head);
                 let v_layer_base = il * v_len + kv_h * (n_embd_head * v_capacity);
-                let v_col_end = kv_pos + t + 1;
-                let v_col_end_padded = v_col_end.div_ceil(256) * 256;
-                let v_col_end_padded = v_col_end_padded.min(v_capacity);
+                scratch.attention_value_buf[n_attend..n_padded].fill(0.0);
                 for d in 0..n_embd_head {
-                    let v_col = v_col_end_padded;
                     let v_col_start = v_layer_base + d * v_capacity;
+                    scratch.attention_value_buf[..n_attend]
+                        .copy_from_slice(&v_cache[v_col_start..v_col_start + n_attend]);
                     scratch.attn_out_buf[out_base + d] = dot_f32(
-                        &v_cache[v_col_start..v_col_start + v_col],
-                        &scratch.score_buf[..v_col],
-                        v_col_end,
+                        &scratch.attention_value_buf[..n_padded],
+                        &scratch.score_buf[..n_padded],
+                        n_padded,
                     );
                 }
             }
