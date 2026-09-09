@@ -14,6 +14,7 @@ const Q5_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_k_matmul.
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
+const F32_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f32_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
@@ -52,7 +53,8 @@ const QWEN35_ATTENTION: usize = 18;
 const QWEN35_RECURRENT_CONV: usize = 19;
 const QWEN35_RECURRENT_SSM: usize = 20;
 const Q5_K_MATMUL: usize = 21;
-const OPERATOR_SHADERS: [&[u8]; 22] = [
+const F32_MATMUL: usize = 22;
+const OPERATOR_SHADERS: [&[u8]; 23] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -75,6 +77,7 @@ const OPERATOR_SHADERS: [&[u8]; 22] = [
     QWEN35_RECURRENT_CONV_SHADER,
     QWEN35_RECURRENT_SSM_SHADER,
     Q5_K_MATMUL_SHADER,
+    F32_MATMUL_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +90,7 @@ pub(crate) enum GpuWeightFormat {
     Q6_K,
     F16,
     BF16,
+    F32,
 }
 
 impl GpuWeightFormat {
@@ -102,6 +106,7 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
+            crate::core::tensor::GGMLType::F32 => Ok(Self::F32),
             value => Err(VulkanError::UnsupportedShape(format!(
                 "unsupported Vulkan weight format {value:?}"
             ))),
@@ -118,6 +123,7 @@ impl GpuWeightFormat {
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
             Self::BF16 => (1, 2, BF16_MATMUL),
+            Self::F32 => (1, 4, F32_MATMUL),
         }
     }
 }
@@ -806,7 +812,9 @@ impl<'a> Qwen3Ops<'a> {
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales) = match format {
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 => (input, q8_scales),
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
+                (input, q8_scales)
+            }
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
                 self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
                 (q8k, q8k_scales)
@@ -880,17 +888,21 @@ impl<'a> Qwen3Ops<'a> {
             )));
         }
         let blocks_per_row = n_in / block_elements;
-        if n_in / 32 > 512 {
+        let is_float = matches!(
+            format,
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
+        );
+        if format == GpuWeightFormat::Q8_0 && n_in > 16_384 {
             return Err(VulkanError::UnsupportedShape(format!(
                 "n_in {n_in} exceeds shader shared-memory capacity"
             )));
         }
-        let input_word = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) {
+        let input_word = if is_float {
             self.f32_word(q8, n_in, "floating-point matvec input")?
         } else {
             self.byte_word(q8, n_in, "Q8_0 matvec input")?
         };
-        let scales_word = if matches!(format, GpuWeightFormat::F16 | GpuWeightFormat::BF16) {
+        let scales_word = if is_float {
             0
         } else {
             self.f32_word(scales, blocks_per_row, "Q8_0 matvec scales")?
@@ -2261,6 +2273,8 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         "f16" => GpuWeightFormat::F16,
         "bf16" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::BF16)
             .map_err(|error| error.to_string())?,
+        "f32" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::F32)
+            .map_err(|error| error.to_string())?,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
     let n_in = match format {
@@ -2271,9 +2285,19 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::BF16 => 1024,
+        GpuWeightFormat::F32 => 1024,
         GpuWeightFormat::Q8_0 => unreachable!(),
     };
-    let n_out = 65;
+    check_weight_matvec(context, name, format, n_in, 65)
+}
+
+fn check_weight_matvec(
+    context: &VulkanContext,
+    name: &str,
+    format: GpuWeightFormat,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), String> {
     let layout = ArenaLayout::for_dims(n_in.max(n_out), n_out, 1, 1, n_in)
         .map_err(|error| error.to_string())?;
     let input: Vec<f32> = (0..n_in)
@@ -2324,6 +2348,7 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
         let tolerance = match format {
+            GpuWeightFormat::F32 => 0.0,
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K => 3e-3,
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
@@ -2591,6 +2616,10 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     };
                     data[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
                 }
+                GpuWeightFormat::F32 => {
+                    let value = ((row * 17 + block * 31) % 257) as f32 / 63.0 - 2.0;
+                    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
                 GpuWeightFormat::Q8_0 => unreachable!(),
             }
         }
@@ -2675,6 +2704,14 @@ fn cpu_weight_matvec(
         }
         GpuWeightFormat::BF16 => {
             let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
+            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
+        GpuWeightFormat::F32 => {
+            let values = weight
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            let kernel = crate::ops::kernel::f32::F32Kernel::new(values);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
         GpuWeightFormat::Q8_0 => unreachable!(),
@@ -3169,6 +3206,30 @@ fn check_close(
 #[cfg(test)]
 mod tests {
     use super::{fill_rope_neox, ArenaLayout, TokenDispatchPlan};
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q5_k_matvec_runs_on_vulkan() {
+        let context = super::VulkanContext::new().unwrap();
+        super::check_weight_format(&context, "q5_k").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn wide_quantized_matvec_runs_on_vulkan() {
+        use super::GpuWeightFormat::*;
+        let context = super::VulkanContext::new().unwrap();
+        for format in [Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+            super::check_weight_matvec(
+                &context,
+                &format!("{format:?} width=17408"),
+                format,
+                17_408,
+                65,
+            )
+            .unwrap();
+        }
+    }
 
     #[test]
     fn vulkan_rope_coefficients_match_cpu_dimension_formula() {
