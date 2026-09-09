@@ -161,7 +161,7 @@ fn torch28_exp_double(value: DoubleF32) -> DoubleF32 {
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_exp(value: f32) -> f32 {
+pub(crate) fn torch28_exp(value: f32) -> f32 {
     let exponent = (value * R_LN2).round_ties_even() as i32;
     let exponent_f32 = exponent as f32;
     let mut reduced = exponent_f32.mul_add(-L2_UPPER, value);
@@ -191,7 +191,7 @@ pub(in crate::models::dots) fn torch28_sigmoid(value: f32) -> f32 {
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_tanh(value: f32) -> f32 {
+pub(crate) fn torch28_tanh(value: f32) -> f32 {
     let magnitude = value.abs();
     let exponential = torch28_exp_double(DoubleF32 {
         high: magnitude,
@@ -210,5 +210,75 @@ pub(in crate::models::dots) fn torch28_tanh(value: f32) -> f32 {
         f32::from_bits(0xffff_ffff)
     } else {
         result
+    }
+}
+
+/// SLEEF `expm1f_u10`, using the same double-float exponential as tanh.
+#[inline(always)]
+pub(crate) fn torch28_expm1(value: f32) -> f32 {
+    if value.to_bits() == 0x8000_0000 {
+        return value;
+    }
+    if value > 88.722_83 {
+        return f32::INFINITY;
+    }
+    if value < -16.635_532 {
+        return -1.0;
+    }
+    let result = df_add2_float(
+        torch28_exp_double(DoubleF32 {
+            high: value,
+            low: 0.0,
+        }),
+        -1.0,
+    );
+    result.high + result.low
+}
+
+/// Pinned Torch ARM `Vectorized<float>::erf` polynomial (vec128_float_neon.h).
+#[inline(always)]
+pub(crate) fn torch28_erf(value: f32) -> f32 {
+    let t = 1.0 / 0.3275911_f32.mul_add(value.abs(), 1.0);
+    let mut r = 1.061405429_f32.mul_add(t, -1.453152027);
+    r = r.mul_add(t, 1.421413741);
+    r = r.mul_add(t, -0.284496736);
+    r = r.mul_add(t, 0.254829592);
+    let negative_exp = -(-(value * value)).exp();
+    let result = (t * negative_exp).mul_add(r, 1.0);
+    f32::from_bits(result.to_bits() ^ (value.to_bits() & 0x8000_0000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{torch28_erf, torch28_expm1};
+
+    #[test]
+    fn torch_arm_expm1_and_erf_match_reference_bits() {
+        // Torch 2.9.1 CPU ARM, float32 tensors, including polynomial boundaries.
+        for (input, expm1, erf) in [
+            (0xc2b40000, 0xbf800000, 0xbf800000),
+            (0xc1800000, 0xbf7ffffe, 0xbf800000),
+            (0xc0c00000, 0xbf7f5d8d, 0xbf800000),
+            (0xc0400000, 0xbf734128, 0xbf7ffe8d),
+            (0xc0200000, 0xbf6afc7a, 0xbf7fe553),
+            (0xbf800000, 0xbf21d2a7, 0xbf57bb3b),
+            (0xbdcccccd, 0xbdc2e49a, 0xbde652fd),
+            (0xb727c5ac, 0xb727c575, 0xb739ffe4),
+            (0x80000000, 0x80000000, 0x80000000),
+            (0x00000000, 0x00000000, 0x00000000),
+            (0x3727c5ac, 0x3727c5e3, 0x3739ffe4),
+            (0x3dcccccd, 0x3dd763da, 0x3de652fd),
+            (0x3f800000, 0x3fdbf0a9, 0x3f57bb3b),
+            (0x40200000, 0x4132eb7f, 0x3f7fe553),
+            (0x40400000, 0x4198af2e, 0x3f7ffe8d),
+            (0x40c00000, 0x43c936e3, 0x3f800000),
+            (0x41800000, 0x4b07975e, 0x3f800000),
+            (0x42b00000, 0x7ef882b7, 0x3f800000),
+            (0x42b20000, 0x7f800000, 0x3f800000),
+        ] {
+            let value = f32::from_bits(input);
+            assert_eq!(torch28_expm1(value).to_bits(), expm1, "expm1({value})");
+            assert_eq!(torch28_erf(value).to_bits(), erf, "erf({value})");
+        }
     }
 }
