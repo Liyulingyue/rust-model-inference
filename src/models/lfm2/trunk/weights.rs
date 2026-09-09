@@ -63,6 +63,35 @@ fn quant_weight<'a>(
     )))
 }
 
+pub(crate) fn weight_needs_q8k(ggml_type: crate::core::tensor::GGMLType) -> bool {
+    use crate::core::tensor::GGMLType;
+    matches!(ggml_type, GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K)
+}
+
+impl<'a> Lfm2LayerWeights<'a> {
+    /// True iff any of this layer's matmul weights need Q8_K pre-quantization.
+    /// Forward loops use this to skip the Q8_K re-quant call when no kernel
+    /// downstream would consume the buffer (Q8_0 / F16 / BF16 / Q4_0 / Q4_1
+    /// paths ignore it).
+    pub(crate) fn needs_q8k(&self) -> bool {
+        weight_needs_q8k(self.w_gate.ggml_type)
+            || weight_needs_q8k(self.w_up.ggml_type)
+            || weight_needs_q8k(self.w_down.ggml_type)
+            || self.wq.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self.wk.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self.wv.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self.wo.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .shortconv_in
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .shortconv_out
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
+    }
+}
+
 pub fn load_layers<'a>(
     source: &'a dyn TensorSource,
     cfg: &Lfm2Config,

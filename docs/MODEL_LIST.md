@@ -12,7 +12,7 @@
 | K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
 | LFM2                          | 8B-A1B     | 文本          |                                       |              | 待核验 |
 | LFM2.5                        | 230M / 1.2B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
-| LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             |              | 待核验 |
+| LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF             | √ |
 | MiniCPM5                      | 1B         | 文本                 |                                       |              | 待核验 |
 | Nanbeige                      |            | 文本                 |                                       |              | 待核验 |
 | Ornith-1.5                    | 9B         | 文本                 |                                       |              | 待核验 |
