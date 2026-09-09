@@ -4,34 +4,13 @@
 //!
 //! All activations are token-major (`[T][C]` row-major) so the per-frame
 //! channel RMSNorm, depthwise mixer and FFN matmuls work on contiguous rows.
-//! Weighted convolutions are evaluated as im2col + BLAS sgemm; the per-channel
-//! mixer is a direct kernel-tap FIR. The causal `SConv1d` padding follows the
-//! official `padding_total = kernel - stride` (left) plus the stride-alignment
-//! `extra` right padding.
+//! Weighted convolutions are evaluated as im2col + native row-major matmul;
+//! the per-channel mixer is a direct kernel-tap FIR. The causal `SConv1d`
+//! padding follows the official `padding_total = kernel - stride` (left) plus
+//! the stride-alignment `extra` right padding.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::ops::{rms_norm, rms_norm_inplace};
-
-#[cfg(all(feature = "accelerate", target_os = "macos"))]
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemm(
-        order: i32,
-        transpose_a: i32,
-        transpose_b: i32,
-        rows: i32,
-        columns: i32,
-        reduction: i32,
-        alpha: f32,
-        left: *const f32,
-        left_stride: i32,
-        right: *const f32,
-        right_stride: i32,
-        beta: f32,
-        output: *mut f32,
-        output_stride: i32,
-    );
-}
 
 unsafe extern "C" {
     fn erff(value: f32) -> f32;
@@ -133,40 +112,17 @@ impl Dense {
         for row in output.chunks_exact_mut(self.n_out) {
             row.copy_from_slice(bias);
         }
-        #[cfg(all(feature = "accelerate", target_os = "macos"))]
-        unsafe {
-            cblas_sgemm(
-                101, // row major
-                111, // no transpose
-                112, // transpose
-                rows as i32,
-                self.n_out as i32,
-                self.n_in as i32,
-                1.0,
-                input.as_ptr(),
-                self.n_in as i32,
-                self.data.as_ptr(),
-                self.n_in as i32,
-                1.0,
-                output.as_mut_ptr(),
-                self.n_out as i32,
-            );
-        }
-        #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
+        for (in_row, out_row) in input
+            .chunks_exact(self.n_in)
+            .zip(output.chunks_exact_mut(self.n_out))
         {
-            for (in_row, out_row) in input
-                .chunks_exact(self.n_in)
-                .zip(output.chunks_exact_mut(self.n_out))
+            for (out_value, weight_row) in out_row.iter_mut().zip(self.data.chunks_exact(self.n_in))
             {
-                for (out_value, weight_row) in
-                    out_row.iter_mut().zip(self.data.chunks_exact(self.n_in))
-                {
-                    let mut sum = 0.0f32;
-                    for (&input_value, &weight_value) in in_row.iter().zip(weight_row) {
-                        sum = weight_value.mul_add(input_value, sum);
-                    }
-                    *out_value += sum;
+                let mut sum = 0.0f32;
+                for (&input_value, &weight_value) in in_row.iter().zip(weight_row) {
+                    sum = weight_value.mul_add(input_value, sum);
                 }
+                *out_value += sum;
             }
         }
     }
@@ -246,29 +202,6 @@ impl Conv1d {
     }
 
     /// output += patches · Wᵀ (accumulates over the bias-seeded output).
-    #[cfg(all(feature = "accelerate", target_os = "macos"))]
-    fn gemm_rows(&self, patches: &[f32], t_out: usize, output: &mut [f32]) {
-        unsafe {
-            cblas_sgemm(
-                101,
-                111,
-                112,
-                t_out as i32,
-                self.n_out as i32,
-                (self.n_in * self.kernel) as i32,
-                1.0,
-                patches.as_ptr(),
-                (self.n_in * self.kernel) as i32,
-                self.data.as_ptr(),
-                (self.n_in * self.kernel) as i32,
-                1.0,
-                output.as_mut_ptr(),
-                self.n_out as i32,
-            );
-        }
-    }
-
-    #[cfg(not(all(feature = "accelerate", target_os = "macos")))]
     fn gemm_rows(&self, patches: &[f32], t_out: usize, output: &mut [f32]) {
         let row_width = self.n_in * self.kernel;
         for (patch_row, out_row) in patches

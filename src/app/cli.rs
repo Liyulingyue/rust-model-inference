@@ -520,6 +520,16 @@ pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOption
         Some("--tts")
     } else if options.edit {
         Some("--edit")
+    } else if options.source_audio.is_some() {
+        Some("--source-audio")
+    } else if options.source_text.is_some() {
+        Some("--source-text")
+    } else if options.target_text.is_some() {
+        Some("--target-text")
+    } else if options.instruction.is_some() {
+        Some("--instruction")
+    } else if options.use_xvector_supplied {
+        Some("--use-xvector")
     } else if options.audio.is_some() {
         Some("--audio")
     } else if options.video.is_some() {
@@ -1267,6 +1277,37 @@ mod tests {
                     .is_err(),
                 "{argv:?}"
             );
+        }
+    }
+
+    #[test]
+    fn dreamx_cli_rejects_edit_only_options() {
+        let base = [
+            "rmi",
+            "--dreamx",
+            "--model",
+            "dreamx.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--image",
+            "first.png",
+            "--prompt",
+            "scene",
+            "--out",
+            "scene.mp4",
+        ];
+        for (extra, expected) in [
+            (vec!["--source-audio", "source.wav"], "--source-audio"),
+            (vec!["--source-text", "source"], "--source-text"),
+            (vec!["--target-text", "target"], "--target-text"),
+            (vec!["--instruction", "replace"], "--instruction"),
+            (vec!["--use-xvector", "auto"], "--use-xvector"),
+        ] {
+            let mut argv = base.to_vec();
+            argv.extend(extra);
+            let error =
+                validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+            assert!(error.contains(expected), "{argv:?}: {error}");
         }
     }
 

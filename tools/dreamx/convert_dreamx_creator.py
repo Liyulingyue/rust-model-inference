@@ -24,18 +24,18 @@ import numpy as np
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR / "dots"))
-sys.path.insert(0, str(TOOLS_DIR / "vibevoice"))
 
 import convert_dots_tts as _gguf  # noqa: E402
 from convert_dots_tts import (  # noqa: E402
     GGML_BF16,
     GGML_F16,
     GGML_F32,
+    GGML_Q8_0,
     GgufWriter,
     gguf_dims,
+    quantize_q8_0,
     validated_dir,
 )
-from convert_vibevoice_asr import GGML_Q8_0, quantize_q8_0  # noqa: E402
 
 
 JOINT_LAYERS = tuple(range(15, 30))

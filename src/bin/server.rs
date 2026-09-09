@@ -1241,6 +1241,13 @@ fn configure_gpu(options: &CliOptions) {
     }
 }
 
+fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.dreamx {
+        return Err("--dreamx is not supported by rust-model-server".into());
+    }
+    Ok(())
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
 
@@ -1281,6 +1288,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Err(error) = reject_unsupported_server_modes(&options) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
     // `--tts` validation requires non-empty `--prompt` and `--out`, but the
     // server receives both over HTTP. Inject placeholders so validation
     // passes; the real values come from `/v1/audio/speech` requests.
@@ -1390,5 +1401,22 @@ mod tests {
         configure_gpu(&options);
 
         assert!(rust_model_inference::ops::float::gpu_requested());
+    }
+}
+
+#[cfg(test)]
+mod server_mode_tests {
+    use super::{reject_unsupported_server_modes, CliOptions};
+
+    #[test]
+    fn dreamx_is_rejected_before_backend_construction() {
+        let options = CliOptions {
+            dreamx: true,
+            ..CliOptions::default()
+        };
+
+        assert!(reject_unsupported_server_modes(&options)
+            .unwrap_err()
+            .contains("--dreamx"));
     }
 }

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
 
+from tools.dreamx import convert_dreamx_creator as converter
 from tools.dots.convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes
 from tools.dreamx.convert_dreamx_creator import (
     JOINT_LAYERS,
@@ -39,6 +40,12 @@ class DreamXOracleTraceTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "CUDA"):
             require_cuda(torch)
+
+
+class DreamXExporterIsolationTest(unittest.TestCase):
+    def test_import_keeps_shared_q8_row_width_validation(self):
+        with self.assertRaisesRegex(ValueError, "row width"):
+            converter._gguf._tensor_nbytes(converter.GGML_Q8_0, (16, 2))
 
 
 VIDEO_CONFIG = {
