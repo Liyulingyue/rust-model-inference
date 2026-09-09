@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Lfm2Config;
-use super::weights::{get_f32_tensor, load_layers, Lfm2LayerWeights};
+use super::weights::{get_f32_tensor, load_layers, weight_needs_q8k, Lfm2LayerWeights};
 
 /// One item of the prefill stream: a text token or a precomputed embedding
 /// row (image tokens from the vision encoder occupy positions directly).
@@ -167,6 +167,24 @@ pub fn run_inference_stream(
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
     println!("Prompt: {} items", n_prompt);
+
+    // Build the output weight once. The K-quant kernels (Q4_K/Q5_K/Q6_K)
+    // expect a pre-quantized Q8_K activation passed via `forward_prepared`;
+    // Q8_0 / F16 / BF16 / Q4_0 / Q4_1 ignore it.
+    let output_pw = crate::ops::kernel::Weight::from_quantized(
+        crate::ops::kernel::QuantizedTensor::from_bytes(
+            output_weight,
+            output_type,
+            n_embd,
+            vocab,
+        ),
+    );
+    let output_needs_q8k = matches!(
+        output_type,
+        crate::core::tensor::GGMLType::Q4K
+            | crate::core::tensor::GGMLType::Q5K
+            | crate::core::tensor::GGMLType::Q6K
+    );
 
     let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
     // Accumulated b*x from prompt tokens (for batch-prefill simulation).
@@ -311,33 +329,38 @@ pub fn run_inference_stream(
             &mut q8_buf[..n_embd],
             &mut scale_buf[..n_embd / 32],
         );
-        quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
         let q8 = &q8_buf[..n_embd];
         let sc = &scale_buf[..n_embd / 32];
-        let q8k = &q8k_buf[..n_embd / 256];
-
-        // Build the output weight lazily once.
-        let output_pw = crate::ops::kernel::Weight::from_quantized(
-            crate::ops::kernel::QuantizedTensor::from_bytes(
-                output_weight,
-                output_type,
-                n_embd,
-                vocab,
-            ),
-        );
+        // Only re-quantize to Q8_K when the LM-head kernel actually consumes it
+        // (K-quant weights); Q8_0 / F16 / BF16 / Q4_0 / Q4_1 ignore the buffer.
+        let q8k_slice: &[crate::ops::quant::BlockQ8K] = if output_needs_q8k {
+            quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            &q8k_buf[..n_embd / 256]
+        } else {
+            &[]
+        };
 
         let logits_ptr = scratch.logits.as_mut_ptr();
+        // `output_pw` was built once before the loop and outlives all
+        // closures; capture only a shared reference so the kernel isn't
+        // moved on the second iteration.
+        let kernel: &dyn crate::ops::kernel::Kernel = &*output_pw.kernel;
         pool.compute(move |ith, nth| {
             let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
             let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
             let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k.as_ptr(), n_embd / 256) };
+            let q8k = unsafe { std::slice::from_raw_parts(q8k_slice.as_ptr(), q8k_slice.len()) };
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-            output_pw.kernel.forward_prepared(
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if q8k_slice.is_empty() {
+                None
+            } else {
+                Some(q8k)
+            };
+            kernel.forward_prepared(
                 input,
                 q8,
                 sc,
-                Some(q8k),
+                q8k_opt,
                 logits,
                 n_embd,
                 vocab,
@@ -488,14 +511,19 @@ fn forward_layer(
             &mut q8_buf[..n_embd],
             &mut scale_buf[..n_embd / 32],
         );
-        quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        // Skip Q8_K re-quant when no weight in this layer actually consumes
+        // it (see Lfm2LayerWeights::needs_q8k). Cuts a 256-element scan per
+        // layer when the model is uniformly Q8_0 (e.g. LFM2.5-VL-3B-Q8_0).
+        if lw.needs_q8k() {
+            quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        }
     }
 
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    let cur_after_block = if lw.is_attn {
+    if lw.is_attn {
         forward_attention(
             &pool,
             lw,
@@ -512,9 +540,8 @@ fn forward_layer(
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(attn_proj, x);
-        unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     } else {
-        let (cur, bx) = forward_shortconv(
+        let (cur, _bx) = forward_shortconv(
             &pool,
             lw,
             layer,
@@ -527,9 +554,7 @@ fn forward_layer(
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(&cur, x);
-        unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     };
-    let _ = cur_after_block;
 
     // ---- FFN (always present) ----
     unsafe {
@@ -542,7 +567,9 @@ fn forward_layer(
             &mut q8_buf[..n_embd],
             &mut scale_buf[..n_embd / 32],
         );
-        quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        if lw.needs_q8k() {
+            quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        }
     }
 
     let q8 = &q8_buf[..n_embd];
@@ -611,7 +638,9 @@ fn forward_layer(
         &mut q8_buf[..n_ff],
         &mut scale_buf[..n_ff / 32],
     );
-    quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
+    if weight_needs_q8k(lw.w_down.ggml_type) {
+        quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
+    }
     let q8 = &q8_buf[..n_ff];
     let sc = &scale_buf[..n_ff / 32];
     let q8k = &q8k_buf[..n_ff / 256];
@@ -644,7 +673,6 @@ fn forward_layer(
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
-    let _ = cur_after_block;
 }
 
 fn forward_attention(
@@ -940,7 +968,13 @@ fn forward_attention(
         &mut q8_buf[..n_embd_q],
         &mut scale_buf[..n_embd_q / 32],
     );
-    quantize_row_q8_k_into(attn_out, &mut q8k_buf[..n_embd_q / 256]);
+    let wo_needs_q8k = lw
+        .wo
+        .as_ref()
+        .is_some_and(|w| weight_needs_q8k(w.ggml_type));
+    if wo_needs_q8k {
+        quantize_row_q8_k_into(attn_out, &mut q8k_buf[..n_embd_q / 256]);
+    }
     let q8 = &q8_buf[..n_embd_q];
     let sc = &scale_buf[..n_embd_q / 32];
     let q8k = &q8k_buf[..n_embd_q / 256];
@@ -958,11 +992,16 @@ fn forward_attention(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
             let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if wo_needs_q8k {
+                Some(q8k)
+            } else {
+                None
+            };
             lw.wo.as_ref().unwrap().kernel.forward_prepared(
                 input,
                 q8,
                 sc,
-                Some(q8k),
+                q8k_opt,
                 attn_proj,
                 n_embd_q,
                 n_embd,
@@ -1001,6 +1040,10 @@ fn forward_shortconv(
     let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
     let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
 
+    let in_proj_needs_q8k = lw
+        .shortconv_in
+        .as_ref()
+        .is_some_and(|w| weight_needs_q8k(w.ggml_type));
     unsafe {
         let normed = std::slice::from_raw_parts(normed_ptr, n_embd);
         quantize_q8_0_into(
@@ -1009,7 +1052,9 @@ fn forward_shortconv(
             &mut q8_buf[..n_embd],
             &mut scale_buf[..n_embd / 32],
         );
-        quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        if in_proj_needs_q8k {
+            quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        }
     }
 
     // Step 1: in_proj -> 3 chunks of size n_embd: b, c, x.
@@ -1031,11 +1076,16 @@ fn forward_shortconv(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if in_proj_needs_q8k {
+                Some(q8k)
+            } else {
+                None
+            };
             lw.shortconv_in.as_ref().unwrap().kernel.forward_prepared(
                 input,
                 q8,
                 sc,
-                Some(q8k),
+                q8k_opt,
                 bcx,
                 n_embd,
                 three_n,
@@ -1129,7 +1179,13 @@ fn forward_shortconv(
         &mut q8_buf[..n_embd],
         &mut scale_buf[..n_embd / 32],
     );
-    quantize_row_q8_k_into(&conv_out, &mut q8k_buf[..n_embd / 256]);
+    let out_proj_needs_q8k = lw
+        .shortconv_out
+        .as_ref()
+        .is_some_and(|w| weight_needs_q8k(w.ggml_type));
+    if out_proj_needs_q8k {
+        quantize_row_q8_k_into(&conv_out, &mut q8k_buf[..n_embd / 256]);
+    }
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
@@ -1145,11 +1201,16 @@ fn forward_shortconv(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if out_proj_needs_q8k {
+                Some(q8k)
+            } else {
+                None
+            };
             lw.shortconv_out.as_ref().unwrap().kernel.forward_prepared(
                 input,
                 q8,
                 sc,
-                Some(q8k),
+                q8k_opt,
                 o,
                 n_embd,
                 n_embd,
