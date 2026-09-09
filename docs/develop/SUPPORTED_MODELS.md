@@ -37,14 +37,6 @@
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
 | Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
 
-## DreamX-Creator CPU 验证证据
-
-- 导出耗时 180.72 秒。main 文件 12,833,754,816 bytes、3,045 tensors、SHA-256 `84fe47b35fcb21552dbd51cae0ac511c52b1261c3d4845ff099c01bef597fd02`；mmproj 文件 15,564,058,592 bytes、1,086 tensors、SHA-256 `3cc74cd84edd7e22078f932e73b7b92f41c8094188058c1c830d613002b59523`。
-- 真实 pair preflight 和 dry-run 通过；64×64、4 spatial tokens、0.2 秒、5 fps、1 step、Flash upsampler、LightVAE decoder 的原生 CPU 运行耗时 45.39 秒，maximum RSS 25,620,398,080 bytes，估算峰值 14.81 GiB/64 GiB。
-- 产物已由 ffmpeg 探测：64×64 H.264 base video、48 kHz 单声道 PCM16 WAV、base mux、128×128 H.264 refined video 和 refined mux，共五个文件。
-- 这是结构、手写算子及缩小端到端运行验证。当前主机无 CUDA，因此 [`tools/dreamx/dreamx_oracle_trace.py`](../../tools/dreamx/dreamx_oracle_trace.py) 只验证了明确的无 CUDA 退出；未生成官方 Python checkpoints，也未运行完整时长/空间 token 数的官方 2K 推理。
-- Rust refiner 当前使用固定 `[1000, 750, 500, 250]` timesteps 和 `sigma_start=0.6251`；上游还会执行 shifted-scheduler warping/filtering。该差异尚未通过 Oracle 消解，因此当前状态是 `Experimental`，不能据此声明官方 refiner 数值或质量对齐。
-
 ## 已接入但未达到 Verified 的范围
 
 | 模型 / 范围 | GGUF architecture | 能力 | 所需组件 | 当前覆盖 | 状态 | 证据 / 限制 |
@@ -57,7 +49,7 @@
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
 | Hunyuan-MT2 / Hunyuan Dense | `hunyuan-dense` | 文本生成 | 无 | 专用 prompt 和 Qwen3 trunk 分发 | `Supported` | README 旧名单只给出型号名；当前没有固定真实 GGUF 的回归证据。 |
 | Granite 兼容文本 GGUF | `granite` | 文本生成 | 无 | 专用 prompt、attention/logit scaling | `Supported` | 架构路径已接入，但未固定一个具体 Granite 型号作为 E2E 回归。 |
-| DreamX-Creator | `dreamx` + `clip`/`dreamx_creator` | 首帧驱动的同步音视频生成、2x 视频 refiner | `DreamX-Creator-Q8_0.gguf` + `mmproj-DreamX-Creator-BF16.gguf` | 真实导出、pair preflight、64×64/1 帧 CPU 全链路和五个媒体产物 | `Experimental` | base/refiner 路径可运行，但 CUDA Oracle 未执行，且 refiner shifted scheduler 尚未逐 checkpoint 对齐；精确证据见上方。 |
+| DreamX-Creator | `dreamx` + `clip`/`dreamx_creator` | 首帧驱动的同步音视频生成、2x 视频 refiner | `DreamX-Creator-Q8_0.gguf` + `mmproj-DreamX-Creator-BF16.gguf` | 真实导出、pair preflight、64×64/1 帧 CPU 全链路和五个媒体产物 | `Experimental` | base/refiner 路径可运行，但 CUDA Oracle 未执行，且 refiner shifted scheduler 尚未逐 checkpoint 对齐。 |
 | 通用 Qwen2 文本 GGUF | `qwen2` | 文本生成 | 无 | 可进入 Qwen trunk；dots.tts 内部 LLM 已使用 | `Experimental` | 当前没有“任意 Qwen2 文本模型”保证，不能用 dots.tts 的内部成功替代通用验证。 |
 | Dense LFM2 v2 | `lfm2` | 文本生成 | 无 | 保留专用 trunk 分发 | `Experimental` | `docs/TODO.md` 明确记录当前模型库没有对应 GGUF。 |
 | Nanbeige | `nanbeige` | 文本生成 | 无 | SPM tokenizer 和 llama trunk 路由 | `Experimental` | 合入提交标题明确标注“未成功”，因此不能列为确定支持。 |
