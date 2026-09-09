@@ -14,6 +14,8 @@ use super::util::f16_at;
 use crate::core::tensor::GGMLType;
 use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
+#[cfg(feature = "vulkan")]
+use crate::vulkan::qwen35::Qwen35VulkanSession;
 
 // =============================================================================
 // Model + Layer-weight structs
@@ -60,6 +62,11 @@ pub struct Qwen35Model<'a> {
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
+    /// Lazily-initialized Vulkan session. Built on the first decode token
+    /// after `--gpu` enables the global Vulkan context. `None` means CPU
+    /// fallback (no eligible GPU or Vulkan init failed).
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu: Option<Qwen35VulkanSession>,
 }
 
 // Convenience alias so that `impl Qwen35Model { fn from_source(...) }` in
@@ -289,6 +296,8 @@ impl<'a> Qwen35Model<'a> {
             output_norm,
             output_weight,
             layers,
+            #[cfg(feature = "vulkan")]
+            gpu: None,
         })
     }
 

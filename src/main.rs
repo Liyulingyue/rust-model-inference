@@ -263,8 +263,8 @@ fn main() {
                 temperature,
                 options.threads,
                 options.thinking,
-                false,
-                false,
+                options.bench,
+                options.profile,
                 options.kv_format,
             ));
         }

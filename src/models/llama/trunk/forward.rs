@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    attention_value_f32, dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm_grouped, rope_neox, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
-    vec_mad_f16_f32, vec_scale_f32,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rope_neox,
+    rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
+    vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt;
 
@@ -660,11 +660,10 @@ pub fn run_inference_tokens(
                             for t in 0..n_cached {
                                 values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
                             }
-                            attn_out[out_base + d] = attention_value_f32(
+                            attn_out[out_base + d] = dot_f32(
                                 &values[..n_padded],
                                 &scores[s_off..s_off + n_padded],
                                 n_cached,
-                                n_padded,
                             );
                         }
                     }
@@ -1022,7 +1021,8 @@ pub fn run_inference_tokens(
         let chosen = crate::ops::sample_llama_cpp(logits, top_k, top_p, temperature, rng_u64);
 
         let chosen_id = chosen as u32;
-        if !bench && eos_id == Some(chosen_id) {
+        let im_end_id = tokenizer.special_token_id("im_end");
+        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
             break;
         }
         if generated_tokens.len() >= max_tokens {
