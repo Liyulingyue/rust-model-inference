@@ -355,7 +355,7 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
 
 #[cfg(feature = "vulkan")]
 fn qwen35_generate(
-    session: &mut Qwen35Session<'_>,
+    session: &mut Qwen35Session<'_, '_>,
     token_ids: &[u32],
     positions: &[[usize; 4]],
     max_new_tokens: usize,
@@ -385,7 +385,7 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
             .map_err(|error| error.to_string())?,
     );
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
-    let model = Qwen35Model::from_source(source.as_ref())?;
+    let mut model = Qwen35Model::from_source(source.as_ref())?;
     let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
     let positions = qwen_text_positions(prompt_tokens.len());
     let capacity = prompt_tokens
@@ -394,15 +394,16 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
         .ok_or("session capacity overflow")?;
     let pool = Arc::new(ComputePool::new(4));
 
-    let mut cpu = Qwen35Session::new(&model, capacity, Arc::clone(&pool))?;
+    let mut cpu = Qwen35Session::new(&mut model, capacity, Arc::clone(&pool))?;
     let cpu_logits = cpu.step_with_tokens(&prompt_tokens, &positions)?;
     cpu.reset();
     let cpu_tokens = qwen35_generate(&mut cpu, &prompt_tokens, &positions, GREEDY_TOKENS + 1)?;
+    drop(cpu);
 
     rust_model_inference::ops::enable_gpu();
     let context = rust_model_inference::ops::get_vulkan_context()
         .ok_or("Vulkan backend did not initialize")?;
-    let mut gpu = Qwen35Session::new(&model, capacity, pool)?;
+    let mut gpu = Qwen35Session::new(&mut model, capacity, pool)?;
     let gpu_logits = gpu.step_with_tokens(&prompt_tokens, &positions)?;
     assert_close("prefill_logits", &gpu_logits, &cpu_logits)?;
     gpu.reset();
