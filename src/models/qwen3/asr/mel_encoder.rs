@@ -2233,7 +2233,8 @@ mod tests {
                     for ky in 0..3 {
                         for kx in 0..3 {
                             let linear = oc_idx * patch_len + ic_idx * 9 + ky * 3 + kx;
-                            let value = ((ky * 9 + kx * 3 + ic_idx * 7 + oc_idx * 11) as f32) * 0.125;
+                            let value =
+                                ((ky * 9 + kx * 3 + ic_idx * 7 + oc_idx * 11) as f32) * 0.125;
                             let bits = crate::ops::f32_to_f16(value);
                             bytes[linear * 2] = (bits & 0xff) as u8;
                             bytes[linear * 2 + 1] = (bits >> 8) as u8;
@@ -2254,8 +2255,7 @@ mod tests {
             let input: Vec<f32> = (0..ic * H * W).map(|i| i as f32).collect();
             let mut actual = Vec::new();
             let (out_h, out_w) =
-                conv2d_stride2_padding1(&input, ic, H, W, &weights, &mut actual)
-                    .unwrap();
+                conv2d_stride2_padding1(&input, ic, H, W, &weights, &mut actual).unwrap();
 
             // Brute-force reference using the SAME byte layout as our encoding.
             let mut expected = vec![0.0f32; oc * out_h * out_w];
@@ -2292,7 +2292,11 @@ mod tests {
                 }
             }
 
-            assert_eq!(actual.len(), expected.len(), "[ic={ic}, oc={oc}] output shape mismatch");
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "[ic={ic}, oc={oc}] output shape mismatch"
+            );
             for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
                 let diff = (a - e).abs();
                 assert!(
