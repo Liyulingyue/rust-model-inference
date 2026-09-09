@@ -46,9 +46,9 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Kernel;
 use crate::ops::{
-    dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into,
-    quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox, sample_top_k, silu_mul_inplace,
-    softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
+    dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
+    rms_norm_inplace, rope_neox, sample_top_k, silu_mul_inplace, softmax_inplace, vec_add_into,
+    vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 
@@ -1168,11 +1168,8 @@ fn forward_attention(
                                 values[t] =
                                     v_cache[kb_local + t * n_embd_gqa + kv_h * n_embd_head_v + d];
                             }
-                            attn_out[out_base + d] = dot_f32(
-                                &values[..n_padded],
-                                &scores[..n_padded],
-                                n_cached,
-                            );
+                            attn_out[out_base + d] =
+                                dot_f32(&values[..n_padded], &scores[..n_padded], n_cached);
                         }
                     }
                 }

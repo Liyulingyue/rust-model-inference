@@ -16,8 +16,7 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox, silu_approx_inplace,
-    silu_mul_approx_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;

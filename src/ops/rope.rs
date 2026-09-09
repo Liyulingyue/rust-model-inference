@@ -828,7 +828,11 @@ mod tests {
             super::rope_neox_apply_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
 
             for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-                assert_eq!(x.to_bits(), y.to_bits(), "head_dim={head_dim} n_heads={n_heads} idx={i}");
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "head_dim={head_dim} n_heads={n_heads} idx={i}"
+                );
             }
         }
     }
@@ -870,7 +874,11 @@ mod tests {
             }
 
             for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-                assert_eq!(x.to_bits(), y.to_bits(), "head_dim={head_dim} n_heads={n_heads} idx={i}");
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "head_dim={head_dim} n_heads={n_heads} idx={i}"
+                );
             }
         }
     }

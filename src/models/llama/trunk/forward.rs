@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into,
-    rms_norm_grouped, rope_neox, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
-    vec_mad_f16_f32, vec_scale_f32,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rope_neox,
+    rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
+    vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt;
 

@@ -5,8 +5,8 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
-    bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_inplace,
+    bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
+    rms_norm_inplace, rope_neox, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]

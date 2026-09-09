@@ -355,8 +355,7 @@ fn attention(
                     + dimension;
                 *value = cache.v[value_start];
             }
-            output_head[dimension] =
-                dot_f32(value_column, scores, value_column.len());
+            output_head[dimension] = dot_f32(value_column, scores, value_column.len());
         }
         #[cfg(not(target_arch = "aarch64"))]
         for (value_position, &weight) in scores[..=position].iter().enumerate() {

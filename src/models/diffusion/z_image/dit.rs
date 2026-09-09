@@ -6,8 +6,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::dot_f32;
 use crate::ops::{
-    rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_inplace,
-    silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_self_f32,
+    rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_inplace, silu_mul_inplace,
+    softmax_inplace, vec_add_into, vec_mad_self_f32,
 };
 
 use super::{

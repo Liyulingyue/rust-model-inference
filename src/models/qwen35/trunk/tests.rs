@@ -531,10 +531,7 @@ fn session_new_sizes_state_to_requested_limit() {
     let KvCache::F32(cache) = session.kv_cache() else {
         panic!("Qwen3.5 KV cache should be F32");
     };
-    assert_eq!(
-        cache.k.len(),
-        cfg.n_layer_impl() * 4 * cfg.n_embd_head()
-    );
+    assert_eq!(cache.k.len(), cfg.n_layer_impl() * 4 * cfg.n_embd_head());
     assert_eq!(cache.v.len(), cache.k.len());
 }
 
