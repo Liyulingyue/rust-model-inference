@@ -8,8 +8,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    attention_value_f32, bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32,
-    matmul_q8_0_quantized_parallel, quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
+    quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -1240,7 +1240,7 @@ pub(in crate::models::qwen3) fn full_attention_into(
                     value_column[key_token] =
                         value[key_token * width + head * head_dim + dimension];
                 }
-                output_row[dimension] = attention_value_f32(&value_column, scores, tokens, tokens);
+                output_row[dimension] = dot_f32(&value_column, scores, tokens);
             }
         }
     }
