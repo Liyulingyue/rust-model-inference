@@ -3,6 +3,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 pub use crate::core::scratchpad::KvFormat;
+pub use crate::models::diffusion::dreamx::{
+    DreamXOptions, DreamXRefinerOptions, LatentUpsampleKind, RefinerDecoderKind,
+};
 use crate::models::dots::XVectorMode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,6 +17,7 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    pub dreamx: bool,
     pub model: PathBuf,
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
@@ -24,11 +28,22 @@ pub struct CliOptions {
     pub vae: Option<PathBuf>,
     pub text_encoder: Option<PathBuf>,
     pub prompt: Option<String>,
+    pub negative_prompt: Option<String>,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
     pub seed: Option<i64>,
+    pub duration_seconds: Option<f32>,
+    pub fps: Option<usize>,
+    pub target_spatial_tokens: Option<usize>,
+    pub refine: Option<bool>,
+    pub refiner_kv_len: Option<usize>,
+    pub latent_upsample: Option<LatentUpsampleKind>,
+    pub refiner_decoder: Option<RefinerDecoderKind>,
+    pub dry_run: bool,
+    pub overwrite: bool,
+    pub allow_memory_overcommit: bool,
     pub temperature: Option<f32>,
     pub threads: usize,
     pub thinking: bool,
@@ -56,6 +71,20 @@ pub struct ZImageCliOptions {
     pub resolution: usize,
     pub seed: i64,
     pub out: PathBuf,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct DreamXCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub image: PathBuf,
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+    pub out: PathBuf,
+    pub options: DreamXOptions,
+    pub dry_run: bool,
+    pub overwrite: bool,
+    pub allow_memory_overcommit: bool,
 }
 
 pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -163,6 +192,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--dreamx" => options.dreamx = true,
             "--model" => {
                 if i + 1 < args.len() {
                     options.model = args[i + 1].as_str().into();
@@ -174,6 +204,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     options.prompt = Some(args[i + 1].clone());
                     i += 1;
                 }
+            }
+            "--negative-prompt" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --negative-prompt")?;
+                options.negative_prompt = Some(value.clone());
+                i += 1;
             }
             "--max-tokens" | "--n-gen" => {
                 if i + 1 < args.len() {
@@ -211,6 +249,81 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--duration" => {
+                let value = args.get(i + 1).ok_or("Missing value for --duration")?;
+                options.duration_seconds = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --duration value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--fps" => {
+                let value = args.get(i + 1).ok_or("Missing value for --fps")?;
+                options.fps = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --fps value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--target-spatial-tokens" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --target-spatial-tokens")?;
+                options.target_spatial_tokens =
+                    Some(value.parse::<usize>().map_err(|error| {
+                        format!("Invalid --target-spatial-tokens value: {error}")
+                    })?);
+                i += 1;
+            }
+            "--refine" => options.refine = Some(true),
+            "--no-refine" => options.refine = Some(false),
+            "--refiner-kv-len" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --refiner-kv-len")?;
+                options.refiner_kv_len = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --refiner-kv-len value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--latent-upsample" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --latent-upsample")?;
+                options.latent_upsample = Some(match value.as_str() {
+                    "bilinear" => LatentUpsampleKind::Bilinear,
+                    "flash" => LatentUpsampleKind::Flash,
+                    "causal2d" => LatentUpsampleKind::Causal2d,
+                    _ => {
+                        return Err(format!(
+                            "Invalid --latent-upsample {value:?}; expected bilinear, flash, or causal2d"
+                        ));
+                    }
+                });
+                i += 1;
+            }
+            "--refiner-decoder" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --refiner-decoder")?;
+                options.refiner_decoder = Some(match value.as_str() {
+                    "wan" => RefinerDecoderKind::Wan,
+                    "lightvae" => RefinerDecoderKind::LightVae,
+                    _ => {
+                        return Err(format!(
+                            "Invalid --refiner-decoder {value:?}; expected wan or lightvae"
+                        ));
+                    }
+                });
+                i += 1;
+            }
+            "--dry-run" => options.dry_run = true,
+            "--overwrite" => options.overwrite = true,
+            "--allow-memory-overcommit" => options.allow_memory_overcommit = true,
             "--temp" => {
                 if i + 1 < args.len() {
                     options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
@@ -370,9 +483,175 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     Ok(options)
 }
 
+pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOptions>, String> {
+    let unique_option = if options.negative_prompt.is_some() {
+        Some("--negative-prompt")
+    } else if options.duration_seconds.is_some() {
+        Some("--duration")
+    } else if options.fps.is_some() {
+        Some("--fps")
+    } else if options.target_spatial_tokens.is_some() {
+        Some("--target-spatial-tokens")
+    } else if options.refine.is_some() {
+        Some("--refine/--no-refine")
+    } else if options.refiner_kv_len.is_some() {
+        Some("--refiner-kv-len")
+    } else if options.latent_upsample.is_some() {
+        Some("--latent-upsample")
+    } else if options.refiner_decoder.is_some() {
+        Some("--refiner-decoder")
+    } else if options.dry_run {
+        Some("--dry-run")
+    } else if options.overwrite {
+        Some("--overwrite")
+    } else if options.allow_memory_overcommit {
+        Some("--allow-memory-overcommit")
+    } else {
+        None
+    };
+    if !options.dreamx {
+        return match unique_option {
+            Some(option) => Err(format!("{option} requires --dreamx")),
+            None => Ok(None),
+        };
+    }
+
+    let conflict = if options.tts {
+        Some("--tts")
+    } else if options.edit {
+        Some("--edit")
+    } else if options.source_audio.is_some() {
+        Some("--source-audio")
+    } else if options.source_text.is_some() {
+        Some("--source-text")
+    } else if options.target_text.is_some() {
+        Some("--target-text")
+    } else if options.instruction.is_some() {
+        Some("--instruction")
+    } else if options.use_xvector_supplied {
+        Some("--use-xvector")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.video.is_some() {
+        Some("--video")
+    } else if options.vae.is_some() {
+        Some("--vae")
+    } else if options.text_encoder.is_some() {
+        Some("--text-encoder")
+    } else if options.ref_audio.is_some() {
+        Some("--ref-audio")
+    } else if options.ref_text.is_some() {
+        Some("--ref-text")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.dump_logits {
+        Some("--dump-logits")
+    } else if options.bench {
+        Some("--bench")
+    } else if options.profile {
+        Some("--profile")
+    } else if options.gpu {
+        Some("--gpu")
+    } else if options.thinking {
+        Some("--thinking")
+    } else if options.language.is_some() {
+        Some("--language")
+    } else if options.max_tokens.is_some() {
+        Some("--max-tokens")
+    } else if options.temperature.is_some() {
+        Some("--temp")
+    } else if options.resolution.is_some() {
+        Some("--resolution")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("--dreamx cannot be used with {conflict}"));
+    }
+
+    if options.model.as_os_str().is_empty() {
+        return Err("--dreamx requires --model".into());
+    }
+    let model = options.model.clone();
+    let mmproj = options
+        .mmproj
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--dreamx requires --mmproj")?;
+    let image = options
+        .image
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--dreamx requires --image")?;
+    let prompt = options
+        .prompt
+        .clone()
+        .filter(|prompt| !prompt.trim().is_empty())
+        .ok_or("--dreamx requires a non-empty --prompt")?;
+    let out = options
+        .out
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--dreamx requires --out")?;
+    if options
+        .negative_prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+    {
+        return Err("--negative-prompt must not be empty".into());
+    }
+
+    let defaults = DreamXOptions::default();
+    let duration_seconds = options
+        .duration_seconds
+        .unwrap_or(defaults.duration_seconds);
+    let fps = options.fps.unwrap_or(defaults.fps);
+    let steps = options.steps.unwrap_or(defaults.steps);
+    let target_spatial_tokens = options
+        .target_spatial_tokens
+        .unwrap_or(defaults.target_spatial_tokens);
+    let kv_len = options.refiner_kv_len.unwrap_or(defaults.refiner.kv_len);
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return Err("--dreamx requires a finite positive --duration".into());
+    }
+    if fps == 0 || steps == 0 || target_spatial_tokens == 0 || kv_len == 0 {
+        return Err(
+            "--dreamx requires positive --fps, --steps, --target-spatial-tokens, and --refiner-kv-len"
+                .into(),
+        );
+    }
+
+    Ok(Some(DreamXCliOptions {
+        model,
+        mmproj,
+        image,
+        prompt,
+        negative_prompt: options.negative_prompt.clone(),
+        out,
+        options: DreamXOptions {
+            duration_seconds,
+            fps,
+            steps,
+            seed: options.seed.unwrap_or(defaults.seed),
+            target_spatial_tokens,
+            refine: options.refine.unwrap_or(defaults.refine),
+            refiner: DreamXRefinerOptions {
+                kv_len,
+                latent_upsample: options
+                    .latent_upsample
+                    .unwrap_or(defaults.refiner.latent_upsample),
+                decoder: options.refiner_decoder.unwrap_or(defaults.refiner.decoder),
+            },
+        },
+        dry_run: options.dry_run,
+        overwrite: options.overwrite,
+        allow_memory_overcommit: options.allow_memory_overcommit,
+    }))
+}
+
 pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
     if options.text_encoder.is_none() && options.vae.is_none() {
-        return if options.seed.is_some() && !options.tts {
+        return if options.seed.is_some() && !options.tts && !options.dreamx {
             Err("--seed requires Z-Image components or --tts".into())
         } else {
             Ok(None)
@@ -455,6 +734,9 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if dreamx_cli_options(options)?.is_some() {
+        return Ok(());
+    }
     if !options.edit
         && (options.source_audio.is_some()
             || options.source_text.is_some()
@@ -818,6 +1100,214 @@ mod tests {
                 z_image_cli_options(&parse_cli_options(&args(argv)).unwrap()).is_err(),
                 "{argv:?}"
             );
+        }
+    }
+
+    #[test]
+    fn dreamx_cli_requires_model_mmproj_image_prompt_and_out() {
+        let complete = parse_cli_options(&args(&[
+            "rmi",
+            "--dreamx",
+            "--model",
+            "dreamx.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--image",
+            "first.png",
+            "--prompt",
+            "scene",
+            "--out",
+            "scene.mp4",
+        ]))
+        .unwrap();
+        let dreamx = dreamx_cli_options(&complete).unwrap().unwrap();
+        assert_eq!(dreamx.model, PathBuf::from("dreamx.gguf"));
+        assert_eq!(dreamx.mmproj, PathBuf::from("mmproj.gguf"));
+        assert_eq!(dreamx.image, PathBuf::from("first.png"));
+        assert_eq!(dreamx.prompt, "scene");
+        assert_eq!(dreamx.out, PathBuf::from("scene.mp4"));
+        assert_eq!(dreamx.options, DreamXOptions::default());
+
+        for argv in [
+            vec![
+                "rmi",
+                "--dreamx",
+                "--mmproj",
+                "mmproj.gguf",
+                "--image",
+                "first.png",
+                "--prompt",
+                "scene",
+                "--out",
+                "scene.mp4",
+            ],
+            vec![
+                "rmi",
+                "--dreamx",
+                "--model",
+                "dreamx.gguf",
+                "--image",
+                "first.png",
+                "--prompt",
+                "scene",
+                "--out",
+                "scene.mp4",
+            ],
+            vec![
+                "rmi",
+                "--dreamx",
+                "--model",
+                "dreamx.gguf",
+                "--mmproj",
+                "mmproj.gguf",
+                "--prompt",
+                "scene",
+                "--out",
+                "scene.mp4",
+            ],
+            vec![
+                "rmi",
+                "--dreamx",
+                "--model",
+                "dreamx.gguf",
+                "--mmproj",
+                "mmproj.gguf",
+                "--image",
+                "first.png",
+                "--out",
+                "scene.mp4",
+            ],
+            vec![
+                "rmi",
+                "--dreamx",
+                "--model",
+                "dreamx.gguf",
+                "--mmproj",
+                "mmproj.gguf",
+                "--image",
+                "first.png",
+                "--prompt",
+                "scene",
+            ],
+        ] {
+            let options = parse_cli_options(&args(&argv)).unwrap();
+            assert!(dreamx_cli_options(&options).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn dreamx_cli_parses_pipeline_controls() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--dreamx",
+            "--model",
+            "dreamx.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--image",
+            "first.png",
+            "--prompt",
+            "scene",
+            "--negative-prompt",
+            "blur",
+            "--out",
+            "scene.mp4",
+            "--duration",
+            "0.2",
+            "--fps",
+            "5",
+            "--steps",
+            "1",
+            "--seed",
+            "-7",
+            "--target-spatial-tokens",
+            "4",
+            "--no-refine",
+            "--refine",
+            "--refiner-kv-len",
+            "3",
+            "--latent-upsample",
+            "causal2d",
+            "--refiner-decoder",
+            "lightvae",
+            "--dry-run",
+            "--overwrite",
+            "--allow-memory-overcommit",
+        ]))
+        .unwrap();
+        let dreamx = dreamx_cli_options(&options).unwrap().unwrap();
+        assert_eq!(dreamx.negative_prompt.as_deref(), Some("blur"));
+        assert_eq!(dreamx.options.duration_seconds, 0.2);
+        assert_eq!(dreamx.options.fps, 5);
+        assert_eq!(dreamx.options.steps, 1);
+        assert_eq!(dreamx.options.seed, -7);
+        assert_eq!(dreamx.options.target_spatial_tokens, 4);
+        assert!(dreamx.options.refine);
+        assert_eq!(dreamx.options.refiner.kv_len, 3);
+        assert_eq!(
+            dreamx.options.refiner.latent_upsample,
+            LatentUpsampleKind::Causal2d
+        );
+        assert_eq!(dreamx.options.refiner.decoder, RefinerDecoderKind::LightVae);
+        assert!(dreamx.dry_run);
+        assert!(dreamx.overwrite);
+        assert!(dreamx.allow_memory_overcommit);
+    }
+
+    #[test]
+    fn dreamx_seed_is_not_claimed_by_z_image() {
+        let options = parse_cli_options(&args(&["rmi", "--dreamx", "--seed", "-7"])).unwrap();
+        assert!(z_image_cli_options(&options).unwrap().is_none());
+    }
+
+    #[test]
+    fn dreamx_cli_rejects_malformed_controls() {
+        for argv in [
+            vec!["rmi", "--dreamx", "--duration", "nan"],
+            vec!["rmi", "--dreamx", "--fps", "0"],
+            vec!["rmi", "--dreamx", "--target-spatial-tokens", "0"],
+            vec!["rmi", "--dreamx", "--refiner-kv-len", "0"],
+            vec!["rmi", "--dreamx", "--latent-upsample", "nearest"],
+            vec!["rmi", "--dreamx", "--refiner-decoder", "fast"],
+            vec!["rmi", "--dreamx", "--negative-prompt"],
+        ] {
+            assert!(
+                parse_cli_options(&args(&argv))
+                    .and_then(|options| dreamx_cli_options(&options).map(|_| options))
+                    .is_err(),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dreamx_cli_rejects_edit_only_options() {
+        let base = [
+            "rmi",
+            "--dreamx",
+            "--model",
+            "dreamx.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--image",
+            "first.png",
+            "--prompt",
+            "scene",
+            "--out",
+            "scene.mp4",
+        ];
+        for (extra, expected) in [
+            (vec!["--source-audio", "source.wav"], "--source-audio"),
+            (vec!["--source-text", "source"], "--source-text"),
+            (vec!["--target-text", "target"], "--target-text"),
+            (vec!["--instruction", "replace"], "--instruction"),
+            (vec!["--use-xvector", "auto"], "--use-xvector"),
+        ] {
+            let mut argv = base.to_vec();
+            argv.extend(extra);
+            let error =
+                validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+            assert!(error.contains(expected), "{argv:?}: {error}");
         }
     }
 

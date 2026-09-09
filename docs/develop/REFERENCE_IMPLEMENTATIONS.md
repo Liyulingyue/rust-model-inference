@@ -1,6 +1,6 @@
 # 参考实现与 Oracle 清单
 
-> 更新于 2026-09-06。这里记录本项目实际参考过的外部实现，以及用于回归对齐的固定 Oracle。
+> 更新于 2026-09-08。这里记录本项目实际参考过的外部实现，以及用于回归对齐的固定 Oracle。
 
 “参考源码”只表示实现时对照过其格式、算子或模型逻辑；“Pinned Oracle”则表示仓库提交已固定，并有构建脚本、补丁或回归测试。二者不能混用：没有 pin 和可执行测试的仓库，不能作为当前结果已经对齐的证据。
 
@@ -14,6 +14,7 @@
 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) | Z-Image Turbo | 文生图 checkpoint 与最终图像 Oracle | `97d2990807fe6d558e395f8764198d7c7e7b411c` | [`tools/z_image/build_stable_diffusion_oracle.sh`](tools/z_image/build_stable_diffusion_oracle.sh)、[`tools/z_image/stable-diffusion-z-image-trace.patch`](tools/z_image/stable-diffusion-z-image-trace.patch)、[`tests/z_image_reference.rs`](tests/z_image_reference.rs) | `Pinned Oracle` |
 | [XHToken/llama.cpp](https://github.com/XHToken/llama.cpp) | Spark-X2.5 | Spark2.5 模型实现参考；仓库内旧称 `XFllama.cpp` | 未固定 | [`src/models/spark/trunk/config.rs`](src/models/spark/trunk/config.rs)、[`docs/TODO.md`](docs/TODO.md)；尚无可执行 Oracle | `Pending pin` |
 | [studio-dots-ai/dots.tts](https://github.com/studio-dots-ai/dots.tts) | dots.tts-base、dots.tts.edit | 官方 Python 推理链路与逐 checkpoint/PCM Oracle | `32407a55228630475c48ecdb2c4e2c0f9c09e030` | [`tools/dots/build_dots_tts_oracle.sh`](tools/dots/build_dots_tts_oracle.sh)、[`tools/dots/run_dots_tts_oracle.py`](tools/dots/run_dots_tts_oracle.py)、[`tools/dots/dots-tts-oracle-trace.patch`](tools/dots/dots-tts-oracle-trace.patch)、[`tests/dots_tts_reference.rs`](tests/dots_tts_reference.rs) | `Pinned Oracle` |
+| [AMAP-ML/DreamX-Creator](https://github.com/AMAP-ML/DreamX-Creator) / [ModelScope weights](https://modelscope.cn/models/GD-ML/DreamX-Creator) | DreamX-Creator base audio-video pipeline、2K refiner | 导出映射、Creator/UMT5/VAE/DAC/SR-DiT/upsampler/LightVAE 行为参考及 CUDA trace 入口 | `215d4cd7fbed7e161ab508ae1f85a8fee0536f62` | [`tools/dreamx/dreamx_oracle_trace.py`](../../tools/dreamx/dreamx_oracle_trace.py)、[`tests/dreamx_reference.rs`](../../tests/dreamx_reference.rs) | `Pinned reference; Oracle unrun` |
 
 用户口头所称的 `Dif.cpp`，本项目实际使用的是 `stable-diffusion.cpp`。`XFllama.cpp` 则是仓库内沿用的本地目录名，对应的上游是 `XHToken/llama.cpp`。
 
@@ -34,3 +35,19 @@
 构建脚本接收外部 checkout 路径，并在运行前校验提交；除通用 scalar 脚本外，脚本会复制到临时目录后再打 trace patch，避免修改输入 checkout。
 
 `references/` 只是可选的本地便利目录，不是完整依赖清单，也不应据此判断某个 Oracle 是否存在。当前仓库不会自动下载这些上游；需要执行回归时，应按上表准备对应仓库和固定提交。
+
+## DreamX-Creator trace
+
+`tools/dreamx/dreamx_oracle_trace.py` 直接包装固定上游的两个官方入口，不修改 checkout。`creator` 子命令记录 tokenizer IDs、text contexts、first-frame latent、joint layers 0/15/29、最终 video/audio latents 和两个 decoder 输出；`refiner` 子命令记录首尾 SR-DiT blocks、最终 SR latent 和 decoder 输入/输出。每个 tensor 转为 little-endian F32 原始数组，token IDs/attention mask 保存为 little-endian I64，shape 和原始 dtype 写入 `manifest.json`。
+
+```bash
+python3 tools/dreamx/dreamx_oracle_trace.py creator \
+  --upstream-root /path/to/DreamX-Creator --out-dir /tmp/dreamx-creator-trace -- \
+  <audio_video_generation/inference.py arguments>
+
+python3 tools/dreamx/dreamx_oracle_trace.py refiner \
+  --upstream-root /path/to/DreamX-Creator --out-dir /tmp/dreamx-refiner-trace -- \
+  <video_refiner/inference_sr.py arguments>
+```
+
+两个官方入口都要求 CUDA。当前 Apple Silicon 验证机只执行了脚本的帮助、静态编译和无 CUDA 明确退出，没有生成 trace 或与 Rust checkpoint 比较，因此 DreamX-Creator 目前不是 `Pinned Oracle` 数值对齐状态。

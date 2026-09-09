@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-06，基于 `main` 的 `16451c2`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-09-08，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -49,6 +49,7 @@
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
 | Hunyuan-MT2 / Hunyuan Dense | `hunyuan-dense` | 文本生成 | 无 | 专用 prompt 和 Qwen3 trunk 分发 | `Supported` | README 旧名单只给出型号名；当前没有固定真实 GGUF 的回归证据。 |
 | Granite 兼容文本 GGUF | `granite` | 文本生成 | 无 | 专用 prompt、attention/logit scaling | `Supported` | 架构路径已接入，但未固定一个具体 Granite 型号作为 E2E 回归。 |
+| DreamX-Creator | `dreamx` + `clip`/`dreamx_creator` | 首帧驱动的同步音视频生成、2x 视频 refiner | `DreamX-Creator-Q8_0.gguf` + `mmproj-DreamX-Creator-BF16.gguf` | 真实导出、pair preflight、64×64/1 帧 CPU 全链路和五个媒体产物 | `Experimental` | base/refiner 路径可运行，但 CUDA Oracle 未执行，且 refiner shifted scheduler 尚未逐 checkpoint 对齐。 |
 | 通用 Qwen2 文本 GGUF | `qwen2` | 文本生成 | 无 | 可进入 Qwen trunk；dots.tts 内部 LLM 已使用 | `Experimental` | 当前没有“任意 Qwen2 文本模型”保证，不能用 dots.tts 的内部成功替代通用验证。 |
 | Dense LFM2 v2 | `lfm2` | 文本生成 | 无 | 保留专用 trunk 分发 | `Experimental` | `docs/TODO.md` 明确记录当前模型库没有对应 GGUF。 |
 | Nanbeige | `nanbeige` | 文本生成 | 无 | SPM tokenizer 和 llama trunk 路由 | `Experimental` | 合入提交标题明确标注“未成功”，因此不能列为确定支持。 |
@@ -63,10 +64,11 @@
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
 | Z-Image Base、img2img、GPU 路径 | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust CPU 文生图。 |
+| DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`。其中 `gemma4` 和 `spark2_5` 使用各自的专用配置加载路径；`clip` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`。其中 `gemma4`、`spark2_5` 和 `dreamx` 使用各自的专用配置加载路径；`clip` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 

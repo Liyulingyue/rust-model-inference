@@ -22,25 +22,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
-import convert_dots_tts as _dots  # noqa: E402
 from convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes  # noqa: E402
 from tools.vibevoice.convert_vibevoice_asr import ShardedSafetensors  # noqa: E402
-
-# the shared reader predates Q8_0; extend its byte-size table
-_orig_tensor_nbytes = _dots._tensor_nbytes
-
-
-def _tensor_nbytes_with_q8_0(ggml_type: int, dims) -> int:
-    if ggml_type == 8:
-        import math
-
-        elements = math.prod(dims)
-        assert elements % 32 == 0
-        return elements // 32 * 34
-    return _orig_tensor_nbytes(ggml_type, dims)
-
-
-_dots._tensor_nbytes = _tensor_nbytes_with_q8_0
 
 
 def dequant_q8_0(raw: bytes, count: int) -> np.ndarray:

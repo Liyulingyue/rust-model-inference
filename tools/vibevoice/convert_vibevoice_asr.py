@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -44,24 +43,6 @@ Q8_BLOCK = 32
 Q8_BLOCK_BYTES = 34  # f16 scale + 32 x int8
 LLM_FILENAME = "VibeVoice-ASR-Streaming-7B-Q8_0.gguf"
 MMPROJ_FILENAME = "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf"
-
-# extend the shared writer's byte-size table with Q8_0 (the dots converter
-# itself never emits it; monkeypatching avoids touching that file)
-_orig_tensor_nbytes = _dots._tensor_nbytes
-
-
-def _tensor_nbytes_with_q8_0(ggml_type: int, dims: tuple[int, ...]) -> int:
-    if ggml_type == GGML_Q8_0:
-        if any(dim <= 0 for dim in dims):
-            raise ValueError(f"invalid tensor dimensions: {dims}")
-        elements = math.prod(dims)
-        if elements % Q8_BLOCK:
-            raise ValueError(f"q8_0 tensor is not a multiple of {Q8_BLOCK} elements: {elements}")
-        return elements // Q8_BLOCK * Q8_BLOCK_BYTES
-    return _orig_tensor_nbytes(ggml_type, dims)
-
-
-_dots._tensor_nbytes = _tensor_nbytes_with_q8_0
 
 
 # --------------------------------------------------------------------------- #

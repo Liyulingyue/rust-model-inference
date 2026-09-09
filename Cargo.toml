@@ -32,6 +32,7 @@ rand = "0.8"
 unicode_categories = "0.1"
 sha2 = "0.10"
 base64 = "0.22"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 
 [profile.release]
 opt-level = 3

@@ -1,6 +1,7 @@
 pub(crate) mod audio;
 pub mod cli;
 pub(crate) mod dots;
+pub(crate) mod dreamx;
 pub(crate) mod embedding;
 pub(crate) mod image;
 pub(crate) mod omni;
@@ -11,11 +12,14 @@ pub(crate) mod vibevoice;
 
 pub use audio::run_asr_cli;
 pub use cli::{
-    inference_step_budget, init_rayon_global_pool, normalize_tts_language, parse_cli_options,
-    per_second, resolve_cli_generation_options, resolve_thread_count, transcription_options,
-    validate_cli_options, validate_qwen3vl_decoder_mode, z_image_cli_options, CliOptions,
-    EmbeddingOutput, KvFormat, ZImageCliOptions, DEFAULT_THREAD_CAP,
+    dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
+    parse_cli_options, per_second, resolve_cli_generation_options, resolve_thread_count,
+    transcription_options, validate_cli_options, validate_qwen3vl_decoder_mode,
+    z_image_cli_options, CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions,
+    EmbeddingOutput, KvFormat, LatentUpsampleKind, RefinerDecoderKind, ZImageCliOptions,
+    DEFAULT_THREAD_CAP,
 };
+pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
 pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};

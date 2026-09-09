@@ -9,7 +9,7 @@ use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
     bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
-    quantize_q8_0_into, sum_f32, sum_sq_centered_f32, vec_mad_f32,
+    quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -1162,6 +1162,26 @@ fn attention_softmax(scores: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
+fn transpose_value_head(
+    value: &[f32],
+    tokens: usize,
+    width: usize,
+    head: usize,
+    head_dim: usize,
+    columns: &mut [f32],
+) {
+    debug_assert_eq!(value.len(), tokens * width);
+    debug_assert_eq!(columns.len(), tokens * head_dim);
+    debug_assert!((head + 1) * head_dim <= width);
+    let head_start = head * head_dim;
+    for dimension in 0..head_dim {
+        let column = &mut columns[dimension * tokens..(dimension + 1) * tokens];
+        for (key_token, target) in column.iter_mut().enumerate() {
+            *target = value[key_token * width + head_start + dimension];
+        }
+    }
+}
+
 fn full_attention(
     query: &[f32],
     key: &[f32],
@@ -1214,10 +1234,13 @@ pub(in crate::models::qwen3) fn full_attention_into(
     }
     resize_f32(scores, "attention scores", tokens)?;
     resize_f32(output, "attention output", len)?;
+    let value_columns_len = checked_product("attention value columns", tokens, head_dim)?;
+    let mut value_columns = reserved_f32("attention value columns", value_columns_len)?;
     output.fill(0.0);
     let scale = 1.0 / (head_dim as f32).sqrt();
-    for query_token in 0..tokens {
-        for head in 0..heads {
+    for head in 0..heads {
+        transpose_value_head(value, tokens, width, head, head_dim, &mut value_columns);
+        for query_token in 0..tokens {
             let query_start = query_token * width + head * head_dim;
             let query_head = &query[query_start..query_start + head_dim];
             let mut maximum = f32::NEG_INFINITY;
@@ -1234,12 +1257,9 @@ pub(in crate::models::qwen3) fn full_attention_into(
             attention_softmax(&mut scores[..tokens])?;
             let output_start = query_token * width + head * head_dim;
             let output_row = &mut output[output_start..output_start + head_dim];
-            output_row.fill(0.0);
-
-            for key_token in 0..tokens {
-                let value_row = &value[key_token * width + head * head_dim..][..head_dim];
-
-                vec_mad_f32(output_row, value_row, scores[key_token]);
+            for dimension in 0..head_dim {
+                let column = &value_columns[dimension * tokens..(dimension + 1) * tokens];
+                output_row[dimension] = dot_f32(column, scores, tokens);
             }
         }
     }
@@ -1834,6 +1854,18 @@ mod tests {
         let output = full_attention(&query, &key, &value, tokens, 1, 1).unwrap();
 
         assert_eq!(output[0].to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn value_head_transpose_preserves_key_order() {
+        let value = [
+            1.0, 2.0, 10.0, 20.0, 3.0, 4.0, 30.0, 40.0, 5.0, 6.0, 50.0, 60.0,
+        ];
+        let mut columns = vec![0.0; 6];
+
+        transpose_value_head(&value, 3, 4, 1, 2, &mut columns);
+
+        assert_eq!(columns, [10.0, 30.0, 50.0, 20.0, 40.0, 60.0]);
     }
 
     fn q8_identity(width: usize) -> &'static [u8] {

@@ -31,6 +31,9 @@ pub use format::load_plan::{
     build_load_plan, load_logical_cpu, LoadPlan, LogicalCpuDeviceLoad, LogicalCpuLoad,
     LogicalCpuPlacement, LogicalDevice, Placement, PlacementPolicy, PlacementSlice,
 };
+pub use models::diffusion::dreamx::{
+    DreamXArtifacts, DreamXConfig, DreamXEstimate, DreamXPipeline, DreamXRequest,
+};
 pub use models::diffusion::pig::{PigConfig, PigModel, PigVAE};
 pub use models::qwen3::asr::model::*;
 pub use models::qwen3::*;

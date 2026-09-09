@@ -5,20 +5,24 @@ use rust_model_inference::app;
 use rust_model_inference::format::ggufrs::ComponentRole;
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
+use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenericDispatchMode {
+enum DispatchMode {
+    DreamX,
     Tts,
     Model,
 }
 
-fn generic_dispatch_mode(options: &app::CliOptions) -> GenericDispatchMode {
-    if options.tts {
-        GenericDispatchMode::Tts
+fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
+    if options.dreamx {
+        DispatchMode::DreamX
+    } else if options.tts {
+        DispatchMode::Tts
     } else {
-        GenericDispatchMode::Model
+        DispatchMode::Model
     }
 }
 
@@ -66,6 +70,10 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    let dreamx_options = app::dreamx_cli_options(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
     let z_image_options = app::z_image_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
@@ -81,6 +89,26 @@ fn main() {
     if options.model.as_os_str().is_empty() {
         app::run_self_test();
         return;
+    }
+
+    match dispatch_mode(&options) {
+        DispatchMode::DreamX => {
+            let dreamx = dreamx_options.expect("validated DreamX options");
+            let main: Arc<dyn TensorSource> =
+                Arc::from(open_or_exit(&dreamx.model, ComponentRole::Llm));
+            let mmproj: Arc<dyn TensorSource> =
+                Arc::from(open_or_exit(&dreamx.mmproj, ComponentRole::Mmproj));
+            app::run_or_exit(
+                DreamXConfig::from_sources(main.as_ref(), mmproj.as_ref()).map(|_| ()),
+            );
+            app::run_or_exit(app::run_dreamx_cli(main, mmproj, dreamx, n_threads));
+            return;
+        }
+        DispatchMode::Tts => {
+            app::run_or_exit(app::run_tts_cli(&options));
+            return;
+        }
+        DispatchMode::Model => {}
     }
 
     if let Some(z_image_options) = z_image_options {
@@ -106,14 +134,6 @@ fn main() {
             n_threads,
         ));
         return;
-    }
-
-    match generic_dispatch_mode(&options) {
-        GenericDispatchMode::Tts => {
-            app::run_or_exit(app::run_tts_cli(&options));
-            return;
-        }
-        GenericDispatchMode::Model => {}
     }
 
     let model_path = options.model.as_path();
@@ -313,20 +333,27 @@ mod tests {
     }
 
     #[test]
-    fn only_tts_dispatches_before_main_model_open() {
+    fn dreamx_and_tts_dispatch_before_main_model_open() {
         assert_eq!(
-            generic_dispatch_mode(&app::CliOptions {
+            dispatch_mode(&app::CliOptions {
+                dreamx: true,
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::DreamX
+        );
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
                 tts: true,
                 ..app::CliOptions::default()
             }),
-            GenericDispatchMode::Tts
+            DispatchMode::Tts
         );
         assert_eq!(
-            generic_dispatch_mode(&app::CliOptions {
+            dispatch_mode(&app::CliOptions {
                 audio: Some("speech.wav".into()),
                 ..app::CliOptions::default()
             }),
-            GenericDispatchMode::Model
+            DispatchMode::Model
         );
     }
 
@@ -353,8 +380,8 @@ mod tests {
     #[test]
     fn ordinary_model_dispatch_stays_in_main() {
         assert_eq!(
-            generic_dispatch_mode(&app::CliOptions::default()),
-            GenericDispatchMode::Model
+            dispatch_mode(&app::CliOptions::default()),
+            DispatchMode::Model
         );
     }
 }

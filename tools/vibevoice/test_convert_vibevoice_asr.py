@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,8 @@ from tools.vibevoice.vibevoice_llm_oracle import (
     tensor_to_f32,
 )
 
+shared_dots = sys.modules["convert_dots_tts"]
+
 
 class FakeReader:
     def __init__(self, tensor):
@@ -35,6 +38,10 @@ class FakeReader:
 
 
 class ConverterContractTests(unittest.TestCase):
+    def test_import_keeps_shared_q8_row_width_validation(self):
+        with self.assertRaisesRegex(ValueError, "row width"):
+            shared_dots._tensor_nbytes(GGML_Q8_0, (16, 2))
+
     def test_output_paths_include_storage_types(self):
         llm, mmproj = output_paths(Path("/tmp/out"))
         self.assertEqual(llm.name, LLM_FILENAME)
