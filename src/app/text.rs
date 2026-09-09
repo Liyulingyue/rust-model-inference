@@ -1,5 +1,4 @@
 use crate::app::cli::{resolve_thread_count, KvFormat};
-use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -13,9 +12,7 @@ use crate::models::qwen35::vision::{
     qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
     VisionScratchpad as VisionScratchpad35,
 };
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model};
-use crate::ops::embedding_lookup;
-use crate::ops::kernel::Kernel;
+use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::prompt::{
     append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
     build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage,
@@ -1107,16 +1104,6 @@ fn run_multimodal_with_video_ref(
     );
 
     let max_seq = (prompt_tokens.len() + max_tokens).min(llm.config.n_ctx);
-    let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(
-        llm.config.n_layer_impl(),
-        max_seq,
-        llm.config.n_embd_head() * llm.config.n_head_kv,
-    );
-    let mut llm_scratch = crate::models::qwen35::Qwen35Scratchpad::new(
-        &llm.config,
-        prompt_tokens.len().max(max_tokens),
-    );
-
     let prompt_embd = inject_vision_embeddings(
         &llm,
         &prompt_tokens,
@@ -1159,6 +1146,7 @@ fn run_multimodal_with_video_ref(
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
+    let mut session = Qwen35Session::new(&mut llm, max_seq, std::sync::Arc::clone(&pool))?;
 
     let mut generated = String::new();
     #[cfg(feature = "parity-trace")]
@@ -1180,14 +1168,15 @@ fn run_multimodal_with_video_ref(
         };
         let n_tok = tokens.len();
 
-        if step == 0 {
-            llm_scratch.x[..prompt_embd.len()].copy_from_slice(&prompt_embd);
+        let decode_embedding;
+        let embeddings = if step == 0 {
+            prompt_embd.as_slice()
         } else {
             let token_id = u32::try_from(tokens[0])
                 .map_err(|_| format!("invalid negative token id {}", tokens[0]))?;
-            let embedding = llm.embed_tokens(&[token_id])?;
-            llm_scratch.x[..embedding.len()].copy_from_slice(&embedding);
-        }
+            decode_embedding = session.embed_tokens(&[token_id])?;
+            decode_embedding.as_slice()
+        };
 
         let decode_position = [[
             next_text_position,
@@ -1200,7 +1189,7 @@ fn run_multimodal_with_video_ref(
         } else {
             &decode_position[..]
         };
-        let logits = llm.forward(n_tok, &mut kv_cache, &mut llm_scratch, &pool, positions)?;
+        let logits = session.step(embeddings, n_tok, positions)?;
         // Parity debugging: top-10 logits per step when RUST_QWEN35_DEBUG_LOGITS
         // is set (mirrors the other trunks).
         if std::env::var("RUST_QWEN35_DEBUG_LOGITS").is_ok() {
@@ -1343,6 +1332,8 @@ mod tests {
             output_norm: vec![1.0; 2],
             output_weight,
             layers: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            gpu: None,
         }
     }
 

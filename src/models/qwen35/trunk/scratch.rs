@@ -79,7 +79,14 @@ impl Qwen35Scratchpad {
             ssm_states: (0..n_layer)
                 .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])
                 .collect(),
-            matmul_out: vec![0.0; (2 * n_ff).max(conv_dim).max(n_embd).max(config.vocab_size)],
+            matmul_out: vec![
+                0.0;
+                (2 * n_ff)
+                    .max(q_dim + 2 * n_embd_head * n_head_kv)
+                    .max(conv_dim)
+                    .max(n_embd)
+                    .max(config.vocab_size)
+            ],
             normed_buf: vec![0.0; max_tokens * n_embd],
             q8k_buf: vec![
                 quant::BlockQ8K {

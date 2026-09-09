@@ -575,9 +575,10 @@ fn session_step_enforces_capacity_across_calls() {
 #[test]
 fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local() {
     let mut model = tiny_q8_session_model();
+    let mut cpu_model = tiny_q8_session_model();
     let fallback_pool = Arc::new(ComputePool::new(2));
     let mut fallback = Qwen35Session::new(&mut model, 3, fallback_pool.clone()).unwrap();
-    let mut cpu = Qwen35Session::new(&mut model, 3, Arc::new(ComputePool::new(2))).unwrap();
+    let mut cpu = Qwen35Session::new(&mut cpu_model, 3, Arc::new(ComputePool::new(2))).unwrap();
 
     let first = fallback.embed_tokens(&[0]).unwrap();
     let second = fallback.embed_tokens(&[1]).unwrap();
