@@ -17,7 +17,7 @@
 | Ornith-1.5                    | 9B         | 文本                 |                                       |              | 待核验 |
 | Qwen2.5-Omni                  |            | 多模态               |                                       |              | 待核验 |
 | Qwen2.5-VL                    |            | 多模态               |                                       |              | 待核验 |
-| Qwen3                         | 0.6B       | 文本                 |                                       |              | 待核验 |
+| Qwen3                         | 0.6B       | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | √ |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
 | Qwen3-ASR                     | 0.6B       | ASR                  | llama.cpp                                      |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | √ |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |

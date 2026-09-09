@@ -2208,6 +2208,101 @@ mod tests {
         assert_eq!(output, vec![12.5, 16.5, 24.5, 28.5]);
     }
 
+    /// Layout verification: tests what the conv2d actually does with the byte slice
+    /// `bytes[oc * patch_len * 2 ..]`. Each `(ky, kx, ic, oc)` weight is encoded
+    /// at offset `(oc * patch_len + ic * 9 + ky * 3 + kx) * 2`, i.e. the byte
+    /// layout for fixed `oc` matches the patch order `[ic, ky, kx]`.
+    ///
+    /// We compare against a brute-force reference that computes the convolution
+    /// formula directly using `bytes[oc * patch_len + ic * 9 + ky * 3 + kx]`.
+    /// If the test passes, the conv2d is consistent with this layout. If it
+    /// fails, we know exactly which byte indexing the conv2d actually uses.
+    #[test]
+    fn conv2d_layout_matches_oc_ic_ky_kx_byte_order() {
+        for &(ic_count, oc_count) in &[(1_usize, 4_usize), (2, 3), (3, 2)] {
+            const H: usize = 5;
+            const W: usize = 5;
+            let ic = ic_count;
+            let oc = oc_count;
+            let patch_len = ic * 9;
+            let byte_len = oc * patch_len * 2;
+
+            let mut bytes = vec![0u8; byte_len];
+            for oc_idx in 0..oc {
+                for ic_idx in 0..ic {
+                    for ky in 0..3 {
+                        for kx in 0..3 {
+                            let linear = oc_idx * patch_len + ic_idx * 9 + ky * 3 + kx;
+                            let value = ((ky * 9 + kx * 3 + ic_idx * 7 + oc_idx * 11) as f32) * 0.125;
+                            let bits = crate::ops::f32_to_f16(value);
+                            bytes[linear * 2] = (bits & 0xff) as u8;
+                            bytes[linear * 2 + 1] = (bits >> 8) as u8;
+                        }
+                    }
+                }
+            }
+            let weights = Conv2dWeights {
+                weight: F16Tensor {
+                    bytes: Box::leak(bytes.into_boxed_slice()),
+                    dims: vec![3, 3, ic as u64, oc as u64],
+                },
+                bias: vec![0.0; oc],
+                input_channels: ic,
+                output_channels: oc,
+            };
+
+            let input: Vec<f32> = (0..ic * H * W).map(|i| i as f32).collect();
+            let mut actual = Vec::new();
+            let (out_h, out_w) =
+                conv2d_stride2_padding1(&input, ic, H, W, &weights, &mut actual)
+                    .unwrap();
+
+            // Brute-force reference using the SAME byte layout as our encoding.
+            let mut expected = vec![0.0f32; oc * out_h * out_w];
+            for oc_idx in 0..oc {
+                for oy in 0..out_h {
+                    for ox in 0..out_w {
+                        let mut sum = 0.0f32;
+                        for ic_idx in 0..ic {
+                            for ky in 0..3 {
+                                let py = oy * 2 + ky;
+                                if py == 0 || py > H {
+                                    continue;
+                                }
+                                let iy = py - 1;
+                                for kx in 0..3 {
+                                    let px = ox * 2 + kx;
+                                    if px == 0 || px > W {
+                                        continue;
+                                    }
+                                    let ix = px - 1;
+                                    let input_idx = (ic_idx * H + iy) * W + ix;
+                                    let linear = oc_idx * patch_len + ic_idx * 9 + ky * 3 + kx;
+                                    let bits = u16::from_le_bytes([
+                                        weights.weight.bytes[linear * 2],
+                                        weights.weight.bytes[linear * 2 + 1],
+                                    ]);
+                                    let weight = crate::ops::f16_to_f32(bits);
+                                    sum += input[input_idx] * weight;
+                                }
+                            }
+                        }
+                        expected[(oc_idx * out_h + oy) * out_w + ox] = sum;
+                    }
+                }
+            }
+
+            assert_eq!(actual.len(), expected.len(), "[ic={ic}, oc={oc}] output shape mismatch");
+            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+                let diff = (a - e).abs();
+                assert!(
+                    diff < 1e-2,
+                    "[ic={ic}, oc={oc}] mismatch at index {i}: actual={a}, expected={e}, diff={diff}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn f16_convolution_quantizes_the_input_patch_like_ggml() {
         let weights = Conv2dWeights {

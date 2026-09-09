@@ -45,11 +45,192 @@ for output_channel in 0..weights.output_channels {
 
 **实际 GGUF 字节 layout 是 `[oc, ic, ky, kx]`**（kx innermost），即使 dims attribute 写的是 `[kH, kW, ic, oc]`。
 
-- llama.cpp / GGML 导出器在导出 conv2d 权重时，**把最后两维 `[ic, oc]` 换成了 `[oc, ic]`**（OC-first 利于 SIMD GEMM 内核连续访问），但保留了 dims 字段没更新。
-- conv2d 代码隐式利用了这个 layout：`bytes[oc * patch_len..]` 切片恰好按 `[ic, ky, kx]` 顺序排，跟 patch 完美对齐。
-- 现有单输出通道测试（`conv2d_stride2_padding_and_layout_are_exact`）用全 1.0 权重，**任何 layout 都通过**，所以这个 layout quirk 一直没被发现。
+#### 什么是 dims attribute？
 
-**优化时不能假设 dims attribute = 实际字节顺序**。任何 conv2d 的字节重排/转置 SIMD 优化，都必须保留 `[oc, ic, ky, kx]` 的字节访问模式，或者在加载时重排到一个显式的新 layout。
+GGUF 文件格式里每个 tensor 的 header 包含一个 `ne_dimensions` 字段（`uint64[n_dims]`），**这是 tensor 的逻辑 shape**——模型作者/导出器填的"这个权重代表什么"。对 conv2d，约定俗成是 `[kH, kW, ic, oc]`。这是**逻辑维度声明**，不是字节存储顺序。
+
+#### 实测确认（2026-09-08）
+
+在 `load_conv2d` 加临时 debug eprintln，跑真实 ASR：
+
+```
+[conv2d-dbg] a.conv2d.1.weight file_dims=[3, 3, 1, 480]   constructed_dims=[3, 3, 1, 480]
+[conv2d-dbg] a.conv2d.2.weight file_dims=[3, 3, 480, 480] constructed_dims=[3, 3, 480, 480]
+[conv2d-dbg] a.conv2d.3.weight file_dims=[3, 3, 480, 480] constructed_dims=[3, 3, 480, 480]
+```
+
+`file_dims` 是 GGUF header 实际报的值，`constructed_dims` 是我们 `load_conv2d` 用来 `static_tensor` 校验的值——**两者一致，都写的是 `[kH, kW, ic, oc]`**。
+
+#### 那 bytes 顺序怎么是 `[oc, ic, ky, kx]`？
+
+llama.cpp / GGML 导出器在把 PyTorch conv2d 权重写进 GGUF 时，**把逻辑维度的最后两维 `[ic, oc]` 物理换序成了 `[oc, ic]`**（OC-first 让 SIMD GEMM kernel 可以对每行连续访问同一 output channel 的全部 weights），但**保留了 dims 字段没更新**。
+
+#### 转化链（推荐记忆方式）
+
+```
+PyTorch 逻辑:  [kH=3, kW=3, ic, oc]
+                    ↓ flatten kernel 到一维
+合并的 shape:   [kH*kW=9, ic, oc]                ← 物理 stride: ic * oc * 9
+                    ↓ OC-first swap
+GGUF bytes:     [oc, ic, kH*kW=9]                ← 物理 stride: oc * (ic * 9)
+                                                    每个 oc 段 = ic * 9 个 f16
+                                                    ic 段内按 [ky, kx] 排 (kx innermost)
+```
+
+为什么是 OC-first 而不是 IC-first：GGML SIMD GEMM 内核（`ggml-cuda.cu::ggml_cuda_conv_2d`、`ggml-cuda.cu::conv2d_mul_mat_f16_f32`）对每个 output channel 做一次 matmul，OC 作为 outer dim 让每行/每段连续访问同一 oc 的全部权重，缓存局部性更好。
+
+这是个 GGML 内部的隐性约定——所有走 `ggml_conv_2d` 的权重都是这个 layout。参考：
+- llama.cpp `convert_hf_to_gguf.py` 里的 conv2d 写入逻辑（外部工具）
+- `ggml-cuda/ggml-cuda.cu` 的 `ggml_cuda_conv_2d` 读取逻辑（OC-major）
+
+#### dims 写得对吗？
+
+作为**逻辑 shape**（PyTorch 视角）：✅ 正确——`[kH, kW, ic, oc]` 描述了 kernel size、输入通道数、输出通道数。
+作为**bytes 索引器**：❌ 误导——正确的 dims 描述（跟 bytes 对齐）应该是 `[kH, kW, oc, ic]` 或者 `[oc, ic, kH, kW]`，但 GGML 没更新。
+
+实操：
+- 从 dims 读 `oc`（=`dims[3]`）✅ 正确
+- 用 `bytes[oc * (ic * 9 * 2)..]` 访问 oc 的权重 ✅ 正确（stride 用了 ic * 9，没用 dims 直接算）
+
+#### conv2d 代码为什么正确？
+
+```rust
+let weight_byte = output_channel * patch_len * 2;
+let sum = ... + dot_f16_f16_bytes(
+    &patch,
+    &weights.weight.bytes[weight_byte..weight_byte + patch_len * 2],
+    patch_len,
+);
+```
+
+`bytes[oc * patch_len..]` 切片**恰好按 `[ic, ky, kx]` 顺序排**（每个 oc 一个 patch_len 大小的连续段），跟 patch buffer 索引 `(ic * 3 + ky) * 3 + kx` 完美对齐。代码隐式假设了这个 layout，没写注释——所以单通道测试用全 1.0 权重**任何 layout 都通过**，layout quirk 一直没被发现。
+
+#### 推论
+
+**优化时不能假设 dims attribute = 实际字节顺序**。任何 conv2d 的字节重排/转置 SIMD 优化，都必须保留 `[oc, ic, ky, kx]` 的字节访问模式，或者在加载时显式重排到一个新的、命名清晰的 layout（例如 `weight_oc_major`），并在注释里注明这是从 GGML 字节序转出来的。
+
+---
+
+## 1.5 conv2d SIMD 现状与优化路线
+
+### 现状：部分 SIMD，但不是瓶颈
+
+`conv2d_stride2_padding1` 内部结构：
+
+```rust
+for oy in 0..H {                              // ← 外层是 (oy, ox)
+    for ox in 0..W {
+        patch.fill(0.0);                      // ❌ 标量 fill（patch_len 个 f32）
+        for ic in 0..IC {                     // ❌ 3×3 gather 带 if continue 分支
+            for ky in 0..3 {
+                if py == 0 || py > H { continue; }   // ❌ 分支
+                for kx in 0..3 {
+                    if px == 0 || px > W { continue; } // ❌ 分支
+                    patch[(ic*3+ky)*3+kx] = input[...];
+                }
+            }
+        }
+        for oc in 0..OC {                     // ❌ 内层 oc 循环
+            let weight_byte = oc * patch_len * 2;
+            let sum = dot_f16_f16_bytes(      // ✅ AVX2 F16C + FMA（patch_len ≥ 16 时）
+                &patch,
+                &bytes[weight_byte..weight_byte + patch_len * 2],
+                patch_len,
+            );
+            output[(oc * H + oy) * W + ox] = sum + bias[oc];
+        }
+    }
+}
+```
+
+**已 SIMD**：`dot_f16_f16_bytes` 内层（`ops/dot.rs:159`）是 AVX2 F16C + FMA，8 elements/iter。Conv1/conv2 patch_len=4320 → 完整走 SIMD path。
+
+**未 SIMD**：
+- `patch.fill(0.0)`（patch_len 个 f32 store，conv1/conv2 每次 4320 floats = 17KB）
+- 3×3 gather 带 `if continue` 分支
+- 跨 oc 循环的权重读：每个 `(oy, ox)` 都重读全部 oc×ic×9 = 2.07M 个 f16 = 4.1MB 权重 → **cache thrashing**
+
+### 真实瓶颈：权重 cache miss，不是 dot
+
+实测 `3xconv2d=430ms`：
+
+| 阶段 | 耗时 | 性质 |
+|------|------|------|
+| Conv0 (1→480, patch_len=9) | ~10ms | 标量 dot fallback（n < 16），循环开销 |
+| Conv1 (480→480, patch_len=4320) | ~200ms | **AVX2 dot 跑得很快，但每个 (oy,ox) 重读 4MB 权重** |
+| Conv2 (480→480, patch_len=4320) | ~220ms | 同上 |
+
+按比例估：dot 计算本身（已 AVX2）只占 ~30%，**剩下 70% 是 patch buffer 反复 fill + 跨 oc 权重读取的 cache miss**。
+
+### 优化方案（按收益/风险排序）
+
+#### 方案 A：交换 oc / (oy, ox) 循环顺序（推荐首选）
+
+```rust
+// 当前：(oy, ox) 外，oc 内
+for oy in 0..H { for ox in 0..W {
+    patch.fill(0); gather_patch();
+    for oc in 0..OC { dot(patch, bytes[oc*patch_len..]); }   // 每次跨 OC 重读权重
+}}
+
+// 改后：oc 外，(oy, ox) 内
+for oc in 0..OC {                                    // 权重切片一次加载到 L1
+    let weight_slice = &bytes[oc * patch_len * 2..][..patch_len * 2];
+    for oy in 0..H {
+        for ox in 0..W {                              // 权重一直在 L1 hot
+            patch.fill(0); gather_patch();
+            output[(oc * H + oy) * W + ox] = dot(patch, weight_slice) + bias[oc];
+        }
+    }
+}
+```
+
+**收益**：
+- 每个 oc 的权重切片 = `ic × kH × kW × 2` bytes
+  - conv0: 1 × 9 × 2 = 18B
+  - conv1/conv2: 480 × 9 × 2 = 8.6KB ← **装得进 L1d (32KB)**
+- 全部 `(oy, ox)` 复用同一份权重 → cache hit rate 接近 100%
+- 预估 **2-3× speedup** for conv1/conv2，**总 ~150-250ms 收益**
+
+**风险**：低。layout 完全保留（`bytes[oc * patch_len..]` 切片语义不变），测试 `conv2d_layout_matches_oc_ic_ky_kx_byte_order` bit-exact 通过就行。输出位置 `output[(oc * H + oy) * W + ox]` 跟原来一样（oc 在外层，只是赋值时机不同）。
+
+#### 方案 B：多 oc SIMD tile
+
+```rust
+for oc_tile in 0..OC step 4 {                       // 同时算 4 个 oc
+    for (oy, ox) in pixels {
+        patch.fill(0); gather_patch();
+        // 4 oc × patch_len FMA，权重 contiguous
+        let sums = dot4_oc(patch, &bytes[oc_tile..][..4*patch_len*2]);
+        for k in 0..4 {
+            output[((oc_tile+k) * H + oy) * W + ox] = sums[k] + bias[oc_tile+k];
+        }
+    }
+}
+```
+
+**收益**：在方案 A 基础上再 +30-50%，但 layout 验证复杂（要保证 `bytes[oc_tile..(oc_tile+4)*patch_len..]` 是 `[4个 oc, ic, ky, kx]` 连续排，符合 OC-major）。
+
+**风险**：中。要新写 `dot4_oc` 函数 + 验证权重连续性。
+
+#### 方案 C：Conv0 (patch_len=9) inline FMA
+
+patch_len=9 太小（< 16），`dot_f16_f16_bytes` 掉到 scalar fallback。可以 inline 9 个 `f32::mul_add` 替代函数调用。
+
+**收益**：~5ms（微小），但代码简单。
+
+### 推荐路径
+
+1. **方案 A（必做）**：循环交换，~30 行代码改动，预估 150-250ms 收益，零风险。
+2. **方案 C（顺手）**：conv0 inline FMA，5 行改动，~5ms 收益。
+3. **方案 B（看情况）**：如果方案 A 后还是 LLM decode 阶段（4.3s）盖住了 audio encode（1.4s），且 conv2d 还是 200ms+ 才考虑。
+
+### 验证
+
+任何 conv2d 重构必须：
+1. `cargo test --release --lib conv2d_layout_matches_oc_ic_ky_kx_byte_order` 三组 `(IC, OC)` bit-exact 通过
+2. ASR 端到端推理输出文本与参考一致（`早上好，今天是二零二零年十月二十九日，最低温度是零下三度。`）
+3. `cargo bench`（如果有）显示 conv2d 阶段耗时下降
 
 ---
 
