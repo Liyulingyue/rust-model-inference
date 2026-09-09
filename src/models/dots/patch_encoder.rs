@@ -7,16 +7,13 @@
 //!   transformer with KV cache (causal RMSNorm self-attention) → concat the two
 //!   tokens → out_proj Linear(2048→1536) → [1,1536].
 
-#[cfg(any(
-    all(feature = "accelerate", target_os = "macos"),
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
-use super::blas::sys;
-
+pub(crate) use super::weights::linear_forward;
+use super::weights::load_weight;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::speaker::exp::torch28_exp;
 use crate::ops::dot_f32;
+use crate::ops::kernel::Weight;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use crate::ops::silu;
 
@@ -42,6 +39,16 @@ pub(crate) fn load_f16_f32(
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = info
+        .checked_nbytes()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
     Ok(match info.ggml_type {
         GGMLType::F16 => bytes
             .chunks_exact(2)
@@ -59,73 +66,8 @@ pub(crate) fn load_f16_f32(
     })
 }
 
-pub(crate) fn linear_forward(
-    weight: &[f32],
-    bias: Option<&[f32]>,
-    input: &[f32],
-    in_dim: usize,
-    out_dim: usize,
-    output: &mut [f32],
-) {
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        let rows = output.len() / out_dim;
-        debug_assert_eq!(input.len(), rows * in_dim);
-        if let Some(bias) = bias {
-            for row in output.chunks_exact_mut(out_dim) {
-                row.copy_from_slice(bias);
-            }
-        } else {
-            output.fill(0.0);
-        }
-        unsafe {
-            sys::cblas_sgemm(
-                101,
-                111,
-                112,
-                rows as i32,
-                out_dim as i32,
-                in_dim as i32,
-                1.0,
-                input.as_ptr(),
-                in_dim as i32,
-                weight.as_ptr(),
-                in_dim as i32,
-                1.0,
-                output.as_mut_ptr(),
-                out_dim as i32,
-            );
-        }
-        return;
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        let rows = output.len() / out_dim;
-        debug_assert_eq!(input.len(), rows * in_dim);
-        for input_row in 0..rows {
-            for output_feature in 0..out_dim {
-                let mut sum = bias.map_or(0.0, |b| b[output_feature]);
-                let w = &weight[output_feature * in_dim..(output_feature + 1) * in_dim];
-                for (wi, &xi) in w
-                    .iter()
-                    .zip(&input[input_row * in_dim..(input_row + 1) * in_dim])
-                {
-                    sum = wi.mul_add(xi, sum);
-                }
-                output[input_row * out_dim + output_feature] = sum;
-            }
-        }
-    }
-}
-
 pub(crate) fn linear_forward_transposed_input_then_bias(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     rows: usize,
@@ -134,50 +76,16 @@ pub(crate) fn linear_forward_transposed_input_then_bias(
     output: &mut [f32],
 ) {
     debug_assert_eq!(input.len(), rows * in_dim);
-    debug_assert_eq!(weight.len(), out_dim * in_dim);
+    debug_assert_eq!((weight.n_in, weight.n_out), (in_dim, out_dim));
     debug_assert_eq!(bias.len(), out_dim);
     debug_assert_eq!(output.len(), rows * out_dim);
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    unsafe {
-        sys::cblas_sgemm(
-            101,
-            112,
-            112,
-            rows as i32,
-            out_dim as i32,
-            in_dim as i32,
-            1.0,
-            input.as_ptr(),
-            rows as i32,
-            weight.as_ptr(),
-            in_dim as i32,
-            0.0,
-            output.as_mut_ptr(),
-            out_dim as i32,
-        );
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
+    let mut contiguous = vec![0.0; input.len()];
     for row in 0..rows {
-        for output_feature in 0..out_dim {
-            let mut sum = 0.0f32;
-            for input_feature in 0..in_dim {
-                sum = weight[output_feature * in_dim + input_feature]
-                    .mul_add(input[input_feature * rows + row], sum);
-            }
-            output[row * out_dim + output_feature] = sum;
+        for feature in 0..in_dim {
+            contiguous[row * in_dim + feature] = input[feature * rows + row];
         }
     }
-    for row in output.chunks_exact_mut(out_dim) {
-        for (value, &bias) in row.iter_mut().zip(bias) {
-            *value += bias;
-        }
-    }
+    linear_forward(weight, Some(bias), &contiguous, in_dim, out_dim, output);
 }
 
 /// Rotary helper shared by DiT; PatchEncoder's pinned Oracle does not apply it.
@@ -302,29 +210,28 @@ fn torch_sum_squares(values: &[f32]) -> f32 {
     total
 }
 
-pub(crate) struct PatchLayerWeights {
+pub(crate) struct PatchLayerWeights<'a> {
     pub(crate) attn_norm: Vec<f32>,
     pub(crate) ffn_norm: Vec<f32>,
-    pub(crate) q: Vec<f32>,
-    pub(crate) k: Vec<f32>,
-    pub(crate) v: Vec<f32>,
-    pub(crate) qkv: Vec<f32>,
-    pub(crate) o: Vec<f32>,
+    pub(crate) q: Weight<'a>,
+    pub(crate) k: Weight<'a>,
+    pub(crate) v: Weight<'a>,
+    pub(crate) o: Weight<'a>,
     pub(crate) o_bias: Vec<f32>,
-    pub(crate) fc1: Vec<f32>,
+    pub(crate) fc1: Weight<'a>,
     pub(crate) fc1_bias: Vec<f32>,
-    pub(crate) fc2: Vec<f32>,
+    pub(crate) fc2: Weight<'a>,
     pub(crate) fc2_bias: Vec<f32>,
 }
 
-pub struct PatchEncoder {
-    pub ds_proj: Vec<f32>,
+pub struct PatchEncoder<'a> {
+    pub ds_proj: Weight<'a>,
     pub ds_bias: Vec<f32>,
-    pub in_proj: Vec<f32>,
+    pub in_proj: Weight<'a>,
     pub in_bias: Vec<f32>,
-    pub out_proj: Vec<f32>,
+    pub out_proj: Weight<'a>,
     pub out_bias: Vec<f32>,
-    pub(crate) layers: Vec<PatchLayerWeights>,
+    pub(crate) layers: Vec<PatchLayerWeights<'a>>,
     pub config: DotsTtsConfig,
 }
 
@@ -386,198 +293,81 @@ fn online_attention_head(
     acc.map(|value| value * recip)
 }
 
-/// Match Torch 2.8 CPU FlashAttention's macOS path: row-major Accelerate
-/// SGEMMs around four-lane SLEEF softmax. The query/output slices may start
-/// at a head offset; their row strides keep the full hidden width.
-#[cfg(any(
-    all(feature = "accelerate", target_os = "macos"),
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
-#[allow(clippy::too_many_arguments)]
-fn torch28_flash_attention_head(
+/// Causal attention through native dot products and an online softmax.
+/// Query/output slices may start at a head offset within a strided row.
+fn native_attention_head(
     q: &[f32],
-    rows: usize,
+    queries: usize,
     q_stride: usize,
     k_cache: &[f32],
     v_cache: &[f32],
     keys: usize,
-    first_query: usize,
+    start: usize,
     head_offset: usize,
     output: &mut [f32],
     output_stride: usize,
 ) -> Result<(), String> {
-    const QUERY_BLOCK: usize = 32;
-    const CBLAS_ROW_MAJOR: i32 = 101;
-    const CBLAS_NO_TRANSPOSE: i32 = 111;
-    const CBLAS_TRANSPOSE: i32 = 112;
-
-    if rows == 0 {
-        return Ok(());
-    }
-    let query_end = first_query
-        .checked_add(rows)
-        .ok_or_else(|| "patch attention query length overflow".to_string())?;
-    if keys < query_end {
-        return Err("patch attention cache does not cover all causal queries".into());
-    }
-    if q_stride < ENC_HEAD_DIM || output_stride < ENC_HEAD_DIM {
-        return Err("patch attention head stride is narrower than its head".into());
-    }
-    if head_offset
-        .checked_add(ENC_HEAD_DIM)
-        .is_none_or(|end| end > ENC_HIDDEN)
+    let row_len = |rows: usize, stride: usize, width: usize| {
+        if rows == 0 {
+            Some(0)
+        } else {
+            (rows - 1).checked_mul(stride)?.checked_add(width)
+        }
+    };
+    if q_stride < ENC_HEAD_DIM
+        || output_stride < ENC_HEAD_DIM
+        || head_offset > ENC_HIDDEN - ENC_HEAD_DIM
+        || head_offset % ENC_HEAD_DIM != 0
     {
-        return Err("patch attention head exceeds hidden width".into());
+        return Err("patch encoder attention has invalid strides or head offset".into());
     }
-    let row_span = rows
-        .checked_sub(1)
-        .and_then(|last| last.checked_mul(q_stride))
-        .and_then(|start| start.checked_add(ENC_HEAD_DIM))
-        .ok_or_else(|| "patch attention query span overflow".to_string())?;
-    let output_span = rows
-        .checked_sub(1)
-        .and_then(|last| last.checked_mul(output_stride))
-        .and_then(|start| start.checked_add(ENC_HEAD_DIM))
-        .ok_or_else(|| "patch attention output span overflow".to_string())?;
-    let cache_span = keys
-        .checked_sub(1)
-        .and_then(|last| last.checked_mul(ENC_HIDDEN))
-        .and_then(|start| start.checked_add(head_offset + ENC_HEAD_DIM))
-        .ok_or_else(|| "patch attention cache span overflow".to_string())?;
-    if q.len() < row_span
-        || output.len() < output_span
-        || k_cache.len() < cache_span
-        || v_cache.len() < cache_span
+    let end = start
+        .checked_add(queries)
+        .ok_or("patch encoder attention causal range overflow")?;
+    if end > keys {
+        return Err("patch encoder attention queries exceed the cached keys".into());
+    }
+    let q_len = row_len(queries, q_stride, ENC_HEAD_DIM)
+        .ok_or("patch encoder attention query size overflow")?;
+    let output_len = row_len(queries, output_stride, ENC_HEAD_DIM)
+        .ok_or("patch encoder attention output size overflow")?;
+    let cache_len = row_len(keys, ENC_HIDDEN, head_offset + ENC_HEAD_DIM)
+        .ok_or("patch encoder attention cache size overflow")?;
+    if q.len() < q_len
+        || output.len() < output_len
+        || k_cache.len() < cache_len
+        || v_cache.len() < cache_len
     {
-        return Err("patch attention buffer is shorter than its declared shape".into());
+        return Err("patch encoder attention has a truncated query, output, or cache".into());
     }
-
-    let q_stride =
-        i32::try_from(q_stride).map_err(|_| "patch attention query stride exceeds BLAS limits")?;
-    let output_stride = i32::try_from(output_stride)
-        .map_err(|_| "patch attention output stride exceeds BLAS limits")?;
-    let keys_i32 =
-        i32::try_from(keys).map_err(|_| "patch attention key count exceeds BLAS limits")?;
-    let head_dim_i32 = i32::try_from(ENC_HEAD_DIM).expect("head dimension fits i32");
-    let mut scores = vec![
-        0.0f32;
-        QUERY_BLOCK.checked_mul(keys).ok_or_else(|| {
-            "patch attention score allocation overflows".to_string()
-        })?
-    ];
-    let mut reciprocals = [0.0f32; QUERY_BLOCK];
-    let scale = 1.0 / (ENC_HEAD_DIM as f32).sqrt();
-
-    for block_start in (0..rows).step_by(QUERY_BLOCK) {
-        let block_rows = (rows - block_start).min(QUERY_BLOCK);
-        let block_rows_i32 = i32::try_from(block_rows).expect("query block fits i32");
-        unsafe {
-            sys::cblas_sgemm(
-                CBLAS_ROW_MAJOR,
-                CBLAS_NO_TRANSPOSE,
-                CBLAS_TRANSPOSE,
-                block_rows_i32,
-                keys_i32,
-                head_dim_i32,
-                1.0,
-                q.as_ptr().add(block_start * q_stride as usize),
-                q_stride,
-                k_cache.as_ptr().add(head_offset),
-                ENC_HIDDEN as i32,
-                0.0,
-                scores.as_mut_ptr(),
-                keys_i32,
-            );
-        }
-        for row in 0..block_rows {
-            let valid = first_query + block_start + row + 1;
-            let row_scores = &mut scores[row * keys..(row + 1) * keys];
-            let mut max4 = [f32::NEG_INFINITY; 4];
-            let vector_end = keys / 4 * 4;
-            for column in (0..vector_end).step_by(4) {
-                for lane in 0..4 {
-                    let index = column + lane;
-                    let score = if index < valid {
-                        row_scores[index] * scale
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                    row_scores[index] = score;
-                    max4[lane] = max4[lane].max(score);
-                }
-            }
-            let mut max = max4[0].max(max4[2]).max(max4[1].max(max4[3]));
-            for index in vector_end..keys {
-                let score = if index < valid {
-                    row_scores[index] * scale
-                } else {
-                    f32::NEG_INFINITY
-                };
-                row_scores[index] = score;
-                max = max.max(score);
-            }
-            let mut sum4 = [0.0f32; 4];
-            for column in (0..vector_end).step_by(4) {
-                for lane in 0..4 {
-                    let index = column + lane;
-                    let weight = torch28_exp(row_scores[index] - max);
-                    row_scores[index] = weight;
-                    sum4[lane] += weight;
-                }
-            }
-            let mut sum = (sum4[0] + sum4[2]) + (sum4[1] + sum4[3]);
-            for index in vector_end..keys {
-                let weight = (row_scores[index] - max).exp();
-                row_scores[index] = weight;
-                sum += weight;
-            }
-            reciprocals[row] = sum.recip();
-        }
-        unsafe {
-            sys::cblas_sgemm(
-                CBLAS_ROW_MAJOR,
-                CBLAS_NO_TRANSPOSE,
-                CBLAS_NO_TRANSPOSE,
-                block_rows_i32,
-                head_dim_i32,
-                keys_i32,
-                1.0,
-                scores.as_ptr(),
-                keys_i32,
-                v_cache.as_ptr().add(head_offset),
-                ENC_HIDDEN as i32,
-                0.0,
-                output
-                    .as_mut_ptr()
-                    .add(block_start * output_stride as usize),
-                output_stride,
-            );
-        }
-        for row in 0..block_rows {
-            let reciprocal = reciprocals[row];
-            let output_start = (block_start + row) * output_stride as usize;
-            let output_row = &mut output[output_start..output_start + ENC_HEAD_DIM];
-            for value in output_row {
-                *value *= reciprocal;
-            }
-        }
+    for query in 0..queries {
+        let acc = online_attention_head(
+            &q[query * q_stride..query * q_stride + ENC_HEAD_DIM],
+            k_cache,
+            v_cache,
+            start + query + 1,
+            head_offset,
+        );
+        output[query * output_stride..query * output_stride + ENC_HEAD_DIM].copy_from_slice(&acc);
     }
     Ok(())
 }
-
-impl PatchEncoder {
-    pub fn from_source(source: &dyn TensorSource, config: DotsTtsConfig) -> Result<Self, String> {
+impl<'a> PatchEncoder<'a> {
+    pub fn from_source(
+        source: &'a dyn TensorSource,
+        config: DotsTtsConfig,
+    ) -> Result<Self, String> {
         let d = config.latent_dim as u64;
         let enc_hid = ENC_HIDDEN as u64;
-        let ds = load_f16_f32(source, "dotstts.patch_encoder.ds_proj.weight", &[2, d, d])?;
+        let ds = load_weight(source, "dotstts.patch_encoder.ds_proj.weight", &[2, d, d])?;
         let ds_bias = load_f16_f32(source, "dotstts.patch_encoder.ds_proj.bias", &[d])?;
-        let in_proj = load_f16_f32(
+        let in_proj = load_weight(
             source,
             "dotstts.patch_encoder.in_proj.weight",
             &[d, enc_hid],
         )?;
         let in_bias = load_f16_f32(source, "dotstts.patch_encoder.in_proj.bias", &[enc_hid])?;
-        let out_proj = load_f16_f32(
+        let out_proj = load_weight(
             source,
             "dotstts.patch_encoder.out_proj.weight",
             &[(ENC_HIDDEN * 2) as u64, config.llm_hidden_size as u64],
@@ -593,29 +383,24 @@ impl PatchEncoder {
                 |suffix: &str| format!("dotstts.patch_encoder.encoder.layers.{layer}.{suffix}");
             let hid = [ENC_HIDDEN as u64];
             let hid2 = [ENC_HIDDEN as u64; 2];
-            let q = load_f16_f32(source, &name("attn_q.weight"), &hid2)?;
-            let k = load_f16_f32(source, &name("attn_k.weight"), &hid2)?;
-            let v = load_f16_f32(source, &name("attn_v.weight"), &hid2)?;
-            let mut qkv = Vec::with_capacity(q.len() + k.len() + v.len());
-            qkv.extend_from_slice(&q);
-            qkv.extend_from_slice(&k);
-            qkv.extend_from_slice(&v);
+            let q = load_weight(source, &name("attn_q.weight"), &hid2)?;
+            let k = load_weight(source, &name("attn_k.weight"), &hid2)?;
+            let v = load_weight(source, &name("attn_v.weight"), &hid2)?;
             layers.push(PatchLayerWeights {
                 attn_norm: load_f16_f32(source, &name("attn_norm.weight"), &hid)?,
                 ffn_norm: load_f16_f32(source, &name("ffn_norm.weight"), &hid)?,
                 q,
                 k,
                 v,
-                qkv,
-                o: load_f16_f32(source, &name("attn_output.weight"), &hid2)?,
+                o: load_weight(source, &name("attn_output.weight"), &hid2)?,
                 o_bias: load_f16_f32(source, &name("attn_output.bias"), &hid)?,
-                fc1: load_f16_f32(
+                fc1: load_weight(
                     source,
                     &name("ffn_fc1.weight"),
                     &[ENC_HIDDEN as u64, ENC_FFN as u64],
                 )?,
                 fc1_bias: load_f16_f32(source, &name("ffn_fc1.bias"), &[ENC_FFN as u64])?,
-                fc2: load_f16_f32(
+                fc2: load_weight(
                     source,
                     &name("ffn_fc2.weight"),
                     &[ENC_FFN as u64, ENC_HIDDEN as u64],
@@ -704,26 +489,7 @@ impl PatchEncoder {
         let n_frames = frames.len() / 128;
         let n_tokens = n_frames / 2;
         let mut tokens = vec![0.0f32; n_tokens * ENC_HIDDEN];
-        #[cfg(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            let projected = self.downsample_projection_channel_major(frames, &state.conv_tail);
-            linear_forward_transposed_input_then_bias(
-                &self.in_proj,
-                &self.in_bias,
-                &projected,
-                n_tokens,
-                128,
-                ENC_HIDDEN,
-                &mut tokens,
-            );
-        }
-        #[cfg(not(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
+
         {
             let projected = self.downsample_projection(frames, &state.conv_tail);
             linear_forward(
@@ -745,87 +511,29 @@ impl PatchEncoder {
     fn downsample_projection(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
         let n_tokens = frames.len() / (2 * 128);
         let mut projected = vec![0.0f32; n_tokens * 128];
-        #[cfg(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            let channel_major = self.downsample_projection_channel_major(frames, conv_tail);
-            for out in 0..128 {
-                for token in 0..n_tokens {
-                    projected[token * 128 + out] = channel_major[out * n_tokens + token];
-                }
-            }
-        }
-        #[cfg(not(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
+        let mut columns = vec![0.0; n_tokens * 256];
         for token in 0..n_tokens {
-            for out in 0..128 {
-                let mut sum = self.ds_bias[out];
-                for tap in 0..2 {
-                    let in_pos = 2 * token + tap;
-                    let frame = if in_pos == 0 {
-                        conv_tail
-                    } else {
-                        &frames[(in_pos - 1) * 128..in_pos * 128]
-                    };
-                    for inp in 0..128 {
-                        let weight = self.ds_proj[(out * 128 + inp) * 2 + tap];
-                        sum = weight.mul_add(frame[inp], sum);
-                    }
-                }
-                projected[token * 128 + out] = sum;
-            }
-        }
-        projected
-    }
-
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    fn downsample_projection_channel_major(&self, frames: &[f32], conv_tail: &[f32]) -> Vec<f32> {
-        let n_tokens = frames.len() / (2 * 128);
-        let mut columns = vec![0.0f32; 2 * 128 * n_tokens];
-        let mut channel_major = vec![0.0f32; 128 * n_tokens];
-        for out in 0..128 {
-            channel_major[out * n_tokens..(out + 1) * n_tokens].fill(self.ds_bias[out]);
-        }
-        for inp in 0..128 {
             for tap in 0..2 {
-                let column = (inp * 2 + tap) * n_tokens;
-                for token in 0..n_tokens {
-                    let in_pos = 2 * token + tap;
-                    let frame = if in_pos == 0 {
-                        conv_tail
-                    } else {
-                        &frames[(in_pos - 1) * 128..in_pos * 128]
-                    };
-                    columns[column + token] = frame[inp];
+                let in_pos = 2 * token + tap;
+                let frame = if in_pos == 0 {
+                    conv_tail
+                } else {
+                    &frames[(in_pos - 1) * 128..in_pos * 128]
+                };
+                for inp in 0..128 {
+                    columns[token * 256 + inp * 2 + tap] = frame[inp];
                 }
             }
         }
-        unsafe {
-            sys::cblas_sgemm(
-                102,
-                111,
-                111,
-                n_tokens as i32,
-                128,
-                256,
-                1.0,
-                columns.as_ptr(),
-                n_tokens as i32,
-                self.ds_proj.as_ptr(),
-                256,
-                1.0,
-                channel_major.as_mut_ptr(),
-                n_tokens as i32,
-            );
-        }
-        channel_major
+        linear_forward(
+            &self.ds_proj,
+            Some(&self.ds_bias),
+            &columns,
+            256,
+            128,
+            &mut projected,
+        );
+        projected
     }
 
     /// Run the 24-layer transformer with KV caching. `start` is the absolute
@@ -840,6 +548,9 @@ impl PatchEncoder {
             return Err("patch encoder transformer input is not hidden-width aligned".into());
         }
         let t = tokens.len() / ENC_HIDDEN;
+        if t == 0 {
+            return Ok(Vec::new());
+        }
         let end = start
             .checked_add(t)
             .ok_or_else(|| "patch encoder cache length overflow".to_string())?;
@@ -859,7 +570,6 @@ impl PatchEncoder {
         }
         let mut x = tokens.to_vec();
         let mut normed = vec![0.0f32; t * ENC_HIDDEN];
-        let mut qkv = vec![0.0f32; t * ENC_HIDDEN * 3];
         let mut q = vec![0.0f32; t * ENC_HIDDEN];
         let mut k = vec![0.0f32; t * ENC_HIDDEN];
         let mut v = vec![0.0f32; t * ENC_HIDDEN];
@@ -876,20 +586,8 @@ impl PatchEncoder {
                     &mut normed[i * ENC_HIDDEN..(i + 1) * ENC_HIDDEN],
                 );
             }
-            linear_forward(
-                &layer.qkv,
-                None,
-                &normed,
-                ENC_HIDDEN,
-                ENC_HIDDEN * 3,
-                &mut qkv,
-            );
-            for i in 0..t {
-                let qkv_row = &qkv[i * ENC_HIDDEN * 3..(i + 1) * ENC_HIDDEN * 3];
-                q[i * ENC_HIDDEN..(i + 1) * ENC_HIDDEN].copy_from_slice(&qkv_row[..ENC_HIDDEN]);
-                k[i * ENC_HIDDEN..(i + 1) * ENC_HIDDEN]
-                    .copy_from_slice(&qkv_row[ENC_HIDDEN..ENC_HIDDEN * 2]);
-                v[i * ENC_HIDDEN..(i + 1) * ENC_HIDDEN].copy_from_slice(&qkv_row[ENC_HIDDEN * 2..]);
+            for (weight, output) in [(&layer.q, &mut q), (&layer.k, &mut k), (&layer.v, &mut v)] {
+                linear_forward(weight, None, &normed, ENC_HIDDEN, ENC_HIDDEN, output);
             }
             #[cfg(test)]
             if std::env::var_os("DOTS_PATCH_DEBUG").is_some() && layer_idx == 0 {
@@ -919,13 +617,10 @@ impl PatchEncoder {
             }
             // attention: query i sees keys 0 .. start+i+1 (causal)
             attn.fill(0.0);
-            #[cfg(any(
-                all(feature = "accelerate", target_os = "macos"),
-                all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-            ))]
+
             for head in 0..ENC_HEADS {
                 let offset = head * ENC_HEAD_DIM;
-                torch28_flash_attention_head(
+                native_attention_head(
                     &q[offset..],
                     t,
                     ENC_HIDDEN,
@@ -938,31 +633,7 @@ impl PatchEncoder {
                     ENC_HIDDEN,
                 )?;
             }
-            #[cfg(not(any(
-                all(feature = "accelerate", target_os = "macos"),
-                all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-            )))]
-            for i in 0..t {
-                let keys = start + i + 1;
-                for head in 0..ENC_HEADS {
-                    let qh = &q[i * ENC_HIDDEN + head * ENC_HEAD_DIM
-                        ..i * ENC_HIDDEN + (head + 1) * ENC_HEAD_DIM];
-                    let acc = online_attention_head(
-                        qh,
-                        &state.k_cache[layer_idx],
-                        &state.v_cache[layer_idx],
-                        keys,
-                        head * ENC_HEAD_DIM,
-                    );
-                    let dst = i * ENC_HIDDEN + head * ENC_HEAD_DIM;
-                    for (slot, &value) in attn[dst..dst + ENC_HEAD_DIM].iter_mut().zip(acc.iter()) {
-                        *slot = value;
-                    }
-                }
-            }
-            // Torch runs the prefill projections as full matrices. Keep the
-            // same SGEMM shape because Accelerate's reduction order is part of
-            // the pinned bitwise contract.
+            // Keep weights in their GGUF representation for every projection.
             linear_forward(
                 &layer.o,
                 Some(&layer.o_bias),
@@ -1074,6 +745,33 @@ mod tests {
     use super::*;
     use crate::core::tensor::TensorInfo;
 
+    fn weight(values: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
+        assert_eq!(values.len(), n_in * n_out);
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(values));
+        weight.n_in = n_in;
+        weight.n_out = n_out;
+        weight
+    }
+
+    fn config(layers: usize) -> DotsTtsConfig {
+        DotsTtsConfig {
+            patch_size: 4,
+            latent_dim: 128,
+            hop_size: 1920,
+            sample_rate: 48_000,
+            fm_hidden_size: ENC_HIDDEN,
+            llm_hidden_size: 1536,
+            xvec_dim: 512,
+            patch_encoder_layers: layers,
+            dit_layers: 18,
+            dit_heads: 16,
+            default_nfe: 10,
+            default_guidance: 1.2,
+            default_speaker_scale: 1.5,
+            default_eos_threshold: 0.8,
+        }
+    }
+
     #[derive(Default)]
     struct Source {
         metadata: std::collections::HashMap<String, crate::core::tensor::MetaValue>,
@@ -1165,42 +863,26 @@ mod tests {
         let mut fc2 = vec![0.0f32; ENC_HIDDEN * ENC_FFN];
         fc2[28] = 1.0;
         let encoder = PatchEncoder {
-            ds_proj: Vec::new(),
+            ds_proj: weight(Vec::new(), 0, 0),
             ds_bias: Vec::new(),
-            in_proj: Vec::new(),
+            in_proj: weight(Vec::new(), 0, 0),
             in_bias: Vec::new(),
-            out_proj: Vec::new(),
+            out_proj: weight(Vec::new(), 0, 0),
             out_bias: Vec::new(),
             layers: vec![PatchLayerWeights {
                 attn_norm: vec![1.0; ENC_HIDDEN],
                 ffn_norm: vec![1.0; ENC_HIDDEN],
-                q: Vec::new(),
-                k: Vec::new(),
-                v: Vec::new(),
-                qkv: vec![0.0; ENC_HIDDEN * ENC_HIDDEN * 3],
-                o: vec![0.0; ENC_HIDDEN * ENC_HIDDEN],
+                q: weight(vec![0.0; ENC_HIDDEN * ENC_HIDDEN], ENC_HIDDEN, ENC_HIDDEN),
+                k: weight(vec![0.0; ENC_HIDDEN * ENC_HIDDEN], ENC_HIDDEN, ENC_HIDDEN),
+                v: weight(vec![0.0; ENC_HIDDEN * ENC_HIDDEN], ENC_HIDDEN, ENC_HIDDEN),
+                o: weight(vec![0.0; ENC_HIDDEN * ENC_HIDDEN], ENC_HIDDEN, ENC_HIDDEN),
                 o_bias: vec![0.0; ENC_HIDDEN],
-                fc1: vec![0.0; ENC_FFN * ENC_HIDDEN],
+                fc1: weight(vec![0.0; ENC_FFN * ENC_HIDDEN], ENC_HIDDEN, ENC_FFN),
                 fc1_bias: vec![f32::from_bits(0xbdbd_9888); ENC_FFN],
-                fc2,
+                fc2: weight(fc2, ENC_FFN, ENC_HIDDEN),
                 fc2_bias: vec![0.0; ENC_HIDDEN],
             }],
-            config: DotsTtsConfig {
-                patch_size: 4,
-                latent_dim: 128,
-                hop_size: 1920,
-                sample_rate: 48_000,
-                fm_hidden_size: ENC_HIDDEN,
-                llm_hidden_size: 1536,
-                xvec_dim: 512,
-                patch_encoder_layers: 1,
-                dit_layers: 18,
-                dit_heads: 16,
-                default_nfe: 10,
-                default_guidance: 1.2,
-                default_speaker_scale: 1.5,
-                default_eos_threshold: 0.8,
-            },
+            config: config(1),
         };
         let mut state = encoder.new_state(1);
         let actual = encoder
@@ -1248,10 +930,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     fn flash_fixture_value(kind: u32, row: u32, column: u32) -> f32 {
         let mut mixed = kind.wrapping_mul(0x9e37_79b9)
             ^ row.wrapping_mul(0x85eb_ca6b)
@@ -1262,10 +940,6 @@ mod tests {
         ((mixed & 0x3fff) as i32 - 8192) as f32 / 2048.0
     }
 
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     fn flash_fixture_qkv(tokens: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut q = vec![0.0f32; tokens * ENC_HEAD_DIM];
         let mut k = vec![0.0f32; tokens * ENC_HIDDEN];
@@ -1280,105 +954,268 @@ mod tests {
         (q, k, v)
     }
 
-    /// Torch 2.8 CPU FlashAttention / Accelerate C oracle, generated from the
-    /// identical integer fixture. Values are raw F32 words, not tolerances.
-    // The pinned bit patterns in `EXPECTED` were captured against Apple's
-    // Accelerate sgemm; OpenBLAS's reduction order produces different bits
-    // in the same ULP range, so this test is restricted to macOS-Accelerate.
-    #[cfg(all(feature = "accelerate", target_os = "macos"))]
+    // Independent f64 dot/softmax reference checks native operator accuracy;
+    // this is not a Torch or llama.cpp bitwise parity assertion.
+    fn attention_reference(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        keys: usize,
+        offset: usize,
+    ) -> Vec<f64> {
+        let scores: Vec<f64> = (0..keys)
+            .map(|key| {
+                q.iter()
+                    .enumerate()
+                    .map(|(column, &query)| {
+                        query as f64 * k[key * ENC_HIDDEN + offset + column] as f64
+                    })
+                    .sum::<f64>()
+                    / (ENC_HEAD_DIM as f64).sqrt()
+            })
+            .collect();
+        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let probabilities: Vec<f64> = scores.iter().map(|score| (score - maximum).exp()).collect();
+        let sum: f64 = probabilities.iter().sum();
+        (0..ENC_HEAD_DIM)
+            .map(|column| {
+                probabilities
+                    .iter()
+                    .enumerate()
+                    .map(|(key, probability)| {
+                        probability * v[key * ENC_HIDDEN + offset + column] as f64
+                    })
+                    .sum::<f64>()
+                    / sum
+            })
+            .collect()
+    }
+
     #[test]
-    fn attention_72_token_fixture_matches_torch28_flash_oracle() {
+    fn native_attention_matches_f64_reference_for_72_tokens_and_scalar_tail() {
+        for tokens in [5, 72] {
+            let (q, k, v) = flash_fixture_qkv(tokens);
+            let mut actual = vec![0.0; tokens * ENC_HEAD_DIM];
+            native_attention_head(
+                &q,
+                tokens,
+                ENC_HEAD_DIM,
+                &k,
+                &v,
+                tokens,
+                0,
+                0,
+                &mut actual,
+                ENC_HEAD_DIM,
+            )
+            .unwrap();
+            for row in 0..tokens {
+                let expected = attention_reference(
+                    &q[row * ENC_HEAD_DIM..(row + 1) * ENC_HEAD_DIM],
+                    &k,
+                    &v,
+                    row + 1,
+                    0,
+                );
+                for (column, &expected) in expected.iter().enumerate() {
+                    let value = actual[row * ENC_HEAD_DIM + column] as f64;
+                    assert!(
+                        (value - expected).abs() < 4e-5 * expected.abs().max(1.0),
+                        "tokens={tokens}, attention[{row}, {column}]: {value} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_attention_streaming_matches_full_with_strided_heads() {
         const TOKENS: usize = 72;
-        const EXPECTED: &[(usize, usize, u32)] = &[
-            (0, 0, 0x406d_9800),
-            (0, 63, 0x3fb0_d000),
-            (1, 7, 0xc072_f800),
-            (15, 19, 0x3e72_645c),
-            (31, 37, 0xbe41_b800),
-            (32, 0, 0xbf33_026b),
-            (32, 63, 0x4011_fdb7),
-            (47, 11, 0x4033_b535),
-            (63, 29, 0x3fea_2e54),
-            (64, 3, 0x3ec0_e823),
-            (70, 41, 0x403e_57a3),
-            (71, 0, 0xbe8a_248a),
-            (71, 13, 0xbf18_7df7),
-            (71, 37, 0x3dbb_381b),
-            (71, 63, 0x3fac_452c),
-        ];
-
-        let (q, k, v) = flash_fixture_qkv(TOKENS);
-        let mut actual = vec![0.0f32; TOKENS * ENC_HEAD_DIM];
-        let legacy = online_attention_head(&q[15 * ENC_HEAD_DIM..16 * ENC_HEAD_DIM], &k, &v, 16, 0);
-        assert_ne!(
-            legacy[19].to_bits(),
-            0x3e72_645c,
-            "fixture must reject the legacy online recurrence"
-        );
-        torch28_flash_attention_head(
-            &q,
-            TOKENS,
-            ENC_HEAD_DIM,
-            &k,
-            &v,
-            TOKENS,
-            0,
-            0,
-            &mut actual,
-            ENC_HEAD_DIM,
-        )
-        .unwrap();
-        for &(row, column, expected) in EXPECTED {
+        let mut q = vec![0.0; TOKENS * ENC_HIDDEN];
+        let mut k = vec![0.0; q.len()];
+        let mut v = vec![0.0; q.len()];
+        for row in 0..TOKENS {
+            for column in 0..ENC_HIDDEN {
+                q[row * ENC_HIDDEN + column] = flash_fixture_value(1, row as u32, column as u32);
+                k[row * ENC_HIDDEN + column] = flash_fixture_value(2, row as u32, column as u32);
+                v[row * ENC_HIDDEN + column] = flash_fixture_value(3, row as u32, column as u32);
+            }
+        }
+        for head in [0, 7, ENC_HEADS - 1] {
+            let offset = head * ENC_HEAD_DIM;
+            let mut full = vec![f32::NAN; q.len()];
+            let mut streamed = vec![f32::NAN; q.len()];
+            native_attention_head(
+                &q[offset..],
+                TOKENS,
+                ENC_HIDDEN,
+                &k,
+                &v,
+                TOKENS,
+                0,
+                offset,
+                &mut full[offset..],
+                ENC_HIDDEN,
+            )
+            .unwrap();
+            for (start, queries) in [(0, 5), (5, 27), (32, 40)] {
+                native_attention_head(
+                    &q[start * ENC_HIDDEN + offset..],
+                    queries,
+                    ENC_HIDDEN,
+                    &k[..(start + queries) * ENC_HIDDEN],
+                    &v[..(start + queries) * ENC_HIDDEN],
+                    start + queries,
+                    start,
+                    offset,
+                    &mut streamed[start * ENC_HIDDEN + offset..],
+                    ENC_HIDDEN,
+                )
+                .unwrap();
+            }
             assert_eq!(
-                actual[row * ENC_HEAD_DIM + column].to_bits(),
-                expected,
-                "attention[{row}, {column}]"
+                full.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                streamed.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
             );
+            for row in 0..TOKENS {
+                let expected = attention_reference(
+                    &q[row * ENC_HIDDEN + offset..row * ENC_HIDDEN + offset + ENC_HEAD_DIM],
+                    &k,
+                    &v,
+                    row + 1,
+                    offset,
+                );
+                for column in 0..ENC_HIDDEN {
+                    let value = full[row * ENC_HIDDEN + column];
+                    if (offset..offset + ENC_HEAD_DIM).contains(&column) {
+                        assert!(
+                            (value as f64 - expected[column - offset]).abs()
+                                < 4e-5 * expected[column - offset].abs().max(1.0)
+                        );
+                    } else {
+                        assert!(value.is_nan(), "attention overwrote another head");
+                    }
+                }
+            }
         }
     }
 
-    /// The final key is a scalar Torch tail after the four-lane reduction.
-    // Pinned against Apple's Accelerate sgemm; see the comment on
-    // `attention_72_token_fixture_matches_torch28_flash_oracle` for why this
-    // is macOS-only.
-    #[cfg(all(feature = "accelerate", target_os = "macos"))]
     #[test]
-    fn attention_scalar_tail_matches_torch28_flash_oracle() {
-        const TOKENS: usize = 5;
-        let (q, k, v) = flash_fixture_qkv(TOKENS);
-        let mut actual = vec![0.0f32; TOKENS * ENC_HEAD_DIM];
-        torch28_flash_attention_head(
-            &q,
-            TOKENS,
-            ENC_HEAD_DIM,
-            &k,
-            &v,
-            TOKENS,
-            0,
-            0,
-            &mut actual,
-            ENC_HEAD_DIM,
-        )
-        .unwrap();
-        for &(row, column, expected) in &[
-            (0, 0, 0x406d_9800),
-            (1, 7, 0xc072_f800),
-            (4, 0, 0xbec9_d053),
-            (4, 17, 0x3f13_a718),
-            (4, 63, 0xbe63_159a),
+    fn native_attention_rejects_invalid_shapes_before_writing_output() {
+        let (q, k, v) = flash_fixture_qkv(2);
+        for (queries, stride, keys, start, head, output_stride) in [
+            (2, 63, 2, 0, 0, 64),
+            (2, 64, 2, 0, 0, 63),
+            (2, 64, 2, 0, 1, 64),
+            (2, 64, 2, 0, ENC_HIDDEN, 64),
+            (2, 64, 2, 1, 0, 64),
+            (2, 64, 3, 0, 0, 64),
+            (2, 64, 2, usize::MAX, 0, 64),
+            (2, usize::MAX, 2, 0, 0, 64),
+            (2, 64, 2, 0, 0, usize::MAX),
+            (3, 64, 3, 0, 0, 64),
         ] {
-            assert_eq!(
-                actual[row * ENC_HEAD_DIM + column].to_bits(),
-                expected,
-                "attention tail[{row}, {column}]"
-            );
+            let mut output = [123.0; 128];
+            assert!(native_attention_head(
+                &q,
+                queries,
+                stride,
+                &k,
+                &v,
+                keys,
+                start,
+                head,
+                &mut output,
+                output_stride
+            )
+            .is_err());
+            assert_eq!(output, [123.0; 128]);
+        }
+        native_attention_head(&[], 0, 64, &[], &[], 0, 0, 0, &mut [], 64).unwrap();
+    }
+
+    #[test]
+    fn q8_downsample_preserves_channel_tap_order_and_streaming_carry() {
+        let mut bytes = Vec::new();
+        for output in 0..128 {
+            for block in 0..8 {
+                bytes.extend_from_slice(&0x3c00u16.to_le_bytes()); // Q8 scale 1
+                for lane in 0..32 {
+                    let column = block * 32 + lane;
+                    let value = if column == output * 2 {
+                        1
+                    } else if column == ((output + 17) % 128) * 2 + 1 {
+                        2
+                    } else {
+                        0
+                    };
+                    bytes.push(value);
+                }
+            }
+        }
+        let source = one_tensor_source("ds", GGMLType::Q8_0, vec![256, 128], bytes);
+        let mut projection = vec![0.0; ENC_HIDDEN * 128];
+        for output in 0..ENC_HIDDEN {
+            projection[output * 128 + output % 128] = 1.0;
+        }
+        let encoder = PatchEncoder {
+            ds_proj: load_weight(&source, "ds", &[2, 128, 128]).unwrap(),
+            ds_bias: (0..128).map(|channel| channel as f32 / 4.0).collect(),
+            in_proj: weight(projection, 128, ENC_HIDDEN),
+            in_bias: vec![0.0; ENC_HIDDEN],
+            out_proj: weight(Vec::new(), 0, 0),
+            out_bias: Vec::new(),
+            layers: Vec::new(),
+            config: config(0),
+        };
+        assert_eq!(encoder.ds_proj.ggml_type, GGMLType::Q8_0);
+        // Each activation block has max=127, so activation quantization is
+        // exact here and the check isolates channel/tap addressing and carry.
+        let frames: Vec<f32> = (0..8)
+            .flat_map(|frame| {
+                (0..128).map(move |channel| {
+                    if channel % 16 == 15 {
+                        127.0
+                    } else {
+                        (frame * 10 + channel % 13) as f32
+                    }
+                })
+            })
+            .collect();
+        let mut state = encoder.new_state(4);
+        let actual = encoder.downsample(&frames, &mut state).unwrap();
+        let mut streamed_state = encoder.new_state(4);
+        let mut streamed = encoder
+            .downsample(&frames[..4 * 128], &mut streamed_state)
+            .unwrap();
+        assert_eq!(streamed_state.conv_tail, frames[3 * 128..4 * 128]);
+        streamed.extend(
+            encoder
+                .downsample(&frames[4 * 128..], &mut streamed_state)
+                .unwrap(),
+        );
+        assert_eq!(actual, streamed);
+        assert_eq!(state.conv_tail, frames[7 * 128..]);
+        assert_eq!(streamed_state.conv_tail, state.conv_tail);
+        for token in 0..4 {
+            for output in 0..ENC_HIDDEN {
+                let channel = output % 128;
+                let previous = if token == 0 {
+                    0.0
+                } else {
+                    frames[(token * 2 - 1) * 128 + channel]
+                };
+                let current = frames[token * 2 * 128 + (channel + 17) % 128];
+                let expected = previous + 2.0 * current + channel as f32 / 4.0;
+                assert_eq!(
+                    actual[token * ENC_HIDDEN + output],
+                    expected,
+                    "token={token}, output={output}"
+                );
+            }
         }
     }
 
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
     #[test]
     #[ignore = "requires fixed Torch/C layer-0 Q/K/V and attention sidecars"]
     fn production_flash_attention_matches_pinned_layer0_sidecar_bitwise() {
@@ -1400,7 +1237,7 @@ mod tests {
         let mut actual = vec![0.0f32; q.len()];
         for head in 0..ENC_HEADS {
             let offset = head * ENC_HEAD_DIM;
-            torch28_flash_attention_head(
+            native_attention_head(
                 &q[offset..],
                 72,
                 ENC_HIDDEN,

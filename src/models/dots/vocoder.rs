@@ -6,64 +6,86 @@
 //! kaiser filters of the AMP-block activations were emitted as
 //! `...activations.{a}.{up,down}_filter`; the post activation keeps its
 //! trained filters.
+//!
+//! Learned operators use native Weight kernels. Their reduction and activation
+//! rounding follows the weight format; the opt-in Torch bit fixtures below
+//! remain diagnostics for the former arithmetic contract.
 
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
+use crate::ops::kernel::Weight;
+
+use super::weights::{linear_forward, load_weight};
 
 const LEAKY: f32 = 0.2;
 const RESSTACK_LEAKY: f32 = 0.01;
 const SNAKE_EPS: f32 = 1e-9;
 const HOP: usize = 1920; // product of decoder upsample rates
 
-#[cfg(any(
-    all(feature = "accelerate", target_os = "macos"),
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
-use super::blas::sys;
+// ---------------------------------------------------------------------------
+// Convolutions retain the exported Torch row layout: [out, in, kernel] for
+// Conv1d and [in, out, kernel] for ConvTranspose1d.
+// ---------------------------------------------------------------------------
 
-#[cfg(any(
-    all(feature = "accelerate", target_os = "macos"),
-    all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-))]
-fn conv1d_sgemm(
-    weight: &[f32],
+fn conv1d(
+    weight: &Weight<'_>,
     bias: &[f32],
-    columns: &[f32],
-    reduction: usize,
+    input: &[f32],
+    in_ch: usize,
+    length: usize,
     out_ch: usize,
+    kernel: usize,
+    stride: usize,
+    dilation: usize,
+    left_pad: usize,
     out_len: usize,
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; out_ch * out_len];
-    for oc in 0..out_ch {
-        out[oc * out_len..(oc + 1) * out_len].fill(bias[oc]);
+    let reduction = in_ch * kernel;
+    debug_assert_eq!((weight.n_in, weight.n_out), (reduction, out_ch));
+    debug_assert_eq!(input.len(), in_ch * length);
+    let mut output = vec![0.0; out_ch * out_len];
+    // Bound im2col scratch independently of waveform duration. The batched
+    // kernel reuses its activation quantization buffers across these rows.
+    let batch = out_len.min(32);
+    if batch == 0 {
+        return output;
     }
-    unsafe {
-        sys::cblas_sgemm(
-            102,
-            111,
-            111,
-            out_len as i32,
-            out_ch as i32,
-            reduction as i32,
-            1.0,
-            columns.as_ptr(),
-            out_len as i32,
-            weight.as_ptr(),
-            reduction as i32,
-            1.0,
-            out.as_mut_ptr(),
-            out_len as i32,
+    let mut columns = vec![0.0; batch * reduction];
+    let mut projected = vec![0.0; batch * out_ch];
+    for start in (0..out_len).step_by(batch) {
+        let rows = (out_len - start).min(batch);
+        columns[..rows * reduction].fill(0.0);
+        for row in 0..rows {
+            for ic in 0..in_ch {
+                for tap in 0..kernel {
+                    let src =
+                        ((start + row) * stride + tap * dilation) as isize - left_pad as isize;
+                    if (0..length as isize).contains(&src) {
+                        columns[row * reduction + ic * kernel + tap] =
+                            input[ic * length + src as usize];
+                    }
+                }
+            }
+        }
+        linear_forward(
+            weight,
+            Some(bias),
+            &columns[..rows * reduction],
+            reduction,
+            out_ch,
+            &mut projected[..rows * out_ch],
         );
+        for row in 0..rows {
+            for oc in 0..out_ch {
+                output[oc * out_len + start + row] = projected[row * out_ch + oc];
+            }
+        }
     }
-    out
+    output
 }
 
-// ---------------------------------------------------------------------------
-// small conv primitives (torch layout: conv1d [out,in,k])
-// ---------------------------------------------------------------------------
-
 fn conv1d_causal(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     in_ch: usize,
@@ -73,54 +95,14 @@ fn conv1d_causal(
     dilation: usize,
     left_pad: usize,
 ) -> Vec<f32> {
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        let reduction = in_ch * kernel;
-        let mut columns = vec![0.0f32; reduction * length];
-        for ic in 0..in_ch {
-            for k in 0..kernel {
-                let column = (ic * kernel + k) * length;
-                for o in 0..length {
-                    let src = o as isize + k as isize * dilation as isize - left_pad as isize;
-                    if src >= 0 && src < length as isize {
-                        columns[column + o] = input[ic * length + src as usize];
-                    }
-                }
-            }
-        }
-        conv1d_sgemm(weight, bias, &columns, reduction, out_ch, length)
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        let mut out = vec![0.0f32; out_ch * length];
-        for oc in 0..out_ch {
-            for o in 0..length {
-                let mut acc = bias[oc];
-                for ic in 0..in_ch {
-                    for k in 0..kernel {
-                        let src = o as isize + k as isize * dilation as isize - left_pad as isize;
-                        if src >= 0 && src < length as isize {
-                            let w = weight[oc * in_ch * kernel + ic * kernel + k];
-                            acc += w * input[ic * length + src as usize];
-                        }
-                    }
-                }
-                out[oc * length + o] = acc;
-            }
-        }
-        out
-    }
+    conv1d(
+        weight, bias, input, in_ch, length, out_ch, kernel, 1, dilation, left_pad, length,
+    )
 }
 
 /// Causal Conv1d with stride: output length = (length + left_pad - kernel)/stride + 1.
 fn conv1d_causal_strided(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     in_ch: usize,
@@ -131,53 +113,13 @@ fn conv1d_causal_strided(
     left_pad: usize,
 ) -> Vec<f32> {
     let out_len = (length + left_pad).saturating_sub(kernel) / stride + 1;
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        let reduction = in_ch * kernel;
-        let mut columns = vec![0.0f32; reduction * out_len];
-        for ic in 0..in_ch {
-            for k in 0..kernel {
-                let column = (ic * kernel + k) * out_len;
-                for o in 0..out_len {
-                    let src = o as isize * stride as isize + k as isize - left_pad as isize;
-                    if src >= 0 && src < length as isize {
-                        columns[column + o] = input[ic * length + src as usize];
-                    }
-                }
-            }
-        }
-        conv1d_sgemm(weight, bias, &columns, reduction, out_ch, out_len)
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        let mut out = vec![0.0f32; out_ch * out_len];
-        for oc in 0..out_ch {
-            for o in 0..out_len {
-                let mut acc = bias[oc];
-                for ic in 0..in_ch {
-                    for k in 0..kernel {
-                        let src = o as isize * stride as isize + k as isize - left_pad as isize;
-                        if src >= 0 && src < length as isize {
-                            let w = weight[oc * in_ch * kernel + ic * kernel + k];
-                            acc += w * input[ic * length + src as usize];
-                        }
-                    }
-                }
-                out[oc * out_len + o] = acc;
-            }
-        }
-        out
-    }
+    conv1d(
+        weight, bias, input, in_ch, length, out_ch, kernel, stride, 1, left_pad, out_len,
+    )
 }
 
 fn conv1d_pad2(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     in_ch: usize,
@@ -186,54 +128,14 @@ fn conv1d_pad2(
     kernel: usize,
     pad: usize,
 ) -> Vec<f32> {
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        let reduction = in_ch * kernel;
-        let mut columns = vec![0.0f32; reduction * length];
-        for ic in 0..in_ch {
-            for k in 0..kernel {
-                let column = (ic * kernel + k) * length;
-                for o in 0..length {
-                    let src = o as isize + k as isize - pad as isize;
-                    if src >= 0 && src < length as isize {
-                        columns[column + o] = input[ic * length + src as usize];
-                    }
-                }
-            }
-        }
-        conv1d_sgemm(weight, bias, &columns, reduction, out_ch, length)
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        let mut out = vec![0.0f32; out_ch * length];
-        for oc in 0..out_ch {
-            for o in 0..length {
-                let mut acc = bias[oc];
-                for ic in 0..in_ch {
-                    for k in 0..kernel {
-                        let src = o as isize + k as isize - pad as isize;
-                        if src >= 0 && src < length as isize {
-                            let w = weight[oc * in_ch * kernel + ic * kernel + k];
-                            acc += w * input[ic * length + src as usize];
-                        }
-                    }
-                }
-                out[oc * length + o] = acc;
-            }
-        }
-        out
-    }
+    conv1d(
+        weight, bias, input, in_ch, length, out_ch, kernel, 1, 1, pad, length,
+    )
 }
 
-/// Causal ConvTranspose1d (kernel == 2*stride, pad 0): output length = in*stride.
+/// Causal ConvTranspose1d: keep the first input_length * stride samples.
 fn conv_transpose1d_causal(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     in_ch: usize,
@@ -242,77 +144,32 @@ fn conv_transpose1d_causal(
     kernel: usize,
     stride: usize,
 ) -> Vec<f32> {
-    // raw output is (length-1)*stride + kernel long; causal trim drops the
-    // last `stride` samples so the result is exactly length*stride
-    let raw_len = (length - 1) * stride + kernel;
+    debug_assert_eq!((weight.n_in, weight.n_out), (out_ch * kernel, in_ch));
+    debug_assert_eq!(input.len(), in_ch * length);
     let out_len = length * stride;
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    let mut raw = {
-        let mut columns = vec![0.0f32; out_ch * kernel * length];
-        unsafe {
-            sys::cblas_sgemm(
-                101,
-                112,
-                111,
-                (out_ch * kernel) as i32,
-                length as i32,
-                in_ch as i32,
-                1.0,
-                weight.as_ptr(),
-                (out_ch * kernel) as i32,
-                input.as_ptr(),
-                length as i32,
-                0.0,
-                columns.as_mut_ptr(),
-                length as i32,
-            );
-        }
-        let mut raw = vec![0.0f32; out_ch * raw_len];
+    let mut output = vec![0.0; out_ch * out_len];
+    // Only one input-channel row is expanded, including for Q8_0 weights.
+    let mut row = vec![0.0; out_ch * kernel];
+    for ic in 0..in_ch {
+        weight.embedding_lookup(ic as u32, &mut row);
         for oc in 0..out_ch {
-            for k in 0..kernel {
-                for i in 0..length {
-                    raw[oc * raw_len + i * stride + k] += columns[(oc * kernel + k) * length + i];
-                }
+            for i in 0..length {
+                let start = i * stride;
+                let taps = kernel.min(out_len - start);
+                crate::ops::vec_mad_f32(
+                    &mut output[oc * out_len + start..oc * out_len + start + taps],
+                    &row[oc * kernel..oc * kernel + taps],
+                    input[ic * length + i],
+                );
             }
         }
-        raw
-    };
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    let mut raw = {
-        let mut raw = vec![0.0f32; out_ch * raw_len];
-        for ic in 0..in_ch {
-            for oc in 0..out_ch {
-                for i in 0..length {
-                    let x = input[ic * length + i];
-                    if x == 0.0 {
-                        continue;
-                    }
-                    for k in 0..kernel {
-                        let w = weight[ic * out_ch * kernel + oc * kernel + k];
-                        raw[oc * raw_len + i * stride + k] += w * x;
-                    }
-                }
-            }
-        }
-        raw
-    };
+    }
     for oc in 0..out_ch {
-        for n in 0..out_len {
-            raw[oc * raw_len + n] += bias[oc];
+        for value in &mut output[oc * out_len..(oc + 1) * out_len] {
+            *value += bias[oc];
         }
     }
-    // causal trim
-    let mut out = Vec::with_capacity(out_ch * out_len);
-    for oc in 0..out_ch {
-        out.extend_from_slice(&raw[oc * raw_len..oc * raw_len + out_len]);
-    }
-    out
+    output
 }
 
 fn leaky_inplace(x: &mut [f32]) {
@@ -334,125 +191,63 @@ fn snakebeta(x: f32, alpha: f32, beta: f32) -> f32 {
 // MI layers (Linear + skip-LSTM + Linear)
 // ---------------------------------------------------------------------------
 
-pub struct MiLayer {
-    pub lin0_w: Vec<f32>,
+pub struct MiLayer<'a> {
+    pub lin0_w: Weight<'a>,
     pub lin0_b: Vec<f32>,
     /// l = 0..4: (weight_ih [2048,512], weight_hh, bias_ih, bias_hh)
-    pub lstm: [(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>); 4],
-    pub lin2_w: Vec<f32>,
+    pub lstm: [(Weight<'a>, Weight<'a>, Vec<f32>, Vec<f32>); 4],
+    pub lin2_w: Weight<'a>,
     pub lin2_b: Vec<f32>,
 }
 
 fn linear_affine(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     rows: usize,
     input_features: usize,
     output_features: usize,
 ) -> Vec<f32> {
-    debug_assert_eq!(weight.len(), input_features * output_features);
-    debug_assert_eq!(bias.len(), output_features);
     debug_assert_eq!(input.len(), rows * input_features);
-    let mut output = Vec::with_capacity(rows * output_features);
-    for _ in 0..rows {
-        output.extend_from_slice(bias);
-    }
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    unsafe {
-        sys::cblas_sgemm(
-            101,
-            111,
-            112,
-            rows as i32,
-            output_features as i32,
-            input_features as i32,
-            1.0,
-            input.as_ptr(),
-            input_features as i32,
-            weight.as_ptr(),
-            input_features as i32,
-            1.0,
-            output.as_mut_ptr(),
-            output_features as i32,
-        );
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    for row in 0..rows {
-        for output_feature in 0..output_features {
-            for input_feature in 0..input_features {
-                output[row * output_features + output_feature] += weight
-                    [output_feature * input_features + input_feature]
-                    * input[row * input_features + input_feature];
-            }
-        }
-    }
+    let mut output = vec![0.0; rows * output_features];
+    linear_forward(
+        weight,
+        Some(bias),
+        input,
+        input_features,
+        output_features,
+        &mut output,
+    );
     output
 }
 
 fn linear_affine_transposed_input(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     rows: usize,
     input_features: usize,
     output_features: usize,
 ) -> Vec<f32> {
-    debug_assert_eq!(weight.len(), input_features * output_features);
-    debug_assert_eq!(bias.len(), output_features);
     debug_assert_eq!(input.len(), rows * input_features);
-    let mut output = vec![0.0f32; rows * output_features];
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    unsafe {
-        sys::cblas_sgemm(
-            101,
-            112,
-            112,
-            rows as i32,
-            output_features as i32,
-            input_features as i32,
-            1.0,
-            input.as_ptr(),
-            rows as i32,
-            weight.as_ptr(),
-            input_features as i32,
-            0.0,
-            output.as_mut_ptr(),
-            output_features as i32,
-        );
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
+    let mut time_major = vec![0.0; input.len()];
     for row in 0..rows {
-        for output_feature in 0..output_features {
-            for input_feature in 0..input_features {
-                output[row * output_features + output_feature] += weight
-                    [output_feature * input_features + input_feature]
-                    * input[input_feature * rows + row];
-            }
+        for channel in 0..input_features {
+            time_major[row * input_features + channel] = input[channel * rows + row];
         }
     }
-    for row in output.chunks_exact_mut(output_features) {
-        for (value, bias) in row.iter_mut().zip(bias) {
-            *value += bias;
-        }
-    }
-    output
+    linear_affine(
+        weight,
+        bias,
+        &time_major,
+        rows,
+        input_features,
+        output_features,
+    )
 }
 
 fn lstm_gate_row(
-    hidden_weight: &[f32],
+    hidden_weight: &Weight<'_>,
     hidden_bias: &[f32],
     hidden: &[f32],
     input_gates: &[f32],
@@ -465,8 +260,8 @@ fn lstm_gate_row(
 }
 
 fn lstm_layer_forward(
-    input_weight: &[f32],
-    hidden_weight: &[f32],
+    input_weight: &Weight<'_>,
+    hidden_weight: &Weight<'_>,
     input_bias: &[f32],
     hidden_bias: &[f32],
     input: &[f32],
@@ -504,76 +299,34 @@ fn add_residual_in_place(input: &mut [f32], residual: &[f32]) {
 }
 
 fn linear_affine_channel_major(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     rows: usize,
     input_features: usize,
     output_features: usize,
 ) -> Vec<f32> {
-    debug_assert_eq!(weight.len(), input_features * output_features);
-    debug_assert_eq!(bias.len(), output_features);
-    debug_assert_eq!(input.len(), rows * input_features);
-    let mut output = Vec::with_capacity(output_features * rows);
-    for output_feature in 0..output_features {
-        output.resize(output.len() + rows, bias[output_feature]);
-    }
-    #[cfg(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    unsafe {
-        let mut channel_major = vec![0.0f32; input_features * rows];
-        for input_feature in 0..input_features {
-            for row in 0..rows {
-                channel_major[input_feature * rows + row] =
-                    input[row * input_features + input_feature];
-            }
-        }
-        sys::cblas_sgemm(
-            101,
-            111,
-            111,
-            output_features as i32,
-            rows as i32,
-            input_features as i32,
-            1.0,
-            weight.as_ptr(),
-            input_features as i32,
-            channel_major.as_ptr(),
-            rows as i32,
-            1.0,
-            output.as_mut_ptr(),
-            rows as i32,
-        );
-    }
-    #[cfg(not(any(
-        all(feature = "accelerate", target_os = "macos"),
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    for output_feature in 0..output_features {
-        for row in 0..rows {
-            for input_feature in 0..input_features {
-                output[output_feature * rows + row] += weight
-                    [output_feature * input_features + input_feature]
-                    * input[row * input_features + input_feature];
-            }
+    let time_major = linear_affine(weight, bias, input, rows, input_features, output_features);
+    let mut output = vec![0.0; rows * output_features];
+    for row in 0..rows {
+        for channel in 0..output_features {
+            output[channel * rows + row] = time_major[row * output_features + channel];
         }
     }
     output
 }
 
-impl MiLayer {
-    fn from_source(source: &dyn TensorSource, prefix: &str) -> Result<Self, String> {
+impl<'a> MiLayer<'a> {
+    fn from_source(source: &'a dyn TensorSource, prefix: &str) -> Result<Self, String> {
         let mut lstm = Vec::with_capacity(4);
         for l in 0..4 {
             lstm.push((
-                load_f16_f32(
+                load_weight(
                     source,
                     &format!("{prefix}.1.lstm.weight_ih_l{l}"),
                     &[512, 2048],
                 )?,
-                load_f16_f32(
+                load_weight(
                     source,
                     &format!("{prefix}.1.lstm.weight_hh_l{l}"),
                     &[512, 2048],
@@ -583,10 +336,12 @@ impl MiLayer {
             ));
         }
         Ok(Self {
-            lin0_w: load_f16_f32(source, &format!("{prefix}.0.weight"), &[128, 512])?,
+            lin0_w: load_weight(source, &format!("{prefix}.0.weight"), &[128, 512])?,
             lin0_b: load_f16_f32(source, &format!("{prefix}.0.bias"), &[512])?,
-            lstm: lstm.try_into().unwrap(),
-            lin2_w: load_f16_f32(source, &format!("{prefix}.2.weight"), &[512, 128])?,
+            lstm: lstm
+                .try_into()
+                .map_err(|_| "expected four vocoder LSTM layers")?,
+            lin2_w: load_weight(source, &format!("{prefix}.2.weight"), &[512, 128])?,
             lin2_b: load_f16_f32(source, &format!("{prefix}.2.bias"), &[128])?,
         })
     }
@@ -619,7 +374,7 @@ impl MiLayer {
         let mut layer_in = h.clone();
         for layer in 0..4 {
             let (w_ih, w_hh, b_ih, b_hh) = &self.lstm[layer];
-            // w dims [512, 2048] → per output gating row: w[i*2048 + g*512 + o]
+            // GGUF [512, 2048]: rows are gates in i/f/g/o order.
             layer_in = lstm_layer_forward(w_ih, w_hh, b_ih, b_hh, &layer_in, frames);
         }
         #[cfg(feature = "parity-trace")]
@@ -673,34 +428,34 @@ fn tanh(x: f32) -> f32 {
 // AudioVAE encoder (prompt latent extraction; causal)
 // ---------------------------------------------------------------------------
 
-struct EncConv {
-    weight: Vec<f32>,
+struct EncConv<'a> {
+    weight: Weight<'a>,
     bias: Vec<f32>,
     kernel: usize,
     stride: usize,
     out_ch: usize,
 }
 
-struct EncResStackLayer {
-    c1: Vec<f32>,
+struct EncResStackLayer<'a> {
+    c1: Weight<'a>,
     b1: Vec<f32>,
     d1: usize,
-    c2: Vec<f32>,
+    c2: Weight<'a>,
     b2: Vec<f32>,
 }
 
-struct EncResStack {
-    layers: Vec<EncResStackLayer>,
+struct EncResStack<'a> {
+    layers: Vec<EncResStackLayer<'a>>,
     ch: usize,
 }
 
-pub struct AudioEncoder {
-    convs: Vec<EncConv>,         // 8 convs: [pre(1→12), 6 down, post(768→128)]
-    resstacks: Vec<EncResStack>, // 6
+pub struct AudioEncoder<'a> {
+    convs: Vec<EncConv<'a>>, // 8 convs: [pre(1→12), 6 down, post(768→128)]
+    resstacks: Vec<EncResStack<'a>>, // 6
 }
 
-impl AudioEncoder {
-    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+impl<'a> AudioEncoder<'a> {
+    fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let w = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
@@ -709,9 +464,10 @@ impl AudioEncoder {
                     out_ch: usize,
                     kernel: usize,
                     stride: usize|
-         -> Result<EncConv, String> {
+         -> Result<EncConv<'a>, String> {
             Ok(EncConv {
-                weight: w(
+                weight: load_weight(
+                    source,
                     &format!("dotstts.vocoder.audio_encoder.generator.{idx}.layer.weight"),
                     &[kernel as u64, in_ch as u64, out_ch as u64],
                 )?,
@@ -743,7 +499,8 @@ impl AudioEncoder {
             for j in 0..6 {
                 let d = 1usize << j;
                 layers.push(EncResStackLayer {
-                    c1: w(
+                    c1: load_weight(
+                        source,
                         &format!(
                             "dotstts.vocoder.audio_encoder.generator.{gi}.layers.{j}.2.weight"
                         ),
@@ -754,7 +511,8 @@ impl AudioEncoder {
                         &[ch as u64],
                     )?,
                     d1: d,
-                    c2: w(
+                    c2: load_weight(
+                        source,
                         &format!(
                             "dotstts.vocoder.audio_encoder.generator.{gi}.layers.{j}.5.weight"
                         ),
@@ -858,16 +616,16 @@ impl AudioEncoder {
 // BigVGAN decoder
 // ---------------------------------------------------------------------------
 
-struct AmpConv {
-    weight: Vec<f32>,
+struct AmpConv<'a> {
+    weight: Weight<'a>,
     bias: Vec<f32>,
     kernel: usize,
     dilation: usize,
 }
 
-pub(crate) struct AmpBlock {
-    convs1: Vec<AmpConv>,
-    convs2: Vec<AmpConv>,
+pub(crate) struct AmpBlock<'a> {
+    convs1: Vec<AmpConv<'a>>,
+    convs2: Vec<AmpConv<'a>>,
     alphas: Vec<f32>, // 6 [ch]
     betas: Vec<f32>,  // 6 [ch]
     ch: usize,
@@ -875,9 +633,9 @@ pub(crate) struct AmpBlock {
     down_filter: Vec<f32>, // fixed kaiser [12]
 }
 
-impl AmpBlock {
+impl<'a> AmpBlock<'a> {
     fn from_source(
-        source: &dyn TensorSource,
+        source: &'a dyn TensorSource,
         idx: usize,
         ch: usize,
         kernel: usize,
@@ -885,9 +643,10 @@ impl AmpBlock {
         let w = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
-        let conv = |group: &str, j: usize, dilation: usize| -> Result<AmpConv, String> {
+        let conv = |group: &str, j: usize, dilation: usize| -> Result<AmpConv<'a>, String> {
             Ok(AmpConv {
-                weight: w(
+                weight: load_weight(
+                    source,
                     &format!("dotstts.vocoder.decoder.resblocks.{idx}.{group}.{j}.weight"),
                     &[kernel as u64, ch as u64, ch as u64],
                 )?,
@@ -1074,44 +833,6 @@ impl AmpBlock {
         }
         // downsample: replicate pad 11 left, conv1d stride 2
         let mut down = vec![0.0f32; self.ch * length];
-        #[cfg(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            let mut columns = vec![0.0f32; self.ch * 12 * length];
-            for c in 0..self.ch {
-                for k in 0..12usize {
-                    for n in 0..length {
-                        let src = n * 2 + k;
-                        let padded = if src >= 11 { src - 11 } else { 0 };
-                        columns[(c * 12 + k) * length + n] = snake[c * 2 * length + padded];
-                    }
-                }
-                unsafe {
-                    sys::cblas_sgemm(
-                        102,
-                        111,
-                        111,
-                        length as i32,
-                        1,
-                        12,
-                        1.0,
-                        columns[c * 12 * length..].as_ptr(),
-                        length as i32,
-                        self.down_filter.as_ptr(),
-                        12,
-                        0.0,
-                        down[c * length..].as_mut_ptr(),
-                        length as i32,
-                    );
-                }
-            }
-        }
-        #[cfg(not(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
         for c in 0..self.ch {
             for n in 0..length {
                 let mut acc = 0.0f32;
@@ -1133,24 +854,28 @@ impl AmpBlock {
     }
 }
 
-pub struct BigVganDecoder {
-    pub conv_pre: (Vec<f32>, Vec<f32>), // [5,128,1536]
-    pub ups: Vec<(Vec<f32>, Vec<f32>, usize, usize, usize, usize)>, // w,b,kernel,stride,in,out
-    pub(crate) resblocks: Vec<AmpBlock>,
+pub struct BigVganDecoder<'a> {
+    pub conv_pre: (Weight<'a>, Vec<f32>), // [5,128,1536]
+    pub ups: Vec<(Weight<'a>, Vec<f32>, usize, usize, usize, usize)>, // w,b,kernel,stride,in,out
+    pub(crate) resblocks: Vec<AmpBlock<'a>>,
     pub post_alpha: Vec<f32>,
     pub post_beta: Vec<f32>,
     pub post_up: Vec<f32>, // trained [24,1,12] → flattened per-channel [24*12]
     pub post_down: Vec<f32>, // trained [24,1,12]
-    pub conv_post: (Vec<f32>, Vec<f32>), // [7,24,1]
+    pub conv_post: (Weight<'a>, Vec<f32>), // [7,24,1]
 }
 
-impl BigVganDecoder {
-    fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+impl<'a> BigVganDecoder<'a> {
+    fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let w = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
         let conv_pre = (
-            w("dotstts.vocoder.decoder.conv_pre.weight", &[5, 128, 1536])?,
+            load_weight(
+                source,
+                "dotstts.vocoder.decoder.conv_pre.weight",
+                &[5, 128, 1536],
+            )?,
             w("dotstts.vocoder.decoder.conv_pre.bias", &[1536])?,
         );
         let mut ups = Vec::new();
@@ -1164,7 +889,8 @@ impl BigVganDecoder {
         ];
         for (i, &(k, s, ich, och)) in spec.iter().enumerate() {
             ups.push((
-                w(
+                load_weight(
+                    source,
                     &format!("dotstts.vocoder.decoder.ups.{i}.0.weight"),
                     &[k as u64, och as u64, ich as u64],
                 )?,
@@ -1207,10 +933,21 @@ impl BigVganDecoder {
             }
         }
         let conv_post = (
-            w("dotstts.vocoder.decoder.conv_post.weight", &[7, 24, 1])?,
-            // the checkpoint ships no conv_post bias; keep zeros so the
-            // decoder math is unchanged
-            w("dotstts.vocoder.decoder.conv_post.bias", &[1]).unwrap_or_else(|_| vec![0.0]),
+            load_weight(
+                source,
+                "dotstts.vocoder.decoder.conv_post.weight",
+                &[7, 24, 1],
+            )?,
+            // The checkpoint may omit this bias; malformed stored biases
+            // must still fail validation.
+            if source
+                .tensor_info("dotstts.vocoder.decoder.conv_post.bias")
+                .is_some()
+            {
+                w("dotstts.vocoder.decoder.conv_post.bias", &[1])?
+            } else {
+                vec![0.0]
+            },
         );
         Ok(Self {
             conv_pre,
@@ -1343,44 +1080,6 @@ impl BigVganDecoder {
             &snake,
         ));
         let mut down = vec![0.0f32; ch * length];
-        #[cfg(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        {
-            let mut columns = vec![0.0f32; ch * 12 * length];
-            for c in 0..ch {
-                for k in 0..12usize {
-                    for n in 0..length {
-                        let src = n * 2 + k;
-                        let padded = if src >= 11 { src - 11 } else { 0 };
-                        columns[(c * 12 + k) * length + n] = snake[c * 2 * length + padded];
-                    }
-                }
-                unsafe {
-                    sys::cblas_sgemm(
-                        102,
-                        111,
-                        111,
-                        length as i32,
-                        1,
-                        12,
-                        1.0,
-                        columns[c * 12 * length..].as_ptr(),
-                        length as i32,
-                        self.post_down[c * 12..].as_ptr(),
-                        12,
-                        0.0,
-                        down[c * length..].as_mut_ptr(),
-                        length as i32,
-                    );
-                }
-            }
-        }
-        #[cfg(not(any(
-            all(feature = "accelerate", target_os = "macos"),
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
         for c in 0..ch {
             for n in 0..length {
                 let mut acc = 0.0f32;
@@ -1423,17 +1122,17 @@ impl BigVganDecoder {
 // Assembled vocoder
 // ---------------------------------------------------------------------------
 
-pub struct Vocoder {
-    pub(crate) encoder: AudioEncoder,
-    pub(crate) enc_mi: MiLayer,
-    pub pre_proj: (Vec<f32>, Vec<f32>),  // [1,128,256]
-    pub post_proj: (Vec<f32>, Vec<f32>), // [1,128,128]
-    pub(crate) dec_mi: MiLayer,
-    pub(crate) decoder: BigVganDecoder,
+pub struct Vocoder<'a> {
+    pub(crate) encoder: AudioEncoder<'a>,
+    pub(crate) enc_mi: MiLayer<'a>,
+    pub pre_proj: (Weight<'a>, Vec<f32>),  // [1,128,256]
+    pub post_proj: (Weight<'a>, Vec<f32>), // [1,128,128]
+    pub(crate) dec_mi: MiLayer<'a>,
+    pub(crate) decoder: BigVganDecoder<'a>,
 }
 
-impl Vocoder {
-    pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+impl<'a> Vocoder<'a> {
+    pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let w = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
@@ -1441,11 +1140,11 @@ impl Vocoder {
             encoder: AudioEncoder::from_source(source)?,
             enc_mi: MiLayer::from_source(source, "dotstts.vocoder.enc_mi_layer")?,
             pre_proj: (
-                w("dotstts.vocoder.pre_proj.weight", &[1, 128, 256])?,
+                load_weight(source, "dotstts.vocoder.pre_proj.weight", &[1, 128, 256])?,
                 w("dotstts.vocoder.pre_proj.bias", &[256])?,
             ),
             post_proj: (
-                w("dotstts.vocoder.post_proj.weight", &[1, 128, 128])?,
+                load_weight(source, "dotstts.vocoder.post_proj.weight", &[1, 128, 128])?,
                 w("dotstts.vocoder.post_proj.bias", &[128])?,
             ),
             dec_mi: MiLayer::from_source(source, "dotstts.vocoder.dec_mi_layer")?,
@@ -1461,8 +1160,7 @@ impl Vocoder {
         if frames == 0 {
             return Err("vocoder encoder produced no frames".into());
         }
-        // Torch feeds the non-contiguous [T, 128] transpose view directly to
-        // the first MI Linear; preserve that SGEMM reduction path here.
+        // Convert the channel-major encoder output for the first MI Linear.
         let mi_out = self
             .enc_mi
             .forward_transposed_input(&encoded, frames, false); // [T, 128]
@@ -1530,6 +1228,14 @@ impl Vocoder {
 mod tests {
     use super::*;
 
+    fn f32_weight(values: Vec<f32>, n_in: usize) -> Weight<'static> {
+        let n_out = values.len() / n_in;
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(values));
+        weight.n_in = n_in;
+        weight.n_out = n_out;
+        weight
+    }
+
     fn read_f32_path(path: impl AsRef<std::path::Path>) -> Vec<f32> {
         std::fs::read(path)
             .unwrap()
@@ -1575,7 +1281,7 @@ mod tests {
         let source = open_model_source(&path, ComponentRole::Mmproj).unwrap();
         let mut input = read_f32("DOTS_AUDIOENC_INPUT");
         input.resize(284_160, 0.0);
-        let weight = load_f16_f32(
+        let weight = load_weight(
             source.as_ref(),
             "dotstts.vocoder.audio_encoder.generator.0.layer.weight",
             &[3, 1, 12],
@@ -1769,7 +1475,7 @@ mod tests {
         let oracle =
             std::path::PathBuf::from(std::env::var_os("DOTS_AUDIOENC_ORACLE_DIR").unwrap());
         let source = open_model_source(&model, ComponentRole::Mmproj).unwrap();
-        let weight = load_f16_f32(
+        let weight = load_weight(
             source.as_ref(),
             "dotstts.vocoder.pre_proj.weight",
             &[1, 128, 256],
@@ -1915,10 +1621,10 @@ mod tests {
     fn encoder_resstack_applies_leaky_relu_before_each_first_convolution() {
         let stack = EncResStack {
             layers: vec![EncResStackLayer {
-                c1: vec![0.0, 0.0, 1.0],
+                c1: f32_weight(vec![0.0, 0.0, 1.0], 3),
                 b1: vec![0.0],
                 d1: 1,
-                c2: vec![0.0, 0.0, 1.0],
+                c2: f32_weight(vec![0.0, 0.0, 1.0], 3),
                 b2: vec![0.0],
             }],
             ch: 1,
@@ -1937,7 +1643,7 @@ mod tests {
     fn encoder_final_convolution_uses_default_two_frame_lookahead() {
         let mut convs = (0..7)
             .map(|_| EncConv {
-                weight: vec![1.0],
+                weight: f32_weight(vec![1.0], 1),
                 bias: vec![0.0],
                 kernel: 1,
                 stride: 1,
@@ -1945,7 +1651,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         convs.push(EncConv {
-            weight: vec![1.0, 0.0, 0.0, 0.0, 0.0],
+            weight: f32_weight(vec![1.0, 0.0, 0.0, 0.0, 0.0], 5),
             bias: vec![0.0],
             kernel: 5,
             stride: 1,
@@ -1973,10 +1679,241 @@ mod tests {
 
     #[test]
     fn conv_transpose_causal_produces_exact_length() {
-        let w = vec![1.0f32; 4 * 2 * 4]; // in=4,out=2,k=4
+        let w = f32_weight(vec![1.0f32; 4 * 2 * 4], 2 * 4); // in=4,out=2,k=4
         let b = vec![0.0f32; 2];
         let x = vec![1.0f32; 4 * 3]; // 3 frames
         let y = conv_transpose1d_causal(&w, &b, &x, 4, 3, 2, 4, 2);
         assert_eq!(y.len(), 2 * 3 * 2);
+    }
+
+    fn q8_fixture(n_in: usize, n_out: usize) -> (Vec<u8>, Vec<f32>) {
+        assert_eq!(n_in % 32, 0);
+        let mut bytes = Vec::new();
+        let mut values = Vec::new();
+        for block in 0..n_in * n_out / 32 {
+            let scale = (block % 4 + 1) as f32 / 64.0;
+            bytes.extend_from_slice(&crate::ops::f32_to_f16(scale).to_le_bytes());
+            for lane in 0..32 {
+                let q = ((block * 7 + lane * 3) % 23) as i8 - 11;
+                bytes.push(q as u8);
+                values.push(q as f32 * scale);
+            }
+        }
+        (bytes, values)
+    }
+
+    #[test]
+    fn q8_convolution_matches_scalar_layout_bias_stride_dilation_and_batch_tail() {
+        use crate::core::tensor::GGMLType;
+        use crate::ops::kernel::QuantizedTensor;
+        let (in_ch, out_ch, length, kernel) = (16, 3, 67, 2);
+        let (bytes, values) = q8_fixture(in_ch * kernel, out_ch);
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &bytes,
+            GGMLType::Q8_0,
+            in_ch * kernel,
+            out_ch,
+        ));
+        // Each activation block is exactly representable in Q8_0 (scale 1).
+        let input: Vec<f32> = (0..in_ch * length)
+            .map(|i| ((i * 7 % 3) as f32 - 1.0) * 127.0)
+            .collect();
+        let bias = [0.125, -0.25, 0.5];
+        for (stride, dilation, pad) in [(1, 1, 1), (2, 1, 1), (1, 3, 3)] {
+            let out_len = if stride == 1 {
+                length
+            } else {
+                length.div_ceil(stride)
+            };
+            let actual = if stride == 1 {
+                conv1d_causal(
+                    &weight, &bias, &input, in_ch, length, out_ch, kernel, dilation, pad,
+                )
+            } else {
+                conv1d_causal_strided(
+                    &weight, &bias, &input, in_ch, length, out_ch, kernel, stride, pad,
+                )
+            };
+            let mut expected = vec![0.0; out_ch * out_len];
+            for oc in 0..out_ch {
+                for t in 0..out_len {
+                    let mut sum = 0.0;
+                    for ic in 0..in_ch {
+                        for k in 0..kernel {
+                            let src = (t * stride + k * dilation) as isize - pad as isize;
+                            if (0..length as isize).contains(&src) {
+                                sum += values[(oc * in_ch + ic) * kernel + k]
+                                    * input[ic * length + src as usize];
+                            }
+                        }
+                    }
+                    expected[oc * out_len + t] = sum + bias[oc];
+                }
+            }
+            assert_eq!(actual, expected, "stride={stride}, dilation={dilation}");
+            let float = f32_weight(values.clone(), in_ch * kernel);
+            assert_eq!(
+                conv1d(
+                    &float, &bias, &input, in_ch, length, out_ch, kernel, stride, dilation, pad,
+                    out_len
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn q8_transpose_convolution_matches_scalar_scatter_and_causal_trim() {
+        use crate::core::tensor::GGMLType;
+        use crate::ops::kernel::QuantizedTensor;
+        let (in_ch, out_ch, kernel, length, stride) = (3, 8, 4, 5, 2);
+        let (bytes, values) = q8_fixture(out_ch * kernel, in_ch);
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &bytes,
+            GGMLType::Q8_0,
+            out_ch * kernel,
+            in_ch,
+        ));
+        let input: Vec<f32> = (0..in_ch * length)
+            .map(|i| (i as f32 - 7.0) / 4.0)
+            .collect();
+        let bias: Vec<f32> = (0..out_ch).map(|c| c as f32 / 16.0).collect();
+        let actual = conv_transpose1d_causal(
+            &weight, &bias, &input, in_ch, length, out_ch, kernel, stride,
+        );
+        let raw_len = (length - 1) * stride + kernel;
+        let mut raw = vec![0.0; out_ch * raw_len];
+        for oc in 0..out_ch {
+            for t in 0..raw_len {
+                for ic in 0..in_ch {
+                    for i in 0..length {
+                        if t >= i * stride && t - i * stride < kernel {
+                            raw[oc * raw_len + t] += input[ic * length + i]
+                                * values[(ic * out_ch + oc) * kernel + t - i * stride];
+                        }
+                    }
+                }
+            }
+        }
+        let expected: Vec<f32> = (0..out_ch)
+            .flat_map(|oc| {
+                raw[oc * raw_len..oc * raw_len + length * stride]
+                    .iter()
+                    .map(|x| x + bias[oc])
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        // Float formats also expand only the requested input-channel row.
+        // The fixture values are exactly representable in all three.
+        for dtype in [GGMLType::F32, GGMLType::F16, GGMLType::BF16] {
+            let bytes: Vec<u8> = values
+                .iter()
+                .flat_map(|&value| match dtype {
+                    GGMLType::F32 => value.to_le_bytes().to_vec(),
+                    GGMLType::F16 => crate::ops::f32_to_f16(value).to_le_bytes().to_vec(),
+                    GGMLType::BF16 => ((value.to_bits() >> 16) as u16).to_le_bytes().to_vec(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            let mut float = Weight::from_quantized(QuantizedTensor::from_bytes(
+                &bytes,
+                dtype,
+                out_ch * kernel,
+                in_ch,
+            ));
+            float.n_in = out_ch * kernel;
+            float.n_out = in_ch;
+            assert_eq!(
+                conv_transpose1d_causal(
+                    &float, &bias, &input, in_ch, length, out_ch, kernel, stride
+                ),
+                expected,
+                "{dtype:?}",
+            );
+        }
+        assert!(
+            conv_transpose1d_causal(&weight, &bias, &[], in_ch, 0, out_ch, kernel, stride)
+                .is_empty()
+        );
+    }
+
+    fn scalar_q8_activation(input: &[f32]) -> Vec<f32> {
+        input
+            .chunks_exact(32)
+            .flat_map(|block| {
+                let max = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let scale = max / 127.0;
+                let inverse = if scale == 0.0 { 0.0 } else { 1.0 / scale };
+                let stored_scale = crate::ops::f16_to_f32(crate::ops::f32_to_f16(scale));
+                block
+                    .iter()
+                    .map(move |&v| (v * inverse).round_ties_even() * stored_scale)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn q8_lstm_matches_independent_gate_order_bias_and_recurrent_state() {
+        use crate::core::tensor::GGMLType;
+        use crate::ops::kernel::QuantizedTensor;
+        let mut bytes = Vec::new();
+        // Sparse diagonal gates make a direct reference possible without
+        // sharing the matrix kernel or materializing dense float matrices.
+        let coefficients = [1i8, -2, 3, 2];
+        for gate in 0..4 {
+            for channel in 0..512 {
+                for block in 0..16 {
+                    bytes.extend_from_slice(&crate::ops::f32_to_f16(1.0 / 32.0).to_le_bytes());
+                    for lane in 0..32 {
+                        bytes.push(if block * 32 + lane == channel {
+                            coefficients[gate] as u8
+                        } else {
+                            0
+                        });
+                    }
+                }
+            }
+        }
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &bytes,
+            GGMLType::Q8_0,
+            512,
+            2048,
+        ));
+        let frames = 3;
+        let input: Vec<f32> = (0..frames * 512)
+            .map(|i| ((i * 11 % 37) as f32 - 18.0) / 23.0)
+            .collect();
+        let input_bias: Vec<f32> = (0..2048).map(|i| ((i % 7) as f32 - 3.0) / 16.0).collect();
+        let hidden_bias: Vec<f32> = (0..2048).map(|i| ((i % 11) as f32 - 5.0) / 32.0).collect();
+        let actual =
+            lstm_layer_forward(&weight, &weight, &input_bias, &hidden_bias, &input, frames);
+        let mut hidden = vec![0.0; 512];
+        let mut cell = vec![0.0; 512];
+        let mut expected = Vec::new();
+        for frame in 0..frames {
+            let xq = scalar_q8_activation(&input[frame * 512..(frame + 1) * 512]);
+            let hq = scalar_q8_activation(&hidden);
+            for channel in 0..512 {
+                let gates: [f32; 4] = std::array::from_fn(|gate| {
+                    let coefficient = coefficients[gate] as f32 / 32.0;
+                    coefficient * hq[channel]
+                        + hidden_bias[gate * 512 + channel]
+                        + (coefficient * xq[channel] + input_bias[gate * 512 + channel])
+                });
+                let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+                cell[channel] =
+                    sigmoid(gates[1]) * cell[channel] + sigmoid(gates[0]) * gates[2].tanh();
+                hidden[channel] = sigmoid(gates[3]) * cell[channel].tanh();
+            }
+            expected.extend_from_slice(&hidden);
+        }
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "LSTM output[{index}]: {actual} vs {expected}"
+            );
+        }
     }
 }

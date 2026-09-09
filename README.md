@@ -12,7 +12,7 @@
 4. **Trait 架构** — 算子和内存通过 trait 解耦
 5. **无 C/C++ FFI** — 100% 纯 Rust，包括量化 kernel
 
-**支持的模型**：见 [模型支持清单](docs/SUPPORTED_MODELS.md)。清单区分 `Verified`、`Supported`、`Experimental` 和 `Unsupported`，避免把架构已接入误写成具体型号已验证。外部参考源码及固定 Oracle 见 [参考实现清单](docs/REFERENCE_IMPLEMENTATIONS.md)。
+**支持的模型**：见 [模型支持清单](docs/develop/SUPPORTED_MODELS.md)。清单区分 `Verified`、`Supported`、`Experimental` 和 `Unsupported`，避免把架构已接入误写成具体型号已验证。外部参考源码及固定 Oracle 见 [参考实现清单](docs/develop/REFERENCE_IMPLEMENTATIONS.md)。
 
 ## 快速开始
 
@@ -122,7 +122,33 @@ cargo run --release --bin rust-model-inference -- \
 
 `--refine`/`--no-refine` 控制 2x refiner；`--latent-upsample` 可选 `bilinear`、`flash`、`causal2d`，`--refiner-decoder` 可选 `wan`、`lightvae`。`--dry-run` 只校验模型对并报告内存，`--overwrite` 允许覆盖五个同名前缀产物，内存估算超过物理内存时只能显式传 `--allow-memory-overcommit`。完整运行会生成 base video、48 kHz WAV、base mux，以及 refined video/refined mux。
 
-Rust 运行时不链接 OpenBLAS、BLIS、MKL、Accelerate、oneDNN、llama.cpp 或 libtorch；计算使用仓库内的标量/AArch64 NEON 算子和 `ComputePool`。当前验证范围是 64×64、1 帧、1 step 的缩小 CPU 全链路，不代表官方 2K 质量或 CUDA Python Oracle 数值对齐；精确证据见 [模型支持清单](docs/SUPPORTED_MODELS.md)。
+Rust 运行时不链接 OpenBLAS、BLIS、MKL、Accelerate、oneDNN、llama.cpp 或 libtorch；计算使用仓库内的标量/AArch64 NEON 算子和 `ComputePool`。当前验证范围是 64×64、1 帧、1 step 的缩小 CPU 全链路，不代表官方 2K 质量或 CUDA Python Oracle 数值对齐；精确证据见 [模型支持清单](docs/develop/SUPPORTED_MODELS.md)。
+
+### dots.tts Base / Edit（Q8_0）
+
+从官方 checkpoint 导出，LLM 和 mmproj 同时量化：
+
+```bash
+python3 tools/dots/convert_dots_tts.py models/dots.tts-base \
+  --variant base --quant q8_0 --out-dir models/dots-base-q8
+python3 tools/dots/convert_dots_tts.py models/dots.tts.edit \
+  --variant edit --quant q8_0 --out-dir models/dots-edit-q8
+
+cargo run --release --bin rust-model-inference -- \
+  --tts --model models/dots-base-q8/dots-tts-base-Q8_0.gguf \
+  --mmproj models/dots-base-q8/dots-tts-base-mmproj-Q8_0.gguf \
+  --prompt "你好，这是语音合成测试。" --language cn --out base.wav
+
+cargo run --release --bin rust-model-inference -- \
+  --tts --edit --model models/dots-edit-q8/dots-tts-edit-Q8_0.gguf \
+  --mmproj models/dots-edit-q8/dots-tts-edit-mmproj-Q8_0.gguf \
+  --source-audio source.wav --source-text "你好。" --target-text "大家好。" \
+  --instruction "将原文替换为目标文本，保持音色。" --use-xvector on --out edit.wav
+```
+
+两份 GGUF 必须来自同一 variant。量化覆盖 embedding、线性层、DiT、PatchEncoder、Speaker 和 Vocoder 的可学习矩阵（含折叠后的卷积、LSTM）；每个展平权重行需为 32 的倍数，不满足的小卷积、norm、bias、统计量和固定滤波器保留源精度。高阶 Q8 卷积张量以二维展平行保存，旧 BF16/F32 文件仍可加载。
+
+Dots 推理复用 `Weight` 和原生 AVX2/NEON/标量内核，不链接 OpenBLAS/CBLAS，也无需 BLAS feature。BF16/F16/Q8 权重保留 mmap 存储；转置卷积仅逐行解码后做 SIMD 累加。原生归约顺序不同于原 Python/BLAS 路径，不承诺 checkpoint 或 PCM 逐位一致；外部 Oracle 审计测试仍保留为 opt-in。
 
 ### Z-Image Turbo
 

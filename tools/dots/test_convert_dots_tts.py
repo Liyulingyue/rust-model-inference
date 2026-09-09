@@ -1,4 +1,5 @@
 import base64
+import json
 import struct
 import tempfile
 import unittest
@@ -10,14 +11,17 @@ import numpy as np
 from convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
+    GGML_I64,
     GGML_Q8_0,
     GgufWriter,
     Tensor,
+    _export_open_model,
     _fold_weight_norm_dim0_f32,
     _output_paths,
     _require_tensor,
     _tensor_nbytes,
     bf16_bytes_to_q8_0,
+    emit_tensor,
     export_model,
     quantize_q8_0,
     read_gguf_directory,
@@ -28,6 +32,115 @@ from convert_dots_tts import (
 
 
 class ExportContractTest(unittest.TestCase):
+    def test_complete_export_quantizes_both_files_and_preserves_mixed_precision(self):
+        def tensor(name, shape, dtype="BF16"):
+            count = int(np.prod(shape))
+            values = ((np.arange(count, dtype=np.float32) % 37 - 18) / 19).reshape(shape)
+            if dtype == "BF16":
+                raw = (values.view(np.uint32) >> 16).astype("<u2").tobytes()
+            elif dtype == "I64":
+                raw = struct.pack("<q", 7)
+            else:
+                raw = values.astype("<f4").tobytes()
+            return Tensor(name, dtype, shape, raw)
+
+        core = {}
+        core["llm.model.embed_tokens.weight"] = tensor("embed", (4, 32))
+        core["llm.model.norm.weight"] = tensor("norm", (32,))
+        shapes = {
+            "hidden_proj": (32, 32), "latent_proj": (32, 16),
+            "coordinate_proj": (32, 16), "xvec_proj.0": (32, 32),
+            "xvec_proj.1": (32,), "eos_proj.0": (32, 32), "eos_proj.2": (2, 32),
+            "patch_encoder.ds_proj": (16, 16, 2),
+            "patch_encoder.in_proj": (32, 16), "patch_encoder.out_proj": (32, 64),
+            "velocity_field_predictor.input_layer": (32, 32),
+            "velocity_field_predictor.time_embedder.mlp.0": (32, 256),
+            "velocity_field_predictor.time_embedder.mlp.2": (32, 32),
+            "velocity_field_predictor.output_layer.adaLN_modulation.1": (64, 32),
+            "velocity_field_predictor.output_layer.linear": (16, 32),
+        }
+        for name, shape in shapes.items():
+            core[name + ".weight"] = tensor(name + ".weight", shape)
+            core[name + ".bias"] = tensor(name + ".bias", (shape[0],))
+        speaker = {
+            "model.conv.weight": tensor("conv", (2, 32, 1, 1), "F32"),
+            "model.small.weight": tensor("small", (32, 1, 3, 3), "F32"),
+            "model.norm.weight": tensor("norm", (32,), "F32"),
+            "model.norm.num_batches_tracked": tensor("counter", (), "I64"),
+            "resample.kernel": tensor("filter", (1, 32), "F32"),
+        }
+        vocoder = {
+            "conv.weight_g": Tensor("g", "F32", (2, 1, 1), struct.pack("<2f", 1, 2)),
+            "conv.weight_v": tensor("v", (2, 16, 2), "F32"),
+            "small.weight_g": Tensor("g", "F32", (4, 1, 1), struct.pack("<4f", 1, 2, 3, 4)),
+            "small.weight_v": tensor("v", (4, 3, 1), "F32"),
+            "plain.weight": tensor("plain", (2, 32, 1), "F32"),
+            "lstm.weight_ih_l0": tensor("ih", (8, 32), "F32"),
+            "lstm.weight_hh_l0": tensor("hh", (8, 32), "F32"),
+            "lstm.bias_ih_l0": tensor("bias", (8,), "F32"),
+            "upsample.filter": tensor("filter", (1, 1, 32), "F32"),
+        }
+        sources = [Mock(header=data, tensor=data.__getitem__) for data in (core, speaker, vocoder)]
+        llm_cfg = dict(num_hidden_layers=0, hidden_size=32, num_attention_heads=2,
+                       num_key_value_heads=2, max_position_embeddings=128,
+                       intermediate_size=64, rms_norm_eps=1e-6, vocab_size=4)
+        cfg = dict(patch_size=4, latent_dim=16, campplus_embedding_size=32,
+                   vocoder=dict(downsample_rates=[2, 2], sample_rate=24000),
+                   PatchEncoder=dict(hidden_size=32, ffn_hidden_size=64, num_layers=0),
+                   DiT=dict(hidden_size=32, ffn_hidden_size=64, num_layers=0, num_heads=2))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, data in (("llm_config", llm_cfg), ("config", cfg),
+                               ("tokenizer_config", {}), ("vocab", dict(a=0, b=1, c=2)),
+                               ("added_tokens", {"<eos>": 3})):
+                (root / f"{name}.json").write_text(json.dumps(data))
+            (root / "merges.txt").write_text("a b\n")
+            for quant in ("bf16", "q8_0"):
+                with self.subTest(quant=quant), patch("convert_dots_tts.load_latent_stats",
+                        return_value=dict(mean=[0.] * 128, var=[1.] * 128)):
+                    llm_path, mmproj_path = _export_open_model(root, "base", root, False, quant, *sources)
+                llm_meta, llm = read_gguf_directory(llm_path)
+                mm_meta, mm = read_gguf_directory(mmproj_path)
+                self.assertEqual(llm_meta["general.file_type"], 7 if quant == "q8_0" else 32)
+                self.assertEqual(mm_meta["general.file_type"], llm_meta["general.file_type"])
+                if quant == "q8_0":
+                    self.assertEqual(mm_meta["general.quantization_version"], 2)
+                else:
+                    self.assertNotIn("general.quantization_version", mm_meta)
+                matrix_type = GGML_Q8_0 if quant == "q8_0" else GGML_BF16
+                self.assertEqual(llm["token_embd.weight"][0], matrix_type)
+                self.assertEqual(llm["output_norm.weight"][0], GGML_F32)
+                self.assertEqual(read_gguf_tensor_bytes(llm_path, "token_embd.weight"),
+                                 read_gguf_tensor_bytes(llm_path, "output.weight"))
+                self.assertEqual(mm["dotstts.dit.input_layer.weight"][0], matrix_type)
+                self.assertEqual(mm["dotstts.hidden_proj.weight"][0], matrix_type)
+                patch_entry = mm["dotstts.patch_encoder.ds_proj.weight"]
+                self.assertEqual(patch_entry[:2], (matrix_type, (32, 16) if quant == "q8_0" else (2, 16, 16)))
+                self.assertEqual(mm["dotstts.latent_proj.weight"][0], GGML_BF16)
+                self.assertEqual(mm["dotstts.xvec_proj.1.weight"][0], GGML_BF16)
+                self.assertEqual(mm["dotstts.hidden_proj.bias"][0], GGML_BF16)
+                self.assertEqual(mm["dotstts.latent_stats.mean"][0], GGML_F32)
+                for name in ("conv", "small"):
+                    _, folded = _fold_weight_norm_dim0_f32(vocoder[name + ".weight_g"].raw,
+                        vocoder[name + ".weight_v"].raw, vocoder[name + ".weight_g"].shape[0])
+                    expected = quantize_q8_0(np.frombuffer(folded, dtype="<f4")) if quant == "q8_0" and name == "conv" else folded
+                    self.assertEqual(read_gguf_tensor_bytes(mmproj_path, f"dotstts.vocoder.{name}.weight"), expected)
+                for source_name in ("plain.weight", "lstm.weight_ih_l0", "lstm.weight_hh_l0"):
+                    expected = vocoder[source_name].raw
+                    if quant == "q8_0":
+                        expected = quantize_q8_0(np.frombuffer(expected, dtype="<f4"))
+                    self.assertEqual(read_gguf_tensor_bytes(mmproj_path, "dotstts.vocoder." + source_name), expected)
+                self.assertEqual(mm["dotstts.speaker.conv.weight"][:2],
+                    (GGML_Q8_0, (32, 2)) if quant == "q8_0" else (GGML_F32, (1, 1, 32, 2)))
+                for name, source_name in (("speaker.small.weight", "model.small.weight"),
+                                          ("speaker.norm.weight", "model.norm.weight"),
+                                          ("speaker.resample_kernel", "resample.kernel")):
+                    self.assertEqual(mm["dotstts." + name][0], GGML_F32)
+                    self.assertEqual(read_gguf_tensor_bytes(mmproj_path, "dotstts." + name), speaker[source_name].raw)
+                self.assertEqual(mm["dotstts.speaker.norm.num_batches_tracked"], (GGML_I64, (1,), 8))
+                self.assertEqual(mm["dotstts.vocoder.upsample.filter"][0], GGML_F32)
+                self.assertFalse(any(name.endswith((".weight_g", ".weight_v")) for name in mm))
+
     def test_weight_norm_fold_matches_pinned_torch_short_rows_bitwise(self):
         g_bits = (
             0x3EFF9355, 0x3F131C5A, 0x3F10961D, 0x3F1F8408,
@@ -259,7 +372,7 @@ class ExportContractTest(unittest.TestCase):
             ))
             self.assertEqual(_output_paths(out, "edit", "q8_0"), (
                 out / "dots-tts-edit-Q8_0.gguf",
-                out / "dots-tts-edit-mmproj-BF16.gguf",
+                out / "dots-tts-edit-mmproj-Q8_0.gguf",
             ))
             with self.assertRaises(ValueError):
                 _output_paths(out, "base", "q4_k")
@@ -370,6 +483,30 @@ class ExportContractTest(unittest.TestCase):
         self.assertEqual(blocks[1, :2].copy().view(np.float16)[0], np.float16(0.0))
         self.assertEqual(blocks[1, 2:].view(np.int8).tolist(), [0] * 32)
 
+    def test_q8_0_matches_pinned_llama_cpp_bytes(self):
+        # llama.cpp b96806d96061049a5b574269b049bf6241d63d46,
+        # ggml/src/ggml-quants.c quantize_row_q8_0_ref, compiled without fast-math.
+        values = np.zeros((4, 32), dtype=np.float32)
+        values[0, :8] = [-1, 1, 0.50003, -0.50003, 0.011813, -0.011813, 0.999, -0.999]
+        values[1, :7] = [-127, 127, -0.5, 0.5, 1.5, -1.5,
+                         np.nextafter(np.float32(0.5), np.float32(0))]
+        values[2] = np.arange(-16, 16, dtype=np.float32) * np.float32(1e-7)
+        expected = bytes.fromhex(
+            "0820817f40c002fe7f81000000000000000000000000000000000000000000000000"
+            "003c817fff0102fe0000000000000000000000000000000000000000000000000000"
+            "000081899199a1a9b1b9c0c8d0d8e0e8f0f8000810182028303840474f575f676f77"
+            "00000000000000000000000000000000000000000000000000000000000000000000"
+        )
+        self.assertEqual(quantize_q8_0(values), expected)
+        self.assertEqual(quantize_q8_0(values.astype(">f4")), expected)
+
+    def test_q8_0_rejects_nonfinite_and_unrepresentable_scales(self):
+        for bad in (float("nan"), float("inf"), -float("inf"), 1e10, 1e-40):
+            values = np.zeros(32, dtype=np.float32)
+            values[0] = bad
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                quantize_q8_0(values)
+
     def test_q8_0_rejects_payload_not_multiple_of_block(self):
         with self.assertRaisesRegex(ValueError, "not a multiple of block size"):
             quantize_q8_0(np.zeros(33, dtype=np.float32))
@@ -383,6 +520,8 @@ class ExportContractTest(unittest.TestCase):
         self.assertEqual(_tensor_nbytes(GGML_BF16, (4,)), 8)
         with self.assertRaisesRegex(ValueError, "not a multiple of block size"):
             _tensor_nbytes(GGML_Q8_0, (33,))
+        with self.assertRaisesRegex(ValueError, "row width"):
+            _tensor_nbytes(GGML_Q8_0, (16, 2))
 
     def test_q8_0_payload_survives_atomic_gguf_readback(self):
         with tempfile.TemporaryDirectory() as raw_dir:
@@ -408,6 +547,9 @@ class ExportContractTest(unittest.TestCase):
         weight = Tensor("hidden_proj.weight", "BF16", (1024, 1024), bytes(2 * 1024 * 1024))
         with self.assertRaisesRegex(ValueError, "expected shape"):
             _require_tensor(weight, "BF16", (1024, 1536))
+        truncated = Tensor("weight", "BF16", (2, 32), bytes(64))
+        with self.assertRaisesRegex(ValueError, "64 bytes, expected 128"):
+            emit_tensor(GgufWriter(Path("unused.gguf")), "hidden_proj.weight", truncated, "q8_0")
 
 
 if __name__ == "__main__":
