@@ -1658,10 +1658,7 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
             // pieces. llama.cpp implements Minicpm5 by first running
             // `\\p{N}{1,3}` over the text, then the standard GPT-2 split;
             // the chunk-size cap is equivalent for the second pass.
-            if matches!(
-                pre,
-                PreTokenizer::K2Horizon | PreTokenizer::Minicpm5
-            ) {
+            if matches!(pre, PreTokenizer::K2Horizon | PreTokenizer::Minicpm5) {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }

@@ -49,8 +49,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             if let Some(context) = crate::ops::get_vulkan_context() {
                 let cfg_probe = &self.config;
                 let n_layer = cfg_probe.n_layer_impl();
-                let stride = cfg_probe.n_head_kv
-                    * cfg_probe.key_length.max(cfg_probe.value_length);
+                let stride = cfg_probe.n_head_kv * cfg_probe.key_length.max(cfg_probe.value_length);
                 let capacity = match kv_cache {
                     KvCache::F32(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
                     KvCache::F16(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
@@ -59,9 +58,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 if capacity > 0 {
                     match Qwen35VulkanSession::try_new(self, capacity, context) {
                         Ok(Some(gpu)) => {
-                            eprintln!(
-                                "[GPU] Qwen3.5 Vulkan session ready (capacity={capacity})"
-                            );
+                            eprintln!("[GPU] Qwen3.5 Vulkan session ready (capacity={capacity})");
                             self.gpu = Some(gpu);
                         }
                         Ok(None) => {}
@@ -371,10 +368,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 &mut scratch.q8_buf[..n_embd],
                 &mut scratch.scale_buf[..n_embd / 32],
             );
-            crate::ops::quantize_row_q8_k_into(
-                inp_slice,
-                &mut scratch.q8k_buf[..n_embd / 256],
-            );
+            crate::ops::quantize_row_q8_k_into(inp_slice, &mut scratch.q8k_buf[..n_embd / 256]);
             let q8_ptr = scratch.q8_buf.as_ptr();
             let sc_ptr = scratch.scale_buf.as_ptr();
             let q8k_ptr = scratch.q8k_buf.as_ptr();
@@ -393,13 +387,29 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let inp = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_q8) };
                 let q_out = unsafe { std::slice::from_raw_parts_mut(matmul_out_ptr, q_dim_q8) };
                 wq.kernel.forward_prepared(
-                    inp, q8, sc, Some(q8k), q_out, n_embd_q8, q_dim_q8, ith, nth,
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    q_out,
+                    n_embd_q8,
+                    q_dim_q8,
+                    ith,
+                    nth,
                 );
                 let k_out = unsafe {
                     std::slice::from_raw_parts_mut(matmul_out_ptr.add(q_dim_q8), k_dim_q8)
                 };
                 wk.kernel.forward_prepared(
-                    inp, q8, sc, Some(q8k), k_out, n_embd_q8, k_dim_q8, ith, nth,
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    k_out,
+                    n_embd_q8,
+                    k_dim_q8,
+                    ith,
+                    nth,
                 );
                 let v_out = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -408,7 +418,15 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     )
                 };
                 wv.kernel.forward_prepared(
-                    inp, q8, sc, Some(q8k), v_out, n_embd_q8, v_dim_q8, ith, nth,
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    v_out,
+                    n_embd_q8,
+                    v_dim_q8,
+                    ith,
+                    nth,
                 );
                 let _ = n_embd_head_q;
             });
@@ -954,10 +972,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 &mut scratch.q8_buf[..n_embd],
                 &mut scratch.scale_buf[..n_embd / 32],
             );
-            crate::ops::quantize_row_q8_k_into(
-                inp,
-                &mut scratch.q8k_buf[..n_embd / 256],
-            );
+            crate::ops::quantize_row_q8_k_into(inp, &mut scratch.q8k_buf[..n_embd / 256]);
             let q8_ptr = scratch.q8_buf.as_ptr();
             let sc_ptr = scratch.scale_buf.as_ptr();
             let q8k_ptr = scratch.q8k_buf.as_ptr();
@@ -973,22 +988,32 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
                 let inp_local = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_local) };
                 let gate_out = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        ffn_gate_buf_ptr.add(t * n_ff_local),
-                        n_ff_local,
-                    )
+                    std::slice::from_raw_parts_mut(ffn_gate_buf_ptr.add(t * n_ff_local), n_ff_local)
                 };
                 layer.ffn_gate.kernel.forward_prepared(
-                    inp_local, q8, sc, Some(q8k), gate_out, n_embd_local, n_ff_local, ith, nth,
+                    inp_local,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    gate_out,
+                    n_embd_local,
+                    n_ff_local,
+                    ith,
+                    nth,
                 );
                 let up_out = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        ffn_up_buf_ptr.add(t * n_ff_local),
-                        n_ff_local,
-                    )
+                    std::slice::from_raw_parts_mut(ffn_up_buf_ptr.add(t * n_ff_local), n_ff_local)
                 };
                 layer.ffn_up.kernel.forward_prepared(
-                    inp_local, q8, sc, Some(q8k), up_out, n_embd_local, n_ff_local, ith, nth,
+                    inp_local,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    up_out,
+                    n_embd_local,
+                    n_ff_local,
+                    ith,
+                    nth,
                 );
             });
             // copy_from_slice skipped: kernel wrote directly into
