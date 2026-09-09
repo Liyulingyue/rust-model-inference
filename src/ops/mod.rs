@@ -2,7 +2,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod activation;
-pub mod attention;
 pub mod dot;
 pub mod embedding;
 pub mod float;
@@ -16,7 +15,6 @@ pub mod sampling;
 pub mod softmax;
 pub mod ssm;
 pub use activation::*;
-pub use attention::*;
 pub use dot::*;
 pub use embedding::*;
 pub use float::*;

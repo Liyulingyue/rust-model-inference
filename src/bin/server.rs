@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{DefaultBodyLimit, Multipart, State},
@@ -74,7 +74,8 @@ enum TextInner {
     },
     Qwen35 {
         // Qwen35Model borrows from its source; we leak the lifetime to 'static.
-        model: Arc<Qwen35Model<'static>>,
+        // `Mutex` is needed because forward now takes `&mut self` (Vulkan state).
+        model: Mutex<Qwen35Model<'static>>,
     },
     Fallback {
         arch: String,
@@ -959,14 +960,19 @@ fn generate_streaming(
         TextInner::Qwen3 { model } => {
             generate_qwen3_streaming(model, &text.tokenizer, &prompt_text, max_tokens, temperature)
         }
-        TextInner::Qwen35 { model } => generate_qwen35_streaming(
-            model,
-            &text.tokenizer,
-            text.pool.clone(),
-            &prompt_text,
-            max_tokens,
-            temperature,
-        ),
+        TextInner::Qwen35 { model } => {
+            let mut guard = model
+                .lock()
+                .map_err(|error| format!("Qwen3.5 model lock poisoned: {error}"))?;
+            generate_qwen35_streaming(
+                &mut *guard,
+                &text.tokenizer,
+                text.pool.clone(),
+                &prompt_text,
+                max_tokens,
+                temperature,
+            )
+        }
         TextInner::Fallback { arch } => Err(format!(
             "Architecture {arch:?} is not yet supported by the server text endpoint; please use the CLI"
         )),
@@ -1026,7 +1032,7 @@ fn generate_qwen3_streaming(
 }
 
 fn generate_qwen35_streaming(
-    model: &Qwen35Model<'_>,
+    model: &mut Qwen35Model<'_>,
     tokenizer: &BPETokenizer,
     pool: Arc<ComputePool>,
     prompt_text: &str,
@@ -1167,7 +1173,7 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
             // satisfy the 'static bound on Arc storage.
             let model: Qwen35Model<'static> = unsafe { std::mem::transmute(model) };
             TextInner::Qwen35 {
-                model: Arc::new(model),
+                model: Mutex::new(model),
             }
         }
         _ => TextInner::Fallback {

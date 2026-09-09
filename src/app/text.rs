@@ -1020,7 +1020,7 @@ fn run_multimodal_with_video_ref(
         );
     }
 
-    let llm = Qwen35Model::from_source(llm_source)
+    let mut llm = Qwen35Model::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     let model_name = llm_source
         .metadata("general.name")

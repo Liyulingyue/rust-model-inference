@@ -34,6 +34,11 @@ enum PreTokenizer {
     /// Differs from `Qwen2` in that punctuation immediately preceding a
     /// letter (`!hello`) is split off as its own token.
     Spark2_5,
+    /// MiniCPM5 (openbmb/MiniCPM5-1B, MiniCPM5-2.6B). GPT-2 style BPE
+    /// (`tokenizer.ggml.model = "gpt2"`) with a pre-split regex that
+    /// chunks numbers into 1-3 digit runs before the standard GPT-2
+    /// split. Mirrors llama.cpp's `LLAMA_VOCAB_PRE_TYPE_MINICPM5`.
+    Minicpm5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,9 +361,10 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
+                Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, llama-bpe, or k2-horizon"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, llama-bpe, k2-horizon, or minicpm5"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -453,21 +459,40 @@ impl BPETokenizer {
                 })
             })
             .collect();
+
+        // Some GGUFs (notably MiniCPM5) tag chat-marker tokens like
+        // `<|im_end|>` as `token_type = Normal` instead of Control. The
+        // semantic-token list below is the source of truth for which
+        // literals count as "stop here", so re-scan the vocab and pull
+        // any literal in that list into `special_tokens` regardless of
+        // its declared type.
+        let semantic_literals: &[(&str, &str)] = match pre {
+            PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
+            PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
+            _ => QWEN_SEMANTIC_TOKENS,
+        };
+        for (literal, _) in semantic_literals {
+            if let Some(&id) = token_to_id.get(*literal) {
+                if !special_tokens.iter().any(|t| t.text == *literal) {
+                    special_tokens.push(SpecialToken {
+                        text: (*literal).into(),
+                        id,
+                        kind: TokenType::Control,
+                    });
+                }
+            }
+        }
         special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
 
-        let semantic_tokens = match pre {
-            PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
-            PreTokenizer::LlamaBpe => LLAMA_BPE_SEMANTIC_TOKENS,
-            _ => QWEN_SEMANTIC_TOKENS,
-        }
-        .iter()
-        .filter_map(|(literal, name)| {
-            special_tokens
-                .iter()
-                .find(|token| token.text == *literal)
-                .map(|token| ((*name).to_string(), token.id))
-        })
-        .collect();
+        let semantic_tokens = semantic_literals
+            .iter()
+            .filter_map(|(literal, name)| {
+                special_tokens
+                    .iter()
+                    .find(|token| token.text == *literal)
+                    .map(|token| ((*name).to_string(), token.id))
+            })
+            .collect();
 
         let byte_fallback = match get_meta("tokenizer.ggml.byte_fallback") {
             Some(MetaValue::Bool(value)) => value,
@@ -1629,7 +1654,11 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
 
         if is_number(current) {
             pos += 1;
-            if pre == PreTokenizer::K2Horizon {
+            // K2Horizon and Minicpm5 both chunk digit runs into 1-3 digit
+            // pieces. llama.cpp implements Minicpm5 by first running
+            // `\\p{N}{1,3}` over the text, then the standard GPT-2 split;
+            // the chunk-size cap is equivalent for the second pass.
+            if matches!(pre, PreTokenizer::K2Horizon | PreTokenizer::Minicpm5) {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }

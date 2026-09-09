@@ -16,15 +16,16 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    attention_value_f32, dot_f32, rope_mrope, rope_neox, silu_approx_inplace,
-    silu_mul_approx_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
+#[cfg(feature = "vulkan")]
+use crate::vulkan::qwen35::Qwen35VulkanSession;
 
 impl<'a> super::weights::Qwen35Model<'a> {
     pub fn forward(
-        &self,
+        &mut self,
         n_tokens: usize,
         kv_cache: &mut KvCache,
         scratch: &mut super::scratch::Qwen35Scratchpad,
@@ -37,6 +38,108 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 mrope_positions.len()
             ));
         }
+
+        // ---- GPU dispatch (decode-only; prefill falls through to CPU) ----
+        // `forward_token` is single-token; the multimodal/text path's first
+        // call is the prefill (n_tokens > 1), subsequent calls decode
+        // (n_tokens == 1). We lazily build the session on the first decode.
+        #[cfg(feature = "vulkan")]
+        if n_tokens == 1 && self.gpu.is_none() {
+            if let Some(context) = crate::ops::get_vulkan_context() {
+                let cfg_probe = &self.config;
+                let n_layer = cfg_probe.n_layer_impl();
+                let stride = cfg_probe.n_head_kv * cfg_probe.key_length.max(cfg_probe.value_length);
+                let capacity = match kv_cache {
+                    KvCache::F32(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
+                    KvCache::F16(c) if n_layer > 0 && stride > 0 => c.k.len() / n_layer / stride,
+                    _ => 0,
+                };
+                if capacity > 0 {
+                    match Qwen35VulkanSession::try_new(self, capacity, context) {
+                        Ok(Some(gpu)) => {
+                            eprintln!("[GPU] Qwen3.5 Vulkan session ready (capacity={capacity})");
+                            self.gpu = Some(gpu);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU] Qwen3.5 Vulkan session init failed: {error}. Falling back to CPU."
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "vulkan")]
+        if n_tokens == 1 {
+            if let Some(gpu) = self.gpu.as_mut() {
+                let gpu_capacity = gpu.capacity;
+                let cache_position = mrope_positions[0][0];
+                let mrope_pos = mrope_positions[0];
+                let cfg = &self.config;
+                let stride = cfg.n_head_kv * cfg.key_length.max(cfg.value_length);
+                let input = &scratch.x[..cfg.n_embd];
+                enum DispatchOutcome {
+                    Logits(Vec<f32>),
+                    Failed,
+                }
+                let outcome = {
+                    let result = gpu.forward_token(input, cache_position, mrope_pos);
+                    match result {
+                        Ok(result) => {
+                            let commit_result = crate::vulkan::qwen35::commit_shadow_state(
+                                kv_cache,
+                                &mut scratch.conv_states,
+                                &mut scratch.ssm_states,
+                                cache_position,
+                                gpu_capacity,
+                                stride,
+                                result.k_delta,
+                                result.v_delta,
+                                result.conv_state,
+                                result.ssm_state,
+                            );
+                            if let Err(error) = commit_result {
+                                eprintln!(
+                                    "[GPU] Qwen3.5 Vulkan commit failed: {error}. Falling back to CPU."
+                                );
+                                DispatchOutcome::Failed
+                            } else {
+                                let mut out = vec![0.0f32; cfg.vocab_size];
+                                let n = result.logits.len().min(cfg.vocab_size);
+                                out[..n].copy_from_slice(&result.logits[..n]);
+                                DispatchOutcome::Logits(out)
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU] Qwen3.5 Vulkan forward_token failed: {error}. Falling back to CPU."
+                            );
+                            DispatchOutcome::Failed
+                        }
+                    }
+                };
+                match outcome {
+                    DispatchOutcome::Logits(out) => {
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.commit_token();
+                        }
+                        return Ok(out);
+                    }
+                    DispatchOutcome::Failed => {
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.abort_token();
+                        }
+                        self.gpu = None;
+                        // fall through to CPU
+                    }
+                }
+            }
+        }
+        // ---- end GPU dispatch ----
+
+        let cfg = &self.config;
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_layer = cfg.n_layer_impl();
@@ -253,36 +356,85 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let inp_off = t * n_embd;
             let t0 = std::time::Instant::now();
             let inp_slice = &input[inp_off..inp_off + n_embd];
-            wq.quantize_and_matmul_with_scratch(
+            // Quantize the shared input ONCE per token. The previous code
+            // called quantize_and_matmul_with_scratch three times (once per
+            // WQ/WK/WV), re-quantizing the same F32 input into Q8_0 + scales
+            // each time. For 27B-class models this is ~3× the AVX2
+            // quantize cost per layer per token.
+            crate::ops::quantize_q8_0_into(
                 inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+                n_embd,
+                &mut scratch.q8_buf[..n_embd],
+                &mut scratch.scale_buf[..n_embd / 32],
             );
+            crate::ops::quantize_row_q8_k_into(inp_slice, &mut scratch.q8k_buf[..n_embd / 256]);
+            let q8_ptr = scratch.q8_buf.as_ptr();
+            let sc_ptr = scratch.scale_buf.as_ptr();
+            let q8k_ptr = scratch.q8k_buf.as_ptr();
+            let q_dim_q8 = q_dim;
+            let k_dim_q8 = k_dim;
+            let v_dim_q8 = v_dim;
+            let n_embd_q8 = n_embd;
+            let n_embd_head_q = n_embd_head;
+            let matmul_out_ptr = scratch.matmul_out.as_mut_ptr();
+            let inp_ptr = inp_slice.as_ptr();
+            let q8k_len = n_embd / 256;
+            pool.compute(move |ith: usize, nth: usize| {
+                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q8) };
+                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q8 / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
+                let inp = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_q8) };
+                let q_out = unsafe { std::slice::from_raw_parts_mut(matmul_out_ptr, q_dim_q8) };
+                wq.kernel.forward_prepared(
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    q_out,
+                    n_embd_q8,
+                    q_dim_q8,
+                    ith,
+                    nth,
+                );
+                let k_out = unsafe {
+                    std::slice::from_raw_parts_mut(matmul_out_ptr.add(q_dim_q8), k_dim_q8)
+                };
+                wk.kernel.forward_prepared(
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    k_out,
+                    n_embd_q8,
+                    k_dim_q8,
+                    ith,
+                    nth,
+                );
+                let v_out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        matmul_out_ptr.add(q_dim_q8 + k_dim_q8),
+                        v_dim_q8,
+                    )
+                };
+                wv.kernel.forward_prepared(
+                    inp,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    v_out,
+                    n_embd_q8,
+                    v_dim_q8,
+                    ith,
+                    nth,
+                );
+                let _ = n_embd_head_q;
+            });
             scratch.q_buf[t * q_dim..t * q_dim + q_dim]
                 .copy_from_slice(&scratch.matmul_out[..q_dim]);
-            wk.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
             scratch.k_buf[t * k_dim..t * k_dim + k_dim]
-                .copy_from_slice(&scratch.matmul_out[..k_dim]);
-            wv.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
+                .copy_from_slice(&scratch.matmul_out[q_dim..q_dim + k_dim]);
             scratch.v_buf[t * v_dim..t * v_dim + v_dim]
-                .copy_from_slice(&scratch.matmul_out[..v_dim]);
+                .copy_from_slice(&scratch.matmul_out[q_dim + k_dim..q_dim + k_dim + v_dim]);
             t_qkv += t0.elapsed().as_secs_f64();
         }
 
@@ -448,11 +600,10 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 for d in 0..n_embd_head {
                     let v_col = v_col_end_padded;
                     let v_col_start = v_layer_base + d * v_capacity;
-                    scratch.attn_out_buf[out_base + d] = attention_value_f32(
+                    scratch.attn_out_buf[out_base + d] = dot_f32(
                         &v_cache[v_col_start..v_col_start + v_col],
                         &scratch.score_buf[..v_col],
                         v_col_end,
-                        v_col,
                     );
                 }
             }
@@ -812,26 +963,59 @@ impl<'a> super::weights::Qwen35Model<'a> {
         for t in 0..n_tokens {
             let off = t * n_embd;
             let inp = &hidden[off..off + n_embd];
-            layer.ffn_gate.quantize_and_matmul_with_scratch(
+            // Quantize shared FFN input ONCE per token (was 2x: gate + up).
+            crate::ops::quantize_q8_0_into(
                 inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+                n_embd,
+                &mut scratch.q8_buf[..n_embd],
+                &mut scratch.scale_buf[..n_embd / 32],
             );
-            scratch.ffn_gate_buf[t * n_ff..t * n_ff + n_ff]
-                .copy_from_slice(&scratch.matmul_out[..n_ff]);
-            layer.ffn_up.quantize_and_matmul_with_scratch(
-                inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            scratch.ffn_up_buf[t * n_ff..t * n_ff + n_ff]
-                .copy_from_slice(&scratch.matmul_out[..n_ff]);
+            crate::ops::quantize_row_q8_k_into(inp, &mut scratch.q8k_buf[..n_embd / 256]);
+            let q8_ptr = scratch.q8_buf.as_ptr();
+            let sc_ptr = scratch.scale_buf.as_ptr();
+            let q8k_ptr = scratch.q8k_buf.as_ptr();
+            let q8k_len = n_embd / 256;
+            let ffn_gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
+            let ffn_up_buf_ptr = scratch.ffn_up_buf.as_mut_ptr();
+            let inp_ptr = inp.as_ptr();
+            let n_ff_local = n_ff;
+            let n_embd_local = n_embd;
+            pool.compute(move |ith: usize, nth: usize| {
+                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_local) };
+                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_local / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
+                let inp_local = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_local) };
+                let gate_out = unsafe {
+                    std::slice::from_raw_parts_mut(ffn_gate_buf_ptr.add(t * n_ff_local), n_ff_local)
+                };
+                layer.ffn_gate.kernel.forward_prepared(
+                    inp_local,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    gate_out,
+                    n_embd_local,
+                    n_ff_local,
+                    ith,
+                    nth,
+                );
+                let up_out = unsafe {
+                    std::slice::from_raw_parts_mut(ffn_up_buf_ptr.add(t * n_ff_local), n_ff_local)
+                };
+                layer.ffn_up.kernel.forward_prepared(
+                    inp_local,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    up_out,
+                    n_embd_local,
+                    n_ff_local,
+                    ith,
+                    nth,
+                );
+            });
+            // copy_from_slice skipped: kernel wrote directly into
+            // ffn_gate_buf[t*n_ff..(t+1)*n_ff] / ffn_up_buf[t*n_ff..(t+1)*n_ff].
         }
 
         silu_mul_approx_inplace(
