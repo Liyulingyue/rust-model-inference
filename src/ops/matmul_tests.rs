@@ -3,7 +3,7 @@ use crate::ops::dot::dot_f32_neon;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 use crate::ops::{
-    attention_value_f32, dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
+    dot_f16, dot_f16_f16_bytes, dot_f16_f32, f16_to_f32, f32_slice_to_f16,
     f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox, rope_norm,
     silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
     ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
@@ -534,7 +534,7 @@ fn neon_attention_value_matches_ggml_256_padded_reduction() {
     padded_values[..values.len()].copy_from_slice(&values);
     padded_weights[..weights.len()].copy_from_slice(&weights);
 
-    let actual = attention_value_f32(&padded_values, &padded_weights, values.len(), 256);
+    let actual = dot_f32(&padded_values, &padded_weights, values.len());
 
     assert_eq!(actual.to_bits(), 0xc032_d8db);
 }

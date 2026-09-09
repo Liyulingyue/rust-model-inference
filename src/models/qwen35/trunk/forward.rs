@@ -16,7 +16,7 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    attention_value_f32, dot_f32, rope_mrope, rope_neox, silu_approx_inplace,
+    dot_f32, rope_mrope, rope_neox, silu_approx_inplace,
     silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
@@ -601,11 +601,10 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 for d in 0..n_embd_head {
                     let v_col = v_col_end_padded;
                     let v_col_start = v_layer_base + d * v_capacity;
-                    scratch.attn_out_buf[out_base + d] = attention_value_f32(
+                    scratch.attn_out_buf[out_base + d] = dot_f32(
                         &v_cache[v_col_start..v_col_start + v_col],
                         &scratch.score_buf[..v_col],
                         v_col_end,
-                        v_col,
                     );
                 }
             }

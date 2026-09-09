@@ -5,7 +5,7 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
-    attention_value_f32, bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
+    bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16,
     quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_neox, softmax_inplace,
 };
 
@@ -626,7 +626,7 @@ pub(super) fn attend(
             for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
                 *slot = cache.values[token * dim + dimension];
             }
-            output[head * dim + dimension] = attention_value_f32(values, scores, cached, padded);
+            output[head * dim + dimension] = dot_f32(values, scores, cached);
         }
     }
     ensure_finite(&format!("blk.{layer} attention"), output)

@@ -6,7 +6,7 @@ use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
-use crate::ops::{attention_value_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
+use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -356,7 +356,7 @@ fn attention(
                 *value = cache.v[value_start];
             }
             output_head[dimension] =
-                attention_value_f32(value_column, scores, value_column.len(), scores.len());
+                dot_f32(value_column, scores, value_column.len());
         }
         #[cfg(not(target_arch = "aarch64"))]
         for (value_position, &weight) in scores[..=position].iter().enumerate() {
@@ -420,7 +420,7 @@ mod tests {
     use super::{validate_hidden_output, z_image_prompt, Qwen3TextEncoder};
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
-    use crate::ops::{attention_value_f32, dot_f32, silu_mul_inplace, softmax_inplace};
+    use crate::ops::{dot_f32, silu_mul_inplace, softmax_inplace};
     use std::sync::Arc;
 
     struct EmptySource;
@@ -584,16 +584,16 @@ mod tests {
         assert!(hidden.iter().all(|value| value.is_finite()));
     }
 
-    /// `attention_value_f32` 与标量参考的 bit-level 一致性。
+    /// `dot_f32` 与标量参考的 bit-level 一致性。
     /// Z-Image 文本编码器 attention value 聚合直接调这个函数（之前还有
     /// `qwen_attention_value` 包装，已删——wrapper 变成1 行透传，没意义）。
     /// 实测：len ≤ 129 时与标量 1 ULP 以内（LLVM 不自动向量化）；
     ///       len ≥ 255 时 LLVM 自动向量化 reference，与手写 SIMD 走不同
     ///       指令序列，最多 ~3 ULP。HEAD_WIDTH=128 是真实调用长度。
-    /// 关键正确性保证见 `attention_value_f32_matches_pinned_ggml_reduction`：
+    /// 关键正确性保证见 `dot_f32_matches_pinned_ggml_reduction`：
     /// 两 arch 都产出 0xbbf2_4ce4（与 ggml NEON 参考完全一致）。
     #[test]
-    fn attention_value_f32_matches_scalar_reference() {
+    fn dot_f32_matches_scalar_reference() {
         let mut max_diff_overall = 0u32;
         for &len in &[
             0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256,
@@ -605,7 +605,7 @@ mod tests {
                 .iter()
                 .zip(&weights)
                 .fold(0.0f32, |acc, (v, w)| acc + v * w);
-            let actual = attention_value_f32(&values, &weights, values.len(), values.len());
+            let actual = dot_f32(&values, &weights, values.len());
             let diff_bits = (actual.to_bits() as i32)
                 .wrapping_sub(expected.to_bits() as i32)
                 .abs() as u32;
@@ -614,7 +614,7 @@ mod tests {
             }
             assert!(
                 diff_bits <= 8,
-                "attention_value_f32 mismatch at len={len}: \
+                "dot_f32 mismatch at len={len}: \
                  actual={actual:?} (bits={:#x}), expected={expected:?} (bits={:#x}), diff_bits={diff_bits}",
                 actual.to_bits(),
                 expected.to_bits()
@@ -627,7 +627,7 @@ mod tests {
     /// `dot_f32`（x86 AVX2）与 `dot_f32_neon` 的 reduce 顺序必须等价，否则
     /// 整个 DiT 文本编码会逐 token 偏离 ggml 参考。
     #[test]
-    fn attention_value_f32_matches_pinned_ggml_reduction() {
+    fn dot_f32_matches_pinned_ggml_reduction() {
         let values = [
             0xbc43_7f80u32,
             0x3dcf_0c16,
@@ -669,17 +669,17 @@ mod tests {
         // 两 arch 都跑：aarch64 → dot_f32_neon，x86 → dot_f32 (AVX2)。
         // 结果应与 ggml NEON 参考一致。
         assert_eq!(
-            attention_value_f32(&values, &weights, values.len(), values.len()).to_bits(),
+            dot_f32(&values, &weights, values.len()).to_bits(),
             0xbbf2_4ce4
         );
     }
 
     /// 空切片不 panic。
     #[test]
-    fn attention_value_f32_empty_input_is_zero() {
+    fn dot_f32_empty_input_is_zero() {
         let values: Vec<f32> = vec![];
         let weights: Vec<f32> = vec![];
-        let result = attention_value_f32(&values, &weights, values.len(), values.len());
+        let result = dot_f32(&values, &weights, values.len());
         assert_eq!(result, 0.0);
     }
 }
