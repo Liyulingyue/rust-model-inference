@@ -11,13 +11,7 @@
 
 use super::neox::rope_sin_cos;
 
-pub fn rope_neox_partial(
-    x: &mut [f32],
-    pos: usize,
-    head_dim: usize,
-    n_rot: usize,
-    freq_base: f32,
-) {
+pub fn rope_neox_partial(x: &mut [f32], pos: usize, head_dim: usize, n_rot: usize, freq_base: f32) {
     assert!(
         n_rot <= head_dim,
         "n_rot ({n_rot}) must be <= head_dim ({head_dim})"

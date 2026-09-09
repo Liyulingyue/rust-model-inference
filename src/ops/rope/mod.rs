@@ -19,17 +19,17 @@ extern "C" {
     fn __sincosf(value: f32, sin: *mut f32, cos: *mut f32);
 }
 
+mod mrope;
 mod neox;
 mod norm;
 mod partial;
-mod mrope;
 mod sleef_math;
 mod sleef_rope;
 
+pub use mrope::{rope_mrope, rope_mrope_interleaved, rope_vision};
 pub use neox::{rope_neox, rope_sin_cos};
 pub use norm::rope_norm;
 pub use partial::rope_neox_partial;
-pub use mrope::{rope_mrope, rope_mrope_interleaved, rope_vision};
 
 pub(crate) use sleef_math::rope_sin_cos_sleef;
 pub(crate) use sleef_rope::{
