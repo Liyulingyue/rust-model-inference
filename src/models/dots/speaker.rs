@@ -5,8 +5,13 @@
 //!   → Kaldi fbank (povey window, pre-emph 0.97, 80 HTK mel bins, log,
 //!   mean-normalized) → CAM++ (FCM stem, TDNN, 3 dense blocks, masked
 //!   statistics pooling, dense → 512-dim x-vector).
+//!
+//! Learned operators use native Weight kernels; their reduction order may
+//! differ from the Torch bit fixtures retained below as diagnostics.
 
-use super::blas::sys;
+use crate::ops::kernel::Weight;
+
+use super::weights::{linear_forward, load_weight};
 
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
@@ -663,6 +668,16 @@ mod campplus_tests {
         transit_forward,
     };
 
+    fn f32_weight(values: Vec<f32>, n_in: usize) -> crate::ops::kernel::Weight<'static> {
+        let n_out = values.len() / n_in;
+        let mut weight = crate::ops::kernel::Weight::from_quantized(
+            crate::ops::kernel::QuantizedTensor::F32(values),
+        );
+        weight.n_in = n_in;
+        weight.n_out = n_out;
+        weight
+    }
+
     #[test]
     fn fcm_layouts_bridge_public_time_major_and_internal_channel_major_buffers() {
         let public = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // [T=3, F=2]
@@ -700,12 +715,18 @@ mod campplus_tests {
     }
 
     #[test]
-    fn regular_and_stride_conv2d_use_source_order_fma() {
+    fn regular_and_stride_conv2d_match_scalar_convolution() {
         let (weight, input) = fma_fixture();
+        let expected: f64 = weight[3..]
+            .iter()
+            .zip(&input)
+            .map(|(&w, &x)| w as f64 * x as f64)
+            .sum();
+        let weight = f32_weight(weight, 9);
         let regular = conv2d_forward(&weight, None, &input, 3, 2, 1, 1, 3, 3, 1, 1);
         let stride = conv2d_forward_stride(&weight, None, &input, 3, 2, 1, 1, 3, 3, 1, 1, 1, 1);
-        assert_eq!(regular[1].to_bits(), 0x3f78_6d04);
-        assert_eq!(stride[1].to_bits(), 0x3f78_6d04);
+        assert!((regular[1] as f64 - expected).abs() < 1e-6);
+        assert_eq!(regular, stride);
     }
 
     #[test]
@@ -723,7 +744,7 @@ mod campplus_tests {
     }
 
     #[test]
-    fn tdnn_conv1d_uses_source_order_fma() {
+    fn tdnn_conv1d_matches_scalar_convolution() {
         let pairs = [
             (0x3f1f_f38a, 0x3f5e_5b40),
             (0xbf20_f634, 0xbf96_afa8),
@@ -733,12 +754,88 @@ mod campplus_tests {
             (0x3cd5_d346, 0xbea8_7f20),
         ];
         let weight = pairs.map(|(weight, _)| f32::from_bits(weight));
+        let expected: f64 = pairs
+            .iter()
+            .map(|&(w, x)| f32::from_bits(w) as f64 * f32::from_bits(x) as f64)
+            .sum();
+        let weight = f32_weight(weight.to_vec(), 6);
         let input = [
             pairs[0].1, pairs[3].1, pairs[1].1, pairs[4].1, pairs[2].1, pairs[5].1,
         ]
         .map(f32::from_bits);
         let actual = conv1d_time_major(&weight, &input, 3, 1, 2, 1, 3, 1, 0, 1);
-        assert_eq!(actual[0].to_bits(), 0x3f78_6d04);
+        assert!((actual[0] as f64 - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn q8_speaker_convolutions_preserve_channel_tap_order_and_strides() {
+        use crate::core::tensor::GGMLType;
+        use crate::ops::kernel::{QuantizedTensor, Weight};
+        let mut bytes = Vec::new();
+        for output in 0..2 {
+            bytes.extend_from_slice(&crate::ops::f32_to_f16(1.0 / 16.0).to_le_bytes());
+            bytes.extend(
+                (0..32)
+                    .map(|i| ((i * 3 + output * 7) % 19) as i8 - 9)
+                    .map(|v| v as u8),
+            );
+        }
+        let weight =
+            Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::Q8_0, 32, 2));
+        let value =
+            |oc: usize, reduction: usize| (bytes[oc * 34 + 2 + reduction] as i8 as f32) / 16.0;
+        // [8, 5, 7] convolved with [2, 8, 2, 2]. Time strides as well
+        // as height strides must use the corresponding output dimensions.
+        let input: Vec<f32> = (0..8 * 5 * 7)
+            .map(|i| ((i * 11 % 3) as f32 - 1.0) * 127.0)
+            .collect();
+        let bias = [0.5, -0.25];
+        let actual =
+            conv2d_forward_stride(&weight, Some(&bias), &input, 7, 5, 8, 2, 2, 2, 2, 2, 1, 0);
+        let (h_out, t_out) = (3, 3);
+        let mut expected = vec![0.0; 2 * h_out * t_out];
+        for oc in 0..2 {
+            for y in 0..h_out {
+                for x in 0..t_out {
+                    let mut sum = bias[oc];
+                    for ic in 0..8 {
+                        for dy in 0..2 {
+                            for dx in 0..2 {
+                                let sy = (y * 2 + dy) as isize - 1;
+                                let sx = x * 2 + dx;
+                                if (0..5).contains(&sy) {
+                                    sum += value(oc, (ic * 2 + dy) * 2 + dx)
+                                        * input[(ic * 5 + sy as usize) * 7 + sx];
+                                }
+                            }
+                        }
+                    }
+                    expected[(oc * h_out + y) * t_out + x] = sum;
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+
+        // The same 32-wide rows are [output=2, input=16, kernel=2].
+        let input: Vec<f32> = (0..35 * 16)
+            .map(|i| ((i * 5 % 3) as f32 - 1.0) * 127.0)
+            .collect();
+        let actual = conv1d_time_major(&weight, &input, 35, 35, 16, 2, 2, 1, 2, 2);
+        let mut expected = vec![0.0; 35 * 2];
+        for time in 0..35 {
+            for oc in 0..2 {
+                for ic in 0..16 {
+                    for tap in 0..2 {
+                        let src = (time + tap * 2) as isize - 2;
+                        if (0..35).contains(&src) {
+                            expected[time * 2 + oc] +=
+                                value(oc, ic * 2 + tap) * input[src as usize * 16 + ic];
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -1512,59 +1609,59 @@ impl BatchNorm {
     }
 }
 
-pub struct CamPlus {
+pub struct CamPlus<'a> {
     // FCM stem (fbank [80, T] → [320, T])
-    pub head_conv1: Vec<f32>, // [32,1,3,3]
+    pub head_conv1: Weight<'a>, // [32,1,3,3]
     pub head_bn1: BatchNorm,
-    pub res_l1_0: ResBlock2d,
-    pub res_l1_1: ResBlock2d,
-    pub res_l2_0: ResBlock2d,
-    pub res_l2_1: ResBlock2d,
-    pub head_conv2: Vec<f32>, // [32,32,3,3] stride (2,1)
+    pub res_l1_0: ResBlock2d<'a>,
+    pub res_l1_1: ResBlock2d<'a>,
+    pub res_l2_0: ResBlock2d<'a>,
+    pub res_l2_1: ResBlock2d<'a>,
+    pub head_conv2: Weight<'a>, // [32,32,3,3] stride (2,1)
     pub head_bn2: BatchNorm,
     // TDNN
-    pub tdnn_w: Vec<f32>, // [128,320,5]
+    pub tdnn_w: Weight<'a>, // [128,320,5]
     pub tdnn_bn: BatchNorm,
     // three dense blocks + transits
-    pub blocks: Vec<DenseBlock>,
-    pub transits: Vec<Transit>,
+    pub blocks: Vec<DenseBlock<'a>>,
+    pub transits: Vec<Transit<'a>>,
     pub out_bn: BatchNorm,
-    pub dense_w: Vec<f32>, // [512,1024,1]
+    pub dense_w: Weight<'a>, // [512,1024,1]
     pub dense_bn: BatchNorm,
 }
 
-pub struct ResBlock2d {
-    pub conv1: Vec<f32>,
+pub struct ResBlock2d<'a> {
+    pub conv1: Weight<'a>,
     pub bn1: BatchNorm,
-    pub conv2: Vec<f32>,
+    pub conv2: Weight<'a>,
     pub bn2: BatchNorm,
-    pub shortcut: Option<(Vec<f32>, BatchNorm)>, // stride != 1
+    pub shortcut: Option<(Weight<'a>, BatchNorm)>, // stride != 1
     pub stride: usize,
 }
 
-pub struct DenseBlock {
-    pub layers: Vec<DenseLayer>,
+pub struct DenseBlock<'a> {
+    pub layers: Vec<DenseLayer<'a>>,
 }
 
-pub struct DenseLayer {
-    pub nl1: BatchNorm,      // bn(in) + relu
-    pub linear1: Vec<f32>,   // [128, in, 1]
-    pub nl2: BatchNorm,      // bn(128) + relu
-    pub cam_local: Vec<f32>, // [32, 128, 3]
+pub struct DenseLayer<'a> {
+    pub nl1: BatchNorm,        // bn(in) + relu
+    pub linear1: Weight<'a>,   // [128, in, 1]
+    pub nl2: BatchNorm,        // bn(128) + relu
+    pub cam_local: Weight<'a>, // [32, 128, 3]
     pub cam_local_dilation: usize,
-    pub cam_lin1: Vec<f32>, // [64, 128, 1]
+    pub cam_lin1: Weight<'a>, // [64, 128, 1]
     pub cam_lin1_bias: Vec<f32>,
-    pub cam_lin2: Vec<f32>, // [32, 64, 1]
+    pub cam_lin2: Weight<'a>, // [32, 64, 1]
     pub cam_lin2_bias: Vec<f32>,
 }
 
-pub struct Transit {
-    pub nl: BatchNorm,    // bn(in) + relu
-    pub linear: Vec<f32>, // [out, in, 1]
+pub struct Transit<'a> {
+    pub nl: BatchNorm,      // bn(in) + relu
+    pub linear: Weight<'a>, // [out, in, 1]
 }
 
-impl CamPlus {
-    pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
+impl<'a> CamPlus<'a> {
+    pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let s = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
             load_f16_f32(source, name, dims)
         };
@@ -1576,17 +1673,21 @@ impl CamPlus {
                 running_var: s(&format!("{prefix}.running_var"), &[channels as u64])?,
             })
         };
-        let head_conv1 = s("dotstts.speaker.head.conv1.weight", &[3, 3, 1, 32])?;
+        let head_conv1 = load_weight(source, "dotstts.speaker.head.conv1.weight", &[3, 3, 1, 32])?;
         let head_bn1 = bn("dotstts.speaker.head.bn1", 32)?;
-        let res = |block: &str, stride: usize| -> Result<ResBlock2d, String> {
+        let res = |block: &str, stride: usize| -> Result<ResBlock2d<'a>, String> {
             let prefix = format!("dotstts.speaker.head.{block}");
-            let conv1 = s(&format!("{prefix}.conv1.weight"), &[3, 3, 32, 32])?;
+            let conv1 = load_weight(source, &format!("{prefix}.conv1.weight"), &[3, 3, 32, 32])?;
             let bn1 = bn(&format!("{prefix}.bn1"), 32)?;
-            let conv2 = s(&format!("{prefix}.conv2.weight"), &[3, 3, 32, 32])?;
+            let conv2 = load_weight(source, &format!("{prefix}.conv2.weight"), &[3, 3, 32, 32])?;
             let bn2 = bn(&format!("{prefix}.bn2"), 32)?;
             let shortcut = if stride != 1 {
                 Some((
-                    s(&format!("{prefix}.shortcut.0.weight"), &[1, 1, 32, 32])?,
+                    load_weight(
+                        source,
+                        &format!("{prefix}.shortcut.0.weight"),
+                        &[1, 1, 32, 32],
+                    )?,
                     bn(&format!("{prefix}.shortcut.1"), 32)?,
                 ))
             } else {
@@ -1605,9 +1706,13 @@ impl CamPlus {
         let res_l1_1 = res("layer1.1", 1)?;
         let res_l2_0 = res("layer2.0", 2)?;
         let res_l2_1 = res("layer2.1", 1)?;
-        let head_conv2 = s("dotstts.speaker.head.conv2.weight", &[3, 3, 32, 32])?;
+        let head_conv2 = load_weight(source, "dotstts.speaker.head.conv2.weight", &[3, 3, 32, 32])?;
         let head_bn2 = bn("dotstts.speaker.head.bn2", 32)?;
-        let tdnn_w = s("dotstts.speaker.xvector.tdnn.linear.weight", &[5, 320, 128])?;
+        let tdnn_w = load_weight(
+            source,
+            "dotstts.speaker.xvector.tdnn.linear.weight",
+            &[5, 320, 128],
+        )?;
         let tdnn_bn = bn("dotstts.speaker.xvector.tdnn.nonlinear.batchnorm", 128)?;
 
         let mut blocks = Vec::new();
@@ -1620,16 +1725,29 @@ impl CamPlus {
                 let dil = *dilation;
                 let in_ch = channels + layer * 32;
                 let prefix = format!("dotstts.speaker.xvector.block{}.tdnnd{}", bi + 1, layer + 1);
-                let linear1 = s(&format!("{prefix}.linear1.weight"), &[1, in_ch as u64, 128])?;
+                let linear1 = load_weight(
+                    source,
+                    &format!("{prefix}.linear1.weight"),
+                    &[1, in_ch as u64, 128],
+                )?;
                 let nl1 = bn(&format!("{prefix}.nonlinear1.batchnorm"), in_ch)?;
                 let nl2 = bn(&format!("{prefix}.nonlinear2.batchnorm"), 128)?;
-                let cam_local = s(
+                let cam_local = load_weight(
+                    source,
                     &format!("{prefix}.cam_layer.linear_local.weight"),
                     &[3, 128, 32],
                 )?;
-                let cam_lin1 = s(&format!("{prefix}.cam_layer.linear1.weight"), &[1, 128, 64])?;
+                let cam_lin1 = load_weight(
+                    source,
+                    &format!("{prefix}.cam_layer.linear1.weight"),
+                    &[1, 128, 64],
+                )?;
                 let cam_lin1_bias = s(&format!("{prefix}.cam_layer.linear1.bias"), &[64])?;
-                let cam_lin2 = s(&format!("{prefix}.cam_layer.linear2.weight"), &[1, 64, 32])?;
+                let cam_lin2 = load_weight(
+                    source,
+                    &format!("{prefix}.cam_layer.linear2.weight"),
+                    &[1, 64, 32],
+                )?;
                 let cam_lin2_bias = s(&format!("{prefix}.cam_layer.linear2.bias"), &[32])?;
                 layers.push(DenseLayer {
                     nl1,
@@ -1652,7 +1770,8 @@ impl CamPlus {
                 ),
                 channels,
             )?;
-            let linear = s(
+            let linear = load_weight(
+                source,
                 &format!("dotstts.speaker.xvector.transit{}.linear.weight", bi + 1),
                 &[1, channels as u64, (channels / 2) as u64],
             )?;
@@ -1660,7 +1779,8 @@ impl CamPlus {
             channels /= 2;
         }
         let out_bn = bn("dotstts.speaker.xvector.out_nonlinear.batchnorm", channels)?;
-        let dense_w = s(
+        let dense_w = load_weight(
+            source,
             "dotstts.speaker.xvector.dense.linear.weight",
             &[1, (channels * 2) as u64, 512],
         )?;
@@ -1748,40 +1868,7 @@ impl CamPlus {
     fn dense_projection(&self, stats: &[f32]) -> Vec<f32> {
         debug_assert_eq!(stats.len(), 1024);
         let mut dense = vec![0.0f32; 512];
-        #[cfg(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        ))]
-        unsafe {
-            const CBLAS_ROW_MAJOR: i32 = 101;
-            const CBLAS_NO_TRANSPOSE: i32 = 111;
-            sys::cblas_sgemm(
-                CBLAS_ROW_MAJOR,
-                CBLAS_NO_TRANSPOSE,
-                CBLAS_NO_TRANSPOSE,
-                512,
-                1,
-                1024,
-                1.0,
-                self.dense_w.as_ptr(),
-                1024,
-                stats.as_ptr(),
-                1,
-                0.0,
-                dense.as_mut_ptr(),
-                1,
-            );
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-        )))]
-        for output in 0..512 {
-            for input in 0..1024 {
-                dense[output] =
-                    self.dense_w[output * 1024 + input].mul_add(stats[input], dense[output]);
-            }
-        }
+        linear_forward(&self.dense_w, None, stats, 1024, 512, &mut dense);
 
         let mut final_output = vec![0.0f32; 512];
         for channel in 0..512 {
@@ -2002,7 +2089,7 @@ fn torch28_batch_norm_terms(
 
 #[allow(clippy::too_many_arguments)]
 fn conv1d_time_major(
-    weight: &[f32],
+    weight: &Weight<'_>,
     input: &[f32],
     input_time: usize,
     output_time: usize,
@@ -2013,86 +2100,61 @@ fn conv1d_time_major(
     padding: usize,
     dilation: usize,
 ) -> Vec<f32> {
-    let mut output = vec![0.0f32; output_time * output_channels];
-    for output_channel in 0..output_channels {
-        for time in 0..output_time {
-            let mut accumulator = 0.0f32;
-            for input_channel in 0..input_channels {
+    let reduction = input_channels * kernel;
+    debug_assert_eq!((weight.n_in, weight.n_out), (reduction, output_channels));
+    let mut output = vec![0.0; output_time * output_channels];
+    let batch = output_time.min(32);
+    if batch == 0 {
+        return output;
+    }
+    let mut columns = vec![0.0; batch * reduction];
+    for start in (0..output_time).step_by(batch) {
+        let rows = (output_time - start).min(batch);
+        columns[..rows * reduction].fill(0.0);
+        for row in 0..rows {
+            for channel in 0..input_channels {
                 for tap in 0..kernel {
-                    let source = time as isize * stride as isize + tap as isize * dilation as isize
-                        - padding as isize;
+                    let source =
+                        ((start + row) * stride + tap * dilation) as isize - padding as isize;
                     if (0..input_time as isize).contains(&source) {
-                        accumulator = weight[output_channel * input_channels * kernel
-                            + input_channel * kernel
-                            + tap]
-                            .mul_add(
-                                input[source as usize * input_channels + input_channel],
-                                accumulator,
-                            );
+                        columns[row * reduction + channel * kernel + tap] =
+                            input[source as usize * input_channels + channel];
                     }
                 }
             }
-            output[time * output_channels + output_channel] = accumulator;
         }
+        linear_forward(
+            weight,
+            None,
+            &columns[..rows * reduction],
+            reduction,
+            output_channels,
+            &mut output[start * output_channels..(start + rows) * output_channels],
+        );
     }
     output
 }
 
-/// Conv2d over a `[channels, h, t]` layout, stride (1,1), pad 1.
-/// `weight` gguf-dims `[kw, kh, in, out]`.
+/// Conv2d over [channels, height, time], with symmetric one-cell padding.
 fn conv2d_forward(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: Option<&[f32]>,
     x: &[f32],
     t: usize,
     h: usize,
     in_ch: usize,
     out_ch: usize,
-    _kw: usize,
-    _kh: usize,
+    kw: usize,
+    kh: usize,
     sh: usize,
     sw: usize,
 ) -> Vec<f32> {
-    let mut out = vec![0.0f32; out_ch * h * t];
-    for o in 0..out_ch {
-        let b = bias.map_or(0.0, |b| b[o]);
-        for i in 0..in_ch {
-            for kh in 0..3usize {
-                for kw in 0..3usize {
-                    let w = weight[o * in_ch * 9 + i * 9 + kh * 3 + kw];
-                    if w == 0.0 {
-                        continue;
-                    }
-                    for hp in 0..h {
-                        let src_h = hp as isize * sh as isize + kh as isize - 1;
-                        for tp in 0..t {
-                            let src_t = tp as isize * sw as isize + kw as isize - 1;
-                            if src_h < 0 || src_t < 0 || src_h >= h as isize || src_t >= t as isize
-                            {
-                                continue;
-                            }
-                            let index = o * h * t + hp * t + tp;
-                            out[index] = w.mul_add(
-                                x[i * h * t + src_h as usize * t + src_t as usize],
-                                out[index],
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        for pos in 0..h * t {
-            out[o * h * t + pos] += b;
-        }
-    }
-    out
+    conv2d_forward_stride(weight, bias, x, t, h, in_ch, out_ch, kw, kh, sh, sw, 1, 1)
 }
 
-/// Conv2d over a `[channels, h, t]` layout with explicit kernel/pad/stride.
-/// `weight` gguf-dims `[kw, kh, in, out]`; pad is symmetric (ph top/bottom,
-/// pw left/right), out h = saturating formula, stride may differ per axis.
+/// GGUF dimensions are [kernel_width, kernel_height, input, output].
 fn conv2d_forward_stride(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: Option<&[f32]>,
     x: &[f32],
     t: usize,
@@ -2107,41 +2169,51 @@ fn conv2d_forward_stride(
     pw: usize,
 ) -> Vec<f32> {
     let h_out = (h_in + 2 * ph).saturating_sub(kh) / sh + 1;
-    let mut out = vec![0.0f32; out_ch * h_out * t];
-    for o in 0..out_ch {
-        let b = bias.map_or(0.0, |b| b[o]);
-        for i in 0..in_ch {
-            for kk_h in 0..kh {
-                for kk_w in 0..kw {
-                    let w = weight[o * in_ch * kh * kw + i * kh * kw + kk_h * kw + kk_w];
-                    if w == 0.0 {
-                        continue;
-                    }
-                    for hp in 0..h_out {
-                        let src_h = hp as isize * sh as isize + kk_h as isize - ph as isize;
-                        if src_h < 0 || src_h >= h_in as isize {
-                            continue;
-                        }
-                        for tp in 0..t {
-                            let src_t = tp as isize * sw as isize + kk_w as isize - pw as isize;
-                            if src_t < 0 || src_t >= t as isize {
-                                continue;
-                            }
-                            let index = o * h_out * t + hp * t + tp;
-                            out[index] = w.mul_add(
-                                x[i * h_in * t + src_h as usize * t + src_t as usize],
-                                out[index],
-                            );
+    let t_out = (t + 2 * pw).saturating_sub(kw) / sw + 1;
+    let positions = h_out * t_out;
+    let reduction = in_ch * kh * kw;
+    debug_assert_eq!((weight.n_in, weight.n_out), (reduction, out_ch));
+    let mut output = vec![0.0; out_ch * positions];
+    let batch = positions.min(32);
+    if batch == 0 {
+        return output;
+    }
+    let mut columns = vec![0.0; batch * reduction];
+    let mut projected = vec![0.0; batch * out_ch];
+    for start in (0..positions).step_by(batch) {
+        let rows = (positions - start).min(batch);
+        columns[..rows * reduction].fill(0.0);
+        for row in 0..rows {
+            let hp = (start + row) / t_out;
+            let tp = (start + row) % t_out;
+            for ic in 0..in_ch {
+                for dh in 0..kh {
+                    let src_h = (hp * sh + dh) as isize - ph as isize;
+                    for dw in 0..kw {
+                        let src_t = (tp * sw + dw) as isize - pw as isize;
+                        if (0..h_in as isize).contains(&src_h) && (0..t as isize).contains(&src_t) {
+                            columns[row * reduction + (ic * kh + dh) * kw + dw] =
+                                x[(ic * h_in + src_h as usize) * t + src_t as usize];
                         }
                     }
                 }
             }
         }
-        for pos in 0..h_out * t {
-            out[o * h_out * t + pos] += b;
+        linear_forward(
+            weight,
+            bias,
+            &columns[..rows * reduction],
+            reduction,
+            out_ch,
+            &mut projected[..rows * out_ch],
+        );
+        for row in 0..rows {
+            for oc in 0..out_ch {
+                output[oc * positions + start + row] = projected[row * out_ch + oc];
+            }
         }
     }
-    out
+    output
 }
 
 /// One dense-layer step: [in, T] → [in+32, T] (concat), with the CAM
@@ -2266,75 +2338,30 @@ fn channel_major_to_time_major(input: &[f32], time: usize, channels: usize) -> V
     output
 }
 
-/// CAM's two biased 1x1 convolutions use the pinned Torch macOS Slow2d path:
-/// bias-prefilled row-major Accelerate SGEMM. Inputs are time-major `[T, in]`;
-/// outputs stay channel-major `[out, T]` for the following gate operation.
+/// Biased 1x1 convolutions from [time, input] to [output, time].
 fn cam_gate_linear(
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     input: &[f32],
     time: usize,
     in_channels: usize,
     out_channels: usize,
 ) -> Vec<f32> {
-    debug_assert_eq!(weight.len(), out_channels * in_channels);
-    debug_assert_eq!(bias.len(), out_channels);
-    debug_assert_eq!(input.len(), time * in_channels);
-
-    let mut output = vec![0.0f32; out_channels * time];
-    for out_channel in 0..out_channels {
-        output[out_channel * time..(out_channel + 1) * time].fill(bias[out_channel]);
-    }
-
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    {
-        let mut channel_major = vec![0.0f32; input.len()];
-        for frame in 0..time {
-            for channel in 0..in_channels {
-                channel_major[channel * time + frame] = input[frame * in_channels + channel];
-            }
-        }
-        const CBLAS_ROW_MAJOR: i32 = 101;
-        const CBLAS_NO_TRANSPOSE: i32 = 111;
-        unsafe {
-            sys::cblas_sgemm(
-                CBLAS_ROW_MAJOR,
-                CBLAS_NO_TRANSPOSE,
-                CBLAS_NO_TRANSPOSE,
-                out_channels as i32,
-                time as i32,
-                in_channels as i32,
-                1.0,
-                weight.as_ptr(),
-                in_channels as i32,
-                channel_major.as_ptr(),
-                time as i32,
-                1.0,
-                output.as_mut_ptr(),
-                time as i32,
-            );
+    let mut projected = vec![0.0; time * out_channels];
+    linear_forward(
+        weight,
+        Some(bias),
+        input,
+        in_channels,
+        out_channels,
+        &mut projected,
+    );
+    let mut output = vec![0.0; projected.len()];
+    for frame in 0..time {
+        for channel in 0..out_channels {
+            output[channel * time + frame] = projected[frame * out_channels + channel];
         }
     }
-
-    #[cfg(not(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    {
-        for out_channel in 0..out_channels {
-            for frame in 0..time {
-                let index = out_channel * time + frame;
-                for in_channel in 0..in_channels {
-                    output[index] = weight[out_channel * in_channels + in_channel]
-                        .mul_add(input[frame * in_channels + in_channel], output[index]);
-                }
-            }
-        }
-    }
-
     output
 }
 

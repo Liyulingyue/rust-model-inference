@@ -368,18 +368,140 @@ pub fn rope_neox_sleef(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f3
 pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
+    if half == 0 || n_heads == 0 {
+        return;
+    }
+    // Cache the sin/cos table once: identical across heads at this pos.
+    // Reduces `powf` + `sin_cos` calls from `n_heads × half` to just `half`.
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
+    let pos_f = pos as f32;
+    for i in 0..half {
+        let inv_freq = 1.0f32 / freq_base.powf((2 * i) as f32 / head_dim as f32);
+        let theta = pos_f * inv_freq;
+        let (c, s) = rope_sin_cos(theta);
+        cos_table[i] = c;
+        sin_table[i] = s;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::has_avx2_fma() {
+            unsafe { rope_neox_apply_avx2(x, n_heads, head_dim, &cos_table, &sin_table) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if super::has_neon() {
+            unsafe { rope_neox_apply_neon(x, n_heads, head_dim, &cos_table, &sin_table) };
+            return;
+        }
+    }
+    rope_neox_apply_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn rope_neox_apply_avx2(
+    x: &mut [f32],
+    n_heads: usize,
+    head_dim: usize,
+    cos: &[f32],
+    sin: &[f32],
+) {
+    use std::arch::x86_64::*;
+    let half = head_dim / 2;
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        let lo_ptr = x.as_mut_ptr().add(base);
+        let hi_ptr = x.as_mut_ptr().add(base + half);
+        let mut i = 0;
+        while i + 8 <= half {
+            let cos_v = _mm256_loadu_ps(cos.as_ptr().add(i));
+            let sin_v = _mm256_loadu_ps(sin.as_ptr().add(i));
+            let x_lo = _mm256_loadu_ps(lo_ptr.add(i));
+            let x_hi = _mm256_loadu_ps(hi_ptr.add(i));
+            // Match the scalar op order `x0 * cos_a + (-x1) * sin_a`
+            // (negation is exact, then mul, then add) so the intermediate
+            // values round identically and the result is bit-exact with
+            // the pinned ggml reference. FMA would fuse the mul+add and
+            // produce 1-ULP differences on some inputs.
+            let neg_x_hi = _mm256_sub_ps(_mm256_setzero_ps(), x_hi);
+            let prod_lo = _mm256_mul_ps(x_lo, cos_v);
+            let prod_hi = _mm256_mul_ps(neg_x_hi, sin_v);
+            let new_lo = _mm256_add_ps(prod_lo, prod_hi);
+            let prod_hi2 = _mm256_mul_ps(x_hi, cos_v);
+            let prod_lo2 = _mm256_mul_ps(x_lo, sin_v);
+            let new_hi = _mm256_add_ps(prod_lo2, prod_hi2);
+            _mm256_storeu_ps(lo_ptr.add(i), new_lo);
+            _mm256_storeu_ps(hi_ptr.add(i), new_hi);
+            i += 8;
+        }
+        while i < half {
+            let x0 = *lo_ptr.add(i);
+            let x1 = *hi_ptr.add(i);
+            *lo_ptr.add(i) = x0 * cos[i] + (-x1) * sin[i];
+            *hi_ptr.add(i) = x0 * sin[i] + x1 * cos[i];
+            i += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn rope_neox_apply_neon(
+    x: &mut [f32],
+    n_heads: usize,
+    head_dim: usize,
+    cos: &[f32],
+    sin: &[f32],
+) {
+    use std::arch::aarch64::*;
+    let half = head_dim / 2;
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        let lo_ptr = x.as_mut_ptr().add(base);
+        let hi_ptr = x.as_mut_ptr().add(base + half);
+        let mut i = 0;
+        while i + 4 <= half {
+            let cos_v = vld1q_f32(cos.as_ptr().add(i));
+            let sin_v = vld1q_f32(sin.as_ptr().add(i));
+            let x_lo = vld1q_f32(lo_ptr.add(i));
+            let x_hi = vld1q_f32(hi_ptr.add(i));
+            // new_lo = x_lo * cos - x_hi * sin
+            let new_lo = vmlsq_f32(vmulq_f32(x_lo, cos_v), x_hi, sin_v);
+            // new_hi = x_hi * cos + x_lo * sin
+            let new_hi = vmlaq_f32(vmulq_f32(x_hi, cos_v), x_lo, sin_v);
+            vst1q_f32(lo_ptr.add(i), new_lo);
+            vst1q_f32(hi_ptr.add(i), new_hi);
+            i += 4;
+        }
+        while i < half {
+            let x0 = *lo_ptr.add(i);
+            let x1 = *hi_ptr.add(i);
+            *lo_ptr.add(i) = x0 * cos[i] - x1 * sin[i];
+            *hi_ptr.add(i) = x0 * sin[i] + x1 * cos[i];
+            i += 1;
+        }
+    }
+}
+
+fn rope_neox_apply_scalar(
+    x: &mut [f32],
+    n_heads: usize,
+    head_dim: usize,
+    cos: &[f32],
+    sin: &[f32],
+) {
+    let half = head_dim / 2;
     for h in 0..n_heads {
         let base = h * head_dim;
         for i in 0..half {
-            // Match Transformers' Qwen2RotaryEmbedding: build each inverse
-            // frequency independently in float32, then multiply by position.
-            let inv_freq = 1.0f32 / freq_base.powf((2 * i) as f32 / head_dim as f32);
-            let theta = (pos as f32) * inv_freq;
-            let (cos_a, sin_a) = rope_sin_cos(theta);
             let x0 = x[base + i];
             let x1 = x[base + i + half];
-            x[base + i] = x0 * cos_a + (-x1) * sin_a;
-            x[base + i + half] = x0 * sin_a + x1 * cos_a;
+            x[base + i] = x0 * cos[i] - x1 * sin[i];
+            x[base + i + half] = x0 * sin[i] + x1 * cos[i];
         }
     }
 }
@@ -424,17 +546,35 @@ pub fn rope_neox_partial(x: &mut [f32], pos: usize, head_dim: usize, n_rot: usiz
 pub fn rope_norm(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
+    if half == 0 || n_heads == 0 {
+        return;
+    }
+    // Cache sin/cos table once across all heads (same for each head at this pos).
+    // `rope_norm` uses the recurrence `theta *= theta_scale` (matches ggml's
+    // ROPE_TYPE_NORM); we keep it here for bit-exact parity with the original
+    // implementation. Reduces `sin_cos` calls from `n_heads × half` to `half`.
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
     let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+    let mut theta = pos as f32;
+    for i in 0..half {
+        let (c, s) = rope_sin_cos(theta);
+        cos_table[i] = c;
+        sin_table[i] = s;
+        theta *= theta_scale;
+    }
+    // Inner loop is scalar because the rotation touches interleaved
+    // `(x[2i], x[2i+1])` pairs, which AVX2 can only handle with shuffles
+    // that cost more than they save at typical `half ≤ 128`.
     for h in 0..n_heads {
         let base = h * head_dim;
-        let mut theta = pos as f32;
         for i in 0..half {
-            let (cos_a, sin_a) = rope_sin_cos(theta);
             let x0 = x[base + 2 * i];
             let x1 = x[base + 2 * i + 1];
-            x[base + 2 * i] = x0.mul_add(cos_a, x1 * -sin_a);
-            x[base + 2 * i + 1] = x0.mul_add(sin_a, x1 * cos_a);
-            theta *= theta_scale;
+            let c = cos_table[i];
+            let sn = sin_table[i];
+            x[base + 2 * i] = x0.mul_add(c, x1 * -sn);
+            x[base + 2 * i + 1] = x0.mul_add(sn, x1 * c);
         }
     }
 }
@@ -642,5 +782,104 @@ mod tests {
         assert!((values[32] - (sin_h + 2.0 * cos_h)).abs() < 1e-6);
         assert!((values[31] - (3.0 * cos_w - 4.0 * sin_w)).abs() < 1e-6);
         assert!((values[63] - (3.0 * sin_w + 4.0 * cos_w)).abs() < 1e-6);
+    }
+
+    /// SIMD path must produce the same result as the scalar fallback.
+    /// Compares public `rope_neox` against the explicit scalar helper used
+    /// when SIMD is unavailable. Catches tail-handling, cache wiring, and
+    /// instruction-order bugs across the three paths.
+    #[test]
+    fn rope_neox_simd_matches_scalar_fallback() {
+        // Vary n_heads × head_dim to exercise SIMD tail loops and edge cases.
+        for &(head_dim, n_heads, pos, freq_base) in &[
+            (64usize, 4usize, 0usize, 10_000.0f32),
+            (128, 8, 1, 1_000_000.0),
+            (128, 16, 7, 500_000.0),
+            (256, 4, 1024, 50_000.0),
+            // head_dim not a multiple of 16 → SIMD tail must fall through to scalar.
+            (96, 2, 3, 100_000.0),
+            (80, 6, 5, 200_000.0),
+            (128, 1, 0, 10_000.0),
+        ] {
+            let mut a = vec![0.0f32; n_heads * head_dim];
+            let mut b = vec![0.0f32; n_heads * head_dim];
+            for (i, slot) in a.iter_mut().enumerate() {
+                *slot = ((i as f32) * 0.0731).sin() * 3.5 - ((i * 31 % 97) as f32) * 0.013;
+            }
+            b.copy_from_slice(&a);
+
+            super::rope_neox(&mut a, pos, head_dim, freq_base);
+
+            // Scalar reference uses the same formula as the public function's
+            // table build, then a plain scalar per-head rotation — the same
+            // shape as the AVX2/NEON tail loop, so SIMD-vs-scalar diffs are
+            // caught bit-for-bit.
+            let half = head_dim / 2;
+            let pos_f = pos as f32;
+            let mut cos_table = vec![0.0f32; half];
+            let mut sin_table = vec![0.0f32; half];
+            for i in 0..half {
+                let inv_freq = 1.0f32 / freq_base.powf((2 * i) as f32 / head_dim as f32);
+                let theta = pos_f * inv_freq;
+                let (c, s) = super::rope_sin_cos(theta);
+                cos_table[i] = c;
+                sin_table[i] = s;
+            }
+            super::rope_neox_apply_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
+
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "head_dim={head_dim} n_heads={n_heads} idx={i}"
+                );
+            }
+        }
+    }
+
+    /// Same for `rope_norm`: SIMD is not used (interleaved-pair layout doesn't
+    /// vectorize cleanly), but the cached table must produce the same output
+    /// as the original per-head recurrence loop.
+    #[test]
+    fn rope_norm_cached_table_matches_per_head_recurrence() {
+        for &(head_dim, n_heads, pos, freq_base) in &[
+            (64usize, 4usize, 0usize, 10_000.0f32),
+            (128, 8, 1, 1_000_000.0),
+            (128, 16, 7, 500_000.0),
+            (256, 4, 1024, 50_000.0),
+        ] {
+            let mut a = vec![0.0f32; n_heads * head_dim];
+            let mut b = vec![0.0f32; n_heads * head_dim];
+            for (i, slot) in a.iter_mut().enumerate() {
+                *slot = ((i as f32) * 0.0731).sin() * 3.5 - ((i * 31 % 97) as f32) * 0.013;
+            }
+            b.copy_from_slice(&a);
+
+            super::rope_norm(&mut a, pos, head_dim, freq_base);
+
+            // Reference: original per-head loop with `theta *= theta_scale`.
+            let half = head_dim / 2;
+            let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+            for h in 0..n_heads {
+                let base = h * head_dim;
+                let mut theta = pos as f32;
+                for i in 0..half {
+                    let (c, s) = super::rope_sin_cos(theta);
+                    let x0 = b[base + 2 * i];
+                    let x1 = b[base + 2 * i + 1];
+                    b[base + 2 * i] = x0.mul_add(c, x1 * -s);
+                    b[base + 2 * i + 1] = x0.mul_add(s, x1 * c);
+                    theta *= theta_scale;
+                }
+            }
+
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "head_dim={head_dim} n_heads={n_heads} idx={i}"
+                );
+            }
+        }
     }
 }

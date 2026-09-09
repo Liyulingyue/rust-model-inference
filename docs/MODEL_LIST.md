@@ -29,4 +29,3 @@
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |
 | NVIDIA-Nemotron-3-Nano        | 4B         | 文本                 |                                      |              | 待核验 |
-| MiniCPM5                      | 1B         | 文本                 | llama.cpp                                      |              | 待核验 |

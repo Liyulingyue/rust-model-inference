@@ -1,9 +1,12 @@
 //! Float conversions + GPU/CPU feature detection.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 #[cfg(target_arch = "x86_64")]
-static GPU_ENABLED: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::AtomicBool;
+
+#[cfg(target_arch = "x86_64")]
+static GPU_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(target_arch = "x86_64"))]
 static GPU_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -12,10 +15,9 @@ pub fn enable_gpu() {
     GPU_ENABLED.store(true, Ordering::Relaxed);
 }
 
-/// Set when a GPU matmul fails at runtime: all subsequent calls fall back to
-/// CPU without retrying the broken path.
-#[cfg(feature = "vulkan")]
-static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
+pub fn gpu_requested() -> bool {
+    GPU_ENABLED.load(Ordering::Relaxed)
+}
 
 /// True when a GPU backend is active and healthy, i.e. matmul outputs are
 /// produced by a fenced GPU dispatch owned by pool thread 0. Trunks use this
@@ -25,7 +27,9 @@ static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
 /// buffer before the dispatch completes.
 #[cfg(feature = "vulkan")]
 pub fn gpu_matmul_active() -> bool {
-    !GPU_BROKEN.load(Ordering::Relaxed) && get_vulkan_context().is_some()
+    !crate::core::thread_pool::gpu_matmul_disabled()
+        && !crate::vulkan::gpu_broken()
+        && get_vulkan_context().is_some()
 }
 
 #[cfg(not(feature = "vulkan"))]
@@ -35,14 +39,12 @@ pub fn gpu_matmul_active() -> bool {
 
 #[cfg(feature = "vulkan")]
 pub fn gpu_broken() -> bool {
-    GPU_BROKEN.load(Ordering::Relaxed)
+    crate::vulkan::gpu_broken()
 }
 
 #[cfg(feature = "vulkan")]
 pub fn mark_gpu_broken(reason: &str) {
-    if !GPU_BROKEN.swap(true, Ordering::Relaxed) {
-        eprintln!("[GPU] Vulkan disabled after error: {reason}. Falling back to CPU.");
-    }
+    crate::vulkan::mark_gpu_broken(reason);
 }
 
 #[cfg(feature = "vulkan")]
@@ -94,7 +96,7 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
                     }
                     Err(e) => {
                         eprintln!("[GPU] Warmup failed: {e}. Falling back to CPU.");
-                        GPU_BROKEN.store(true, Ordering::Relaxed);
+                        crate::vulkan::mark_gpu_broken(&e.to_string());
                         Err(format!("warmup failed: {e}"))
                     }
                 }

@@ -23,8 +23,8 @@
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
 | Qwen3-ASR-0.6B | `qwen3vl` | 语音识别 | Qwen3-ASR mmproj、WAV | Q8_0 LLM + Q8_0 mmproj | `Verified` | [`src/format/ggufrs.rs`](src/format/ggufrs.rs) 有固定文件哈希的 raw GGUF/GGUFRS 转写等价测试；仅支持 greedy 解码，不能同时传图像。 |
 | Qwen3-TTS-12Hz-1.7B-Base | `qwen3tts` | TTS、参考音频声音克隆 | mmproj；克隆时还需参考 WAV/文本 | Q8_0 GGUF + mmproj | `Verified` | [`tests/qwen3_tts_reference.rs`](tests/qwen3_tts_reference.rs) 覆盖 pinned llama.cpp Oracle。 |
-| dots.tts-base | `qwen2` LLM + `clip` mmproj | TTS | `dotstts` mmproj | 转换器产出的混合精度 GGUF + mmproj | `Verified` | [`tests/dots_tts_reference.rs`](tests/dots_tts_reference.rs) 覆盖 pinned Python Oracle 位级对照。 |
-| dots.tts.edit | `qwen2` LLM + `clip` mmproj | 指令式语音编辑 | `dotstts` mmproj、源 WAV、编辑区间 | 转换器产出的混合精度 GGUF + mmproj | `Verified` | 与 Base 共用同一 Oracle 测试，覆盖 Edit 调度和完整波形链路。 |
+| dots.tts-base | `qwen2` LLM + `clip` mmproj | TTS | `dotstts` mmproj | Q8_0 LLM + Q8_0 mmproj；旧 BF16/F32 混合精度文件 | `Verified` | 2026-09-08 原生 Weight/SIMD 路径完成真实 Q8 生成及旧文件冒烟；[导出与运行说明](../../README.md#dotstts-base--editq8_0)。原 BLAS/Python 位级审计保留为 opt-in，当前不承诺逐位一致。 |
+| dots.tts.edit | `qwen2` LLM + `clip` mmproj | 指令式语音编辑 | `dotstts` mmproj、源 WAV、编辑指令 | Q8_0 LLM + Q8_0 mmproj | `Verified` | 2026-09-08 真实双 Q8 文件通过源音频编码、x-vector、Edit 调度与波形生成冒烟；使用 Base 生成 WAV 作输入，未做主观音质评估或 Python 位级对齐。 |
 | Qwen3.5-0.8B | `qwen35` | 文本、图像 | 图像需要 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | 已有真实图文运行记录；未声明其他量化格式。 |
 | Qwen3.5-2B | `qwen35` | 文本；图像路径已接入 | 图像需要匹配 mmproj | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录真实冒烟回归；未单独记录图像 Oracle。 |
 | Qwen3.8-27B | `qwen35` | 文本、图像 | 图像需要 mmproj | 测试指定的 GGUF + mmproj | `Verified` | [`tests/qwen35_reference.rs`](tests/qwen35_reference.rs) 覆盖 pinned llama.cpp lossless checkpoints 和图像冒烟。Qwen3.8 是独立型号，不是 Qwen3-8B。 |

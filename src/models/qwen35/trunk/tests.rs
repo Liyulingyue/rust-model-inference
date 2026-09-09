@@ -9,7 +9,7 @@
 //! - dense-attention softmax + value reduction (aarch64 NEON pinned)
 //! - `Qwen35Session` state management + embed-lookup helpers
 
-use super::session::Qwen35Session;
+use super::session::{required_token_count, Qwen35Session};
 use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
@@ -109,6 +109,8 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
+        #[cfg(feature = "vulkan")]
+        gpu: None,
     }
 }
 
@@ -374,6 +376,8 @@ fn tiny_dense_session_model_with_embedding(
         output_norm: vec![1.0; n_embd],
         output_weight: mk_weight(vocab_size),
         layers: vec![layer],
+        #[cfg(feature = "vulkan")]
+        gpu: None,
     }
 }
 
@@ -398,45 +402,251 @@ fn qwen35_q4_0_embedding_lookup_is_row_local_and_checked() {
     assert!(model.embed_tokens(&[2]).unwrap_err().contains("vocab=2"));
 }
 
+fn tiny_q8_session_model() -> Qwen35Model<'static> {
+    fn q8_weight(n_rows: usize) -> Weight<'static> {
+        const N_COLS: usize = 256;
+        let mut data = Vec::with_capacity(n_rows * N_COLS / 32 * quant::BLOCK_Q80_SIZE);
+        for _ in 0..n_rows {
+            for _ in 0..N_COLS / 32 {
+                data.extend_from_slice(&crate::ops::f32_to_f16(0.01).to_le_bytes());
+                data.extend(std::iter::repeat_n(1, 32));
+            }
+        }
+        let data = Box::leak(data.into_boxed_slice());
+        Weight::from_quantized(QuantizedTensor::Q8_0 {
+            data,
+            n_cols: N_COLS,
+            n_rows,
+        })
+    }
+
+    let config = Qwen35Config {
+        n_nextn: 0,
+        n_embd: 256,
+        n_layer: 1,
+        n_head: 1,
+        n_head_kv: 1,
+        n_ff: 256,
+        n_ctx: 3,
+        vocab_size: 32,
+        rope_freq_base: 1_000_000.0,
+        norm_eps: 1e-6,
+        rope_dimension_count: 256,
+        rope_dimension_sections: [0; 4],
+        ssm_d_conv: 1,
+        ssm_d_state: 2,
+        ssm_n_group: 1,
+        ssm_dt_rank: 1,
+        ssm_d_inner: 2,
+        full_attention_interval: 1,
+        is_recurrent: vec![false],
+        key_length: 256,
+        value_length: 256,
+    };
+    let layer = Qwen35LayerWeights {
+        attn_norm: vec![1.0; 256],
+        attn_post_norm: vec![1.0; 256],
+        wq: Some(q8_weight(512)),
+        wk: Some(q8_weight(256)),
+        wv: Some(q8_weight(256)),
+        wo: Some(q8_weight(256)),
+        attn_q_norm: Some(vec![1.0; 256]),
+        attn_k_norm: Some(vec![1.0; 256]),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: q8_weight(256),
+        ffn_up: q8_weight(256),
+        ffn_down: q8_weight(256),
+    };
+    Qwen35Model {
+        config,
+        tok_embd: f32_test_weight(
+            (0..32 * 256)
+                .map(|index| (index % 17 + 1) as f32 * 0.01)
+                .collect(),
+            256,
+            32,
+        ),
+        output_norm: vec![1.0; 256],
+        output_weight: q8_weight(32),
+        layers: vec![layer],
+        #[cfg(feature = "vulkan")]
+        gpu: None,
+    }
+}
+
 fn session_pool() -> Arc<ComputePool> {
     Arc::new(ComputePool::new(1))
 }
 
 #[test]
 fn session_new_initializes_state_and_allocates_cache() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let pool = session_pool();
-    let session = Qwen35Session::new(&model, 4, pool.clone()).unwrap();
+    let session = Qwen35Session::new(&mut model, 4, pool.clone()).unwrap();
 
     assert_eq!(session.next_position(), 0);
     assert_eq!(session.config().vocab_size, 8);
     assert_eq!(session.config().n_embd, 4);
-    assert_eq!(session.model().config.n_layer, model.config.n_layer);
+    let cfg = session.config().clone();
+    assert_eq!(session.model().config.n_layer, cfg.n_layer);
     assert_eq!(session.pool().n_threads(), 1);
     assert_eq!(session.scratch().x.len(), 4 * 4);
 }
 
 #[test]
 fn session_capacity_must_fit_model_context() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
 
-    assert!(Qwen35Session::new(&model, 0, session_pool()).is_err());
-    assert!(Qwen35Session::new(&model, 17, session_pool()).is_err());
+    assert!(Qwen35Session::new(&mut model, 0, session_pool()).is_err());
+    assert!(Qwen35Session::new(&mut model, 17, session_pool()).is_err());
 }
 
 #[test]
 fn session_step_rejects_tokens_above_capacity() {
-    let model = tiny_dense_session_model();
-    let mut session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let err = session.step(&[0.0; 8], 2, &[[0; 4]; 2]).unwrap_err();
-    assert!(err.contains("capacity 1"), "unexpected error: {err}");
+    assert!(
+        err.contains("session capacity is 1"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn session_new_sizes_state_to_requested_limit() {
+    let mut model = tiny_dense_session_model();
+    let cfg = model.config.clone();
+    let session = Qwen35Session::new(&mut model, 4, session_pool()).unwrap();
+
+    assert_eq!(session.scratch().x.len(), 4 * cfg.n_embd);
+    let KvCache::F32(cache) = session.kv_cache() else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert_eq!(cache.k.len(), cfg.n_layer_impl() * 4 * cfg.n_embd_head());
+    assert_eq!(cache.v.len(), cache.k.len());
+}
+
+#[test]
+fn session_step_rejects_empty_token_batches() {
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
+
+    let error = session.step(&[], 0, &[]).unwrap_err();
+
+    assert!(
+        error.contains("requires at least one token"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn session_step_rejects_embedding_length_overflow() {
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
+
+    let error = session.step(&[], usize::MAX, &[]).unwrap_err();
+
+    assert!(
+        error.contains("embedding length overflow"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn session_step_enforces_capacity_across_calls() {
+    let error = required_token_count(1, 1, 1).unwrap_err();
+
+    assert!(
+        error.contains("requires 2 tokens; session capacity is 1"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local() {
+    let mut model = tiny_q8_session_model();
+    let fallback_pool = Arc::new(ComputePool::new(2));
+    let mut fallback = Qwen35Session::new(&mut model, 3, fallback_pool.clone()).unwrap();
+    let mut cpu = Qwen35Session::new(&mut model, 3, Arc::new(ComputePool::new(2))).unwrap();
+
+    let first = fallback.embed_tokens(&[0]).unwrap();
+    let second = fallback.embed_tokens(&[1]).unwrap();
+    let third = fallback.embed_tokens(&[2]).unwrap();
+    fallback.step(&first, 1, &[[0; 4]]).unwrap();
+    cpu.step(&first, 1, &[[0; 4]]).unwrap();
+    let KvCache::F32(committed) = fallback.kv_cache() else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert!(committed
+        .k
+        .iter()
+        .chain(&committed.v)
+        .any(|value| *value != 0.0));
+
+    fallback.fail_gpu_once_for_test("later token failure");
+    assert!(fallback.gpu_enabled_for_test());
+    assert!(!crate::vulkan::gpu_broken());
+    fallback_pool.clear_gpu_disabled_workers_for_test();
+
+    let actual = fallback.step(&second, 1, &[[1; 4]]).unwrap();
+    let expected = cpu.step(&second, 1, &[[1; 4]]).unwrap();
+
+    assert_eq!(
+        actual.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
+        expected
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+    assert!(!fallback.gpu_enabled_for_test());
+    assert!(!crate::vulkan::gpu_broken());
+    assert_eq!(
+        fallback_pool.gpu_disabled_workers_for_test() & 0b11,
+        0b11,
+        "the failed Q8_0 token must keep every worker out of legacy Vulkan",
+    );
+    fallback_pool.clear_gpu_disabled_workers_for_test();
+
+    let actual = fallback.step(&third, 1, &[[2; 4]]).unwrap();
+    let expected = cpu.step(&third, 1, &[[2; 4]]).unwrap();
+    assert_eq!(
+        actual.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
+        expected
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fallback_pool.gpu_disabled_workers_for_test() & 0b11,
+        0b11,
+        "subsequent Q8_0 tokens must keep every worker out of legacy Vulkan",
+    );
+    assert!(!crate::vulkan::gpu_broken());
+    let (KvCache::F32(actual_cache), KvCache::F32(expected_cache)) =
+        (fallback.kv_cache(), cpu.kv_cache())
+    else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    assert_eq!(actual_cache.k, expected_cache.k);
+    assert_eq!(actual_cache.v, expected_cache.v);
 }
 
 #[test]
 fn session_embed_token_returns_expected_row() {
-    let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     // token id 3 -> row offset 12 -> [12, 13, 14, 15]
     let row = session.embed_token(3).unwrap();
@@ -449,8 +659,8 @@ fn session_embed_token_returns_expected_row() {
 
 #[test]
 fn session_embed_token_out_of_range_errors() {
-    let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let err = session.embed_token(8).unwrap_err();
     assert!(err.contains("out of range"), "unexpected error: {err}");
@@ -460,8 +670,8 @@ fn session_embed_token_out_of_range_errors() {
 
 #[test]
 fn session_embed_tokens_concatenates_rows() {
-    let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let all = session.embed_tokens(&[0, 1, 2]).unwrap();
     assert_eq!(all.len(), 12);
@@ -472,8 +682,8 @@ fn session_embed_tokens_concatenates_rows() {
 
 #[test]
 fn session_embed_tokens_rejects_out_of_range_ids() {
-    let model = tiny_dense_session_model();
-    let session = Qwen35Session::new(&model, 1, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     assert!(session
         .embed_tokens(&[0, 99, 2])
@@ -483,8 +693,8 @@ fn session_embed_tokens_rejects_out_of_range_ids() {
 
 #[test]
 fn session_set_next_position_and_reset() {
-    let model = tiny_dense_session_model();
-    let mut session = Qwen35Session::new(&model, 2, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
 
     assert_eq!(session.next_position(), 0);
     session.set_next_position(42);
@@ -503,8 +713,8 @@ fn session_set_next_position_and_reset() {
 
 #[test]
 fn session_step_validates_embedding_and_position_lengths() {
-    let model = tiny_dense_session_model();
-    let mut session = Qwen35Session::new(&model, 2, session_pool()).unwrap();
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
 
     // embeddings.len() != n_tokens * n_embd
     let bad = vec![0.0f32; 7];

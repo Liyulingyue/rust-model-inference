@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use rand::Rng;
 
-use super::blas::sys;
-
+use super::weights::load_weight;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::models::dots::config::DotsTtsConfig;
@@ -26,6 +25,7 @@ use crate::models::dots::schedule::{
 };
 use crate::models::dots::speaker::{kaldi_fbank, CamPlus, Resampler};
 use crate::models::dots::vocoder::Vocoder;
+use crate::ops::kernel::Weight;
 
 pub const DEFAULT_NFE: usize = 10;
 pub const DEFAULT_GUIDANCE: f32 = 1.2;
@@ -36,18 +36,20 @@ pub const LN_EPS: f32 = 1e-5;
 pub struct DotsTtsModel {
     pub config: DotsTtsConfig,
     pub llm: DotsLlm,
-    pub patch_encoder: PatchEncoder,
-    pub dit: DiT,
-    pub speaker: CamPlus,
+    patch_encoder: PatchEncoder<'static>,
+    dit: DiT<'static>,
+    speaker: CamPlus<'static>,
     pub speaker_resample: Resampler,
-    pub vocoder: Vocoder,
-    pub hidden_proj: (Vec<f32>, Vec<f32>),
-    pub latent_proj: (Vec<f32>, Vec<f32>),
-    pub coordinate_proj: (Vec<f32>, Vec<f32>),
-    pub xvec_proj: (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>), // lin w/b, norm w/b
-    pub eos_proj: (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>),  // l0 w/b, l2 w/b
+    vocoder: Vocoder<'static>,
+    hidden_proj: (Weight<'static>, Vec<f32>),
+    latent_proj: (Weight<'static>, Vec<f32>),
+    coordinate_proj: (Weight<'static>, Vec<f32>),
+    xvec_proj: (Weight<'static>, Vec<f32>, Vec<f32>, Vec<f32>),
+    eos_proj: (Weight<'static>, Vec<f32>, Weight<'static>, Vec<f32>),
     pub latent_mean: Vec<f32>,
     pub latent_var: Vec<f32>,
+    // Declared last so all borrowed kernels are dropped before their mmap owner.
+    _mmproj_source: Arc<dyn TensorSource>,
 }
 
 impl DotsTtsModel {
@@ -57,7 +59,12 @@ impl DotsTtsModel {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let config = DotsTtsConfig::from_source(mmproj_source.as_ref())?;
-        let w = |name: &str, dims: &[u64]| load_f16_f32(mmproj_source.as_ref(), name, dims);
+        // SAFETY: the immutable owner is retained privately, and no borrowed
+        // matrix/component can escape this model through a public field.
+        let source: &'static dyn TensorSource =
+            unsafe { std::mem::transmute(mmproj_source.as_ref()) };
+        let w = |name: &str, dims: &[u64]| load_f16_f32(source, name, dims);
+        let matrix = |name: &str, dims: &[u64]| load_weight(source, name, dims);
         let ln_var = config.latent_dim as u64;
         let fm = config.fm_hidden_size as u64;
         let llm_h = config.llm_hidden_size as u64;
@@ -65,40 +72,41 @@ impl DotsTtsModel {
         Ok(Self {
             config: config.clone(),
             llm: DotsLlm::from_source(llm_source, pool)?,
-            patch_encoder: PatchEncoder::from_source(mmproj_source.as_ref(), config.clone())?,
-            dit: DiT::from_source(mmproj_source.as_ref(), config.clone())?,
-            speaker: CamPlus::from_source(mmproj_source.as_ref())?,
+            patch_encoder: PatchEncoder::from_source(source, config.clone())?,
+            dit: DiT::from_source(source, config.clone())?,
+            speaker: CamPlus::from_source(source)?,
             speaker_resample: Resampler::from_kernel(&w(
                 "dotstts.speaker.resample_kernel",
                 &[41, 1, 1],
             )?)?,
-            vocoder: Vocoder::from_source(mmproj_source.as_ref())?,
+            vocoder: Vocoder::from_source(source)?,
             hidden_proj: (
-                w("dotstts.hidden_proj.weight", &[llm_h, fm])?,
+                matrix("dotstts.hidden_proj.weight", &[llm_h, fm])?,
                 w("dotstts.hidden_proj.bias", &[fm])?,
             ),
             latent_proj: (
-                w("dotstts.latent_proj.weight", &[ln_var, fm])?,
+                matrix("dotstts.latent_proj.weight", &[ln_var, fm])?,
                 w("dotstts.latent_proj.bias", &[fm])?,
             ),
             coordinate_proj: (
-                w("dotstts.coordinate_proj.weight", &[ln_var, fm])?,
+                matrix("dotstts.coordinate_proj.weight", &[ln_var, fm])?,
                 w("dotstts.coordinate_proj.bias", &[fm])?,
             ),
             xvec_proj: (
-                w("dotstts.xvec_proj.0.weight", &[xvec, fm])?,
+                matrix("dotstts.xvec_proj.0.weight", &[xvec, fm])?,
                 w("dotstts.xvec_proj.0.bias", &[fm])?,
                 w("dotstts.xvec_proj.1.weight", &[fm])?,
                 w("dotstts.xvec_proj.1.bias", &[fm])?,
             ),
             eos_proj: (
-                w("dotstts.eos_proj.0.weight", &[llm_h; 2])?,
+                matrix("dotstts.eos_proj.0.weight", &[llm_h; 2])?,
                 w("dotstts.eos_proj.0.bias", &[llm_h])?,
-                w("dotstts.eos_proj.2.weight", &[llm_h, 2])?,
+                matrix("dotstts.eos_proj.2.weight", &[llm_h, 2])?,
                 w("dotstts.eos_proj.2.bias", &[2])?,
             ),
             latent_mean: w("dotstts.latent_stats.mean", &[ln_var])?,
             latent_var: w("dotstts.latent_stats.var", &[ln_var])?,
+            _mmproj_source: mmproj_source,
         })
     }
 
@@ -293,50 +301,21 @@ fn torch28_rowwise_moments_1024(input: &[f32]) -> (f32, f32) {
 fn speaker_condition_forward(
     xvector: &[f32],
     scale: f32,
-    weight: &[f32],
+    weight: &Weight<'_>,
     bias: &[f32],
     norm_weight: &[f32],
     norm_bias: &[f32],
 ) -> Vec<f32> {
     debug_assert_eq!(xvector.len(), 512);
-    debug_assert_eq!(weight.len(), 1024 * 512);
+    debug_assert_eq!((weight.n_in, weight.n_out), (512, 1024));
     debug_assert_eq!(bias.len(), 1024);
     let scaled = xvector
         .iter()
         .map(|&value| value * scale)
         .collect::<Vec<_>>();
     let mut output = bias.to_vec();
-    #[cfg(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    ))]
-    unsafe {
-        sys::cblas_sgemm(
-            101,
-            111,
-            111,
-            1024,
-            1,
-            512,
-            1.0,
-            weight.as_ptr(),
-            512,
-            scaled.as_ptr(),
-            1,
-            1.0,
-            output.as_mut_ptr(),
-            1,
-        );
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(feature = "openblas", target_os = "linux", target_arch = "x86_64"),
-    )))]
-    for out in 0..1024 {
-        for input in 0..512 {
-            output[out] = weight[out * 512 + input].mul_add(scaled[input], output[out]);
-        }
-    }
+
+    linear_forward(weight, Some(bias), &scaled, 512, 1024, &mut output);
     let (mean, variance) = torch28_rowwise_moments_1024(&output);
     let reciprocal_std = 1.0 / (variance + LN_EPS).sqrt();
     for index in 0..1024 {
@@ -1159,7 +1138,8 @@ mod tests {
         let actual = speaker_condition_forward(
             &xvector,
             1.5,
-            &load("dotstts.xvec_proj.0.weight", &[512, 1024]),
+            &super::load_weight(source.as_ref(), "dotstts.xvec_proj.0.weight", &[512, 1024])
+                .unwrap(),
             &load("dotstts.xvec_proj.0.bias", &[1024]),
             &load("dotstts.xvec_proj.1.weight", &[1024]),
             &load("dotstts.xvec_proj.1.bias", &[1024]),
