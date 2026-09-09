@@ -33,8 +33,8 @@ use crate::vulkan::qwen35::{commit_shadow_state, Qwen35VulkanSession};
 ///
 /// Construction validates the model is loaded (no extra work) and allocates
 /// the cache and scratchpad sized for `model.config.n_ctx`.
-pub struct Qwen35Session<'a> {
-    model: &'a mut Qwen35Model<'a>,
+pub struct Qwen35Session<'a, 'm> {
+    model: &'a mut Qwen35Model<'m>,
     capacity: usize,
     kv_cache: KvCache,
     scratch: Qwen35Scratchpad,
@@ -70,12 +70,12 @@ pub(super) fn required_token_count(
     Ok(required)
 }
 
-impl<'a> Qwen35Session<'a> {
+impl<'a, 'm> Qwen35Session<'a, 'm> {
     /// Build a session with cache and scratch sized for `model.config.n_ctx`.
     /// `pool` is shared across sessions (typical) so a single `Arc<ComputePool>`
     /// is sufficient.
     pub fn new(
-        model: &'a mut Qwen35Model<'a>,
+        model: &'a mut Qwen35Model<'m>,
         capacity: usize,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {

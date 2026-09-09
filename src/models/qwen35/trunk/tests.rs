@@ -488,21 +488,22 @@ fn session_pool() -> Arc<ComputePool> {
 
 #[test]
 fn session_new_initializes_state_and_allocates_cache() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let pool = session_pool();
     let session = Qwen35Session::new(&mut model, 4, pool.clone()).unwrap();
 
     assert_eq!(session.next_position(), 0);
     assert_eq!(session.config().vocab_size, 8);
     assert_eq!(session.config().n_embd, 4);
-    assert_eq!(session.model().config.n_layer, model.config.n_layer);
+    let cfg = session.config().clone();
+    assert_eq!(session.model().config.n_layer, cfg.n_layer);
     assert_eq!(session.pool().n_threads(), 1);
     assert_eq!(session.scratch().x.len(), 4 * 4);
 }
 
 #[test]
 fn session_capacity_must_fit_model_context() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
 
     assert!(Qwen35Session::new(&mut model, 0, session_pool()).is_err());
     assert!(Qwen35Session::new(&mut model, 17, session_pool()).is_err());
@@ -510,7 +511,7 @@ fn session_capacity_must_fit_model_context() {
 
 #[test]
 fn session_step_rejects_tokens_above_capacity() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let err = session.step(&[0.0; 8], 2, &[[0; 4]; 2]).unwrap_err();
@@ -522,23 +523,24 @@ fn session_step_rejects_tokens_above_capacity() {
 
 #[test]
 fn session_new_sizes_state_to_requested_limit() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
+    let cfg = model.config.clone();
     let session = Qwen35Session::new(&mut model, 4, session_pool()).unwrap();
 
-    assert_eq!(session.scratch().x.len(), 4 * model.config.n_embd);
+    assert_eq!(session.scratch().x.len(), 4 * cfg.n_embd);
     let KvCache::F32(cache) = session.kv_cache() else {
         panic!("Qwen3.5 KV cache should be F32");
     };
     assert_eq!(
         cache.k.len(),
-        model.config.n_layer_impl() * 4 * model.config.n_embd_head()
+        cfg.n_layer_impl() * 4 * cfg.n_embd_head()
     );
     assert_eq!(cache.v.len(), cache.k.len());
 }
 
 #[test]
 fn session_step_rejects_empty_token_batches() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let error = session.step(&[], 0, &[]).unwrap_err();
@@ -551,7 +553,7 @@ fn session_step_rejects_empty_token_batches() {
 
 #[test]
 fn session_step_rejects_embedding_length_overflow() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let error = session.step(&[], usize::MAX, &[]).unwrap_err();
@@ -575,7 +577,7 @@ fn session_step_enforces_capacity_across_calls() {
 #[cfg(feature = "vulkan")]
 #[test]
 fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local() {
-    let model = tiny_q8_session_model();
+    let mut model = tiny_q8_session_model();
     let fallback_pool = Arc::new(ComputePool::new(2));
     let mut fallback = Qwen35Session::new(&mut model, 3, fallback_pool.clone()).unwrap();
     let mut cpu = Qwen35Session::new(&mut model, 3, Arc::new(ComputePool::new(2))).unwrap();
@@ -646,7 +648,7 @@ fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_loca
 
 #[test]
 fn session_embed_token_returns_expected_row() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     // token id 3 -> row offset 12 -> [12, 13, 14, 15]
@@ -660,7 +662,7 @@ fn session_embed_token_returns_expected_row() {
 
 #[test]
 fn session_embed_token_out_of_range_errors() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let err = session.embed_token(8).unwrap_err();
@@ -671,7 +673,7 @@ fn session_embed_token_out_of_range_errors() {
 
 #[test]
 fn session_embed_tokens_concatenates_rows() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     let all = session.embed_tokens(&[0, 1, 2]).unwrap();
@@ -683,7 +685,7 @@ fn session_embed_tokens_concatenates_rows() {
 
 #[test]
 fn session_embed_tokens_rejects_out_of_range_ids() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();
 
     assert!(session
@@ -694,7 +696,7 @@ fn session_embed_tokens_rejects_out_of_range_ids() {
 
 #[test]
 fn session_set_next_position_and_reset() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
 
     assert_eq!(session.next_position(), 0);
@@ -714,7 +716,7 @@ fn session_set_next_position_and_reset() {
 
 #[test]
 fn session_step_validates_embedding_and_position_lengths() {
-    let model = tiny_dense_session_model();
+    let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
 
     // embeddings.len() != n_tokens * n_embd
