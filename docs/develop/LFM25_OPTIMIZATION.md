@@ -58,55 +58,48 @@ scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
 
 ### 1.3 结果
 
-| 指标 | Before | After | 变化 |
-|------|--------|-------|------|
-| **Generation t/s** | 24.5 | 27.3 (3-run avg) | **+11%** |
-| End-to-end tok/s | 5.4 | 10.9 | +100%（含 prefill） |
-| Prompt t/s | 8.4 | 22.7 | +170% |
+| 指标 | Before | After (Phase 1) | After (Phase 2) | 总变化 |
+|------|--------|-----------------|-----------------|--------|
+| **Generation t/s** | 24.5 | 27.3 | **28.6** | **+17%** |
+| End-to-end tok/s | 5.4 | 10.9 | 11.6 | +115%（含 prefill） |
+| Prompt t/s | 8.4 | 22.7 | 23.9 | +184% |
 
 > **注意**：ETE 提升远超 GT 是因为 prefill 用同一段代码且只跑一次，
 > decode 每 token 重复 512 次 fill（16 层 × 32 head），单次成本小但累积大。
 
 ---
 
-## Phase 2（规划中）
+## Phase 2（已完成 2026-09-09）
 
-### 2.1 `attention values gather` 重构（推荐先做）
+### 2.1 `attention values gather` 重构 ❌ 失败（已 revert）
 
 **位置**：`src/models/lfm25/trunk/forward.rs:825-833`
 
-```rust
-// 当前（每次 decode 走）：
-let mut values = [0.0f32; 512];
-for d in 0..n_embd_head_v {
-    for t in 0..n_cached {
-        values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
-    }
-    attn_out[out_base + d] = dot_f32(&values[..n_padded], &scores[..n_padded], n_cached);
-}
-```
-
-**问题**：
-1. 512-element stack buffer 每次重新初始化
-2. transpose gather（`v_cache[kb + t * stride + d]`）— stride access，cache-unfriendly
-3. 调 `dot_f32` 函数开销
-
-**目标**：去掉中转 buffer，inline 计算（按 d 循环累加）：
+尝试把 `dot_f32` 调用替换成 inline strided dot：
 
 ```rust
-// 重构后：
+// 试过的方案（已 revert）：
 for d in 0..n_embd_head_v {
     let mut acc = 0.0f32;
+    let base_d = kb_local + kv_h * n_embd_head_v + d;
     for t in 0..n_cached {
-        acc += v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d] * scores[t];
+        acc += v_cache[base_d + t * n_embd_gqa] * scores[t];
     }
     attn_out[out_base + d] = acc;
 }
 ```
 
-**预估收益**：GT +5-10%（去掉中转 + 函数调用；LLVM 可在长 context 时部分向量化 stride dot）。
+**实测**：GT 从 27.3 跌到 21.3（-22%）。
 
-**风险**：低。语义等价（同样输入同样输出），没有改变数据依赖。
+**原因**：`dot_f32`（`ops/dot.rs`）是 AVX2 + FMA 向量化的（每次 8 floats FMA）。
+inline strided dot 里 `v_cache[base_d + t * n_embd_gqa]` 是 stride access（stride=2048），
+LLVM 不能向量化 → 比 AVX2 向量化的 `dot_f32` 慢 4×。
+
+**Lesson**：当 `dot_f32` 已经 SIMD 时不要"简化"调用。这条路径在
+F32 KV cache 模式下才走（`KvFormat::F32`），而 LFM2.5 默认 `KvFormat::F16`，
+所以实际很少跑。**保留原 `dot_f32` 调用**。
+
+### 2.2 `shortconv conv1d` 标量 dot unroll ✅ 成功（GT +7.7%）
 
 ### 2.2 `shortconv conv1d` 标量 dot unroll
 
@@ -181,34 +174,32 @@ vec_scale_f32(logits, 1.0 / temperature);
 
 ---
 
-## Phase 3（潜在大收益）
+## Phase 3（重新评估）
 
-### 3.1 FFN Q8_0 量化 dedup
+### 3.1 ~~FFN Q8_0 量化 dedup~~ ❌ 已经实现，无需做
 
-**借鉴**：PR #54 给 qwen35 trunk 加的优化——
-> The qwen35 trunk was calling `quantize_and_matmul_with_scratch` once per matmul: WQ, WK, WV each re-quantized the same F32 input slice to Q8_0 + scales + Q8K (3x redundant); same for FFN gate and FFN up (2x redundant).
-> 
-> Pre-quantize once per token into the existing q8_buf / scale_buf / q8k_buf, then run WQ/WK/WV (and FFN gate/up) as `kernel.forward_prepared` inside a single `pool.compute` closure.
+**重要发现**：审计时误以为 LFM2.5 每个 matmul 前都做 quantize，实际**已经是 dedup 模式**——
 
-**LFM2.5 当前**：每个 matmul 前都做 `quantize_q8_0_into` + `quantize_row_q8_k_into`（forward.rs:215, 680, 914 等）。
+参考 `src/models/lfm25/trunk/forward.rs`:
+- **Attention** (line 600-650): 单次 `quantize_q8_0_into` + 单次 `pool.compute` 内跑 `wq` + `wk` + `wv` 三个 matmul，共享同一个 `input`/`q8`/`sc`/`q8k`
+- **FFN** (line 461-520): 单次 quantize + 单次 pool.compute 内跑 `w_gate` + `w_up` + silu_mul
 
-**改动**：把同一层同一 input 的量化合并到 matmul 之前。
+这正是 PR #54 给 qwen35 加的模式，**LFM2.5 已经具备**。
 
-**预估收益**：GT +10-20%（量化本身是 free 的，但减少 cache pressure 和减少重复 work）。
+### 3.2 F32 KV cache path — 几乎不走
 
-**风险**：中。要确保量化 buffer 不被并发 matmul 复用（pool.compute 的并发模型要正确）。
+LFM2.5 默认 `KvFormat::F16`（`app/text.rs:176`）。F32 path 仅在用户传 `--kv-cache f32` 时走。
+**不是 GT 优化目标**。
 
-### 3.2 `KvCache::F32` → `KvCache::F16`
+### 3.3 dead `.to_vec()` allocation — prefill only
 
-**借鉴**：LFM2.5 已经有 `KvCache::F16` 分支（forward.rs:718），但 default 可能是 F32。
+`forward_layer` line 433/448 的 `let _cur_after_block = ... .to_vec()` 是 dead allocation（变量立即丢弃）。
+每层 × 2 路径 × prefill tokens 次 = prefill 时 ~32 次冗余分配 + 拷贝。
 
-**LFM2.5-1.2B 实测**：n_embd=2048, n_head=32, n_head_kv 隐含 GQA 比 1:1（n_layer=16, max_ctx 默认 ~2048）→ KV cache 总大小：16 × 2048 × 2048 × 4 = 256MB (F32) vs 128MB (F16)。
+**改动**：去掉 `.to_vec()`，直接 discard。约 5 行代码改动。
+**预估收益**：prefill 提升（prefill only），GT 几乎不影响。
 
-**改动**：默认切换 + 在线量化（matmul 之前）。
-
-**预估收益**：内存减半 + GT +2-5%（F16 dot 比 F32 dot 快，量化在 matmul 前一次性做）。
-
-**风险**：低。已有 `vec_mad_f16_f32` 路径走 F16 cache。
+**实测**：已完成，GT 没变化（27.6-29.4 t/s vs Phase 2 的 28.2-30.8 t/s，噪声范围内），符合 prefill-only 的预期。
 
 ---
 
@@ -224,19 +215,31 @@ LFM2.5 矩阵小（n_embd=2048, d_conv=4），SIMD overhead 比收益大。
 
 ---
 
-## 实施优先级
+## 实施优先级（修订）
 
-| 优先级 | 改动 | 行数 | 预估 GT 收益 | 风险 |
+| 优先级 | 改动 | 行数 | 预估 GT 收益 | 状态 |
 |--------|------|------|--------------|------|
-| **P0** | 2.1 attention values gather | ~10 | +5-10% | 低 |
-| **P0** | 2.2 shortconv conv1d unroll | ~15 | +2-5% | 低 |
-| **P1** | 2.3 logits scale → vec_scale_f32 | 1 | 微小 | 极低 |
-| **P1** | 2.4 argmax → argmax_f32 | 5 | 微小 | 极低 |
-| **P1** | 2.5 residual add → vec_add_into | ~5 | prefill | 低 |
-| **P2** | 3.1 FFN Q8_0 dedup | ~30 | +10-20% | 中 |
-| **P3** | 3.2 F32 → F16 KV cache default | ~10 | +2-5% | 低 |
+| **P0** | Phase 1: fill() x 2 | 2 | +11% | ✅ 完成 |
+| **P0** | Phase 2.2: shortconv conv1d unroll | ~15 | +7.7% | ✅ 完成 |
+| **P1** | 2.1 attention values gather | ~10 | -22%（**失败**） | ❌ 已 revert |
+| **P1** | 3.3 dead `.to_vec()` | ~5 | prefill only | ✅ 完成 |
+| ~~P2~~ | ~~3.1 FFN dedup~~ | — | — | 已实现，无需做 |
+| ~~P3~~ | ~~3.2 F32 KV path~~ | — | — | 几乎不走 |
 
-**推荐顺序**：P0 (2.1 + 2.2) → P1 (cleanup) → P2 (FFN dedup)。
+**当前状态**：LFM2.5 GT 从 baseline 24.5 → 28.6 t/s (+17%)。剩余 GT 优化空间不大，
+**真正大头是 matmul（已 SIMD）+ attention softmax（已 SIMD）+ shortconv（已 unroll）**。
+
+## 验证
+
+每次改动：
+1. `cargo build --release --bin rust-model-inference` 通过
+2. 跑 3 次取平均 GT：
+   ```bash
+   for i in 1..3; do ./target/release/rust-model-inference.exe \
+     --model models/LFM2.5-1.2B-Instruct-Q8_0.gguf \
+     --prompt "法国的首都是" --max-tokens 200 --threads 8 2>&1 | grep t/s; done
+   ```
+3. 输出文本必须是 `法国的首都是巴黎。`（bit-exact）
 
 ## 验证
 

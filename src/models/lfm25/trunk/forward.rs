@@ -413,7 +413,7 @@ fn forward_layer(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
 
-    let _cur_after_block = if lw.is_attn {
+    if lw.is_attn {
         forward_attention(
             &pool,
             lw,
@@ -430,9 +430,8 @@ fn forward_layer(
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(attn_proj, x);
-        unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     } else {
-        let (cur, bx) = forward_shortconv(
+        let (cur, _bx) = forward_shortconv(
             &pool,
             lw,
             layer,
@@ -445,7 +444,6 @@ fn forward_layer(
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(&cur, x);
-        unsafe { std::slice::from_raw_parts(x_ptr, n_embd).to_vec() }
     };
 
     unsafe {
@@ -989,14 +987,35 @@ fn forward_shortconv(
     let kernel = lw.shortconv_conv.as_ref().unwrap();
     debug_assert_eq!(kernel.len(), l_cache * n_embd);
     let mut conv_out: Vec<f32> = vec![0.0; n_embd];
-    for c_idx in 0..n_embd {
-        let k_off = c_idx * l_cache;
-        let b_off = c_idx * l_buf;
-        let mut acc = 0.0f32;
-        for k in 0..l_cache {
-            acc += bx_buf[b_off + k] * kernel[k_off + k];
+    // LFM2.5-1.2B ships with l_cache=4. The scalar loop below is small
+    // (4 fma per channel × n_embd channels), but unrolling avoids the
+    // branch overhead and lets LLVM keep `bx_buf` values in registers.
+    // We branch on l_cache for safety; fall back to the scalar version
+    // if a future checkpoint uses a different kernel size.
+    if l_cache == 4 {
+        for c_idx in 0..n_embd {
+            let k_off = c_idx * 4;
+            let b_off = c_idx * l_buf;
+            let a0 = bx_buf[b_off];
+            let a1 = bx_buf[b_off + 1];
+            let a2 = bx_buf[b_off + 2];
+            let a3 = bx_buf[b_off + 3];
+            let w0 = kernel[k_off];
+            let w1 = kernel[k_off + 1];
+            let w2 = kernel[k_off + 2];
+            let w3 = kernel[k_off + 3];
+            conv_out[c_idx] = a0 * w0 + a1 * w1 + a2 * w2 + a3 * w3;
         }
-        conv_out[c_idx] = acc;
+    } else {
+        for c_idx in 0..n_embd {
+            let k_off = c_idx * l_cache;
+            let b_off = c_idx * l_buf;
+            let mut acc = 0.0f32;
+            for k in 0..l_cache {
+                acc += bx_buf[b_off + k] * kernel[k_off + k];
+            }
+            conv_out[c_idx] = acc;
+        }
     }
 
     vec_mul_inplace(c, conv_out.as_mut_slice());
