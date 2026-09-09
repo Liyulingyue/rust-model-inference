@@ -6,7 +6,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_neox, softmax_inplace,
+    rms_norm_inplace, rope_neox_inplace, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -551,7 +551,7 @@ fn apply_rope(
         ));
     }
     if is_swa(layer) {
-        rope_neox(values, position, dim, 10_000.0);
+        rope_neox_inplace(values, position, dim, 10_000.0);
         return Ok(());
     }
     if full_freq_factors.len() != dim / 2 {

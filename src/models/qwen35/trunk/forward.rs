@@ -16,7 +16,7 @@ use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_neox_inplace, silu_approx_inplace, silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -495,7 +495,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         cfg.rope_freq_base,
                     );
                 } else {
-                    rope_neox(
+                    rope_neox_inplace(
                         &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
                         positions[0],
                         cfg.rope_dimension_count,
@@ -514,7 +514,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         cfg.rope_freq_base,
                     );
                 } else {
-                    rope_neox(
+                    rope_neox_inplace(
                         &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
                         positions[0],
                         cfg.rope_dimension_count,

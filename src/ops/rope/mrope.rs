@@ -12,10 +12,10 @@
 //! - [`rope_mrope_interleaved`] — interleaved-pair layout: rotate
 //!   `(x[2i], x[2i + 1])` at `pair % section_pairs`.
 //!
-//! `rope_mrope` internally delegates to [`super::rope_neox`] when
+//! `rope_mrope` internally delegates to [`super::rope_neox_inplace`] when
 //! `sections` are all-zero (pure text mode).
 
-use super::neox::rope_neox;
+use super::neox::rope_neox_inplace;
 
 pub fn rope_mrope(
     x: &mut [f32],
@@ -28,7 +28,7 @@ pub fn rope_mrope(
     let half = head_dim / 2;
     let total_sections: i32 = sections.iter().sum();
     if total_sections == 0 {
-        rope_neox(x, positions[0], head_dim, freq_base);
+        rope_neox_inplace(x, positions[0], head_dim, freq_base);
         return;
     }
     let total_sections = total_sections as usize;

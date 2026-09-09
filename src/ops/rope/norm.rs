@@ -3,7 +3,7 @@
 //! Used by the classic `llama` GGUF architecture. HF `rotate_half`-style
 //! weights are permuted to this layout by the llama.cpp llama-arch
 //! converter, so a `llama`-arch GGUF must use this variant, not
-//! [`super::rope_neox`].
+//! [`super::rope_neox_inplace`].
 //!
 //! Inner loop stays scalar because the rotation touches interleaved
 //! `(x[2i], x[2i+1])` pairs, which AVX2 can only handle with shuffles

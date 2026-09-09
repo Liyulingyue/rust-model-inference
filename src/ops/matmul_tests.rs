@@ -4,7 +4,7 @@ use crate::ops::dot::dot_f32_neon;
 use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 use crate::ops::{
     dot_f16, dot_f16_f16_bytes, dot_f16_f32, dot_f32, f16_to_f32, f32_slice_to_f16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox, rope_norm, silu_inplace,
+    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox_inplace, rope_norm, silu_inplace,
     silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
     ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
     vec_mad_self_f32, vec_scale_f32,
@@ -384,14 +384,14 @@ fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
 }
 
 #[test]
-fn rope_neox_matches_pinned_ggml_recurrence_and_fused_rotation() {
+fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
     let mut values = [0.0f32; 128];
     values[0] = f32::from_bits(0x402a_4f21);
     values[1] = f32::from_bits(0x3fad_b711);
     values[64] = f32::from_bits(0xbe0e_7273);
     values[65] = f32::from_bits(0x3ef5_b8f9);
 
-    rope_neox(&mut values, 1, 128, 1_000_000.0);
+    rope_neox_inplace(&mut values, 1, 128, 1_000_000.0);
 
     assert_eq!(
         [values[0], values[1], values[64], values[65]].map(f32::to_bits),

@@ -27,7 +27,7 @@ mod sleef_math;
 mod sleef_rope;
 
 pub use mrope::{rope_mrope, rope_mrope_interleaved, rope_vision};
-pub use neox::{rope_neox, rope_sin_cos};
+pub use neox::{rope_neox_inplace, rope_sin_cos};
 pub use norm::rope_norm;
 pub use partial::rope_neox_partial;
 

@@ -342,7 +342,7 @@ pub fn text_encode(
                 let q_slice = &mut q_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Qwen3Rope::Neox => {
-                        rope_neox(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                        rope_neox_inplace(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
@@ -361,7 +361,7 @@ pub fn text_encode(
                 let k_slice = &mut k_all[off..off + cfg.n_embd_head_k];
                 match cfg.rope {
                     Qwen3Rope::Neox => {
-                        rope_neox(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
+                        rope_neox_inplace(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(

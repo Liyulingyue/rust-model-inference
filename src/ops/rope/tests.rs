@@ -1,8 +1,8 @@
 //! Bit-exact parity tests for the RoPE variants.
 
 use super::{
-    neox::{rope_neox_apply_scalar, rope_sin_cos},
-    rope_mrope, rope_neox, rope_neox_sleef, rope_norm, rope_sin_cos_sleef,
+    neox::{rope_neox_inplace_scalar, rope_sin_cos},
+    rope_mrope, rope_neox_inplace, rope_neox_sleef, rope_norm, rope_sin_cos_sleef,
     rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
 
@@ -76,11 +76,11 @@ fn vision_rope_rotates_both_halves_with_independent_axes() {
 }
 
 /// SIMD path must produce the same result as the scalar fallback.
-/// Compares public `rope_neox` against the explicit scalar helper used
+/// Compares public `rope_neox_inplace` against the explicit scalar helper used
 /// when SIMD is unavailable. Catches tail-handling, cache wiring, and
 /// instruction-order bugs across the three paths.
 #[test]
-fn rope_neox_simd_matches_scalar_fallback() {
+fn rope_neox_inplace_simd_matches_scalar_fallback() {
     // Vary n_heads × head_dim to exercise SIMD tail loops and edge cases.
     for &(head_dim, n_heads, pos, freq_base) in &[
         (64usize, 4usize, 0usize, 10_000.0f32),
@@ -99,7 +99,7 @@ fn rope_neox_simd_matches_scalar_fallback() {
         }
         b.copy_from_slice(&a);
 
-        rope_neox(&mut a, pos, head_dim, freq_base);
+        rope_neox_inplace(&mut a, pos, head_dim, freq_base);
 
         // Scalar reference uses the same formula as the public function's
         // table build, then a plain scalar per-head rotation — the same
@@ -116,7 +116,7 @@ fn rope_neox_simd_matches_scalar_fallback() {
             cos_table[i] = c;
             sin_table[i] = s;
         }
-        rope_neox_apply_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
+        rope_neox_inplace_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
 
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
             assert_eq!(

@@ -620,7 +620,7 @@ impl<'model> Qwen3Session<'model> {
                         }
                         for head in q.chunks_exact_mut(config.n_embd_head_k) {
                             match config.rope {
-                                Qwen3Rope::Neox => rope_neox(
+                                Qwen3Rope::Neox => rope_neox_inplace(
                                     head,
                                     position[0],
                                     config.n_embd_head_k,
@@ -640,7 +640,7 @@ impl<'model> Qwen3Session<'model> {
                         }
                         for head in k.chunks_exact_mut(config.n_embd_head_k) {
                             match config.rope {
-                                Qwen3Rope::Neox => rope_neox(
+                                Qwen3Rope::Neox => rope_neox_inplace(
                                     head,
                                     position[0],
                                     config.n_embd_head_k,

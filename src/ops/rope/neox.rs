@@ -1,22 +1,21 @@
 //! Neox-style RoPE: rotate lo/hi halves independently.
 //!
 //! Public API:
-//! - [`rope_neox`] — high-level entry point that caches the sin/cos table once
+//! - [`rope_neox_inplace`] — high-level entry point that caches the sin/cos table once
 //!   per token and dispatches to the AVX2 / NEON / scalar apply kernel.
 //!
 //! Private kernels:
-//! - [`rope_neox_apply_avx2`] / [`rope_neox_apply_neon`] /
-//!   [`rope_neox_apply_scalar`] — the actual rotation loop, taking a
-//!   precomputed `(cos, sin)` table. Naming intentionally omits `_apply_`
-//!   (no non-apply variant exists in the file); alignment with the
-//!   `[name]-[variant]-[inplace]-[arch]` convention from `math/exp.rs`.
+//! - [`rope_neox_inplace_avx2`] / [`rope_neox_inplace_neon`] /
+//!   [`rope_neox_inplace_scalar`] — the actual rotation loop, taking a
+//!   precomputed `(cos, sin)` table. Naming follows the
+//!   `[name]-[inplace]-[arch]` convention from `math/exp.rs`.
 
 #[inline]
 pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
     (theta.cos(), theta.sin())
 }
 
-pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     let half = head_dim / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
@@ -38,23 +37,23 @@ pub fn rope_neox(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     #[cfg(target_arch = "x86_64")]
     {
         if super::super::has_avx2_fma() {
-            unsafe { rope_neox_apply_avx2(x, n_heads, head_dim, &cos_table, &sin_table) };
+            unsafe { rope_neox_inplace_avx2(x, n_heads, head_dim, &cos_table, &sin_table) };
             return;
         }
     }
     #[cfg(target_arch = "aarch64")]
     {
         if super::super::has_neon() {
-            unsafe { rope_neox_apply_neon(x, n_heads, head_dim, &cos_table, &sin_table) };
+            unsafe { rope_neox_inplace_neon(x, n_heads, head_dim, &cos_table, &sin_table) };
             return;
         }
     }
-    rope_neox_apply_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
+    rope_neox_inplace_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn rope_neox_apply_avx2(
+unsafe fn rope_neox_inplace_avx2(
     x: &mut [f32],
     n_heads: usize,
     head_dim: usize,
@@ -101,7 +100,7 @@ unsafe fn rope_neox_apply_avx2(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn rope_neox_apply_neon(
+unsafe fn rope_neox_inplace_neon(
     x: &mut [f32],
     n_heads: usize,
     head_dim: usize,
@@ -138,7 +137,7 @@ unsafe fn rope_neox_apply_neon(
     }
 }
 
-pub(crate) fn rope_neox_apply_scalar(
+pub(crate) fn rope_neox_inplace_scalar(
     x: &mut [f32],
     n_heads: usize,
     head_dim: usize,

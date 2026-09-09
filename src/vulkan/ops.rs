@@ -1940,11 +1940,11 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
         expected_projection.truncate(N_EMBD);
         for head in expected_q.chunks_exact_mut(HEAD_DIM) {
             crate::ops::rms_norm_inplace(head, &q_norm, EPS);
-            crate::ops::rope_neox(head, POSITION, HEAD_DIM, FREQ_BASE);
+            crate::ops::rope_neox_inplace(head, POSITION, HEAD_DIM, FREQ_BASE);
         }
         for head in expected_k.chunks_exact_mut(HEAD_DIM) {
             crate::ops::rms_norm_inplace(head, &k_norm, EPS);
-            crate::ops::rope_neox(head, POSITION, HEAD_DIM, FREQ_BASE);
+            crate::ops::rope_neox_inplace(head, POSITION, HEAD_DIM, FREQ_BASE);
         }
         let expected_k_f16: Vec<f32> = expected_k
             .iter()

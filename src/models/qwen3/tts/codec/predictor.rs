@@ -28,7 +28,7 @@ use crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range_nrc1;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use crate::ops::{
     dot_f16, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
-    rope_neox, silu_mul_approx_inplace, vec_scale_f32,
+    rope_neox_inplace, silu_mul_approx_inplace, vec_scale_f32,
 };
 
 use super::{RVQ_CODEBOOK_SIZE, RVQ_LEVELS};
@@ -471,7 +471,7 @@ fn forward_layer_inplace(
     for head in 0..PRED_N_HEAD {
         let off = head * PRED_HEAD_DIM;
         rms_norm_inplace(&mut q[off..off + PRED_HEAD_DIM], &layer.q_norm, eps);
-        rope_neox(
+        rope_neox_inplace(
             &mut q[off..off + PRED_HEAD_DIM],
             pos,
             PRED_HEAD_DIM,
@@ -481,7 +481,7 @@ fn forward_layer_inplace(
     for head in 0..PRED_N_HEAD_KV {
         let off = head * PRED_HEAD_DIM;
         rms_norm_inplace(&mut k[off..off + PRED_HEAD_DIM], &layer.k_norm, eps);
-        rope_neox(
+        rope_neox_inplace(
             &mut k[off..off + PRED_HEAD_DIM],
             pos,
             PRED_HEAD_DIM,

@@ -35,7 +35,7 @@ use crate::models::qwen3::Qwen3Config;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     dot_f16, f16_to_f32, f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_mrope_interleaved, rope_neox, silu_mul_approx_inplace, softmax_inplace,
+    rms_norm_inplace, rope_mrope_interleaved, rope_neox_inplace, silu_mul_approx_inplace, softmax_inplace,
     vec_scale_f32,
 };
 
@@ -1328,7 +1328,7 @@ fn apply_rope_to_heads(heads: &mut [f32], position: [usize; 4], config: &Qwen3Tt
         );
     } else {
         for head in heads.chunks_exact_mut(n_dims) {
-            rope_neox(head, position[0], n_dims, config.freq_base);
+            rope_neox_inplace(head, position[0], n_dims, config.freq_base);
         }
     }
 }

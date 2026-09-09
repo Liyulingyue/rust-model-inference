@@ -13,7 +13,7 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rope_neox,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rope_neox_inplace,
     rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
     vec_scale_f32,
 };
@@ -155,7 +155,7 @@ fn normalization_groups(
 
 fn apply_rope(arch: &str, values: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     if arch == "k2-horizon" {
-        rope_neox(values, pos, head_dim, freq_base);
+        rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
         rope_norm(values, pos, head_dim, freq_base);
     }
@@ -1121,7 +1121,7 @@ mod tests {
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
         apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0);
-        crate::ops::rope_neox(&mut expected, 7, 4, 10_000_000.0);
+        crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 }
