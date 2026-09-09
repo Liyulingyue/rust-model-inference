@@ -1,7 +1,9 @@
 pub mod config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::{dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace};
+use crate::ops::{
+    dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
+};
 pub use config::Gemma4VisionConfig;
 use std::path::Path;
 

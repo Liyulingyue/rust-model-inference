@@ -25,6 +25,7 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 5. **最小实现**：仅补齐必须的配置解析、Tokenizer 行为、权重映射、模型计算、状态/KV 管理和显式调度；复用仓库已有算子，不为未来模型建立抽象层。
 6. **逐位对齐**：Rust 与 Oracle 使用同一模型、prompt、chat template、线程数、CPU 路径、KV 类型和 greedy 参数。依次比较 token IDs、checkpoint 名称/顺序/shape/次数、中间 F32 的 `to_bits()`/`u32`、最终 logits 位模式和多步 greedy token。出现差异时定位第一个分叉 checkpoint；不得改用容差、余弦相似度或可读文本作为替代结论。
 7. **验证真实入口**：运行最小相关单测、格式/编译检查、release 模式真实 CLI 和逐位对齐命令。完整测试中的历史失败、环境失败与本次回归必须分开报告；没有执行的检查不得声称通过。
+8. **更新模型清单**：适配完成后同步更新 `docs/MODEL_LIST.md` 和 `docs/develop/SUPPORTED_MODELS.md`；写明具体型号、GGUF architecture、已验证格式、验证范围和已知限制。
 
 ## 完成定义
 
