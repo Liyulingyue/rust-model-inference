@@ -47,7 +47,7 @@
 | Qwen3-Omni MoE 兼容 GGUF 对 | `qwen3vlmoe` + `qwen3vl_merger` projector | 文本、图像、视频、音频 | 匹配 mmproj | MoE、媒体投影和生成路径 | `Supported` | shared-expert 张量仍会被明确拒绝。 |
 | Jina Embeddings v5 Omni retrieval | 带 `pooling_type` 的 Qwen-family arch | 文本、图像、视频、音频 Embedding | 媒体输入需要匹配 mmproj | pooling、媒体编码、CLI 参数和单元测试 | `Supported` | 当前仓库没有固定真实 GGUF/Oracle 的回归测试。 |
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
-| Hunyuan-MT2 / Hunyuan Dense | `hunyuan-dense` | 文本生成 | 无 | 专用 prompt 和 Qwen3 trunk 分发 | `Supported` | README 旧名单只给出型号名；当前没有固定真实 GGUF 的回归证据。 |
+| Hunyuan-MT2 1.8B | `hunyuan-dense` | 多语言翻译（33+5）、通用 chat | 无 | Q8_0 | `Verified` | 真实 GGUF 端到端翻译通过（中↔英三组用例），详见 [`docs/usage/hunyuan.md`](../usage/hunyuan.md)。Oracle pin 待补；其他 Hunyuan 尺寸（7B / 30B-A3B-MoE）尚未验证。 |
 | Granite 兼容文本 GGUF | `granite` | 文本生成 | 无 | 专用 prompt、attention/logit scaling | `Supported` | 架构路径已接入，但未固定一个具体 Granite 型号作为 E2E 回归。 |
 | DreamX-Creator | `dreamx` + `clip`/`dreamx_creator` | 首帧驱动的同步音视频生成、2x 视频 refiner | `DreamX-Creator-Q8_0.gguf` + `mmproj-DreamX-Creator-BF16.gguf` | 真实导出、pair preflight、64×64/1 帧 CPU 全链路和五个媒体产物 | `Experimental` | base/refiner 路径可运行，但 CUDA Oracle 未执行，且 refiner shifted scheduler 尚未逐 checkpoint 对齐。 |
 | 通用 Qwen2 文本 GGUF | `qwen2` | 文本生成 | 无 | 可进入 Qwen trunk；dots.tts 内部 LLM 已使用 | `Experimental` | 当前没有“任意 Qwen2 文本模型”保证，不能用 dots.tts 的内部成功替代通用验证。 |
