@@ -22,10 +22,12 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
             !matches!(
                 format,
                 GGMLType::BF16
+                    | GGMLType::F32
                     | GGMLType::Q8_0
                     | GGMLType::Q4_0
                     | GGMLType::Q4_1
                     | GGMLType::Q4K
+                    | GGMLType::Q5K
                     | GGMLType::Q6K
             )
         })
@@ -1198,11 +1200,15 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_q4_q8_weight_formats_are_vulkan_eligible() {
+    fn qwen35_weight_formats_are_vulkan_eligible() {
         for formats in [
             vec![GGMLType::Q8_0],
             vec![GGMLType::Q4_0, GGMLType::Q4_1, GGMLType::Q6K],
             vec![GGMLType::Q4K, GGMLType::Q6K],
+            vec![GGMLType::Q5K],
+            vec![GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
+            vec![GGMLType::F32],
+            vec![GGMLType::Q4_0, GGMLType::Q5K, GGMLType::F32],
         ] {
             let facts = EligibilityFacts {
                 architecture: "qwen35".into(),
@@ -1214,13 +1220,21 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_quantized_weights_expose_gpu_upload_bytes() {
+    fn qwen35_weights_expose_gpu_upload_bytes() {
         let q8 = [0u8; 34];
         let q4_0 = [0u8; 18];
         let q4_1 = [0u8; 20];
         let q4_k = [0u8; 144];
+        let q5_k = [0u8; 176];
         let q6_k = [0u8; 210];
+        let f32_values = [1.000_000_1f32, -2.5, 0.0, -0.0, 70_000.0, 1e-8];
         let weights = [
+            Weight {
+                kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(f32_values.to_vec())),
+                ggml_type: GGMLType::F32,
+                n_in: 3,
+                n_out: 2,
+            },
             Weight::from_quantized(QuantizedTensor::Q8_0 {
                 data: &q8,
                 n_cols: 32,
@@ -1241,6 +1255,11 @@ mod tests {
                 n_cols: 256,
                 n_rows: 1,
             }),
+            Weight::from_quantized(QuantizedTensor::Q5_K {
+                data: &q5_k,
+                n_cols: 256,
+                n_rows: 1,
+            }),
             Weight::from_quantized(QuantizedTensor::Q6_K {
                 data: &q6_k,
                 n_cols: 256,
@@ -1248,12 +1267,22 @@ mod tests {
             }),
         ];
 
-        for (weight, expected) in
-            weights
-                .iter()
-                .zip([&q8[..], &q4_0[..], &q4_1[..], &q4_k[..], &q6_k[..]])
-        {
-            assert_eq!(weight.kernel.weight_bytes(), Some(expected));
+        for (weight, expected) in weights.iter().zip([
+            &f32_values
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()[..],
+            &q8[..],
+            &q4_0[..],
+            &q4_1[..],
+            &q4_k[..],
+            &q5_k[..],
+            &q6_k[..],
+        ]) {
+            assert_eq!(
+                validated_weight_bytes(weight, "test weight").unwrap(),
+                expected
+            );
         }
     }
 
@@ -1269,6 +1298,155 @@ mod tests {
         let error = validated_weight_bytes(&weight, "test weight")
             .expect_err("short Q8_0 storage must be rejected");
         assert!(format!("{error:?}").contains("expected 34"));
+
+        let mut weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0; 5]));
+        weight.n_in = 3;
+        weight.n_out = 2;
+        assert!(validated_weight_bytes(&weight, "short F32")
+            .unwrap_err()
+            .to_string()
+            .contains("expected 24"));
+    }
+
+    fn check_f32_gpu_weights(
+        context: &'static super::VulkanContext,
+        weights: &[(&Weight<'_>, &str)],
+        input: &[f32],
+    ) {
+        let n_in = input.len();
+        let max_rows = weights
+            .iter()
+            .map(|(weight, _)| weight.n_out)
+            .max()
+            .unwrap();
+        let layout =
+            crate::vulkan::ops::ArenaLayout::for_dims(n_in.max(max_rows), max_rows, 1, 1, 1)
+                .unwrap();
+        let mut buffers = super::UploadedBuffers::new(context);
+        let mut ops = super::Qwen3Ops::new(context, layout, 2).unwrap();
+        let (gpu_buffers, formats): (Vec<_>, Vec<_>) = weights
+            .iter()
+            .map(|(weight, label)| {
+                assert_eq!(weight.ggml_type, GGMLType::F32);
+                assert_eq!(weight.n_in, n_in);
+                super::upload_weight(&mut buffers, weight, label).unwrap()
+            })
+            .unzip();
+        let bindings = ops.bind_weight_buffers(&gpu_buffers, &formats).unwrap();
+        let outputs: Vec<_> = [layout.projection, layout.gate, layout.up]
+            .into_iter()
+            .zip(weights)
+            .map(|(region, (weight, _))| (region, weight.n_out))
+            .collect();
+        ops.write_f32(layout.x, input).unwrap();
+        let commands = super::TokenCommands::begin(context).unwrap();
+        ops.record_weight_matvec_group(
+            &commands,
+            bindings,
+            layout.x,
+            layout.q8,
+            layout.q8_scales,
+            layout.q4_1_input_sums,
+            layout.q8k,
+            layout.q8k_scales,
+            &outputs,
+            n_in,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        for ((weight, label), (region, rows)) in weights.iter().zip(outputs) {
+            let mut expected = vec![0.0; rows];
+            weight
+                .kernel
+                .forward_prepared(input, &[], &[], None, &mut expected, n_in, rows, 0, 1);
+            for (row, (&actual, expected)) in ops
+                .read_f32(region, rows)
+                .unwrap()
+                .iter()
+                .zip(expected)
+                .enumerate()
+            {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{label} row {row}, n_in={n_in}"
+                );
+            }
+            println!(
+                "F32 {label}: {n_in} -> {rows}, group={}, CPU/GPU bits equal",
+                weights.len()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn f32_weights_run_on_vulkan() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        for n_in in [3, 5120, 17_409] {
+            let mut input: Vec<f32> = (0..n_in)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            input[0] = 1.0;
+            input[1] = 1.0 - f32::EPSILON;
+            let weights = [48, 33, 65].map(|n_out| {
+                let mut values: Vec<f32> = (0..n_in * n_out)
+                    .map(|i| ((i * 31 + n_out * 17) % 257) as f32 / 63.0 - 2.0)
+                    .collect();
+                // Separate multiply/add yields zero here; fused multiply/add does not.
+                values[..n_in].fill(0.0);
+                values[0] = -1.0;
+                values[1] = 1.0 + f32::EPSILON;
+                Weight {
+                    kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(values)),
+                    ggml_type: GGMLType::F32,
+                    n_in,
+                    n_out,
+                }
+            });
+            for count in 1..=3 {
+                let labeled: Vec<_> = weights[..count]
+                    .iter()
+                    .zip(["alpha", "beta", "third"])
+                    .collect();
+                check_f32_gpu_weights(context, &labeled, &input);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device and RMI_QWEN35_MODEL"]
+    fn qwen35_real_f32_weights_run_on_vulkan() {
+        let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+        let source =
+            crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm)
+                .unwrap();
+        let config = Qwen35Config::from_source(source.as_ref()).unwrap();
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let input: Vec<f32> = (0..config.n_embd)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        let mut checked = 0;
+        for layer in 0..config.n_layer_impl() {
+            if !config.is_recurrent[layer] {
+                continue;
+            }
+            let names = [
+                format!("blk.{layer}.ssm_alpha.weight"),
+                format!("blk.{layer}.ssm_beta.weight"),
+            ];
+            let weights = names.each_ref().map(|name| {
+                crate::models::qwen35::trunk::weights::load_weight(source.as_ref(), name).unwrap()
+            });
+            check_f32_gpu_weights(
+                context,
+                &[(&weights[0], &names[0]), (&weights[1], &names[1])],
+                &input,
+            );
+            checked += 2;
+        }
+        assert!(checked > 0, "model must have recurrent F32 matrices");
+        println!("verified {checked} real F32 matrices");
     }
 
     #[test]

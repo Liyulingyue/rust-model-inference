@@ -5,6 +5,18 @@
 
 use super::BF16Kernel;
 
+/// llama.cpp's scalar BF16 dot: F32 products accumulated in F64.
+pub(crate) fn dot_bf16(weight: &[u8], input: &[u8]) -> f32 {
+    debug_assert_eq!(weight.len(), input.len());
+    let mut sum = 0.0f64;
+    for (w, x) in weight.chunks_exact(2).zip(input.chunks_exact(2)) {
+        let w = crate::ops::bf16_to_f32(u16::from_le_bytes([w[0], w[1]]));
+        let x = crate::ops::bf16_to_f32(u16::from_le_bytes([x[0], x[1]]));
+        sum += f64::from(w * x);
+    }
+    sum as f32
+}
+
 pub fn forward_f32_rows_scalar(
     weight: &[u8],
     input: &[f32],

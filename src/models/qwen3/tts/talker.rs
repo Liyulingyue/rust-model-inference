@@ -35,8 +35,8 @@ use crate::models::qwen3::Qwen3Config;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     dot_f16, f16_to_f32, f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_mrope_interleaved, rope_neox_inplace, silu_mul_approx_inplace, softmax_inplace,
-    vec_scale_f32,
+    rms_norm_inplace, rope_mrope_interleaved, rope_neox_inplace, silu_mul_approx_inplace,
+    softmax_inplace, vec_scale_f32,
 };
 
 const SEMANTIC_CODEBOOK_SIZE: usize = 2048;

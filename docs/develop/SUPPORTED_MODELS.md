@@ -28,6 +28,8 @@
 | Qwen3.5-0.8B | `qwen35` | 文本、图像 | 图像需要 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | 已有真实图文运行记录；未声明其他量化格式。 |
 | Qwen3.5-2B | `qwen35` | 文本；图像路径已接入 | 图像需要匹配 mmproj | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录真实冒烟回归；未单独记录图像 Oracle。 |
 | Qwen3.8-27B | `qwen35` | 文本、图像 | 图像需要 mmproj | 测试指定的 GGUF + mmproj | `Verified` | [`tests/qwen35_reference.rs`](tests/qwen35_reference.rs) 覆盖 pinned llama.cpp lossless checkpoints 和图像冒烟。Qwen3.8 是独立型号，不是 Qwen3-8B。 |
+| NeoHorse-1-4B | `qwen35` | 文本生成 | 无 | BF16 / F16 / Q8_0 / Q4_K_M / Q5_K_M | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 逐位一致；Q4/Q5 使用标量量化 Oracle，默认重排路径不保证逐位一致。GGUF 不含 NFC metadata；[哈希、边界与命令](../../tools/neohorse/README.md#neohorse-1-4b-官方-gguf-对比)。 |
+| NeoHorse-1-9B | `qwen35` | 文本生成 | 无 | BF16 GGUF + NFC metadata | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 的 checkpoint 和 logits 与固定 llama.cpp 逐位一致；Tokenizer 对齐发布版本。发布权重不含 MTP；[转换、哈希与验证命令](../../tools/neohorse/README.md)。 |
 | Ornith-1.5-9B | `qwen35` | 文本生成 | 无 | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | MiniCPM5-1B | `llama` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |

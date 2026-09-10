@@ -22,6 +22,10 @@ impl<'a> Q5_KKernel<'a> {
 }
 
 impl<'a> Kernel for Q5_KKernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     fn forward_prequantized(
         &self,
         _input_q8: &[u8],

@@ -6,7 +6,7 @@
 //! - model loading (gated on `RMI_QWEN35_MODEL`)
 //! - `Q8_0` quantized matmul dispatch (scalar fallback path)
 //! - scratchpad sizing invariants
-//! - dense-attention softmax + value reduction (aarch64 NEON pinned)
+//! - dense-attention softmax + padded value reduction
 //! - `Qwen35Session` state management + embed-lookup helpers
 
 use super::session::{required_token_count, Qwen35Session};
@@ -14,8 +14,7 @@ use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::QuantizedTensor;
-use crate::ops::kernel::Weight;
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::quant::{self, BlockQ8K};
 use std::sync::Arc;
 
@@ -24,6 +23,39 @@ fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static>
     weight.n_in = n_in;
     weight.n_out = n_out;
     weight
+}
+
+#[test]
+fn qwen35_bf16_matmul_rounds_activations_before_dot() {
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    struct Source(TensorInfo, Vec<u8>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+            Some(&self.0)
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            Some(&self.1)
+        }
+    }
+    let source = Source(
+        TensorInfo {
+            name: "blk.0.attn_qkv.weight".into(),
+            dims: vec![3, 1],
+            ggml_type: GGMLType::BF16,
+            offset: 0,
+        },
+        [1.0f32, 2.0, -1.0]
+            .into_iter()
+            .flat_map(|x| crate::ops::f32_to_bf16(x).to_le_bytes())
+            .collect(),
+    );
+    let weight = super::weights::load_weight(&source, &source.0.name).unwrap();
+    let input = [1.00390625, 1.01171875, 0.501953125];
+    // RNE BF16 inputs are 1.0, 1.015625, 0.5; llama.cpp's scalar dot = 2.53125.
+    assert_eq!(weight.matmul(&input)[0].to_bits(), 2.53125f32.to_bits());
 }
 
 fn dense_test_config(n_ctx: usize) -> Qwen35Config {
@@ -112,6 +144,90 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
+}
+
+struct RejectQ8KKernel;
+
+impl Kernel for RejectQ8KKernel {
+    fn forward_prequantized(
+        &self,
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        output: &mut [f32],
+        _n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        output[start..end].fill(0.0);
+    }
+
+    fn forward_prepared(
+        &self,
+        _input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        assert!(
+            q8_k.is_none(),
+            "non-K-quant weights must not receive Q8_K input"
+        );
+        self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+    }
+}
+
+fn reject_q8k_weight(n_in: usize, n_out: usize) -> Weight<'static> {
+    Weight {
+        kernel: Box::new(RejectQ8KKernel),
+        ggml_type: GGMLType::F32,
+        n_in,
+        n_out,
+    }
+}
+
+#[test]
+fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
+    let mut model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let layer = &mut model.layers[0];
+    layer.wq = Some(reject_q8k_weight(2, 4));
+    layer.wk = Some(reject_q8k_weight(2, 2));
+    layer.wv = Some(reject_q8k_weight(2, 2));
+    layer.ffn_gate = reject_q8k_weight(2, 2);
+    layer.ffn_up = reject_q8k_weight(2, 2);
+
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
+    let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
+    let pool = ComputePool::new(1);
+    let hidden = [1.0, 0.0];
+
+    scratch.x[..2].copy_from_slice(&hidden);
+    model
+        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]])
+        .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Qwen3.5 attention input width 2 must be a multiple of 256")]
+fn qwen35_k_quant_weights_reject_non_block_width() {
+    let mut model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let mut bad_wq = reject_q8k_weight(2, 4);
+    bad_wq.ggml_type = GGMLType::Q4K;
+    model.layers[0].wq = Some(bad_wq);
+
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
+    let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
+    let pool = ComputePool::new(1);
+    scratch.x[..2].copy_from_slice(&[1.0, 0.0]);
+    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]]);
 }
 
 #[test]
@@ -280,9 +396,9 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
         scratch.score_buf[1].to_bits(),
     ]
     .into_iter()
-    .zip([0x3f25_1fe0, 0x3eb5_c03f])
+    .zip([0x3f25_1fe0, 0x3eb5_c040])
     {
-        assert!(got.abs_diff(expected) <= 1);
+        assert_eq!(got, expected);
     }
 }
 
@@ -291,26 +407,28 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
 fn qwen35_dense_attention_value_uses_ggml_padded_reduction() {
     let model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
     let n_tokens = 18;
-    let mut scratch = Qwen35Scratchpad::new(&model.config, n_tokens);
-    let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, model.config.n_ctx, 2);
-    let pool = ComputePool::new(1);
-    let input: Vec<f32> = std::iter::repeat_n([1.0, 0.0], n_tokens)
-        .flatten()
-        .collect();
+    for capacity in [n_tokens, model.config.n_ctx] {
+        let mut scratch = Qwen35Scratchpad::new(&model.config, n_tokens);
+        let mut kv_cache = crate::core::scratchpad::KvCache::new_f32(1, capacity, 2);
+        let pool = ComputePool::new(1);
+        let input: Vec<f32> = std::iter::repeat_n([1.0, 0.0], n_tokens)
+            .flatten()
+            .collect();
 
-    let output = model.forward_dense_attn_layer(
-        0,
-        &input,
-        n_tokens,
-        &mut kv_cache,
-        &mut scratch,
-        &pool,
-        &vec![[0; 4]; n_tokens],
-        #[cfg(feature = "parity-trace")]
-        false,
-    );
+        let output = model.forward_dense_attn_layer(
+            0,
+            &input,
+            n_tokens,
+            &mut kv_cache,
+            &mut scratch,
+            &pool,
+            &vec![[0; 4]; n_tokens],
+            #[cfg(feature = "parity-trace")]
+            false,
+        );
 
-    assert_eq!(output[(n_tokens - 1) * 2].to_bits(), 0x3f00_0000);
+        assert_eq!(output[(n_tokens - 1) * 2].to_bits(), 0x3f00_0000);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -568,6 +686,27 @@ fn session_step_enforces_capacity_across_calls() {
     assert!(
         error.contains("requires 2 tokens; session capacity is 1"),
         "unexpected error: {error}"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn cpu_scope_prevents_model_from_creating_a_second_vulkan_session() {
+    crate::ops::float::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let mut model = tiny_q8_session_model();
+    let pool = ComputePool::new(2);
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 3);
+    let mut cache = KvCache::new_f32(1, 3, 256);
+    scratch.x[..256].copy_from_slice(&model.embed_tokens(&[0]).unwrap());
+    let _scope = ComputePool::disable_gpu_matmul_for_scope();
+    model
+        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]])
+        .unwrap();
+    assert!(
+        model.gpu.is_none(),
+        "CPU fallback must not create a model-level GPU session"
     );
 }
 

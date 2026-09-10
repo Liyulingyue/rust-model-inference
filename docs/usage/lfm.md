@@ -71,6 +71,25 @@ cargo run --release --bin rust-model-inference -- \
   feed_forward_length, attention.layer_norm_epsilon, projection_dim, image_mean,
   image_std}`，见 `src/models/lfm2/vision.rs:73-83`。
 
+### 4.1 图片大小与 vision token 数（CPU 实测，2026-09）
+
+Vision encoder 把图切成 512×512 tile + 1 张 overview。tile 数和总 vision tokens
+直接决定 prefill 时长：
+
+| 原图分辨率 | Tile grid | Vision tokens | 备注 |
+|---|---|---|---|
+| ≤ 512（任一维） | 0×0 | ~64–128 | 单 overview，prefill ~1s |
+| ~768×768 | 2×2 (4 tiles) + overview | ~1100+ | CPU prefill > 10 分钟（实际不要用） |
+| 401×287（实测 `references/apple.png`） | 0×0 | 117 | 端到端 3.8 tok/s @ 8 thread |
+
+**建议**：CPU 路径下使用 ≤ 512×512 的输入图。`references/apple.png`（401×287）
+是个不错的示例尺寸。`models/test768.png`（768×768）这种分辨率在 CPU 上
+prefill 阶段会卡死，需要 ≥ 10 分钟才能出第一个 token。
+
+3B VL 模型 + 1024 vision tokens 的 CPU prefill 主要成本是 30 层 × 1024
+tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（Vulkan
+未对 `lfm2` arch 完整覆盖，仅在分片 matmul 上生效——见 §6）。
+
 ## 5. CLI 路由规则速查
 
 | 输入 GGUF `general.architecture` | `general.basename` | 进入 trunk | Modes |
