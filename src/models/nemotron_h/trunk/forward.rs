@@ -265,13 +265,22 @@ impl NemotronModel {
             // + out projection) only runs on attention layers. SSM / FFN
             // layers skip it; their pre-norm `attn_norm` is consumed by the
             // SSM/FFN branch below.
-            if let (Some(wq), Some(wk), Some(wv)) = (&lw.wq, &lw.wk, &lw.wv) {
-                wq.kernel
-                    .forward_prepared(&scratch.normed, q8, sc, None, &mut q, n_embd, n_attn_q, 0, 1);
-                wk.kernel
-                    .forward_prepared(&scratch.normed, q8, sc, None, &mut k, n_embd, n_attn_kv, 0, 1);
-                wv.kernel
-                    .forward_prepared(&scratch.normed, q8, sc, None, &mut v, n_embd, n_attn_v, 0, 1);
+                if let (Some(wq), Some(wk), Some(wv)) = (&lw.wq, &lw.wk, &lw.wv) {
+                    wq.kernel
+                        .forward_prepared(&scratch.normed, q8, sc, None, &mut q, n_embd, n_attn_q, 0, 1);
+                    wk.kernel
+                        .forward_prepared(&scratch.normed, q8, sc, None, &mut k, n_embd, n_attn_kv, 0, 1);
+                    wv.kernel
+                        .forward_prepared(&scratch.normed, q8, sc, None, &mut v, n_embd, n_attn_v, 0, 1);
+                    // Persist per-token K and V into the layer's
+                    // scratch cache so the next tokens can attend to
+                    // this token. Without this write, the K/V cache
+                    // access below reads only the current token (and
+                    // panics on out-of-bounds for j > 0).
+                    scratch.k[t * n_attn_kv..(t + 1) * n_attn_kv]
+                        .copy_from_slice(&k);
+                    scratch.v[t * n_attn_v..(t + 1) * n_attn_v]
+                        .copy_from_slice(&v);
                 if let (Some(qn), Some(kn)) = (&lw.attn_q_norm, &lw.attn_k_norm) {
                     for h in 0..n_head {
                         let o = h * head_dim_k;
@@ -312,11 +321,15 @@ impl NemotronModel {
                 // first head — each head reads its own slot.
                 let mut q_f16 = vec![0u16; n_attn_q];
                 f32_slice_to_f16(&q[..n_attn_q], &mut q_f16);
+                // Convert ALL cached K rows to f16 in one shot — they
+                // were written into scratch.k above. (Old code accessed
+                // a freshly-allocated per-token `k` vector, which was
+                // out of bounds for j > 0.)
                 let mut k_f16_storage: Vec<Vec<u16>> =
                     (0..=t).map(|_| vec![0u16; n_attn_kv]).collect();
                 for j in 0..=t {
                     f32_slice_to_f16(
-                        &k[j * n_attn_kv..(j + 1) * n_attn_kv],
+                        &scratch.k[j * n_attn_kv..(j + 1) * n_attn_kv],
                         &mut k_f16_storage[j],
                     );
                 }
@@ -324,7 +337,7 @@ impl NemotronModel {
                     (0..=t).map(|_| vec![0.0f32; n_attn_v]).collect();
                 for j in 0..=t {
                     v_storage[j].copy_from_slice(
-                        &v[j * n_attn_v..(j + 1) * n_attn_v],
+                        &scratch.v[j * n_attn_v..(j + 1) * n_attn_v],
                     );
                 }
                 for h in 0..n_head {
@@ -610,6 +623,8 @@ impl NemotronModel {
                     0,
                     1,
                 );
+                // DEBUG: disable SSM residual to isolate attention/FFN
+                // let _ = scratch.ffn_out; // skip residual
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
@@ -665,7 +680,7 @@ impl NemotronModel {
                     cfg.n_ff,
                     n_embd,
                     0,
-                    1,
+            1,
                 );
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
