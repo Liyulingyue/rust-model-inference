@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rope_neox_inplace,
-    rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32, vec_mad_f16_f32,
-    vec_scale_f32,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped,
+    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
+    vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt;
 
@@ -596,9 +596,7 @@ pub fn run_inference_tokens(
                         let out_base = h * n_embd_head_v;
                         let mut ms = 0.0f32;
                         let mut s_sum = 0.0f32;
-                        for d in 0..n_embd_head_v {
-                            attn_out[out_base + d] = 0.0;
-                        }
+                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
                         for t in 0..n_cached {
                             let score = dot_f16_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -711,13 +709,10 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "attn_proj", layer, attn_proj);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
-            for i in 0..n_embd {
-                let r = if residual_scale != 0.0 {
-                    attn_proj[i] * residual_scale
-                } else {
-                    attn_proj[i]
-                };
-                x[i] += r;
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, attn_proj, residual_scale);
+            } else {
+                vec_add_into(attn_proj, x);
             }
             dbg_tensor(step, "ffn_inp", layer, x);
             dbg_full(step, "ffn_inp", layer, x, n_embd);
@@ -891,13 +886,10 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "down_buf", layer, down_buf);
             dbg_full(step, "down_buf", layer, down_buf, n_embd);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-            for i in 0..n_embd {
-                let r = if residual_scale != 0.0 {
-                    down_buf[i] * residual_scale
-                } else {
-                    down_buf[i]
-                };
-                x[i] += r;
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, down_buf, residual_scale);
+            } else {
+                vec_add_into(down_buf, x);
             }
             dbg_tensor(step, "ffn_out", layer, x);
             dbg_tensor(step, "l_out", layer, x);
