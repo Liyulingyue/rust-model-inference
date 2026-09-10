@@ -722,6 +722,9 @@ fn forward_moe_ffn(
     let normed = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
 
     // ---- Router: F32 logits -> gating probs -> biased top-k ----
+    // 128 sequential dot_f32 calls; parallelizing via pool.compute costs
+    // more in dispatch overhead (~5-10µs) than the 17µs total work saved,
+    // so keep sequential.
     let logits: Vec<f32> = (0..n_expert)
         .map(|e| dot_f32(&lw.router[e * n_embd..(e + 1) * n_embd], normed, n_embd))
         .collect();
