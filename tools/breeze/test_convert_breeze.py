@@ -106,7 +106,6 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(metadata["general.architecture"], "breeze")
         self.assertEqual(metadata["breeze.config"], self.config)
         self.assertEqual(metadata["breeze.tokenizer_json"], self.tokenizer)
-        self.assertEqual(metadata["breeze.oracle.commit"], "e2c5ac2f54fe15daa94237a7dbf31e446660a4c9")
         self.assertEqual(tensors, {
             "backbone_model.layers.0.weight": ((3, 2), 30, bytes.fromhex("0000803f0080817f7fff80bf")),
             "codec_model.legacy.initialized": ((1,), 0, bytes.fromhex("0000803f")),

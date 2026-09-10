@@ -276,16 +276,17 @@ fn main_graph_real_weights_replay() {
 }
 
 #[test]
-#[ignore = "requires BREEZE_GGUF and BREEZE_ORACLE_TRACE with its request manifest"]
+#[ignore = "requires BREEZE_GGUF and BREEZE_REFERENCE_TRACE with its request manifest"]
 fn main_mode_real_weights_replay() {
     use crate::format::ggufrs::{open_model_source, ComponentRole};
     let path = std::env::var("BREEZE_GGUF").unwrap();
-    let oracle = std::env::var("BREEZE_ORACLE_TRACE").unwrap();
-    let manifest: Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{oracle}.manifest.json")).unwrap())
-            .unwrap();
+    let reference = std::env::var("BREEZE_REFERENCE_TRACE").unwrap();
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{reference}.manifest.json")).unwrap(),
+    )
+    .unwrap();
     let request = &manifest["request"];
-    let records = std::fs::read_to_string(&oracle).unwrap();
+    let records = std::fs::read_to_string(&reference).unwrap();
     let reference_codes = records
         .lines()
         .map(|s| serde_json::from_str::<Value>(s).unwrap())

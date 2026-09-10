@@ -1,15 +1,13 @@
 //! Breeze TTS 2: lossless BF16 text/backbone/depth inference and native 24 kHz codec.
-mod bf16_math;
 pub mod codec;
 #[cfg(test)]
 mod tests;
 mod transformer;
 
 use crate::core::tensor::{load_f32_tensor, MetaValue, TensorSource};
-use crate::ops::kernel::Weight;
+use crate::ops::kernel::{Kernel, Weight};
 pub use codec::BreezeCodec;
 use rand::{Rng, SeedableRng};
-use rayon::prelude::*;
 use serde_json::Value;
 use transformer::{linear, matrix, Cache, Kind, Transformer};
 
@@ -289,22 +287,23 @@ impl<'a> BreezeModel<'a> {
             }
             let mut frame = [0u32; 16];
             frame[0] = first;
-            let mut depth_cache = Cache::default();
+            let mut cond_depth_cache = Cache::default();
+            let mut neg_depth_cache = Cache::default();
             for codebook in 1..CODEBOOKS {
                 let depth_step = step * 15 + codebook - 1;
                 let mut logits = self.depth_step(
                     &cond_hidden,
                     &frame[..codebook],
-                    if negative_hidden.is_some() {
-                        None
-                    } else {
-                        Some(&mut depth_cache)
-                    },
+                    &mut cond_depth_cache,
                     depth_step,
                 )?;
                 if let Some(hidden) = &negative_hidden {
-                    let neg_logits =
-                        self.depth_step(hidden, &frame[..codebook], None, depth_step)?;
+                    let neg_logits = self.depth_step(
+                        hidden,
+                        &frame[..codebook],
+                        &mut neg_depth_cache,
+                        depth_step,
+                    )?;
                     guide(&mut logits, &neg_logits, cfg_scale);
                 }
                 frame[codebook] = sampler.draw(&logits, false)?;
@@ -348,10 +347,10 @@ impl<'a> BreezeModel<'a> {
         &self,
         backbone_hidden: &[f32],
         codes: &[u32],
-        mut cache: Option<&mut Cache>,
+        cache: &mut Cache,
         step: usize,
     ) -> Result<Vec<f32>, String> {
-        let cached = cache.as_ref().map_or(0, |c| c.len);
+        let cached = cache.len;
         let mut embeddings = Vec::new();
         if cached == 0 {
             embeddings.extend_from_slice(backbone_hidden);
@@ -365,37 +364,20 @@ impl<'a> BreezeModel<'a> {
         let input = linear(&self.depth_projection, &embeddings);
         let n = input.len() / 1024;
         trace("breeze.depth.input", None, Some(step), &[n, 1024], &input)?;
-        let hidden = self
-            .depth
-            .forward(input, &[n], cache.as_deref_mut(), Some(step))?;
-        // CFG's official eager path recomputes the full depth prefix, including all output heads.
-        let first = if cache.is_none() { 1 } else { n - 1 };
-        let mut all_logits = Vec::new();
-        for row in first..n {
-            let head = if cache.is_none() {
-                row - 1
-            } else {
-                codes.len() - 1
-            };
-            let weights = &self.depth_heads[head * VOCAB * 1024 * 2..(head + 1) * VOCAB * 1024 * 2];
-            let h = &hidden[row * 1024..(row + 1) * 1024];
-            let mut logits = vec![0.0; VOCAB];
-            logits
-                .par_iter_mut()
-                .zip(weights.par_chunks_exact(1024 * 2))
-                .for_each(|(out, w)| {
-                    *out = bf16_math::dot_bf16_gemm(w, h);
-                });
-            all_logits.extend(logits);
-        }
+        let hidden = self.depth.forward(input, &[n], Some(cache), Some(step))?;
+        let head = codes.len() - 1;
+        let weights = &self.depth_heads[head * VOCAB * 1024 * 2..(head + 1) * VOCAB * 1024 * 2];
+        let h = &hidden[hidden.len() - 1024..];
+        let mut logits = vec![0.0; VOCAB];
+        crate::ops::kernel::bf16::BF16Kernel::new(weights).forward(h, &mut logits, 1024, VOCAB);
         trace(
             "breeze.depth.logits",
             None,
             Some(step),
-            &[all_logits.len() / VOCAB, VOCAB],
-            &all_logits,
+            &[1, VOCAB],
+            &logits,
         )?;
-        Ok(all_logits[all_logits.len() - VOCAB..].to_vec())
+        Ok(logits)
     }
 
     fn audio_embedding(&self, codes: &[u32; 16]) -> Vec<f32> {
@@ -657,7 +639,7 @@ fn validate_config(source: &dyn TensorSource) -> Result<(), String> {
         "/depth_decoder_config/rope_scaling/high_freq_factor":0.0078125,"/depth_decoder_config/rope_scaling/low_freq_factor":0.001953125,"/depth_decoder_config/rope_scaling/original_max_position_embeddings":16,
         "/depth_decoder_config/attention_bias":false,"/depth_decoder_config/mlp_bias":false,"/depth_decoder_config/hidden_act":"silu",
         "/text_encoder_config/hidden_size":1152,"/text_encoder_config/num_hidden_layers":26,"/text_encoder_config/num_attention_heads":4,"/text_encoder_config/num_key_value_heads":1,"/text_encoder_config/head_dim":256,"/text_encoder_config/intermediate_size":6912,
-        "/text_encoder_config/rms_norm_eps":0.000001,"/text_encoder_config/hidden_activation":"gelu_pytorch_tanh","/text_encoder_config/attention_bias":false,"/text_encoder_config/sliding_window":512,"/text_encoder_config/query_pre_attn_scalar":256,
+        "/text_encoder_config/rms_norm_eps":0.000001,"/text_encoder_config/attention_bias":false,"/text_encoder_config/sliding_window":512,"/text_encoder_config/query_pre_attn_scalar":256,
         "/text_encoder_config/rope_parameters/full_attention/rope_type":"linear","/text_encoder_config/rope_parameters/full_attention/rope_theta":1000000,"/text_encoder_config/rope_parameters/full_attention/factor":8.0,
         "/text_encoder_config/rope_parameters/sliding_attention/rope_type":"default","/text_encoder_config/rope_parameters/sliding_attention/rope_theta":10000,"/text_encoder_config/attn_logit_softcapping":null,
         "/text_encoder_config/vocab_size":262158,"/text_encoder_config/eoi_token_index":256000

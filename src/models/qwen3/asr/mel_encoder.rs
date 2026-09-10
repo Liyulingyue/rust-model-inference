@@ -8,7 +8,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, matmul_q8_0_quantized_parallel,
     quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
 };
 use rayon::prelude::*;
@@ -18,10 +18,6 @@ use super::audio_processor::{
     compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
     split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
 };
-
-unsafe extern "C" {
-    fn erff(value: f32) -> f32;
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Qwen3AudioConfig {
@@ -1135,10 +1131,6 @@ pub(in crate::models::qwen3) fn layer_norm_rows(
         )?;
     }
     Ok(())
-}
-
-fn gelu_erf(value: f32) -> f32 {
-    0.5 * value * (1.0 + unsafe { erff(value * std::f32::consts::FRAC_1_SQRT_2) })
 }
 
 pub(in crate::models::qwen3) fn apply_gelu_erf(values: &mut [f32]) -> Result<(), String> {

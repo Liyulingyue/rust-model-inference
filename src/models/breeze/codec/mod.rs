@@ -5,12 +5,10 @@
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops::dot_f32;
-use crate::ops::math::{torch28_erf, torch28_exp, torch28_expm1};
 use rayon::prelude::*;
 
 mod decoder;
 mod encoder;
-mod math;
 #[cfg(test)]
 mod tests;
 
@@ -228,16 +226,6 @@ struct Linear {
     bias: Vec<f32>,
     input: usize,
     output: usize,
-    bias_after: bool,
-}
-
-// Torch CPU GEMM reduces K in order with fused multiply-add. The shared
-// dot_f32 kernel reduces independent SIMD lanes and differs at F32 bits.
-fn ordered_dot(input: &[f32], weight: &[f32], initial: f32) -> f32 {
-    input
-        .iter()
-        .zip(weight)
-        .fold(initial, |sum, (&x, &w)| x.mul_add(w, sum))
 }
 
 impl Linear {
@@ -257,7 +245,6 @@ impl Linear {
             },
             input,
             output,
-            bias_after: false,
         })
     }
 
@@ -269,18 +256,11 @@ impl Linear {
             .zip(input.par_chunks(self.input))
             .for_each(|(out, row)| {
                 for (channel, value) in out.iter_mut().enumerate() {
-                    *value = ordered_dot(
+                    *value = dot_f32(
                         row,
                         &self.weight[channel * self.input..(channel + 1) * self.input],
-                        if self.bias_after {
-                            0.
-                        } else {
-                            self.bias[channel]
-                        },
-                    );
-                    if self.bias_after {
-                        *value += self.bias[channel];
-                    }
+                        self.input,
+                    ) + self.bias[channel];
                 }
             });
         output
@@ -350,21 +330,6 @@ impl Conv {
         let in_group = self.input / self.groups;
         let out_group = self.output / self.groups;
         let reduction = in_group * self.kernel;
-        // Pinned Torch CPU BLAS folds bias into full 32-row tiles, including
-        // a final 16-row tile only when it exactly fills the matrix. Its
-        // remainder kernel adds bias after the ordered FMA reduction.
-        let bias_seeded_rows = if (out_group == 1
-            && reduction >= 128
-            && output_length >= 128
-            && output_length % 32 == 0)
-            || (out_group >= 32 && output_length % 16 == 0)
-        {
-            output_length
-        } else if out_group >= 16 {
-            output_length / 32 * 32
-        } else {
-            0
-        };
         output
             .par_chunks_mut(self.output)
             .enumerate()
@@ -388,18 +353,11 @@ impl Conv {
                             }
                         }
                         for oc in group * out_group..(group + 1) * out_group {
-                            out[oc] = ordered_dot(
+                            out[oc] = dot_f32(
                                 patch,
                                 &self.weight[oc * reduction..(oc + 1) * reduction],
-                                if time < bias_seeded_rows {
-                                    self.bias[oc]
-                                } else {
-                                    0.
-                                },
-                            );
-                            if time >= bias_seeded_rows {
-                                out[oc] += self.bias[oc];
-                            }
+                                reduction,
+                            ) + self.bias[oc];
                         }
                     }
                 },
@@ -441,18 +399,15 @@ impl Norm {
             .zip(input.par_chunks(dim))
             .for_each(|(out, row)| {
                 if let Some(bias) = &self.bias {
-                    let (mean, var) = math::row_moments(row);
+                    let mean = (crate::ops::sum_f32(row) / row.len() as f64) as f32;
+                    let var =
+                        (crate::ops::sum_sq_centered_f32(row, mean) / row.len() as f64) as f32;
                     let scale = 1. / (var + self.epsilon).sqrt();
                     for i in 0..dim {
                         out[i] = (row[i] - mean) * scale * self.weight[i] + bias[i];
                     }
                 } else {
-                    crate::models::dots::patch_encoder::torch_rms_norm_with_eps(
-                        row,
-                        &self.weight,
-                        out,
-                        self.epsilon,
-                    );
+                    crate::ops::rms_norm(row, &self.weight, out, self.epsilon);
                 }
             });
         output
@@ -461,14 +416,14 @@ impl Norm {
 
 fn gelu(values: &mut [f32]) {
     for v in values {
-        *v = 0.5 * *v * (1. + torch28_erf(*v * std::f32::consts::FRAC_1_SQRT_2));
+        *v = crate::ops::gelu_erf(*v);
     }
 }
 
 fn elu(values: &mut [f32]) {
     for v in values {
         if *v < 0. {
-            *v = torch28_expm1(*v);
+            *v = v.exp_m1();
         }
     }
 }
@@ -620,28 +575,9 @@ impl TransformerLayer {
                     {
                         let kr =
                             &k[offset * channels + head * 64..offset * channels + (head + 1) * 64];
-                        let dot = if frames == 3 && time == 2 {
-                            gemv_tail_dot(qr, kr)
-                        } else {
-                            ordered_dot(qr, kr, 0.)
-                        };
-                        *score = dot * 0.125;
+                        *score = dot_f32(qr, kr, 64) * 0.125;
                     }
-                    let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let mut sums = [0.0f32; 4];
-                    for (index, score) in scores.iter_mut().enumerate() {
-                        *score = torch28_exp(*score - maximum);
-                        sums[index % 4] += *score;
-                    }
-                    let sum = if frames < 4 {
-                        (sums[0] + sums[1]) + sums[2]
-                    } else {
-                        (sums[0] + sums[2]) + (sums[1] + sums[3])
-                    };
-                    let inverse = 1. / sum;
-                    for score in &mut scores {
-                        *score *= inverse;
-                    }
+                    crate::ops::softmax_inplace(&mut scores);
                     for (offset, &probability) in
                         scores.iter().enumerate().take(time + 1).skip(first)
                     {
@@ -666,7 +602,7 @@ impl TransformerLayer {
             let gated = gate.forward(&normalized);
             stage("gate", &gated, self.fc1.output);
             for (h, g) in hidden.iter_mut().zip(gated) {
-                *h *= g / (1. + torch28_exp(-g));
+                *h *= crate::ops::silu(g);
             }
         } else {
             gelu(&mut hidden);
@@ -679,33 +615,12 @@ impl TransformerLayer {
     }
 }
 
-// Apple Accelerate's small 3-row GEMV tail used by Torch's CPU attention
-// kernel: the first 60 K terms use four FMA lanes, the final four use plain
-// multiply/add, then pairwise horizontal reduction. The singleton tail column
-// uses the even/odd reduction tree.
-fn gemv_tail_dot(query: &[f32], key: &[f32]) -> f32 {
-    let mut lanes = [0.0f32; 4];
-    for index in 0..60 {
-        lanes[index % 4] = query[index].mul_add(key[index], lanes[index % 4]);
-    }
-    for index in 60..64 {
-        lanes[index % 4] += query[index] * key[index];
-    }
-    (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
-}
-
 fn rope(values: &mut [f32], heads: usize) {
-    let positions: Vec<usize> = (0..values.len() / (heads * 64)).collect();
-    let (cos, sin) = crate::ops::rope_sin_cos_sleef_table_with_threads(
-        &positions,
-        64,
-        10_000.,
-        rayon::current_num_threads(),
-    );
     for (position, row) in values.chunks_exact_mut(heads * 64).enumerate() {
         for head in row.chunks_exact_mut(64) {
             for i in 0..32 {
-                let (sin, cos) = (sin[position * 64 + i], cos[position * 64 + i]);
+                let angle = position as f32 / 10_000_f32.powf((2 * i) as f32 / 64.0);
+                let (sin, cos) = crate::ops::rope_sin_cos(angle);
                 let first = head[i];
                 let second = head[i + 32];
                 head[i] = first * cos - second * sin;

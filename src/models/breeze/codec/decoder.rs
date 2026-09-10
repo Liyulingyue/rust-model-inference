@@ -62,7 +62,8 @@ impl TransposeConv {
                     let source = &input[t * self.input..(t + 1) * self.input];
                     for (oc, value) in row.iter_mut().enumerate() {
                         let start = (oc * self.kernel + tap) * self.input;
-                        *value += ordered_dot(source, &self.weight[start..start + self.input], 0.);
+                        *value +=
+                            dot_f32(source, &self.weight[start..start + self.input], self.input);
                     }
                 }
                 for (value, bias) in row.iter_mut().zip(&self.bias) {
@@ -82,11 +83,10 @@ impl Snake {
     fn load(source: &dyn TensorSource, prefix: &str, channels: usize) -> Result<Self, String> {
         let mut alpha = tensor(source, &format!("{prefix}.alpha"), &[channels])?;
         let mut beta = tensor(source, &format!("{prefix}.beta"), &[channels])?;
-        for a in &mut alpha {
-            *a = torch28_exp(*a);
-        }
+        crate::ops::exp_inplace(&mut alpha);
+        crate::ops::exp_inplace(&mut beta);
         for b in &mut beta {
-            *b = 1. / (torch28_exp(*b) + 1e-9);
+            *b = 1. / (*b + 1e-9);
         }
         if alpha.iter().chain(&beta).any(|v| !v.is_finite()) {
             return Err(format!("Breeze Snake parameters overflow: {prefix}"));
@@ -100,7 +100,7 @@ impl Snake {
     fn forward(&self, x: &mut [f32]) -> Result<(), String> {
         for row in x.chunks_exact_mut(self.alpha.len()) {
             for (channel, value) in row.iter_mut().enumerate() {
-                let sine = crate::ops::rope_sin_cos_sleef(self.alpha[channel] * *value).1;
+                let sine = (self.alpha[channel] * *value).sin();
                 *value += self.inverse_beta[channel] * (sine * sine);
             }
         }
@@ -307,17 +307,13 @@ pub(super) struct Decoder {
 
 impl Decoder {
     pub(super) fn load(source: &dyn TensorSource) -> Result<Self, String> {
-        let mut input_projection = Linear::load(
+        let input_projection = Linear::load(
             source,
             "decoder.pre_transformer.input_proj",
             1024,
             DIM,
             true,
         )?;
-        // The official pre-convolution is transposed into a noncontiguous
-        // [B,T,C] tensor. Torch linear uses matmul + bias on that input; later
-        // contiguous projections use addmm with the bias seeded into GEMM.
-        input_projection.bias_after = true;
         Ok(Self {
             semantic: Codebook::load(
                 source,

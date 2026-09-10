@@ -23,6 +23,7 @@
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
 | Qwen3-ASR-0.6B | `qwen3vl` | 语音识别 | Qwen3-ASR mmproj、WAV | Q8_0 LLM + Q8_0 mmproj | `Verified` | [`src/format/ggufrs.rs`](src/format/ggufrs.rs) 有固定文件哈希的 raw GGUF/GGUFRS 转写等价测试；仅支持 greedy 解码，不能同时传图像。 |
 | Qwen3-TTS-12Hz-1.7B-Base | `qwen3tts` | TTS、参考音频声音克隆 | mmproj；克隆时还需参考 WAV/文本 | Q8_0 GGUF + mmproj | `Verified` | [`tests/qwen3_tts_reference.rs`](tests/qwen3_tts_reference.rs) 覆盖 pinned llama.cpp Oracle。 |
+| Breeze-TTS-2 | `breeze` + `breeze_audio` | TTS、指令控制、参考音频声音克隆 | F32 codec GGUF；克隆时还需 24 kHz WAV/文本 | BF16 主模型 + F32 codec | `Verified` | 2026-09-10 从原始 checkpoint 转换并通过普通、instruction + CFG、参考音频三种真实 CLI；覆盖 tokenizer、配置、张量 shape/dtype、codec 和路由单测，未做主观音质评估。 |
 | dots.tts-base | `qwen2` LLM + `clip` mmproj | TTS | `dotstts` mmproj | Q8_0 LLM + Q8_0 mmproj；旧 BF16/F32 混合精度文件 | `Verified` | 2026-09-08 原生 Weight/SIMD 路径完成真实 Q8 生成及旧文件冒烟；[导出与运行说明](../../README.md#dotstts-base--editq8_0)。原 BLAS/Python 位级审计保留为 opt-in，当前不承诺逐位一致。 |
 | dots.tts.edit | `qwen2` LLM + `clip` mmproj | 指令式语音编辑 | `dotstts` mmproj、源 WAV、编辑指令 | Q8_0 LLM + Q8_0 mmproj | `Verified` | 2026-09-08 真实双 Q8 文件通过源音频编码、x-vector、Edit 调度与波形生成冒烟；使用 Base 生成 WAV 作输入，未做主观音质评估或 Python 位级对齐。 |
 | Qwen3.5-0.8B | `qwen35` | 文本、图像 | 图像需要 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | 已有真实图文运行记录；未声明其他量化格式。 |

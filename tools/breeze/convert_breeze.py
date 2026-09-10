@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
 from convert_dots_tts import GGML_BF16, GGML_F32, GgufWriter, gguf_dims  # noqa: E402
 
-ORACLE_COMMIT = "e2c5ac2f54fe15daa94237a7dbf31e446660a4c9"
 _ELEMENT_BYTES = {"BF16": 2, "F32": 4}
 
 
@@ -145,7 +144,6 @@ def _build(path: Path, architecture: str, config_key: str, config: str, tensors,
     writer.add_meta(config_key, config)
     if tokenizer is not None:
         writer.add_meta("breeze.tokenizer_json", tokenizer)
-        writer.add_meta("breeze.oracle.commit", ORACLE_COMMIT)
     for name, source, entry in tensors:
         dtype, shape, _start, _end = entry
         nbytes = _end - _start

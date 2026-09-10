@@ -69,8 +69,8 @@ def binary(trace: Path, row: dict) -> bytes:
     return data
 
 
-def compare(oracle: Path, native: Path) -> dict:
-    left, right = records(oracle), records(native)
+def compare(reference: Path, candidate: Path) -> dict:
+    left, right = records(reference), records(candidate)
     compared_values = 0
     for index, (a, b) in enumerate(zip(left, right)):
         context = {"record": index, "name": a["name"], "shape": a.get("shape")}
@@ -78,14 +78,14 @@ def compare(oracle: Path, native: Path) -> dict:
         for key in ("name", "shape", "len", "layer", "step", "occurrence"):
             if (key in a) != (key in b) or a.get(key) != b.get(key):
                 return {"status": "metadata_mismatch", **context, "field": key,
-                        "oracle": a.get(key), "native": b.get(key)}
+                        "reference": a.get(key), "candidate": b.get(key)}
         kind_a = next(key for key in PAYLOADS if key in a)
         kind_b = next(key for key in PAYLOADS if key in b)
         if kind_a != kind_b:
             return {"status": "payload_mismatch", **context,
-                    "oracle": kind_a, "native": kind_b}
+                    "reference": kind_a, "candidate": kind_b}
         if kind_a == "binary_path":
-            a_bytes, b_bytes = binary(oracle, a), binary(native, b)
+            a_bytes, b_bytes = binary(reference, a), binary(candidate, b)
             compared_values += a["len"]
             if a_bytes != b_bytes:
                 byte = next(i for i, pair in enumerate(zip(a_bytes, b_bytes)) if pair[0] != pair[1])
@@ -96,16 +96,16 @@ def compare(oracle: Path, native: Path) -> dict:
                     remainder //= dimension
                 return {"status": "bit_mismatch", **context, "element": element,
                         "coordinate": list(reversed(coordinate)),
-                        "oracle_u32": struct.unpack_from("<I", a_bytes, element * 4)[0],
-                        "native_u32": struct.unpack_from("<I", b_bytes, element * 4)[0]}
+                        "reference_u32": struct.unpack_from("<I", a_bytes, element * 4)[0],
+                        "candidate_u32": struct.unpack_from("<I", b_bytes, element * 4)[0]}
         else:
             compared_values += len(a[kind_a])
             if a[kind_a] != b[kind_b]:
                 element = next(i for i, pair in enumerate(zip(a[kind_a], b[kind_b])) if pair[0] != pair[1])
                 return {"status": "value_mismatch", **context, "element": element,
-                        "oracle": a[kind_a][element], "native": b[kind_b][element]}
+                        "reference": a[kind_a][element], "candidate": b[kind_b][element]}
     if len(left) != len(right):
-        return {"status": "record_count_mismatch", "oracle": len(left), "native": len(right)}
+        return {"status": "record_count_mismatch", "reference": len(left), "candidate": len(right)}
     if compared_values == 0:
         raise ValueError("Trace contains no values to compare")
     return {"status": "identical", "records": len(left), "values": compared_values}
@@ -113,11 +113,11 @@ def compare(oracle: Path, native: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("oracle", type=Path)
-    parser.add_argument("native", type=Path)
+    parser.add_argument("reference", type=Path)
+    parser.add_argument("candidate", type=Path)
     args = parser.parse_args()
     try:
-        result = compare(args.oracle, args.native)
+        result = compare(args.reference, args.candidate)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(json.dumps({"status": "invalid_trace", "error": str(exc)}))
         return 2

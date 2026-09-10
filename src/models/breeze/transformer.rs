@@ -21,17 +21,8 @@ pub(super) fn linear(weight: &Weight<'_>, input: &[f32]) -> Vec<f32> {
     let ni = weight.n_in;
     let no = weight.n_out;
     assert_eq!(input.len() % ni, 0);
-    let bytes = weight.kernel.bf16_bytes().expect("validated BF16 matrix");
     let mut out = vec![0.0; input.len() / ni * no];
-    for (x, y) in input.chunks_exact(ni).zip(out.chunks_exact_mut(no)) {
-        y.par_chunks_mut(64).enumerate().for_each(|(chunk, y)| {
-            let start = chunk * 64 * ni * 2;
-            let end = start + y.len() * ni * 2;
-            for (out, row) in y.iter_mut().zip(bytes[start..end].chunks_exact(ni * 2)) {
-                *out = super::bf16_math::dot_bf16(row, x);
-            }
-        });
-    }
+    weight.kernel.forward_batched(input, &mut out, ni, no);
     out
 }
 
@@ -316,21 +307,16 @@ impl<'a> Transformer<'a> {
                                         * (hd as f32).sqrt().recip());
                             }
                         }
-                        softmax(&mut scores);
+                        crate::ops::softmax_inplace(&mut scores);
                         for p in &mut scores {
                             *p = bf(*p);
                         }
                         for d in 0..hd {
-                            let mut sums = [0.0f32; 4];
+                            let mut sum = 0.0f32;
                             for s in 0..nk {
-                                let lane = if n * nk * hd >= 400 && s < nk / 4 * 4 {
-                                    s % 4
-                                } else {
-                                    0
-                                };
-                                sums[lane] += scores[s] * values[((b * nk + s) * kv + kh) * hd + d];
+                                sum += scores[s] * values[((b * nk + s) * kv + kh) * hd + d];
                             }
-                            output[h * hd + d] = bf(((sums[0] + sums[1]) + sums[2]) + sums[3]);
+                            output[h * hd + d] = bf(sum);
                         }
                     }
                 });
@@ -356,7 +342,7 @@ impl<'a> Transformer<'a> {
                                 }
                             }
                             raw.extend_from_slice(&scores);
-                            softmax(&mut scores);
+                            crate::ops::softmax_inplace(&mut scores);
                             probabilities.extend(scores.into_iter().map(bf));
                         }
                     }
@@ -383,9 +369,9 @@ impl<'a> Transformer<'a> {
             fine("gate", &dims(layer.gate.n_out), &gate)?;
             for g in &mut gate {
                 let activated = if text {
-                    gelu_tanh(*g)
+                    crate::ops::gelu(*g)
                 } else {
-                    *g / (1.0 + (-*g).exp())
+                    crate::ops::silu(*g)
                 };
                 *g = bf(activated);
             }
@@ -432,12 +418,6 @@ impl<'a> Transformer<'a> {
     }
 }
 
-fn gelu_tanh(x: f32) -> f32 {
-    let cube = (x * x) * x;
-    let inner = 0.797_884_560_802_865_4_f32 * (x + 0.044715_f32 * cube);
-    (0.5 * x) * (1.0 + crate::ops::math::torch28_tanh(inner))
-}
-
 fn residual(x: &mut [f32], add: &[f32]) {
     for (x, a) in x.iter_mut().zip(add) {
         *x = bf(*x + a);
@@ -447,7 +427,7 @@ fn residual(x: &mut [f32], add: &[f32]) {
 pub(super) fn rms(x: &[f32], w: &[f32], eps: f32, gemma: bool) -> Vec<f32> {
     let mut out = x.to_vec();
     for row in out.chunks_exact_mut(w.len()) {
-        let variance = sum_squares(row) / w.len() as f32;
+        let variance = (crate::ops::sum_sq_f32(row) / w.len() as f64) as f32;
         let scale = (variance + eps).sqrt().recip();
         for (v, w) in row.iter_mut().zip(w) {
             *v = if gemma {
@@ -458,71 +438,6 @@ pub(super) fn rms(x: &[f32], w: &[f32], eps: f32, gemma: bool) -> Vec<f32> {
         }
     }
     out
-}
-
-// PyTorch 2.9 CPU cascade reduction: four independent 4-lane vectors,
-// with 16-vector partial sums. Keep additions separate from the square.
-fn sum_squares(x: &[f32]) -> f32 {
-    let groups = x.len() / 16;
-    let mut levels = [[[0.0f32; 4]; 4]; 4];
-    let mut i = 0;
-    while i + 16 <= groups {
-        for _ in 0..16 {
-            for k in 0..4 {
-                for lane in 0..4 {
-                    let v = x[i * 16 + k * 4 + lane];
-                    levels[0][k][lane] += v * v;
-                }
-            }
-            i += 1;
-        }
-        for level in 1..4 {
-            for k in 0..4 {
-                for lane in 0..4 {
-                    levels[level][k][lane] += levels[level - 1][k][lane];
-                    levels[level - 1][k][lane] = 0.0;
-                }
-            }
-            if i & (15 << (4 * level)) != 0 {
-                break;
-            }
-        }
-    }
-    while i < groups {
-        for k in 0..4 {
-            for lane in 0..4 {
-                let v = x[i * 16 + k * 4 + lane];
-                levels[0][k][lane] += v * v;
-            }
-        }
-        i += 1;
-    }
-    for level in 1..4 {
-        for k in 0..4 {
-            for lane in 0..4 {
-                levels[0][k][lane] += levels[level][k][lane];
-            }
-        }
-    }
-    for j in groups * 4..x.len() / 4 {
-        for lane in 0..4 {
-            let v = x[j * 4 + lane];
-            levels[0][0][lane] += v * v;
-        }
-    }
-    for k in 1..4 {
-        for lane in 0..4 {
-            levels[0][0][lane] += levels[0][k][lane];
-        }
-    }
-    let mut sum = 0.0;
-    for &v in &x[x.len() / 4 * 4..] {
-        sum += v * v;
-    }
-    for v in levels[0][0] {
-        sum += v;
-    }
-    sum
 }
 
 fn inv_freq(dim: usize, theta: f32, linear_factor: f32, llama3: bool) -> Vec<f32> {
@@ -559,30 +474,11 @@ fn rope(x: &mut [f32], hd: usize, pos: usize, freq: &[f32]) {
     }
 }
 
-pub(super) fn softmax(scores: &mut [f32]) {
-    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    // Torch's F32 CPU softmax reduces four SIMD lanes, then multiplies by the reciprocal.
-    let mut sums = [0.0f32; 4];
-    for (index, p) in scores.iter_mut().enumerate() {
-        *p = crate::ops::math::torch28_exp(*p - max);
-        sums[index % 4] += *p;
-    }
-    let total = if scores.len() < 4 {
-        (sums[0] + sums[1]) + sums[2]
-    } else {
-        (sums[0] + sums[2]) + (sums[1] + sums[3])
-    };
-    let inverse = total.recip();
-    for p in scores {
-        *p *= inverse;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires BREEZE_GGUF and BREEZE_ORACLE_TRACE; replays one causal layer with its real KV history"]
+    #[ignore = "requires BREEZE_GGUF and BREEZE_REFERENCE_TRACE; replays one causal layer with its real KV history"]
     fn causal_layer_replay() {
         use crate::format::ggufrs::{open_model_source, ComponentRole};
         let path = std::env::var("BREEZE_GGUF").unwrap();
@@ -600,7 +496,7 @@ mod tests {
             .parse()
             .unwrap();
         let records =
-            std::fs::read_to_string(std::env::var("BREEZE_ORACLE_TRACE").unwrap()).unwrap();
+            std::fs::read_to_string(std::env::var("BREEZE_REFERENCE_TRACE").unwrap()).unwrap();
         let input_name = if index == 0 {
             format!("{}.input", kind.trace())
         } else {
@@ -679,76 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn mean_square_matches_pinned_cpu_reduction_bits() {
-        for (n, bits) in [
-            (128, 0x498d2b35),
-            (256, 0x4a219352),
-            (1024, 0x4b1d5330),
-            (1152, 0x4b344524),
-            (2048, 0x4b9c8a7e),
-        ] {
-            let x = (0..n)
-                .map(|i| {
-                    let u = (i as u32).wrapping_mul(1664525).wrapping_add(1013904223);
-                    let b = (u & 0x807f) | ((((u >> 16) % 20) + 116) << 7);
-                    f32::from_bits(b << 16)
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(sum_squares(&x).to_bits(), bits, "width={n}");
-        }
-    }
-
-    #[test]
-    fn softmax_keeps_the_real_thirteen_key_rounding_boundary() {
-        let mut scores = [
-            0.84375,
-            -0.010986328125,
-            -0.72265625,
-            -0.3203125,
-            -1.9140625,
-            -2.625,
-            -2.75,
-            -2.9375,
-            -3.109375,
-            -3.375,
-            -3.625,
-            -3.734375,
-            -3.625,
-        ];
-        softmax(&mut scores);
-        assert_eq!(
-            scores.map(f32::to_bits),
-            [
-                0x3eed36c4, 0x3e49d1c4, 0x3dc61d95, 0x3e141fa5, 0x3cf0bebd, 0x3c6c8001, 0x3c50b5e5,
-                0x3c2d06f1, 0x3c11b415, 0x3bdf6ded, 0x3bae01ca, 0x3b9bfa96, 0x3bae01ca
-            ]
-        );
-    }
-
-    #[test]
-    fn softmax_keeps_the_nine_key_instruction_rounding_boundary() {
-        let mut scores = [
-            3.953125,
-            0.1962890625,
-            1.5703125,
-            2.515625,
-            0.90234375,
-            -0.16796875,
-            2.6875,
-            f32::from_bits(0xff7f0000),
-            f32::from_bits(0xff7f0000),
-        ];
-        softmax(&mut scores);
-        assert_eq!(
-            scores.map(f32::to_bits),
-            [
-                0x3f16b243, 0x3c6145f2, 0x3d5e8699, 0x3e0f2c8f, 0x3ce43324, 0x3c1c8001, 0x3e2a05fe,
-                0, 0
-            ]
-        );
-    }
-
-    #[test]
     fn bf16_norm_and_rope_round_at_operator_boundaries() {
         assert_eq!(
             rms(&[3., 4.], &[1., 1.], 0., false),
@@ -759,7 +585,7 @@ mod tests {
         rope(&mut x, 4, 0, &[1., 0.1]);
         assert_eq!(x, original);
         let mut scores = [-1000., 0., 0.];
-        softmax(&mut scores);
+        crate::ops::softmax_inplace(&mut scores);
         assert_eq!(scores, [0., 0.5, 0.5]);
     }
 }
