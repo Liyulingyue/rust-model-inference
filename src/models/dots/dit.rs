@@ -10,8 +10,8 @@ use super::weights::load_weight;
 use crate::core::tensor::TensorSource;
 use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::patch_encoder::{dots_rotary, linear_forward, load_f16_f32};
+use crate::models::dots::speaker::exp::{torch28_exp, torch28_tanh};
 use crate::ops::kernel::Weight;
-use crate::ops::math::{torch28_exp, torch28_tanh};
 use crate::ops::{dot_f32, rope_sin_cos_sleef};
 
 #[cfg(feature = "parity-trace")]

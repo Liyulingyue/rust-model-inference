@@ -10,9 +10,9 @@ use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::models::dots::patch_encoder::torch_rms_norm_with_eps;
+use crate::models::dots::speaker::exp::torch28_exp;
 use crate::models::dots::weights::load_weight;
 use crate::ops::kernel::Weight;
-use crate::ops::math::torch28_exp;
 use crate::ops::{dot_f32, vec_mad_f32};
 
 #[derive(Debug, Clone)]

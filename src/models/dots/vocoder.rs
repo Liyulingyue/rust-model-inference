@@ -181,8 +181,8 @@ fn leaky_inplace(x: &mut [f32]) {
 /// SnakeBeta with logscale parameters.
 fn snakebeta(x: f32, alpha: f32, beta: f32) -> f32 {
     let (a, b) = (
-        crate::ops::math::torch28_exp(alpha),
-        crate::ops::math::torch28_exp(beta),
+        super::speaker::exp::torch28_exp(alpha),
+        super::speaker::exp::torch28_exp(beta),
     );
     x + (1.0 / (b + SNAKE_EPS)) * crate::ops::rope_sin_cos_sleef(x * a).1.powi(2)
 }
@@ -416,12 +416,12 @@ impl<'a> MiLayer<'a> {
 }
 
 fn sigmoid(x: f32) -> f32 {
-    crate::ops::math::torch28_sigmoid(x)
+    super::speaker::exp::torch28_sigmoid(x)
 }
 
 #[inline(always)]
 fn tanh(x: f32) -> f32 {
-    crate::ops::math::torch28_tanh(x)
+    super::speaker::exp::torch28_tanh(x)
 }
 
 // ---------------------------------------------------------------------------

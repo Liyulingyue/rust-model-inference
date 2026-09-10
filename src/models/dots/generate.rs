@@ -218,7 +218,7 @@ fn sample_latent_distribution(
             let mean = distribution[c * frames + t];
             let log_std = distribution[(latent_dim + c) * frames + t];
             sampled[t * latent_dim + c] =
-                mean + noise[c * frames + t] * crate::ops::math::torch28_exp(log_std);
+                mean + noise[c * frames + t] * super::speaker::exp::torch28_exp(log_std);
         }
     }
     Ok(sampled)
