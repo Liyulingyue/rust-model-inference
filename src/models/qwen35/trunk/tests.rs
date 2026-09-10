@@ -6,7 +6,7 @@
 //! - model loading (gated on `RMI_QWEN35_MODEL`)
 //! - `Q8_0` quantized matmul dispatch (scalar fallback path)
 //! - scratchpad sizing invariants
-//! - dense-attention softmax + value reduction (aarch64 NEON pinned)
+//! - dense-attention softmax + padded value reduction
 //! - `Qwen35Session` state management + embed-lookup helpers
 
 use super::session::{required_token_count, Qwen35Session};
@@ -313,7 +313,7 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
         scratch.score_buf[1].to_bits(),
     ]
     .into_iter()
-    .zip([0x3f25_1fe0, 0x3eb5_c03f])
+    .zip([0x3f25_1fe0, 0x3eb5_c040])
     {
         assert_eq!(got, expected);
     }

@@ -17,7 +17,7 @@ use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f32, rope_mrope, rope_neox_inplace, silu_approx_inplace, silu_mul_approx_inplace,
-    softmax_approx_inplace,
+    softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -589,7 +589,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     scratch.score_buf[s] = dot * scale;
                 }
                 scratch.score_buf[n_attend..n_padded].fill(f32::NEG_INFINITY);
-                softmax_approx_inplace(&mut scratch.score_buf[..n_padded]);
+                softmax_inplace(&mut scratch.score_buf[..n_padded]);
                 let out_base = t * n_embd_heads_total + h * n_embd_head;
                 // Pad the reduction even when the physical cache is shorter than
                 // ggml's row. Otherwise changing the generation limit changes

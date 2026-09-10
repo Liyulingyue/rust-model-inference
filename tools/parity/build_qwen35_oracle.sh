@@ -21,6 +21,8 @@ build_dir=$work_dir/build
 git clone --shared --no-checkout "$source_dir" "$clone_dir"
 git -C "$clone_dir" checkout --detach "$pin"
 git -C "$clone_dir" apply "$script_dir/qwen35-llama-trace.patch"
+# Match Rust's precise softmax without changing the production implementation.
+git -C "$clone_dir" apply "$script_dir/qwen35-scalar-softmax.patch"
 set --
 if [ "${RMI_QWEN35_SCALAR_KQUANT:-0}" = 1 ]; then
     # Match the existing ARM64 Rust Q4_K/Q5_K/Q6_K scalar dot products.
@@ -38,6 +40,7 @@ cmake -S "$clone_dir" -B "$build_dir" \
     -DGGML_NATIVE=OFF \
     -DGGML_OPENMP=OFF \
     -DLLAMA_BUILD_SERVER=OFF \
-    -DLLAMA_BUILD_TESTS=OFF "$@"
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX "$@"
 cmake --build "$build_dir" --target llama-eval-callback --parallel "${RMI_BUILD_JOBS:-4}"
 printf '%s\n' "$build_dir/bin/llama-eval-callback"
