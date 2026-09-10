@@ -871,10 +871,6 @@ fn forward_moe_ffn(
     dbg_out(step, layer, "l_out", x);
 }
 
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn forward_attention(
     pool: &Arc<ComputePool>,

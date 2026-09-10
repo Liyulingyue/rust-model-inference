@@ -3,8 +3,8 @@
 //! - `f16_at` / `f16_bits_to_f32`: F16 → F32 conversion without depending on
 //!   the `half` crate (matches llama.cpp scalar order; bit-exact pinned in
 //!   `qwen35_l2_norm_matches_pinned_llama_cpp_bits`).
-//! - `l2_norm`, `sigmoid_f32`, `softplus_f32`: tiny scalar helpers used by
-//!   the Mamba SSM (recurrent) layer.
+//! - `l2_norm`, `softplus_f32`: tiny scalar helpers used by the Mamba SSM
+//!   (recurrent) layer. Sigmoid moved to `ops::sigmoid_inplace` (SIMD).
 
 /// Read the f32 value at `idx` of a little-endian f16 buffer.
 /// Returns 0.0 if `idx` is out of range.
@@ -45,10 +45,6 @@ pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
     for v in x.iter_mut() {
         *v *= scale;
     }
-}
-
-pub(crate) fn sigmoid_f32(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
 }
 
 pub(crate) fn softplus_f32(x: f32) -> f32 {
