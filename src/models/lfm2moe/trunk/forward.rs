@@ -48,8 +48,8 @@ use crate::ops::kernel::Kernel;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, f32_slice_to_f16, quantize_q8_0_into,
     quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox_inplace, sample_top_k,
-    sigmoid_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32,
-    vec_mad_f32, vec_mul_inplace, vec_scale_f32,
+    sigmoid_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mad_f32,
+    vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 

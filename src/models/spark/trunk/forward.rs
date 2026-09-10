@@ -212,14 +212,8 @@ impl SparkSession {
                 };
                 let kv_stride = n_embd_kv;
                 let layer_off = il * (self.kv_state.capacity * kv_stride) + pos * kv_stride;
-                f32_slice_to_f16(
-                    k_full,
-                    &mut cache.k[layer_off..layer_off + kv_stride],
-                );
-                f32_slice_to_f16(
-                    v_full,
-                    &mut cache.v[layer_off..layer_off + kv_stride],
-                );
+                f32_slice_to_f16(k_full, &mut cache.k[layer_off..layer_off + kv_stride]);
+                f32_slice_to_f16(v_full, &mut cache.v[layer_off..layer_off + kv_stride]);
             }
 
             // Attention: q[h] @ k[0..pos+1] for each head, softmax, weighted v sum
@@ -238,10 +232,7 @@ impl SparkSession {
                     let mut k_row_f32 = vec![0.0f32; n_embd_head];
                     for t in 0..=pos {
                         let k_off = layer_off_base + t * n_embd_kv + kv_h * n_embd_head;
-                        f16_slice_to_f32(
-                            &cache.k[k_off..k_off + n_embd_head],
-                            &mut k_row_f32,
-                        );
+                        f16_slice_to_f32(&cache.k[k_off..k_off + n_embd_head], &mut k_row_f32);
                         scores[t] = dot_f32(q_h, &k_row_f32, n_embd_head) * scale;
                     }
                     // Sliding-window mask (pre-softmax): -inf outside window so
@@ -259,10 +250,7 @@ impl SparkSession {
                             continue;
                         }
                         let v_off = layer_off_base + t * n_embd_kv + kv_h * n_embd_head;
-                        f16_slice_to_f32(
-                            &cache.v[v_off..v_off + n_embd_head],
-                            &mut v_row_f32,
-                        );
+                        f16_slice_to_f32(&cache.v[v_off..v_off + n_embd_head], &mut v_row_f32);
                         vec_mad_f32(
                             &mut attn_out[h * n_embd_head..(h + 1) * n_embd_head],
                             &v_row_f32,

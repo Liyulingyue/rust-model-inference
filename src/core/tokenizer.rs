@@ -74,6 +74,7 @@ pub struct BPETokenizer {
     add_bos: bool,
     add_eos: bool,
     byte_fallback: bool,
+    normalize_nfc: bool,
 }
 
 const QWEN_SEMANTIC_TOKENS: &[(&str, &str)] = &[
@@ -323,6 +324,7 @@ impl BPETokenizer {
             add_bos: false,
             add_eos: false,
             byte_fallback: false,
+            normalize_nfc: false,
         };
         if tokenizer.vocab_size() != MODEL_VOCAB_SIZE {
             return Err(format!(
@@ -515,6 +517,10 @@ impl BPETokenizer {
             add_bos,
             add_eos,
             byte_fallback,
+            normalize_nfc: bool_meta(
+                get_meta("tokenizer.ggml.normalizer.nfc"),
+                "tokenizer.ggml.normalizer.nfc",
+            )?,
         })
     }
 
@@ -553,6 +559,14 @@ impl BPETokenizer {
     }
 
     fn encode_ordinary(&self, text: &str) -> Vec<u32> {
+        let mut normalized;
+        let text = if self.normalize_nfc {
+            normalized = tokenizers::NormalizedString::from(text);
+            normalized.nfc();
+            normalized.get()
+        } else {
+            text
+        };
         let mut ids = Vec::new();
         if self.pre == PreTokenizer::Gemma4 {
             for fragment in text.split_inclusive('\n') {

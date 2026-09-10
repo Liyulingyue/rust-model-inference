@@ -1,0 +1,20 @@
+diff --git a/ggml/src/ggml-cpu/vec.cpp b/ggml/src/ggml-cpu/vec.cpp
+index ff2b636df..21bbfe8ae 100644
+--- a/ggml/src/ggml-cpu/vec.cpp
++++ b/ggml/src/ggml-cpu/vec.cpp
+@@ -531,6 +531,7 @@ ggml_float ggml_vec_cvar_f32(const int n, float * y, const float * x, const floa
+ ggml_float ggml_vec_soft_max_f32(const int n, float * y, const float * x, float max) {
+     int i = 0;
+     ggml_float sum = 0;
++#if !defined(RMI_QWEN35_SCALAR_SOFTMAX)
+ #if defined(__AVX512F__) && defined(__AVX512DQ__)
+     for (; i + 15 < n; i += 16) {
+         __m512 val = ggml_v_expf(_mm512_sub_ps(_mm512_loadu_ps(x + i),
+@@ -590,6 +591,7 @@ ggml_float ggml_vec_soft_max_f32(const int n, float * y, const float * x, float
+         vsum = __riscv_vfwredusum_vs_f32m2_f64m1(val, vsum, avl);
+     }
+     return (ggml_float)__riscv_vfmv_f_s_f64m1_f64(vsum);
++#endif
+ #endif
+     for (; i < n; ++i) {
+         float val = expf(x[i] - max);
