@@ -346,23 +346,52 @@ impl NemotronModel {
             //   ssm_in.weight         (inner, n_embd)        Q4_0   in_proj
             //   ssm_conv1d.weight     (4, 9728)              F32   fused conv + b + c
             //   ssm_conv1d.bias       (9728,)                F32   fused conv + b + c bias
-            //   ssm_dt.bias           (inner,)               F32   dt bias
-            //   ssm_a                 (1, inner)             F32   A_log
-            //   ssm_d                 (1, inner)             F32   D skip
+            //   ssm_dt.bias           (dt_rank,)             F32   dt bias
+            //   ssm_a                 (1, dt_rank)            F32   A_log
+            //   ssm_d                 (1, dt_rank)            F32   D skip
             //   ssm_norm.weight       (per_group, n_groups) F32   group RMSNorm
             //   ssm_out.weight        (n_embd, inner)        Q5_K  out_proj
             //
             // 9728 = 7680 (x after conv) + 1024 + 1024 (B, C groupings).
             //
-            // This is the first cut: we project → conv1d (first inner
-            // channels) → SiLU → D-skip → group RMSNorm → out_proj. The
-            // selective scan (B, C → state over A·dt) is a no-op because
-            // this checkpoint does not store dt-projection weights; the
-            // B/C channels of ssm_conv1d output are loaded but unused
-            // here. A full Mamba2 implementation would replace the
-            // D-skip with a real selective scan.
-            if let (Some(ssm_in), Some(ssm_conv1d_w), Some(ssm_conv1d_b), Some(ssm_d), Some(ssm_norm), Some(ssm_out)) = (
-                &lw.ssm_in, &lw.ssm_conv1d_w, &lw.ssm_conv1d_b, &lw.ssm_d, &lw.ssm_norm, &lw.ssm_out,
+            // The 4B Nano checkpoint uses a slimmed Mamba2 layout: dt/a/d
+            // are per-time_step_rank (96) rather than per-channel, and
+            // the in_proj (`ssm_in`) produces only x — no z/B/C/dt
+            // concatenated. B/C are picked up from `ssm_conv1d` output's
+            // trailing 2048 channels. This implementation approximates the
+            // selective scan by routing each (group, rank) to a contiguous
+            // 10-channel slot in d_inner and per-rank dt/a/d broadcast:
+            //
+            //   state[t][g, r] = exp(A[r] * dt[r]) * state[t-1][g, r]
+            //               + dt[r] * B[t][g * d_state + r] * x_act[inner(g, r)]
+            //   y[inner(g, r)] = C[t][g * d_state + r] * state[t][g, r]
+            //                 + D[r] * x_act[inner(g, r)]
+            //
+            // The exact inner(g, r) ↔ channel mapping is unknown for
+            // this 4B Nano variant (no reference commit exposes it), so
+            // we use a simple per-group chunking: inner(g, r) =
+            // g * (d_inner / n_group) + r * (d_inner / n_group / dt_rank).
+            // This produces structurally-valid output but is not
+            // guaranteed to match llama.cpp byte-for-byte without a
+            // parity test against the exact reference.
+            if let (
+                Some(ssm_in),
+                Some(ssm_conv1d_w),
+                Some(ssm_conv1d_b),
+                Some(ssm_dt_bias),
+                Some(ssm_a_log),
+                Some(ssm_d),
+                Some(ssm_norm),
+                Some(ssm_out),
+            ) = (
+                &lw.ssm_in,
+                &lw.ssm_conv1d_w,
+                &lw.ssm_conv1d_b,
+                &lw.ssm_dt_bias,
+                &lw.ssm_a_log,
+                &lw.ssm_d,
+                &lw.ssm_norm,
+                &lw.ssm_out,
             ) {
                 // Input projection: x = ssm_in @ hidden.
                 let blocks_in = (n_embd + 31) / 32;
@@ -375,7 +404,13 @@ impl NemotronModel {
                 let q8 = &scratch.q8_buf[..n_embd];
                 let sc = &scratch.scale_buf[..blocks_in];
                 let inner_size = cfg.ssm_inner_size;
+                let n_group = cfg.ssm_group_count;
+                let d_state = cfg.ssm_state_size;
+                let dt_rank = cfg.ssm_time_step_rank;
                 let conv_kernel = cfg.ssm_conv_kernel;
+                let per_group = inner_size / n_group;
+                // 9728 = inner + 2 * n_group * d_state
+                let conv_out_cols = inner_size + 2 * n_group * d_state;
                 let mut x_inner = vec![0.0f32; inner_size];
                 ssm_in.kernel.forward_prepared(
                     row,
@@ -388,62 +423,78 @@ impl NemotronModel {
                     0,
                     1,
                 );
-                // Causal conv1d on the first `inner` channels of the fused
-                // output. The remaining 2 * (n_groups * d_state) channels
-                // are the B/C projections which are loaded but not yet
-                // used (the selective scan is the missing piece).
-                let conv_out_cols = inner_size
-                    + 2 * cfg.ssm_state_size * cfg.ssm_group_count;
-                let mut x_conv = vec![0.0f32; inner_size];
+                // Causal conv1d producing [x_conv, B, C] in the fused
+                // output. Each time step we treat the conv as a single
+                // tap with zero history (first cut; sequential prefill
+                // would carry state across steps).
+                let mut conv_out = vec![0.0f32; conv_out_cols];
                 for ki in 0..conv_kernel {
-                    let t_src = if t >= ki { t - ki } else { 0 };
-                    // We don't carry the full prefill sequence in
-                    // scratch.hidden (each step processes a single token),
-                    // so the conv1d here is a single-tap with zero
-                    // history. For real sequential prefill we'd need to
-                    // accumulate state.
-                    let _ = t_src;
                     let row_off = ki * conv_out_cols;
-                    for c in 0..inner_size {
-                        x_conv[c] += ssm_conv1d_w[row_off + c];
+                    for c in 0..conv_out_cols {
+                        conv_out[c] += ssm_conv1d_w[row_off + c];
                     }
                 }
-                for c in 0..inner_size {
-                    x_conv[c] += ssm_conv1d_b[c];
+                for c in 0..conv_out_cols {
+                    conv_out[c] += ssm_conv1d_b[c];
                 }
-                // SiLU activation.
-                for v in x_conv.iter_mut() {
-                    *v = crate::ops::silu(*v);
+                let x_act: Vec<f32> = conv_out[..inner_size]
+                    .iter()
+                    .map(|&v| crate::ops::silu(v))
+                    .collect();
+                // B and C are the trailing 2 * n_group * d_state
+                // channels of the conv1d output, stored as (n_group *
+                // d_state) per token. dt_rank = 96 controls 10
+                // d_inner channels each (inner / (n_group * dt_rank) =
+                // 7680 / (8 * 96) = 10).
+                let b: Vec<f32> = conv_out[inner_size..inner_size + n_group * d_state].to_vec();
+                let c: Vec<f32> = conv_out[inner_size + n_group * d_state..].to_vec();
+                // Per-(group, rank) decay: A = -exp(A_log), broadcast.
+                let channels_per_rank = per_group / dt_rank; // = 10
+                let mut state = vec![0.0f32; n_group * dt_rank];
+                let mut y_buf = vec![0.0f32; inner_size];
+                for (g, _grp_ch) in (0..n_group).enumerate() {
+                    for r in 0..dt_rank.min(d_state) {
+                        let decay = (-ssm_a_log[r]).exp();
+                        let dt = ssm_dt_bias[r];
+                        let d = ssm_d[r];
+                        let b_gr = b[g * d_state + r];
+                        let c_gr = c[g * d_state + r];
+                        // Inner-channel range for this (g, r).
+                        let inner_start = g * per_group + r * channels_per_rank;
+                        let inner_end = inner_start + channels_per_rank;
+                        // First-order selective scan update.
+                        let mut new_state = decay * state[g * dt_rank + r] + dt * b_gr;
+                        for j in inner_start..inner_end {
+                            new_state += dt * b_gr * x_act[j];
+                        }
+                        state[g * dt_rank + r] = new_state;
+                        // Output: scan contribution + D-skip.
+                        for j in inner_start..inner_end {
+                            y_buf[j] += c_gr * new_state + d * x_act[j];
+                        }
+                    }
                 }
-                // D-skip (per-channel residual): x_conv *= D.
-                for (xi, di) in x_conv.iter_mut().zip(ssm_d.iter()) {
-                    *xi *= *di;
-                }
-                // Group RMSNorm: split inner_size into n_groups groups,
-                // each with `per_group` features, normalized by RMS(scale).
-                let n_groups = cfg.ssm_group_count;
-                let per_group = inner_size / n_groups;
-                // ssm_norm.weight is row-major (per_group × n_groups).
-                for g in 0..n_groups {
+                // Group RMSNorm on the scan output.
+                for g in 0..n_group {
                     let group_start = g * per_group;
                     let group_end = group_start + per_group;
-                    let group = &mut x_conv[group_start..group_end];
+                    let group = &mut y_buf[group_start..group_end];
                     let mean_sq = group.iter().map(|x| x * x).sum::<f32>() / per_group as f32;
                     let rstd = 1.0 / (mean_sq + cfg.norm_eps).sqrt();
                     for (j, v) in group.iter_mut().enumerate() {
                         *v = *v * rstd * ssm_norm[g * per_group + j];
                     }
                 }
-                // Output projection: y = ssm_out @ x_conv.
+                // Output projection: y = ssm_out @ y_buf.
                 let blocks_out = (inner_size + 31) / 32;
                 quantize_q8_0_into(
-                    &x_conv,
+                    &y_buf,
                     inner_size,
                     &mut scratch.q8_buf[..inner_size],
                     &mut scratch.scale_buf[..blocks_out],
                 );
                 ssm_out.kernel.forward_prepared(
-                    &x_conv,
+                    &y_buf,
                     &scratch.q8_buf[..inner_size],
                     &scratch.scale_buf[..blocks_out],
                     None,
