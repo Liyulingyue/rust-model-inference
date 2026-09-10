@@ -352,6 +352,12 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let mut t_qkv: f64 = 0.0;
         let mut t_score: f64 = 0.0;
         let mut t_wo: f64 = 0.0;
+        let q8k_required = wq.uses_q8_k() || wk.uses_q8_k() || wv.uses_q8_k();
+        assert!(
+            !q8k_required || n_embd % crate::ops::quant::QK_K == 0,
+            "Qwen3.5 attention input width {n_embd} must be a multiple of {} for K-quant weights",
+            crate::ops::quant::QK_K
+        );
 
         for t in 0..n_tokens {
             let inp_off = t * n_embd;
@@ -368,8 +374,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 &mut scratch.q8_buf[..n_embd],
                 &mut scratch.scale_buf[..n_embd / 32],
             );
-            if n_embd % 256 == 0 {
-                crate::ops::quantize_row_q8_k_into(inp_slice, &mut scratch.q8k_buf[..n_embd / 256]);
+            if q8k_required {
+                crate::ops::quantize_row_q8_k_into(
+                    inp_slice,
+                    &mut scratch.q8k_buf[..n_embd / crate::ops::quant::QK_K],
+                );
             }
             let q8_ptr = scratch.q8_buf.as_ptr();
             let sc_ptr = scratch.scale_buf.as_ptr();
@@ -381,18 +390,22 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let n_embd_head_q = n_embd_head;
             let matmul_out_ptr = scratch.matmul_out.as_mut_ptr();
             let inp_ptr = inp_slice.as_ptr();
-            let q8k_len = n_embd / 256;
+            let q8k_len = n_embd / crate::ops::quant::QK_K;
             pool.compute(move |ith: usize, nth: usize| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q8) };
                 let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q8 / 32) };
-                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
                 let inp = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_q8) };
                 let q_out = unsafe { std::slice::from_raw_parts_mut(matmul_out_ptr, q_dim_q8) };
+                let q8k = if q8k_required {
+                    Some(unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) })
+                } else {
+                    None
+                };
                 wq.kernel.forward_prepared(
                     inp,
                     q8,
                     sc,
-                    Some(q8k),
+                    if wq.uses_q8_k() { q8k } else { None },
                     q_out,
                     n_embd_q8,
                     q_dim_q8,
@@ -406,7 +419,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     inp,
                     q8,
                     sc,
-                    Some(q8k),
+                    if wk.uses_q8_k() { q8k } else { None },
                     k_out,
                     n_embd_q8,
                     k_dim_q8,
@@ -423,7 +436,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     inp,
                     q8,
                     sc,
-                    Some(q8k),
+                    if wv.uses_q8_k() { q8k } else { None },
                     v_out,
                     n_embd_q8,
                     v_dim_q8,
@@ -960,6 +973,12 @@ impl<'a> super::weights::Qwen35Model<'a> {
     ) {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
+        let q8k_required = layer.ffn_gate.uses_q8_k() || layer.ffn_up.uses_q8_k();
+        assert!(
+            !q8k_required || n_embd % crate::ops::quant::QK_K == 0,
+            "Qwen3.5 FFN input width {n_embd} must be a multiple of {} for K-quant weights",
+            crate::ops::quant::QK_K
+        );
 
         for t in 0..n_tokens {
             let off = t * n_embd;
@@ -971,11 +990,16 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 &mut scratch.q8_buf[..n_embd],
                 &mut scratch.scale_buf[..n_embd / 32],
             );
-            crate::ops::quantize_row_q8_k_into(inp, &mut scratch.q8k_buf[..n_embd / 256]);
+            if q8k_required {
+                crate::ops::quantize_row_q8_k_into(
+                    inp,
+                    &mut scratch.q8k_buf[..n_embd / crate::ops::quant::QK_K],
+                );
+            }
             let q8_ptr = scratch.q8_buf.as_ptr();
             let sc_ptr = scratch.scale_buf.as_ptr();
             let q8k_ptr = scratch.q8k_buf.as_ptr();
-            let q8k_len = n_embd / 256;
+            let q8k_len = n_embd / crate::ops::quant::QK_K;
             let ffn_gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
             let ffn_up_buf_ptr = scratch.ffn_up_buf.as_mut_ptr();
             let inp_ptr = inp.as_ptr();
@@ -984,8 +1008,12 @@ impl<'a> super::weights::Qwen35Model<'a> {
             pool.compute(move |ith: usize, nth: usize| {
                 let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_local) };
                 let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_local / 32) };
-                let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) };
                 let inp_local = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_local) };
+                let q8k = if q8k_required {
+                    Some(unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) })
+                } else {
+                    None
+                };
                 let gate_out = unsafe {
                     std::slice::from_raw_parts_mut(ffn_gate_buf_ptr.add(t * n_ff_local), n_ff_local)
                 };
@@ -993,7 +1021,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     inp_local,
                     q8,
                     sc,
-                    Some(q8k),
+                    if layer.ffn_gate.uses_q8_k() {
+                        q8k
+                    } else {
+                        None
+                    },
                     gate_out,
                     n_embd_local,
                     n_ff_local,
@@ -1007,7 +1039,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     inp_local,
                     q8,
                     sc,
-                    Some(q8k),
+                    if layer.ffn_up.uses_q8_k() { q8k } else { None },
                     up_out,
                     n_embd_local,
                     n_ff_local,

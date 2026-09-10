@@ -68,6 +68,28 @@ impl<'a> Weight<'a> {
         }
     }
 
+    pub(crate) fn uses_q8_k(&self) -> bool {
+        use crate::core::tensor::GGMLType;
+
+        matches!(
+            self.ggml_type,
+            GGMLType::Q2K
+                | GGMLType::Q3K
+                | GGMLType::Q4K
+                | GGMLType::Q5K
+                | GGMLType::Q6K
+                | GGMLType::IQ1_S
+                | GGMLType::IQ1_M
+                | GGMLType::IQ2_XXS
+                | GGMLType::IQ2_XS
+                | GGMLType::IQ2_S
+                | GGMLType::IQ3_XXS
+                | GGMLType::IQ3_S
+                | GGMLType::IQ4_NL
+                | GGMLType::IQ4_XS
+        )
+    }
+
     pub fn quantize_and_matmul_with_scratch(
         &self,
         input: &[f32],

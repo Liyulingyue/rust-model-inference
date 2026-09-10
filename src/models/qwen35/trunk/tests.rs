@@ -14,8 +14,7 @@ use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::QuantizedTensor;
-use crate::ops::kernel::Weight;
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::quant::{self, BlockQ8K};
 use std::sync::Arc;
 
@@ -145,6 +144,90 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
+}
+
+struct RejectQ8KKernel;
+
+impl Kernel for RejectQ8KKernel {
+    fn forward_prequantized(
+        &self,
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        output: &mut [f32],
+        _n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        output[start..end].fill(0.0);
+    }
+
+    fn forward_prepared(
+        &self,
+        _input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        assert!(
+            q8_k.is_none(),
+            "non-K-quant weights must not receive Q8_K input"
+        );
+        self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+    }
+}
+
+fn reject_q8k_weight(n_in: usize, n_out: usize) -> Weight<'static> {
+    Weight {
+        kernel: Box::new(RejectQ8KKernel),
+        ggml_type: GGMLType::F32,
+        n_in,
+        n_out,
+    }
+}
+
+#[test]
+fn qwen35_non_k_quant_weights_do_not_receive_q8_k_input() {
+    let mut model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let layer = &mut model.layers[0];
+    layer.wq = Some(reject_q8k_weight(2, 4));
+    layer.wk = Some(reject_q8k_weight(2, 2));
+    layer.wv = Some(reject_q8k_weight(2, 2));
+    layer.ffn_gate = reject_q8k_weight(2, 2);
+    layer.ffn_up = reject_q8k_weight(2, 2);
+
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
+    let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
+    let pool = ComputePool::new(1);
+    let hidden = [1.0, 0.0];
+
+    scratch.x[..2].copy_from_slice(&hidden);
+    model
+        .forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]])
+        .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Qwen3.5 attention input width 2 must be a multiple of 256")]
+fn qwen35_k_quant_weights_reject_non_block_width() {
+    let mut model = tiny_dense_model([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let mut bad_wq = reject_q8k_weight(2, 4);
+    bad_wq.ggml_type = GGMLType::Q4K;
+    model.layers[0].wq = Some(bad_wq);
+
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
+    let mut kv_cache = KvCache::new_f32(1, model.config.n_ctx, 2);
+    let pool = ComputePool::new(1);
+    scratch.x[..2].copy_from_slice(&[1.0, 0.0]);
+    let _ = model.forward(1, &mut kv_cache, &mut scratch, &pool, &[[0; 4]]);
 }
 
 #[test]
