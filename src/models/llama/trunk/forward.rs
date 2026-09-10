@@ -718,13 +718,26 @@ pub fn run_inference_tokens(
             dbg_full(step, "ffn_inp", layer, x, n_embd);
 
             let t0 = Instant::now();
+            // Debug-only ffn_norm stats (printed when RUST_LLAMA_DEBUG_TENSORS
+            // is set). The static OnceLock guard lets the early return
+            // collapse away in production so we skip the AVX2 reduction
+            // entirely per layer × token.
             {
-                let sum_sq = sum_sq_f32(&x[..n_embd]);
-                let mean_sq = (sum_sq / n_embd as f64) as f32;
-                let scale = 1.0f32 / (mean_sq + eps).sqrt();
-                dbg_scalar(step, "ffn_norm_scale", layer, scale);
-                dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
-                dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+                static FFN_NORM_DBG_ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+                let limit = *FFN_NORM_DBG_ON.get_or_init(|| {
+                    std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                });
+                if limit != 0 && (layer as u32) < limit {
+                    let sum_sq = sum_sq_f32(&x[..n_embd]);
+                    let mean_sq = (sum_sq / n_embd as f64) as f32;
+                    let scale = 1.0f32 / (mean_sq + eps).sqrt();
+                    dbg_scalar(step, "ffn_norm_scale", layer, scale);
+                    dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
+                    dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+                }
             }
             rms_norm_grouped(x, &lw.ffn_norm, normed, norm_groups, eps);
             dbg_tensor(step, "ffn_norm", layer, normed);
