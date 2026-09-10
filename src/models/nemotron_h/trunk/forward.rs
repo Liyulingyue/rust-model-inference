@@ -340,16 +340,122 @@ impl NemotronModel {
             for d in 0..n_embd {
                 row[d] += scratch.ffn_out[d];
             }
-            // SSM branch: Mamba2 forward. Currently a no-op (output zeros)
-            // when the block has an SSM — the weights are loaded but the
-            // selective scan and dt/A math are not implemented. See
-            // module-level docs. Layers without SSM tensors skip the
-            // branch entirely (saves one normalization step too).
-            if lw.ssm_in.is_some() {
-                // TODO: implement Mamba2 SSM forward (in_proj → conv1d →
-                //  softplus(dt) · A → scan → group_norm → out_proj).
-                // For now, the SSM contributes zero — the attention and
-                // FFN branches still produce correct (but reduced) output.
+            // SSM branch: Mamba2 selective-state-space forward.
+            //
+            // Tensor layout (per Nemotron-3 Nano 4B reference):
+            //   ssm_in.weight         (inner, n_embd)        Q4_0   in_proj
+            //   ssm_conv1d.weight     (4, 9728)              F32   fused conv + b + c
+            //   ssm_conv1d.bias       (9728,)                F32   fused conv + b + c bias
+            //   ssm_dt.bias           (inner,)               F32   dt bias
+            //   ssm_a                 (1, inner)             F32   A_log
+            //   ssm_d                 (1, inner)             F32   D skip
+            //   ssm_norm.weight       (per_group, n_groups) F32   group RMSNorm
+            //   ssm_out.weight        (n_embd, inner)        Q5_K  out_proj
+            //
+            // 9728 = 7680 (x after conv) + 1024 + 1024 (B, C groupings).
+            //
+            // This is the first cut: we project → conv1d (first inner
+            // channels) → SiLU → D-skip → group RMSNorm → out_proj. The
+            // selective scan (B, C → state over A·dt) is a no-op because
+            // this checkpoint does not store dt-projection weights; the
+            // B/C channels of ssm_conv1d output are loaded but unused
+            // here. A full Mamba2 implementation would replace the
+            // D-skip with a real selective scan.
+            if let (Some(ssm_in), Some(ssm_conv1d_w), Some(ssm_conv1d_b), Some(ssm_d), Some(ssm_norm), Some(ssm_out)) = (
+                &lw.ssm_in, &lw.ssm_conv1d_w, &lw.ssm_conv1d_b, &lw.ssm_d, &lw.ssm_norm, &lw.ssm_out,
+            ) {
+                // Input projection: x = ssm_in @ hidden.
+                let blocks_in = (n_embd + 31) / 32;
+                quantize_q8_0_into(
+                    row,
+                    n_embd,
+                    &mut scratch.q8_buf[..n_embd],
+                    &mut scratch.scale_buf[..blocks_in],
+                );
+                let q8 = &scratch.q8_buf[..n_embd];
+                let sc = &scratch.scale_buf[..blocks_in];
+                let inner_size = cfg.ssm_inner_size;
+                let conv_kernel = cfg.ssm_conv_kernel;
+                let mut x_inner = vec![0.0f32; inner_size];
+                ssm_in.kernel.forward_prepared(
+                    row,
+                    q8,
+                    sc,
+                    None,
+                    &mut x_inner,
+                    n_embd,
+                    inner_size,
+                    0,
+                    1,
+                );
+                // Causal conv1d on the first `inner` channels of the fused
+                // output. The remaining 2 * (n_groups * d_state) channels
+                // are the B/C projections which are loaded but not yet
+                // used (the selective scan is the missing piece).
+                let conv_out_cols = inner_size
+                    + 2 * cfg.ssm_state_size * cfg.ssm_group_count;
+                let mut x_conv = vec![0.0f32; inner_size];
+                for ki in 0..conv_kernel {
+                    let t_src = if t >= ki { t - ki } else { 0 };
+                    // We don't carry the full prefill sequence in
+                    // scratch.hidden (each step processes a single token),
+                    // so the conv1d here is a single-tap with zero
+                    // history. For real sequential prefill we'd need to
+                    // accumulate state.
+                    let _ = t_src;
+                    let row_off = ki * conv_out_cols;
+                    for c in 0..inner_size {
+                        x_conv[c] += ssm_conv1d_w[row_off + c];
+                    }
+                }
+                for c in 0..inner_size {
+                    x_conv[c] += ssm_conv1d_b[c];
+                }
+                // SiLU activation.
+                for v in x_conv.iter_mut() {
+                    *v = crate::ops::silu(*v);
+                }
+                // D-skip (per-channel residual): x_conv *= D.
+                for (xi, di) in x_conv.iter_mut().zip(ssm_d.iter()) {
+                    *xi *= *di;
+                }
+                // Group RMSNorm: split inner_size into n_groups groups,
+                // each with `per_group` features, normalized by RMS(scale).
+                let n_groups = cfg.ssm_group_count;
+                let per_group = inner_size / n_groups;
+                // ssm_norm.weight is row-major (per_group × n_groups).
+                for g in 0..n_groups {
+                    let group_start = g * per_group;
+                    let group_end = group_start + per_group;
+                    let group = &mut x_conv[group_start..group_end];
+                    let mean_sq = group.iter().map(|x| x * x).sum::<f32>() / per_group as f32;
+                    let rstd = 1.0 / (mean_sq + cfg.norm_eps).sqrt();
+                    for (j, v) in group.iter_mut().enumerate() {
+                        *v = *v * rstd * ssm_norm[g * per_group + j];
+                    }
+                }
+                // Output projection: y = ssm_out @ x_conv.
+                let blocks_out = (inner_size + 31) / 32;
+                quantize_q8_0_into(
+                    &x_conv,
+                    inner_size,
+                    &mut scratch.q8_buf[..inner_size],
+                    &mut scratch.scale_buf[..blocks_out],
+                );
+                ssm_out.kernel.forward_prepared(
+                    &x_conv,
+                    &scratch.q8_buf[..inner_size],
+                    &scratch.scale_buf[..blocks_out],
+                    None,
+                    &mut scratch.ffn_out,
+                    inner_size,
+                    n_embd,
+                    0,
+                    1,
+                );
+                for d in 0..n_embd {
+                    row[d] += scratch.ffn_out[d];
+                }
             }
             // FFN branch (plain 2-layer): only if FFN weights are present.
             // Some Nemotron-H layers appear to skip FFN. When ffn_norm is
@@ -463,8 +569,17 @@ pub fn run_inference(
         v: vec![0.0; scratch_capacity * n_attn_v],
         attn_out: vec![0.0; n_attn_v],
         ffn_out: vec![0.0; model.config.n_embd],
-        q8_buf: vec![0u8; model.config.n_embd.max(model.config.n_ff).max(n_attn_v).max(model.config.n_embd_head_v * model.config.n_head)],
-        scale_buf: vec![0.0; model.config.n_embd.max(model.config.n_ff).max(n_attn_v).max(model.config.n_embd_head_v * model.config.n_head).div_ceil(32)],
+        q8_buf: vec![0u8; model.config.n_embd
+            .max(model.config.n_ff)
+            .max(n_attn_v)
+            .max(model.config.n_embd_head_v * model.config.n_head)
+            .max(model.config.ssm_inner_size)],
+        scale_buf: vec![0.0; model.config.n_embd
+            .max(model.config.n_ff)
+            .max(n_attn_v)
+            .max(model.config.n_embd_head_v * model.config.n_head)
+            .max(model.config.ssm_inner_size)
+            .div_ceil(32)],
         scores: vec![0.0; scratch_capacity * scratch_capacity],
         logits: vec![0.0; model.config.vocab_size],
         ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
