@@ -1,6 +1,6 @@
-# NeoHorse-1-9B
+# NeoHorse-1-9B / 4B
 
-复用 `qwen35` 文本推理入口。原始目录是 BF16 safetensors；配置声明 MTP，但发布权重不含 MTP，需要跳过该组件。发布的 Tokenizer 使用 NFC，转换时保留为 `tokenizer.ggml.normalizer.nfc=true`。
+复用 `qwen35` 文本推理入口。9B 原始目录是 BF16 safetensors；配置声明 MTP，但发布权重不含 MTP，需要跳过该组件。发布的 Tokenizer 使用 NFC，转换时保留为 `tokenizer.ggml.normalizer.nfc=true`。
 
 ## 转换和运行
 
@@ -61,3 +61,38 @@ RMI_LLAMA_CPP=/path/to/llama.cpp \
 - 转换源契约检查、拒绝 1 ULP 差异的比较器检查、格式检查和 `git diff --check` 均通过。
 
 通用 Tokenizer 测试中的 `normal_control_looking_literal_has_no_chatml_semantic_name` 目前失败（`Some(1)` 与 `None`）；已用 HEAD 原版 Tokenizer 代码独立复现。本次未修改该特殊 token 名称行为。
+
+## NeoHorse-1-4B 官方 GGUF 对比
+
+2026-09-10 使用 [TokenRhythm/NeoHorse-1-4B-GGUF](https://huggingface.co/TokenRhythm/NeoHorse-1-4B-GGUF) 的本地文件核验。4B 仍为 `qwen35`、32 层（24 循环层、8 dense 层）、vocab 248320；hidden=2560、FFN=9216，输出层复用 embedding，共 426 个张量。文件不含 MTP 层或 NFC metadata；这里验证的是相同 GGUF 在两个运行时的行为，不代表已与原始 HF Tokenizer 的 NFC 行为对齐。
+
+双方使用固定的上述 llama.cpp commit、相同 GGUF 和 ChatML 输入 `你好`、单线程 ARM64 CPU、F32 KV、4 步 greedy。每种格式比较 85 条 trace 记录，共 3,928,576 个 F32 值，包含选定中间 checkpoint、每步完整 logits，以及 token IDs；均逐位一致。生成 token IDs 均为 `[109266, 6115, 98691, 111454]`。这是固定输入的正确性检查，不是模型质量或性能评测。
+
+| GGUF 格式 | Oracle 点积路径 | 结果 | SHA256 |
+| --- | --- | --- | --- |
+| BF16 | 默认 CPU（BF16 标量点积） | 逐位一致 | `b27b4cb2770673ab948a8db166f52f9c74da3df3c88d43f5aa564377f1b4ae50` |
+| F16 | 默认 CPU | 逐位一致 | `6882ed8cbb847bca71144b8527dfce3ee7ce91573e9f3f411d13df53b3d738c7` |
+| Q8_0 | 默认 CPU | 逐位一致 | `62c6b5d23e15e38f75e4d301ba3d9a16d48662bf48cebe8ec27a7c9c30b65dfb` |
+| Q4_K_M | Q4_K / Q5_K / Q6_K 标量参考点积 | 逐位一致 | `7da8ac6219b0aaa21b58cb26c1ec6826b478449215a3b0448742e1cda60fa2b4` |
+| Q5_K_M | Q4_K / Q5_K / Q6_K 标量参考点积 | 逐位一致 | `617f51ff6e639d0c5049cbacad3ca736523d50de8510b7afff7d5d0fa9e7fc02` |
+
+Q4_K_M / Q5_K_M 的 Rust ARM64 路径已有标量点积。普通 Oracle 启用 CPU 权重重排时，首个 `conv_output_raw-0` 的第二个值出现 `0x3c592303` / `0x3c592302` 差异。标量 Oracle 使用原有 `*_generic` 点积、关闭 `GGML_CPU_REPACK` 和 C 自动 FMA 融合后逐位一致；因此不声明与默认重排/SIMD 路径逐位一致。其余算子仍复用已有 CPU / NEON / approx 实现，并非整个模型强制全标量；本次没有新增近似算子。
+
+复现 BF16、F16 或 Q8_0（替换实际路径和文件后缀）：
+
+```sh
+RMI_NEOHORSE_MODEL=/path/to/NeoHorse-1-4B-GGUF/NeoHorse-1-4B-BF16.gguf \
+RMI_LLAMA_CPP=/path/to/llama.cpp \
+  cargo test --release --features parity-trace --test qwen35_reference neohorse_matches_pinned_llama_cpp_bitwise -- --ignored --nocapture
+```
+
+复现 Q4_K_M / Q5_K_M 时显式选择标量量化 Oracle：
+
+```sh
+RMI_NEOHORSE_MODEL=/path/to/NeoHorse-1-4B-GGUF/NeoHorse-1-4B-Q4_K_M.gguf \
+RMI_LLAMA_CPP=/path/to/llama.cpp \
+RMI_QWEN35_SCALAR_KQUANT=1 \
+  cargo test --release --features parity-trace --test qwen35_reference neohorse_matches_pinned_llama_cpp_bitwise -- --ignored --nocapture
+```
+
+两种 Oracle 都在临时副本中构建，保留原始 llama.cpp checkout。`RMI_QWEN35_ORACLE` 可复用已按对应模式构建的二进制；设置它时不会重新执行构建脚本。

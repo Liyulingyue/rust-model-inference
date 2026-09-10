@@ -424,7 +424,7 @@ fn neohorse_tokenizer_matches_published_tokenizer() {
 }
 
 #[test]
-#[ignore = "requires NeoHorse BF16 GGUF, pinned llama.cpp, and --features parity-trace"]
+#[ignore = "requires NeoHorse 4B/9B GGUF, pinned llama.cpp, and --features parity-trace"]
 fn neohorse_matches_pinned_llama_cpp_bitwise() {
     let model = required_path("RMI_NEOHORSE_MODEL");
     let llama = required_path("RMI_LLAMA_CPP");
@@ -432,7 +432,8 @@ fn neohorse_matches_pinned_llama_cpp_bitwise() {
     let source = rust_model_inference::GGUFLoader::from_file(&model).unwrap();
     let config = rust_model_inference::models::qwen35::Qwen35Config::from_source(&source).unwrap();
     assert_eq!((config.n_layer, config.n_nextn), (32, 0));
-    assert_eq!((config.n_embd, config.vocab_size), (4096, 248320));
+    assert!(matches!(config.n_embd, 2560 | 4096));
+    assert_eq!(config.vocab_size, 248320);
     assert_eq!((config.key_dim(), config.value_dim()), (2048, 4096));
     assert_eq!(config.is_recurrent.iter().filter(|&&r| !r).count(), 8);
     let artifacts = unique_temp_dir("rmi-neohorse-parity");
