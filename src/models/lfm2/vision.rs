@@ -581,15 +581,11 @@ impl<'a> VisionModel<'a> {
                 let patch_row = unsafe {
                     std::slice::from_raw_parts(patches_ptr.add(patch_idx * patch_dim), patch_dim)
                 };
-                let out_row = unsafe {
-                    std::slice::from_raw_parts_mut(inp_ptr.add(patch_idx * ne), ne)
-                };
+                let out_row =
+                    unsafe { std::slice::from_raw_parts_mut(inp_ptr.add(patch_idx * ne), ne) };
                 for oc in 0..ne {
                     let weight_row = unsafe {
-                        std::slice::from_raw_parts(
-                            patch_embd_ptr.add(oc * patch_dim),
-                            patch_dim,
-                        )
+                        std::slice::from_raw_parts(patch_embd_ptr.add(oc * patch_dim), patch_dim)
                     };
                     out_row[oc] = dot_f32_exact(patch_row, weight_row, patch_dim)
                         + unsafe { *patch_bias_ptr.add(oc) };
@@ -744,7 +740,10 @@ impl<'a> VisionModel<'a> {
                 merged_dim,
                 cfg.projection_dim,
             );
-            vec_add_into(&self.mm1_b, &mut mid[t * cfg.projection_dim..(t + 1) * cfg.projection_dim]);
+            vec_add_into(
+                &self.mm1_b,
+                &mut mid[t * cfg.projection_dim..(t + 1) * cfg.projection_dim],
+            );
         }
         gelu_inplace(&mut mid);
         let mut out = vec![0.0f32; n_tok * cfg.projection_dim];
@@ -755,7 +754,10 @@ impl<'a> VisionModel<'a> {
                 cfg.projection_dim,
                 cfg.projection_dim,
             );
-            vec_add_into(&self.mm2_b, &mut out[t * cfg.projection_dim..(t + 1) * cfg.projection_dim]);
+            vec_add_into(
+                &self.mm2_b,
+                &mut out[t * cfg.projection_dim..(t + 1) * cfg.projection_dim],
+            );
         }
         Ok(out)
     }

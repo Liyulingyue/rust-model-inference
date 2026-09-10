@@ -172,12 +172,7 @@ pub fn run_inference_stream(
     // expect a pre-quantized Q8_K activation passed via `forward_prepared`;
     // Q8_0 / F16 / BF16 / Q4_0 / Q4_1 ignore it.
     let output_pw = crate::ops::kernel::Weight::from_quantized(
-        crate::ops::kernel::QuantizedTensor::from_bytes(
-            output_weight,
-            output_type,
-            n_embd,
-            vocab,
-        ),
+        crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab),
     );
     let output_needs_q8k = matches!(
         output_type,
@@ -356,17 +351,7 @@ pub fn run_inference_stream(
             } else {
                 Some(q8k)
             };
-            kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                q8k_opt,
-                logits,
-                n_embd,
-                vocab,
-                ith,
-                nth,
-            );
+            kernel.forward_prepared(input, q8, sc, q8k_opt, logits, n_embd, vocab, ith, nth);
         });
 
         let eval_elapsed = eval_started.elapsed();
@@ -992,21 +977,10 @@ fn forward_attention(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
             let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if wo_needs_q8k {
-                Some(q8k)
-            } else {
-                None
-            };
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+                if wo_needs_q8k { Some(q8k) } else { None };
             lw.wo.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                q8k_opt,
-                attn_proj,
-                n_embd_q,
-                n_embd,
-                ith,
-                nth,
+                input, q8, sc, q8k_opt, attn_proj, n_embd_q, n_embd, ith, nth,
             );
         }
     });
@@ -1076,22 +1050,13 @@ fn forward_shortconv(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if in_proj_needs_q8k {
-                Some(q8k)
-            } else {
-                None
-            };
-            lw.shortconv_in.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                q8k_opt,
-                bcx,
-                n_embd,
-                three_n,
-                ith,
-                nth,
-            );
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+                if in_proj_needs_q8k { Some(q8k) } else { None };
+            lw.shortconv_in
+                .as_ref()
+                .unwrap()
+                .kernel
+                .forward_prepared(input, q8, sc, q8k_opt, bcx, n_embd, three_n, ith, nth);
         }
     });
 
@@ -1201,22 +1166,13 @@ fn forward_shortconv(
             let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
             let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if out_proj_needs_q8k {
-                Some(q8k)
-            } else {
-                None
-            };
-            lw.shortconv_out.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                q8k_opt,
-                o,
-                n_embd,
-                n_embd,
-                ith,
-                nth,
-            );
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+                if out_proj_needs_q8k { Some(q8k) } else { None };
+            lw.shortconv_out
+                .as_ref()
+                .unwrap()
+                .kernel
+                .forward_prepared(input, q8, sc, q8k_opt, o, n_embd, n_embd, ith, nth);
         }
     });
 

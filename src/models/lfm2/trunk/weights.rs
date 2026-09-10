@@ -77,10 +77,22 @@ impl<'a> Lfm2LayerWeights<'a> {
         weight_needs_q8k(self.w_gate.ggml_type)
             || weight_needs_q8k(self.w_up.ggml_type)
             || weight_needs_q8k(self.w_down.ggml_type)
-            || self.wq.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
-            || self.wk.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
-            || self.wv.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
-            || self.wo.as_ref().is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .wq
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .wk
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .wv
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
+            || self
+                .wo
+                .as_ref()
+                .is_some_and(|w| weight_needs_q8k(w.ggml_type))
             || self
                 .shortconv_in
                 .as_ref()
