@@ -691,6 +691,27 @@ fn session_step_enforces_capacity_across_calls() {
 
 #[cfg(feature = "vulkan")]
 #[test]
+#[ignore = "requires a Vulkan device"]
+fn cpu_scope_prevents_model_from_creating_a_second_vulkan_session() {
+    crate::ops::float::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let mut model = tiny_q8_session_model();
+    let pool = ComputePool::new(2);
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 3);
+    let mut cache = KvCache::new_f32(1, 3, 256);
+    scratch.x[..256].copy_from_slice(&model.embed_tokens(&[0]).unwrap());
+    let _scope = ComputePool::disable_gpu_matmul_for_scope();
+    model
+        .forward(1, &mut cache, &mut scratch, &pool, &[[0; 4]])
+        .unwrap();
+    assert!(
+        model.gpu.is_none(),
+        "CPU fallback must not create a model-level GPU session"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
 fn later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local() {
     let mut model = tiny_q8_session_model();
     let mut cpu_model = tiny_q8_session_model();

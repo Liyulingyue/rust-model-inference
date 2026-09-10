@@ -45,7 +45,9 @@ impl<'a> super::weights::Qwen35Model<'a> {
         // call is the prefill (n_tokens > 1), subsequent calls decode
         // (n_tokens == 1). We lazily build the session on the first decode.
         #[cfg(feature = "vulkan")]
-        if n_tokens == 1 && self.gpu.is_none() {
+        let gpu_allowed = n_tokens == 1 && !crate::core::thread_pool::gpu_matmul_disabled();
+        #[cfg(feature = "vulkan")]
+        if gpu_allowed && self.gpu.is_none() {
             if let Some(context) = crate::ops::get_vulkan_context() {
                 let cfg_probe = &self.config;
                 let n_layer = cfg_probe.n_layer_impl();
@@ -73,7 +75,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
 
         #[cfg(feature = "vulkan")]
-        if n_tokens == 1 {
+        if gpu_allowed {
             if let Some(gpu) = self.gpu.as_mut() {
                 let gpu_capacity = gpu.capacity;
                 let cache_position = mrope_positions[0][0];

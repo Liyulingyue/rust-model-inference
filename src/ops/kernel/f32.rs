@@ -23,6 +23,10 @@ impl Kernel for F32Kernel {
         Some(&self.weight)
     }
 
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(bytemuck::cast_slice(&self.weight))
+    }
+
     fn forward_prequantized(
         &self,
         _input_q8: &[u8],
