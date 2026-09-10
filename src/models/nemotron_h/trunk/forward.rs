@@ -100,6 +100,17 @@ pub struct NemotronScratch {
     pub ffn_out: Vec<f32>,
     pub q8_buf: Vec<u8>,
     pub scale_buf: Vec<f32>,
+    /// Per-layer SSM conv1d history buffer. Layout
+    /// `[layer * kernel * conv_cols + k * conv_cols + c]`
+    /// with `kernel = ssm_conv_kernel = 4` and
+    /// `conv_cols = d_inner + 2*n_group*d_state = 9728`. Holds the
+    /// most recent `kernel-1` input slices so the next token's
+    /// causal conv1d can include contributions from past tokens.
+    pub ssm_conv_hist: Vec<f32>,
+    /// Per-layer SSM scan state. Layout
+    /// `[layer * n_group * dt_rank + g * dt_rank + r]`.
+    /// Carried across tokens within one prefill, reset per prefill.
+    pub ssm_scan_state: Vec<f32>,
     pub scores: Vec<f32>,
     pub logits: Vec<f32>,
     pub ssm_state: Vec<f32>,
@@ -111,6 +122,11 @@ impl NemotronScratch {
         let n_attn_kv = config.n_head_kv * config.n_embd_head_k;
         let n_attn_v = config.n_head_kv * config.n_embd_head_v;
         let n_embd = config.n_embd;
+        // Per-layer SSM state. Sized so we can index by
+        // [layer * stride + offset]. conv_cols =
+        // d_inner + 2*n_group*d_state = 9728 for 4B Nano.
+        let conv_cols = config.ssm_inner_size
+            + 2 * config.ssm_group_count * config.ssm_state_size;
         Self {
             hidden: vec![0.0; capacity * n_embd],
             normed: vec![0.0; n_embd],
@@ -124,6 +140,21 @@ impl NemotronScratch {
             scores: vec![0.0; capacity * capacity],
             logits: vec![0.0; config.vocab_size],
             ssm_state: vec![0.0; config.ssm_state_size * config.ssm_inner_size],
+            ssm_conv_hist: vec![0.0;
+                config.n_layer * config.ssm_conv_kernel * conv_cols],
+            ssm_scan_state: vec![0.0;
+                config.n_layer * config.ssm_group_count * config.ssm_time_step_rank],
+        }
+    }
+
+    /// Reset per-prefill SSM state (conv1d history and scan state).
+    /// Called at the top of `prefill` so each sequence starts clean.
+    pub fn reset_ssm_state(&mut self) {
+        for v in &mut self.ssm_conv_hist {
+            *v = 0.0;
+        }
+        for v in &mut self.ssm_scan_state {
+            *v = 0.0;
         }
     }
 }
@@ -145,6 +176,11 @@ impl NemotronModel {
                 scratch.hidden.len() / self.config.n_embd
             ));
         }
+        // Reset per-prefill SSM state so each sequence starts from a
+        // clean conv1d history and zeroed scan state. Without this,
+        // leftover state from the previous prefill call would
+        // contaminate the next sequence.
+        scratch.reset_ssm_state();
         // 1) Embed input tokens.
         for (i, &tid) in token_ids.iter().enumerate() {
             let row_start = i * self.config.n_embd;
@@ -441,20 +477,37 @@ impl NemotronModel {
                 // Causal depthwise conv1d producing [x_conv, B, C] in the
                 // fused output. The conv1d weight has shape
                 // (kernel=4, channels=conv_out_cols); for each output
-                // channel c, output[c] = sum_k weight[k, c] * input[c]
-                // (history from previous tokens would be added in a
-                // proper implementation, but we're processing tokens
-                // one-by-one with no carry state, so the contribution
-                // from past tokens is dropped — this is the "single tap
-                // with zero history" first cut).
-                let conv_input: Vec<f32> = ssm_in_out[..conv_out_cols].to_vec();
+                // channel c:
+                //   conv_out[t, c] = sum_{k=0..K-1} weight[k, c] *
+                //                     history[k, c] + bias[c]
+                // where history[0] = current input, history[k] = input
+                // t-k. After the conv1d we shift the buffer so the
+                // current input becomes history[1] for the next token
+                // (and history[0] gets a fresh write).
+                let hist_base = layer_idx * conv_kernel * conv_out_cols;
+                let cur_input = &ssm_in_out[..conv_out_cols];
                 let mut conv_out = ssm_conv1d_b.to_vec();
                 for ki in 0..conv_kernel {
-                    let row_off = ki * conv_out_cols;
+                    let w_row = ki * conv_out_cols;
+                    let hist_row = hist_base + ki * conv_out_cols;
                     for c in 0..conv_out_cols {
-                        conv_out[c] += ssm_conv1d_w[row_off + c] * conv_input[c];
+                        conv_out[c] += ssm_conv1d_w[w_row + c]
+                            * scratch.ssm_conv_hist[hist_row + c];
                     }
                 }
+                // Shift history[1..K] <- history[0..K-1] so the
+                // current input becomes history[1] for the next
+                // token. We do the shift in-place: start from the
+                // oldest tap and move downward.
+                for k in (1..conv_kernel).rev() {
+                    let dst_off = hist_base + k * conv_out_cols;
+                    let src_off = hist_base + (k - 1) * conv_out_cols;
+                    scratch.ssm_conv_hist
+                        .copy_within(src_off..src_off + conv_out_cols, dst_off);
+                }
+                // Write current input into history[0].
+                let h0 = &mut scratch.ssm_conv_hist[hist_base..hist_base + conv_out_cols];
+                h0.copy_from_slice(cur_input);
                 // The conv_out now contains: x_conv, B, C. Apply SiLU
                 // gating with z (which came from ssm_in_out[d_inner..]).
                 let x_act: Vec<f32> = conv_out[..inner_size]
@@ -474,11 +527,24 @@ impl NemotronModel {
                 // x through a linear learned during training). Apply
                 // softplus(dt) per the canonical Mamba2 formula.
                 let channels_per_rank = per_group / dt_rank; // = 10
-                let mut state = vec![0.0f32; n_group * dt_rank];
+                // Load scan state from scratch (persists across tokens
+                // within a prefill, reset per prefill). We copy out so
+                // we can mutate freely, then write back at the end.
+                let state_base = layer_idx * n_group * dt_rank;
+                let state_end = state_base + n_group * dt_rank;
+                let mut state: Vec<f32> = scratch.ssm_scan_state[state_base..state_end].to_vec();
                 let mut y_buf = vec![0.0f32; inner_size];
                 for (g, _grp_ch) in (0..n_group).enumerate() {
                     for r in 0..dt_rank.min(d_state) {
-                        let decay = (-ssm_a_log[r]).exp();
+                        // Canonical Mamba2: A = -exp(A_log), then
+                        // decay = exp(A * dt). A is negative, dt is
+                        // positive (post-softplus), so decay in (0, 1].
+                        // The previous code used `(-ssm_a_log[r]).exp()`
+                        // which gave exp of a positive value because
+                        // A_log entries are deeply negative (e.g.
+                        // -345, -2800, -163) — exp(-(-345)) ≈ 10^150,
+                        // utterly dominating the scan state.
+                        let a = -ssm_a_log[r].exp();
                         let dt_base = ssm_in_out[dt_offset + r];
                         // Mamba2 canonical: dt = softplus(dt_base + dt_bias)
                         // ≈ log(1 + exp(dt_base + dt_bias)) when not using
@@ -499,6 +565,7 @@ impl NemotronModel {
                         let inner_start = g * per_group + r * channels_per_rank;
                         let inner_end = inner_start + channels_per_rank;
                         // First-order selective scan update.
+                        let decay = (a * dt).exp();
                         let mut new_state = decay * state[g * dt_rank + r] + dt * b_gr;
                         for j in inner_start..inner_end {
                             new_state += dt * b_gr * x_act[j];
@@ -510,6 +577,9 @@ impl NemotronModel {
                         }
                     }
                 }
+                // Persist scan state for the next token in the same
+                // prefill.
+                scratch.ssm_scan_state[state_base..state_end].copy_from_slice(&state);
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
                     let group_start = g * per_group;
@@ -648,6 +718,8 @@ pub fn run_inference(
     let n_attn_q = model.config.n_head * model.config.n_embd_head_k;
     let n_attn_v = model.config.n_head_kv.max(1) * model.config.n_embd_head_v;
     let scratch_capacity = (prompt_ids.len() + max_tokens).max(8);
+    let conv_cols = model.config.ssm_inner_size
+        + 2 * model.config.ssm_group_count * model.config.ssm_state_size;
     let mut scratch = NemotronScratch {
         hidden: vec![0.0; scratch_capacity * model.config.n_embd],
         normed: vec![0.0; model.config.n_embd],
@@ -670,6 +742,10 @@ pub fn run_inference(
         scores: vec![0.0; scratch_capacity * scratch_capacity],
         logits: vec![0.0; model.config.vocab_size],
         ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
+        ssm_conv_hist: vec![0.0;
+            model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
+        ssm_scan_state: vec![0.0;
+            model.config.n_layer * model.config.ssm_group_count * model.config.ssm_time_step_rank],
     };
 
     // Prefill each prompt token as a separate step (no KV cache yet).
