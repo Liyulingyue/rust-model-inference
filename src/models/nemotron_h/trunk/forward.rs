@@ -409,37 +409,58 @@ impl NemotronModel {
                 let dt_rank = cfg.ssm_time_step_rank;
                 let conv_kernel = cfg.ssm_conv_kernel;
                 let per_group = inner_size / n_group;
-                // 9728 = inner + 2 * n_group * d_state
+                // ssm_in output layout (matches llama.cpp nemotron-h.cpp):
+                //   d_in_proj = 2 * d_inner + 2 * n_group * d_state + dt_rank
+                // Split into [x_proj, z_proj, B, C, dt]:
+                //   [0  .. d_inner)            = x (will go through conv1d)
+                //   [d_inner .. 2*d_inner)      = z (the gate)
+                //   [2*d_inner .. 2*d_inner + 2*n_group*d_state) = [B, C]
+                //   [2*d_inner + 2*n_group*d_state .. end) = dt (per dt_rank)
+                let d_in_proj = 2 * inner_size
+                    + 2 * n_group * d_state
+                    + dt_rank;
+                let z_offset = inner_size;
+                let b_offset = 2 * inner_size;
+                let dt_offset = 2 * inner_size + 2 * n_group * d_state;
+                // 9728 = d_inner + 2 * n_group * d_state (the conv1d fused
+                // input is just [x, B, C]; z and dt are split out from
+                // ssm_in's larger output).
                 let conv_out_cols = inner_size + 2 * n_group * d_state;
-                let mut x_inner = vec![0.0f32; inner_size];
+                let mut ssm_in_out = vec![0.0f32; d_in_proj];
                 ssm_in.kernel.forward_prepared(
                     row,
                     q8,
                     sc,
                     None,
-                    &mut x_inner,
+                    &mut ssm_in_out,
                     n_embd,
-                    inner_size,
+                    d_in_proj,
                     0,
                     1,
                 );
-                // Causal conv1d producing [x_conv, B, C] in the fused
-                // output. Each time step we treat the conv as a single
-                // tap with zero history (first cut; sequential prefill
-                // would carry state across steps).
-                let mut conv_out = vec![0.0f32; conv_out_cols];
+                // Causal depthwise conv1d producing [x_conv, B, C] in the
+                // fused output. The conv1d weight has shape
+                // (kernel=4, channels=conv_out_cols); for each output
+                // channel c, output[c] = sum_k weight[k, c] * input[c]
+                // (history from previous tokens would be added in a
+                // proper implementation, but we're processing tokens
+                // one-by-one with no carry state, so the contribution
+                // from past tokens is dropped — this is the "single tap
+                // with zero history" first cut).
+                let conv_input: Vec<f32> = ssm_in_out[..conv_out_cols].to_vec();
+                let mut conv_out = ssm_conv1d_b.to_vec();
                 for ki in 0..conv_kernel {
                     let row_off = ki * conv_out_cols;
                     for c in 0..conv_out_cols {
-                        conv_out[c] += ssm_conv1d_w[row_off + c];
+                        conv_out[c] += ssm_conv1d_w[row_off + c] * conv_input[c];
                     }
                 }
-                for c in 0..conv_out_cols {
-                    conv_out[c] += ssm_conv1d_b[c];
-                }
+                // The conv_out now contains: x_conv, B, C. Apply SiLU
+                // gating with z (which came from ssm_in_out[d_inner..]).
                 let x_act: Vec<f32> = conv_out[..inner_size]
                     .iter()
-                    .map(|&v| crate::ops::silu(v))
+                    .zip(ssm_in_out[z_offset..z_offset + inner_size].iter())
+                    .map(|(&x, &z)| crate::ops::silu(x) * z)
                     .collect();
                 // B and C are the trailing 2 * n_group * d_state
                 // channels of the conv1d output, stored as (n_group *
@@ -449,13 +470,28 @@ impl NemotronModel {
                 let b: Vec<f32> = conv_out[inner_size..inner_size + n_group * d_state].to_vec();
                 let c: Vec<f32> = conv_out[inner_size + n_group * d_state..].to_vec();
                 // Per-(group, rank) decay: A = -exp(A_log), broadcast.
+                // dt comes from ssm_in_out[dt_offset..] (projection of
+                // x through a linear learned during training). Apply
+                // softplus(dt) per the canonical Mamba2 formula.
                 let channels_per_rank = per_group / dt_rank; // = 10
                 let mut state = vec![0.0f32; n_group * dt_rank];
                 let mut y_buf = vec![0.0f32; inner_size];
                 for (g, _grp_ch) in (0..n_group).enumerate() {
                     for r in 0..dt_rank.min(d_state) {
                         let decay = (-ssm_a_log[r]).exp();
-                        let dt = ssm_dt_bias[r];
+                        let dt_base = ssm_in_out[dt_offset + r];
+                        // Mamba2 canonical: dt = softplus(dt_base + dt_bias)
+                        // ≈ log(1 + exp(dt_base + dt_bias)) when not using
+                        // fast (mamba2.cu) approximation. We use a stable
+                        // log1p(exp(z)) form to avoid overflow.
+                        let z = dt_base + ssm_dt_bias[r];
+                        let dt = if z > 20.0 {
+                            z
+                        } else if z < -20.0 {
+                            z.exp()
+                        } else {
+                            z.exp().ln_1p()
+                        };
                         let d = ssm_d[r];
                         let b_gr = b[g * d_state + r];
                         let c_gr = c[g * d_state + r];

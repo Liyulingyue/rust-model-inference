@@ -200,10 +200,19 @@ pub fn load_layers(
             ssm_norm,
             ssm_out,
         ) = if this_has_ssm {
+            // ssm_in.shape is (n_embd, d_in_proj) where
+            // d_in_proj = 2*d_inner + 2*n_group*d_state + dt_rank
+            // (matches llama.cpp nemotron-h.cpp). Earlier read attempts
+            // swapped the args and treated ssm_in as (d_inner, n_embd),
+            // which corrupted the dispatch and produced degenerate output.
+            let d_in_proj =
+                2 * config.ssm_inner_size
+                    + 2 * config.ssm_state_size * config.ssm_group_count
+                    + config.ssm_time_step_rank;
             let ssm_in = static_q8_into_weight(
                 source,
                 &format!("{prefix}.ssm_in.weight"),
-                config.ssm_inner_size,
+                d_in_proj,
                 config.n_embd,
             );
             // Mamba2 SSM tensors in this checkpoint are F32 (not quantized).
