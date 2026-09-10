@@ -15,7 +15,7 @@ use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::{
     dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped,
     rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
-    vec_mad_f16_f32, vec_scale_f32,
+    vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt;
 
@@ -596,9 +596,7 @@ pub fn run_inference_tokens(
                         let out_base = h * n_embd_head_v;
                         let mut ms = 0.0f32;
                         let mut s_sum = 0.0f32;
-                        for d in 0..n_embd_head_v {
-                            attn_out[out_base + d] = 0.0;
-                        }
+                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
                         for t in 0..n_cached {
                             let score = dot_f16_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -711,25 +709,35 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "attn_proj", layer, attn_proj);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
-            for i in 0..n_embd {
-                let r = if residual_scale != 0.0 {
-                    attn_proj[i] * residual_scale
-                } else {
-                    attn_proj[i]
-                };
-                x[i] += r;
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, attn_proj, residual_scale);
+            } else {
+                vec_add_into(attn_proj, x);
             }
             dbg_tensor(step, "ffn_inp", layer, x);
             dbg_full(step, "ffn_inp", layer, x, n_embd);
 
             let t0 = Instant::now();
+            // Debug-only ffn_norm stats (printed when RUST_LLAMA_DEBUG_TENSORS
+            // is set). The static OnceLock guard lets the early return
+            // collapse away in production so we skip the AVX2 reduction
+            // entirely per layer × token.
             {
-                let sum_sq = sum_sq_f32(&x[..n_embd]);
-                let mean_sq = (sum_sq / n_embd as f64) as f32;
-                let scale = 1.0f32 / (mean_sq + eps).sqrt();
-                dbg_scalar(step, "ffn_norm_scale", layer, scale);
-                dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
-                dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+                static FFN_NORM_DBG_ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+                let limit = *FFN_NORM_DBG_ON.get_or_init(|| {
+                    std::env::var("RUST_LLAMA_DEBUG_TENSORS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                });
+                if limit != 0 && (layer as u32) < limit {
+                    let sum_sq = sum_sq_f32(&x[..n_embd]);
+                    let mean_sq = (sum_sq / n_embd as f64) as f32;
+                    let scale = 1.0f32 / (mean_sq + eps).sqrt();
+                    dbg_scalar(step, "ffn_norm_scale", layer, scale);
+                    dbg_scalar(step, "ffn_norm_mean", layer, mean_sq);
+                    dbg_scalar_full(step, "ffn_norm_sum_sq", layer, sum_sq);
+                }
             }
             rms_norm_grouped(x, &lw.ffn_norm, normed, norm_groups, eps);
             dbg_tensor(step, "ffn_norm", layer, normed);
@@ -891,13 +899,10 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "down_buf", layer, down_buf);
             dbg_full(step, "down_buf", layer, down_buf, n_embd);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-            for i in 0..n_embd {
-                let r = if residual_scale != 0.0 {
-                    down_buf[i] * residual_scale
-                } else {
-                    down_buf[i]
-                };
-                x[i] += r;
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, down_buf, residual_scale);
+            } else {
+                vec_add_into(down_buf, x);
             }
             dbg_tensor(step, "ffn_out", layer, x);
             dbg_tensor(step, "l_out", layer, x);
@@ -955,13 +960,12 @@ pub fn run_inference_tokens(
             });
             t_logits += t0.elapsed().as_secs_f64();
 
-            // Granite rescales logits by 1/logit_scale before softmax.
+            // Granite rescales logits by `logit_scale` before softmax (sharpens
+            // the distribution; values > 1). Granite-4.0 ships with
+            // logit_scale=8.0, so the multiplier is 8.0, not 1/8.0.
             if logit_scale != 0.0 {
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-                let inv = 1.0 / logit_scale;
-                for v in logits.iter_mut() {
-                    *v *= inv;
-                }
+                vec_scale_f32(logits, logit_scale);
             }
 
             // DEBUG: print LOGITS for step 0 (first 16 values).

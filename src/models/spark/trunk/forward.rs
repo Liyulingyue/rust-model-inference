@@ -20,15 +20,15 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
-use crate::ops::{dot_f32, gelu_inplace, rms_norm, rope_neox_partial, softmax_inplace};
+use crate::ops::{
+    dot_f32, f16_slice_to_f32, f32_slice_to_f16, gelu_inplace, rms_norm, rope_neox_partial,
+    sigmoid_inplace, softmax_approx_inplace, softmax_inplace, vec_add_into, vec_mad_f32,
+    vec_mul_inplace, vec_scale_f32,
+};
 
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
-
-pub(crate) fn sigmoid_f32(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
 
 /// Loaded Spark 2.5 model.
 pub struct SparkModel {
@@ -212,12 +212,8 @@ impl SparkSession {
                 };
                 let kv_stride = n_embd_kv;
                 let layer_off = il * (self.kv_state.capacity * kv_stride) + pos * kv_stride;
-                for (i, &v) in k_full.iter().enumerate() {
-                    cache.k[layer_off + i] = f16::from_f32(v).to_bits();
-                }
-                for (i, &v) in v_full.iter().enumerate() {
-                    cache.v[layer_off + i] = f16::from_f32(v).to_bits();
-                }
+                f32_slice_to_f16(k_full, &mut cache.k[layer_off..layer_off + kv_stride]);
+                f32_slice_to_f16(v_full, &mut cache.v[layer_off..layer_off + kv_stride]);
             }
 
             // Attention: q[h] @ k[0..pos+1] for each head, softmax, weighted v sum
@@ -233,12 +229,10 @@ impl SparkSession {
                     let q_h = &q[h * n_embd_head..(h + 1) * n_embd_head];
                     let kv_h = h / group_size;
                     let mut scores = vec![0.0f32; pos + 1];
+                    let mut k_row_f32 = vec![0.0f32; n_embd_head];
                     for t in 0..=pos {
                         let k_off = layer_off_base + t * n_embd_kv + kv_h * n_embd_head;
-                        let k_row_f32: Vec<f32> = cache.k[k_off..k_off + n_embd_head]
-                            .iter()
-                            .map(|&bits| f16::from_bits(bits).to_f32())
-                            .collect();
+                        f16_slice_to_f32(&cache.k[k_off..k_off + n_embd_head], &mut k_row_f32);
                         scores[t] = dot_f32(q_h, &k_row_f32, n_embd_head) * scale;
                     }
                     // Sliding-window mask (pre-softmax): -inf outside window so
@@ -250,18 +244,18 @@ impl SparkSession {
                         }
                     }
                     softmax_inplace(&mut scores);
+                    let mut v_row_f32 = vec![0.0f32; n_embd_head];
                     for t in 0..=pos {
                         if scores[t] == 0.0 {
                             continue;
                         }
                         let v_off = layer_off_base + t * n_embd_kv + kv_h * n_embd_head;
-                        let v_row_f32: Vec<f32> = cache.v[v_off..v_off + n_embd_head]
-                            .iter()
-                            .map(|&bits| f16::from_bits(bits).to_f32())
-                            .collect();
-                        for d in 0..n_embd_head {
-                            attn_out[h * n_embd_head + d] += scores[t] * v_row_f32[d];
-                        }
+                        f16_slice_to_f32(&cache.v[v_off..v_off + n_embd_head], &mut v_row_f32);
+                        vec_mad_f32(
+                            &mut attn_out[h * n_embd_head..(h + 1) * n_embd_head],
+                            &v_row_f32,
+                            scores[t],
+                        );
                     }
                 }
             }
@@ -276,11 +270,12 @@ impl SparkSession {
                 &mut gate_raw,
                 &self.pool,
             );
-            let gate: Vec<f32> = gate_raw.iter().map(|&g| sigmoid_f32(g)).collect();
+            sigmoid_inplace(&mut gate_raw);
             for h in 0..n_head {
-                for d in 0..n_embd_head {
-                    attn_out[h * n_embd_head + d] *= gate[h];
-                }
+                vec_scale_f32(
+                    &mut attn_out[h * n_embd_head..(h + 1) * n_embd_head],
+                    gate_raw[h],
+                );
             }
 
             // Output projection
@@ -295,9 +290,7 @@ impl SparkSession {
             );
 
             // Residual
-            for i in 0..n_embd {
-                hidden[i] += attn_proj[i];
-            }
+            vec_add_into(&attn_proj, &mut hidden);
 
             // FFN (GeGLU)
             let mut normed2 = vec![0.0f32; n_embd];
@@ -322,14 +315,11 @@ impl SparkSession {
                 &mut up_proj,
                 &self.pool,
             );
-            let mut ffn_hidden: Vec<f32> = gate_proj
-                .iter()
-                .zip(up_proj.iter())
-                .map(|(g, u)| g * u)
-                .collect();
+            // GeGLU: gate * up, gate is consumed in place.
+            vec_mul_inplace(&gate_proj, &mut up_proj);
             let mut ffn_out = vec![0.0f32; n_embd];
             lw.ffn_down.quantize_and_matmul_with_scratch(
-                &ffn_hidden,
+                &up_proj,
                 &mut self.q8k_buf,
                 &mut self.q8_buf,
                 &mut self.scale_buf,
@@ -338,9 +328,7 @@ impl SparkSession {
             );
 
             // Residual
-            for i in 0..n_embd {
-                hidden[i] += ffn_out[i];
-            }
+            vec_add_into(&ffn_out, &mut hidden);
         }
 
         // Final norm + logits (tied embeddings)
@@ -362,28 +350,12 @@ impl SparkSession {
 }
 
 fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
+    use crate::ops::argmax;
     if temperature == 0.0 {
-        let mut best_id = 0u32;
-        let mut best = f32::NEG_INFINITY;
-        for (i, &v) in logits.iter().enumerate() {
-            if v > best {
-                best = v;
-                best_id = i as u32;
-            }
-        }
-        Ok(best_id)
+        Ok(argmax(logits) as u32)
     } else {
-        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        let mut probs = vec![0.0f32; logits.len()];
-        for (i, &v) in logits.iter().enumerate() {
-            let p = ((v - max_logit) / temperature).exp();
-            probs[i] = p;
-            sum += p;
-        }
-        for p in probs.iter_mut() {
-            *p /= sum;
-        }
+        let mut probs = logits.to_vec();
+        softmax_approx_inplace(&mut probs);
         let target = rand::random::<f32>();
         let mut cum = 0.0f32;
         for (i, &p) in probs.iter().enumerate() {

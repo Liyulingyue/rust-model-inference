@@ -11,13 +11,13 @@
 
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
-use super::util::{l2_norm, sigmoid_f32, softplus_f32};
+use super::util::{l2_norm, softplus_f32};
 use super::weights::Qwen35LayerWeights;
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox_inplace, silu_approx_inplace, silu_mul_approx_inplace,
-    softmax_inplace,
+    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace,
+    silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -628,8 +628,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
             for h in 0..n_head {
                 let gate_off = t * q_dim + h * n_embd_head * 2 + n_embd_head;
                 let out_off = t * n_embd_heads_total + h * n_embd_head;
+                let gate = &mut scratch.q_buf[gate_off..gate_off + n_embd_head];
+                let attn_out = &mut scratch.attn_out_buf[out_off..out_off + n_embd_head];
+                sigmoid_inplace(gate);
                 for d in 0..n_embd_head {
-                    scratch.attn_out_buf[out_off + d] *= sigmoid_f32(scratch.q_buf[gate_off + d]);
+                    attn_out[d] *= gate[d];
                 }
             }
         }
@@ -728,10 +731,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let n_beta = num_v_heads;
             scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]
                 .copy_from_slice(&scratch.matmul_out[..n_beta]);
-            for v in 0..num_v_heads {
-                scratch.beta_buf[t * num_v_heads + v] =
-                    sigmoid_f32(scratch.beta_buf[t * num_v_heads + v]);
-            }
+            sigmoid_inplace(&mut scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]);
             ssm_alpha.quantize_and_matmul_with_scratch(
                 inp_slice,
                 &mut scratch.q8k_buf,

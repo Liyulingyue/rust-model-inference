@@ -18,6 +18,7 @@ pub use activation::*;
 pub use dot::*;
 pub use embedding::*;
 pub use float::*;
+pub use math::*;
 pub use matmul::*;
 pub use norm::*;
 pub use quant::q8_0::*;

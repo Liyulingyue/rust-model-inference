@@ -6,7 +6,7 @@
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | https://github.com/AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
 | Gemma-4                       | E2B        | 文本、图像、音频      | llama.cpp @ `3173a56`                 |              | 待核验 |
-| Granite                       |            | 文本                 |                                       |              | 待核验 |
+| Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B | 文本                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | 待核验 |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
 | K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
