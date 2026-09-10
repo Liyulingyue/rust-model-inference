@@ -299,6 +299,67 @@ pub fn f32_slice_to_f16(src: &[f32], dst: &mut [u16]) {
     }
 }
 
+/// Bulk decode of a little-endian F16 buffer into F32. The single-lane
+/// `f16::from_bits(...).to_f32()` per element is ~3-4 cycles; bulk dispatch
+/// uses the same F16C path as `f32_slice_to_f16` and is ~1 cycle/element.
+pub fn f16_slice_to_f32(src: &[u16], dst: &mut [f32]) {
+    debug_assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() {
+            unsafe {
+                f16_slice_to_f32_avx2(src, dst);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            unsafe {
+                f16_slice_to_f32_neon(src, dst);
+            }
+            return;
+        }
+    }
+    for i in 0..src.len() {
+        dst[i] = f16_to_f32(src[i]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "f16c")]
+unsafe fn f16_slice_to_f32_avx2(src: &[u16], dst: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let mut i = 0;
+    while i + 8 <= src.len() {
+        // Load 16 bytes (8 f16s) and F16C → 8 f32s.
+        let v = _mm256_cvtph_ps(_mm_loadu_si128(src.as_ptr().add(i) as *const __m128i));
+        _mm256_storeu_ps(dst.as_mut_ptr().add(i), v);
+        i += 8;
+    }
+    while i < src.len() {
+        dst[i] = f16_to_f32(src[i]);
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn f16_slice_to_f32_neon(src: &[u16], dst: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let mut i = 0;
+    while i + 4 <= src.len() {
+        let v = vld1q_f16(src.as_ptr().add(i) as *const f16);
+        vst1q_f32(dst.as_mut_ptr().add(i), vcvtq_f32_f16(v));
+        i += 4;
+    }
+    while i < src.len() {
+        dst[i] = f16_to_f32(src[i]);
+        i += 1;
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn f32_slice_to_f16_neon(src: &[f32], dst: &mut [u16]) {

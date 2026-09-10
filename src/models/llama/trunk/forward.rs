@@ -965,9 +965,7 @@ pub fn run_inference_tokens(
             // logit_scale=8.0, so the multiplier is 8.0, not 1/8.0.
             if logit_scale != 0.0 {
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-                for v in logits.iter_mut() {
-                    *v *= logit_scale;
-                }
+                vec_scale_f32(logits, logit_scale);
             }
 
             // DEBUG: print LOGITS for step 0 (first 16 values).
