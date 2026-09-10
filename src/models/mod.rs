@@ -7,5 +7,6 @@ pub mod lfm2moe;
 pub mod llama;
 pub mod qwen3;
 pub mod qwen35;
+pub mod qwen_drive;
 pub mod spark;
 pub mod vibevoice_asr;

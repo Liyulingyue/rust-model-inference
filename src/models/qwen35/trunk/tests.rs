@@ -654,6 +654,59 @@ fn session_new_sizes_state_to_requested_limit() {
 }
 
 #[test]
+fn dense_kv_snapshots_return_token_major_post_rotary_values() {
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 4, session_pool()).unwrap();
+    session
+        .step(&[0.0; 8], 2, &[[0; 4], [1; 4]])
+        .unwrap();
+    let KvCache::F32(cache) = session.kv_cache_mut() else {
+        panic!("Qwen3.5 KV cache should be F32");
+    };
+    cache.k[..8].copy_from_slice(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    cache.v.copy_from_slice(&[
+        100.0, 101.0, 0.0, 0.0, 110.0, 111.0, 0.0, 0.0, 120.0, 121.0, 0.0,
+        0.0, 130.0, 131.0, 0.0, 0.0,
+    ]);
+
+    let snapshots = session.dense_kv_snapshots(&[0], 2).unwrap();
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].shape(), [2, 1, 4]);
+    assert_eq!(snapshots[0].key, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(
+        snapshots[0].value,
+        [100.0, 110.0, 120.0, 130.0, 101.0, 111.0, 121.0, 131.0]
+    );
+}
+
+#[test]
+fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
+    let mut model = tiny_dense_session_model();
+    model.config.norm_eps = 0.0;
+    model.layers[0].wo = Some(f32_test_weight(vec![0.0; 16], 4, 4));
+    model.layers[0].ffn_down = f32_test_weight(vec![0.0; 16], 4, 4);
+    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
+    session
+        .step(&[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0], 2, &[[0; 4], [1; 4]])
+        .unwrap();
+
+    assert_eq!(
+        session.last_hidden(2).unwrap(),
+        &[1.2, 1.6, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0]
+    );
+}
+
+#[test]
+fn last_hidden_rejects_rows_not_produced_by_the_last_step() {
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
+    session.step(&[0.0; 4], 1, &[[0; 4]]).unwrap();
+
+    assert!(session.last_hidden(2).unwrap_err().contains("last step"));
+}
+
+#[test]
 fn session_step_rejects_empty_token_batches() {
     let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 1, session_pool()).unwrap();

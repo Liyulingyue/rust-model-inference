@@ -15,6 +15,6 @@ pub mod vision;
 
 pub use crate::models::qwen35::vision::VisionGrid;
 pub use trunk::{
-    build_qwen35_positions, Qwen35Config, Qwen35LayerWeights, Qwen35Model, Qwen35Scratchpad,
-    Qwen35Session,
+    build_qwen35_positions, Qwen35Config, Qwen35DenseKvSnapshot, Qwen35LayerWeights, Qwen35Model,
+    Qwen35Scratchpad, Qwen35Session,
 };
