@@ -246,6 +246,15 @@ impl NemotronModel {
         for t in 0..length {
             let off = t * n_embd;
             let row = &mut scratch.hidden[off..off + n_embd];
+            // DEBUG: print input residual norm.
+            if layer_idx % 10 == 0 && t == length.saturating_sub(1) {
+                let l2_in: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+                eprintln!(
+                    "[NEMOTRON-IN] layer {layer_idx:>2} | l2_in={:.3} max_in={:.3}",
+                    l2_in,
+                    row.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+                );
+            }
             // Pre-attention norm.
             rms_norm(row, &lw.attn_norm, &mut scratch.normed, cfg.norm_eps);
             // QKV projections (Q8 matmul, SIMD via existing Q8 path).
@@ -549,15 +558,6 @@ impl NemotronModel {
                 let mut y_buf = vec![0.0f32; inner_size];
                 for (g, _grp_ch) in (0..n_group).enumerate() {
                     for r in 0..dt_rank.min(d_state) {
-                        // Canonical Mamba2: A = -exp(A_log), then
-                        // decay = exp(A * dt). A is negative, dt is
-                        // positive (post-softplus), so decay in (0, 1].
-                        // The previous code used `(-ssm_a_log[r]).exp()`
-                        // which gave exp of a positive value because
-                        // A_log entries are deeply negative (e.g.
-                        // -345, -2800, -163) — exp(-(-345)) ≈ 10^150,
-                        // utterly dominating the scan state.
-                        let a = -ssm_a_log[r].exp();
                         let dt_base = ssm_in_out[dt_offset + r];
                         // Mamba2 canonical: dt = softplus(dt_base + dt_bias)
                         // ≈ log(1 + exp(dt_base + dt_bias)) when not using
@@ -571,6 +571,16 @@ impl NemotronModel {
                         } else {
                             z.exp().ln_1p()
                         };
+                        // Canonical Mamba2 (llama.cpp nemotron-h.cpp):
+                        //   decay = exp(dt_soft_plus * A_log[r])
+                        // A is stored AS A_log (raw negative value).
+                        // For A_log = -345 and dt = 33.5, this gives
+                        // decay ≈ exp(-11558) ≈ 0 (very fast decay).
+                        // The earlier code did `-exp(A_log[r]) * dt`
+                        // which yields ≈ exp(0) = 1 — wrong, the
+                        // residual then just keeps accumulating dt *
+                        // B * x with no decay.
+                        let decay = (ssm_a_log[r] * dt).exp();
                         let d = ssm_d[r];
                         let b_gr = b[g * d_state + r];
                         let c_gr = c[g * d_state + r];
@@ -578,7 +588,6 @@ impl NemotronModel {
                         let inner_start = g * per_group + r * channels_per_rank;
                         let inner_end = inner_start + channels_per_rank;
                         // First-order selective scan update.
-                        let decay = (a * dt).exp();
                         let mut new_state = decay * state[g * dt_rank + r] + dt * b_gr;
                         for j in inner_start..inner_end {
                             new_state += dt * b_gr * x_act[j];
@@ -593,6 +602,11 @@ impl NemotronModel {
                 // Persist scan state for the next token in the same
                 // prefill.
                 scratch.ssm_scan_state[state_base..state_end].copy_from_slice(&state);
+                // DEBUG: print y_buf L2 norm BEFORE norm
+                let y_buf_l2_pre: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if layer_idx == 0 && t == length.saturating_sub(1) {
+                    eprintln!("[NEMOTRON-YBUF] pre-norm l2={:.3}", y_buf_l2_pre);
+                }
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
                     let group_start = g * per_group;
@@ -603,6 +617,11 @@ impl NemotronModel {
                     for (j, v) in group.iter_mut().enumerate() {
                         *v = *v * rstd * ssm_norm[g * per_group + j];
                     }
+                }
+                // DEBUG: print y_buf L2 norm AFTER norm
+                let y_buf_l2_post: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if layer_idx == 0 && t == length.saturating_sub(1) {
+                    eprintln!("[NEMOTRON-YBUF] post-norm l2={:.3}", y_buf_l2_post);
                 }
                 // Output projection: y = ssm_out @ y_buf.
                 let blocks_out = (inner_size + 31) / 32;
@@ -685,6 +704,27 @@ impl NemotronModel {
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
+            }
+            // DEBUG: per-layer residual stream magnitude. Look for
+            // either exponential growth (numerical blow-up, e.g. wrong
+            // sign on Mamba2 decay) or saturation (logits collapsing
+            // to a single token).
+            if t == length.saturating_sub(1) {
+                eprintln!("[NEMOTRON-MARKER] FFN+SSM scaling is 0.1x");
+
+                let l2: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let min = row.iter().cloned().fold(f32::INFINITY, f32::min);
+                let has_attn = lw.wq.is_some();
+                let has_ssm = lw.ssm_in.is_some();
+                let has_ffn = lw.w_up.is_some();
+                eprintln!(
+                    "[NEMOTRON-DEBUG] layer {layer_idx:>2} | A={} S={} F={} | l2={:.3} min={:.3} max={:.3}",
+                    if has_attn { "Y" } else { "." },
+                    if has_ssm { "Y" } else { "." },
+                    if has_ffn { "Y" } else { "." },
+                    l2, min, max
+                );
             }
             let _ = layer_idx;
         }
