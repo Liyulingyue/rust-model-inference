@@ -16,7 +16,6 @@ use super::weights::{linear_forward, load_weight};
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
 
-pub(crate) mod exp;
 mod log;
 mod melbank;
 
@@ -2254,7 +2253,7 @@ fn cam_gate(layer: &DenseLayer, local: &[f32], context: &[f32], time: usize) -> 
     );
     let mut sigmoid = linear2.clone();
     for value in &mut sigmoid {
-        *value = exp::torch28_sigmoid(*value);
+        *value = crate::ops::math::torch28_sigmoid(*value);
     }
     let mut gated = local.to_vec();
     for channel in 0..32 {

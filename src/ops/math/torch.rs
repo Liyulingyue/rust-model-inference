@@ -1,3 +1,5 @@
+//! Bit-compatible scalar translations of Torch 2.8 ARM math kernels.
+
 // Scalar translation of pinned SLEEF 5a1d179d `xexpf`. Torch 2.8's ARM
 // sigmoid kernel evaluates four independent F32 lanes with this polynomial;
 // explicit `mul_add` calls preserve the AdvSIMD CONFIG=1 FMA association.
@@ -186,7 +188,7 @@ pub(crate) fn torch28_exp(value: f32) -> f32 {
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_sigmoid(value: f32) -> f32 {
+pub(crate) fn torch28_sigmoid(value: f32) -> f32 {
     1.0 / (1.0 + torch28_exp(-value))
 }
 

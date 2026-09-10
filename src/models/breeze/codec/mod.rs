@@ -4,8 +4,8 @@
 //! Buffers inside this module are time-major [frames, channels].
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
-use crate::models::dots::speaker::exp::{torch28_erf, torch28_exp, torch28_expm1};
 use crate::ops::dot_f32;
+use crate::ops::math::{torch28_erf, torch28_exp, torch28_expm1};
 use rayon::prelude::*;
 
 mod decoder;

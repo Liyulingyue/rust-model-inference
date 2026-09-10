@@ -11,9 +11,9 @@ pub(crate) use super::weights::linear_forward;
 use super::weights::load_weight;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::dots::config::DotsTtsConfig;
-use crate::models::dots::speaker::exp::torch28_exp;
 use crate::ops::dot_f32;
 use crate::ops::kernel::Weight;
+use crate::ops::math::torch28_exp;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 use crate::ops::silu;
 

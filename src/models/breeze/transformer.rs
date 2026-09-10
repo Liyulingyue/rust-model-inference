@@ -435,7 +435,7 @@ impl<'a> Transformer<'a> {
 fn gelu_tanh(x: f32) -> f32 {
     let cube = (x * x) * x;
     let inner = 0.797_884_560_802_865_4_f32 * (x + 0.044715_f32 * cube);
-    (0.5 * x) * (1.0 + crate::models::dots::speaker::exp::torch28_tanh(inner))
+    (0.5 * x) * (1.0 + crate::ops::math::torch28_tanh(inner))
 }
 
 fn residual(x: &mut [f32], add: &[f32]) {
@@ -564,7 +564,7 @@ pub(super) fn softmax(scores: &mut [f32]) {
     // Torch's F32 CPU softmax reduces four SIMD lanes, then multiplies by the reciprocal.
     let mut sums = [0.0f32; 4];
     for (index, p) in scores.iter_mut().enumerate() {
-        *p = crate::models::dots::speaker::exp::torch28_exp(*p - max);
+        *p = crate::ops::math::torch28_exp(*p - max);
         sums[index % 4] += *p;
     }
     let total = if scores.len() < 4 {
