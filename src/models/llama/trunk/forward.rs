@@ -955,12 +955,13 @@ pub fn run_inference_tokens(
             });
             t_logits += t0.elapsed().as_secs_f64();
 
-            // Granite rescales logits by 1/logit_scale before softmax.
+            // Granite rescales logits by `logit_scale` before softmax (sharpens
+            // the distribution; values > 1). Granite-4.0 ships with
+            // logit_scale=8.0, so the multiplier is 8.0, not 1/8.0.
             if logit_scale != 0.0 {
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
-                let inv = 1.0 / logit_scale;
                 for v in logits.iter_mut() {
-                    *v *= inv;
+                    *v *= logit_scale;
                 }
             }
 
