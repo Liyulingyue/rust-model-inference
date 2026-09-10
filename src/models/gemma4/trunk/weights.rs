@@ -44,17 +44,20 @@ pub(super) struct Gemma4Layer {
 impl Gemma4Model {
     pub fn from_source(source: Arc<dyn TensorSource>, threads: usize) -> Result<Self, String> {
         let config = Gemma4Config::from_source(source.as_ref())?;
-        let token_embedding = load_weight(
+        let token_embedding = load_weight_any(
             source.as_ref(),
             "token_embd.weight",
             &[EMBED as u64, VOCAB as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0, GGMLType::Q4K],
         )?;
-        let per_layer_token_embedding = load_weight(
+        // `per_layer_token_embd.weight` is consumed via
+        // `Weight::embedding_lookup`, so any row-quantized type works. Pick the
+        // file's actual ggml_type (Q8_0 for 8-bit exports, Q5_K for Q4_K_M).
+        let per_layer_token_embedding = load_weight_any(
             source.as_ref(),
             "per_layer_token_embd.weight",
             &[PER_LAYER_ALL as u64, VOCAB as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0, GGMLType::Q5K],
         )?;
         let per_layer_model_proj = load_weight(
             source.as_ref(),
@@ -129,6 +132,7 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<Gemma4Layer, St
     } else {
         MAX_FFN
     };
+    let k_quant = [GGMLType::Q8_0, GGMLType::Q4K, GGMLType::Q6K];
     Ok(Gemma4Layer {
         head_dim: dim,
         attn_norm: load_f32(
@@ -136,29 +140,29 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<Gemma4Layer, St
             &format!("{prefix}.attn_norm.weight"),
             &[EMBED as u64],
         )?,
-        attn_q: load_weight(
+        attn_q: load_weight_any(
             source,
             &format!("{prefix}.attn_q.weight"),
             &[EMBED as u64, (HEADS * dim) as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
-        attn_k: load_weight(
+        attn_k: load_weight_any(
             source,
             &format!("{prefix}.attn_k.weight"),
             &[EMBED as u64, dim as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
-        attn_v: load_weight(
+        attn_v: load_weight_any(
             source,
             &format!("{prefix}.attn_v.weight"),
             &[EMBED as u64, dim as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
-        attn_output: load_weight(
+        attn_output: load_weight_any(
             source,
             &format!("{prefix}.attn_output.weight"),
             &[(HEADS * dim) as u64, EMBED as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
         attn_q_norm: load_f32(
             source,
@@ -180,23 +184,23 @@ fn load_layer(source: &dyn TensorSource, layer: usize) -> Result<Gemma4Layer, St
             &format!("{prefix}.ffn_norm.weight"),
             &[EMBED as u64],
         )?,
-        ffn_gate: load_weight(
+        ffn_gate: load_weight_any(
             source,
             &format!("{prefix}.ffn_gate.weight"),
             &[EMBED as u64, ffn as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
-        ffn_up: load_weight(
+        ffn_up: load_weight_any(
             source,
             &format!("{prefix}.ffn_up.weight"),
             &[EMBED as u64, ffn as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
-        ffn_down: load_weight(
+        ffn_down: load_weight_any(
             source,
             &format!("{prefix}.ffn_down.weight"),
             &[ffn as u64, EMBED as u64],
-            GGMLType::Q8_0,
+            &k_quant,
         )?,
         post_ffw_norm: load_f32(
             source,
@@ -260,6 +264,50 @@ pub(super) fn load_weight(
     let mut weight =
         Weight::from_quantized(QuantizedTensor::from_bytes(bytes, ggml_type, n_in, n_out));
     // QuantizedTensor's owned F32 variant carries values but not matrix shape.
+    weight.n_in = n_in;
+    weight.n_out = n_out;
+    Ok(weight)
+}
+
+/// Variant of `load_weight` that accepts any of several `ggml_type`s. The
+/// actual file type is propagated into `Weight::ggml_type` so downstream code
+/// (e.g. `Weight::embedding_lookup`) can dispatch correctly.
+pub(super) fn load_weight_any(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[u64],
+    allowed_types: &[GGMLType],
+) -> Result<Weight<'static>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims || !allowed_types.contains(&info.ggml_type) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} one of {allowed_types:?}",
+            info.dims, info.ggml_type, dims
+        ));
+    }
+    let expected = info
+        .checked_nbytes()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    let n_in = usize::try_from(dims[0]).map_err(|_| format!("{name} input width overflow"))?;
+    let n_out = usize::try_from(dims[1]).map_err(|_| format!("{name} output width overflow"))?;
+    let ggml_type = info.ggml_type;
+    // SAFETY: Gemma4Model retains the immutable TensorSource Arc for at least as
+    // long as these weights, matching the repository's existing model loaders.
+    let bytes = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
+    let mut weight =
+        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, ggml_type, n_in, n_out));
     weight.n_in = n_in;
     weight.n_out = n_out;
     Ok(weight)

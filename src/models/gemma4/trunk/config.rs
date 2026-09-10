@@ -1,6 +1,6 @@
 use super::super::contract::{
     require_array, require_f32, require_gemma4_token_table, require_string, require_tensor,
-    require_u32,
+    require_tensor_any, require_u32,
 };
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
@@ -84,45 +84,87 @@ impl Gemma4Config {
                 GGMLType::BF16,
             ),
             ("per_layer_proj_norm.weight", &[256][..], GGMLType::F32),
-            (
-                "per_layer_token_embd.weight",
-                &[8960, 262_144][..],
-                GGMLType::Q8_0,
-            ),
             ("rope_freqs.weight", &[256][..], GGMLType::F32),
-            ("token_embd.weight", &[1536, 262_144][..], GGMLType::Q8_0),
         ] {
             require_tensor(source, name, dims, ty)?;
         }
+        // Mixed-quants like Q4_K_M use K-quants here (per_layer_token_embd is
+        // typically Q5_K, token_embd is typically Q4_K). All three variants
+        // have a working `embedding_lookup`, so accept either.
+        require_tensor_any(
+            source,
+            "per_layer_token_embd.weight",
+            &[8960, 262_144][..],
+            &[GGMLType::Q8_0, GGMLType::Q5K],
+        )?;
+        // token_embd may also be Q4_K in mixed-quants.
+        require_tensor_any(
+            source,
+            "token_embd.weight",
+            &[1536, 262_144][..],
+            &[GGMLType::Q8_0, GGMLType::Q4K],
+        )?;
         for layer in 0..35 {
             let head_dim = if layer % 5 == 4 { 512 } else { 256 };
             let ffn = if layer < 15 { 6144 } else { 12_288 };
             let prefix = format!("blk.{layer}");
-            for (name, dims, ty) in [
-                ("attn_k.weight", vec![1536, head_dim], GGMLType::Q8_0),
-                ("attn_k_norm.weight", vec![head_dim], GGMLType::F32),
-                ("attn_norm.weight", vec![1536], GGMLType::F32),
-                (
-                    "attn_output.weight",
-                    vec![head_dim * 8, 1536],
-                    GGMLType::Q8_0,
-                ),
-                ("attn_q.weight", vec![1536, head_dim * 8], GGMLType::Q8_0),
-                ("attn_q_norm.weight", vec![head_dim], GGMLType::F32),
-                ("attn_v.weight", vec![1536, head_dim], GGMLType::Q8_0),
-                ("ffn_down.weight", vec![ffn, 1536], GGMLType::Q8_0),
-                ("ffn_gate.weight", vec![1536, ffn], GGMLType::Q8_0),
-                ("ffn_norm.weight", vec![1536], GGMLType::F32),
-                ("ffn_up.weight", vec![1536, ffn], GGMLType::Q8_0),
-                ("inp_gate.weight", vec![1536, 256], GGMLType::F32),
-                ("layer_output_scale.weight", vec![1], GGMLType::F32),
-                ("post_attention_norm.weight", vec![1536], GGMLType::F32),
-                ("post_ffw_norm.weight", vec![1536], GGMLType::F32),
-                ("post_norm.weight", vec![1536], GGMLType::F32),
-                ("proj.weight", vec![256, 1536], GGMLType::F32),
-            ] {
-                require_tensor(source, &format!("{prefix}.{name}"), &dims, ty)?;
-            }
+            // Mixed-quants split: matmul weights appear as Q4_K (gate/up/q/k
+            // and most output) or Q6_K (v, down) per-layer; Q8_0 is the
+            // baseline for 8-bit exports. K-quants are supported by all
+            // downstream matmul kernels.
+            let k_quant = [GGMLType::Q8_0, GGMLType::Q4K, GGMLType::Q6K];
+            require_tensor_any(
+                source,
+                &format!("{prefix}.attn_k.weight"),
+                &[1536, head_dim as u64],
+                &k_quant,
+            )?;
+            require_tensor(source, &format!("{prefix}.attn_k_norm.weight"), &[head_dim as u64], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.attn_norm.weight"), &[1536], GGMLType::F32)?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.attn_output.weight"),
+                &[(head_dim * 8) as u64, 1536],
+                &k_quant,
+            )?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.attn_q.weight"),
+                &[1536, (head_dim * 8) as u64],
+                &k_quant,
+            )?;
+            require_tensor(source, &format!("{prefix}.attn_q_norm.weight"), &[head_dim as u64], GGMLType::F32)?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.attn_v.weight"),
+                &[1536, head_dim as u64],
+                &k_quant,
+            )?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.ffn_down.weight"),
+                &[ffn as u64, 1536],
+                &k_quant,
+            )?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.ffn_gate.weight"),
+                &[1536, ffn as u64],
+                &k_quant,
+            )?;
+            require_tensor(source, &format!("{prefix}.ffn_norm.weight"), &[1536], GGMLType::F32)?;
+            require_tensor_any(
+                source,
+                &format!("{prefix}.ffn_up.weight"),
+                &[1536, ffn as u64],
+                &k_quant,
+            )?;
+            require_tensor(source, &format!("{prefix}.inp_gate.weight"), &[1536, 256], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.layer_output_scale.weight"), &[1], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.post_attention_norm.weight"), &[1536], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.post_ffw_norm.weight"), &[1536], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.post_norm.weight"), &[1536], GGMLType::F32)?;
+            require_tensor(source, &format!("{prefix}.proj.weight"), &[256, 1536], GGMLType::F32)?;
         }
 
         Ok(Self {
