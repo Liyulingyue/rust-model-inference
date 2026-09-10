@@ -25,6 +25,19 @@ pub struct NemotronConfig {
 }
 
 impl NemotronConfig {
+    /// Number of SSM heads. The 4B Nano GGUF stores
+    /// `ssm_dt.bias.shape == (dt_rank,)`, and canonical Mamba2 uses
+    /// one dt per head. So n_ssm_head == ssm_time_step_rank.
+    pub fn ssm_n_head(&self) -> usize {
+        self.ssm_time_step_rank
+    }
+    /// Per-head channel count: d_inner / n_head.
+    pub fn ssm_headdim(&self) -> usize {
+        self.ssm_inner_size / self.ssm_n_head()
+    }
+}
+
+impl NemotronConfig {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         let architecture = source
             .metadata("general.architecture")

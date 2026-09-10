@@ -142,8 +142,14 @@ impl NemotronScratch {
             ssm_state: vec![0.0; config.ssm_state_size * config.ssm_inner_size],
             ssm_conv_hist: vec![0.0;
                 config.n_layer * config.ssm_conv_kernel * conv_cols],
+            // Per-layer scan state shape: (n_head, headdim, d_state).
+            // Total per layer = n_head * headdim * d_state
+            //                  = dt_rank * (d_inner / dt_rank) * d_state
+            //                  = d_inner * d_state.
+            // For 4B Nano: 7680 * 128 = 983040 floats/layer = 3.75 MB,
+            // 42 layers = 158 MB total. Reasonable.
             ssm_scan_state: vec![0.0;
-                config.n_layer * config.ssm_group_count * config.ssm_time_step_rank],
+                config.n_layer * config.ssm_inner_size * config.ssm_state_size],
         }
     }
 
@@ -544,59 +550,112 @@ impl NemotronModel {
                 // 7680 / (8 * 96) = 10).
                 let b: Vec<f32> = conv_out[inner_size..inner_size + n_group * d_state].to_vec();
                 let c: Vec<f32> = conv_out[inner_size + n_group * d_state..].to_vec();
-                // Per-(group, rank) decay: A = -exp(A_log), broadcast.
-                // dt comes from ssm_in_out[dt_offset..] (projection of
-                // x through a linear learned during training). Apply
-                // softplus(dt) per the canonical Mamba2 formula.
-                let channels_per_rank = per_group / dt_rank; // = 10
-                // Load scan state from scratch (persists across tokens
-                // within a prefill, reset per prefill). We copy out so
-                // we can mutate freely, then write back at the end.
-                let state_base = layer_idx * n_group * dt_rank;
-                let state_end = state_base + n_group * dt_rank;
+                // Canonical Mamba2 scan (matches llama.cpp's
+                // ggml_compute_forward_ssm_scan_f32 in ggml-cpu/ops.cpp):
+                //
+                //   n_head = ssm_dt_rank        (= 96)
+                //   headdim = d_inner / n_head  (= 80)
+                //   d_state = nc                (= 128)
+                //   n_group = ng                (= 8)
+                //   heads_per_group = n_head / n_group (= 12)
+                //
+                // State shape per layer: (n_head, headdim, d_state).
+                // For each (head, channel-in-head, state-element):
+                //   g = head / heads_per_group         # B[g], C[g] are shared
+                //   x_dt = x[head, k] * dt[head]
+                //   state[h, k, n] = state[h, k, n] * exp(dt * A_log[h])
+                //                   + B[g, n] * x_dt
+                // Output for each (head, channel-in-head):
+                //   y[head, k] = sum_n state[h, k, n] * C[g, n] + D * x_orig[head, k]
+                //
+                // Key differences from the previous (incorrect)
+                // implementation:
+                //   * state is per (head, channel-in-head, state-element),
+                //     not a scalar per (group, rank).
+                //   * y[head, k] is a single scalar (the dot product of
+                //     state and C), not a scalar multiplied across 10
+                //     inner channels.
+                //   * B, C are vector-valued per group (size d_state),
+                //     shared across heads within the group.
+                //   * dt is per-head (size n_head, from
+                //     ssm_in_out[dt_offset..dt_offset+n_head]), not
+                //     per-time_step_rank.
+                let n_head = cfg.ssm_n_head();
+                let headdim = cfg.ssm_headdim();
+                let heads_per_group = n_head / n_group;
+                let state_stride_layer = n_head * headdim * d_state;
+                let state_base = layer_idx * state_stride_layer;
+                let state_end = state_base + state_stride_layer;
                 let mut state: Vec<f32> = scratch.ssm_scan_state[state_base..state_end].to_vec();
                 let mut y_buf = vec![0.0f32; inner_size];
-                for (g, _grp_ch) in (0..n_group).enumerate() {
-                    for r in 0..dt_rank.min(d_state) {
-                        let dt_base = ssm_in_out[dt_offset + r];
-                        // Mamba2 canonical: dt = softplus(dt_base + dt_bias)
-                        // ≈ log(1 + exp(dt_base + dt_bias)) when not using
-                        // fast (mamba2.cu) approximation. We use a stable
-                        // log1p(exp(z)) form to avoid overflow.
-                        let z = dt_base + ssm_dt_bias[r];
-                        let dt = if z > 20.0 {
-                            z
-                        } else if z < -20.0 {
-                            z.exp()
-                        } else {
-                            z.exp().ln_1p()
-                        };
-                        // Canonical Mamba2 (llama.cpp nemotron-h.cpp):
-                        //   decay = exp(dt_soft_plus * A_log[r])
-                        // A is stored AS A_log (raw negative value).
-                        // For A_log = -345 and dt = 33.5, this gives
-                        // decay ≈ exp(-11558) ≈ 0 (very fast decay).
-                        // The earlier code did `-exp(A_log[r]) * dt`
-                        // which yields ≈ exp(0) = 1 — wrong, the
-                        // residual then just keeps accumulating dt *
-                        // B * x with no decay.
-                        let decay = (ssm_a_log[r] * dt).exp();
-                        let d = ssm_d[r];
-                        let b_gr = b[g * d_state + r];
-                        let c_gr = c[g * d_state + r];
-                        // Inner-channel range for this (g, r).
-                        let inner_start = g * per_group + r * channels_per_rank;
-                        let inner_end = inner_start + channels_per_rank;
-                        // First-order selective scan update.
-                        let mut new_state = decay * state[g * dt_rank + r] + dt * b_gr;
-                        for j in inner_start..inner_end {
-                            new_state += dt * b_gr * x_act[j];
+                // Snapshot dt per head, then apply softplus. dt_base is
+                // a per-head projection of x (size n_head).
+                let mut dt_per_head = [0.0f32; 96];
+                for h in 0..n_head {
+                    // The GGUF stores ssm_dt.bias as (dt_rank,) but
+                    // n_head = dt_rank for this model, so it pairs 1:1
+                    // with heads in head order.
+                    let dt_bias_h = if h < dt_rank {
+                        ssm_dt_bias[h]
+                    } else {
+                        0.0
+                    };
+                    let dt_base = ssm_in_out[dt_offset + h];
+                    let z = dt_base + dt_bias_h;
+                    dt_per_head[h] = if z > 20.0 {
+                        z
+                    } else if z < -20.0 {
+                        z.exp()
+                    } else {
+                        z.exp().ln_1p()
+                    };
+                }
+                // Per-head dA factor (decay): exp(dt_soft_plus * A_log[h]).
+                // A_log stored raw (negative). llama.cpp matches this.
+                let mut dA_per_head = [0.0f32; 96];
+                for h in 0..n_head {
+                    dA_per_head[h] = (dt_per_head[h] * ssm_a_log[h]).exp();
+                }
+                // Scan loop. The canonical layout (see llama.cpp
+                // ggml_compute_forward_ssm_scan_f32):
+                //   * state[(h * headdim + k) * d_state + n] for the
+                //     d_state-dim state vector at (h, k).
+                //   * B[g, n] = b[g * d_state + n]
+                //   * C[g, n] = c[g * d_state + n]
+                //   * x_dt = x[h * headdim + k] * dt_per_head[h]
+                for h in 0..n_head {
+                    let g = h / heads_per_group;
+                    let g_b_off = g * d_state;
+                    let g_c_off = g * d_state;
+                    let head_x_off = h * headdim;
+                    let head_state_off = h * headdim * d_state;
+                    let dA = dA_per_head[h];
+                    let dt_h = dt_per_head[h];
+                    let d_h = ssm_d[h];
+                    for k in 0..headdim {
+                        let x_dt = x_act[head_x_off + k] * dt_h;
+                        let state_row_off = head_state_off + k * d_state;
+                        let mut sumf = 0.0f32;
+                        for n in 0..d_state {
+                            let state_idx = state_row_off + n;
+                            let b_gn = b[g_b_off + n];
+                            let c_gn = c[g_c_off + n];
+                            let new_state = state[state_idx] * dA + b_gn * x_dt;
+                            state[state_idx] = new_state;
+                            sumf += new_state * c_gn;
                         }
-                        state[g * dt_rank + r] = new_state;
-                        // Output: scan contribution + D-skip.
-                        for j in inner_start..inner_end {
-                            y_buf[j] += c_gr * new_state + d * x_act[j];
-                        }
+                        // Output: y[h*headdim + k] = sum_n(state * C) + D * x_orig.
+                        // x_orig is the un-gated input (pre-SiLU, pre-z);
+                        // for the D-skip term we follow the canonical
+                        // convention and use x[h*headdim + k] from the
+                        // conv1d output (silu(conv_x) * z already
+                        // captured in x_act). Note that llama.cpp
+                        // applies D on the *conv output*, not on
+                        // x_act — but our ssm_in_out[..d_inner] is
+                        // post-SiLU*z (since we already built x_act).
+                        // The D-skip is conventionally `D * silu(x) * z`,
+                        // which is `D * x_act`. Use x_act.
+                        y_buf[head_x_off + k] = sumf + d_h * x_act[head_x_off + k];
                     }
                 }
                 // Persist scan state for the next token in the same
@@ -800,7 +859,7 @@ pub fn run_inference(
         ssm_conv_hist: vec![0.0;
             model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
         ssm_scan_state: vec![0.0;
-            model.config.n_layer * model.config.ssm_group_count * model.config.ssm_time_step_rank],
+            model.config.n_layer * model.config.ssm_inner_size * model.config.ssm_state_size],
     };
 
     // Prefill each prompt token as a separate step (no KV cache yet).
