@@ -47,8 +47,8 @@ use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Kernel;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
-    rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace, vec_add_into,
-    vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
+    rms_norm_inplace, rope_neox_inplace, sample_top_k, sigmoid_inplace, silu_mul_inplace,
+    softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 
@@ -739,7 +739,11 @@ fn forward_moe_ffn(
             exps
         }
         // sigmoid (LFM2-8B-A1B ships expert_gating_func = 2)
-        2 => logits.iter().map(|&l| sigmoid(l)).collect(),
+        2 => {
+            let mut probs = logits.to_vec();
+            sigmoid_inplace(&mut probs);
+            probs
+        }
         other => panic!("unsupported expert_gating_func {other}"),
     };
 
