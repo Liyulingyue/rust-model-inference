@@ -5,8 +5,9 @@ use crate::ops::quant::{BlockQ8K, QK_K};
 use crate::ops::{dot_f32, sum_f32, sum_sq_centered_f32, vec_add_into};
 
 pub use crate::ops::{
-    gelu_approx_inplace, gelu_inplace, rms_norm, rms_norm_inplace, rope_neox_inplace, rope_neox_partial,
-    silu_approx_inplace, silu_inplace, silu_mul_approx_inplace, silu_mul_inplace,
+    gelu_approx_inplace, gelu_inplace, rms_norm, rms_norm_inplace, rope_neox_inplace,
+    rope_neox_partial, silu_approx_inplace, silu_inplace, silu_mul_approx_inplace,
+    silu_mul_inplace,
 };
 
 pub fn checked_len(name: &str, dimensions: &[usize]) -> Result<usize, String> {

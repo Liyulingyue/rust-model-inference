@@ -34,6 +34,90 @@ fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
     s
 }
 
+/// Same throughput as `dot_f32_avx2` but with **separate `mul` + `add`** instead of
+/// FMA. Useful where the caller needs numerical behavior closer to the scalar
+/// `sum += a[i] * b[i]` (e.g. vision encoders whose accumulated output feeds a
+/// downstream LLM — FMA rounding drift can cascade through 20+ layers and
+/// change token distributions enough to trigger spurious EOS).
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f32_avx2_non_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let prod = _mm256_mul_ps(va, vb);
+        acc = _mm256_add_ps(acc, prod);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    while i < n {
+        sum += a[i] * b[i];
+        i += 1;
+    }
+    sum
+}
+
+/// Same throughput as `dot_f32_neon` but with **separate `vmulq` + `vaddq`**
+/// instead of FMA. Matches `dot_f32_avx2_non_fma` in spirit.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_neon_non_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut i = 0;
+    while i + 16 <= n {
+        let prod0 = vmulq_f32(vld1q_f32(a.as_ptr().add(i)), vld1q_f32(b.as_ptr().add(i)));
+        let prod1 = vmulq_f32(
+            vld1q_f32(a.as_ptr().add(i + 4)),
+            vld1q_f32(b.as_ptr().add(i + 4)),
+        );
+        let prod2 = vmulq_f32(
+            vld1q_f32(a.as_ptr().add(i + 8)),
+            vld1q_f32(b.as_ptr().add(i + 8)),
+        );
+        let prod3 = vmulq_f32(
+            vld1q_f32(a.as_ptr().add(i + 12)),
+            vld1q_f32(b.as_ptr().add(i + 12)),
+        );
+        acc0 = vaddq_f32(acc0, prod0);
+        acc1 = vaddq_f32(acc1, prod1);
+        acc2 = vaddq_f32(acc2, prod2);
+        acc3 = vaddq_f32(acc3, prod3);
+        i += 16;
+    }
+    acc0 = vaddq_f32(acc0, acc2);
+    acc1 = vaddq_f32(acc1, acc3);
+    let mut sum = vaddvq_f32(vaddq_f32(acc0, acc1));
+    while i < n {
+        sum += a[i] * b[i];
+        i += 1;
+    }
+    sum
+}
+
+/// Bit-closer-to-scalar SIMD dot. See `dot_f32_avx2_non_fma` and
+/// `dot_f32_neon_non_fma` for rationale.
+pub fn dot_f32_exact(a: &[f32], b: &[f32], n: usize) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            return unsafe { dot_f32_avx2_non_fma(a, b, n) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            return unsafe { dot_f32_neon_non_fma(a, b, n) };
+        }
+    }
+    dot_f32_scalar(a, b, n)
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn dot_f32_neon(a: &[f32], b: &[f32], n: usize) -> f32 {

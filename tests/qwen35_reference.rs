@@ -98,6 +98,9 @@ fn build_oracle(llama: &Path, artifacts: &Path) -> PathBuf {
 
 fn run_rust(model: &Path, prompt: &str, max_tokens: usize, artifacts: &Path) -> PathBuf {
     let trace = artifacts.join("rust.jsonl");
+    let source = rust_model_inference::GGUFLoader::from_file(model).unwrap();
+    let config = rust_model_inference::models::qwen35::Qwen35Config::from_source(&source).unwrap();
+    let filter = TRACE_FILTER.replace("63", &(config.n_layer_impl() - 1).to_string());
     command_output(
         Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
             .args(["--model"])
@@ -115,8 +118,8 @@ fn run_rust(model: &Path, prompt: &str, max_tokens: usize, artifacts: &Path) -> 
                 "f32",
             ])
             .env("RMI_PARITY_TRACE", &trace)
-            .env("RMI_PARITY_FILTER", TRACE_FILTER),
-        "Rust Qwen3.8 inference",
+            .env("RMI_PARITY_FILTER", filter),
+        "Rust Qwen3.5 inference",
     );
     trace
 }
@@ -142,11 +145,11 @@ fn run_oracle(
                 "-n",
                 &max_tokens.to_string(),
                 "-c",
-                "14",
+                "128",
                 "-b",
-                "14",
+                "128",
                 "-ub",
-                "14",
+                "128",
                 "-t",
                 "1",
                 "-tb",
@@ -157,6 +160,8 @@ fn run_oracle(
                 "f32",
                 "-ctv",
                 "f32",
+                "-fa",
+                "off",
                 "--temp",
                 "0",
                 "--top-k",
@@ -167,7 +172,7 @@ fn run_oracle(
                 "1.0",
             ])
             .env("RMI_PARITY_TRACE", &trace),
-        "llama.cpp Qwen3.8 inference",
+        "llama.cpp Qwen3.5 inference",
     );
     trace
 }
@@ -231,7 +236,7 @@ fn close(got: f32, expected: f32, abs_tol: f32, rel_tol: f32) -> bool {
         && (got - expected).abs() <= abs_tol + rel_tol * expected.abs()
 }
 
-fn compare_qwen35_traces(rust: &Path, llama: &Path) -> Result<(), String> {
+fn compare_qwen35_traces(rust: &Path, llama: &Path, bitwise: bool) -> Result<(), String> {
     let rust = records(rust)?;
     let llama = records(llama)?;
     if rust.len() != llama.len() {
@@ -242,7 +247,7 @@ fn compare_qwen35_traces(rust: &Path, llama: &Path) -> Result<(), String> {
         ));
     }
     for (record_index, (got, expected)) in rust.iter().zip(&llama).enumerate() {
-        for field in ["name", "layer", "step"] {
+        for field in ["name", "layer", "step", "occurrence"] {
             if got.get(field) != expected.get(field) {
                 return Err(format!(
                     "record {record_index} field {field}: Rust={:?} llama.cpp={:?}",
@@ -290,7 +295,7 @@ fn compare_qwen35_traces(rust: &Path, llama: &Path) -> Result<(), String> {
         for (index, (&got_bits, &expected_bits)) in
             got_words.iter().zip(&expected_words).enumerate()
         {
-            if BITWISE.contains(&name) {
+            if bitwise || BITWISE.contains(&name) {
                 if got_bits != expected_bits {
                     return Err(format!(
                         "checkpoint {name} index {index}: Rust=0x{got_bits:08x} llama.cpp=0x{expected_bits:08x}"
@@ -328,6 +333,32 @@ fn compare_qwen35_traces(rust: &Path, llama: &Path) -> Result<(), String> {
 }
 
 #[test]
+fn bitwise_comparison_rejects_one_ulp() {
+    let artifacts = unique_temp_dir("rmi-bitwise-check");
+    let mut traces = Vec::new();
+    for (side, word) in [("rust", 1.0f32.to_bits()), ("llama", 1.0f32.to_bits() + 1)] {
+        let binary = artifacts.join(format!("{side}.f32"));
+        std::fs::write(&binary, word.to_le_bytes()).unwrap();
+        let trace = artifacts.join(format!("{side}.jsonl"));
+        std::fs::write(
+            &trace,
+            serde_json::json!({
+                "name": "result_output", "shape": [1], "len": 1,
+                "occurrence": 0, "binary_path": binary,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        traces.push(trace);
+    }
+    assert!(compare_qwen35_traces(&traces[0], &traces[0], true).is_ok());
+    assert!(compare_qwen35_traces(&traces[0], &traces[1], true)
+        .unwrap_err()
+        .contains("0x3f800000 llama.cpp=0x3f800001"));
+    std::fs::remove_dir_all(artifacts).unwrap();
+}
+
+#[test]
 #[ignore = "requires Qwen3.8 model and pinned llama.cpp"]
 fn qwen38_matches_pinned_llama_cpp_at_lossless_checkpoints() {
     let model = required_path("RMI_QWEN35_MODEL");
@@ -337,7 +368,81 @@ fn qwen38_matches_pinned_llama_cpp_at_lossless_checkpoints() {
     let oracle = build_oracle(&llama, &artifacts);
     let rust_trace = run_rust(&model, "你好", 1, &artifacts);
     let llama_trace = run_oracle(&oracle, &model, "你好", 1, &artifacts);
-    if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace) {
+    if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, false) {
+        panic!("{error}\nartifacts retained in {}", artifacts.display());
+    }
+    std::fs::remove_dir_all(artifacts).unwrap();
+}
+
+#[test]
+#[ignore = "requires RMI_NEOHORSE_MODEL and RMI_NEOHORSE_HF"]
+fn neohorse_tokenizer_matches_published_tokenizer() {
+    let model = required_path("RMI_NEOHORSE_MODEL");
+    let hf = required_path("RMI_NEOHORSE_HF");
+    let reference = tokenizers::Tokenizer::from_file(hf.join("tokenizer.json")).unwrap();
+    let source = rust_model_inference::GGUFLoader::from_file(model).unwrap();
+    let tokenizer =
+        rust_model_inference::BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .unwrap();
+    assert_eq!(tokenizer.vocab_size(), 248320);
+    assert_eq!(tokenizer.bos_id(), None);
+    assert_eq!(tokenizer.eos_id(), Some(248046));
+    let malformed = rust_model_inference::BPETokenizer::from_gguf_metadata(|key| {
+        if key == "tokenizer.ggml.normalizer.nfc" {
+            Some(rust_model_inference::MetaValue::String("true".into()))
+        } else {
+            source.metadata(key).cloned()
+        }
+    });
+    assert!(malformed
+        .unwrap_err()
+        .contains("tokenizer.ggml.normalizer.nfc"));
+    for text in [
+        "",
+        "你好",
+        " hello   world\n\n\t1234567890",
+        "e\u{301} résumé 日本語 🐎",
+        "<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    ] {
+        let actual = tokenizer.encode(
+            text,
+            rust_model_inference::EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        assert_eq!(
+            actual,
+            reference.encode(text, false).unwrap().get_ids(),
+            "{text:?}"
+        );
+        assert_eq!(
+            tokenizer.decode(&actual, true),
+            reference.decode(&actual, false).unwrap()
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires NeoHorse 4B/9B GGUF, pinned llama.cpp, and --features parity-trace"]
+fn neohorse_matches_pinned_llama_cpp_bitwise() {
+    let model = required_path("RMI_NEOHORSE_MODEL");
+    let llama = required_path("RMI_LLAMA_CPP");
+    assert_eq!(git_head(&llama), LLAMA_PIN);
+    let source = rust_model_inference::GGUFLoader::from_file(&model).unwrap();
+    let config = rust_model_inference::models::qwen35::Qwen35Config::from_source(&source).unwrap();
+    assert_eq!((config.n_layer, config.n_nextn), (32, 0));
+    assert!(matches!(config.n_embd, 2560 | 4096));
+    assert_eq!(config.vocab_size, 248320);
+    assert_eq!((config.key_dim(), config.value_dim()), (2048, 4096));
+    assert_eq!(config.is_recurrent.iter().filter(|&&r| !r).count(), 8);
+    let artifacts = unique_temp_dir("rmi-neohorse-parity");
+    let oracle = std::env::var_os("RMI_QWEN35_ORACLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_oracle(&llama, &artifacts));
+    let rust_trace = run_rust(&model, "你好", 4, &artifacts);
+    let llama_trace = run_oracle(&oracle, &model, "你好", 4, &artifacts);
+    if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, true) {
         panic!("{error}\nartifacts retained in {}", artifacts.display());
     }
     std::fs::remove_dir_all(artifacts).unwrap();
