@@ -16,6 +16,7 @@ pub mod softmax;
 pub mod ssm;
 pub use activation::*;
 pub use dot::*;
+pub use math::*;
 pub use embedding::*;
 pub use float::*;
 pub use matmul::*;

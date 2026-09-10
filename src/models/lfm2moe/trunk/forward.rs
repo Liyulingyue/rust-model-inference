@@ -46,9 +46,10 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::ops::kernel::Kernel;
 use crate::ops::{
-    dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
-    rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace, vec_add_into,
-    vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
+    dot_f16_f32, dot_f32, embedding_lookup, f32_slice_to_f16, quantize_q8_0_into,
+    quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox_inplace, sample_top_k,
+    sigmoid_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32,
+    vec_mad_f32, vec_mul_inplace, vec_scale_f32,
 };
 use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
 
@@ -341,9 +342,7 @@ pub fn run_inference(
                 .map(|(i, _)| i)
                 .unwrap_or(0)
         } else {
-            for l in logits.iter_mut() {
-                *l /= temperature;
-            }
+            vec_scale_f32(logits, 1.0 / temperature);
             let top = sample_top_k(logits, 40);
             let mut rng = 0u64;
             for &t in &all_tokens {
@@ -723,6 +722,9 @@ fn forward_moe_ffn(
     let normed = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
 
     // ---- Router: F32 logits -> gating probs -> biased top-k ----
+    // 128 sequential dot_f32 calls; parallelizing via pool.compute costs
+    // more in dispatch overhead (~5-10µs) than the 17µs total work saved,
+    // so keep sequential.
     let logits: Vec<f32> = (0..n_expert)
         .map(|e| dot_f32(&lw.router[e * n_embd..(e + 1) * n_embd], normed, n_embd))
         .collect();
@@ -739,7 +741,11 @@ fn forward_moe_ffn(
             exps
         }
         // sigmoid (LFM2-8B-A1B ships expert_gating_func = 2)
-        2 => logits.iter().map(|&l| sigmoid(l)).collect(),
+        2 => {
+            let mut probs = logits.to_vec();
+            sigmoid_inplace(&mut probs);
+            probs
+        }
         other => panic!("unsupported expert_gating_func {other}"),
     };
 
@@ -865,10 +871,6 @@ fn forward_moe_ffn(
     dbg_out(step, layer, "ffn_moe_out", &moe_dump);
     vec_add_into(&moe_dump, x);
     dbg_out(step, layer, "l_out", x);
-}
-
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1035,10 +1037,12 @@ fn forward_attention(
         let v_new = std::slice::from_raw_parts(v_ptr, n_embd_gqa);
         let off = kb + pos * n_embd_gqa;
         if !k_cache_f16_ptr.is_null() {
-            for i in 0..n_embd_gqa {
-                *k_cache_f16_ptr.add(off + i) = crate::ops::f32_to_f16(k_new[i]);
-                *v_cache_f16_ptr.add(off + i) = crate::ops::f32_to_f16(v_new[i]);
-            }
+            let k_dst =
+                std::slice::from_raw_parts_mut(k_cache_f16_ptr.add(off) as *mut u16, n_embd_gqa);
+            let v_dst =
+                std::slice::from_raw_parts_mut(v_cache_f16_ptr.add(off) as *mut u16, n_embd_gqa);
+            crate::ops::f32_slice_to_f16(k_new, k_dst);
+            crate::ops::f32_slice_to_f16(v_new, v_dst);
         } else {
             let k_dst = std::slice::from_raw_parts_mut(k_cache_f32_ptr.add(off), n_embd_gqa);
             let v_dst = std::slice::from_raw_parts_mut(v_cache_f32_ptr.add(off), n_embd_gqa);
@@ -1081,9 +1085,7 @@ fn forward_attention(
                         let out_base = h * n_embd_head_v;
                         let mut ms = 0.0f32;
                         let mut s_sum = 0.0f32;
-                        for d in 0..n_embd_head_v {
-                            attn_out[out_base + d] = 0.0;
-                        }
+                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
                         for t in 0..pos + 1 {
                             let score = dot_f16_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -1341,12 +1343,14 @@ fn forward_shortconv(
     // Reorganize to GGML layout: bx_buf[c * l_buf + k] where k < d_conv is state time.
     for k in 0..d_conv {
         let row = &state[k * n_embd..(k + 1) * n_embd];
+        // Strided scatter: row[c] -> bx_buf[c * l_buf + k]. Same stride per
+        // iteration (l_buf) so LLVM can keep things tight; prefill-only.
         for c in 0..n_embd {
             bx_buf[c * l_buf + k] = row[c];
         }
     }
 
-    // Row d_conv is b*x.
+    // Row d_conv is b*x (strided scatter; prefill-only).
     for ci in 0..n_embd {
         bx_buf[ci * l_buf + d_conv] = bx[ci];
     }
@@ -1367,14 +1371,30 @@ fn forward_shortconv(
     // GGML layout: kernel[k, c] at offset c * l_cache + k.
     // bx_buf[t, c] at offset c * l_buf + t.
     let mut conv_out: Vec<f32> = vec![0.0; n_embd];
-    for c_idx in 0..n_embd {
-        let k_off = c_idx * l_cache;
-        let b_off = c_idx * l_buf;
-        let mut acc = 0.0f32;
-        for k in 0..l_cache {
-            acc += bx_buf[b_off + k] * kernel[k_off + k];
+    // LFM2-8B-A1B ships with l_cache=3; unroll for 3 fma per channel so LLVM
+    // keeps bx_buf values in registers. Branch on l_cache for safety.
+    if l_cache == 3 {
+        for c_idx in 0..n_embd {
+            let k_off = c_idx * 3;
+            let b_off = c_idx * l_buf;
+            let a0 = bx_buf[b_off];
+            let a1 = bx_buf[b_off + 1];
+            let a2 = bx_buf[b_off + 2];
+            let w0 = kernel[k_off];
+            let w1 = kernel[k_off + 1];
+            let w2 = kernel[k_off + 2];
+            conv_out[c_idx] = a0 * w0 + a1 * w1 + a2 * w2;
         }
-        conv_out[c_idx] = acc;
+    } else {
+        for c_idx in 0..n_embd {
+            let k_off = c_idx * l_cache;
+            let b_off = c_idx * l_buf;
+            let mut acc = 0.0f32;
+            for k in 0..l_cache {
+                acc += bx_buf[b_off + k] * kernel[k_off + k];
+            }
+            conv_out[c_idx] = acc;
+        }
     }
 
     dbg_out(step, layer_idx, "conv.conv", &conv_out);
