@@ -45,11 +45,11 @@ vision patch tensors to exact F32 representations.
 
 | Output | Bytes | Tensors | SHA256 |
 | --- | ---: | ---: | --- |
-| `Qwen-Drive-1.0-4B-BF16.gguf` | 8,424,390,848 | 426 | `887ce4ebb8933e9d45b63de4a9c854fe390983aef1aecee86baec4b0073bec33` |
-| `Qwen-Drive-1.0-4B-mmproj-BF16.gguf` | 675,569,312 | 298 | `5f5b2a0e3d57f899f747916376a0fe7fd8e7447de57850a73cfc33fbb7b547bb` |
-| `Qwen-Drive-1.0-planner-sft-BF16.gguf` | 2,079,726,944 | 358 | `31a2b747f49790239cfe09dae7d41c8567ba294f38c1a69d7fb7a3409f49d09d` |
-| `Qwen-Drive-1.0-planner-rl-BF16.gguf` | 2,079,726,944 | 358 | `1e5caa8781822d6ab340d806d030d3c3214ac336c58f738c0d970c1dcc280586` |
-| `Qwen-Drive-1.0-perception-F32.gguf` | 500,348,704 | 827 | `95f7f8cb5056229f6a60c489ad776826dca4b161ae2365e25f4e24ebc46e12a5` |
+| `Qwen-Drive-1.0-4B-BF16.gguf` | 8,424,390,752 | 426 | `1d5aabe7f02ef97fdf173bad8bcaaf783af4d85bd07ea56cc3dd42d1f28deac9` |
+| `Qwen-Drive-1.0-4B-mmproj-BF16.gguf` | 675,569,216 | 298 | `d0ba72870cca4073c0e3aaef251e36c6ff1061c6b76fa725cb55d518a11a3d9f` |
+| `Qwen-Drive-1.0-planner-sft-BF16.gguf` | 2,079,728,448 | 358 | `7ab6abef07523192aad877bc0186dcc6c82c854f951f00ba00c7ce06bcf89cd9` |
+| `Qwen-Drive-1.0-planner-rl-BF16.gguf` | 2,079,728,448 | 358 | `05f205728c822382650b6ee43f8c343da09f2dce381e399c86f891b4411b9b5a` |
+| `Qwen-Drive-1.0-perception-F32.gguf` | 500,350,464 | 827 | `ed3c415ac932f7c48e37ca6caea75e4fb3d399e4e66773dce23d9edc4e8bb0d3` |
 
 The official Qwen-Drive source Oracle is fixed at
 `28091c1532e869bc7aee91fc0aef6b3e6fd0b2e0`.

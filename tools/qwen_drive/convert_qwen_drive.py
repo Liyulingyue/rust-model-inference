@@ -50,6 +50,65 @@ OUTPUT_NAMES = (
     "Qwen-Drive-1.0-perception-F32.gguf",
 )
 
+PLANNER_EXPERT_CONFIG = {
+    "hidden_size": 1024,
+    "intermediate_size": 3584,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 4,
+    "head_dim": 256,
+    "layers_per_kv": 4,
+    "rms_norm_eps": 1e-5,
+    "nav_command_classes": 3,
+    "ego_status_dim": 8,
+    "history_dynamics_dim": 2,
+    "time_embed_dim": 128,
+    "time_embed_scale": 1000.0,
+    "fourier_num_features": 16,
+    "fourier_max_frequency": 16.0,
+    "mrope_section": [11, 11, 10],
+    "rope_theta": 10_000_000.0,
+}
+PLANNER_TOP_CONFIG = {
+    "num_future_points": 50,
+    "num_history_points": 16,
+    "trajectory_point_dim": 3,
+    "trajectory_scale": [165.0, 25.0, 1.5703125],
+    "num_inference_steps": 10,
+    "min_one_minus_t": 0.1,
+    "noise_init_std": 1.0,
+    "noise_seed": 42,
+    "trajectory_hz": 10.0,
+    "max_reasoning_tokens": 256,
+}
+PERCEPTION_CONFIG = {
+    "llm_dim": 2560,
+    "vit_dim": 1024,
+    "embed_dim": 256,
+    "bev_h": 200,
+    "bev_w": 200,
+    "occ_pillar_h": 16,
+    "occ_dim": 32,
+    "occ_num_classes": 10,
+    "det_num_classes": 7,
+    "map_num_classes": 6,
+    "num_query": 900,
+    "code_size": 10,
+    "num_encoder_layers": 6,
+    "num_decoder_layers": 6,
+    "image_size": [896, 512],
+    "det_pc_range": [-51.2, -51.2, -5.0, 51.2, 51.2, 5.4],
+    "det_voxel_size": [0.512, 0.512, 10.4],
+    "nuscenes_occ_pc_range": [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
+    "nuscenes_occ_voxel_size": [0.4, 0.4, 6.4],
+    "nuplan_occ_pc_range": [-50.0, -50.0, -4.0, 50.0, 50.0, 4.0],
+    "nuplan_occ_voxel_size": [0.5, 0.5, 0.5],
+    "map_xbound": [-30.0, 30.0, 0.15],
+    "map_ybound": [-15.0, 15.0, 0.15],
+    "frustum_range": [0.0, 0.0, 1.0, 896.0, 512.0, 60.0],
+    "frustum_size": [16.0, 16.0, 0.5],
+}
+
 
 @dataclass(frozen=True)
 class SourceTensor:
@@ -193,6 +252,48 @@ def output_name(architecture: str, source_name: str) -> str:
     return f"{architecture}.{source_name.removeprefix(prefix)}"
 
 
+def _read_config(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read Qwen-Drive config {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"Qwen-Drive config must be an object: {path}")
+    return value
+
+
+def _validate_fixed_config(actual: dict, expected: dict, path: Path) -> None:
+    for key, value in expected.items():
+        if actual.get(key) != value:
+            raise ValueError(
+                f"{path}: expected {key}={value!r}, got {actual.get(key)!r}"
+            )
+
+
+def _head_metadata(component_dir: Path, architecture: str) -> dict[str, object]:
+    if architecture == "qwen_drive_planner":
+        component_config_path = component_dir / "config.json"
+        component_config = _read_config(component_config_path)
+        _validate_fixed_config(
+            component_config, PLANNER_EXPERT_CONFIG, component_config_path
+        )
+        top_config_path = component_dir.parent / "config.json"
+        top_config = _read_config(top_config_path)
+        _validate_fixed_config(top_config, PLANNER_TOP_CONFIG, top_config_path)
+        _validate_fixed_config(
+            top_config.get("expert_config", {}), PLANNER_EXPERT_CONFIG, top_config_path
+        )
+        values = PLANNER_EXPERT_CONFIG | PLANNER_TOP_CONFIG
+    elif architecture == "qwen_drive_perception":
+        config_path = component_dir / "config.json"
+        config = _read_config(config_path)
+        _validate_fixed_config(config, PERCEPTION_CONFIG, config_path)
+        values = PERCEPTION_CONFIG
+    else:
+        raise ValueError(f"unsupported head architecture {architecture!r}")
+    return {f"{architecture}.{key}": value for key, value in values.items()}
+
+
 def export_head(
     component_dir: Path,
     out_path: Path,
@@ -219,6 +320,8 @@ def export_head(
         f"{architecture}.compute_dtype",
         "bfloat16",
     )
+    for key, value in _head_metadata(component_dir, architecture).items():
+        writer.add_meta(key, value)
     for tensor in tensors:
         if tensor.dtype != expected_dtype:
             raise ValueError(
@@ -279,6 +382,7 @@ from conversion.qwen3vl import Qwen3VLVisionModel
 
 text_filter = Qwen3_5TextModel.filter_tensors
 vision_filter = Qwen3VLVisionModel.filter_tensors
+text_set_vocab = Qwen3_5TextModel.set_vocab
 
 @classmethod
 def qwen_drive_text_filter(cls, item):
@@ -293,10 +397,19 @@ def qwen_drive_vision_filter(cls, item):
 Qwen3_5TextModel.filter_tensors = qwen_drive_text_filter
 Qwen3VLVisionModel.filter_tensors = qwen_drive_vision_filter
 
+def qwen_drive_set_vocab(self):
+    text_set_vocab(self)
+    self.gguf_writer.add_bool("tokenizer.ggml.normalizer.nfc", True)
+
+Qwen3_5TextModel.set_vocab = qwen_drive_set_vocab
+
 import convert_hf_to_gguf
 sys.argv = ["convert_hf_to_gguf.py", "--outfile", str(output), "--outtype", "bf16"]
 if mode.name == "mmproj":
     sys.argv.append("--mmproj")
+else:
+    # The released checkpoint contains the 32 base layers but no MTP weights.
+    sys.argv.append("--no-nextn")
 sys.argv.append(str(model))
 convert_hf_to_gguf.main()
 '''
@@ -343,6 +456,8 @@ def _install_llama_output(
         expected = "clip" if mmproj else "qwen35"
         if metadata.get("general.architecture") != expected or not tensors:
             raise ValueError(f"{temporary}: invalid {expected} GGUF readback")
+        if not mmproj and metadata.get("tokenizer.ggml.normalizer.nfc") is not True:
+            raise ValueError(f"{temporary}: missing tokenizer NFC contract")
         if overwrite:
             os.replace(temporary, destination)
         else:
@@ -468,6 +583,18 @@ def verify_outputs(
                     raise ValueError(f"{path}: unexpected tensor {tensor_name!r}")
                 if ggml_type != expected_type:
                     raise ValueError(f"{path}: unexpected tensor type for {tensor_name}")
+            expected_metadata = (
+                PLANNER_EXPERT_CONFIG | PLANNER_TOP_CONFIG
+                if architecture == "qwen_drive_planner"
+                else PERCEPTION_CONFIG
+            )
+            for key, value in expected_metadata.items():
+                metadata_key = f"{architecture}.{key}"
+                if metadata.get(metadata_key) != value:
+                    raise ValueError(
+                        f"{path}: expected {metadata_key}={value!r}, "
+                        f"got {metadata.get(metadata_key)!r}"
+                    )
         counts: dict[str, int] = {}
         for ggml_type, _dims, _nbytes in tensors.values():
             key = str(ggml_type)

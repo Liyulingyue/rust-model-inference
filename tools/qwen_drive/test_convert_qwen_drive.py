@@ -52,7 +52,143 @@ def component_manifest(path: Path, tensors: dict[str, tuple[str, tuple[int, ...]
     }
 
 
+def write_head_configs(root: Path) -> None:
+    planner = {
+        "hidden_size": 1024,
+        "intermediate_size": 3584,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "layers_per_kv": 4,
+        "rms_norm_eps": 1e-5,
+        "nav_command_classes": 3,
+        "ego_status_dim": 8,
+        "history_dynamics_dim": 2,
+        "time_embed_dim": 128,
+        "time_embed_scale": 1000.0,
+        "fourier_num_features": 16,
+        "fourier_max_frequency": 16.0,
+        "mrope_section": [11, 11, 10],
+        "rope_theta": 10_000_000.0,
+    }
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "expert_config": planner,
+                "num_future_points": 50,
+                "num_history_points": 16,
+                "trajectory_point_dim": 3,
+                "trajectory_scale": [165.0, 25.0, 1.5703125],
+                "num_inference_steps": 10,
+                "min_one_minus_t": 0.1,
+                "noise_init_std": 1.0,
+                "noise_seed": 42,
+                "trajectory_hz": 10.0,
+                "max_reasoning_tokens": 256,
+            }
+        )
+    )
+    for name in ("planner-sft", "planner-rl"):
+        component = root / name
+        component.mkdir(exist_ok=True)
+        (component / "config.json").write_text(json.dumps(planner))
+    perception = {
+        "llm_dim": 2560,
+        "vit_dim": 1024,
+        "embed_dim": 256,
+        "bev_h": 200,
+        "bev_w": 200,
+        "occ_pillar_h": 16,
+        "occ_dim": 32,
+        "occ_num_classes": 10,
+        "det_num_classes": 7,
+        "map_num_classes": 6,
+        "num_query": 900,
+        "code_size": 10,
+        "num_encoder_layers": 6,
+        "num_decoder_layers": 6,
+        "image_size": [896, 512],
+        "det_pc_range": [-51.2, -51.2, -5.0, 51.2, 51.2, 5.4],
+        "det_voxel_size": [0.512, 0.512, 10.4],
+        "nuscenes_occ_pc_range": [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
+        "nuscenes_occ_voxel_size": [0.4, 0.4, 6.4],
+        "nuplan_occ_pc_range": [-50.0, -50.0, -4.0, 50.0, 50.0, 4.0],
+        "nuplan_occ_voxel_size": [0.5, 0.5, 0.5],
+        "map_xbound": [-30.0, 30.0, 0.15],
+        "map_ybound": [-15.0, 15.0, 0.15],
+        "frustum_range": [0.0, 0.0, 1.0, 896.0, 512.0, 60.0],
+        "frustum_size": [16.0, 16.0, 0.5],
+    }
+    perception_dir = root / "perception"
+    perception_dir.mkdir(exist_ok=True)
+    (perception_dir / "config.json").write_text(json.dumps(perception))
+
+
 class QwenDriveExportTest(unittest.TestCase):
+    def test_head_exports_fixed_geometry_metadata(self):
+        tensors = {
+            "planning_expert.out_proj.weight": ("BF16", (3, 4), bytes(range(24))),
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_head_configs(root)
+            component, manifest = self.make_component(root, "planner-sft", tensors)
+            out = root / "planner.gguf"
+
+            export_head(component, out, "qwen_drive_planner", manifest)
+
+            metadata, _ = read_gguf_directory(out)
+            self.assertEqual(metadata["qwen_drive_planner.hidden_size"], 1024)
+            self.assertEqual(metadata["qwen_drive_planner.head_dim"], 256)
+            self.assertEqual(metadata["qwen_drive_planner.mrope_section"], [11, 11, 10])
+            self.assertEqual(
+                metadata["qwen_drive_planner.trajectory_scale"],
+                [165.0, 25.0, 1.5703125],
+            )
+    def test_vlm_view_preserves_the_source_config(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            model = root / "model"
+            view = root / "view"
+            model.mkdir()
+            view.mkdir()
+            (model / "config.json").write_text(
+                json.dumps(
+                    {
+                        "vlm_config": {
+                            "text_config": {
+                                "num_hidden_layers": 32,
+                                "mtp_num_hidden_layers": 1,
+                            }
+                        }
+                    }
+                )
+            )
+            (model / "tokenizer.json").write_text("{}")
+
+            converter._prepare_vlm_view(model, view)
+
+            config = json.loads((view / "config.json").read_text())
+            self.assertEqual(config["text_config"]["num_hidden_layers"], 32)
+            self.assertEqual(config["text_config"]["mtp_num_hidden_layers"], 1)
+            self.assertEqual(
+                (view / "tokenizer.json").resolve(), (model / "tokenizer.json").resolve()
+            )
+
+    def test_vlm_text_conversion_disables_the_unshipped_mtp_layer(self):
+        with mock.patch.object(subprocess, "run") as run:
+            converter._run_llama_converter(
+                Path("/tmp/llama.cpp"),
+                Path("/tmp/model"),
+                Path("/tmp/model.gguf"),
+                mmproj=False,
+            )
+        command = run.call_args.args[0]
+        bootstrap = command[command.index("-c") + 1]
+        self.assertIn('sys.argv.append("--no-nextn")', bootstrap)
+        self.assertIn('add_bool("tokenizer.ggml.normalizer.nfc", True)', bootstrap)
+
     def test_output_paths_use_the_five_fixed_source_precision_names(self):
         paths = output_paths(Path("/tmp/out"))
         self.assertEqual(
@@ -69,6 +205,7 @@ class QwenDriveExportTest(unittest.TestCase):
     def test_export_model_validates_every_source_before_writing(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
+            write_head_configs(root)
             tensors = {
                 "vlm": {"vlm.model.embed_tokens.weight": ("BF16", (1, 2), bytes(4))},
                 "planner-sft": {"planning_expert.out.weight": ("BF16", (1, 2), bytes(4))},
@@ -89,6 +226,8 @@ class QwenDriveExportTest(unittest.TestCase):
                 for path, architecture in ((vlm, "qwen35"), (mmproj, "clip")):
                     writer = GgufWriter(path)
                     writer.add_meta("general.architecture", architecture)
+                    if architecture == "qwen35":
+                        writer.add_meta("tokenizer.ggml.normalizer.nfc", True)
                     if architecture == "clip":
                         writer.add_meta("clip.projector_type", "qwen3vl_merger")
                     writer.add_tensor("weight", GGML_BF16, (2, 1), bytes(4))
@@ -182,8 +321,9 @@ class QwenDriveExportTest(unittest.TestCase):
         name: str,
         tensors: dict[str, tuple[str, tuple[int, ...], bytes]],
     ) -> tuple[Path, dict]:
+        write_head_configs(root)
         component = root / name
-        component.mkdir()
+        component.mkdir(exist_ok=True)
         source = component / "model.safetensors"
         write_safetensors(source, tensors)
         return component, {
