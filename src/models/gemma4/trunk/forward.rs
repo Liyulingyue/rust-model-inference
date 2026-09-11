@@ -130,14 +130,23 @@ impl Gemma4Session<'_> {
                 &layer.attn_norm,
                 &mut scratch.normed,
             )?;
-            matmul(
+            // Q+K+V share the same `normed` input. Quantize once and
+            // reuse via `matmul_q8_pool` to skip redundant Q8 conversions
+            // per layer per decode.
+            quantize_q8_0_into(
+                &scratch.normed,
+                embd,
+                &mut scratch.q8[..embd],
+                &mut scratch.scales[..embd.div_ceil(32)],
+            );
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.attn_q.weight"),
                 &layer.attn_q,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.q[..q_width],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
             for query in scratch.q[..q_width].chunks_exact_mut(dim) {
                 rms_norm_inplace(query, &layer.attn_q_norm, EPS);
@@ -145,23 +154,23 @@ impl Gemma4Session<'_> {
             }
 
             if layer_index < base_kv {
-                matmul(
+                matmul_q8_pool(
                     &format!("blk.{layer_index}.attn_k.weight"),
                     &layer.attn_k,
                     &scratch.normed,
+                    &scratch.q8[..embd],
+                    &scratch.scales[..embd.div_ceil(32)],
                     &mut scratch.k[..kv_width],
                     model.pool(),
-                    &mut scratch.q8,
-                    &mut scratch.scales,
                 )?;
-                matmul(
+                matmul_q8_pool(
                     &format!("blk.{layer_index}.attn_v.weight"),
                     &layer.attn_v,
                     &scratch.normed,
+                    &scratch.q8[..embd],
+                    &scratch.scales[..embd.div_ceil(32)],
                     &mut scratch.v[..kv_width],
                     model.pool(),
-                    &mut scratch.q8,
-                    &mut scratch.scales,
                 )?;
                 for kv_head in 0..cfg.kv_heads {
                     let off = kv_head * dim;
@@ -230,23 +239,30 @@ impl Gemma4Session<'_> {
                 &layer.ffn_norm,
                 &mut scratch.normed,
             )?;
-            matmul(
+            // gate + up share `normed`. Quantize once and reuse.
+            quantize_q8_0_into(
+                &scratch.normed,
+                embd,
+                &mut scratch.q8[..embd],
+                &mut scratch.scales[..embd.div_ceil(32)],
+            );
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.ffn_gate.weight"),
                 &layer.ffn_gate,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.gate[..ffn],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
-            matmul(
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.ffn_up.weight"),
                 &layer.ffn_up,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.up[..ffn],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
             ggml_geglu_fp16_inplace(&mut scratch.gate[..ffn], &scratch.up[..ffn]);
             matmul(
@@ -466,6 +482,58 @@ pub(super) fn matmul(
             );
         });
     }
+    ensure_finite(name, output)
+}
+
+/// Q8-quantized matmul: caller has already filled `q8` + `scales` for
+/// `weight.n_in` elements. Use this when the same `input` is fed into
+/// multiple matmuls in a row (Q+K+V, gate+up) to skip redundant Q8
+/// conversions of the same input.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn matmul_q8_pool(
+    name: &str,
+    weight: &Weight<'_>,
+    input: &[f32],
+    q8: &[u8],
+    scales: &[f32],
+    output: &mut [f32],
+    pool: &ComputePool,
+) -> Result<(), String> {
+    if input.len() != weight.n_in || output.len() != weight.n_out {
+        return Err(format!(
+            "Invalid {name} matmul lengths: input {}, output {}; expected {}, {}",
+            input.len(),
+            output.len(),
+            weight.n_in,
+            weight.n_out
+        ));
+    }
+    let blocks = weight.n_in.div_ceil(32);
+    if q8.len() < weight.n_in || scales.len() < blocks {
+        return Err(format!("Invalid {name} activation scratch length"));
+    }
+    if weight.ggml_type == GGMLType::F32 {
+        return Err(format!(
+            "{name} is F32, but matmul_q8_pool requires a Q-quantized kernel"
+        ));
+    }
+    let input_ptr = input.as_ptr();
+    let q8_ptr = q8.as_ptr();
+    let scales_ptr = scales.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(|thread, threads| unsafe {
+        weight.kernel.forward_prepared(
+            std::slice::from_raw_parts(input_ptr, weight.n_in),
+            std::slice::from_raw_parts(q8_ptr, weight.n_in),
+            std::slice::from_raw_parts(scales_ptr, blocks),
+            None,
+            std::slice::from_raw_parts_mut(output_ptr, weight.n_out),
+            weight.n_in,
+            weight.n_out,
+            thread,
+            threads,
+        );
+    });
     ensure_finite(name, output)
 }
 
@@ -804,6 +872,32 @@ pub(super) fn softcap(value: f32, cap: f32) -> f32 {
 }
 
 pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
+    // Scalar reference; matches llama.cpp GEGLU with f16 intermediate.
+    //
+    // === TODO-002: SIMD GeGLU (`tanh_approx`) ===
+    //
+    // An AVX2+F16C SIMD version was prototyped (see git history) but
+    // reverted because tanh lacks native SIMD on x86 and the
+    // Padé [3/2] rational `tanh(x) ≈ x*(27+x²)/(27+9x²)` diverges for
+    // |x| > 5. Three mitigation strategies were tried, none ideal:
+    //
+    //   1. Clamp arg to ±5 before Padé — works for typical gelu inputs
+    //      (arg stays in ~(-3.6, 3.6) when x ∈ (-3, 3)) but loses
+    //      ~0.5% accuracy once clamped because tanh saturates near ±1
+    //      and the rational diverges; clamping trades divergence for
+    //      a hard saturation step.
+    //   2. Padé [5/4] / [7/6] higher-order — more accurate but adds
+    //      4-6 extra FMA per lane, eroding the SIMD win.
+    //   3. Schraudolph-style fast exp via bit manipulation — too
+    //      imprecise (5-10% error) for gate values outside (-2, 2).
+    //
+    // The SIMD version showed ~0.5% drift on the gelu output (after
+    // f16 round-trip) and caused occasional top-K token flips on a few
+    // gemma4 reference prompts. The scalar path remains the safe
+    // reference. See `docs/TODO.md` TODO-002 for full analysis and
+    // recovery plan (likely a `[7/6]` padé + per-call opt-in feature
+    // flag once precision is characterised against the llama.cpp
+    // pinned Oracle).
     const GELU_COEF_A: f32 = 0.044715;
     const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
 

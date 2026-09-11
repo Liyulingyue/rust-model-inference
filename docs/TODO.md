@@ -1,5 +1,48 @@
 # TODO
 
+## TODO-002: SIMD GeGLU `tanh_approx` 未启用
+
+### 现状
+
+`src/models/gemma4/trunk/forward.rs` 的 `ggml_geglu_fp16_inplace` 仍然走 scalar 路径。AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体内（forward.rs 顶部）。
+
+### 影响
+
+- **性能**：scalar GELU 算 10240 元素 × 2 个 GELU/层（FFN + per-layer）× 35 层 = ~717k scalar ops/token。scalar ~12ns/element = **~8.6 ms/token**（当前 E2B ~80ms/token 的 ~10%）。
+- **正确性**：scalar 版本 bit-exact 同 llama.cpp。所有 gemma4 测试通过。
+
+### 何时触发
+
+每次 FFN 块调用 `ggml_geglu_fp16_inplace(&mut scratch.gate[..ffn], &scratch.up[..ffn])` 时。
+
+### 选项
+
+1. **接受 ±1-2 ULP drift 启用 SIMD**（推荐，参考 llama.cpp `GGML_FMA_DISABLED` 做法）：
+   - Padé [7/6] tanh 近似：~0.04% max error in |x| ≤ 4.5（vs Padé [3/2] 的 1.5%）
+   - 加 `#[cfg(feature = "experimental-geglu-simd")]` 默认关
+   - 用 `cargo run --features experimental-geglu-simd` 启用
+   - 预期：+5-8% ETE
+   - 风险：gemma4_reference.rs 中 token Oracle 偶尔 ±1 分叉（top-K 边界）
+   - 工作量：半天
+
+2. **Schraudolph fast exp + tanh = (exp(2x)-1)/(exp(2x)+1)**：
+   - 5-10% tanh error on |x|>2 → gelu 漂移 ~3-5% → logits 漂移 ~5-10% → 必分叉
+   - 不推荐
+
+3. **保持 scalar**（当前）：零风险，零加速。
+
+### 推荐
+
+短期：选项 3（保持 scalar，已记录）。
+中期：当跑 gemma4_reference.rs Oracle 时确认 Padé [7/6] 漂移可控后，切到选项 1。
+
+### 关联文件
+
+- `src/models/gemma4/trunk/forward.rs:858` — 当前 scalar + 详细 doc-comment
+- `src/ops/kernel/q8_0/avx2.rs` — FMA pattern 参考
+
+---
+
 ## TODO-001: Q4_0 AVX2 kernel 不使用 FMA，性能受限
 
 ### 现状
