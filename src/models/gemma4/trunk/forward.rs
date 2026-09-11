@@ -627,26 +627,24 @@ pub(super) fn attend(
     scores.resize(padded, f32::NEG_INFINITY);
     values.resize(padded, 0.0);
 
-    // Parallelize per-head over the compute pool. The hot inner loop is the
-    // strided V gather (`cache.values[token * row_width + kv_offset + dim]`),
-    // which is cache-unfriendly on a single thread; spreading heads across
-    // threads gives each its own working set.
+    // Parallelize per-head over the compute pool. The V pass iterates
+    // `token` outer / `dimension` inner: V at fixed token is contiguous in
+    // memory (stride 1 in `dim`), so each token-load is cache-friendly, and
+    // the inner dim loop is FMA-fused (AVX2 `_mm256_fmadd_ps`) over
+    // `score[token] * V[token, dim]`. This drops the per-dim `head_values`
+    // gather + `dot_f32` and avoids the strided V reads of the old code.
     let query_ptr = query.as_ptr();
     let keys_ptr = cache.keys.as_ptr();
     let values_ptr = cache.values.as_ptr();
-    let scores_ptr = scores.as_mut_ptr();
     let output_ptr = output.as_mut_ptr();
     pool.compute(move |ith, nth| {
-        // Each thread gets a contiguous head range. 8 heads / 8 threads → 1
-        // head per thread; the kernel auto-distributes via `nth`.
         let h_step = (HEADS + nth - 1) / nth;
         let h_start = (ith * h_step).min(HEADS);
         let h_end = (h_start + h_step).min(HEADS);
-        // Per-thread scratch (allocated here to avoid cross-thread sharing).
         let mut head_scores = vec![f32::NEG_INFINITY; padded];
-        let mut head_values = vec![0.0f32; padded];
         for head in h_start..h_end {
-            let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
+            let query_head =
+                unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
             let kv_head = head / group_size;
             let kv_offset = kv_head * dim;
             head_scores.fill(f32::NEG_INFINITY);
@@ -658,17 +656,147 @@ pub(super) fn attend(
             softmax_inplace(&mut head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
-            for dimension in 0..dim {
-                head_values.fill(0.0);
-                for (slot, token) in head_values[..cached].iter_mut().zip(first..rows) {
-                    let offset = token * row_width + kv_offset + dimension;
-                    *slot = unsafe { *values_ptr.add(offset) };
-                }
-                head_output[dimension] = dot_f32(&head_values, &head_scores, cached);
+            unsafe {
+                attend_v(
+                    values_ptr,
+                    head_scores.as_ptr(),
+                    row_width,
+                    kv_offset,
+                    first,
+                    cached,
+                    dim,
+                    head_output,
+                );
             }
         }
     });
     ensure_finite(&format!("blk.{layer} attention"), output)
+}
+
+/// Fused `output[d] += Σ_t scores[t] * V[t, d]` over `[first, first+cached)`.
+/// Outer loop iterates `t` so each V load is a contiguous `dim`-length chunk
+/// (stride 1 in `dim`). Inner loop uses the SIMD FMA of the host to fuse
+/// `output[d] += score * V[t, d]`.
+#[inline]
+unsafe fn attend_v(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return attend_v_avx2(
+                values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+            );
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return attend_v_neon(
+                values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+            );
+        }
+    }
+    attend_v_scalar(
+        values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn attend_v_avx2(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        let vscore = _mm256_set1_ps(score);
+        let mut d = 0;
+        while d + 8 <= dim {
+            let vo = _mm256_loadu_ps(head_output.as_ptr().add(d));
+            let vd = _mm256_loadu_ps(v_base.add(d));
+            _mm256_storeu_ps(
+                head_output.as_mut_ptr().add(d),
+                _mm256_fmadd_ps(vscore, vd, vo),
+            );
+            d += 8;
+        }
+        while d < dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+            d += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn attend_v_neon(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    use std::arch::aarch64::*;
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        let vscore = vdupq_n_f32(score);
+        let mut d = 0;
+        while d + 4 <= dim {
+            let vo = vld1q_f32(head_output.as_ptr().add(d));
+            let vd = vld1q_f32(v_base.add(d));
+            vst1q_f32(head_output.as_mut_ptr().add(d), vfmaq_f32(vo, vscore, vd));
+            d += 4;
+        }
+        while d < dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+            d += 1;
+        }
+    }
+}
+
+unsafe fn attend_v_scalar(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        for d in 0..dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+        }
+    }
 }
 
 pub(super) fn softcap(value: f32, cap: f32) -> f32 {

@@ -13,7 +13,7 @@ pub(super) const VOCAB: usize = 262_144;
 pub(super) const CONTEXT: usize = 131_072;
 pub(super) const EPS: f32 = 1e-6;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Gemma4Config {
     pub layers: usize,
     pub embd: usize,

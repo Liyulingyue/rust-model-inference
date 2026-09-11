@@ -429,6 +429,18 @@ fn gemma4_e2b_contract_is_exact() {
             per_layer_width: 256,
             sliding_window: 512,
             logit_softcap: 30.0,
+            ffn_per_layer: [
+                6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144,
+                6144, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288,
+                12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288,
+            ]
+            .to_vec(),
+            swa_pattern: [
+                true, true, true, true, false, true, true, true, true, false, true, true, true,
+                true, false, true, true, true, true, false, true, true, true, true, false, true,
+                true, true, true, false, true, true, true, true, false,
+            ]
+            .to_vec(),
         }
     );
 }

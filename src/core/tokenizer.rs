@@ -2122,9 +2122,11 @@ mod tests {
             },
         );
         assert_eq!(ids[0], tokenizer.bos_id().unwrap());
+        // The encoder normalizes a leading space to the SPM `▁` (U+2581)
+        // marker; the decoder unescapes it back to a literal space.
         assert_eq!(
             tokenizer.decode_bytes(&ids[1..], true),
-            "▁hello\nworld".as_bytes()
+            " hello\nworld".as_bytes()
         );
     }
 
