@@ -1,6 +1,7 @@
 //! Qwen-Drive planning and perception heads.
 
 pub mod config;
+pub mod scene;
 pub mod weights;
 
 #[cfg(test)]
