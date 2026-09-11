@@ -41,6 +41,12 @@ codegen-units = 1
 strip = "debuginfo"
 debug = true
 
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug = 1
+
 [[bin]]
 name = "micro-bench"
 path = "src/bin/micro_bench.rs"

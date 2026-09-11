@@ -1,6 +1,6 @@
-use super::config::{BASE_KV_LAYERS, CONTEXT, EMBED, EPS, HEADS, LAYERS, PER_LAYER, VOCAB};
+use super::config::{CONTEXT, EPS, HEADS, PER_LAYER, VOCAB};
 use super::session::{Gemma4Session, KvLayer};
-use super::weights::{is_swa, kv_source_layer};
+use super::weights::kv_source_layer;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
@@ -33,7 +33,7 @@ pub(super) struct AssembledInputRow {
 
 impl Gemma4Session<'_> {
     pub fn forward_rows(&mut self, rows: &[Gemma4InputRow]) -> Result<Vec<f32>, String> {
-        let rows = assemble_input_rows(rows)?;
+        let rows = assemble_input_rows(rows, self.model.config.embd)?;
         let end = self
             .seq_len
             .checked_add(rows.len())
@@ -64,7 +64,9 @@ impl Gemma4Session<'_> {
 
     fn forward_row(&mut self, row: &AssembledInputRow) -> Result<(), String> {
         let model = self.model;
+        let cfg = &model.config;
         let scratch = &mut self.scratch;
+        let embd = cfg.embd;
         match &row.values {
             InputValues::Token(token) => {
                 model
@@ -74,7 +76,7 @@ impl Gemma4Session<'_> {
             InputValues::Raw(values) => scratch.x.copy_from_slice(values),
         }
         if row.scale_token_embedding {
-            let scale = (EMBED as f32).sqrt();
+            let scale = (embd as f32).sqrt();
             for value in &mut scratch.x {
                 *value *= scale;
             }
@@ -97,9 +99,9 @@ impl Gemma4Session<'_> {
             &mut scratch.q8,
             &mut scratch.scales,
         )?;
-        let projection_scale = 1.0 / (EMBED as f32).sqrt();
+        let projection_scale = 1.0 / (embd as f32).sqrt();
         let merge_scale = 1.0 / 2.0_f32.sqrt();
-        for layer in 0..LAYERS {
+        for layer in 0..cfg.layers {
             let start = layer * PER_LAYER;
             let end = start + PER_LAYER;
             let projected = &mut scratch.per_layer_projected[start..end];
@@ -114,9 +116,11 @@ impl Gemma4Session<'_> {
         ensure_finite("gemma4.per_layer_input", &scratch.per_layer)?;
 
         let position = self.seq_len;
-        for layer_index in 0..LAYERS {
+        let base_kv = cfg.base_kv_layers();
+        for layer_index in 0..cfg.layers {
             let layer = &model.layers[layer_index];
             let dim = layer.head_dim;
+            let kv_width = cfg.kv_heads * dim;
             let q_width = HEADS * dim;
             let ffn = layer.ffn_gate.n_out;
 
@@ -137,15 +141,15 @@ impl Gemma4Session<'_> {
             )?;
             for query in scratch.q[..q_width].chunks_exact_mut(dim) {
                 rms_norm_inplace(query, &layer.attn_q_norm, EPS);
-                apply_rope(query, position, dim, layer_index, &model.rope_freqs)?;
+                apply_rope(query, position, dim, layer_index, cfg.is_swa(layer_index), &model.rope_freqs)?;
             }
 
-            if layer_index < BASE_KV_LAYERS {
+            if layer_index < base_kv {
                 matmul(
                     &format!("blk.{layer_index}.attn_k.weight"),
                     &layer.attn_k,
                     &scratch.normed,
-                    &mut scratch.k[..dim],
+                    &mut scratch.k[..kv_width],
                     model.pool(),
                     &mut scratch.q8,
                     &mut scratch.scales,
@@ -154,35 +158,47 @@ impl Gemma4Session<'_> {
                     &format!("blk.{layer_index}.attn_v.weight"),
                     &layer.attn_v,
                     &scratch.normed,
-                    &mut scratch.v[..dim],
+                    &mut scratch.v[..kv_width],
                     model.pool(),
                     &mut scratch.q8,
                     &mut scratch.scales,
                 )?;
-                rms_norm_inplace(&mut scratch.k[..dim], &layer.attn_k_norm, EPS);
-                rms_norm_inplace(&mut scratch.v[..dim], &scratch.v_norm_weight[..dim], EPS);
+                for kv_head in 0..cfg.kv_heads {
+                    let off = kv_head * dim;
+                    rms_norm_inplace(
+                        &mut scratch.k[off..off + dim],
+                        &layer.attn_k_norm,
+                        EPS,
+                    );
+                    rms_norm_inplace(
+                        &mut scratch.v[off..off + dim],
+                        &scratch.v_norm_weight[..dim],
+                        EPS,
+                    );
+                }
                 apply_rope(
-                    &mut scratch.k[..dim],
+                    &mut scratch.k[..kv_width],
                     position,
                     dim,
                     layer_index,
+                    cfg.is_swa(layer_index),
                     &model.rope_freqs,
                 )?;
                 self.kv[layer_index].append(
                     layer_index,
                     position,
-                    &scratch.k[..dim],
-                    &scratch.v[..dim],
+                    &scratch.k[..kv_width],
+                    &scratch.v[..kv_width],
                 )?;
             }
 
-            let cache_layer = kv_source_layer(layer_index);
+            let cache_layer = kv_source_layer(cfg, layer_index);
             attend(
                 layer_index,
                 position,
                 &scratch.q[..q_width],
                 &self.kv[cache_layer],
-                is_swa(layer_index),
+                cfg.is_swa(layer_index),
                 &mut scratch.attn[..q_width],
                 &mut scratch.scores,
                 &mut scratch.attention_values,
@@ -320,6 +336,7 @@ impl Gemma4Session<'_> {
 }
 pub(super) fn assemble_input_rows(
     rows: &[Gemma4InputRow],
+    embd: usize,
 ) -> Result<Vec<AssembledInputRow>, String> {
     if rows.is_empty() {
         return Err("Gemma4 input rows are empty".into());
@@ -339,9 +356,9 @@ pub(super) fn assemble_input_rows(
                 values,
                 per_layer_token,
             } => {
-                if values.len() != EMBED {
+                if values.len() != embd {
                     return Err(format!(
-                        "Gemma4 raw row {index} has length {}; expected {EMBED}",
+                        "Gemma4 raw row {index} has length {}; expected {embd}",
                         values.len()
                     ));
                 }
@@ -542,6 +559,7 @@ fn apply_rope(
     position: usize,
     dim: usize,
     layer: usize,
+    sliding: bool,
     full_freq_factors: &[f32],
 ) -> Result<(), String> {
     if values.len() % dim != 0 {
@@ -550,7 +568,7 @@ fn apply_rope(
             values.len()
         ));
     }
-    if is_swa(layer) {
+    if sliding {
         rope_neox_inplace(values, position, dim, 10_000.0);
         return Ok(());
     }
@@ -589,17 +607,20 @@ pub(super) fn attend(
     values: &mut Vec<f32>,
 ) -> Result<(), String> {
     let dim = cache.head_dim;
-    if query.len() != HEADS * dim || output.len() != HEADS * dim {
+    let row_width = cache.row_width;
+    let group_size = cache.group_size;
+    let q_width = HEADS * dim;
+    if query.len() != q_width || output.len() != q_width {
         return Err(format!(
             "blk.{layer} attention length mismatch: query {}, output {}, expected {}",
             query.len(),
             output.len(),
-            HEADS * dim
+            q_width
         ));
     }
     let rows = position + 1;
     let expected = rows
-        .checked_mul(dim)
+        .checked_mul(row_width)
         .ok_or_else(|| format!("blk.{layer} KV context length overflow"))?;
     if cache.keys.len() != expected || cache.values.len() != expected {
         return Err(format!(
@@ -615,16 +636,18 @@ pub(super) fn attend(
     values.resize(padded, 0.0);
 
     for (head, query) in query.chunks_exact(dim).enumerate() {
+        let kv_head = head / group_size;
+        let kv_offset_in_row = kv_head * dim;
         scores.fill(f32::NEG_INFINITY);
         for (score, token) in scores[..cached].iter_mut().zip(first..rows) {
-            let offset = token * dim;
+            let offset = token * row_width + kv_offset_in_row;
             *score = dot_f32(query, &cache.keys[offset..offset + dim], dim);
         }
         softmax_inplace(scores);
         for dimension in 0..dim {
             values.fill(0.0);
             for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
-                *slot = cache.values[token * dim + dimension];
+                *slot = cache.values[token * row_width + kv_offset_in_row + dimension];
             }
             output[head * dim + dimension] = dot_f32(values, scores, cached);
         }
