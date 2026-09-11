@@ -159,7 +159,9 @@ fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
 
 fn post_kv_failure_model() -> Gemma4Model {
     let cfg = test_config();
-    let mut layers = (0..cfg.layers).map(|l| zero_layer(l, &cfg)).collect::<Vec<_>>();
+    let mut layers = (0..cfg.layers)
+        .map(|l| zero_layer(l, &cfg))
+        .collect::<Vec<_>>();
     layers[0].attn_output.n_in += 1;
     let embd = cfg.embd;
     let per_layer_all = cfg.per_layer_all();
@@ -544,10 +546,14 @@ fn per_layer_projection_rejects_wrong_bf16_storage_length() {
 
 #[test]
 fn input_rows_reject_empty_invalid_and_nonfinite_values() {
-    assert!(assemble_input_rows(&[], TEST_EMBD).unwrap_err().contains("empty"));
-    assert!(assemble_input_rows(&[Gemma4InputRow::Token(262_144)], TEST_EMBD)
+    assert!(assemble_input_rows(&[], TEST_EMBD)
         .unwrap_err()
-        .contains("token"));
+        .contains("empty"));
+    assert!(
+        assemble_input_rows(&[Gemma4InputRow::Token(262_144)], TEST_EMBD)
+            .unwrap_err()
+            .contains("token")
+    );
     assert!(assemble_input_rows(
         &[Gemma4InputRow::Raw {
             values: vec![0.0; 1535],

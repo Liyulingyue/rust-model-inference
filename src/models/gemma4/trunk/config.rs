@@ -83,9 +83,11 @@ impl Gemma4Config {
                             "Invalid metadata gemma4.feed_forward_length: expected Int32 array, got {v:?}"
                         ));
                     };
-                    per_layer.push(usize::try_from(*n).map_err(|_| {
-                        format!("Invalid gemma4.feed_forward_length entry: {n}")
-                    })?);
+                    per_layer.push(
+                        usize::try_from(*n).map_err(|_| {
+                            format!("Invalid gemma4.feed_forward_length entry: {n}")
+                        })?,
+                    );
                 }
                 if per_layer.len() != layers {
                     return Err(format!(
@@ -96,15 +98,13 @@ impl Gemma4Config {
                 per_layer
             }
             Some(MetaValue::Uint32(n)) => {
-                let n = usize::try_from(*n).map_err(|_| {
-                    format!("Invalid gemma4.feed_forward_length scalar: {n}")
-                })?;
+                let n = usize::try_from(*n)
+                    .map_err(|_| format!("Invalid gemma4.feed_forward_length scalar: {n}"))?;
                 vec![n; layers]
             }
             Some(MetaValue::Int32(n)) => {
-                let n = usize::try_from(*n).map_err(|_| {
-                    format!("Invalid gemma4.feed_forward_length scalar: {n}")
-                })?;
+                let n = usize::try_from(*n)
+                    .map_err(|_| format!("Invalid gemma4.feed_forward_length scalar: {n}"))?;
                 vec![n; layers]
             }
             Some(other) => {
@@ -151,7 +151,11 @@ impl Gemma4Config {
         check_f32(source, "gemma4.rope.freq_base_swa", 10_000.0)?;
         check_f32(source, "gemma4.attention.layer_norm_rms_epsilon", EPS)?;
         check_u32(source, "gemma4.attention.key_length", FULL_HEAD_DIM as u32)?;
-        check_u32(source, "gemma4.attention.value_length", FULL_HEAD_DIM as u32)?;
+        check_u32(
+            source,
+            "gemma4.attention.value_length",
+            FULL_HEAD_DIM as u32,
+        )?;
         let logit_softcap = read_f32(source, "gemma4.final_logit_softcapping")?;
         let sliding_window = read_u32(source, "gemma4.attention.sliding_window")? as usize;
         let shared_kv_layers = read_u32(source, "gemma4.attention.shared_kv_layers")? as usize;
@@ -160,10 +164,22 @@ impl Gemma4Config {
             "gemma4.embedding_length_per_layer_input",
             PER_LAYER as u32,
         )?;
-        check_u32(source, "gemma4.attention.key_length_swa", SWA_HEAD_DIM as u32)?;
-        check_u32(source, "gemma4.attention.value_length_swa", SWA_HEAD_DIM as u32)?;
+        check_u32(
+            source,
+            "gemma4.attention.key_length_swa",
+            SWA_HEAD_DIM as u32,
+        )?;
+        check_u32(
+            source,
+            "gemma4.attention.value_length_swa",
+            SWA_HEAD_DIM as u32,
+        )?;
         check_u32(source, "gemma4.rope.dimension_count", FULL_HEAD_DIM as u32)?;
-        check_u32(source, "gemma4.rope.dimension_count_swa", SWA_HEAD_DIM as u32)?;
+        check_u32(
+            source,
+            "gemma4.rope.dimension_count_swa",
+            SWA_HEAD_DIM as u32,
+        )?;
         require_string(source, "tokenizer.ggml.model", "gemma4")?;
         require_gemma4_token_table(source)?;
 
@@ -176,8 +192,16 @@ impl Gemma4Config {
                 &[embd as u64, per_layer_all as u64][..],
                 GGMLType::BF16,
             ),
-            ("per_layer_proj_norm.weight", &[PER_LAYER as u64][..], GGMLType::F32),
-            ("rope_freqs.weight", &[(FULL_HEAD_DIM / 2) as u64][..], GGMLType::F32),
+            (
+                "per_layer_proj_norm.weight",
+                &[PER_LAYER as u64][..],
+                GGMLType::F32,
+            ),
+            (
+                "rope_freqs.weight",
+                &[(FULL_HEAD_DIM / 2) as u64][..],
+                GGMLType::F32,
+            ),
         ] {
             require_tensor(source, name, dims, ty)?;
         }
@@ -198,7 +222,11 @@ impl Gemma4Config {
             &[GGMLType::Q8_0, GGMLType::Q4K],
         )?;
         for layer in 0..layers {
-            let head_dim = if swa_pattern[layer] { SWA_HEAD_DIM } else { FULL_HEAD_DIM };
+            let head_dim = if swa_pattern[layer] {
+                SWA_HEAD_DIM
+            } else {
+                FULL_HEAD_DIM
+            };
             let kv_dim = kv_heads * head_dim;
             let q_dim = HEADS * head_dim;
             let ffn = ffn_per_layer[layer];
@@ -223,8 +251,18 @@ impl Gemma4Config {
                 &[embd as u64, kv_dim as u64],
                 &k_quant,
             )?;
-            require_tensor(source, &format!("{prefix}.attn_k_norm.weight"), &[head_dim as u64], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.attn_norm.weight"), &[embd as u64], GGMLType::F32)?;
+            require_tensor(
+                source,
+                &format!("{prefix}.attn_k_norm.weight"),
+                &[head_dim as u64],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.attn_norm.weight"),
+                &[embd as u64],
+                GGMLType::F32,
+            )?;
             require_tensor_any(
                 source,
                 &format!("{prefix}.attn_output.weight"),
@@ -237,7 +275,12 @@ impl Gemma4Config {
                 &[embd as u64, q_dim as u64],
                 &k_quant,
             )?;
-            require_tensor(source, &format!("{prefix}.attn_q_norm.weight"), &[head_dim as u64], GGMLType::F32)?;
+            require_tensor(
+                source,
+                &format!("{prefix}.attn_q_norm.weight"),
+                &[head_dim as u64],
+                GGMLType::F32,
+            )?;
             require_tensor_any(
                 source,
                 &format!("{prefix}.attn_v.weight"),
@@ -256,19 +299,54 @@ impl Gemma4Config {
                 &[embd as u64, ffn as u64],
                 &k_quant,
             )?;
-            require_tensor(source, &format!("{prefix}.ffn_norm.weight"), &[embd as u64], GGMLType::F32)?;
+            require_tensor(
+                source,
+                &format!("{prefix}.ffn_norm.weight"),
+                &[embd as u64],
+                GGMLType::F32,
+            )?;
             require_tensor_any(
                 source,
                 &format!("{prefix}.ffn_up.weight"),
                 &[embd as u64, ffn as u64],
                 &k_quant,
             )?;
-            require_tensor(source, &format!("{prefix}.inp_gate.weight"), &[embd as u64, PER_LAYER as u64], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.layer_output_scale.weight"), &[1], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.post_attention_norm.weight"), &[embd as u64], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.post_ffw_norm.weight"), &[embd as u64], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.post_norm.weight"), &[embd as u64], GGMLType::F32)?;
-            require_tensor(source, &format!("{prefix}.proj.weight"), &[PER_LAYER as u64, embd as u64], GGMLType::F32)?;
+            require_tensor(
+                source,
+                &format!("{prefix}.inp_gate.weight"),
+                &[embd as u64, PER_LAYER as u64],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.layer_output_scale.weight"),
+                &[1],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.post_attention_norm.weight"),
+                &[embd as u64],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.post_ffw_norm.weight"),
+                &[embd as u64],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.post_norm.weight"),
+                &[embd as u64],
+                GGMLType::F32,
+            )?;
+            require_tensor(
+                source,
+                &format!("{prefix}.proj.weight"),
+                &[PER_LAYER as u64, embd as u64],
+                GGMLType::F32,
+            )?;
         }
 
         Ok(Self {

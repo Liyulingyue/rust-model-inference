@@ -148,10 +148,22 @@ impl Gemma4Session<'_> {
                 &mut scratch.q[..q_width],
                 model.pool(),
             )?;
+            // Per-head QK-norm can't be batched (each head has its own
+            // scale), but rope_neox_inplace / apply_rope_full both loop
+            // over heads internally with one cached sin/cos table, so
+            // call them once on the full q_width buffer rather than
+            // 8× per-head.
             for query in scratch.q[..q_width].chunks_exact_mut(dim) {
                 rms_norm_inplace(query, &layer.attn_q_norm, EPS);
-                apply_rope(query, position, dim, layer_index, cfg.is_swa(layer_index), &model.rope_freqs)?;
             }
+            apply_rope(
+                &mut scratch.q[..q_width],
+                position,
+                dim,
+                layer_index,
+                cfg.is_swa(layer_index),
+                &model.rope_freqs,
+            )?;
 
             if layer_index < base_kv {
                 matmul_q8_pool(
@@ -174,11 +186,7 @@ impl Gemma4Session<'_> {
                 )?;
                 for kv_head in 0..cfg.kv_heads {
                     let off = kv_head * dim;
-                    rms_norm_inplace(
-                        &mut scratch.k[off..off + dim],
-                        &layer.attn_k_norm,
-                        EPS,
-                    );
+                    rms_norm_inplace(&mut scratch.k[off..off + dim], &layer.attn_k_norm, EPS);
                     // V uses a unit-norm weight (scratch.v_norm_weight is
                     // initialised to 1.0 and never loaded from a tensor), so
                     // skip the per-element weight multiply.
@@ -628,6 +636,10 @@ fn apply_rope(
         ));
     }
     if sliding {
+        // `rope_neox_inplace` internally loops over `n_heads = x.len() / dim`
+        // with one cached sin/cos table, so passing the full buffer is
+        // strictly cheaper than calling it once per head (which would
+        // rebuild the same table 8 times for E2B/E4B).
         rope_neox_inplace(values, position, dim, 10_000.0);
         return Ok(());
     }
@@ -638,20 +650,46 @@ fn apply_rope(
             dim / 2
         ));
     }
-    let theta_scale = 1_000_000.0_f32.powf(-2.0 / dim as f32);
-    for head in values.chunks_exact_mut(dim) {
-        let mut theta = position as f32;
-        for pair in 0..dim / 2 {
-            let angle = theta / full_freq_factors[pair];
-            let (cosine, sine) = crate::ops::rope::rope_sin_cos(angle);
-            let first = head[pair];
-            let second = head[pair + dim / 2];
-            head[pair] = first.mul_add(cosine, second * -sine);
-            head[pair + dim / 2] = first.mul_add(sine, second * cosine);
-            theta *= theta_scale;
+    apply_rope_full(values, position, dim, full_freq_factors);
+    Ok(())
+}
+
+/// Full-attention RoPE: pre-compute the sin/cos table once from
+/// `factors` (which already encodes `θ_i = 1 / freq_base^(2i/dim)`)
+/// and apply the standard neox rotation to every head in one pass.
+fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f32]) {
+    let half = dim / 2;
+    let n_heads = values.len() / dim;
+    if half == 0 || n_heads == 0 {
+        return;
+    }
+    let pos_f = position as f32;
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
+    for (i, factor) in factors[..half].iter().enumerate() {
+        let angle = pos_f / factor;
+        let (c, s) = crate::ops::rope::rope_sin_cos(angle);
+        cos_table[i] = c;
+        sin_table[i] = s;
+    }
+    // Same rotation formula as the scalar path; AVX2-equivalent of the
+    // inner FMA pattern will be picked up by the compiler when
+    // targeting AVX2. The key win is one sin/cos table per call
+    // (vs `n_heads × half` calls in the old loop).
+    for h in 0..n_heads {
+        let base = h * dim;
+        // split_at_mut avoids the borrow-conflict that the slice
+        // pair `(values[..base+half], values[base+half..])` would
+        // create (overlap at base+half).
+        let (lo, hi) = values[base..base + dim].split_at_mut(half);
+        for i in 0..half {
+            let (c, s) = (cos_table[i], sin_table[i]);
+            let first = lo[i];
+            let second = hi[i];
+            lo[i] = first.mul_add(c, second * -s);
+            hi[i] = first.mul_add(s, second * c);
         }
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -711,8 +749,7 @@ pub(super) fn attend(
         let h_end = (h_start + h_step).min(HEADS);
         let mut head_scores = vec![f32::NEG_INFINITY; padded];
         for head in h_start..h_end {
-            let query_head =
-                unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
+            let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
             let kv_head = head / group_size;
             let kv_offset = kv_head * dim;
             head_scores.fill(f32::NEG_INFINITY);
@@ -760,7 +797,14 @@ unsafe fn attend_v(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return attend_v_avx2(
-                values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+                values_ptr,
+                scores_ptr,
+                row_width,
+                kv_offset,
+                first,
+                cached,
+                dim,
+                head_output,
             );
         }
     }
@@ -768,12 +812,26 @@ unsafe fn attend_v(
     {
         if std::arch::is_aarch64_feature_detected!("neon") {
             return attend_v_neon(
-                values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+                values_ptr,
+                scores_ptr,
+                row_width,
+                kv_offset,
+                first,
+                cached,
+                dim,
+                head_output,
             );
         }
     }
     attend_v_scalar(
-        values_ptr, scores_ptr, row_width, kv_offset, first, cached, dim, head_output,
+        values_ptr,
+        scores_ptr,
+        row_width,
+        kv_offset,
+        first,
+        cached,
+        dim,
+        head_output,
     )
 }
 
@@ -917,7 +975,11 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     }
 }
 
-#[cfg_attr(not(debug_assertions), allow(dead_code, unused_variables), inline(always))]
+#[cfg_attr(
+    not(debug_assertions),
+    allow(dead_code, unused_variables),
+    inline(always)
+)]
 fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     #[cfg(debug_assertions)]
     {

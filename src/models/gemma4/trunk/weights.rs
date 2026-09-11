@@ -1,6 +1,4 @@
-use super::config::{
-    Gemma4Config, FULL_HEAD_DIM, HEADS, PER_LAYER, SWA_HEAD_DIM, VOCAB,
-};
+use super::config::{Gemma4Config, FULL_HEAD_DIM, HEADS, PER_LAYER, SWA_HEAD_DIM, VOCAB};
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -180,11 +178,7 @@ fn load_layer(
             &format!("{prefix}.post_attention_norm.weight"),
             &[embd as u64],
         )?,
-        ffn_norm: load_f32(
-            source,
-            &format!("{prefix}.ffn_norm.weight"),
-            &[embd as u64],
-        )?,
+        ffn_norm: load_f32(source, &format!("{prefix}.ffn_norm.weight"), &[embd as u64])?,
         ffn_gate: load_weight_any(
             source,
             &format!("{prefix}.ffn_gate.weight"),

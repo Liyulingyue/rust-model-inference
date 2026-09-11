@@ -1,4 +1,4 @@
-use super::config::{Gemma4Config, HEADS, FULL_HEAD_DIM, PER_LAYER, VOCAB};
+use super::config::{Gemma4Config, FULL_HEAD_DIM, HEADS, PER_LAYER, VOCAB};
 
 pub(super) struct Gemma4Scratch {
     pub(super) x: Vec<f32>,
