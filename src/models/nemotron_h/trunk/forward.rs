@@ -527,12 +527,18 @@ impl NemotronModel {
                 // Write current input into history[0].
                 let h0 = &mut scratch.ssm_conv_hist[hist_base..hist_base + conv_out_cols];
                 h0.copy_from_slice(cur_input);
-                // The conv_out now contains: x_conv, B, C. Apply SiLU
-                // gating with z (which came from ssm_in_out[d_inner..]).
-                let x_act: Vec<f32> = conv_out[..inner_size]
+                // The conv_out contains: x_conv (first d_inner channels),
+                // B, C (next 2 * n_group * d_state channels). Per
+                // llama.cpp mamba-base.cpp:
+                //   xBC = ggml_silu(xBC)   // SiLU applied to ALL channels
+                // then B = silu(conv_B), C = silu(conv_C) feed the
+                // scan, x = silu(conv_x) feeds both the scan and the
+                // D-skip. The z gate is APPLIED AFTER the scan and
+                // D-skip via ggml_swiglu_split(z, y) = silu(z) * y.
+                // So x is NOT gated by z here; gating happens later.
+                let x_pre: Vec<f32> = conv_out[..inner_size]
                     .iter()
-                    .zip(ssm_in_out[z_offset..z_offset + inner_size].iter())
-                    .map(|(&x, &z)| crate::ops::silu(x) * z)
+                    .map(|&v| crate::ops::silu(v))
                     .collect();
                 // B and C are the trailing 2 * n_group * d_state
                 // channels of the conv1d output, stored as (n_group *
@@ -613,7 +619,13 @@ impl NemotronModel {
                 //     d_state-dim state vector at (h, k).
                 //   * B[g, n] = b[g * d_state + n]
                 //   * C[g, n] = c[g * d_state + n]
-                //   * x_dt = x[h * headdim + k] * dt_per_head[h]
+                //   * x_dt = silu(conv_x)[h * headdim + k] * dt_per_head[h]
+                // The D-skip in llama.cpp is `D * silu(conv_x)` (NOT
+                // gated by z), and the z-gate is applied AFTER the
+                // scan and D-skip via ggml_swiglu_split(z, y) =
+                // silu(z) * y. See mamba-base.cpp lines 283-285:
+                //   y = ggml_add(y, ggml_mul(x, ssm_d));   // +D*silu(conv_x)
+                //   y = ggml_swiglu_split(z, y);            // silu(z) * y
                 for h in 0..n_head {
                     let g = h / heads_per_group;
                     let g_b_off = g * d_state;
@@ -624,7 +636,8 @@ impl NemotronModel {
                     let dt_h = dt_per_head[h];
                     let d_h = ssm_d[h];
                     for k in 0..headdim {
-                        let x_dt = x_act[head_x_off + k] * dt_h;
+                        // x_dt uses the post-SiLU conv1d x (no z gate).
+                        let x_dt = x_pre[head_x_off + k] * dt_h;
                         let state_row_off = head_state_off + k * d_state;
                         let mut sumf = 0.0f32;
                         for n in 0..d_state {
@@ -635,17 +648,16 @@ impl NemotronModel {
                             state[state_idx] = new_state;
                             sumf += new_state * c_gn;
                         }
-                        // Output: scan dot product + D-skip on the
-                        // gated conv1d output (silu(conv_x) * z).
-                        // llama.cpp's scan kernel doesn't apply D, but
-                        // removing the D-skip here produced gibberish
-                        // (e.g. 'irropBelcor deltaHar Xuler fourgat'),
-                        // so it appears the model still expects the
-                        // skip term even if the reference impl omits
-                        // it. Possibly a quantization-related
-                        // divergence.
-                        y_buf[head_x_off + k] = sumf + d_h * x_act[head_x_off + k];
+                        // D-skip on post-SiLU conv1d x, NOT gated by z.
+                        y_buf[head_x_off + k] = sumf + d_h * x_pre[head_x_off + k];
                     }
+                }
+                // z-gate applied AFTER the scan+D-skip:
+                //   y_final[h, k] = silu(z[h, k]) * y_buf[h, k]
+                // (equivalent to ggml_swiglu_split(z, y_buf)).
+                let z_slice = &ssm_in_out[z_offset..z_offset + inner_size];
+                for j in 0..inner_size {
+                    y_buf[j] = crate::ops::silu(z_slice[j]) * y_buf[j];
                 }
                 // Persist scan state for the next token in the same
                 // prefill.
