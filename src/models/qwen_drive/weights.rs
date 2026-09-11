@@ -1,9 +1,8 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::Weight;
 
 enum HeadWeight<'a> {
-    Planner(Weight<'a>),
+    Planner(&'a [u8]),
     PerceptionBf16(Vec<u8>),
 }
 
@@ -105,7 +104,59 @@ fn load_bias<S: TensorSource + ?Sized>(
     }
 }
 
+#[inline(always)]
+fn bf16_at(bytes: &[u8], index: usize) -> f32 {
+    let offset = index * 2;
+    crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+}
+
+// PyTorch 2.8's AArch64 BF16 GEMV widens eight BF16 values into two F32x4
+// accumulators, keeps eight accumulators per 32-value block, then reduces them
+// as a fixed tree. The order is observable when the result is rounded to BF16.
+fn torch28_bf16_dot(weight: &[u8], input: &[u8]) -> f32 {
+    debug_assert_eq!(weight.len(), input.len());
+    let len = weight.len() / 2;
+    let aligned = len & !31;
+    let mut sums = [[0.0f32; 4]; 8];
+    for base in (0..aligned).step_by(32) {
+        for (register, sum) in sums.iter_mut().enumerate() {
+            for (lane, value) in sum.iter_mut().enumerate() {
+                let index = base + register * 4 + lane;
+                *value = bf16_at(weight, index).mul_add(bf16_at(input, index), *value);
+            }
+        }
+    }
+    for offset in [4, 2, 1] {
+        for register in 0..offset {
+            for lane in 0..4 {
+                sums[register][lane] += sums[register + offset][lane];
+            }
+        }
+    }
+    let mut result = (sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3]);
+
+    let vector_aligned = len & !7;
+    let mut tail = [0.0f32; 4];
+    for base in (aligned..vector_aligned).step_by(8) {
+        for lane in 0..4 {
+            tail[lane] =
+                bf16_at(weight, base + lane).mul_add(bf16_at(input, base + lane), tail[lane]);
+            tail[lane] = bf16_at(weight, base + 4 + lane)
+                .mul_add(bf16_at(input, base + 4 + lane), tail[lane]);
+        }
+    }
+    result += (tail[0] + tail[1]) + (tail[2] + tail[3]);
+    for index in vector_aligned..len {
+        result += bf16_at(weight, index) * bf16_at(input, index);
+    }
+    result
+}
+
 impl<'a> HeadLinear<'a> {
+    pub(crate) fn output(&self) -> usize {
+        self.output
+    }
+
     pub fn load<S: TensorSource + ?Sized>(
         source: &'a S,
         name: &str,
@@ -114,9 +165,7 @@ impl<'a> HeadLinear<'a> {
         bias: bool,
     ) -> Result<Self, String> {
         let weight_name = format!("{name}.weight");
-        checked_matrix(source, &weight_name, input, output, GGMLType::BF16)?;
-        let weight = crate::models::qwen35::trunk::weights::load_weight(source, &weight_name)
-            .ok_or_else(|| format!("Unsupported tensor: {weight_name}"))?;
+        let weight = checked_matrix(source, &weight_name, input, output, GGMLType::BF16)?;
         Ok(Self {
             weight: HeadWeight::Planner(weight),
             bias: bias
@@ -178,7 +227,7 @@ impl<'a> HeadLinear<'a> {
         &self,
         input: &[f32],
         rows: usize,
-        _pool: &ComputePool,
+        pool: &ComputePool,
         output: &mut [f32],
         scratch: &mut HeadLinearScratch,
     ) -> Result<(), String> {
@@ -193,17 +242,45 @@ impl<'a> HeadLinear<'a> {
                 self.output
             ));
         }
-        for (input, output) in input
-            .chunks_exact(self.input)
-            .zip(output.chunks_exact_mut(self.output))
-        {
-            match &self.weight {
-                HeadWeight::Planner(weight) => {
-                    weight
-                        .kernel
-                        .forward(input, output, self.input, self.output);
-                }
-                HeadWeight::PerceptionBf16(weight) => {
+        match &self.weight {
+            HeadWeight::Planner(weight) => {
+                scratch.rounded.clear();
+                scratch.rounded.extend(
+                    input
+                        .iter()
+                        .flat_map(|value| crate::ops::f32_to_bf16(*value).to_le_bytes()),
+                );
+                let input_ptr = scratch.rounded.as_ptr() as usize;
+                let weight_ptr = weight.as_ptr() as usize;
+                let output_ptr = output.as_mut_ptr() as usize;
+                pool.compute(|thread, threads| {
+                    for task in (thread..rows * self.output).step_by(threads) {
+                        let row = task / self.output;
+                        let output_index = task % self.output;
+                        let input_offset = row * self.input * 2;
+                        let weight_offset = output_index * self.input * 2;
+                        let input = unsafe {
+                            std::slice::from_raw_parts(
+                                (input_ptr as *const u8).add(input_offset),
+                                self.input * 2,
+                            )
+                        };
+                        let weight = unsafe {
+                            std::slice::from_raw_parts(
+                                (weight_ptr as *const u8).add(weight_offset),
+                                self.input * 2,
+                            )
+                        };
+                        let sum = torch28_bf16_dot(weight, input);
+                        unsafe { *(output_ptr as *mut f32).add(task) = sum };
+                    }
+                });
+            }
+            HeadWeight::PerceptionBf16(weight) => {
+                for (input, output) in input
+                    .chunks_exact(self.input)
+                    .zip(output.chunks_exact_mut(self.output))
+                {
                     scratch.rounded.clear();
                     scratch.rounded.extend(
                         input
@@ -215,15 +292,15 @@ impl<'a> HeadLinear<'a> {
                     }
                 }
             }
+        }
+        for output in output.chunks_exact_mut(self.output) {
             if let Some(bias) = &self.bias {
                 for (value, bias) in output.iter_mut().zip(bias) {
                     *value += bias;
                 }
             }
-            if matches!(self.weight, HeadWeight::PerceptionBf16(_)) {
-                for value in output {
-                    *value = crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(*value));
-                }
+            for value in output {
+                *value = crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(*value));
             }
         }
         Ok(())
@@ -299,5 +376,61 @@ impl HeadConv2d {
             output_channels,
             kernel,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planner_linear_is_bitwise_stable_across_thread_counts() {
+        const INPUT: usize = 64;
+        const OUTPUT: usize = 17;
+        const ROWS: usize = 3;
+        let mut state = 42_u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f32::from_bits(0x3f00_0000 | (state & 0x007f_ffff)) - 1.0
+        };
+        let weight = (0..INPUT * OUTPUT)
+            .flat_map(|_| crate::ops::f32_to_bf16(next()).to_le_bytes())
+            .collect::<Vec<_>>();
+        let bias = (0..OUTPUT).map(|_| next()).collect::<Vec<_>>();
+        let input = (0..ROWS * INPUT).map(|_| next()).collect::<Vec<_>>();
+        let linear = HeadLinear {
+            weight: HeadWeight::Planner(&weight),
+            bias: Some(bias),
+            input: INPUT,
+            output: OUTPUT,
+        };
+        let mut single = vec![0.0; ROWS * OUTPUT];
+        let mut parallel = vec![0.0; ROWS * OUTPUT];
+        linear
+            .forward_rows(
+                &input,
+                ROWS,
+                &ComputePool::new(1),
+                &mut single,
+                &mut HeadLinearScratch::default(),
+            )
+            .unwrap();
+        linear
+            .forward_rows(
+                &input,
+                ROWS,
+                &ComputePool::new(12),
+                &mut parallel,
+                &mut HeadLinearScratch::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            single.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            parallel
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 }

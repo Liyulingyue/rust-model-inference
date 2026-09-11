@@ -12,6 +12,7 @@ use rust_model_inference::TensorSource;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
+    QwenDrive,
     Tts,
     Model,
 }
@@ -19,6 +20,8 @@ enum DispatchMode {
 fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
     if options.dreamx {
         DispatchMode::DreamX
+    } else if options.planner.is_some() || options.perception.is_some() {
+        DispatchMode::QwenDrive
     } else if options.tts {
         DispatchMode::Tts
     } else {
@@ -78,6 +81,10 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    let qwen_drive_options = app::qwen_drive_cli_options(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
 
     // Resolved thread count for both LLM ComputePool and rayon global pool.
     let available_threads = std::thread::available_parallelism()
@@ -106,6 +113,13 @@ fn main() {
         }
         DispatchMode::Tts => {
             app::run_or_exit(app::run_tts_cli(&options));
+            return;
+        }
+        DispatchMode::QwenDrive => {
+            app::run_or_exit(app::run_qwen_drive_cli(
+                qwen_drive_options.expect("validated Qwen-Drive options"),
+                n_threads,
+            ));
             return;
         }
         DispatchMode::Model => {}

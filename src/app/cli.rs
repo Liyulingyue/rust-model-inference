@@ -18,6 +18,15 @@ pub enum EmbeddingOutput {
 #[derive(Debug, Default)]
 pub struct CliOptions {
     pub dreamx: bool,
+    pub planner: Option<PathBuf>,
+    pub perception: Option<PathBuf>,
+    pub scenes: Option<PathBuf>,
+    pub image_root: Option<PathBuf>,
+    pub frames: Option<PathBuf>,
+    pub planning_mode: Option<String>,
+    pub num_samples: Option<usize>,
+    pub num_steps: Option<usize>,
+    pub output: Option<PathBuf>,
     pub model: PathBuf,
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
@@ -85,6 +94,33 @@ pub struct DreamXCliOptions {
     pub dry_run: bool,
     pub overwrite: bool,
     pub allow_memory_overcommit: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum QwenDriveHead {
+    Planner(PathBuf),
+    Perception(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanningMode {
+    Direct,
+    Reasoning,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct QwenDriveCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub head: QwenDriveHead,
+    pub mode: PlanningMode,
+    pub scenes: Option<PathBuf>,
+    pub image_root: Option<PathBuf>,
+    pub frames: Option<PathBuf>,
+    pub output: PathBuf,
+    pub samples: usize,
+    pub steps: usize,
+    pub seed: i64,
 }
 
 pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
@@ -193,6 +229,33 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--dreamx" => options.dreamx = true,
+            "--planner" => {
+                options.planner = Some(required_path_value(args, &mut i, "--planner")?);
+            }
+            "--perception" => {
+                options.perception = Some(required_path_value(args, &mut i, "--perception")?);
+            }
+            "--scenes" => {
+                options.scenes = Some(required_path_value(args, &mut i, "--scenes")?);
+            }
+            "--image-root" => {
+                options.image_root = Some(required_path_value(args, &mut i, "--image-root")?);
+            }
+            "--frames" => {
+                options.frames = Some(required_path_value(args, &mut i, "--frames")?);
+            }
+            "--mode" => {
+                options.planning_mode = Some(required_string_value(args, &mut i, "--mode")?);
+            }
+            "--num-samples" => {
+                options.num_samples = Some(required_usize_value(args, &mut i, "--num-samples")?);
+            }
+            "--num-steps" => {
+                options.num_steps = Some(required_usize_value(args, &mut i, "--num-steps")?);
+            }
+            "--output" => {
+                options.output = Some(required_path_value(args, &mut i, "--output")?);
+            }
             "--model" => {
                 if i + 1 < args.len() {
                     options.model = args[i + 1].as_str().into();
@@ -483,6 +546,151 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     Ok(options)
 }
 
+fn required_string_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
+    let value = args
+        .get(*index + 1)
+        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("Missing value for {flag}"))?;
+    *index += 1;
+    Ok(value.clone())
+}
+
+fn required_path_value(args: &[String], index: &mut usize, flag: &str) -> Result<PathBuf, String> {
+    required_string_value(args, index, flag).map(PathBuf::from)
+}
+
+fn required_usize_value(args: &[String], index: &mut usize, flag: &str) -> Result<usize, String> {
+    required_string_value(args, index, flag)?
+        .parse()
+        .map_err(|error| format!("Invalid {flag} value: {error}"))
+}
+
+pub fn qwen_drive_cli_options(
+    options: &CliOptions,
+) -> Result<Option<QwenDriveCliOptions>, String> {
+    let requested = options.planner.is_some()
+        || options.perception.is_some()
+        || options.scenes.is_some()
+        || options.image_root.is_some()
+        || options.frames.is_some()
+        || options.planning_mode.is_some()
+        || options.num_samples.is_some()
+        || options.num_steps.is_some()
+        || options.output.is_some();
+    if !requested {
+        return Ok(None);
+    }
+    let head = match (&options.planner, &options.perception) {
+        (Some(_), Some(_)) => return Err("--planner and --perception are mutually exclusive".into()),
+        (Some(path), None) => QwenDriveHead::Planner(path.clone()),
+        (None, Some(path)) => QwenDriveHead::Perception(path.clone()),
+        (None, None) => return Err("Qwen-Drive requires --planner or --perception".into()),
+    };
+    if options.model.as_os_str().is_empty() {
+        return Err("Qwen-Drive requires --model".into());
+    }
+    let mmproj = options
+        .mmproj
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Qwen-Drive requires --mmproj")?;
+    let output = options
+        .output
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("Qwen-Drive requires --output")?;
+    let conflict = if options.dreamx {
+        Some("--dreamx")
+    } else if options.tts {
+        Some("--tts")
+    } else if options.edit {
+        Some("--edit")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.image.is_some() {
+        Some("--image")
+    } else if options.video.is_some() {
+        Some("--video")
+    } else if options.vae.is_some() || options.text_encoder.is_some() {
+        Some("Z-Image flags")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.out.is_some() {
+        Some("--out")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("Qwen-Drive cannot be used with {conflict}"));
+    }
+
+    let (mode, scenes, image_root, frames, samples, steps, seed) = match head {
+        QwenDriveHead::Planner(_) => {
+            let mode = match options.planning_mode.as_deref() {
+                Some("direct_planning") => PlanningMode::Direct,
+                Some("reasoning_planning") => PlanningMode::Reasoning,
+                Some(value) => {
+                    return Err(format!(
+                        "Invalid --mode {value:?}; expected direct_planning or reasoning_planning"
+                    ));
+                }
+                None => return Err("--planner requires --mode".into()),
+            };
+            let scenes = options
+                .scenes
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty())
+                .ok_or("--planner requires --scenes")?;
+            let image_root = options
+                .image_root
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty())
+                .ok_or("--planner requires --image-root")?;
+            if options.frames.is_some() {
+                return Err("--frames requires --perception".into());
+            }
+            let samples = options.num_samples.ok_or("--planner requires --num-samples")?;
+            let steps = options.num_steps.ok_or("--planner requires --num-steps")?;
+            let seed = options.seed.ok_or("--planner requires --seed")?;
+            if samples == 0 || steps == 0 {
+                return Err("--num-samples and --num-steps must be greater than zero".into());
+            }
+            (mode, Some(scenes), Some(image_root), None, samples, steps, seed)
+        }
+        QwenDriveHead::Perception(_) => {
+            if options.scenes.is_some()
+                || options.image_root.is_some()
+                || options.planning_mode.is_some()
+                || options.num_samples.is_some()
+                || options.num_steps.is_some()
+                || options.seed.is_some()
+            {
+                return Err("Planning flags require --planner".into());
+            }
+            let frames = options
+                .frames
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty())
+                .ok_or("--perception requires --frames")?;
+            (PlanningMode::Direct, None, None, Some(frames), 1, 10, 42)
+        }
+    };
+
+    Ok(Some(QwenDriveCliOptions {
+        model: options.model.clone(),
+        mmproj,
+        head,
+        mode,
+        scenes,
+        image_root,
+        frames,
+        output,
+        samples,
+        steps,
+        seed,
+    }))
+}
+
 pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOptions>, String> {
     let unique_option = if options.negative_prompt.is_some() {
         Some("--negative-prompt")
@@ -651,7 +859,12 @@ pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOption
 
 pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptions>, String> {
     if options.text_encoder.is_none() && options.vae.is_none() {
-        return if options.seed.is_some() && !options.tts && !options.dreamx {
+        return if options.seed.is_some()
+            && options.planner.is_none()
+            && options.perception.is_none()
+            && !options.tts
+            && !options.dreamx
+        {
             Err("--seed requires Z-Image components or --tts".into())
         } else {
             Ok(None)
@@ -734,6 +947,9 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if qwen_drive_cli_options(options)?.is_some() {
+        return Ok(());
+    }
     if dreamx_cli_options(options)?.is_some() {
         return Ok(());
     }
@@ -1039,6 +1255,45 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn planner_cli_requires_complete_component_set() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "vlm.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--planner",
+            "planner.gguf",
+            "--scenes",
+            "scenes.jsonl",
+            "--image-root",
+            "frames",
+            "--mode",
+            "direct_planning",
+            "--num-samples",
+            "1",
+            "--num-steps",
+            "10",
+            "--seed",
+            "42",
+            "--output",
+            "predictions.jsonl",
+        ]))
+        .unwrap();
+        let planner = qwen_drive_cli_options(&options).unwrap().unwrap();
+        assert_eq!(planner.model, PathBuf::from("vlm.gguf"));
+        assert_eq!(planner.mmproj, PathBuf::from("mmproj.gguf"));
+        assert_eq!(planner.output, PathBuf::from("predictions.jsonl"));
+        assert_eq!(planner.samples, 1);
+        assert_eq!(planner.steps, 10);
+        assert_eq!(planner.seed, 42);
+        assert!(z_image_cli_options(&options).unwrap().is_none());
+
+        let incomplete = parse_cli_options(&args(&["rmi", "--planner", "p.gguf"])).unwrap();
+        assert!(qwen_drive_cli_options(&incomplete).is_err());
     }
 
     #[test]

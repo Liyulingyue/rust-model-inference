@@ -16,7 +16,7 @@ use super::weights::{linear_forward, load_weight};
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
 
-pub(in crate::models::dots) mod exp;
+pub(crate) mod exp;
 mod log;
 mod melbank;
 
