@@ -120,7 +120,9 @@ fn assert_matches(prompt: &str, fixture: &str) {
 #[test]
 #[ignore = "skipped: Rust Mamba2 scan structure now matches llama.cpp, but residual \
           magnitudes drift and output is coherent-but-wrong English. Re-enable once \
-          the L2 growth is bounded and the logits match the oracle."]
+          the L2 growth is bounded and the logits match the oracle. \
+          Run with `cargo test --release --test nemotron_h_parity -- --include-ignored` \
+          to see the current oracle vs ours diff."]
 fn nemotron_h_4b_hello() {
     assert_matches("Hello", "Hello.txt");
 }
