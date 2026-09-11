@@ -232,6 +232,7 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
         &mut output,
         &mut Vec::new(),
         &mut Vec::new(),
+        &ComputePool::new(1),
     )
     .unwrap();
 

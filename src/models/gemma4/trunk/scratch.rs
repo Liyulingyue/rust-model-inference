@@ -29,6 +29,11 @@ impl Gemma4Scratch {
         let per_layer_all = cfg.per_layer_all();
         let max_kv_width = cfg.kv_heads * FULL_HEAD_DIM;
         let max_input = max_ffn.max(HEADS * FULL_HEAD_DIM);
+        // Score / value buffers are bounded by the sliding-window length
+        // (512 for Gemma4) when SWA is on, or full KV context otherwise.
+        // Allocate 512 once so per-decode `resize` is a no-op and we don't
+        // grow during prefill (where padded length steps up to 256).
+        let max_attn_buffer = 512usize.next_power_of_two();
         Self {
             x: vec![0.0; embd],
             normed: vec![0.0; embd],
@@ -45,8 +50,8 @@ impl Gemma4Scratch {
             per_layer_gate: vec![0.0; PER_LAYER],
             q8: vec![0; max_input],
             scales: vec![0.0; max_input.div_ceil(32)],
-            scores: Vec::new(),
-            attention_values: Vec::new(),
+            scores: vec![f32::NEG_INFINITY; max_attn_buffer],
+            attention_values: vec![0.0; max_attn_buffer],
             v_norm_weight: vec![1.0; FULL_HEAD_DIM],
             logits: vec![0.0; VOCAB],
         }

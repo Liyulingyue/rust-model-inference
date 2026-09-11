@@ -6,7 +6,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_neox_inplace, softmax_inplace,
+    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,11 +170,10 @@ impl Gemma4Session<'_> {
                         &layer.attn_k_norm,
                         EPS,
                     );
-                    rms_norm_inplace(
-                        &mut scratch.v[off..off + dim],
-                        &scratch.v_norm_weight[..dim],
-                        EPS,
-                    );
+                    // V uses a unit-norm weight (scratch.v_norm_weight is
+                    // initialised to 1.0 and never loaded from a tensor), so
+                    // skip the per-element weight multiply.
+                    rms_unit_inplace(&mut scratch.v[off..off + dim], EPS);
                 }
                 apply_rope(
                     &mut scratch.k[..kv_width],
@@ -202,6 +201,7 @@ impl Gemma4Session<'_> {
                 &mut scratch.attn[..q_width],
                 &mut scratch.scores,
                 &mut scratch.attention_values,
+                model.pool(),
             )?;
             matmul(
                 &format!("blk.{layer_index}.attn_output.weight"),
@@ -434,17 +434,8 @@ pub(super) fn matmul(
                 values.len()
             ));
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
-                *result = dot_f32(row, input, weight.n_in);
-            }
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            weight
-                .kernel
-                .forward(input, output, weight.n_in, weight.n_out);
+        for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
+            *result = dot_f32(row, input, weight.n_in);
         }
     } else {
         let blocks = weight.n_in.div_ceil(32);
@@ -605,6 +596,7 @@ pub(super) fn attend(
     output: &mut [f32],
     scores: &mut Vec<f32>,
     values: &mut Vec<f32>,
+    pool: &ComputePool,
 ) -> Result<(), String> {
     let dim = cache.head_dim;
     let row_width = cache.row_width;
@@ -635,23 +627,47 @@ pub(super) fn attend(
     scores.resize(padded, f32::NEG_INFINITY);
     values.resize(padded, 0.0);
 
-    for (head, query) in query.chunks_exact(dim).enumerate() {
-        let kv_head = head / group_size;
-        let kv_offset_in_row = kv_head * dim;
-        scores.fill(f32::NEG_INFINITY);
-        for (score, token) in scores[..cached].iter_mut().zip(first..rows) {
-            let offset = token * row_width + kv_offset_in_row;
-            *score = dot_f32(query, &cache.keys[offset..offset + dim], dim);
-        }
-        softmax_inplace(scores);
-        for dimension in 0..dim {
-            values.fill(0.0);
-            for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
-                *slot = cache.values[token * row_width + kv_offset_in_row + dimension];
+    // Parallelize per-head over the compute pool. The hot inner loop is the
+    // strided V gather (`cache.values[token * row_width + kv_offset + dim]`),
+    // which is cache-unfriendly on a single thread; spreading heads across
+    // threads gives each its own working set.
+    let query_ptr = query.as_ptr();
+    let keys_ptr = cache.keys.as_ptr();
+    let values_ptr = cache.values.as_ptr();
+    let scores_ptr = scores.as_mut_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(move |ith, nth| {
+        // Each thread gets a contiguous head range. 8 heads / 8 threads → 1
+        // head per thread; the kernel auto-distributes via `nth`.
+        let h_step = (HEADS + nth - 1) / nth;
+        let h_start = (ith * h_step).min(HEADS);
+        let h_end = (h_start + h_step).min(HEADS);
+        // Per-thread scratch (allocated here to avoid cross-thread sharing).
+        let mut head_scores = vec![f32::NEG_INFINITY; padded];
+        let mut head_values = vec![0.0f32; padded];
+        for head in h_start..h_end {
+            let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
+            let kv_head = head / group_size;
+            let kv_offset = kv_head * dim;
+            head_scores.fill(f32::NEG_INFINITY);
+            for (score, token) in head_scores[..cached].iter_mut().zip(first..rows) {
+                let offset = token * row_width + kv_offset;
+                let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
+                *score = dot_f32(query_head, key, dim);
             }
-            output[head * dim + dimension] = dot_f32(values, scores, cached);
+            softmax_inplace(&mut head_scores);
+            let head_output =
+                unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
+            for dimension in 0..dim {
+                head_values.fill(0.0);
+                for (slot, token) in head_values[..cached].iter_mut().zip(first..rows) {
+                    let offset = token * row_width + kv_offset + dimension;
+                    *slot = unsafe { *values_ptr.add(offset) };
+                }
+                head_output[dimension] = dot_f32(&head_values, &head_scores, cached);
+            }
         }
-    }
+    });
     ensure_finite(&format!("blk.{layer} attention"), output)
 }
 
@@ -679,16 +695,21 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     }
 }
 
+#[cfg_attr(not(debug_assertions), allow(dead_code, unused_variables), inline(always))]
 fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
-    if let Some((index, value)) = values
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
+    #[cfg(debug_assertions)]
     {
-        return Err(format!(
-            "{name} produced non-finite value {value:?} at index {index}"
-        ));
+        if let Some((index, value)) = values
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(format!(
+                "{name} produced non-finite value {value:?} at index {index}"
+            ));
+        }
     }
+    let _ = (name, values);
     Ok(())
 }
 
