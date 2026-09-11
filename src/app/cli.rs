@@ -45,6 +45,9 @@ pub struct CliOptions {
     pub overwrite: bool,
     pub allow_memory_overcommit: bool,
     pub temperature: Option<f32>,
+    pub cfg_scale: Option<f32>,
+    pub top_k: Option<usize>,
+    pub top_p: Option<f32>,
     pub threads: usize,
     pub thinking: bool,
     pub embedding: bool,
@@ -329,6 +332,42 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
                     i += 1;
                 }
+            }
+            "--temperature" => {
+                let value = args.get(i + 1).ok_or("Missing value for --temperature")?;
+                options.temperature = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --temperature value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--cfg-scale" => {
+                let value = args.get(i + 1).ok_or("Missing value for --cfg-scale")?;
+                options.cfg_scale = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --cfg-scale value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--top-k" => {
+                let value = args.get(i + 1).ok_or("Missing value for --top-k")?;
+                options.top_k = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --top-k value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--top-p" => {
+                let value = args.get(i + 1).ok_or("Missing value for --top-p")?;
+                options.top_p = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --top-p value: {error}"))?,
+                );
+                i += 1;
             }
             "--threads" => {
                 if i + 1 < args.len() {
@@ -734,17 +773,39 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if (options.top_k.is_some() || options.top_p.is_some()) && (!options.tts || options.edit) {
+        return Err("--top-k/--top-p require Breeze --tts without --edit".into());
+    }
+    if options
+        .top_p
+        .is_some_and(|p| !p.is_finite() || p <= 0.0 || p > 1.0)
+    {
+        return Err("--top-p must be finite and in (0, 1]".into());
+    }
+    if let Some(scale) = options.cfg_scale {
+        if !options.tts || options.edit {
+            return Err("--cfg-scale requires Breeze --tts without --edit".into());
+        }
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("--cfg-scale must be finite and greater than zero".into());
+        }
+    }
     if dreamx_cli_options(options)?.is_some() {
         return Ok(());
+    }
+    if options.instruction.is_some() && !options.tts {
+        return Err("--instruction requires --tts".into());
     }
     if !options.edit
         && (options.source_audio.is_some()
             || options.source_text.is_some()
             || options.target_text.is_some()
-            || options.instruction.is_some()
             || options.use_xvector_supplied)
     {
-        return Err("--source-audio, --source-text, --target-text, --instruction, and --use-xvector require --tts --edit".into());
+        return Err(
+            "--source-audio, --source-text, --target-text, and --use-xvector require --tts --edit"
+                .into(),
+        );
     }
     if options.edit && !options.tts {
         return Err("--edit requires --tts".into());
@@ -1599,6 +1660,75 @@ mod tests {
         assert!(normalize_tts_language(Some("auto"))
             .unwrap_err()
             .contains("TTS language"));
+    }
+
+    #[test]
+    fn breeze_instruction_is_valid_without_edit_and_temperature_alias_parses() {
+        let options = parse_cli_options(&args(&[
+            "rmi",
+            "--tts",
+            "--model",
+            "breeze.gguf",
+            "--mmproj",
+            "codec.gguf",
+            "--prompt",
+            "你好",
+            "--out",
+            "output.wav",
+            "--instruction",
+            "温柔的女声",
+            "--temperature",
+            "0",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&options).is_ok());
+        assert_eq!(options.temperature, Some(0.0));
+        assert!(options.audio.is_none());
+    }
+
+    #[test]
+    fn breeze_cfg_scale_parses_and_rejects_invalid_values_or_other_modes() {
+        let base = [
+            "rmi",
+            "--tts",
+            "--model",
+            "breeze.gguf",
+            "--mmproj",
+            "codec.gguf",
+            "--prompt",
+            "你好",
+            "--out",
+            "output.wav",
+        ];
+        for value in ["0", "-1", "NaN", "inf"] {
+            let mut values = base.to_vec();
+            values.extend(["--cfg-scale", value]);
+            let options = parse_cli_options(&args(&values)).unwrap();
+            assert!(validate_cli_options(&options)
+                .unwrap_err()
+                .contains("--cfg-scale"));
+        }
+        let mut values = base.to_vec();
+        values.extend(["--cfg-scale", "3"]);
+        let options = parse_cli_options(&args(&values)).unwrap();
+        assert_eq!(options.cfg_scale, Some(3.0));
+        assert!(validate_cli_options(&options).is_ok());
+        let options = parse_cli_options(&args(&["rmi", "--cfg-scale", "3"])).unwrap();
+        assert!(validate_cli_options(&options).is_err());
+        assert!(parse_cli_options(&args(&["rmi", "--cfg-scale"])).is_err());
+        let mut values = base.to_vec();
+        values.extend(["--top-k", "50", "--top-p", "0.9"]);
+        let options = parse_cli_options(&args(&values)).unwrap();
+        assert_eq!(options.top_k, Some(50));
+        assert_eq!(options.top_p, Some(0.9));
+        assert!(validate_cli_options(&options).is_ok());
+        for (flag, value) in [
+            ("--top-k", "-1"),
+            ("--top-p", "bad"),
+            ("--temperature", "bad"),
+        ] {
+            assert!(parse_cli_options(&args(&["rmi", flag, value])).is_err());
+        }
     }
 
     #[test]

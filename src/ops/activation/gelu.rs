@@ -1,8 +1,17 @@
 //! Exact and approximate GELU activation functions.
 
+unsafe extern "C" {
+    fn erff(value: f32) -> f32;
+}
+
 #[inline]
 pub fn gelu(x: f32) -> f32 {
     0.5 * x * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
+}
+
+#[inline]
+pub fn gelu_erf(x: f32) -> f32 {
+    0.5 * x * (1.0 + unsafe { erff(x * std::f32::consts::FRAC_1_SQRT_2) })
 }
 
 #[inline(always)]
@@ -194,6 +203,13 @@ mod tests {
         for (actual, expected) in output.iter().zip(gelu_scalar(&input).iter()) {
             close(*actual, *expected);
         }
+    }
+
+    #[test]
+    fn gelu_erf_matches_known_values() {
+        close(gelu_erf(0.0), 0.0);
+        close(gelu_erf(1.0), 0.841_344_7);
+        close(gelu_erf(-1.0), -0.158_655_26);
     }
 
     #[cfg(target_arch = "x86_64")]
