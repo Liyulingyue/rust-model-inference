@@ -706,7 +706,10 @@ impl BPETokenizer {
             return vec![byte];
         }
         if self.pre == PreTokenizer::Gemma4 && kind == TokenType::Normal {
-            return token.as_bytes().to_vec();
+            // Gemma4 token pieces are raw UTF-8 but use the SentencePiece `▁`
+            // (U+2581) marker at word starts. Replace it with a literal space
+            // so decoded text reads naturally.
+            return token.replace('\u{2581}', " ").into_bytes();
         }
 
         let mut bytes = Vec::new();
