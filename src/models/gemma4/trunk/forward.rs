@@ -1,12 +1,12 @@
-use super::config::{BASE_KV_LAYERS, CONTEXT, EMBED, EPS, HEADS, LAYERS, PER_LAYER, VOCAB};
+use super::config::{CONTEXT, EPS, HEADS, PER_LAYER, VOCAB};
 use super::session::{Gemma4Session, KvLayer};
-use super::weights::{is_swa, kv_source_layer};
+use super::weights::kv_source_layer;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{
     bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rope_neox_inplace, softmax_inplace,
+    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +33,7 @@ pub(super) struct AssembledInputRow {
 
 impl Gemma4Session<'_> {
     pub fn forward_rows(&mut self, rows: &[Gemma4InputRow]) -> Result<Vec<f32>, String> {
-        let rows = assemble_input_rows(rows)?;
+        let rows = assemble_input_rows(rows, self.model.config.embd)?;
         let end = self
             .seq_len
             .checked_add(rows.len())
@@ -64,7 +64,9 @@ impl Gemma4Session<'_> {
 
     fn forward_row(&mut self, row: &AssembledInputRow) -> Result<(), String> {
         let model = self.model;
+        let cfg = &model.config;
         let scratch = &mut self.scratch;
+        let embd = cfg.embd;
         match &row.values {
             InputValues::Token(token) => {
                 model
@@ -74,7 +76,7 @@ impl Gemma4Session<'_> {
             InputValues::Raw(values) => scratch.x.copy_from_slice(values),
         }
         if row.scale_token_embedding {
-            let scale = (EMBED as f32).sqrt();
+            let scale = (embd as f32).sqrt();
             for value in &mut scratch.x {
                 *value *= scale;
             }
@@ -97,9 +99,9 @@ impl Gemma4Session<'_> {
             &mut scratch.q8,
             &mut scratch.scales,
         )?;
-        let projection_scale = 1.0 / (EMBED as f32).sqrt();
+        let projection_scale = 1.0 / (embd as f32).sqrt();
         let merge_scale = 1.0 / 2.0_f32.sqrt();
-        for layer in 0..LAYERS {
+        for layer in 0..cfg.layers {
             let start = layer * PER_LAYER;
             let end = start + PER_LAYER;
             let projected = &mut scratch.per_layer_projected[start..end];
@@ -114,9 +116,11 @@ impl Gemma4Session<'_> {
         ensure_finite("gemma4.per_layer_input", &scratch.per_layer)?;
 
         let position = self.seq_len;
-        for layer_index in 0..LAYERS {
+        let base_kv = cfg.base_kv_layers();
+        for layer_index in 0..cfg.layers {
             let layer = &model.layers[layer_index];
             let dim = layer.head_dim;
+            let kv_width = cfg.kv_heads * dim;
             let q_width = HEADS * dim;
             let ffn = layer.ffn_gate.n_out;
 
@@ -126,66 +130,95 @@ impl Gemma4Session<'_> {
                 &layer.attn_norm,
                 &mut scratch.normed,
             )?;
-            matmul(
+            // Q+K+V share the same `normed` input. Quantize once and
+            // reuse via `matmul_q8_pool` to skip redundant Q8 conversions
+            // per layer per decode.
+            quantize_q8_0_into(
+                &scratch.normed,
+                embd,
+                &mut scratch.q8[..embd],
+                &mut scratch.scales[..embd.div_ceil(32)],
+            );
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.attn_q.weight"),
                 &layer.attn_q,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.q[..q_width],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
+            // Per-head QK-norm can't be batched (each head has its own
+            // scale), but rope_neox_inplace / apply_rope_full both loop
+            // over heads internally with one cached sin/cos table, so
+            // call them once on the full q_width buffer rather than
+            // 8× per-head.
             for query in scratch.q[..q_width].chunks_exact_mut(dim) {
                 rms_norm_inplace(query, &layer.attn_q_norm, EPS);
-                apply_rope(query, position, dim, layer_index, &model.rope_freqs)?;
             }
+            apply_rope(
+                &mut scratch.q[..q_width],
+                position,
+                dim,
+                layer_index,
+                cfg.is_swa(layer_index),
+                &model.rope_freqs,
+            )?;
 
-            if layer_index < BASE_KV_LAYERS {
-                matmul(
+            if layer_index < base_kv {
+                matmul_q8_pool(
                     &format!("blk.{layer_index}.attn_k.weight"),
                     &layer.attn_k,
                     &scratch.normed,
-                    &mut scratch.k[..dim],
+                    &scratch.q8[..embd],
+                    &scratch.scales[..embd.div_ceil(32)],
+                    &mut scratch.k[..kv_width],
                     model.pool(),
-                    &mut scratch.q8,
-                    &mut scratch.scales,
                 )?;
-                matmul(
+                matmul_q8_pool(
                     &format!("blk.{layer_index}.attn_v.weight"),
                     &layer.attn_v,
                     &scratch.normed,
-                    &mut scratch.v[..dim],
+                    &scratch.q8[..embd],
+                    &scratch.scales[..embd.div_ceil(32)],
+                    &mut scratch.v[..kv_width],
                     model.pool(),
-                    &mut scratch.q8,
-                    &mut scratch.scales,
                 )?;
-                rms_norm_inplace(&mut scratch.k[..dim], &layer.attn_k_norm, EPS);
-                rms_norm_inplace(&mut scratch.v[..dim], &scratch.v_norm_weight[..dim], EPS);
+                for kv_head in 0..cfg.kv_heads {
+                    let off = kv_head * dim;
+                    rms_norm_inplace(&mut scratch.k[off..off + dim], &layer.attn_k_norm, EPS);
+                    // V uses a unit-norm weight (scratch.v_norm_weight is
+                    // initialised to 1.0 and never loaded from a tensor), so
+                    // skip the per-element weight multiply.
+                    rms_unit_inplace(&mut scratch.v[off..off + dim], EPS);
+                }
                 apply_rope(
-                    &mut scratch.k[..dim],
+                    &mut scratch.k[..kv_width],
                     position,
                     dim,
                     layer_index,
+                    cfg.is_swa(layer_index),
                     &model.rope_freqs,
                 )?;
                 self.kv[layer_index].append(
                     layer_index,
                     position,
-                    &scratch.k[..dim],
-                    &scratch.v[..dim],
+                    &scratch.k[..kv_width],
+                    &scratch.v[..kv_width],
                 )?;
             }
 
-            let cache_layer = kv_source_layer(layer_index);
+            let cache_layer = kv_source_layer(cfg, layer_index);
             attend(
                 layer_index,
                 position,
                 &scratch.q[..q_width],
                 &self.kv[cache_layer],
-                is_swa(layer_index),
+                cfg.is_swa(layer_index),
                 &mut scratch.attn[..q_width],
                 &mut scratch.scores,
                 &mut scratch.attention_values,
+                model.pool(),
             )?;
             matmul(
                 &format!("blk.{layer_index}.attn_output.weight"),
@@ -214,23 +247,30 @@ impl Gemma4Session<'_> {
                 &layer.ffn_norm,
                 &mut scratch.normed,
             )?;
-            matmul(
+            // gate + up share `normed`. Quantize once and reuse.
+            quantize_q8_0_into(
+                &scratch.normed,
+                embd,
+                &mut scratch.q8[..embd],
+                &mut scratch.scales[..embd.div_ceil(32)],
+            );
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.ffn_gate.weight"),
                 &layer.ffn_gate,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.gate[..ffn],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
-            matmul(
+            matmul_q8_pool(
                 &format!("blk.{layer_index}.ffn_up.weight"),
                 &layer.ffn_up,
                 &scratch.normed,
+                &scratch.q8[..embd],
+                &scratch.scales[..embd.div_ceil(32)],
                 &mut scratch.up[..ffn],
                 model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
             )?;
             ggml_geglu_fp16_inplace(&mut scratch.gate[..ffn], &scratch.up[..ffn]);
             matmul(
@@ -320,6 +360,7 @@ impl Gemma4Session<'_> {
 }
 pub(super) fn assemble_input_rows(
     rows: &[Gemma4InputRow],
+    embd: usize,
 ) -> Result<Vec<AssembledInputRow>, String> {
     if rows.is_empty() {
         return Err("Gemma4 input rows are empty".into());
@@ -339,9 +380,9 @@ pub(super) fn assemble_input_rows(
                 values,
                 per_layer_token,
             } => {
-                if values.len() != EMBED {
+                if values.len() != embd {
                     return Err(format!(
-                        "Gemma4 raw row {index} has length {}; expected {EMBED}",
+                        "Gemma4 raw row {index} has length {}; expected {embd}",
                         values.len()
                     ));
                 }
@@ -417,17 +458,8 @@ pub(super) fn matmul(
                 values.len()
             ));
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
-                *result = dot_f32(row, input, weight.n_in);
-            }
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            weight
-                .kernel
-                .forward(input, output, weight.n_in, weight.n_out);
+        for (result, row) in output.iter_mut().zip(values.chunks_exact(weight.n_in)) {
+            *result = dot_f32(row, input, weight.n_in);
         }
     } else {
         let blocks = weight.n_in.div_ceil(32);
@@ -458,6 +490,58 @@ pub(super) fn matmul(
             );
         });
     }
+    ensure_finite(name, output)
+}
+
+/// Q8-quantized matmul: caller has already filled `q8` + `scales` for
+/// `weight.n_in` elements. Use this when the same `input` is fed into
+/// multiple matmuls in a row (Q+K+V, gate+up) to skip redundant Q8
+/// conversions of the same input.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn matmul_q8_pool(
+    name: &str,
+    weight: &Weight<'_>,
+    input: &[f32],
+    q8: &[u8],
+    scales: &[f32],
+    output: &mut [f32],
+    pool: &ComputePool,
+) -> Result<(), String> {
+    if input.len() != weight.n_in || output.len() != weight.n_out {
+        return Err(format!(
+            "Invalid {name} matmul lengths: input {}, output {}; expected {}, {}",
+            input.len(),
+            output.len(),
+            weight.n_in,
+            weight.n_out
+        ));
+    }
+    let blocks = weight.n_in.div_ceil(32);
+    if q8.len() < weight.n_in || scales.len() < blocks {
+        return Err(format!("Invalid {name} activation scratch length"));
+    }
+    if weight.ggml_type == GGMLType::F32 {
+        return Err(format!(
+            "{name} is F32, but matmul_q8_pool requires a Q-quantized kernel"
+        ));
+    }
+    let input_ptr = input.as_ptr();
+    let q8_ptr = q8.as_ptr();
+    let scales_ptr = scales.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(|thread, threads| unsafe {
+        weight.kernel.forward_prepared(
+            std::slice::from_raw_parts(input_ptr, weight.n_in),
+            std::slice::from_raw_parts(q8_ptr, weight.n_in),
+            std::slice::from_raw_parts(scales_ptr, blocks),
+            None,
+            std::slice::from_raw_parts_mut(output_ptr, weight.n_out),
+            weight.n_in,
+            weight.n_out,
+            thread,
+            threads,
+        );
+    });
     ensure_finite(name, output)
 }
 
@@ -542,6 +626,7 @@ fn apply_rope(
     position: usize,
     dim: usize,
     layer: usize,
+    sliding: bool,
     full_freq_factors: &[f32],
 ) -> Result<(), String> {
     if values.len() % dim != 0 {
@@ -550,7 +635,11 @@ fn apply_rope(
             values.len()
         ));
     }
-    if is_swa(layer) {
+    if sliding {
+        // `rope_neox_inplace` internally loops over `n_heads = x.len() / dim`
+        // with one cached sin/cos table, so passing the full buffer is
+        // strictly cheaper than calling it once per head (which would
+        // rebuild the same table 8 times for E2B/E4B).
         rope_neox_inplace(values, position, dim, 10_000.0);
         return Ok(());
     }
@@ -561,20 +650,46 @@ fn apply_rope(
             dim / 2
         ));
     }
-    let theta_scale = 1_000_000.0_f32.powf(-2.0 / dim as f32);
-    for head in values.chunks_exact_mut(dim) {
-        let mut theta = position as f32;
-        for pair in 0..dim / 2 {
-            let angle = theta / full_freq_factors[pair];
-            let (cosine, sine) = crate::ops::rope::rope_sin_cos(angle);
-            let first = head[pair];
-            let second = head[pair + dim / 2];
-            head[pair] = first.mul_add(cosine, second * -sine);
-            head[pair + dim / 2] = first.mul_add(sine, second * cosine);
-            theta *= theta_scale;
+    apply_rope_full(values, position, dim, full_freq_factors);
+    Ok(())
+}
+
+/// Full-attention RoPE: pre-compute the sin/cos table once from
+/// `factors` (which already encodes `θ_i = 1 / freq_base^(2i/dim)`)
+/// and apply the standard neox rotation to every head in one pass.
+fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f32]) {
+    let half = dim / 2;
+    let n_heads = values.len() / dim;
+    if half == 0 || n_heads == 0 {
+        return;
+    }
+    let pos_f = position as f32;
+    let mut cos_table = vec![0.0f32; half];
+    let mut sin_table = vec![0.0f32; half];
+    for (i, factor) in factors[..half].iter().enumerate() {
+        let angle = pos_f / factor;
+        let (c, s) = crate::ops::rope::rope_sin_cos(angle);
+        cos_table[i] = c;
+        sin_table[i] = s;
+    }
+    // Same rotation formula as the scalar path; AVX2-equivalent of the
+    // inner FMA pattern will be picked up by the compiler when
+    // targeting AVX2. The key win is one sin/cos table per call
+    // (vs `n_heads × half` calls in the old loop).
+    for h in 0..n_heads {
+        let base = h * dim;
+        // split_at_mut avoids the borrow-conflict that the slice
+        // pair `(values[..base+half], values[base+half..])` would
+        // create (overlap at base+half).
+        let (lo, hi) = values[base..base + dim].split_at_mut(half);
+        for i in 0..half {
+            let (c, s) = (cos_table[i], sin_table[i]);
+            let first = lo[i];
+            let second = hi[i];
+            lo[i] = first.mul_add(c, second * -s);
+            hi[i] = first.mul_add(s, second * c);
         }
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -587,19 +702,23 @@ pub(super) fn attend(
     output: &mut [f32],
     scores: &mut Vec<f32>,
     values: &mut Vec<f32>,
+    pool: &ComputePool,
 ) -> Result<(), String> {
     let dim = cache.head_dim;
-    if query.len() != HEADS * dim || output.len() != HEADS * dim {
+    let row_width = cache.row_width;
+    let group_size = cache.group_size;
+    let q_width = HEADS * dim;
+    if query.len() != q_width || output.len() != q_width {
         return Err(format!(
             "blk.{layer} attention length mismatch: query {}, output {}, expected {}",
             query.len(),
             output.len(),
-            HEADS * dim
+            q_width
         ));
     }
     let rows = position + 1;
     let expected = rows
-        .checked_mul(dim)
+        .checked_mul(row_width)
         .ok_or_else(|| format!("blk.{layer} KV context length overflow"))?;
     if cache.keys.len() != expected || cache.values.len() != expected {
         return Err(format!(
@@ -614,22 +733,196 @@ pub(super) fn attend(
     scores.resize(padded, f32::NEG_INFINITY);
     values.resize(padded, 0.0);
 
-    for (head, query) in query.chunks_exact(dim).enumerate() {
-        scores.fill(f32::NEG_INFINITY);
-        for (score, token) in scores[..cached].iter_mut().zip(first..rows) {
-            let offset = token * dim;
-            *score = dot_f32(query, &cache.keys[offset..offset + dim], dim);
-        }
-        softmax_inplace(scores);
-        for dimension in 0..dim {
-            values.fill(0.0);
-            for (slot, token) in values[..cached].iter_mut().zip(first..rows) {
-                *slot = cache.values[token * dim + dimension];
+    // Parallelize per-head over the compute pool. The V pass iterates
+    // `token` outer / `dimension` inner: V at fixed token is contiguous in
+    // memory (stride 1 in `dim`), so each token-load is cache-friendly, and
+    // the inner dim loop is FMA-fused (AVX2 `_mm256_fmadd_ps`) over
+    // `score[token] * V[token, dim]`. This drops the per-dim `head_values`
+    // gather + `dot_f32` and avoids the strided V reads of the old code.
+    let query_ptr = query.as_ptr();
+    let keys_ptr = cache.keys.as_ptr();
+    let values_ptr = cache.values.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(move |ith, nth| {
+        let h_step = (HEADS + nth - 1) / nth;
+        let h_start = (ith * h_step).min(HEADS);
+        let h_end = (h_start + h_step).min(HEADS);
+        let mut head_scores = vec![f32::NEG_INFINITY; padded];
+        for head in h_start..h_end {
+            let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
+            let kv_head = head / group_size;
+            let kv_offset = kv_head * dim;
+            head_scores.fill(f32::NEG_INFINITY);
+            for (score, token) in head_scores[..cached].iter_mut().zip(first..rows) {
+                let offset = token * row_width + kv_offset;
+                let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
+                *score = dot_f32(query_head, key, dim);
             }
-            output[head * dim + dimension] = dot_f32(values, scores, cached);
+            softmax_inplace(&mut head_scores);
+            let head_output =
+                unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
+            unsafe {
+                attend_v(
+                    values_ptr,
+                    head_scores.as_ptr(),
+                    row_width,
+                    kv_offset,
+                    first,
+                    cached,
+                    dim,
+                    head_output,
+                );
+            }
+        }
+    });
+    ensure_finite(&format!("blk.{layer} attention"), output)
+}
+
+/// Fused `output[d] += Σ_t scores[t] * V[t, d]` over `[first, first+cached)`.
+/// Outer loop iterates `t` so each V load is a contiguous `dim`-length chunk
+/// (stride 1 in `dim`). Inner loop uses the SIMD FMA of the host to fuse
+/// `output[d] += score * V[t, d]`.
+#[inline]
+unsafe fn attend_v(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return attend_v_avx2(
+                values_ptr,
+                scores_ptr,
+                row_width,
+                kv_offset,
+                first,
+                cached,
+                dim,
+                head_output,
+            );
         }
     }
-    ensure_finite(&format!("blk.{layer} attention"), output)
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return attend_v_neon(
+                values_ptr,
+                scores_ptr,
+                row_width,
+                kv_offset,
+                first,
+                cached,
+                dim,
+                head_output,
+            );
+        }
+    }
+    attend_v_scalar(
+        values_ptr,
+        scores_ptr,
+        row_width,
+        kv_offset,
+        first,
+        cached,
+        dim,
+        head_output,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn attend_v_avx2(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        let vscore = _mm256_set1_ps(score);
+        let mut d = 0;
+        while d + 8 <= dim {
+            let vo = _mm256_loadu_ps(head_output.as_ptr().add(d));
+            let vd = _mm256_loadu_ps(v_base.add(d));
+            _mm256_storeu_ps(
+                head_output.as_mut_ptr().add(d),
+                _mm256_fmadd_ps(vscore, vd, vo),
+            );
+            d += 8;
+        }
+        while d < dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+            d += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn attend_v_neon(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    use std::arch::aarch64::*;
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        let vscore = vdupq_n_f32(score);
+        let mut d = 0;
+        while d + 4 <= dim {
+            let vo = vld1q_f32(head_output.as_ptr().add(d));
+            let vd = vld1q_f32(v_base.add(d));
+            vst1q_f32(head_output.as_mut_ptr().add(d), vfmaq_f32(vo, vscore, vd));
+            d += 4;
+        }
+        while d < dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+            d += 1;
+        }
+    }
+}
+
+unsafe fn attend_v_scalar(
+    values_ptr: *const f32,
+    scores_ptr: *const f32,
+    row_width: usize,
+    kv_offset: usize,
+    first: usize,
+    cached: usize,
+    dim: usize,
+    head_output: &mut [f32],
+) {
+    head_output.fill(0.0);
+    for i in 0..cached {
+        let token = first + i;
+        let v_base = values_ptr.add(token * row_width + kv_offset);
+        let score = *scores_ptr.add(i);
+        for d in 0..dim {
+            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
+        }
+    }
 }
 
 pub(super) fn softcap(value: f32, cap: f32) -> f32 {
@@ -637,6 +930,32 @@ pub(super) fn softcap(value: f32, cap: f32) -> f32 {
 }
 
 pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
+    // Scalar reference; matches llama.cpp GEGLU with f16 intermediate.
+    //
+    // === TODO-002: SIMD GeGLU (`tanh_approx`) ===
+    //
+    // An AVX2+F16C SIMD version was prototyped (see git history) but
+    // reverted because tanh lacks native SIMD on x86 and the
+    // Padé [3/2] rational `tanh(x) ≈ x*(27+x²)/(27+9x²)` diverges for
+    // |x| > 5. Three mitigation strategies were tried, none ideal:
+    //
+    //   1. Clamp arg to ±5 before Padé — works for typical gelu inputs
+    //      (arg stays in ~(-3.6, 3.6) when x ∈ (-3, 3)) but loses
+    //      ~0.5% accuracy once clamped because tanh saturates near ±1
+    //      and the rational diverges; clamping trades divergence for
+    //      a hard saturation step.
+    //   2. Padé [5/4] / [7/6] higher-order — more accurate but adds
+    //      4-6 extra FMA per lane, eroding the SIMD win.
+    //   3. Schraudolph-style fast exp via bit manipulation — too
+    //      imprecise (5-10% error) for gate values outside (-2, 2).
+    //
+    // The SIMD version showed ~0.5% drift on the gelu output (after
+    // f16 round-trip) and caused occasional top-K token flips on a few
+    // gemma4 reference prompts. The scalar path remains the safe
+    // reference. See `docs/TODO.md` TODO-002 for full analysis and
+    // recovery plan (likely a `[7/6]` padé + per-call opt-in feature
+    // flag once precision is characterised against the llama.cpp
+    // pinned Oracle).
     const GELU_COEF_A: f32 = 0.044715;
     const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
 
@@ -656,16 +975,25 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     }
 }
 
+#[cfg_attr(
+    not(debug_assertions),
+    allow(dead_code, unused_variables),
+    inline(always)
+)]
 fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
-    if let Some((index, value)) = values
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
+    #[cfg(debug_assertions)]
     {
-        return Err(format!(
-            "{name} produced non-finite value {value:?} at index {index}"
-        ));
+        if let Some((index, value)) = values
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(format!(
+                "{name} produced non-finite value {value:?} at index {index}"
+            ));
+        }
     }
+    let _ = (name, values);
     Ok(())
 }
 

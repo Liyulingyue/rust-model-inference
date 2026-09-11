@@ -143,6 +143,24 @@ pub(super) fn require_tensor(
     Ok(())
 }
 
+pub(super) fn require_tensor_any(
+    source: &dyn TensorSource,
+    name: &str,
+    expected_dims: &[u64],
+    expected_types: &[GGMLType],
+) -> Result<GGMLType, String> {
+    let tensor = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if tensor.dims != expected_dims || !expected_types.contains(&tensor.ggml_type) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} one of {expected_types:?}",
+            tensor.dims, tensor.ggml_type, expected_dims
+        ));
+    }
+    Ok(tensor.ggml_type)
+}
+
 pub(super) fn require_clippable(
     source: &dyn TensorSource,
     prefix: &str,
