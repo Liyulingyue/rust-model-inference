@@ -635,17 +635,15 @@ impl NemotronModel {
                             state[state_idx] = new_state;
                             sumf += new_state * c_gn;
                         }
-                        // Output: y[h*headdim + k] = sum_n(state * C) + D * x_orig.
-                        // x_orig is the un-gated input (pre-SiLU, pre-z);
-                        // for the D-skip term we follow the canonical
-                        // convention and use x[h*headdim + k] from the
-                        // conv1d output (silu(conv_x) * z already
-                        // captured in x_act). Note that llama.cpp
-                        // applies D on the *conv output*, not on
-                        // x_act — but our ssm_in_out[..d_inner] is
-                        // post-SiLU*z (since we already built x_act).
-                        // The D-skip is conventionally `D * silu(x) * z`,
-                        // which is `D * x_act`. Use x_act.
+                        // Output: scan dot product + D-skip on the
+                        // gated conv1d output (silu(conv_x) * z).
+                        // llama.cpp's scan kernel doesn't apply D, but
+                        // removing the D-skip here produced gibberish
+                        // (e.g. 'irropBelcor deltaHar Xuler fourgat'),
+                        // so it appears the model still expects the
+                        // skip term even if the reference impl omits
+                        // it. Possibly a quantization-related
+                        // divergence.
                         y_buf[head_x_off + k] = sumf + d_h * x_act[head_x_off + k];
                     }
                 }
