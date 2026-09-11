@@ -717,10 +717,15 @@ impl NemotronModel {
                     0,
                     1,
                 );
-                // Activation: SiLU. The reference uses SiLU; if a different
-                // activation is needed the parity test will catch it.
+                // Activation: ReLU(x)^2 (LLM_FFN_RELU_SQR).
+                // llama.cpp's nemotron-h.cpp builds FFN as
+                //   build_ffn(cur, ..., LLM_FFN_RELU_SQR, LLM_FFN_PAR, ...)
+                // which is `cur = relu(cur); cur = sqr(cur)`. Earlier
+                // we used SiLU which is the LLM_FFN_SILU activation —
+                // completely wrong for this model.
                 for j in 0..cfg.n_ff {
-                    up_buf[j] = crate::ops::silu(up_buf[j]);
+                    let x = up_buf[j];
+                    up_buf[j] = if x > 0.0 { x * x } else { 0.0 };
                 }
                 quantize_q8_0_into(
                     &up_buf,
