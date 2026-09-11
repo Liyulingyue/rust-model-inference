@@ -854,8 +854,28 @@ pub fn run_inference(
 
     // Decode one token at a time. Each step reuses the full prefill
     // scratch (we don't have KV cache yet, so this is O(n²)).
-    for _step in 0..max_tokens {
+    for step in 0..max_tokens {
         let next_logits = model.prefill(&[next_token], &mut scratch)?;
+        // DEBUG: dump logits stats + argmax to stderr for parity diff
+        // against llama.cpp oracle (commit 96013c511).
+        {
+            let mut l2 = 0.0f64;
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            let mut best = 0usize;
+            let mut best_v = f32::NEG_INFINITY;
+            for (i, &v) in next_logits.iter().enumerate() {
+                let vv = v as f64;
+                l2 += vv * vv;
+                if v < mn { mn = v; }
+                if v > mx { mx = v; }
+                if v > best_v { best_v = v; best = i; }
+            }
+            eprintln!(
+                "[OURS-LOGITS] step {step}: L2={:.3} min={:.3} max={:.3} argmax={best} (logit={:.3})",
+                l2.sqrt(), mn, mx, best_v
+            );
+        }
         next_token = sample_argmax(&next_logits, temperature);
         if let Some(eos) = tokenizer.eos_id() {
             if next_token == eos {
