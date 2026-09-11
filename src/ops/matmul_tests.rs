@@ -534,7 +534,7 @@ fn neon_attention_value_matches_ggml_256_padded_reduction() {
     padded_values[..values.len()].copy_from_slice(&values);
     padded_weights[..weights.len()].copy_from_slice(&weights);
 
-    let actual = dot_f32(&padded_values, &padded_weights, values.len());
+    let actual = dot_f32(&padded_values, &padded_weights, padded_values.len());
 
     assert_eq!(actual.to_bits(), 0xc032_d8db);
 }

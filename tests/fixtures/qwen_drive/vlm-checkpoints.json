@@ -1,0 +1,58 @@
+[
+  {
+    "name": "omni.vision.patch_conv0",
+    "layer": null,
+    "shape": [1024, 16, 16],
+    "occurrence": 0,
+    "oracle_sha256": "ac180fcfc16654cdd024d8c1a34b76d4a3e44c5e6538080dbc160e5049c2c311"
+  },
+  {
+    "name": "omni.vision.patch_conv1",
+    "layer": null,
+    "shape": [1024, 16, 16],
+    "occurrence": 0,
+    "oracle_sha256": "7c88eea629a6060ee469f9262300bfeccc8f8d8205250b353100a35f2fe9aed2"
+  },
+  {
+    "name": "omni.vision.patch_sum",
+    "layer": null,
+    "shape": [1024, 16, 16],
+    "occurrence": 0,
+    "oracle_sha256": "832d3aa681823d7683c9eb661c0b0ac51d2a67d7c2d5c3d8ecb940fa032a419a"
+  },
+  {
+    "name": "omni.vision.patch_bias",
+    "layer": null,
+    "shape": [256, 1024],
+    "occurrence": 0,
+    "oracle_sha256": "5ab118e938228b70bd05fa335454dc94e34e1b970abc8bf255309e534652914f"
+  },
+  {
+    "name": "omni.vision.inp_pos_emb",
+    "layer": null,
+    "shape": [256, 1024],
+    "occurrence": 0,
+    "oracle_sha256": "853d49bbd76f17e25b4e6635a9762e15e76ab37881a7c2e382af6399b09a7560"
+  },
+  {
+    "name": "omni.vision.layer_out",
+    "layer": 0,
+    "shape": [256, 1024],
+    "occurrence": 0,
+    "oracle_sha256": "b66252fe4b84c06df6e31419957102609de9adfbd8e6b631bca9c5b2bc3bc8b1"
+  },
+  {
+    "name": "omni.vision.layer_out",
+    "layer": 23,
+    "shape": [256, 1024],
+    "occurrence": 1,
+    "oracle_sha256": "66efcbd47fc658bd2a5851eb525206925e8ab2212c53eb30d5999cd68b317585"
+  },
+  {
+    "name": "omni.vision.projected",
+    "layer": null,
+    "shape": [64, 2560],
+    "occurrence": 0,
+    "oracle_sha256": "3a645e1ff35229408d8f5fe6da92afb81d3f7a8ddcdf0e0242129301e6536629"
+  }
+]

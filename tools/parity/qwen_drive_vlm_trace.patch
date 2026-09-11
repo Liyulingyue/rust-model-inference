@@ -1,0 +1,163 @@
+diff --git a/common/debug.cpp b/common/debug.cpp
+index 102c6924d..02b4fa0e3 100644
+--- a/common/debug.cpp
++++ b/common/debug.cpp
+@@ -4,6 +4,11 @@
+ #include "log.h"
+
+ #include <cmath>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <map>
+ #include <regex>
+ #include <string>
+ #include <vector>
+@@ -74,6 +79,85 @@ static float common_ggml_get_float_value(const uint8_t * data,
+     return v;
+ }
+
++static std::string parity_json_escape(const std::string & value) {
++    std::string escaped;
++    for (char ch : value) {
++        if (ch == '\\' || ch == '"') escaped.push_back('\\');
++        escaped.push_back(ch);
++    }
++    return escaped;
++}
++
++static void parity_dump_tensor(const ggml_tensor * t, const uint8_t * data) {
++    const char * manifest_path = std::getenv("RMI_PARITY_TRACE");
++    if (manifest_path == nullptr || manifest_path[0] == '\0' || ggml_is_quantized(t->type)) return;
++
++    static std::string initialized_path;
++    static std::map<std::string, size_t> occurrences;
++    if (initialized_path != manifest_path) {
++        std::ofstream(manifest_path, std::ios::trunc);
++        initialized_path = manifest_path;
++        occurrences.clear();
++    }
++
++    const std::string source_name = t->name;
++    std::string name;
++    int layer = -1;
++    if (source_name == "patch_conv0") {
++        name = "omni.vision.patch_conv0";
++    } else if (source_name == "patch_conv1") {
++        name = "omni.vision.patch_conv1";
++    } else if (source_name == "patch_sum") {
++        name = "omni.vision.patch_sum";
++    } else if (source_name == "patch_bias") {
++        name = "omni.vision.patch_bias";
++    } else if (source_name == "inp_pos_emb") {
++        name = "omni.vision.inp_pos_emb";
++    } else if (source_name == "projected") {
++        name = "omni.vision.projected";
++    } else if (source_name.rfind("layer_out-", 0) == 0) {
++        name = "omni.vision.layer_out";
++        layer = std::stoi(source_name.substr(std::strlen("layer_out-")));
++    } else {
++        return;
++    }
++
++    const size_t occurrence = occurrences[name]++;
++    const std::string binary_path = std::string(manifest_path) + "." + source_name + "." + std::to_string(occurrence) + ".f32";
++    std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++    for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
++        for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
++            for (int64_t i1 = 0; i1 < t->ne[1]; ++i1) {
++                for (int64_t i0 = 0; i0 < t->ne[0]; ++i0) {
++                    const float value = common_ggml_get_float_value(data, t->type, t->nb, i0, i1, i2, i3);
++                    uint32_t bits;
++                    std::memcpy(&bits, &value, sizeof(bits));
++                    const char bytes[] = {char(bits), char(bits >> 8), char(bits >> 16), char(bits >> 24)};
++                    binary.write(bytes, sizeof(bytes));
++                }
++            }
++        }
++    }
++    if (!binary) throw std::runtime_error("failed to write " + binary_path);
++
++    std::ofstream manifest(manifest_path, std::ios::app);
++    manifest << "{\"name\":\"" << name << "\",\"layer\":";
++    if (layer < 0) manifest << "null"; else manifest << layer;
++    manifest << ",\"step\":null,\"shape\":[";
++    bool first = true;
++    for (int axis = GGML_MAX_DIMS - 1; axis >= 0; --axis) {
++        if (t->ne[axis] == 1) continue;
++        if (!first) manifest << ',';
++        manifest << t->ne[axis];
++        first = false;
++    }
++    if (first) manifest << 1;
++    manifest << "],\"len\":" << ggml_nelements(t)
++             << ",\"occurrence\":" << occurrence
++             << ",\"binary_path\":\"" << parity_json_escape(binary_path) << "\"}\n";
++    if (!manifest) throw std::runtime_error("failed to write parity trace manifest");
++}
++
+ #define INDENT "    "
+
+ static void common_debug_print_tensor(uint8_t * data, ggml_type type, const int64_t * ne, const size_t * nb, int64_t n, bool abort_on_nan) {
+@@ -183,6 +267,7 @@ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
+
+     if (!ggml_is_quantized(t->type) && matches_filter) {
+         uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
++        parity_dump_tensor(t, data);
+         common_debug_print_tensor(data, t->type, t->ne, t->nb, 3, pimpl->abort_on_nan);
+     }
+
+diff --git a/tools/mtmd/debug/mtmd-debug.cpp b/tools/mtmd/debug/mtmd-debug.cpp
+index 2719dae9b..51548daf7 100644
+--- a/tools/mtmd/debug/mtmd-debug.cpp
++++ b/tools/mtmd/debug/mtmd-debug.cpp
+@@ -76,7 +76,9 @@ int main(int argc, char ** argv) {
+
+     mtmd::context_ptr ctx_mtmd;
+     common_init_result_ptr llama_init;
+-    common_debug_cb_user_data cb_data;
++    common_debug_cb_user_data cb_data(params, {
++        "patch_conv0", "patch_conv1", "patch_sum", "patch_bias", "inp_pos_emb", "layer_out-0", "layer_out-23", "projected"
++    });
+
+     llama_init = common_init_from_params(params);
+     {
+@@ -291,4 +293,3 @@ int main(int argc, char ** argv) {
+
+     return 0;
+ }
+-
+diff --git a/tools/mtmd/models/qwen2vl.cpp b/tools/mtmd/models/qwen2vl.cpp
+index 2220c2692..75b751c0d 100644
+--- a/tools/mtmd/models/qwen2vl.cpp
++++ b/tools/mtmd/models/qwen2vl.cpp
+@@ -11,9 +11,13 @@ ggml_tensor * clip_graph_qwen2vl::build_inp_with_temporal_merge() {
+
+     if (n_batch == 1) {
+         // still image input
+-        return ggml_add(ctx0,
+-            ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1),
+-            ggml_conv_2d(ctx0, model.patch_embeddings_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1));
++        ggml_tensor * patch_conv0 = ggml_conv_2d(ctx0, model.patch_embeddings_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
++        ggml_tensor * patch_conv1 = ggml_conv_2d(ctx0, model.patch_embeddings_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1);
++        cb(patch_conv0, "patch_conv0", -1);
++        cb(patch_conv1, "patch_conv1", -1);
++        ggml_tensor * patch_sum = ggml_add(ctx0, patch_conv0, patch_conv1);
++        cb(patch_sum, "patch_sum", -1);
++        return patch_sum;
+     } else if (n_batch == 2) {
+         // 2 frames input (video input)
+         ggml_tensor * inp_0 = ggml_view_3d(ctx0, inp_raw,
+diff --git a/tools/mtmd/models/qwen3vl.cpp b/tools/mtmd/models/qwen3vl.cpp
+index 48626b221..4701128d4 100644
+--- a/tools/mtmd/models/qwen3vl.cpp
++++ b/tools/mtmd/models/qwen3vl.cpp
+@@ -174,6 +174,7 @@ ggml_cgraph * clip_graph_qwen3vl::build() {
+         nullptr, nullptr,
+         model.mm_1_w, model.mm_1_b,
+         ffn_op_type::FFN_GELU, -1);
++    cb(embeddings, "projected", -1);
+
+     if (deepstack_features) {
+         embeddings = ggml_concat(ctx0, embeddings, deepstack_features, 0);
