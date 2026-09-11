@@ -877,6 +877,16 @@ pub fn run_inference(
             );
         }
         next_token = sample_argmax(&next_logits, temperature);
+        // DEBUG: dump top-10 logits (parity diff vs llama.cpp oracle).
+        {
+            let mut idxs: Vec<(usize, f32)> = next_logits.iter().enumerate()
+                .map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            eprintln!("  top10 logit:");
+            for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {
+                eprintln!("    [{rank}] token={tid} logit={v:.3}");
+            }
+        }
         if let Some(eos) = tokenizer.eos_id() {
             if next_token == eos {
                 break;
