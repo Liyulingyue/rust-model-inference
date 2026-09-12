@@ -540,6 +540,14 @@ impl NemotronModel {
                 // 7680 / (8 * 96) = 10).
                 let b: Vec<f32> = conv_out[inner_size..inner_size + n_group * d_state].to_vec();
                 let c: Vec<f32> = conv_out[inner_size + n_group * d_state..].to_vec();
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    let l2_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let l2_c: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!("[OURS-M2] layer {layer_idx} b (silu(conv_B)) | l2={l2_b:.3}");
+                    eprintln!("[OURS-M2] layer {layer_idx} c (silu(conv_C)) | l2={l2_c:.3}");
+                    eprintln!("[OURS-M2] layer {layer_idx} b[:8]={:?}", &b[..8]);
+                    eprintln!("[OURS-M2] layer {layer_idx} c[:8]={:?}", &c[..8]);
+                }
                 // Canonical Mamba2 scan (matches llama.cpp's
                 // ggml_compute_forward_ssm_scan_f32 in ggml-cpu/ops.cpp):
                 //
@@ -606,6 +614,22 @@ impl NemotronModel {
                 for h in 0..n_head {
                     dA_per_head[h] = (dt_per_head[h] * ssm_a_log[h]).exp();
                 }
+                // DEBUG: dump dt + dA for layer 6 to match oracle m2_ prints.
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} dt[:8]={:?}",
+                        &dt_per_head[..8]
+                    );
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} dA[:8]={:?}",
+                        &dA_per_head[..8]
+                    );
+                    let l2_x_pre: f32 =
+                        x_pre.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} x_pre (silu(conv_x)) | l2={l2_x_pre:.3}"
+                    );
+                }
                 // Scan loop. The canonical layout (see llama.cpp
                 // ggml_compute_forward_ssm_scan_f32):
                 //   * state[(h * headdim + k) * d_state + n] for the
@@ -649,12 +673,29 @@ impl NemotronModel {
                 //   y_final[h, k] = silu(z[h, k]) * y_buf[h, k]
                 // (equivalent to ggml_swiglu_split(z, y_buf)).
                 let z_slice = &ssm_in_out[z_offset..z_offset + inner_size];
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    let l2_pre_gated: f32 =
+                        y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let l2_z_slice: f32 =
+                        z_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} y_buf (pre-z-gate) | l2={l2_pre_gated:.3}"
+                    );
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} z_slice | l2={l2_z_slice:.3}"
+                    );
+                }
                 for j in 0..inner_size {
                     y_buf[j] = crate::ops::silu(z_slice[j]) * y_buf[j];
                 }
-                // Persist scan state for the next token in the same
-                // prefill.
-                scratch.ssm_scan_state[state_base..state_end].copy_from_slice(&state);
+                // DEBUG: dump ssm_out input L2 (post-norm y) for parity
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    let l2_post_norm: f32 =
+                        y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} post-norm y | l2={l2_post_norm:.3}"
+                    );
+                }
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
                     let group_start = g * per_group;
