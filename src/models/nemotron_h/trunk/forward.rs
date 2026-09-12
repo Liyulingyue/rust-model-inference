@@ -415,26 +415,13 @@ impl NemotronModel {
             //
             // 9728 = 7680 (x after conv) + 1024 + 1024 (B, C groupings).
             //
-            // The 4B Nano checkpoint uses a slimmed Mamba2 layout: dt/a/d
-            // are per-time_step_rank (96) rather than per-channel, and
-            // the in_proj (`ssm_in`) produces only x — no z/B/C/dt
-            // concatenated. B/C are picked up from `ssm_conv1d` output's
-            // trailing 2048 channels. This implementation approximates the
-            // selective scan by routing each (group, rank) to a contiguous
-            // 10-channel slot in d_inner and per-rank dt/a/d broadcast:
-            //
-            //   state[t][g, r] = exp(A[r] * dt[r]) * state[t-1][g, r]
-            //               + dt[r] * B[t][g * d_state + r] * x_act[inner(g, r)]
-            //   y[inner(g, r)] = C[t][g * d_state + r] * state[t][g, r]
-            //                 + D[r] * x_act[inner(g, r)]
-            //
-            // The exact inner(g, r) ↔ channel mapping is unknown for
-            // this 4B Nano variant (no reference commit exposes it), so
-            // we use a simple per-group chunking: inner(g, r) =
-            // g * (d_inner / n_group) + r * (d_inner / n_group / dt_rank).
-            // This produces structurally-valid output but is not
-            // guaranteed to match llama.cpp byte-for-byte without a
-            // parity test against the exact reference.
+            // (Historical comment: earlier revisions of this code approximated
+//  the scan with a scalar state per (group, rank) and per-rank
+//  dt/a/d broadcast, with a heuristic inner(g,r) channel mapping.
+//  That was rewritten to the canonical per-head d_state=128 vector
+//  scan structure in commit 5e970e1. The code below matches
+//  llama.cpp's ggml_compute_forward_ssm_scan_f32 directly. Stale
+//  comments above are kept to preserve history.)
             if let (
                 Some(ssm_in),
                 Some(ssm_conv1d_w),
