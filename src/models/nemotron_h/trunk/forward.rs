@@ -252,6 +252,12 @@ impl NemotronModel {
         for t in 0..length {
             let off = t * n_embd;
             let row = &mut scratch.hidden[off..off + n_embd];
+            // DEBUG: per-layer L2 dump for parity vs llama.cpp oracle.
+            // Only printed for the last token in prefill (t == length-1).
+            if t == length.saturating_sub(1) {
+                let l2: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+                eprintln!("[OURS-LAYER] layer {layer_idx:>2} | l2={l2:.3}");
+            }
             // Pre-attention norm.
             rms_norm(row, &lw.attn_norm, &mut scratch.normed, cfg.norm_eps);
             // QKV projections (Q8 matmul, SIMD via existing Q8 path).
@@ -877,7 +883,17 @@ pub fn run_inference(
             );
         }
         next_token = sample_argmax(&next_logits, temperature);
-        // DEBUG: dump top-10 logits (parity diff vs llama.cpp oracle).
+        // DEBUG: dump top-10 logits for first decode step (parity diff
+        // vs llama.cpp oracle). Skip after first step.
+        {
+            let mut idxs: Vec<(usize, f32)> = next_logits.iter().enumerate()
+                .map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            eprintln!("  top10 logit:");
+            for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {
+                eprintln!("    [{rank}] token={tid} logit={v:.3}");
+            }
+        }
         {
             let mut idxs: Vec<(usize, f32)> = next_logits.iter().enumerate()
                 .map(|(i, &v)| (i, v)).collect();
