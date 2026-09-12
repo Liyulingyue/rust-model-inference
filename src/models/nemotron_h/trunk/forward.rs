@@ -614,6 +614,23 @@ impl NemotronModel {
                 for h in 0..n_head {
                     dA_per_head[h] = (dt_per_head[h] * ssm_a_log[h]).exp();
                 }
+                // DEBUG: dump y_buf for layer 6 last token multiple heads
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    // Print y_buf for first channel of each of heads 0, 1, 2, 3.
+                    for h in 0..4 {
+                        let off = h * headdim;
+                        eprintln!(
+                            "[OURS-Y-BEFORE-NORM] layer {layer_idx} head={h} k=0..15 (last token): {:?}",
+                            &y_buf[off..off+16]
+                        );
+                    }
+                    // Also L2 norm of each head's 80 channels.
+                    for h in 0..4 {
+                        let off = h * headdim;
+                        let l2: f32 = y_buf[off..off+headdim].iter().map(|x| x*x).sum::<f32>().sqrt();
+                        eprintln!("[OURS-Y-BEFORE-NORM] layer {layer_idx} head={h} L2={l2:.3}");
+                    }
+                }
                 // DEBUG: dump dt + dA for layer 6 to match oracle m2_ prints.
                 if layer_idx == 6 && t == length.saturating_sub(1) {
                     eprintln!(
@@ -668,6 +685,13 @@ impl NemotronModel {
                         // D-skip on post-SiLU conv1d x, NOT gated by z.
                         y_buf[head_x_off + k] = sumf + d_h * x_pre[head_x_off + k];
                     }
+                }
+                // DEBUG: dump y_buf post-scan-D for layer 6 last token
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    eprintln!(
+                        "[OURS-Y-POST-SCAN] layer {layer_idx} heads (k=0): h0={:.4} h1={:.4} h2={:.4} h3={:.4}",
+                        y_buf[0], y_buf[headdim], y_buf[2*headdim], y_buf[3*headdim]
+                    );
                 }
                 // z-gate applied AFTER the scan+D-skip:
                 //   y_final[h, k] = silu(z[h, k]) * y_buf[h, k]
