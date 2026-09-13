@@ -231,3 +231,44 @@ Q4_0 失败不是形状问题（所有 `weight` 都是 2D 且行宽 % 32 == 0）
 - `src/ops/kernel/{q4_k,q5_k,q6_k}.rs` — K-quant Kernel 实现
 - `models/Breeze-TTS-2-gguf/breeze-tts-2-Q4_0.wav` — 当前 Q4_0 输出（128 frames，退化证据）
 - `tools/converter/README.md` — breeze 量化对照表
+
+## TODO-005: F32 x86_64 matmul 缺 SIMD kernel
+
+### 现状（解决前）
+
+`src/ops/kernel/f32.rs::F32Kernel::forward` 走纯 scalar f32×f32 dot product。x86_64 上没有 AVX2 / FMA 路径，只有 aarch64 NEON 在文件里挂了个占位。BF16（`bf16/avx2.rs`）和 Q8_0（`q8_0/avx2.rs`）早就有 AVX2 kernel。
+
+实测 Breeze `--quant f32` 在同一 prompt / seed 下：
+
+| 精度 | scalar F32 | AVX2 F32 |
+|---|---|---|
+| 推理耗时 | 234s | **54s** |
+| 帧数 | 47 | 29 |
+| 与 BF16 输出 bit-exact | n/a | ✅ md5 一致 |
+
+4.3× 加速，与 BF16（33s）同一量级。
+
+### 影响
+
+- **F32 是 CPU 数值稳定 + debug 首选**（与 GGML F32 完全等价）；scalar 实现让 debug 体验差到不可用。
+- 任何 `--quant f32` 或 f32-input 模型（未来扩展）都会落到这条慢路径。
+- 用户在精度对照表里会看到 "F32 234s" 而非 "F32 54s"。
+
+### 选项
+
+1. **已完成**：F32 AVX2 kernel（`f32/avx2.rs`），结构镜像 `bf16/avx2.rs`，去掉 unpack 步骤。✅
+2. **未做**：F32 NEON kernel（`f32/neon.rs`）目前是 `unreachable!` 占位；aarch64 落地时实现。
+3. **长期**：抽 `matmul_f32_vs_f32_simd` 公共核心，让 BF16/F16/F32 共享（F16 需要先做 f16→f32 unpack）。
+4. **长期**：f32×f32 已经是 optimal FMA 路径，再优化空间是 cache blocking / multithreading，不在本 TODO 范围。
+
+### 推荐
+
+方案 1 已落地。后续 F32 / F16 NEON 是"加法"工作，按需触发。
+
+### 关联文件
+
+- `src/ops/kernel/f32/mod.rs` — F32Kernel + SIMD 分发
+- `src/ops/kernel/f32/scalar.rs` — scalar 参考实现 + row_range 分区
+- `src/ops/kernel/f32/avx2.rs` — AVX2+FMA f32×f32 matmul（仿 `bf16/avx2.rs`）
+- `src/ops/kernel/f32/neon.rs` — aarch64 NEON 占位
+- `src/ops/kernel/bf16/avx2.rs` — 参考模板（去掉 unpack 步骤即得 F32 AVX2）
