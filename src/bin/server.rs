@@ -1251,6 +1251,9 @@ fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
     if options.dreamx {
         return Err("--dreamx is not supported by rust-model-server".into());
     }
+    if options.planner.is_some() || options.perception.is_some() {
+        return Err("Qwen-Drive heads are not supported by rust-model-server".into());
+    }
     Ok(())
 }
 

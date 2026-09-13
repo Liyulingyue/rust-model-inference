@@ -1,5 +1,11 @@
 //! Exact and approximate GELU activation functions.
 
+#[cfg(unix)]
+#[cfg_attr(not(target_vendor = "apple"), link(name = "m"))]
+unsafe extern "C" {
+    fn tanhf(value: f32) -> f32;
+}
+
 unsafe extern "C" {
     fn erff(value: f32) -> f32;
 }
@@ -28,6 +34,24 @@ pub fn gelu_inplace(values: &mut [f32]) {
     }
     for value in values {
         *value = gelu(*value);
+    }
+}
+
+pub fn gelu_ggml_f16_inplace(values: &mut [f32]) {
+    use super::super::float::{f16_to_f32, f32_to_f16};
+
+    for value in values {
+        if *value <= -10.0 {
+            *value = 0.0;
+        } else if *value < 10.0 {
+            let x = f16_to_f32(f32_to_f16(*value));
+            let inner = 0.797_884_6 * x * (1.0 + 0.044_715 * x * x);
+            #[cfg(unix)]
+            let activation = unsafe { tanhf(inner) };
+            #[cfg(not(unix))]
+            let activation = inner.tanh();
+            *value = f16_to_f32(f32_to_f16(0.5 * x * (1.0 + activation)));
+        }
     }
 }
 
@@ -260,5 +284,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gelu_ggml_f16_matches_pinned_oracle_bits() {
+        let mut values = [f32::from_bits(0xc009_836e)];
+        gelu_ggml_f16_inplace(&mut values);
+        assert_eq!(values[0].to_bits(), 0xbd0a_8000);
     }
 }

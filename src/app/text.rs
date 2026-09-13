@@ -320,7 +320,7 @@ pub fn normalize_resized_image(
     Ok(output)
 }
 
-fn build_qwen3_media_positions(
+pub(crate) fn build_qwen3_media_positions(
     token_ids: &[u32],
     placeholder_id: u32,
     grid_shapes: &[(usize, usize)],

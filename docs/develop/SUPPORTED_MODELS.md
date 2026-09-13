@@ -29,6 +29,7 @@
 | Qwen3.5-0.8B | `qwen35` | 文本、图像 | 图像需要 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | 已有真实图文运行记录；未声明其他量化格式。 |
 | Qwen3.5-2B | `qwen35` | 文本；图像路径已接入 | 图像需要匹配 mmproj | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录真实冒烟回归；未单独记录图像 Oracle。 |
 | Qwen3.8-27B | `qwen35` | 文本、图像 | 图像需要 mmproj | 测试指定的 GGUF + mmproj | `Verified` | [`tests/qwen35_reference.rs`](tests/qwen35_reference.rs) 覆盖 pinned llama.cpp lossless checkpoints 和图像冒烟。Qwen3.8 是独立型号，不是 Qwen3-8B。 |
+| Qwen-Drive-1.0-4B（规划） | `qwen35` + `qwen_drive_planner` | 三视角多帧直接规划、推理后规划 | `clip` mmproj；SFT 或 RL planner | BF16 VLM + BF16 mmproj + BF16 planner | `Verified` | 固定官方 commit `28091c1`；Tokenizer、规划算子/checkpoint/trajectory 使用原始 F32 words 严格比较，支持 SFT/RL 与 direct/reasoning 四种入口；[命令与 GGUF 哈希](../../tools/qwen_drive/README.md)。 |
 | NeoHorse-1-4B | `qwen35` | 文本生成 | 无 | BF16 / F16 / Q8_0 / Q4_K_M / Q5_K_M | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 逐位一致；Q4/Q5 使用标量量化 Oracle，默认重排路径不保证逐位一致。GGUF 不含 NFC metadata；[哈希、边界与命令](../../tools/neohorse/README.md#neohorse-1-4b-官方-gguf-对比)。 |
 | NeoHorse-1-9B | `qwen35` | 文本生成 | 无 | BF16 GGUF + NFC metadata | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 的 checkpoint 和 logits 与固定 llama.cpp 逐位一致；Tokenizer 对齐发布版本。发布权重不含 MTP；[转换、哈希与验证命令](../../tools/neohorse/README.md)。 |
 | Ornith-1.5-9B | `qwen35` | 文本生成 | 无 | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
@@ -48,6 +49,7 @@
 | Qwen3-VL 0.6B / 2B 配置 | `qwen3vl` | 文本、图像、视频 | `qwen3vl_merger` mmproj | 两组主模型维度白名单、视觉编码器和 CLI 路由 | `Supported` | 当前代码接受 1024-dim 与 2048-dim 两组配置；没有独立的生成式 VL Oracle 记录。 |
 | Qwen2.5-Omni 兼容 GGUF 对 | `qwen2vl` + `qwen2.5o` projector | 文本、图像、视频、音频 | 匹配 mmproj | 多媒体编码、投影和生成路径 | `Supported` | 架构级覆盖，不代表所有 Qwen2.5-Omni 尺寸均可用。 |
 | Qwen3-Omni MoE 兼容 GGUF 对 | `qwen3vlmoe` + `qwen3vl_merger` projector | 文本、图像、视频、音频 | 匹配 mmproj | MoE、媒体投影和生成路径 | `Supported` | shared-expert 张量仍会被明确拒绝。 |
+| Qwen-Drive-1.0-4B（感知） | `qwen35` + `qwen_drive_perception` | 六相机 3D 检测、占用和地图分割 | `clip` BF16 mmproj、F32 perception、官方 frame manifest | F32 存储、BF16 计算；固定 fixture、真实 827-tensor 加载与单帧 CPU CLI 输出 | `Experimental` | ARM64 CPU 已核验 Tokenizer、预处理、FPN/view 与 head/postprocess 的原始 BF16 words；官方 nuScenes 六相机帧的真实 CLI 产出 300 个检测框、`[200,200,16]` 占用和 `[200,400]` 地图。NVIDIA CUDA 端到端 parity 尚未执行，不据此声明 CUDA 等价。 |
 | Jina Embeddings v5 Omni retrieval | 带 `pooling_type` 的 Qwen-family arch | 文本、图像、视频、音频 Embedding | 媒体输入需要匹配 mmproj | pooling、媒体编码、CLI 参数和单元测试 | `Supported` | 当前仓库没有固定真实 GGUF/Oracle 的回归测试。 |
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
 | Hunyuan-MT2 1.8B | `hunyuan-dense` | 多语言翻译（33+5）、通用 chat | 无 | Q8_0 | `Verified` | 真实 GGUF 端到端翻译通过（中↔英三组用例），详见 [`docs/usage/hunyuan.md`](../usage/hunyuan.md)。Oracle pin 待补；其他 Hunyuan 尺寸（7B / 30B-A3B-MoE）尚未验证。 |

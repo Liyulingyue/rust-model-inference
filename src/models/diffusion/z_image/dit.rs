@@ -1303,6 +1303,28 @@ thread_local! {
         std::cell::RefCell::new((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 }
 
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct FloatSinCos {
+    sine: f32,
+    cosine: f32,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn __sincosf_stret(value: f32) -> FloatSinCos;
+}
+
+fn torch_sin_cos(value: f32) -> (f32, f32) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let result = __sincosf_stret(value);
+        return (result.cosine, result.sine);
+    }
+    #[cfg(not(target_os = "macos"))]
+    (value.cos(), value.sin())
+}
+
 pub(crate) struct TorchMt19937 {
     state: [u32; MT_N],
     left: usize,
@@ -1395,9 +1417,10 @@ impl TorchMt19937 {
             let u1 = 1.0 - values[index];
             let u2 = values[index + 8];
             let radius = (-2.0 * u1.ln()).sqrt();
-            let theta = 2.0 * std::f32::consts::PI * u2;
-            values[index] = radius * theta.cos();
-            values[index + 8] = radius * theta.sin();
+            let theta = (2.0 * std::f64::consts::PI * f64::from(u2)) as f32;
+            let (cosine, sine) = torch_sin_cos(theta);
+            values[index] = radius * cosine;
+            values[index + 8] = radius * sine;
         }
     }
 
@@ -1753,23 +1776,23 @@ mod tests {
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
-            0x3ff6_a52a,
-            0x3fbe_5f53,
+            0x3ff6_a527,
+            0x3fbe_5f54,
             0x3f66_9567,
-            0xc006_c0db,
+            0xc006_c0dd,
             0xbf42_14e2,
             0x3f8a_0650,
             0x3f4d_0143,
             0x3fd7_1e93,
-            0x3eb6_3345,
+            0x3eb6_3341,
             0xbf2f_c686,
             0xbefc_9934,
             0x3e77_4894,
             0xbe6d_2eed,
             0x3d2b_0c00,
-            0xbe80_ce7a,
+            0xbe80_ce79,
             0x3f5c_1fb0,
-            0xbe9e_9482,
+            0xbe9e_9487,
             0xbeca_9a91,
             0x3f4d_ac3c,
             0xbf1f_20e0,

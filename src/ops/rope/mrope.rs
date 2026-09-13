@@ -17,6 +17,34 @@
 
 use super::neox::rope_neox_inplace;
 
+unsafe extern "C" {
+    fn powf(base: f32, exponent: f32) -> f32;
+}
+
+#[cfg(target_vendor = "apple")]
+#[repr(C)]
+struct SinCos {
+    sin: f32,
+    cos: f32,
+}
+
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    #[link_name = "__sincosf_stret"]
+    fn sincosf(value: f32) -> SinCos;
+}
+
+#[inline]
+fn sin_cos(value: f32) -> (f32, f32) {
+    #[cfg(target_vendor = "apple")]
+    {
+        let result = unsafe { sincosf(value) };
+        (result.sin, result.cos)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    value.sin_cos()
+}
+
 pub fn rope_mrope(
     x: &mut [f32],
     positions: [usize; 4],
@@ -50,8 +78,7 @@ pub fn rope_mrope(
             } else {
                 3
             };
-            let cos_a = theta[axis].cos();
-            let sin_a = theta[axis].sin();
+            let (sin_a, cos_a) = sin_cos(theta[axis]);
             let idx0 = base + i;
             let idx1 = idx0 + half;
             let x0 = x[idx0];
@@ -81,7 +108,7 @@ pub fn rope_vision(
         (sections[0] + sections[1]) as usize,
         (sections[0] + sections[1] + sections[2]) as usize,
     ];
-    let theta_scale = freq_base.powf(-2.0 / n_rope_dims as f32);
+    let theta_scale = unsafe { powf(freq_base, -2.0 / n_rope_dims as f32) };
     for head in x.chunks_exact_mut(head_dim) {
         let mut theta = positions.map(|value| value as f32);
         for pair in 0..head_dim / 2 {
@@ -102,11 +129,11 @@ pub fn rope_vision(
             {
                 theta[axis] = positions[axis] as f32;
             }
-            let (sin, cos) = theta[axis].sin_cos();
+            let (sin, cos) = sin_cos(theta[axis]);
             let x0 = head[pair];
             let x1 = head[pair + head_dim / 2];
-            head[pair] = x0 * cos - x1 * sin;
-            head[pair + head_dim / 2] = x0 * sin + x1 * cos;
+            head[pair] = x0.mul_add(cos, -(x1 * sin));
+            head[pair + head_dim / 2] = x0.mul_add(sin, x1 * cos);
             for value in &mut theta {
                 *value *= theta_scale;
             }

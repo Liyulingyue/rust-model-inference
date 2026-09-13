@@ -39,7 +39,9 @@ pub use models::qwen3::asr::model::*;
 pub use models::qwen3::*;
 pub use models::qwen35::vision::clip_config::ClipVisionConfig;
 pub use models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
-pub use models::qwen35::{build_qwen35_positions, Qwen35Config, Qwen35Model};
+pub use models::qwen35::{
+    build_qwen35_positions, Qwen35Config, Qwen35DenseKvSnapshot, Qwen35Model,
+};
 
 pub use ops::quant::{dequant_weight_q4k, dequantize_q4_k_weight, BlockQ8K, QK_K};
 pub use ops::*;
