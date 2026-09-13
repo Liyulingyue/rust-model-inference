@@ -29,13 +29,14 @@ import numpy as np
 
 GGML_F32 = 0
 GGML_F16 = 1
+GGML_Q4_0 = 2
 GGML_Q8_0 = 8
 GGML_I64 = 27
 GGML_BF16 = 30
 
 GGUF_ALIGNMENT = 32
 
-_ELEMENT_BYTES = {GGML_F32: 4, GGML_F16: 2, GGML_Q8_0: 0, GGML_I64: 8, GGML_BF16: 2}
+_ELEMENT_BYTES = {GGML_F32: 4, GGML_F16: 2, GGML_Q8_0: 0, GGML_Q4_0: 0, GGML_I64: 8, GGML_BF16: 2}
 
 
 def validated_dir(raw: str, *, must_exist: bool) -> Path:
@@ -127,12 +128,12 @@ def _f16_to_f32_bits(bits: int) -> int:
 
 
 def bf16_to_f32(data: bytes) -> bytes:
-    count = len(data) // 2
-    out = array("I")
-    for i in range(count):
-        bits = struct.unpack_from("<H", data, i * 2)[0]
-        out.append(_bf16_to_f32_bits(bits))
-    return out.tobytes()
+    if len(data) == 0:
+        return b""
+    if len(data) % 2 != 0:
+        raise ValueError(f"bf16_to_f32: data length {len(data)} is not a multiple of 2")
+    arr = np.frombuffer(data, dtype="<u2")
+    return (arr.astype(np.uint32) << np.uint32(16)).view(np.float32).tobytes()
 
 
 def f16_to_f32(data: bytes) -> bytes:
@@ -145,17 +146,37 @@ def f16_to_f32(data: bytes) -> bytes:
 
 
 def bf16_to_f16(data: bytes) -> bytes:
-    f32 = bf16_to_f32(data)
-    return f32_to_f16(f32)
+    if len(data) == 0:
+        return b""
+    arr = np.frombuffer(data, dtype="<u2")
+    f32 = (arr.astype(np.uint32) << np.uint32(16)).view(np.float32)
+    return f32.astype("<f2").tobytes()
+
+
+def f32_to_bf16(data: bytes) -> bytes:
+    """Round-to-nearest-even F32 -> BF16."""
+    arr = np.frombuffer(data, dtype="<f4")
+    f32_u32 = arr.view(np.uint32).copy()
+    # add 0x7FFF + ((mantissa >> 16) & 1) for round-to-nearest-even, then
+    # mask off the low 16 mantissa bits
+    rounding_bias = np.uint32(0x00007FFF) + ((f32_u32 >> np.uint32(16)) & np.uint32(1))
+    rounded = (f32_u32 + rounding_bias) & np.uint32(0xFFFF0000)
+    # preserve NaNs (exponent all-ones, mantissa != 0): just keep the high bits
+    is_nan = ((f32_u32 & np.uint32(0x7F800000)) == np.uint32(0x7F800000)) & (
+        (f32_u32 & np.uint32(0x007FFFFF)) != np.uint32(0)
+    )
+    rounded = np.where(is_nan, f32_u32 & np.uint32(0xFFFF0000), rounded)
+    out = (rounded >> np.uint32(16)).astype("<u2")
+    return out.tobytes()
 
 
 def f32_to_f16(data: bytes) -> bytes:
-    count = len(data) // 4
-    out = array("H")
-    for i in range(count):
-        value = struct.unpack_from("<f", data, i * 4)[0]
-        out.append(struct.unpack("<e", struct.pack("<f", value))[0])
-    return out.tobytes()
+    if len(data) == 0:
+        return b""
+    if len(data) % 4 != 0:
+        raise ValueError(f"f32_to_f16: data length {len(data)} not a multiple of 4")
+    arr = np.frombuffer(data, dtype="<f4")
+    return arr.astype("<f2").tobytes()
 
 
 def f32_values(data: bytes) -> list[float]:
@@ -163,23 +184,65 @@ def f32_values(data: bytes) -> list[float]:
     return list(struct.unpack_from(f"<{count}f", data))
 
 
+Q8_0_BLOCK = 32
+Q8_0_BLOCK_BYTES = 34  # f16 scale + 32 x int8
+
+
 def quantize_q8_0(values: np.ndarray) -> bytes:
-    if values.dtype != np.float32:
-        values = values.astype(np.float32, copy=False)
-    n = values.size
-    block_size = 32
-    if n % block_size != 0:
-        raise ValueError(f"quantize_q8_0: length {n} not multiple of {block_size}")
-    out = bytearray()
-    for start in range(0, n, block_size):
-        block = values[start:start + block_size]
-        amax = float(np.max(np.abs(block)))
-        scale = amax / 127.0 if amax > 0 else 1.0
-        inv_scale = 1.0 / scale if scale > 0 else 0.0
-        quant = np.clip(np.round(block * inv_scale), -127.0, 127.0).astype(np.int8)
-        out += struct.pack("<f", scale)
-        out += quant.tobytes()
-    return bytes(out)
+    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
+
+    Rounding is round-half-away-from-zero to match ggml's roundf, and a zero
+    block encodes a zero scale.
+    """
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if flat.size % Q8_0_BLOCK:
+        raise ValueError(
+            f"q8_0 payload {flat.size} elements is not a multiple of block size {Q8_0_BLOCK}"
+        )
+    blocks = flat.reshape(-1, Q8_0_BLOCK)
+    amax = np.max(np.abs(blocks), axis=1)
+    scale = (amax / 127.0).astype(np.float16)
+    scale_f32 = scale.astype(np.float32)
+    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
+    scaled = blocks / safe[:, None]
+    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
+    out = np.empty((blocks.shape[0], Q8_0_BLOCK_BYTES), dtype=np.uint8)
+    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_0_BLOCK)
+    return out.tobytes()
+
+
+def quantize_q4_0(values: np.ndarray) -> bytes:
+    """GGML Q4_0: per 32-element block, f16 scale = amax/7, 4-bit packed payload.
+
+    Layout per block (18 bytes):
+      * f16 scale (amax / 7, 0 if block is all-zero)
+      * 16 bytes of int4 nibbles (low nibble = element 2*i, high nibble = element 2*i+1)
+        with bias +8 so each nibble is unsigned in [0, 15].
+    """
+    Q4_BLOCK = 32
+    Q4_BLOCK_BYTES = 18  # f16 scale + 16 nibble-bytes
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if flat.size % Q4_BLOCK:
+        raise ValueError(
+            f"q4_0 payload {flat.size} elements is not a multiple of block size {Q4_BLOCK}"
+        )
+    blocks = flat.reshape(-1, Q4_BLOCK)
+    amax = np.max(np.abs(blocks), axis=1)
+    scale = (amax / 7.0).astype(np.float16)
+    scale_f32 = scale.astype(np.float32)
+    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
+    scaled = blocks / safe[:, None]
+    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-8.0, 7.0)
+    q_int = (q + 8.0).astype(np.uint8)  # unsigned in [0, 15]
+    # Pack low nibble first: low = element 2*i, high = element 2*i+1
+    low = q_int[:, 0::2]
+    high = q_int[:, 1::2]
+    packed = (high << 4) | low
+    out = np.empty((blocks.shape[0], Q4_BLOCK_BYTES), dtype=np.uint8)
+    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    out[:, 2:] = packed
+    return out.tobytes()
 
 
 def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
@@ -218,9 +281,14 @@ def _gguf_array(values: list) -> bytes:
 def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
     if ggml_type == GGML_Q8_0:
         n = math.prod(dims)
+        if n % Q8_0_BLOCK != 0:
+            raise ValueError(f"Q8_0 tensor with {n} elements not divisible by {Q8_0_BLOCK}")
+        return (n // Q8_0_BLOCK) * Q8_0_BLOCK_BYTES
+    if ggml_type == GGML_Q4_0:
+        n = math.prod(dims)
         if n % 32 != 0:
-            raise ValueError(f"Q8_0 tensor with {n} elements not divisible by 32")
-        return (n // 32) * 34
+            raise ValueError(f"Q4_0 tensor with {n} elements not divisible by 32")
+        return (n // 32) * 18
     element_bytes = _ELEMENT_BYTES.get(ggml_type)
     if element_bytes is None:
         raise ValueError(f"unsupported ggml type {ggml_type}")
@@ -432,9 +500,13 @@ def load_latent_stats(pt_path: Path) -> dict:
 __all__ = [
     "GGML_F32",
     "GGML_F16",
+    "GGML_Q4_0",
     "GGML_Q8_0",
     "GGML_I64",
     "GGML_BF16",
+    "GGUF_ALIGNMENT",
+    "Q8_0_BLOCK",
+    "Q8_0_BLOCK_BYTES",
     "Tensor",
     "Safetensors",
     "open_safetensors",
@@ -442,9 +514,11 @@ __all__ = [
     "bf16_to_f32",
     "f16_to_f32",
     "bf16_to_f16",
+    "f32_to_bf16",
     "f32_to_f16",
     "f32_values",
     "quantize_q8_0",
+    "quantize_q4_0",
     "bf16_bytes_to_q8_0",
     "GgufWriter",
     "TensorPayload",
