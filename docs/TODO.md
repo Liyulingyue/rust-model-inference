@@ -236,39 +236,41 @@ Q4_0 失败不是形状问题（所有 `weight` 都是 2D 且行宽 % 32 == 0）
 
 ### 现状（解决前）
 
-`src/ops/kernel/f32.rs::F32Kernel::forward` 走纯 scalar f32×f32 dot product。x86_64 上没有 AVX2 / FMA 路径，只有 aarch64 NEON 在文件里挂了个占位。BF16（`bf16/avx2.rs`）和 Q8_0（`q8_0/avx2.rs`）早就有 AVX2 kernel。
+`src/ops/kernel/f32.rs::F32Kernel::forward` 走纯 scalar f32×f32 dot product。x86_64 上没有 AVX2 / FMA 路径，只有 aarch64 NEON 在文件里挂了个占位。BF16（`bf16/avx2.rs`）和 Q8_0（`q8/avx2.rs`）早就有 AVX2 kernel。F16 走 `crate::ops::dot::dot_f16_f16_bytes_avx2` 但每行要 `f32→f16(input)` 转换，per-row 开销不小。
 
-实测 Breeze `--quant f32` 在同一 prompt / seed 下：
+实测 Breeze `--quant f32` / `--quant f16` 在同一 prompt / seed 下：
 
-| 精度 | scalar F32 | AVX2 F32 |
+| 精度 | scalar / F16×F16 dot | AVX2（F32 / F16×F32） |
 |---|---|---|
-| 推理耗时 | 234s | **54s** |
-| 帧数 | 47 | 29 |
-| 与 BF16 输出 bit-exact | n/a | ✅ md5 一致 |
+| F32 推理耗时 | 234s | **54s** (4.3×) |
+| F32 帧数 | 47 | 29 |
+| F32 与 BF16 bit-exact | n/a | ✅ md5 `a7c5e3f5...` |
+| F16 推理耗时 | 47s | **31s** (1.5×) |
+| F16 帧数 | 35 | 35 |
+| F16 与 F16×F16 一致 | n/a | ❌（更精确，省一次 input 量化） |
 
-4.3× 加速，与 BF16（33s）同一量级。
+F32 AVX2 把 F32 与 BF16 拉到同一量级；F16 AVX2 提升有限，因为 F16×F32 比 F16×F16 数值略精但每行转换开销仍在。
 
 ### 影响
 
-- **F32 是 CPU 数值稳定 + debug 首选**（与 GGML F32 完全等价）；scalar 实现让 debug 体验差到不可用。
-- 任何 `--quant f32` 或 f32-input 模型（未来扩展）都会落到这条慢路径。
-- 用户在精度对照表里会看到 "F32 234s" 而非 "F32 54s"。
+- **F32 是 CPU 数值稳定 + debug 首选**（与 GGML F32 完全等价）；scalar 实现让 debug 体验差到不可用。AVX2 已落地。
+- 任何 `--quant f32` 或 f32-input 模型（未来扩展）都会自动用上 AVX2 路径。
+- F16 NEON 仍是 `unreachable!` 占位；aarch64 落地需要实现。
 
 ### 选项
 
 1. **已完成**：F32 AVX2 kernel（`f32/avx2.rs`），结构镜像 `bf16/avx2.rs`，去掉 unpack 步骤。✅
-2. **未做**：F32 NEON kernel（`f32/neon.rs`）目前是 `unreachable!` 占位；aarch64 落地时实现。
-3. **长期**：抽 `matmul_f32_vs_f32_simd` 公共核心，让 BF16/F16/F32 共享（F16 需要先做 f16→f32 unpack）。
-4. **长期**：f32×f32 已经是 optimal FMA 路径，再优化空间是 cache blocking / multithreading，不在本 TODO 范围。
+2. **已完成**：F16 AVX2 kernel（`f16/avx2.rs`），用 `_mm256_cvtph_ps` (F16C) 转换；新增 `forward_f16_dispatch` 让 `forward` / `forward_batched` 走 F16×F32 直通，跳过 input pre-conversion。✅
+3. **未做**：F32 / F16 NEON kernel（占位）；aarch64 落地时实现。
+4. **长期**：抽 `matmul_f32_vs_f32_simd` 公共核心，让 BF16 / F16 / F32 共享 AVX2 代码（去掉各自 unpack 后的版本）；优化空间是 cache blocking / 多线程。
 
 ### 推荐
 
-方案 1 已落地。后续 F32 / F16 NEON 是"加法"工作，按需触发。
+方案 1 + 2 已落地。NEON 是"加法"工作，按需触发。
 
 ### 关联文件
 
-- `src/ops/kernel/f32/mod.rs` — F32Kernel + SIMD 分发
-- `src/ops/kernel/f32/scalar.rs` — scalar 参考实现 + row_range 分区
-- `src/ops/kernel/f32/avx2.rs` — AVX2+FMA f32×f32 matmul（仿 `bf16/avx2.rs`）
-- `src/ops/kernel/f32/neon.rs` — aarch64 NEON 占位
-- `src/ops/kernel/bf16/avx2.rs` — 参考模板（去掉 unpack 步骤即得 F32 AVX2）
+- `src/ops/kernel/f32/{mod,scalar,avx2,neon}.rs` — F32 SIMD 套件
+- `src/ops/kernel/f16/{mod,scalar,avx2,neon}.rs` — F16 SIMD 套件
+- `src/ops/kernel/bf16/avx2.rs` — 参考模板
+- `src/ops/dot.rs:243` — `dot_f16_f16_bytes_avx2`（F16×F16 dot，遗留路径）

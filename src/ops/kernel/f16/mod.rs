@@ -3,8 +3,24 @@
 //! F16 weights use the ggml F16 × F16 dot contract. `forward_prepared`
 //! converts the original F32 activation to F16 before computing each row;
 //! direct prequantized callers dequantize their Q8 input to F32.
+//!
+//! Module structure mirrors the BF16 / F32 kernels so x86_64 AVX2+FMA+F16C
+//! and aarch64 NEON paths can dispatch transparently.  See
+//! `docs/TODO.md` TODO-005 for the SIMD coverage plan and the future
+//! `matmul_f32_vs_f32_simd` core that should subsume these kernels.
+//!
+//! Forward-path SIMD dispatch: `matmul_f16_vs_f32_avx2` / `..._neon`
+//! operate on the F32 input directly (skipping the F32→F16 input
+//! pre-conversion).  The ggml-compatible F16×F16 dot fallback
+//! (`crate::ops::dot::dot_f16_f16_bytes`) stays for callers that need
+//! bit-exact ggml semantics.
 
 use super::Kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
+pub mod scalar;
 
 /// F16 matmul kernel: `output = weight × input`, all dequantized to f32.
 ///
@@ -140,8 +156,14 @@ impl<'a> Kernel for F16Kernel<'a> {
     }
 
     /// F16 converts the input to F16 before the dot product, matching ggml's
-    /// `vec_dot_type = GGML_TYPE_F16` contract.
+    /// `vec_dot_type = GGML_TYPE_F16` contract.  When AVX2+F16C is available
+    /// we skip the input pre-conversion and run the F16 weight × F32 input
+    /// kernel directly — same precision (F16→F32 inside the kernel via
+    /// `_mm256_cvtph_ps`) and ~2× faster than the legacy F16×F16 path.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
+        if forward_f16_dispatch(self.weight, input, output, n_in, n_out, 0, 1) {
+            return;
+        }
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
@@ -152,6 +174,17 @@ impl<'a> Kernel for F16Kernel<'a> {
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
         for t in 0..n_tokens {
+            if forward_f16_dispatch(
+                self.weight,
+                &input[t * n_in..(t + 1) * n_in],
+                &mut output[t * n_out..(t + 1) * n_out],
+                n_in,
+                n_out,
+                0,
+                1,
+            ) {
+                continue;
+            }
             self.forward(
                 &input[t * n_in..(t + 1) * n_in],
                 &mut output[t * n_out..(t + 1) * n_out],
@@ -164,6 +197,50 @@ impl<'a> Kernel for F16Kernel<'a> {
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         crate::ops::embedding::embedding_lookup_f16(self.weight, token_id, n_embd, out);
     }
+}
+
+/// Dispatch a single-token F16×F32 matmul to the SIMD kernel when available.
+///
+/// Returns `true` if the SIMD path ran (caller should skip the legacy
+/// F16×F16 fallback).  Returns `false` on architectures without a SIMD
+/// kernel — caller falls back to `forward_scaled_rows` for bit-exact
+/// ggml semantics.
+pub(crate) fn forward_f16_dispatch(
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if n_in % 8 == 0 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    avx2::matmul_f16_vs_f32_avx2(weight, input, my_out, n_in, start, end);
+                }
+                return true;
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    neon::matmul_f16_vs_f32_neon(weight, input, my_out, n_in, start, end);
+                }
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
