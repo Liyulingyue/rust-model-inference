@@ -20,7 +20,7 @@ pub(crate) mod qwen3;
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
-pub use ops::run_qwen3_operator_check;
+pub use ops::{run_batched_matmul_check, run_qwen3_operator_check};
 
 #[cfg(feature = "vulkan")]
 use ash::vk;

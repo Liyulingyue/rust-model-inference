@@ -74,8 +74,8 @@ float divide_finite_normal(float numerator, float denominator) {
 
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
-        uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
-        uint row = gl_WorkGroupID.z;
+    uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = gl_WorkGroupID.z;
     uint base = block * 256u;
     if (base >= pc.count) return;
     float amax = 0.0;

@@ -38,7 +38,7 @@ void main() {
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
     for (uint index = 0u; index < pc.n_in; index++) {
-        float input_value = uintBitsToFloat(arena.data[pc.input_word + index]);
+        float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
         precise float term = weight_bf16(slot, row_base + index) * input_value;
         sum += term;
     }

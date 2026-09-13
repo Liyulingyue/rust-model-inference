@@ -49,7 +49,7 @@ void main() {
     precise float sum = 0.0;
     uint row_base = row * pc.elements_per_row;
     for (uint index = 0u; index < pc.n_in; index++) {
-        float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + index]));
+        float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
         float weight_value = f16_decode(weight_f16(slot, row_base + index));
         sum += input_value * weight_value;
     }
