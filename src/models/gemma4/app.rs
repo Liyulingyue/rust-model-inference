@@ -20,6 +20,7 @@ pub struct Gemma4Request<'a> {
     pub max_tokens: usize,
     pub threads: usize,
     pub kv_format: KvFormat,
+    pub prefill_batch_size: usize,
 }
 
 pub fn build_turn_rows(
@@ -89,7 +90,11 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
     let eos = tokenizer
         .eos_id()
         .ok_or_else(|| "Gemma4 tokenizer is missing an EOS ID".to_string())?;
-    let mut session = Gemma4Session::new(&model, request.kv_format)?;
+    let mut session = Gemma4Session::new_with_prefill_batch_size(
+        &model,
+        request.kv_format,
+        request.prefill_batch_size,
+    )?;
     let t_total = std::time::Instant::now();
     let mut logits = session.forward_rows(&rows)?;
     let prefill_time = t_total.elapsed();
@@ -467,6 +472,7 @@ mod tests {
             max_tokens: 1,
             threads: 1,
             kv_format: KvFormat::F32,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         })
         .unwrap_err();
 
@@ -484,6 +490,7 @@ mod tests {
             max_tokens: 1,
             threads: 1,
             kv_format: KvFormat::F32,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         })
         .unwrap_err();
 

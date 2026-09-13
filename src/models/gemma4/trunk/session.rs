@@ -1,6 +1,7 @@
-use super::config::HEADS;
+use super::config::{CONTEXT, HEADS};
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
+use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
 use crate::core::scratchpad::KvFormat;
 
 pub struct Gemma4Session<'model> {
@@ -8,6 +9,7 @@ pub struct Gemma4Session<'model> {
     pub(super) kv: Vec<KvLayer>,
     pub(super) scratch: Gemma4Scratch,
     pub(super) seq_len: usize,
+    pub(super) prefill_batch_size: usize,
 }
 
 pub(super) struct KvLayer {
@@ -24,7 +26,16 @@ pub(super) struct KvLayer {
 
 impl<'model> Gemma4Session<'model> {
     pub fn new(model: &'model Gemma4Model, kv_format: KvFormat) -> Result<Self, String> {
+        Self::new_with_prefill_batch_size(model, kv_format, DEFAULT_PREFILL_BATCH_SIZE)
+    }
+
+    pub fn new_with_prefill_batch_size(
+        model: &'model Gemma4Model,
+        kv_format: KvFormat,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
         require_f32_kv(kv_format)?;
+        let prefill_batch_size = checked_prefill_batch_size(Some(prefill_batch_size))?;
         let cfg = &model.config;
         let base = cfg.base_kv_layers();
         let kv = (0..base)
@@ -42,13 +53,18 @@ impl<'model> Gemma4Session<'model> {
         Ok(Self {
             model,
             kv,
-            scratch: Gemma4Scratch::new(cfg),
+            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(CONTEXT)),
             seq_len: 0,
+            prefill_batch_size,
         })
     }
 
     pub fn len(&self) -> usize {
         self.seq_len
+    }
+
+    pub fn scratch_bytes(&self) -> usize {
+        self.scratch.bytes()
     }
 }
 

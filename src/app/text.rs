@@ -780,6 +780,7 @@ fn run_multimodal_with_video_ref(
             max_tokens,
             threads: n_threads_arg,
             kv_format: KvFormat::F32,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         });
     }
     if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")

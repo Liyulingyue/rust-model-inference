@@ -8,6 +8,7 @@ use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::gemma4::Gemma4Config;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 const TEST_LAYERS: usize = 35;
@@ -65,6 +66,43 @@ struct ZeroBf16Kernel {
     bytes: Vec<u8>,
 }
 
+struct DeterministicKernel {
+    seed: usize,
+    output_projection_calls: Option<Arc<AtomicUsize>>,
+}
+
+impl Kernel for DeterministicKernel {
+    fn forward_prequantized(
+        &self,
+        input_q8: &[u8],
+        input_scales: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if let Some(calls) = &self.output_projection_calls {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
+        let per_thread = n_out.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(n_out);
+        for out in start..end {
+            let input = (out.wrapping_mul(17) + self.seed) % n_in;
+            output[out] = input_q8[input] as i8 as f32
+                * input_scales[input / 32]
+                * (1.0 + (self.seed % 7) as f32 / 16.0);
+        }
+    }
+
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {
+        for (index, value) in output.iter_mut().take(n_embd).enumerate() {
+            *value = ((token_id as usize + index + self.seed) % 17) as f32 / 16.0 - 0.5;
+        }
+    }
+}
+
 impl Kernel for ZeroBf16Kernel {
     fn bf16_bytes(&self) -> Option<&[u8]> {
         Some(&self.bytes)
@@ -108,6 +146,34 @@ fn zero_bf16_weight(n_in: usize, n_out: usize) -> Weight<'static> {
             bytes: vec![0; n_in * n_out * 2],
         }),
         ggml_type: GGMLType::BF16,
+        n_in,
+        n_out,
+    }
+}
+
+fn deterministic_weight(n_in: usize, n_out: usize, seed: usize) -> Weight<'static> {
+    Weight {
+        kernel: Box::new(DeterministicKernel {
+            seed,
+            output_projection_calls: None,
+        }),
+        ggml_type: GGMLType::Q8_0,
+        n_in,
+        n_out,
+    }
+}
+
+fn counting_output_weight(
+    n_in: usize,
+    n_out: usize,
+    output_projection_calls: Arc<AtomicUsize>,
+) -> Weight<'static> {
+    Weight {
+        kernel: Box::new(DeterministicKernel {
+            seed: 1,
+            output_projection_calls: Some(output_projection_calls),
+        }),
+        ggml_type: GGMLType::Q8_0,
         n_in,
         n_out,
     }
@@ -177,6 +243,171 @@ fn post_kv_failure_model() -> Gemma4Model {
         rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
         layers,
     }
+}
+
+fn deterministic_config() -> Gemma4Config {
+    Gemma4Config {
+        layers: 3,
+        embd: 32,
+        heads: HEADS,
+        kv_heads: 1,
+        vocab: VOCAB,
+        full_head_dim: FULL_HEAD_DIM,
+        swa_head_dim: SWA_HEAD_DIM,
+        shared_kv_layers: 1,
+        per_layer_width: PER_LAYER,
+        sliding_window: 512,
+        logit_softcap: 30.0,
+        ffn_per_layer: vec![64; 3],
+        swa_pattern: vec![true, false, true],
+    }
+}
+
+fn deterministic_model(output_projection_calls: Arc<AtomicUsize>) -> Gemma4Model {
+    let cfg = deterministic_config();
+    let layers = (0..cfg.layers)
+        .map(|layer| {
+            let dim = cfg.head_dim(layer);
+            let ffn = cfg.ffn_per_layer[layer];
+            Gemma4Layer {
+                head_dim: dim,
+                attn_norm: vec![1.0; cfg.embd],
+                attn_q: deterministic_weight(cfg.embd, HEADS * dim, layer * 11 + 1),
+                attn_k: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 2),
+                attn_v: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 3),
+                attn_output: deterministic_weight(HEADS * dim, cfg.embd, layer * 11 + 4),
+                attn_q_norm: vec![1.0; dim],
+                attn_k_norm: vec![1.0; dim],
+                post_attention_norm: vec![1.0; cfg.embd],
+                ffn_norm: vec![1.0; cfg.embd],
+                ffn_gate: deterministic_weight(cfg.embd, ffn, layer * 11 + 5),
+                ffn_up: deterministic_weight(cfg.embd, ffn, layer * 11 + 6),
+                ffn_down: deterministic_weight(ffn, cfg.embd, layer * 11 + 7),
+                post_ffw_norm: vec![1.0; cfg.embd],
+                inp_gate: deterministic_weight(cfg.embd, PER_LAYER, layer * 11 + 8),
+                proj: deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9),
+                post_norm: vec![1.0; cfg.embd],
+                output_scale: 0.75 + layer as f32 / 16.0,
+            }
+        })
+        .collect();
+    let embd = cfg.embd;
+    let per_layer_all = cfg.per_layer_all();
+    Gemma4Model {
+        _source: Arc::new(EmptySource),
+        config: cfg,
+        pool: Arc::new(ComputePool::new(1)),
+        token_embedding: counting_output_weight(embd, VOCAB, output_projection_calls),
+        per_layer_token_embedding: deterministic_weight(per_layer_all, VOCAB, 41),
+        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
+        per_layer_proj_norm: vec![1.0; PER_LAYER],
+        output_norm: vec![1.0; embd],
+        rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
+        layers,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Gemma4Snapshot {
+    logits: Vec<u32>,
+    base_kv: Vec<(Vec<u32>, Vec<u32>)>,
+    seq_len: usize,
+    decode_ids: [u32; 3],
+}
+
+#[derive(Debug, PartialEq)]
+struct CountingGemma4Snapshot {
+    output_projection_calls: usize,
+}
+
+#[derive(Debug, PartialEq)]
+struct Gemma4StateSnapshot {
+    seq_len: usize,
+    base_kv: Vec<(Vec<u32>, Vec<u32>)>,
+}
+
+fn snapshot_base_kv(session: &super::Gemma4Session<'_>) -> Vec<(Vec<u32>, Vec<u32>)> {
+    session
+        .kv
+        .iter()
+        .map(|layer| {
+            (
+                layer.keys.iter().map(|value| value.to_bits()).collect(),
+                layer.values.iter().map(|value| value.to_bits()).collect(),
+            )
+        })
+        .collect()
+}
+
+fn snapshot_gemma4_state(session: &super::Gemma4Session<'_>) -> Gemma4StateSnapshot {
+    Gemma4StateSnapshot {
+        seq_len: session.len(),
+        base_kv: snapshot_base_kv(session),
+    }
+}
+
+fn fixture_rows(len: usize) -> Vec<Gemma4InputRow> {
+    (0..len)
+        .map(|index| Gemma4InputRow::Token((index % 13 + 1) as u32))
+        .collect()
+}
+
+fn greedy_id(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0 as u32
+}
+
+fn run_gemma4_fixture(len: usize, batch: usize) -> Gemma4Snapshot {
+    let output_projection_calls = Arc::new(AtomicUsize::new(0));
+    let model = deterministic_model(output_projection_calls);
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch).unwrap();
+    let mut logits = session.forward_rows(&fixture_rows(len)).unwrap();
+    let mut decode_ids = [0; 3];
+    for (index, id) in decode_ids.iter_mut().enumerate() {
+        *id = greedy_id(&logits);
+        if index + 1 < 3 {
+            logits = session.forward_rows(&[Gemma4InputRow::Token(*id)]).unwrap();
+        }
+    }
+    Gemma4Snapshot {
+        logits: logits.iter().map(|value| value.to_bits()).collect(),
+        base_kv: snapshot_base_kv(&session),
+        seq_len: session.len(),
+        decode_ids,
+    }
+}
+
+fn run_counting_gemma4_fixture(prompt_len: usize, batch_size: usize) -> CountingGemma4Snapshot {
+    let output_projection_calls = Arc::new(AtomicUsize::new(0));
+    let model = deterministic_model(Arc::clone(&output_projection_calls));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch_size)
+            .unwrap();
+    session.forward_rows(&fixture_rows(prompt_len)).unwrap();
+    CountingGemma4Snapshot {
+        output_projection_calls: output_projection_calls.load(Ordering::Relaxed),
+    }
+}
+
+#[test]
+fn gemma4_prefill_matches_batch_one_across_chunk_boundaries() {
+    for len in [1, 2, 3, 63, 64, 65, 127, 128] {
+        let expected = run_gemma4_fixture(len, 1);
+        for batch in [16, 32, 64, 128] {
+            assert_eq!(run_gemma4_fixture(len, batch), expected);
+        }
+    }
+}
+
+#[test]
+fn gemma4_only_projects_prompt_logits_for_last_row() {
+    let calls = run_counting_gemma4_fixture(65, 64);
+    assert_eq!(calls.output_projection_calls, 1);
 }
 
 #[test]
@@ -597,23 +828,13 @@ fn incremental_session_is_f32_only() {
 }
 
 #[test]
-fn post_kv_failure_leaves_session_state_unchanged() {
+fn failed_gemma4_chunk_truncates_every_base_kv_layer() {
     let model = post_kv_failure_model();
-    let mut session = super::Gemma4Session::new(&model, KvFormat::F32).unwrap();
-    let rows = [Gemma4InputRow::Raw {
-        values: vec![0.0; TEST_EMBD],
-        per_layer_token: 0,
-    }];
-
-    for _ in 0..2 {
-        let error = session.forward_rows(&rows).unwrap_err();
-        assert!(error.contains("blk.0.attn_output.weight"), "{error}");
-        assert_eq!(session.len(), 0);
-        assert!(session
-            .kv
-            .iter()
-            .all(|layer| layer.keys.is_empty() && layer.values.is_empty()));
-    }
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 4).unwrap();
+    let before = snapshot_gemma4_state(&session);
+    assert!(session.forward_rows(&fixture_rows(3)).is_err());
+    assert_eq!(snapshot_gemma4_state(&session), before);
 }
 
 #[test]

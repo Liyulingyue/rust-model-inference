@@ -453,6 +453,7 @@ fn run_rust_case(
         max_tokens: 1,
         threads: GEMMA4_THREADS,
         kv_format: KvFormat::F32,
+        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
     });
     restore_env("RMI_PARITY_TRACE", old_trace);
     restore_env("RMI_PARITY_FILTER", old_filter);
@@ -815,6 +816,7 @@ fn gemma4_text_smoke() {
         max_tokens: 1,
         threads: 4,
         kv_format: KvFormat::F32,
+        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
     })
     .unwrap();
 }
@@ -957,6 +959,7 @@ fn gemma4_image_audio_smoke() {
         max_tokens: 1,
         threads: 4,
         kv_format: KvFormat::F32,
+        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
     });
     let _ = std::fs::remove_file(image_path);
     let _ = std::fs::remove_file(audio_path);
