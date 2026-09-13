@@ -75,8 +75,8 @@ impl Gemma4Scratch {
             + self.per_layer_projected.len()
             + self.per_layer_gate.len()
             + self.scales.len()
-            + self.scores.len()
-            + self.attention_values.len()
+            + self.scores.capacity()
+            + self.attention_values.capacity()
             + self.v_norm_weight.len()
             + self.logits.len();
         f32_values * std::mem::size_of::<f32>() + self.q8.len() + self.prepared.bytes()

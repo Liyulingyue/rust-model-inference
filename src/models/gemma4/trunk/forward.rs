@@ -34,7 +34,6 @@ pub(super) struct AssembledInputRow {
 
 impl Gemma4Session<'_> {
     pub fn forward_rows(&mut self, rows: &[Gemma4InputRow]) -> Result<Vec<f32>, String> {
-        let rows = assemble_input_rows(rows, self.model.config.embd)?;
         let end = self
             .seq_len
             .checked_add(rows.len())
@@ -44,17 +43,17 @@ impl Gemma4Session<'_> {
                 "Gemma4 input length {end} exceeds context {CONTEXT}"
             ));
         }
+        validate_input_rows(rows, self.model.config.embd)?;
 
         let mut chunks = prefill_chunks(rows.len(), self.prefill_batch_size).peekable();
         while let Some(range) = chunks.next() {
+            let chunk_rows = assemble_validated_input_rows(&rows[range.clone()]);
             let kv_lengths = self
                 .kv
                 .iter()
                 .map(|layer| (layer.keys.len(), layer.values.len()))
                 .collect::<Vec<_>>();
-            if let Err(error) =
-                self.forward_chunk_inner(&rows[range.clone()], chunks.peek().is_none())
-            {
+            if let Err(error) = self.forward_chunk_inner(&chunk_rows, chunks.peek().is_none()) {
                 for (layer, (key_len, value_len)) in self.kv.iter_mut().zip(kv_lengths) {
                     layer.keys.truncate(key_len);
                     layer.values.truncate(value_len);
@@ -518,19 +517,18 @@ pub(super) fn assemble_input_rows(
     rows: &[Gemma4InputRow],
     embd: usize,
 ) -> Result<Vec<AssembledInputRow>, String> {
+    validate_input_rows(rows, embd)?;
+    Ok(assemble_validated_input_rows(rows))
+}
+
+fn validate_input_rows(rows: &[Gemma4InputRow], embd: usize) -> Result<(), String> {
     if rows.is_empty() {
         return Err("Gemma4 input rows are empty".into());
     }
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| match row {
+    for (index, row) in rows.iter().enumerate() {
+        match row {
             Gemma4InputRow::Token(token) => {
                 validate_token(index, "token", *token)?;
-                Ok(AssembledInputRow {
-                    values: InputValues::Token(*token),
-                    scale_token_embedding: true,
-                    per_layer_token: *token,
-                })
             }
             Gemma4InputRow::Raw {
                 values,
@@ -552,12 +550,28 @@ pub(super) fn assemble_input_rows(
                     ));
                 }
                 validate_token(index, "per-layer token", *per_layer_token)?;
-                Ok(AssembledInputRow {
-                    values: InputValues::Raw(values.clone()),
-                    scale_token_embedding: false,
-                    per_layer_token: *per_layer_token,
-                })
             }
+        }
+    }
+    Ok(())
+}
+
+fn assemble_validated_input_rows(rows: &[Gemma4InputRow]) -> Vec<AssembledInputRow> {
+    rows.iter()
+        .map(|row| match row {
+            Gemma4InputRow::Token(token) => AssembledInputRow {
+                values: InputValues::Token(*token),
+                scale_token_embedding: true,
+                per_layer_token: *token,
+            },
+            Gemma4InputRow::Raw {
+                values,
+                per_layer_token,
+            } => AssembledInputRow {
+                values: InputValues::Raw(values.clone()),
+                scale_token_embedding: false,
+                per_layer_token: *per_layer_token,
+            },
         })
         .collect()
 }

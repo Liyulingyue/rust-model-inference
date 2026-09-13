@@ -1,3 +1,4 @@
+use super::config::CONTEXT;
 use super::{
     assemble_input_rows, attend, kv_source_layer, load_weight, matmul, require_f32_kv, softcap,
     Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, FULL_HEAD_DIM, HEADS, PER_LAYER,
@@ -366,18 +367,22 @@ fn run_gemma4_fixture(len: usize, batch: usize) -> Gemma4Snapshot {
     let model = deterministic_model(output_projection_calls);
     let mut session =
         super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch).unwrap();
-    let mut logits = session.forward_rows(&fixture_rows(len)).unwrap();
+    let logits = session.forward_rows(&fixture_rows(len)).unwrap();
+    let prompt_logits = logits.iter().map(|value| value.to_bits()).collect();
+    let prompt_base_kv = snapshot_base_kv(&session);
+    let prompt_seq_len = session.len();
+    let mut decode_logits = logits;
     let mut decode_ids = [0; 3];
     for (index, id) in decode_ids.iter_mut().enumerate() {
-        *id = greedy_id(&logits);
+        *id = greedy_id(&decode_logits);
         if index + 1 < 3 {
-            logits = session.forward_rows(&[Gemma4InputRow::Token(*id)]).unwrap();
+            decode_logits = session.forward_rows(&[Gemma4InputRow::Token(*id)]).unwrap();
         }
     }
     Gemma4Snapshot {
-        logits: logits.iter().map(|value| value.to_bits()).collect(),
-        base_kv: snapshot_base_kv(&session),
-        seq_len: session.len(),
+        logits: prompt_logits,
+        base_kv: prompt_base_kv,
+        seq_len: prompt_seq_len,
         decode_ids,
     }
 }
@@ -402,6 +407,11 @@ fn gemma4_prefill_matches_batch_one_across_chunk_boundaries() {
             assert_eq!(run_gemma4_fixture(len, batch), expected);
         }
     }
+}
+
+#[test]
+fn gemma4_fixture_snapshots_prompt_state_before_decode() {
+    assert_eq!(run_gemma4_fixture(3, 1).seq_len, 3);
 }
 
 #[test]
@@ -812,6 +822,73 @@ fn input_rows_reject_empty_invalid_and_nonfinite_values() {
 }
 
 #[test]
+fn gemma4_rejects_over_capacity_before_validating_rows() {
+    let output_projection_calls = Arc::new(AtomicUsize::new(0));
+    let model = deterministic_model(output_projection_calls);
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 1).unwrap();
+    let mut rows = vec![Gemma4InputRow::Token(1); CONTEXT + 1];
+    rows[0] = Gemma4InputRow::Raw {
+        values: Vec::new(),
+        per_layer_token: 0,
+    };
+
+    let error = session.forward_rows(&rows).unwrap_err();
+
+    assert!(error.contains("exceeds context"), "{error}");
+}
+
+#[test]
+fn gemma4_prevalidates_later_chunks_before_running_any_projection() {
+    let projection_calls = Arc::new(AtomicUsize::new(0));
+    let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let dim = model.config.head_dim(0);
+    model.layers[0].attn_q = counting_output_weight(
+        model.config.embd,
+        HEADS * dim,
+        Arc::clone(&projection_calls),
+    );
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 1).unwrap();
+    let before = snapshot_gemma4_state(&session);
+    let rows = [
+        Gemma4InputRow::Token(1),
+        Gemma4InputRow::Token(2),
+        Gemma4InputRow::Raw {
+            values: vec![0.0; model.config.embd - 1],
+            per_layer_token: 0,
+        },
+    ];
+
+    let error = session.forward_rows(&rows).unwrap_err();
+
+    assert!(error.contains("raw row 2"), "{error}");
+    assert_eq!(projection_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(snapshot_gemma4_state(&session), before);
+}
+
+#[test]
+fn gemma4_scratch_bytes_counts_retained_attention_capacity() {
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 1).unwrap();
+    let before_bytes = session.scratch_bytes();
+    let before_capacity =
+        session.scratch.scores.capacity() + session.scratch.attention_values.capacity();
+    session.scratch.scores.reserve(1);
+    session.scratch.attention_values.reserve(1);
+    let retained_values = session.scratch.scores.capacity()
+        + session.scratch.attention_values.capacity()
+        - before_capacity;
+
+    assert!(retained_values > 0);
+    assert_eq!(
+        session.scratch_bytes() - before_bytes,
+        retained_values * std::mem::size_of::<f32>()
+    );
+}
+
+#[test]
 fn shared_kv_layers_map_by_attention_kind() {
     let cfg = test_config();
     assert_eq!(kv_source_layer(&cfg, 0), 0);
@@ -833,7 +910,8 @@ fn failed_gemma4_chunk_truncates_every_base_kv_layer() {
     let mut session =
         super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 4).unwrap();
     let before = snapshot_gemma4_state(&session);
-    assert!(session.forward_rows(&fixture_rows(3)).is_err());
+    let error = session.forward_rows(&fixture_rows(3)).unwrap_err();
+    assert!(error.contains("blk.0.attn_output.weight"), "{error}");
     assert_eq!(snapshot_gemma4_state(&session), before);
 }
 
