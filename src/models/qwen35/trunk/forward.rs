@@ -286,8 +286,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
         for t in 0..n_tokens {
             let off = t * n_embd;
-            scratch.normed_buf[off..off + n_embd]
-                .copy_from_slice(&scratch.x[off..off + n_embd]);
+            scratch.normed_buf[off..off + n_embd].copy_from_slice(&scratch.x[off..off + n_embd]);
             crate::ops::rms_norm_inplace(
                 &mut scratch.normed_buf[off..off + n_embd],
                 &self.output_norm,
@@ -295,8 +294,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             );
         }
 
-        let last_normed =
-            &scratch.normed_buf[(n_tokens - 1) * n_embd..n_tokens * n_embd];
+        let last_normed = &scratch.normed_buf[(n_tokens - 1) * n_embd..n_tokens * n_embd];
         #[cfg(feature = "parity-trace")]
         parity_trace::report(parity_trace::checkpoint(
             "result_norm",

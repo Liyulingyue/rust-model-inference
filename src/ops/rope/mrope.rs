@@ -78,8 +78,7 @@ pub fn rope_mrope(
             } else {
                 3
             };
-            let cos_a = theta[axis].cos();
-            let sin_a = theta[axis].sin();
+            let (sin_a, cos_a) = sin_cos(theta[axis]);
             let idx0 = base + i;
             let idx1 = idx0 + half;
             let x0 = x[idx0];

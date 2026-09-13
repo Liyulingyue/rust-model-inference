@@ -371,6 +371,27 @@ class QwenDriveExportTest(unittest.TestCase):
                 (GGML_F32, (2, 2), 16),
             )
 
+    def test_perception_scalar_tensors_use_one_element_gguf_shape(self):
+        tensors = {
+            "bev_modeling.norm.num_batches_tracked": (
+                "F32",
+                (),
+                struct.pack("<f", 7.0),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            component, manifest = self.make_component(root, "perception", tensors)
+            out = root / "perception.gguf"
+
+            export_head(component, out, "qwen_drive_perception", manifest)
+
+            _, directory = read_gguf_directory(out)
+            self.assertEqual(
+                directory["qwen_drive_perception.norm.num_batches_tracked"],
+                (GGML_F32, (1,), 4),
+            )
+
     def test_manifest_rejects_hash_shape_dtype_missing_and_truncated_payload(self):
         tensors = {
             "planning_expert.out_proj.weight": ("BF16", (3, 4), bytes(range(24))),

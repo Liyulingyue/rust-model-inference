@@ -4,10 +4,17 @@ use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad};
+use crate::models::qwen35::vision::{
+    qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad,
+};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
+use crate::models::qwen_drive::perception::fpn::ViewGeometry;
+use crate::models::qwen_drive::perception::ops::Tensor4;
+use crate::models::qwen_drive::perception::QwenDrivePerception;
 use crate::models::qwen_drive::planning::{PlanningExpert, TrajectoryBatch};
-use crate::models::qwen_drive::scene::{read_planning_scenes, PlanningScene};
+use crate::models::qwen_drive::scene::{
+    read_perception_frame, read_planning_scenes, PerceptionContent, PerceptionFrame, PlanningScene,
+};
 use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -28,6 +35,13 @@ struct PlanningPrediction<'a> {
     reasoning_token_ids: &'a [u32],
 }
 
+#[derive(Serialize)]
+struct PerceptionPrediction<'a> {
+    token: &'a str,
+    #[serde(flatten)]
+    result: &'a crate::models::qwen_drive::perception::heads::PerceptionResult,
+}
+
 struct PrefillOutput {
     cache: Vec<crate::models::qwen35::Qwen35DenseKvSnapshot>,
     anchor: [usize; 3],
@@ -41,7 +55,9 @@ fn architecture(source: &dyn TensorSource, expected: &str, label: &str) -> Resul
         .and_then(MetaValue::to_string_val)
         .ok_or_else(|| format!("{label} has no string general.architecture"))?;
     if actual != expected {
-        return Err(format!("Expected {label} architecture {expected}, got {actual}"));
+        return Err(format!(
+            "Expected {label} architecture {expected}, got {actual}"
+        ));
     }
     Ok(())
 }
@@ -73,7 +89,13 @@ fn build_prompt(
     let vision_end = special(tokenizer, "vision_end")?;
     let im_start = special(tokenizer, "im_start")?;
     let im_end = special(tokenizer, "im_end")?;
-    if grids.len() != scene.views.iter().map(|view| view.frames.len()).sum::<usize>() {
+    if grids.len()
+        != scene
+            .views
+            .iter()
+            .map(|view| view.frames.len())
+            .sum::<usize>()
+    {
         return Err("Qwen-Drive image grid count does not match the scene".into());
     }
 
@@ -184,11 +206,8 @@ fn encode_images(
                 grid.image_width(),
                 grid.image_height(),
             )?;
-            let normalized = normalize_rgb(
-                &rgb,
-                encoder.config.image_mean,
-                encoder.config.image_std,
-            )?;
+            let normalized =
+                normalize_rgb(&rgb, encoder.config.image_mean, encoder.config.image_std)?;
             let actual = encoder.encode_image(
                 &normalized,
                 grid.image_width(),
@@ -203,6 +222,207 @@ fn encode_images(
         }
     }
     Ok((projected, grids))
+}
+
+fn build_perception_prompt(
+    tokenizer: &BPETokenizer,
+    frame: &PerceptionFrame,
+    grids: &[VisionGrid],
+) -> Result<Vec<u32>, String> {
+    let image = special(tokenizer, "image_pad")?;
+    let vision_start = special(tokenizer, "vision_start")?;
+    let vision_end = special(tokenizer, "vision_end")?;
+    let im_start = special(tokenizer, "im_start")?;
+    let im_end = special(tokenizer, "im_end")?;
+    let mut body = Vec::new();
+    let mut image_index = 0usize;
+    for item in &frame.content {
+        match item {
+            PerceptionContent::Text(text) => body.extend(plain(tokenizer, text)),
+            PerceptionContent::Image { .. } => {
+                let grid = grids
+                    .get(image_index)
+                    .ok_or("Qwen-Drive perception image grid count mismatch")?;
+                body.push(vision_start);
+                body.extend(std::iter::repeat_n(image, grid.token_count()));
+                body.push(vision_end);
+                image_index += 1;
+            }
+        }
+    }
+    if image_index != grids.len() {
+        return Err("Qwen-Drive perception image grid count mismatch".into());
+    }
+    let mut tokens = vec![im_start];
+    tokens.extend(plain(tokenizer, "user\n"));
+    tokens.extend(body);
+    tokens.push(im_end);
+    tokens.extend(plain(tokenizer, "\n"));
+    tokens.push(im_start);
+    tokens.extend(plain(tokenizer, "assistant\n"));
+    Ok(tokens)
+}
+
+fn encode_perception_images(
+    encoder: &VisionEncoder<'_>,
+    frame: &PerceptionFrame,
+    image_size: [usize; 2],
+    vit_dim: usize,
+) -> Result<(Tensor4, Vec<f32>, Vec<VisionGrid>), String> {
+    if encoder.config.n_embd != vit_dim {
+        return Err(format!(
+            "Qwen-Drive perception expects ViT width {vit_dim}, got {}",
+            encoder.config.n_embd
+        ));
+    }
+    let images = frame
+        .content
+        .iter()
+        .filter_map(|item| match item {
+            PerceptionContent::Image { path, .. } => Some(path),
+            PerceptionContent::Text(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let cameras = images.len();
+    let mut projected = Vec::new();
+    let mut grids = Vec::with_capacity(cameras);
+    let mut vit = Vec::new();
+    let mut scratch = VisionScratchpad::new(&encoder.config);
+    for (camera, path) in images.into_iter().enumerate() {
+        let image = decode_image(path)?.to_rgb8();
+        let rgb = crate::models::gemma4::vision::resize_bicubic_pillow(
+            image.as_raw(),
+            image.width() as usize,
+            image.height() as usize,
+            image_size[0],
+            image_size[1],
+        )?;
+        let normalized = normalize_rgb(&rgb, encoder.config.image_mean, encoder.config.image_std)?;
+        let grid = encoder.encode_image(&normalized, image_size[0], image_size[1], &mut scratch)?;
+        if grids.first().is_some_and(|first| *first != grid) {
+            return Err("Qwen-Drive perception cameras produced different vision grids".into());
+        }
+        let patch_height = grid.grid_h * grid.merge_size;
+        let patch_width = grid.grid_w * grid.merge_size;
+        let image_values = patch_height
+            .checked_mul(patch_width)
+            .and_then(|value| value.checked_mul(vit_dim))
+            .ok_or("Qwen-Drive perception ViT feature length overflow")?;
+        if scratch.merged.len() != image_values {
+            return Err("Qwen-Drive perception pre-merge feature shape mismatch".into());
+        }
+        let start = vit.len();
+        vit.resize(start + image_values, 0.0);
+        for block_y in 0..grid.grid_h {
+            for block_x in 0..grid.grid_w {
+                for dy in 0..grid.merge_size {
+                    for dx in 0..grid.merge_size {
+                        let y = block_y * grid.merge_size + dy;
+                        let x = block_x * grid.merge_size + dx;
+                        let source = (((block_y * grid.grid_w + block_x) * grid.merge_size + dy)
+                            * grid.merge_size
+                            + dx)
+                            * vit_dim;
+                        for channel in 0..vit_dim {
+                            let destination =
+                                start + ((channel * patch_height + y) * patch_width + x);
+                            vit[destination] = scratch.merged[source + channel];
+                        }
+                    }
+                }
+            }
+        }
+        projected.extend_from_slice(&scratch.projected);
+        grids.push(grid);
+        debug_assert_eq!(camera + 1, grids.len());
+    }
+    let grid = grids
+        .first()
+        .copied()
+        .ok_or("Qwen-Drive perception frame has no images")?;
+    Ok((
+        Tensor4::new(
+            vit,
+            [
+                cameras,
+                vit_dim,
+                grid.grid_h * grid.merge_size,
+                grid.grid_w * grid.merge_size,
+            ],
+        )?,
+        projected,
+        grids,
+    ))
+}
+
+fn prefill_perception(
+    model: &mut Qwen35Model<'_>,
+    tokenizer: &BPETokenizer,
+    pool: Arc<ComputePool>,
+    frame: &PerceptionFrame,
+    projected: &[f32],
+    grids: &[VisionGrid],
+) -> Result<Tensor4, String> {
+    let tokens = build_perception_prompt(tokenizer, frame, grids)?;
+    let image = special(tokenizer, "image_pad")?;
+    let signed_tokens = tokens
+        .iter()
+        .map(|&token| i32::try_from(token).map_err(|_| "Qwen-Drive token id exceeds i32"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let embeddings = inject_vision_embeddings(
+        model,
+        &signed_tokens,
+        Some(image as i32),
+        projected,
+        projected.len() / model.config.n_embd,
+        model.config.n_embd,
+    )?;
+    let (positions, _) = build_qwen35_positions(&tokens, Some(image), grids)?;
+    let width = model.config.n_embd;
+    let mut session = Qwen35Session::new(model, tokens.len(), pool)?;
+    session.step(&embeddings, tokens.len(), &positions)?;
+    let hidden = session.last_hidden(tokens.len())?;
+    let grid = grids
+        .last()
+        .copied()
+        .ok_or("Qwen-Drive perception has no image grids")?;
+    if grids.iter().any(|current| *current != grid) {
+        return Err("Qwen-Drive perception image grids differ".into());
+    }
+    let per_image = grid.token_count();
+    let cameras = frame.cam_order.len();
+    let image_rows = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &token)| (token == image).then_some(index))
+        .collect::<Vec<_>>();
+    let keep = cameras
+        .checked_mul(per_image)
+        .ok_or("Qwen-Drive perception hidden length overflow")?;
+    let start = image_rows
+        .len()
+        .checked_sub(keep)
+        .ok_or("Qwen-Drive perception prompt has too few image tokens")?;
+    let image_rows = image_rows
+        .get(start..)
+        .ok_or("Qwen-Drive perception image-token slice is invalid")?;
+    let mut values = vec![0.0; keep * width];
+    for (row, &source_row) in image_rows.iter().enumerate() {
+        for channel in 0..width {
+            values[(row / per_image * width + channel) * per_image + row % per_image] =
+                hidden[source_row * width + channel];
+        }
+    }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "qwen_drive.perception_prompt_ids",
+        &tokens,
+    ));
+    Tensor4::new(values, [cameras, width, grid.grid_h, grid.grid_w])
+}
+
+fn single_frame_lidar2ego(frame: &PerceptionFrame) -> [[f32; 16]; 1] {
+    [frame.lidar2ego]
 }
 
 fn argmax(logits: &[f32]) -> Result<u32, String> {
@@ -286,7 +506,8 @@ fn prefill_scene(
             reasoning_ids.push(token);
             if index + 1 < max_reasoning_tokens {
                 let position = session.next_position();
-                logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
+                logits =
+                    session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
                 cached += 1;
             }
         }
@@ -360,76 +581,144 @@ fn temp_output_path(output: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn run_qwen_drive_cli(options: QwenDriveCliOptions, threads: usize) -> Result<(), String> {
-    let QwenDriveHead::Planner(planner_path) = &options.head else {
-        return Err("Qwen-Drive perception runtime is not implemented yet".into());
-    };
     let vlm = open_model_source(&options.model, ComponentRole::Llm)
         .map_err(|error| format!("Failed to load Qwen-Drive VLM: {error}"))?;
     let mmproj = open_model_source(&options.mmproj, ComponentRole::Mmproj)
         .map_err(|error| format!("Failed to load Qwen-Drive mmproj: {error}"))?;
-    let planner = open_model_source(planner_path, ComponentRole::Llm)
-        .map_err(|error| format!("Failed to load Qwen-Drive planner: {error}"))?;
+    let (head_path, expected_architecture, head_label) = match &options.head {
+        QwenDriveHead::Planner(path) => (path, "qwen_drive_planner", "planner"),
+        QwenDriveHead::Perception(path) => (path, "qwen_drive_perception", "perception"),
+    };
+    let head = open_model_source(head_path, ComponentRole::Llm)
+        .map_err(|error| format!("Failed to load Qwen-Drive {head_label}: {error}"))?;
     architecture(vlm.as_ref(), "qwen35", "Qwen-Drive VLM")?;
     architecture(mmproj.as_ref(), "clip", "Qwen-Drive mmproj")?;
-    architecture(
-        planner.as_ref(),
-        "qwen_drive_planner",
-        "Qwen-Drive planner",
-    )?;
+    architecture(head.as_ref(), expected_architecture, "Qwen-Drive head")?;
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| vlm.metadata(key).cloned())
         .map_err(|error| format!("Failed to initialize Qwen-Drive tokenizer: {error}"))?;
     let mut model = Qwen35Model::from_source(vlm.as_ref())?;
     let encoder = VisionEncoder::from_source(mmproj.as_ref())?;
-    let planner = PlanningExpert::from_source(planner.as_ref())?;
-    let scenes = read_planning_scenes(
-        options.scenes.as_deref().expect("validated planner scenes"),
-        options
-            .image_root
-            .as_deref()
-            .expect("validated planner image root"),
-        None,
-    )?;
     let pool = Arc::new(ComputePool::new(threads.max(1)));
     let temporary = temp_output_path(&options.output)?;
     let result = (|| {
         let file = File::create(&temporary)
             .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
         let mut writer = BufWriter::new(file);
-        for scene in &scenes {
-            let (projected, grids) = encode_images(&encoder, scene)?;
-            let prefill = prefill_scene(
-                &mut model,
-                &tokenizer,
-                Arc::clone(&pool),
-                scene,
-                &projected,
-                &grids,
-                options.mode,
-                planner.config().max_reasoning_tokens,
-            )?;
-            let batch = planner.sample(
-                &prefill.cache,
-                prefill.anchor,
-                scene,
-                options.samples,
-                options.steps,
-                options.seed as u64,
-                pool.as_ref(),
-            )?;
-            serde_json::to_writer(
-                &mut writer,
-                &PlanningPrediction {
-                    token: &scene.token,
-                    trajectories: trajectories(&batch)?,
-                    reasoning: prefill.reasoning.as_deref(),
-                    reasoning_token_ids: &prefill.reasoning_token_ids,
-                },
-            )
-            .map_err(|error| format!("Cannot serialize Qwen-Drive prediction: {error}"))?;
-            writer
-                .write_all(b"\n")
-                .map_err(|error| format!("Cannot write {}: {error}", temporary.display()))?;
+        match &options.head {
+            QwenDriveHead::Planner(_) => {
+                let planner = PlanningExpert::from_source(head.as_ref())?;
+                let scenes = read_planning_scenes(
+                    options.scenes.as_deref().expect("validated planner scenes"),
+                    options
+                        .image_root
+                        .as_deref()
+                        .expect("validated planner image root"),
+                    None,
+                )?;
+                for scene in &scenes {
+                    let (projected, grids) = encode_images(&encoder, scene)?;
+                    let prefill = prefill_scene(
+                        &mut model,
+                        &tokenizer,
+                        Arc::clone(&pool),
+                        scene,
+                        &projected,
+                        &grids,
+                        options.mode,
+                        planner.config().max_reasoning_tokens,
+                    )?;
+                    let batch = planner.sample(
+                        &prefill.cache,
+                        prefill.anchor,
+                        scene,
+                        options.samples,
+                        options.steps,
+                        options.seed as u64,
+                        pool.as_ref(),
+                    )?;
+                    serde_json::to_writer(
+                        &mut writer,
+                        &PlanningPrediction {
+                            token: &scene.token,
+                            trajectories: trajectories(&batch)?,
+                            reasoning: prefill.reasoning.as_deref(),
+                            reasoning_token_ids: &prefill.reasoning_token_ids,
+                        },
+                    )
+                    .map_err(|error| format!("Cannot serialize Qwen-Drive prediction: {error}"))?;
+                    writer.write_all(b"\n").map_err(|error| {
+                        format!("Cannot write {}: {error}", temporary.display())
+                    })?;
+                }
+            }
+            QwenDriveHead::Perception(_) => {
+                let perception = QwenDrivePerception::from_source(head.as_ref())?;
+                if perception.config().llm_dim != model.config.n_embd {
+                    return Err(format!(
+                        "Qwen-Drive perception expects LLM width {}, got {}",
+                        perception.config().llm_dim,
+                        model.config.n_embd
+                    ));
+                }
+                let frame = read_perception_frame(
+                    options
+                        .frames
+                        .as_deref()
+                        .expect("validated perception frame"),
+                )?;
+                let (vit, projected, grids) = encode_perception_images(
+                    &encoder,
+                    &frame,
+                    perception.config().image_size,
+                    perception.config().vit_dim,
+                )?;
+                let llm = prefill_perception(
+                    &mut model,
+                    &tokenizer,
+                    Arc::clone(&pool),
+                    &frame,
+                    &projected,
+                    &grids,
+                )?;
+                let lidar2ego = single_frame_lidar2ego(&frame);
+                let config = perception.config();
+                let geometry = ViewGeometry {
+                    frustum_range: config.frustum_range,
+                    frustum_size: config.frustum_size,
+                    pc_range: config.det_pc_range,
+                    voxel_size: [
+                        config.det_voxel_size[0],
+                        config.det_voxel_size[1],
+                        (config.det_pc_range[5] - config.det_pc_range[2])
+                            / config.occ_pillar_h as f32,
+                    ],
+                    voxel_shape: [config.bev[1], config.bev[0], config.occ_pillar_h],
+                    lidar2img: &frame.lidar2img,
+                    lidar2ego: &lidar2ego,
+                };
+                let output = perception.infer(
+                    &vit,
+                    &llm,
+                    &geometry,
+                    &frame.dataset_type,
+                    frame.box_coord_system_ego,
+                    pool.as_ref(),
+                )?;
+                serde_json::to_writer(
+                    &mut writer,
+                    &PerceptionPrediction {
+                        token: &frame.token,
+                        result: &output,
+                    },
+                )
+                .map_err(|error| {
+                    format!("Cannot serialize Qwen-Drive perception result: {error}")
+                })?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|error| format!("Cannot write {}: {error}", temporary.display()))?;
+            }
         }
         writer
             .flush()
@@ -459,14 +748,35 @@ mod tests {
         reasoning: Vec<u32>,
     }
 
+    #[derive(serde::Deserialize)]
+    struct PerceptionPromptIds {
+        prompt_ids: Vec<u32>,
+    }
+
+    #[test]
+    fn perception_geometry_keeps_one_lidar_pose_for_six_cameras() {
+        let frame = PerceptionFrame {
+            token: "fixture".into(),
+            dataset_type: "nuscenes".into(),
+            cam_order: vec![String::new(); 6],
+            content: Vec::new(),
+            image_shapes: vec![[512, 896, 3]; 6],
+            lidar2img: vec![[0.0; 16]; 6],
+            lidar2ego: [1.0; 16],
+            box_coord_system_ego: true,
+        };
+
+        assert_eq!(single_frame_lidar2ego(&frame), [[1.0; 16]]);
+    }
+
     #[test]
     #[ignore = "requires RMI_QWEN_DRIVE_VLM and RMI_QWEN_DRIVE_OFFICIAL"]
     fn planning_prompt_token_ids_match_official_tokenizer() {
         let model = std::env::var_os("RMI_QWEN_DRIVE_VLM").unwrap();
         let official = PathBuf::from(std::env::var_os("RMI_QWEN_DRIVE_OFFICIAL").unwrap());
         let source = crate::core::loader::GGUFLoader::from_file(model).unwrap();
-        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
-            .unwrap();
+        let tokenizer =
+            BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap();
         let scene = read_planning_scenes(
             &official.join("data/demo/planning_scenes.jsonl"),
             &official.join("data/demo"),
@@ -501,6 +811,66 @@ mod tests {
         assert_eq!(
             build_prompt(&tokenizer, &scene, &grids, PlanningMode::Reasoning).unwrap(),
             fixture.reasoning
+        );
+    }
+
+    #[test]
+    #[ignore = "requires RMI_QWEN_DRIVE_VLM"]
+    fn perception_prompt_token_ids_match_official_tokenizer() {
+        let source = crate::core::loader::GGUFLoader::from_file(
+            std::env::var_os("RMI_QWEN_DRIVE_VLM").unwrap(),
+        )
+        .unwrap();
+        let tokenizer =
+            BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap();
+        let cameras = [
+            ("<FRONT VIEW>", "CAM_FRONT"),
+            ("<FRONT RIGHT VIEW>", "CAM_FRONT_RIGHT"),
+            ("<BACK RIGHT VIEW>", "CAM_BACK_RIGHT"),
+            ("<BACK VIEW>", "CAM_BACK"),
+            ("<BACK LEFT VIEW>", "CAM_BACK_LEFT"),
+            ("<FRONT LEFT VIEW>", "CAM_FRONT_LEFT"),
+        ];
+        let mut content = Vec::new();
+        for (label, camera) in cameras {
+            content.push(PerceptionContent::Text(label.into()));
+            content.push(PerceptionContent::Image {
+                camera: camera.into(),
+                path: PathBuf::from(format!("{camera}.jpg")),
+            });
+        }
+        content.push(PerceptionContent::Text("Analyze the scene.".into()));
+        let frame = PerceptionFrame {
+            token: "fixture".into(),
+            dataset_type: "nuscenes".into(),
+            cam_order: cameras
+                .into_iter()
+                .map(|(_, camera)| camera.into())
+                .collect(),
+            content,
+            image_shapes: vec![[512, 896, 3]; 6],
+            lidar2img: Vec::new(),
+            lidar2ego: [0.0; 16],
+            box_coord_system_ego: true,
+        };
+        let grids = vec![
+            VisionGrid {
+                grid_t: 1,
+                grid_h: 16,
+                grid_w: 28,
+                patch_size: 16,
+                merge_size: 2,
+            };
+            6
+        ];
+        let fixture: PerceptionPromptIds = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/qwen_drive/perception-frame.json"
+        )))
+        .unwrap();
+        assert_eq!(
+            build_perception_prompt(&tokenizer, &frame, &grids).unwrap(),
+            fixture.prompt_ids
         );
     }
 

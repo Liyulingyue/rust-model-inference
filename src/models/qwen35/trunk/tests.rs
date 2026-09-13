@@ -657,16 +657,14 @@ fn session_new_sizes_state_to_requested_limit() {
 fn dense_kv_snapshots_return_token_major_post_rotary_values() {
     let mut model = tiny_dense_session_model();
     let mut session = Qwen35Session::new(&mut model, 4, session_pool()).unwrap();
-    session
-        .step(&[0.0; 8], 2, &[[0; 4], [1; 4]])
-        .unwrap();
+    session.step(&[0.0; 8], 2, &[[0; 4], [1; 4]]).unwrap();
     let KvCache::F32(cache) = session.kv_cache_mut() else {
         panic!("Qwen3.5 KV cache should be F32");
     };
     cache.k[..8].copy_from_slice(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     cache.v.copy_from_slice(&[
-        100.0, 101.0, 0.0, 0.0, 110.0, 111.0, 0.0, 0.0, 120.0, 121.0, 0.0,
-        0.0, 130.0, 131.0, 0.0, 0.0,
+        100.0, 101.0, 0.0, 0.0, 110.0, 111.0, 0.0, 0.0, 120.0, 121.0, 0.0, 0.0, 130.0, 131.0, 0.0,
+        0.0,
     ]);
 
     let snapshots = session.dense_kv_snapshots(&[0], 2).unwrap();
@@ -688,7 +686,11 @@ fn last_hidden_borrows_all_final_norm_rows_from_the_last_step() {
     model.layers[0].ffn_down = f32_test_weight(vec![0.0; 16], 4, 4);
     let mut session = Qwen35Session::new(&mut model, 2, session_pool()).unwrap();
     session
-        .step(&[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0], 2, &[[0; 4], [1; 4]])
+        .step(
+            &[3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0],
+            2,
+            &[[0; 4], [1; 4]],
+        )
         .unwrap();
 
     assert_eq!(

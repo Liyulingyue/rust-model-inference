@@ -565,9 +565,7 @@ fn required_usize_value(args: &[String], index: &mut usize, flag: &str) -> Resul
         .map_err(|error| format!("Invalid {flag} value: {error}"))
 }
 
-pub fn qwen_drive_cli_options(
-    options: &CliOptions,
-) -> Result<Option<QwenDriveCliOptions>, String> {
+pub fn qwen_drive_cli_options(options: &CliOptions) -> Result<Option<QwenDriveCliOptions>, String> {
     let requested = options.planner.is_some()
         || options.perception.is_some()
         || options.scenes.is_some()
@@ -581,7 +579,9 @@ pub fn qwen_drive_cli_options(
         return Ok(None);
     }
     let head = match (&options.planner, &options.perception) {
-        (Some(_), Some(_)) => return Err("--planner and --perception are mutually exclusive".into()),
+        (Some(_), Some(_)) => {
+            return Err("--planner and --perception are mutually exclusive".into())
+        }
         (Some(path), None) => QwenDriveHead::Planner(path.clone()),
         (None, Some(path)) => QwenDriveHead::Perception(path.clone()),
         (None, None) => return Err("Qwen-Drive requires --planner or --perception".into()),
@@ -649,13 +649,23 @@ pub fn qwen_drive_cli_options(
             if options.frames.is_some() {
                 return Err("--frames requires --perception".into());
             }
-            let samples = options.num_samples.ok_or("--planner requires --num-samples")?;
+            let samples = options
+                .num_samples
+                .ok_or("--planner requires --num-samples")?;
             let steps = options.num_steps.ok_or("--planner requires --num-steps")?;
             let seed = options.seed.ok_or("--planner requires --seed")?;
             if samples == 0 || steps == 0 {
                 return Err("--num-samples and --num-steps must be greater than zero".into());
             }
-            (mode, Some(scenes), Some(image_root), None, samples, steps, seed)
+            (
+                mode,
+                Some(scenes),
+                Some(image_root),
+                None,
+                samples,
+                steps,
+                seed,
+            )
         }
         QwenDriveHead::Perception(_) => {
             if options.scenes.is_some()
@@ -1564,6 +1574,43 @@ mod tests {
                 validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
             assert!(error.contains(expected), "{argv:?}: {error}");
         }
+    }
+
+    #[test]
+    fn perception_cli_requires_frame_manifest_and_perception_head() {
+        let argv = args(&[
+            "rmi",
+            "--model",
+            "vlm.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--perception",
+            "perception.gguf",
+            "--frames",
+            "frame-dir",
+            "--output",
+            "result.json",
+        ]);
+        let options = parse_cli_options(&argv).unwrap();
+        let drive = qwen_drive_cli_options(&options).unwrap().unwrap();
+        assert!(matches!(drive.head, QwenDriveHead::Perception(_)));
+        assert_eq!(drive.frames.as_deref(), Some(Path::new("frame-dir")));
+
+        let missing = parse_cli_options(&args(&[
+            "rmi",
+            "--model",
+            "vlm.gguf",
+            "--mmproj",
+            "mmproj.gguf",
+            "--perception",
+            "perception.gguf",
+            "--output",
+            "result.json",
+        ]))
+        .unwrap();
+        assert!(qwen_drive_cli_options(&missing)
+            .unwrap_err()
+            .contains("--frames"));
     }
 
     #[test]

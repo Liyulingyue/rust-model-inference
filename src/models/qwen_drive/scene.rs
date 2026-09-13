@@ -30,6 +30,42 @@ pub struct PlanningScene {
     pub ego_status: [f32; 8],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PerceptionContent {
+    Text(String),
+    Image { camera: String, path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerceptionFrame {
+    pub token: String,
+    pub dataset_type: String,
+    pub cam_order: Vec<String>,
+    pub content: Vec<PerceptionContent>,
+    pub image_shapes: Vec<[usize; 3]>,
+    pub lidar2img: Vec<[f32; 16]>,
+    pub lidar2ego: [f32; 16],
+    pub box_coord_system_ego: bool,
+}
+
+#[derive(Deserialize)]
+struct PerceptionFrameRecord {
+    dataset_type: String,
+    cam_order: Vec<String>,
+    content: Vec<PerceptionContentRecord>,
+    image_shapes: Vec<[usize; 3]>,
+    lidar2img: Vec<[[f32; 4]; 4]>,
+    lidar2ego: [[f32; 4]; 4],
+    box_coord_system: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PerceptionContentRecord {
+    Text { text: String },
+    Image { image: String },
+}
+
 #[derive(Deserialize)]
 struct SceneRecord {
     messages: Vec<SceneMessage>,
@@ -273,6 +309,121 @@ pub fn read_planning_scenes(
     Ok(scenes)
 }
 
+pub fn read_perception_frame(root: &Path) -> Result<PerceptionFrame, String> {
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "Cannot resolve perception frame {}: {error}",
+            root.display()
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(format!(
+            "Perception frame is not a directory: {}",
+            root.display()
+        ));
+    }
+    let manifest = root.join("frame-manifest.json");
+    let record: PerceptionFrameRecord =
+        serde_json::from_reader(File::open(&manifest).map_err(|error| {
+            format!(
+                "Cannot open perception frame {}: {error}",
+                manifest.display()
+            )
+        })?)
+        .map_err(|error| format!("Invalid perception frame {}: {error}", manifest.display()))?;
+    if !matches!(record.dataset_type.as_str(), "nuscenes" | "nuplan") {
+        return Err(format!(
+            "Unsupported Qwen-Drive dataset type: {}",
+            record.dataset_type
+        ));
+    }
+    let cameras = record.cam_order.len();
+    if cameras == 0
+        || record.image_shapes.len() != cameras
+        || record.lidar2img.len() != cameras
+        || record
+            .image_shapes
+            .iter()
+            .any(|shape| *shape != [512, 896, 3])
+    {
+        return Err("Qwen-Drive frame camera metadata is incomplete or not 896x512 RGB".into());
+    }
+    if record
+        .cam_order
+        .iter()
+        .enumerate()
+        .any(|(index, camera)| camera.is_empty() || record.cam_order[..index].contains(camera))
+    {
+        return Err("Qwen-Drive camera order contains an empty or duplicate name".into());
+    }
+
+    let flatten = |matrix: [[f32; 4]; 4]| matrix.into_iter().flatten().collect::<Vec<_>>();
+    let mut lidar2img = Vec::with_capacity(cameras);
+    for matrix in record.lidar2img {
+        let matrix: [f32; 16] = flatten(matrix)
+            .try_into()
+            .expect("4x4 matrix has sixteen values");
+        super::perception::fpn::inverse_4x4(&matrix)?;
+        lidar2img.push(matrix);
+    }
+    let lidar2ego: [f32; 16] = flatten(record.lidar2ego)
+        .try_into()
+        .expect("4x4 matrix has sixteen values");
+    super::perception::fpn::inverse_4x4(&lidar2ego)?;
+
+    let mut image_index = 0usize;
+    let mut content = Vec::with_capacity(record.content.len());
+    for item in record.content {
+        match item {
+            PerceptionContentRecord::Text { text } => {
+                if text.is_empty() {
+                    return Err("Qwen-Drive frame contains empty text".into());
+                }
+                content.push(PerceptionContent::Text(text));
+            }
+            PerceptionContentRecord::Image { image } => {
+                if record.cam_order.get(image_index) != Some(&image) {
+                    return Err(format!(
+                        "Qwen-Drive frame image order differs at camera {image_index}: {image}"
+                    ));
+                }
+                let path = resolve_image(
+                    &root,
+                    Path::new("images").join(format!("{image}.jpg")).as_path(),
+                )?;
+                content.push(PerceptionContent::Image {
+                    camera: image,
+                    path,
+                });
+                image_index += 1;
+            }
+        }
+    }
+    if image_index != cameras {
+        return Err(format!(
+            "Qwen-Drive frame has {image_index} images for {cameras} cameras"
+        ));
+    }
+    Ok(PerceptionFrame {
+        token: root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Perception frame directory must have a UTF-8 name")?
+            .to_owned(),
+        dataset_type: record.dataset_type,
+        cam_order: record.cam_order,
+        content,
+        image_shapes: record.image_shapes,
+        lidar2img,
+        lidar2ego,
+        box_coord_system_ego: match record.box_coord_system.as_str() {
+            "ego" => true,
+            "lidar" => false,
+            value => return Err(format!("Unsupported box coordinate system: {value}")),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +460,43 @@ mod tests {
         assert!(resolve_image(&root, Path::new("../outside.jpg"))
             .unwrap_err()
             .contains("escapes image root"));
+    }
+
+    #[test]
+    fn qwen_drive_perception_frame_validates_official_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "rmi-qwen-drive-perception-frame-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/qwen_drive/perception-frame.json"
+        ));
+        std::fs::write(root.join("frame-manifest.json"), fixture).unwrap();
+        for camera in [
+            "CAM_FRONT",
+            "CAM_FRONT_RIGHT",
+            "CAM_BACK_RIGHT",
+            "CAM_BACK",
+            "CAM_BACK_LEFT",
+            "CAM_FRONT_LEFT",
+        ] {
+            std::fs::write(root.join("images").join(format!("{camera}.jpg")), []).unwrap();
+        }
+        let frame = read_perception_frame(&root).unwrap();
+        assert_eq!(frame.dataset_type, "nuscenes");
+        assert_eq!(frame.cam_order.len(), 6);
+        assert_eq!(frame.image_shapes, vec![[512, 896, 3]; 6]);
+        assert_eq!(
+            frame
+                .content
+                .iter()
+                .filter(|item| matches!(item, PerceptionContent::Image { .. }))
+                .count(),
+            6
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -330,7 +330,7 @@ def export_head(
         writer.add_tensor_chunks(
             output_name(architecture, tensor.name),
             GGML_TYPES[tensor.dtype],
-            gguf_dims(tensor.shape),
+            gguf_dims(tensor.shape or (1,)),
             tensor.nbytes,
             lambda tensor=tensor: payload_chunks(path, tensor.offset, tensor.nbytes),
         )
@@ -538,7 +538,7 @@ def _verify_head_payloads(
         ggml_type, dims, nbytes, offset = directory[name]
         if (ggml_type, dims, nbytes) != (
             GGML_TYPES[tensor.dtype],
-            gguf_dims(tensor.shape),
+            gguf_dims(tensor.shape or (1,)),
             tensor.nbytes,
         ):
             raise ValueError(f"{output}: tensor contract mismatch for {name}")

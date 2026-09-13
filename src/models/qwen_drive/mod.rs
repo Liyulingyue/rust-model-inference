@@ -10,13 +10,20 @@ pub mod weights;
 #[cfg(test)]
 mod tests {
     use super::config::{PerceptionConfig, PlannerConfig};
+    use super::perception::bev::BevFormer;
+    use super::perception::fpn::{
+        conv_transpose2d, depth_softmax, frustum_voxel_coordinates, layer_norm_2d,
+        voxel_to_bev_tokens, ViewBackbone, ViewGeometry,
+    };
+    use super::perception::heads::PerceptionHeads;
+    use super::perception::ops::{
+        grid_sample_bilinear, ms_deform_attn, resize_bilinear, resize_bilinear_aligned,
+        voxel_pool_depth, DeformAttentionInput, Tensor4, VoxelPoolInput,
+    };
+    use super::perception::QwenDrivePerception;
     use super::planning::{
         euler_update, fourier_features, normalize_history, time_embedding, validate_sample_request,
         waypoint_mrope, PlanningExpert,
-    };
-    use super::perception::ops::{
-        grid_sample_bilinear, ms_deform_attn, resize_bilinear, voxel_pool_depth,
-        DeformAttentionInput, Tensor4, VoxelPoolInput,
     };
     use super::rng::TorchNormalRng;
     use super::scene::PlanningScene;
@@ -258,6 +265,61 @@ mod tests {
         deform: DeformFixture,
     }
 
+    #[derive(Deserialize)]
+    struct NormFixture {
+        input: TensorFixture,
+        weight: Vec<u32>,
+        bias: Vec<u32>,
+        epsilon: u32,
+        output: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct TransposeFixture {
+        input: TensorFixture,
+        weight_shape: [usize; 4],
+        weight: Vec<u32>,
+        bias: Vec<u32>,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        output_shape: [usize; 4],
+        output: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct GeometryFixture {
+        frustum_range: Vec<u32>,
+        frustum_size: Vec<u32>,
+        pc_range: Vec<u32>,
+        voxel_size: Vec<u32>,
+        voxel_shape: [usize; 3],
+        lidar2img: Vec<Vec<u32>>,
+        lidar2ego: Vec<Vec<u32>>,
+        coords: Vec<[usize; 4]>,
+        point_indices: Vec<usize>,
+    }
+
+    #[derive(Deserialize)]
+    struct BevFixture {
+        values: Vec<u32>,
+        shape: [usize; 5],
+        weight: Vec<u32>,
+        weight_shape: [usize; 2],
+        bias: Vec<u32>,
+        output: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
+    struct PerceptionViewFixture {
+        layer_norm: NormFixture,
+        transpose: TransposeFixture,
+        resize_aligned: ResizeFixture,
+        depth: TensorFixture,
+        depth_output: Vec<u32>,
+        geometry: GeometryFixture,
+        bev: BevFixture,
+    }
+
     fn values(bits: &[u32]) -> Vec<f32> {
         bits.iter().copied().map(f32::from_bits).collect()
     }
@@ -347,9 +409,8 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let tensor = |fixture: &TensorFixture| {
-            Tensor4::new(values(&fixture.values), fixture.shape).unwrap()
-        };
+        let tensor =
+            |fixture: &TensorFixture| Tensor4::new(values(&fixture.values), fixture.shape).unwrap();
         assert_bits(
             "resize",
             resize_bilinear(
@@ -372,8 +433,7 @@ mod tests {
             .values(),
             &fixture.grid.output,
         );
-        let [batch, sweeps, cameras, x, y, z, depth, height, width, channels] =
-            fixture.voxel.shape;
+        let [batch, sweeps, cameras, x, y, z, depth, height, width, channels] = fixture.voxel.shape;
         assert_bits(
             "voxel",
             &voxel_pool_depth(&VoxelPoolInput {
@@ -413,6 +473,117 @@ mod tests {
             .unwrap(),
             &fixture.deform.output,
         );
+    }
+
+    #[test]
+    fn perception_view_pipeline_matches_oracle_words() {
+        let fixture: PerceptionViewFixture = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/qwen_drive/perception-view.json"
+        )))
+        .unwrap();
+        assert_bits(
+            "layer norm",
+            layer_norm_2d(
+                &Tensor4::new(
+                    values(&fixture.layer_norm.input.values),
+                    fixture.layer_norm.input.shape,
+                )
+                .unwrap(),
+                &values(&fixture.layer_norm.weight),
+                &values(&fixture.layer_norm.bias),
+                f32::from_bits(fixture.layer_norm.epsilon),
+            )
+            .unwrap()
+            .values(),
+            &fixture.layer_norm.output,
+        );
+        let transposed = conv_transpose2d(
+            &Tensor4::new(
+                values(&fixture.transpose.input.values),
+                fixture.transpose.input.shape,
+            )
+            .unwrap(),
+            &values(&fixture.transpose.weight),
+            fixture.transpose.weight_shape,
+            Some(&values(&fixture.transpose.bias)),
+            fixture.transpose.stride,
+            fixture.transpose.padding,
+        )
+        .unwrap();
+        assert_eq!(transposed.shape(), fixture.transpose.output_shape);
+        assert_bits("transpose", transposed.values(), &fixture.transpose.output);
+        assert_bits(
+            "resize aligned",
+            resize_bilinear_aligned(
+                &Tensor4::new(
+                    values(&fixture.resize_aligned.input.values),
+                    fixture.resize_aligned.input.shape,
+                )
+                .unwrap(),
+                fixture.resize_aligned.output_hw[0],
+                fixture.resize_aligned.output_hw[1],
+                true,
+            )
+            .unwrap()
+            .values(),
+            &fixture.resize_aligned.output,
+        );
+        assert_bits(
+            "depth",
+            depth_softmax(
+                &Tensor4::new(values(&fixture.depth.values), fixture.depth.shape).unwrap(),
+            )
+            .unwrap()
+            .values(),
+            &fixture.depth_output,
+        );
+        let geometry = &fixture.geometry;
+        let matrices = |source: &[Vec<u32>]| {
+            source
+                .iter()
+                .map(|matrix| values(matrix).try_into().unwrap())
+                .collect::<Vec<[f32; 16]>>()
+        };
+        let (coords, point_indices) = frustum_voxel_coordinates(&ViewGeometry {
+            frustum_range: values(&geometry.frustum_range).try_into().unwrap(),
+            frustum_size: values(&geometry.frustum_size).try_into().unwrap(),
+            pc_range: values(&geometry.pc_range).try_into().unwrap(),
+            voxel_size: values(&geometry.voxel_size).try_into().unwrap(),
+            voxel_shape: geometry.voxel_shape,
+            lidar2img: &matrices(&geometry.lidar2img),
+            lidar2ego: &matrices(&geometry.lidar2ego),
+        })
+        .unwrap();
+        assert_eq!(coords, geometry.coords);
+        assert_eq!(point_indices, geometry.point_indices);
+        assert_bits(
+            "bev",
+            &voxel_to_bev_tokens(
+                &values(&fixture.bev.values),
+                fixture.bev.shape,
+                &values(&fixture.bev.weight),
+                fixture.bev.weight_shape,
+                &values(&fixture.bev.bias),
+            )
+            .unwrap(),
+            &fixture.bev.output,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires RMI_QWEN_DRIVE_PERCEPTION"]
+    fn qwen_drive_perception_loads_released_view_backbone() {
+        let source = crate::core::loader::GGUFLoader::from_file(
+            std::env::var_os("RMI_QWEN_DRIVE_PERCEPTION").unwrap(),
+        )
+        .unwrap();
+        let model = ViewBackbone::from_source(&source).unwrap();
+        assert_eq!(model.config().image_size, [896, 512]);
+        let _ = BevFormer::from_source(&source).unwrap();
+        let _ = PerceptionHeads::from_source(&source).unwrap();
+        let model = QwenDrivePerception::from_source(&source).unwrap();
+        assert_eq!(model.config().bev, [200, 200]);
     }
 
     #[test]

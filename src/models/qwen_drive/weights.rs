@@ -211,6 +211,43 @@ impl<'a> HeadLinear<'a> {
         })
     }
 
+    pub fn load_perception_slice<S: TensorSource + ?Sized>(
+        source: &'a S,
+        name: &str,
+        input: usize,
+        full_output: usize,
+        rows: std::ops::Range<usize>,
+    ) -> Result<Self, String> {
+        if rows.is_empty() || rows.end > full_output {
+            return Err(format!("Invalid Qwen-Drive linear row range: {rows:?}"));
+        }
+        let weight_name = format!("{name}_weight");
+        let bytes = checked_matrix(source, &weight_name, input, full_output, GGMLType::F32)?;
+        let row_bytes = input * 4;
+        let mut weight = Vec::with_capacity((rows.end - rows.start) * input * 2);
+        for chunk in bytes[rows.start * row_bytes..rows.end * row_bytes].chunks_exact(4) {
+            let value = f32::from_le_bytes(chunk.try_into().expect("four-byte chunk"));
+            if !value.is_finite() {
+                return Err(format!("Invalid finite tensor: {weight_name}"));
+            }
+            weight.extend_from_slice(&crate::ops::f32_to_bf16(value).to_le_bytes());
+        }
+        let bias = load_bias(
+            source,
+            &format!("{name}_bias"),
+            full_output,
+            GGMLType::F32,
+            true,
+        )?[rows.clone()]
+        .to_vec();
+        Ok(Self {
+            weight: HeadWeight::PerceptionBf16(weight),
+            bias: Some(bias),
+            input,
+            output: rows.end - rows.start,
+        })
+    }
+
     pub fn forward_one(&self, input: &[f32]) -> Result<Vec<f32>, String> {
         let mut output = vec![0.0; self.output];
         self.forward_rows(
@@ -426,7 +463,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            single.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            single
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
             parallel
                 .iter()
                 .map(|value| value.to_bits())

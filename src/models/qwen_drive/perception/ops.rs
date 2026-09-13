@@ -15,7 +15,7 @@ fn require_finite(values: &[f32], label: &str) -> Result<(), String> {
 }
 
 #[inline]
-fn round_bf16(value: f32) -> f32 {
+pub(crate) fn round_bf16(value: f32) -> f32 {
     bf16::from_f32(value).to_f32()
 }
 
@@ -61,25 +61,50 @@ pub fn resize_bilinear(
     output_height: usize,
     output_width: usize,
 ) -> Result<Tensor4, String> {
+    resize_bilinear_aligned(input, output_height, output_width, false)
+}
+
+pub fn resize_bilinear_aligned(
+    input: &Tensor4,
+    output_height: usize,
+    output_width: usize,
+    align_corners: bool,
+) -> Result<Tensor4, String> {
     if output_height == 0 || output_width == 0 {
         return Err("resize output dimensions must be greater than zero".into());
     }
     let [batch, channels, input_height, input_width] = input.shape;
     let mut output =
         vec![0.0; checked_len(&[batch, channels, output_height, output_width], "resize")?];
-    let y_scale = input_height as f32 / output_height as f32;
-    let x_scale = input_width as f32 / output_width as f32;
+    let y_scale = if align_corners && output_height > 1 {
+        (input_height - 1) as f32 / (output_height - 1) as f32
+    } else {
+        input_height as f32 / output_height as f32
+    };
+    let x_scale = if align_corners && output_width > 1 {
+        (input_width - 1) as f32 / (output_width - 1) as f32
+    } else {
+        input_width as f32 / output_width as f32
+    };
     for n in 0..batch {
         for c in 0..channels {
             for y in 0..output_height {
-                let source_y = (y as f32 + 0.5) * y_scale - 0.5;
+                let source_y = if align_corners {
+                    y as f32 * y_scale
+                } else {
+                    (y as f32 + 0.5) * y_scale - 0.5
+                };
                 let y_low_raw = source_y.floor() as isize;
                 let y_high_raw = y_low_raw + 1;
                 let y_lerp = source_y - y_low_raw as f32;
                 let y_low = y_low_raw.clamp(0, input_height as isize - 1) as usize;
                 let y_high = y_high_raw.clamp(0, input_height as isize - 1) as usize;
                 for x in 0..output_width {
-                    let source_x = (x as f32 + 0.5) * x_scale - 0.5;
+                    let source_x = if align_corners {
+                        x as f32 * x_scale
+                    } else {
+                        (x as f32 + 0.5) * x_scale - 0.5
+                    };
                     let x_low_raw = source_x.floor() as isize;
                     let x_high_raw = x_low_raw + 1;
                     let x_lerp = source_x - x_low_raw as f32;
@@ -102,6 +127,15 @@ pub fn grid_sample_bilinear(
     input: &Tensor4,
     grid: &[f32],
     grid_shape: [usize; 3],
+) -> Result<Tensor4, String> {
+    grid_sample_bilinear_aligned(input, grid, grid_shape, false)
+}
+
+pub fn grid_sample_bilinear_aligned(
+    input: &Tensor4,
+    grid: &[f32],
+    grid_shape: [usize; 3],
+    align_corners: bool,
 ) -> Result<Tensor4, String> {
     let [batch, output_height, output_width] = grid_shape;
     if batch != input.shape[0] || output_height == 0 || output_width == 0 {
@@ -130,8 +164,17 @@ pub fn grid_sample_bilinear(
         for y in 0..output_height {
             for x in 0..output_width {
                 let grid_index = ((n * output_height + y) * output_width + x) * 2;
-                let source_x = ((grid[grid_index] + 1.0) * input_width as f32 - 1.0) * 0.5;
-                let source_y = ((grid[grid_index + 1] + 1.0) * input_height as f32 - 1.0) * 0.5;
+                let source_x = if align_corners {
+                    round_bf16(round_bf16(grid[grid_index] + 1.0) * (input_width - 1) as f32) * 0.5
+                } else {
+                    ((grid[grid_index] + 1.0) * input_width as f32 - 1.0) * 0.5
+                };
+                let source_y = if align_corners {
+                    round_bf16(round_bf16(grid[grid_index + 1] + 1.0) * (input_height - 1) as f32)
+                        * 0.5
+                } else {
+                    ((grid[grid_index + 1] + 1.0) * input_height as f32 - 1.0) * 0.5
+                };
                 let x_low = source_x.floor() as isize;
                 let y_low = source_y.floor() as isize;
                 let x_high = x_low + 1;
@@ -147,9 +190,17 @@ pub fn grid_sample_bilinear(
                                 && source_w >= 0
                                 && source_w < input_width as isize
                             {
-                                value += h_weight
-                                    * w_weight
-                                    * input.at(n, c, source_h as usize, source_w as usize);
+                                let sample = input.at(n, c, source_h as usize, source_w as usize);
+                                if align_corners {
+                                    let h_weight = round_bf16(h_weight);
+                                    let w_weight = round_bf16(w_weight);
+                                    value = round_bf16(
+                                        value
+                                            + round_bf16(round_bf16(h_weight * w_weight) * sample),
+                                    );
+                                } else {
+                                    value += h_weight * w_weight * sample;
+                                }
                             }
                         }
                     }

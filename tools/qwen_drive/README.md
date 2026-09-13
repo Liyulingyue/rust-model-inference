@@ -49,9 +49,65 @@ vision patch tensors to exact F32 representations.
 | `Qwen-Drive-1.0-4B-mmproj-BF16.gguf` | 675,569,216 | 298 | `d0ba72870cca4073c0e3aaef251e36c6ff1061c6b76fa725cb55d518a11a3d9f` |
 | `Qwen-Drive-1.0-planner-sft-BF16.gguf` | 2,079,728,448 | 358 | `7ab6abef07523192aad877bc0186dcc6c82c854f951f00ba00c7ce06bcf89cd9` |
 | `Qwen-Drive-1.0-planner-rl-BF16.gguf` | 2,079,728,448 | 358 | `05f205728c822382650b6ee43f8c343da09f2dce381e399c86f891b4411b9b5a` |
-| `Qwen-Drive-1.0-perception-F32.gguf` | 500,350,464 | 827 | `ed3c415ac932f7c48e37ca6caea75e4fb3d399e4e66773dce23d9edc4e8bb0d3` |
+| `Qwen-Drive-1.0-perception-F32.gguf` | 500,350,848 | 827 | `c1ac01ca2f3c70a67d2517969d43016373c4b30dca47ce82b29609739b9879c5` |
 
 The official Qwen-Drive source Oracle is fixed at
 `28091c1532e869bc7aee91fc0aef6b3e6fd0b2e0`.
+
+## Native runtime
+
+Planning accepts the released SFT or RL planner and both `direct_planning` and
+`reasoning_planning` modes:
+
+```bash
+target/release/rust-model-inference \
+  --model models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-4B-BF16.gguf \
+  --mmproj models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-4B-mmproj-BF16.gguf \
+  --planner models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-planner-sft-BF16.gguf \
+  --scenes data/demo/planning_scenes.jsonl \
+  --image-root data/demo \
+  --mode direct_planning \
+  --num-samples 1 \
+  --num-steps 10 \
+  --seed 42 \
+  --output predictions.jsonl \
+  --threads 12
+```
+
+Perception requires a directory containing the six camera JPEGs and the
+Oracle-generated `frame-manifest.json`:
+
+```bash
+python3 tools/qwen_drive/qwen_drive_oracle.py perception-frame \
+  --source /path/to/Qwen-Drive \
+  --expected-commit 28091c1532e869bc7aee91fc0aef6b3e6fd0b2e0 \
+  --frames /path/to/Qwen-Drive/data/demo/perception/FRAME_ID \
+  --model-root models/Qwen-Drive-1.0-4B \
+  --output /path/to/Qwen-Drive/data/demo/perception/FRAME_ID/frame-manifest.json
+
+target/release/rust-model-inference \
+  --model models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-4B-BF16.gguf \
+  --mmproj models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-4B-mmproj-BF16.gguf \
+  --perception models/Qwen-Drive-1.0-4B/Qwen-Drive-1.0-perception-F32.gguf \
+  --frames /path/to/Qwen-Drive/data/demo/perception/FRAME_ID \
+  --output perception.json \
+  --threads 12
+```
+
+The runtime writes planning JSONL or perception JSON through a same-directory
+temporary file and publishes it with an atomic rename.
+
+## Validation
+
+```bash
+python3 -m unittest tools.qwen_drive.test_convert_qwen_drive -v
+cargo test qwen_drive --lib --features parity-trace
+python3 tools/qwen_drive/convert_qwen_drive.py verify \
+  models/Qwen-Drive-1.0-4B \
+  --out-dir models/Qwen-Drive-1.0-4B
+```
+
+The pinned Torch 2.8 Oracle fixtures compare token IDs and raw F32 `u32` /
+BF16 words; the checks do not use numerical tolerances.
 
 Full CUDA end-to-end perception parity is unverified until the NVIDIA gate runs.

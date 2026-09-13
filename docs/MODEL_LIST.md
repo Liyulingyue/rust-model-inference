@@ -28,6 +28,7 @@
 | Qwen3-VL                      | 0.6B / 2B  | 多模态               |                                       |              | 待核验 |
 | Qwen3.5                       | 0.8B / 2B  | 文本                 | llama.cpp @ `b96806d`                 |              | 待核验 |
 | Qwen3.8                       | 27B        | 多模态               | llama.cpp @ `b96806d`                 |              | 待核验 |
+| Qwen-Drive-1.0               | 4B         | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/qwen_drive/README.md) |
 | Spark-X2.5                    | 1.7B / 4B  | 文本                 | XHToken/llama.cpp                     | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF             | 待核验 |
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |

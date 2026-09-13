@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
 import struct
 import subprocess
 import sys
+import types
 from collections import defaultdict
 from pathlib import Path
 
@@ -315,6 +317,531 @@ def perception_operator_fixture() -> dict:
     }
 
 
+def perception_view_fixture(source: Path) -> dict:
+    if torch.__version__.split("+", 1)[0] != "2.8.0":
+        raise RuntimeError(f"expected torch 2.8.0, got {torch.__version__}")
+
+    norm_input = _bf16(
+        (torch.arange(16, dtype=torch.float32) - 7) * 0.1875
+    ).reshape(1, 4, 2, 2)
+    norm_weight = _bf16(torch.tensor([0.75, 1.0, 1.25, -0.5]))
+    norm_bias = _bf16(torch.tensor([0.125, -0.25, 0.5, -0.75]))
+    norm_mean = norm_input.mean(1, keepdim=True)
+    norm_var = (norm_input - norm_mean).pow(2).mean(1, keepdim=True)
+    norm_output = _bf16(
+        norm_weight[:, None, None]
+        * ((norm_input - norm_mean) / torch.sqrt(norm_var + 1e-6))
+        + norm_bias[:, None, None]
+    )
+
+    transpose_input = _bf16(
+        (torch.arange(8, dtype=torch.float32) - 3) * 0.25
+    ).reshape(1, 2, 2, 2)
+    transpose_weight = _bf16(
+        (torch.arange(24, dtype=torch.float32) - 11) * 0.0625
+    ).reshape(2, 3, 2, 2)
+    transpose_bias = _bf16(torch.tensor([0.125, -0.25, 0.375]))
+    transpose_output = _bf16(
+        F.conv_transpose2d(
+            transpose_input,
+            transpose_weight,
+            transpose_bias,
+            stride=2,
+        )
+    )
+
+    aligned_input = _bf16(
+        (torch.arange(12, dtype=torch.float32) - 5) * 0.125
+    ).reshape(1, 2, 2, 3)
+    aligned_output = _bf16(
+        F.interpolate(
+            aligned_input,
+            size=(3, 5),
+            mode="bilinear",
+            align_corners=True,
+        )
+    )
+
+    depth_input = _bf16(
+        torch.tensor(
+            [
+                -1.0, 0.5, 1.25, -0.75,
+                0.25, -0.5, 0.75, 1.5,
+                1.0, 0.0, -1.25, 0.25,
+            ],
+            dtype=torch.float32,
+        )
+    ).reshape(1, 3, 2, 2)
+    depth_output = _bf16(torch.softmax(depth_input, dim=1))
+
+    frustum_range = [0.0, 0.0, 1.0, 2.0, 2.0, 3.0]
+    frustum_size = [1.0, 1.0, 1.0]
+    pc_range = [-1.0, -1.0, 0.0, 3.0, 3.0, 3.0]
+    voxel_size = [1.0, 1.0, 1.0]
+    voxel_shape = [4, 4, 3]
+    identity = torch.eye(4, dtype=torch.float32)
+    camera_two = torch.tensor(
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    lidar2img = torch.stack([identity, camera_two]).reshape(1, 2, 1, 4, 4)
+    lidar2ego = identity.reshape(1, 4, 4)
+    axes = [
+        torch.arange(frustum_range[i], frustum_range[i + 3], frustum_size[i])
+        for i in range(3)
+    ]
+    frustum = torch.stack(torch.meshgrid(axes, indexing="ij"), dim=-1)
+    width, height, depth = frustum.shape[:-1]
+    points = torch.cat([frustum, torch.ones_like(frustum[..., :1])], -1)
+    points = points.flatten(0, 2).unsqueeze(0).unsqueeze(0)
+    points[..., :2] *= points[..., 2:3]
+    points = torch.matmul(
+        torch.inverse(lidar2img.flatten(1, 2)).unsqueeze(2),
+        points.unsqueeze(-1),
+    ).squeeze(-1)
+    points = torch.matmul(
+        lidar2ego[:, None, None], points.unsqueeze(-1)
+    ).squeeze(-1)
+    voxel_coords = (
+        (points[..., :3] - torch.tensor(pc_range[:3]))
+        / torch.tensor(voxel_size)
+    ).int()
+    batch_index = torch.zeros_like(voxel_coords[..., :1])
+    voxel_coords = torch.cat([batch_index, voxel_coords], dim=-1)
+    voxel_coords = (
+        voxel_coords.view(1, 2, 1, width, height, depth, 4)
+        .permute(0, 1, 2, 5, 4, 3, 6)
+        .contiguous()
+    )
+    mask = (
+        (voxel_coords[..., 1] >= 0)
+        & (voxel_coords[..., 1] < voxel_shape[0])
+        & (voxel_coords[..., 2] >= 0)
+        & (voxel_coords[..., 2] < voxel_shape[1])
+        & (voxel_coords[..., 3] >= 0)
+        & (voxel_coords[..., 3] < voxel_shape[2])
+    )
+    flat_mask = mask.reshape(-1)
+    geometry_coords = voxel_coords.reshape(-1, 4)[flat_mask].tolist()
+    geometry_indices = torch.arange(flat_mask.numel(), dtype=torch.int64)[flat_mask].tolist()
+
+    bev_shape = [2, 2, 2, 2, 2]
+    bev_values = _bf16(
+        (torch.arange(math.prod(bev_shape), dtype=torch.float32) - 15) * 0.0625
+    ).reshape(bev_shape)
+    bev_weight = _bf16(
+        (torch.arange(12, dtype=torch.float32) - 5) * 0.09375
+    ).reshape(3, 4, 1, 1)
+    bev_bias = _bf16(torch.tensor([0.125, -0.25, 0.5]))
+    bev_maps = _bf16(
+        F.conv2d(bev_values.reshape(2, 4, 2, 2), bev_weight, bev_bias)
+    )
+    bev_output = _bf16(bev_maps.mean(dim=0, keepdim=True))
+    bev_output = bev_output.squeeze(0).permute(1, 2, 0).reshape(-1, 3)
+
+    module_path = source / "src/qwen_drive_perception/fpn.py"
+    spec = importlib.util.spec_from_file_location("qwen_drive_perception_fpn", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    SimpleFPN = module.SimpleFPN
+
+    fpn = SimpleFPN(dim=4, out_channels=2).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        for index, parameter in enumerate(fpn.parameters()):
+            values = (
+                torch.arange(parameter.numel(), dtype=torch.float32)
+                - parameter.numel() // 2
+            ) * (0.0078125 / (index + 1))
+            parameter.copy_(values.reshape(parameter.shape).to(torch.bfloat16))
+    fpn_input = _bf16(
+        (torch.arange(24, dtype=torch.float32) - 11) * 0.0625
+    ).reshape(1, 4, 2, 3).to(torch.bfloat16)
+    with torch.no_grad():
+        fpn_outputs = fpn(fpn_input)
+    fpn_weights = [
+        {"name": name, "shape": list(value.shape), "values": bits(value.float())}
+        for name, value in fpn.state_dict().items()
+    ]
+
+    package = types.ModuleType("qwen_drive_perception")
+    package.__path__ = [str(source / "src/qwen_drive_perception")]
+    sys.modules[package.__name__] = package
+    module_path = source / "src/qwen_drive_perception/view_transform.py"
+    spec = importlib.util.spec_from_file_location(
+        "qwen_drive_perception.view_transform", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    DepthNet = module.DepthNet
+    Uni3DVoxelPoolDepth = module.Uni3DVoxelPoolDepth
+
+    depth_net = DepthNet(
+        in_channels=4,
+        mid_channels=32,
+        depth_channels=3,
+        aspp_mid_channels=32,
+    ).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        for index, parameter in enumerate(depth_net.parameters()):
+            values = (
+                torch.arange(parameter.numel(), dtype=torch.float32)
+                - parameter.numel() // 2
+            ) * (0.0009765625 / (index + 1))
+            parameter.copy_(values.reshape(parameter.shape).to(torch.bfloat16))
+    depth_net_input = _bf16(
+        (torch.arange(48, dtype=torch.float32) - 23) * 0.03125
+    ).reshape(2, 4, 2, 3).to(torch.bfloat16)
+    with torch.no_grad():
+        depth_logits = depth_net(depth_net_input)
+        depth_probabilities = depth_logits.softmax(1)
+    depth_weights = [
+        {"name": name, "shape": list(value.shape), "values": bits(value.float())}
+        for name, value in depth_net.state_dict().items()
+    ]
+
+    view_features = _bf16(
+        (torch.arange(32, dtype=torch.float32) - 15) * 0.03125
+    ).reshape(2, 4, 2, 2).to(torch.bfloat16)
+    view_depth_logits = _bf16(
+        (torch.arange(16, dtype=torch.float32) - 7) * 0.0625
+    ).reshape(2, 2, 2, 2).to(torch.bfloat16)
+    view_depth = view_depth_logits.softmax(1)
+    pooled = torch.zeros(1, 2, 4, 4, 3, 4, dtype=torch.float32)
+    for coord, point_index in zip(geometry_coords, geometry_indices):
+        point = point_index
+        w = point % 2
+        point //= 2
+        h = point % 2
+        point //= 2
+        d = point % 2
+        point //= 2
+        camera = point % 2
+        for channel in range(4):
+            pooled[coord[0], camera, coord[1], coord[2], coord[3], channel] += (
+                view_features[camera, channel, h, w].float()
+                * view_depth[camera, d, h, w].float()
+            )
+    pooled = _bf16(pooled).to(torch.bfloat16)
+    voxel_space = pooled.permute(0, 1, 5, 4, 3, 2).contiguous()
+    view_transform = Uni3DVoxelPoolDepth(
+        pc_range=pc_range,
+        voxel_size=voxel_size,
+        voxel_shape=voxel_shape,
+        frustum_range=frustum_range,
+        frustum_size=frustum_size,
+        embed_dim=4,
+    ).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        for index, parameter in enumerate(view_transform.parameters()):
+            values = (
+                torch.arange(parameter.numel(), dtype=torch.float32)
+                - parameter.numel() // 2
+            ) * (0.00390625 / (index + 1))
+            parameter.copy_(values.reshape(parameter.shape).to(torch.bfloat16))
+        for index, layer in enumerate(view_transform.conv_layer):
+            layer[1].running_mean.copy_(
+                torch.arange(4, dtype=torch.float32).mul(0.0078125 * (index + 1)).to(torch.bfloat16)
+            )
+            layer[1].running_var.copy_(
+                torch.arange(4, dtype=torch.float32).mul(0.015625).add(1.0).to(torch.bfloat16)
+            )
+        view_voxel = view_transform.feat_encoding(voxel_space)
+    uvtr = torch.nn.Conv2d(12, 3, kernel_size=1).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        uvtr.weight.copy_(
+            (torch.arange(36, dtype=torch.float32) - 17)
+            .mul(0.005859375)
+            .reshape_as(uvtr.weight)
+            .to(torch.bfloat16)
+        )
+        uvtr.bias.copy_(torch.tensor([0.125, -0.25, 0.375], dtype=torch.bfloat16))
+        view_bev = uvtr(view_voxel.flatten(1, 2))
+        view_bev = view_bev.mean(0, keepdim=True).squeeze(0).permute(1, 2, 0).reshape(-1, 3)
+    view_weights = [
+        {
+            "name": f"view_trans.{name}",
+            "shape": list(value.shape),
+            "values": bits(value.float()),
+        }
+        for name, value in view_transform.state_dict().items()
+    ] + [
+        {
+            "name": f"uvtr_query_proj.{name}",
+            "shape": list(value.shape),
+            "values": bits(value.float()),
+        }
+        for name, value in uvtr.state_dict().items()
+    ]
+
+    return {
+        "fpn": {
+            "input": {"shape": list(fpn_input.shape), "values": bits(fpn_input.float())},
+            "weights": fpn_weights,
+            "outputs": [
+                {"shape": list(output.shape), "values": bits(output.float())}
+                for output in fpn_outputs
+            ],
+        },
+        "depth_net": {
+            "input": {
+                "shape": list(depth_net_input.shape),
+                "values": bits(depth_net_input.float()),
+            },
+            "weights": depth_weights,
+            "logits": {"shape": list(depth_logits.shape), "values": bits(depth_logits.float())},
+            "probabilities": bits(depth_probabilities.float()),
+        },
+        "view_transform": {
+            "features": {"shape": list(view_features.shape), "values": bits(view_features.float())},
+            "depth": {"shape": list(view_depth.shape), "values": bits(view_depth.float())},
+            "weights": view_weights,
+            "voxel": {"shape": list(view_voxel.shape), "values": bits(view_voxel.float())},
+            "bev": {"shape": list(view_bev.shape), "values": bits(view_bev.float())},
+        },
+        "layer_norm": {
+            "input": {"shape": list(norm_input.shape), "values": bits(norm_input)},
+            "weight": bits(norm_weight),
+            "bias": bits(norm_bias),
+            "epsilon": bits(torch.tensor([1e-6], dtype=torch.float32))[0],
+            "output": bits(norm_output),
+        },
+        "transpose": {
+            "input": {
+                "shape": list(transpose_input.shape),
+                "values": bits(transpose_input),
+            },
+            "weight_shape": list(transpose_weight.shape),
+            "weight": bits(transpose_weight),
+            "bias": bits(transpose_bias),
+            "stride": [2, 2],
+            "padding": [0, 0],
+            "output_shape": list(transpose_output.shape),
+            "output": bits(transpose_output),
+        },
+        "resize_aligned": {
+            "input": {"shape": list(aligned_input.shape), "values": bits(aligned_input)},
+            "output_hw": [3, 5],
+            "output": bits(aligned_output),
+        },
+        "depth": {"shape": list(depth_input.shape), "values": bits(depth_input)},
+        "depth_output": bits(depth_output),
+        "geometry": {
+            "frustum_range": bits(torch.tensor(frustum_range)),
+            "frustum_size": bits(torch.tensor(frustum_size)),
+            "pc_range": bits(torch.tensor(pc_range)),
+            "voxel_size": bits(torch.tensor(voxel_size)),
+            "voxel_shape": voxel_shape,
+            "lidar2img": [bits(identity), bits(camera_two)],
+            "lidar2ego": [bits(identity)],
+            "coords": geometry_coords,
+            "point_indices": geometry_indices,
+        },
+        "bev": {
+            "values": bits(bev_values),
+            "shape": bev_shape,
+            "weight": bits(bev_weight),
+            "weight_shape": [3, 4],
+            "bias": bits(bev_bias),
+            "output": bits(bev_output),
+        },
+    }
+
+
+def perception_heads_fixture(source: Path) -> dict:
+    if torch.__version__.split("+", 1)[0] != "2.8.0":
+        raise RuntimeError(f"expected torch 2.8.0, got {torch.__version__}")
+
+    package = types.ModuleType("qwen_drive_perception")
+    package.__path__ = [str(source / "src/qwen_drive_perception")]
+    sys.modules[package.__name__] = package
+    from qwen_drive_perception.heads import BevFeatureSlicer, NMSFreeCoder
+    from qwen_drive_perception.layers import inverse_sigmoid
+    from qwen_drive_perception.perception_transformer import PerceptionTransformer
+
+    references = _bf16(torch.tensor([0.0, 0.125, 0.5, 0.875, 1.0]))
+    inverse = _bf16(inverse_sigmoid(references))
+
+    refine_references = torch.tensor(
+        [[0.125, 0.5, 0.875], [0.25, 0.75, 0.625]], dtype=torch.bfloat16
+    )
+    refine_regression = (
+        (torch.arange(20, dtype=torch.float32) - 9) * 0.0625
+    ).reshape(2, 10).to(torch.bfloat16)
+    refined = torch.zeros_like(refine_references)
+    refined[..., :2] = (
+        refine_regression[..., :2] + inverse_sigmoid(refine_references[..., :2])
+    )
+    refined[..., 2:3] = (
+        refine_regression[..., 4:5] + inverse_sigmoid(refine_references[..., 2:3])
+    )
+    refined = refined.sigmoid()
+    scaled = refine_regression.clone()
+    scaled[..., :2] += inverse_sigmoid(refine_references[..., :2])
+    scaled[..., :2] = scaled[..., :2].sigmoid()
+    scaled[..., 4:5] += inverse_sigmoid(refine_references[..., 2:3])
+    scaled[..., 4:5] = scaled[..., 4:5].sigmoid()
+    scaled[..., 0:1] = scaled[..., 0:1] * 102.4 - 51.2
+    scaled[..., 1:2] = scaled[..., 1:2] * 102.4 - 51.2
+    scaled[..., 4:5] = scaled[..., 4:5] * 10.4 - 5.0
+
+    classes = torch.tensor([[0.25, 1.0], [-0.75, 0.5]]).to(torch.bfloat16)
+    coordinates = (
+        torch.tensor(
+            [
+                [2.0, -1.0, 0.0, math.log(2.0), 1.5, math.log(0.5), 0.0, 1.0, 0.25, -0.5],
+                [-3.0, 4.0, math.log(1.5), 0.0, -0.5, math.log(2.0), 1.0, 0.0, -0.25, 0.75],
+            ]
+        ).to(torch.bfloat16)
+    )
+    coder = NMSFreeCoder(
+        pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 5.4],
+        post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+        max_num=4,
+        num_classes=2,
+    )
+    decoded = coder.decode_single(classes, coordinates)
+    boxes = decoded["bboxes"].clone()
+    boxes[:, 2] -= boxes[:, 5] * 0.5
+
+    det_grid = {
+        "xbound": [-2.0, 2.0, 1.0],
+        "ybound": [-2.0, 2.0, 1.0],
+        "zbound": [-1.0, 1.0, 2.0],
+    }
+    map_grid = {
+        "xbound": [-1.0, 1.0, 1.0],
+        "ybound": [-1.0, 1.0, 1.0],
+        "zbound": [-1.0, 1.0, 2.0],
+    }
+    cropper = BevFeatureSlicer(det_grid, map_grid).to(torch.bfloat16).eval()
+    crop_input = (
+        (torch.arange(32, dtype=torch.float32) - 15) * 0.0625
+    ).reshape(1, 2, 4, 4).to(torch.bfloat16)
+    crop_output = cropper(crop_input)
+
+    adaptor = PerceptionTransformer.__new__(PerceptionTransformer)
+    adaptor.det_pc_range = [-2.0, -2.0, -1.0, 2.0, 2.0, 1.0]
+    adaptor.occ_pillar_h = 2
+    volume_input = _bf16(
+        (torch.arange(64, dtype=torch.float32) - 31) * 0.03125
+    ).reshape(1, 2, 2, 4, 4)
+    volume_output = adaptor._adapt_volume_for_occ(
+        volume_input,
+        4,
+        4,
+        occ_pc_range=[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        occ_voxel_size=[1.0, 1.0, 1.0],
+    )
+
+    logits = _bf16(torch.tensor([[-2.0, -0.5, 0.25], [1.0, 0.0, -1.0]]))
+    softplus = _bf16(F.softplus(logits))
+
+    return {
+        "inverse_sigmoid": {
+            "input": bits(references),
+            "output": bits(inverse),
+        },
+        "reference_refine": {
+            "references": bits(refine_references),
+            "regression": bits(refine_regression),
+            "refined": bits(refined),
+            "scaled": bits(scaled),
+        },
+        "detection": {
+            "classes": bits(classes),
+            "coordinates": bits(coordinates),
+            "boxes": bits(boxes.float()),
+            "scores": bits(decoded["scores"].float()),
+            "labels": decoded["labels"].tolist(),
+        },
+        "map_crop": {
+            "input": {"shape": list(crop_input.shape), "values": bits(crop_input)},
+            "grid": bits(cropper._grid(crop_input).to(torch.bfloat16)),
+            "output": {"shape": list(crop_output.shape), "values": bits(crop_output)},
+        },
+        "occupancy_crop": {
+            "input": {"shape": list(volume_input.shape), "values": bits(volume_input)},
+            "output": {"shape": list(volume_output.shape), "values": bits(volume_output)},
+        },
+        "softplus": {
+            "input": bits(logits),
+            "output": bits(softplus),
+            "argmax": softplus.argmax(-1).tolist(),
+        },
+    }
+
+
+def perception_frame_fixture(source: Path, frame_dir: Path, model_root: Path) -> dict:
+    import numpy as np
+    from PIL import Image
+    from transformers import AutoTokenizer
+
+    frame = json.loads((frame_dir / "frame.json").read_text())
+    calibration = np.load(frame_dir / "calib.npz")
+    module_path = source / "src/qwen_drive_perception/geometry.py"
+    spec = importlib.util.spec_from_file_location("qwen_drive_perception_geometry", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import {module_path}")
+    geometry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(geometry)
+
+    target_width, target_height = 896, 512
+    lidar2img = []
+    for camera, intrinsic, rotation, translation in zip(
+        frame["cam_order"],
+        calibration["cam_intrinsic"],
+        calibration["sensor2lidar_rotation"],
+        calibration["sensor2lidar_translation"],
+    ):
+        with Image.open(frame_dir / "images" / f"{camera}.jpg") as image:
+            width, height = image.size
+        matrix = geometry.build_lidar2img(intrinsic, rotation, translation)
+        matrix = geometry.apply_image_scale(
+            matrix, target_width / width, target_height / height
+        )
+        lidar2img.append(matrix.astype(np.float32).tolist())
+
+    tokenizer = AutoTokenizer.from_pretrained(model_root)
+    token = lambda value: tokenizer.convert_tokens_to_ids(value)
+    encode = lambda value: tokenizer.encode(value, add_special_tokens=False)
+    body = []
+    for item in frame["content"]:
+        if "text" in item:
+            body.extend(encode(item["text"]))
+        else:
+            body.append(token("<|vision_start|>"))
+            body.extend([token("<|image_pad|>")] * (32 // 2 * 56 // 2))
+            body.append(token("<|vision_end|>"))
+    prompt_ids = (
+        [token("<|im_start|>")]
+        + encode("user")
+        + encode("\n")
+        + body
+        + [token("<|im_end|>")]
+        + encode("\n")
+        + [token("<|im_start|>")]
+        + encode("assistant")
+        + encode("\n")
+    )
+    return {
+        **frame,
+        "image_shapes": [[target_height, target_width, 3] for _ in frame["cam_order"]],
+        "lidar2img": lidar2img,
+        "lidar2ego": calibration["lidar2ego"].astype(np.float32).tolist(),
+        "box_coord_system": "ego",
+        "prompt_ids": prompt_ids,
+    }
+
+
 class TraceSink:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -567,12 +1094,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=["planner-operators", "perception-ops", "planning-prompt", "planner"],
+        choices=[
+            "planner-operators",
+            "perception-ops",
+            "perception-view",
+            "perception-heads",
+            "perception-frame",
+            "planning-prompt",
+            "planner",
+        ],
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--expected-commit")
     parser.add_argument("--model-root", type=Path)
+    parser.add_argument("--frames", type=Path)
     parser.add_argument("--planner", choices=["sft", "rl"], default="sft")
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--threads", type=int, default=12)
@@ -588,6 +1124,32 @@ def main() -> None:
             parser.error("perception-ops requires --output, --source, and --expected-commit")
         _require_commit(args.source, args.expected_commit)
         fixture = perception_operator_fixture()
+        args.output.write_text(json.dumps(fixture, indent=2) + "\n")
+    elif args.command == "perception-view":
+        if args.output is None or args.source is None or args.expected_commit is None:
+            parser.error("perception-view requires --output, --source, and --expected-commit")
+        _require_commit(args.source, args.expected_commit)
+        fixture = perception_view_fixture(args.source)
+        args.output.write_text(json.dumps(fixture, indent=2) + "\n")
+    elif args.command == "perception-heads":
+        if args.output is None or args.source is None or args.expected_commit is None:
+            parser.error("perception-heads requires --output, --source, and --expected-commit")
+        _require_commit(args.source, args.expected_commit)
+        fixture = perception_heads_fixture(args.source)
+        args.output.write_text(json.dumps(fixture, indent=2) + "\n")
+    elif args.command == "perception-frame":
+        if (
+            args.output is None
+            or args.source is None
+            or args.expected_commit is None
+            or args.frames is None
+            or args.model_root is None
+        ):
+            parser.error(
+                "perception-frame requires --output, --source, --expected-commit, --frames, and --model-root"
+            )
+        _require_commit(args.source, args.expected_commit)
+        fixture = perception_frame_fixture(args.source, args.frames, args.model_root)
         args.output.write_text(json.dumps(fixture, indent=2) + "\n")
     elif args.command == "planning-prompt":
         if (

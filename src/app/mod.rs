@@ -15,11 +15,11 @@ pub use audio::run_asr_cli;
 pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
     parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
-    resolve_thread_count,
-    transcription_options, validate_cli_options, validate_qwen3vl_decoder_mode,
-    z_image_cli_options, CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions,
-    EmbeddingOutput, KvFormat, LatentUpsampleKind, PlanningMode, QwenDriveCliOptions,
-    QwenDriveHead, RefinerDecoderKind, ZImageCliOptions, DEFAULT_THREAD_CAP,
+    resolve_thread_count, transcription_options, validate_cli_options,
+    validate_qwen3vl_decoder_mode, z_image_cli_options, CliOptions, DreamXCliOptions,
+    DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, KvFormat, LatentUpsampleKind,
+    PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind, ZImageCliOptions,
+    DEFAULT_THREAD_CAP,
 };
 pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
