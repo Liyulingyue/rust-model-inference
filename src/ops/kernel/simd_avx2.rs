@@ -97,11 +97,7 @@ macro_rules! avx2_matmul_packed {
                 while i < n_in {
                     let w_val = $scalar_unpack(w_ptr, row_byte, i);
                     let x_val = *i_ptr.add(i);
-                    acc0 = _mm256_fmadd_ps(
-                        _mm256_set1_ps(w_val),
-                        _mm256_set1_ps(x_val),
-                        acc0,
-                    );
+                    acc0 = _mm256_fmadd_ps(_mm256_set1_ps(w_val), _mm256_set1_ps(x_val), acc0);
                     i += 1;
                 }
 

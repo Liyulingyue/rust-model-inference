@@ -7,22 +7,14 @@
 use crate::avx2_matmul_packed;
 
 #[target_feature(enable = "avx2", enable = "fma", enable = "f16c")]
-unsafe fn unpack_f16_8(
-    w: *const u8,
-    row_byte: usize,
-    col: usize,
-) -> std::arch::x86_64::__m256 {
+unsafe fn unpack_f16_8(w: *const u8, row_byte: usize, col: usize) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let chunk = _mm_loadu_si128(w.add(row_byte + col * 2) as *const __m128i);
     _mm256_cvtph_ps(chunk)
 }
 
 #[target_feature(enable = "avx2", enable = "fma", enable = "f16c")]
-unsafe fn unpack_f16_4(
-    w: *const u8,
-    row_byte: usize,
-    col: usize,
-) -> std::arch::x86_64::__m128 {
+unsafe fn unpack_f16_4(w: *const u8, row_byte: usize, col: usize) -> std::arch::x86_64::__m128 {
     use std::arch::x86_64::*;
     let half = _mm_loadl_epi64(w.add(row_byte + col * 2) as *const __m128i);
     _mm_cvtph_ps(half)
@@ -30,10 +22,7 @@ unsafe fn unpack_f16_4(
 
 #[target_feature(enable = "avx2", enable = "fma", enable = "f16c")]
 unsafe fn scalar_unpack_f16(w: *const u8, row_byte: usize, col: usize) -> f32 {
-    let bits = u16::from_le_bytes([
-        *w.add(row_byte + col * 2),
-        *w.add(row_byte + col * 2 + 1),
-    ]);
+    let bits = u16::from_le_bytes([*w.add(row_byte + col * 2), *w.add(row_byte + col * 2 + 1)]);
     crate::ops::f16_to_f32(bits)
 }
 

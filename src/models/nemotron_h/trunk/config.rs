@@ -55,9 +55,7 @@ impl NemotronConfig {
                 .ok_or_else(|| format!("Missing metadata: {key}"))?;
             Ok(v as u32)
         };
-        let as_usize = |key: &str| -> Result<usize, String> {
-            get_u32(key).map(|v| v as usize)
-        };
+        let as_usize = |key: &str| -> Result<usize, String> { get_u32(key).map(|v| v as usize) };
         let get_f32 = |key: &str, default: f32| -> Result<f32, String> {
             Ok(source
                 .metadata(key)

@@ -43,8 +43,12 @@ pub(super) fn matrix<'a>(
             bytes.len()
         ));
     }
-    let mut weight =
-        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, info.ggml_type, n_in, n_out));
+    let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+        bytes,
+        info.ggml_type,
+        n_in,
+        n_out,
+    ));
     // QuantizedTensor's F32 variant loses matrix shape; the rest of Breeze
     // already relies on `Weight::n_in` / `Weight::n_out` being correct.
     weight.n_in = n_in;

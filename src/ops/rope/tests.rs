@@ -220,12 +220,8 @@ fn rope_neox_inplace_with_table_matches_breeze_bf_round_reference() {
         (256, 1, 17),
     ] {
         let half = head_dim / 2;
-        let cos: Vec<f32> = (0..half)
-            .map(|i| ((i as f32) * 0.123).cos())
-            .collect();
-        let sin: Vec<f32> = (0..half)
-            .map(|i| ((i as f32) * 0.123).sin())
-            .collect();
+        let cos: Vec<f32> = (0..half).map(|i| ((i as f32) * 0.123).cos()).collect();
+        let sin: Vec<f32> = (0..half).map(|i| ((i as f32) * 0.123).sin()).collect();
         let mut expected: Vec<f32> = (0..head_dim * n_heads)
             .map(|i| (i as f32 * 0.07).sin() * 4.0 - 2.0)
             .collect();

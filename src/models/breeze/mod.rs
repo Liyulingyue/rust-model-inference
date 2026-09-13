@@ -58,10 +58,12 @@ impl<'a> BreezeModel<'a> {
         let require_f32_compatible = |name: &str| -> Result<(), String> {
             match source.tensor_info(name) {
                 None => Err(format!("Missing tensor: {name}")),
-                Some(info) if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) => Err(format!(
-                    "{name}: Breeze loader accepts F32 or BF16, got {:?}",
-                    info.ggml_type
-                )),
+                Some(info) if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) => {
+                    Err(format!(
+                        "{name}: Breeze loader accepts F32 or BF16, got {:?}",
+                        info.ggml_type
+                    ))
+                }
                 Some(_) => Ok(()),
             }
         };

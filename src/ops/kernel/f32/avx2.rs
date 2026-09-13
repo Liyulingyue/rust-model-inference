@@ -37,7 +37,13 @@ mod tests {
     use super::matmul_f32_vs_f32_avx2;
     use crate::ops::kernel::f32::scalar::forward_f32_rows;
 
-    fn assert_avx2_eq_scalar(label: &str, weight: &[f32], input: &[f32], n_in: usize, n_out: usize) {
+    fn assert_avx2_eq_scalar(
+        label: &str,
+        weight: &[f32],
+        input: &[f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
         let mut avx2_out = vec![0.0f32; n_out];
         let mut scalar_out = vec![0.0f32; n_out];
         let weight_bytes: &[u8] = bytemuck::cast_slice(weight);

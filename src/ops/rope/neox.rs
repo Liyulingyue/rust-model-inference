@@ -176,12 +176,7 @@ pub(crate) fn rope_neox_inplace_scalar(
 /// replaces its hand-written scalar rope with a single
 /// `rope_neox_inplace_with_table(...)` call.
 #[allow(dead_code)]
-pub fn rope_neox_inplace_with_table(
-    x: &mut [f32],
-    head_dim: usize,
-    cos: &[f32],
-    sin: &[f32],
-) {
+pub fn rope_neox_inplace_with_table(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
     debug_assert_eq!(cos.len(), sin.len());
     debug_assert!(head_dim % 2 == 0);
     let half = head_dim / 2;

@@ -29,7 +29,11 @@ pub unsafe fn matmul_f32_vs_f32_neon(
         let mut index = 0;
 
         while index + 4 <= n_in {
-            sum = vfmaq_f32(sum, vld1q_f32(weight_ptr.add(row_off + index)), vld1q_f32(input_ptr.add(index)));
+            sum = vfmaq_f32(
+                sum,
+                vld1q_f32(weight_ptr.add(row_off + index)),
+                vld1q_f32(input_ptr.add(index)),
+            );
             index += 4;
         }
 

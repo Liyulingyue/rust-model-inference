@@ -238,9 +238,7 @@ mod tests {
 
     #[test]
     fn silu_inplace_matches_scalar_with_tail() {
-        let values: Vec<f32> = (0..37)
-            .map(|i| (i as f32 * 0.21).sin() * 4.0)
-            .collect();
+        let values: Vec<f32> = (0..37).map(|i| (i as f32 * 0.21).sin() * 4.0).collect();
         assert_inplace_matches_scalar(&values);
     }
 }

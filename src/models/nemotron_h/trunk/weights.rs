@@ -55,8 +55,7 @@ pub(crate) fn static_q8_into_weight(
     let info = source
         .tensor_info(name)
         .unwrap_or_else(|| panic!("tensor info {name} not found"));
-    let bytes_static: &'static [u8] =
-        unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
+    let bytes_static: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
     Weight::from_quantized(QuantizedTensor::from_bytes(
         bytes_static,
         info.ggml_type,
@@ -190,119 +189,109 @@ pub fn load_layers(
             (None, None, None)
         };
         // Mamba2 SSM branch — present in ~21 of 42 layers.
-        let (
-            ssm_in,
-            ssm_conv1d_w,
-            ssm_conv1d_b,
-            ssm_dt_bias,
-            ssm_a_log,
-            ssm_d,
-            ssm_norm,
-            ssm_out,
-        ) = if this_has_ssm {
-            // ssm_in.shape is (n_embd, d_in_proj) where
-            // d_in_proj = 2*d_inner + 2*n_group*d_state + dt_rank
-            // (matches llama.cpp nemotron-h.cpp). Earlier read attempts
-            // swapped the args and treated ssm_in as (d_inner, n_embd),
-            // which corrupted the dispatch and produced degenerate output.
-            let d_in_proj =
-                2 * config.ssm_inner_size
+        let (ssm_in, ssm_conv1d_w, ssm_conv1d_b, ssm_dt_bias, ssm_a_log, ssm_d, ssm_norm, ssm_out) =
+            if this_has_ssm {
+                // ssm_in.shape is (n_embd, d_in_proj) where
+                // d_in_proj = 2*d_inner + 2*n_group*d_state + dt_rank
+                // (matches llama.cpp nemotron-h.cpp). Earlier read attempts
+                // swapped the args and treated ssm_in as (d_inner, n_embd),
+                // which corrupted the dispatch and produced degenerate output.
+                let d_in_proj = 2 * config.ssm_inner_size
                     + 2 * config.ssm_state_size * config.ssm_group_count
                     + config.ssm_time_step_rank;
-            let ssm_in = static_q8_into_weight(
-                source,
-                &format!("{prefix}.ssm_in.weight"),
-                d_in_proj,
-                config.n_embd,
-            );
-            // Mamba2 SSM tensors in this checkpoint are F32 (not quantized).
-            // Layout per the reference:
-            //   ssm_conv1d.weight (4, 9728) — fused causal conv + b + c outputs
-            //   ssm_conv1d.bias   (9728,)   — bias for the same fused tensor
-            //   ssm_dt.bias       (inner,)  — dt bias
-            //   ssm_a             (1, inner) — A_log
-            //   ssm_d             (1, inner) — D skip
-            //   ssm_norm.weight   (per_group, n_groups) — group RMSNorm
-            //   ssm_out.weight    (n_embd, inner) — out_proj (Q5_K, quantized)
-            let ssm_conv1d_w = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_conv1d.weight"),
-                &[
-                    usize_to_u64(config.ssm_conv_kernel, "ssm conv1d kernel")?,
-                    usize_to_u64(
-                        config.ssm_inner_size
-                            + 2 * config.ssm_state_size * config.ssm_group_count,
-                        "ssm conv1d cols",
-                    )?,
-                ],
-            )?;
-            let ssm_conv1d_b = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_conv1d.bias"),
-                &[usize_to_u64(
-                    config.ssm_inner_size
-                        + 2 * config.ssm_state_size * config.ssm_group_count,
-                    "ssm conv1d bias",
-                )?],
-            )?;
-            // ssm_dt.bias is per-time_step_rank (96), not per-inner_size.
-            // A proper Mamba2 would project (B, L, dt_rank) → (B, L,
-            // inner_size); this checkpoint appears to broadcast dt to
-            // per-channel via the time_step_rank dim. The dt is
-            // effectively a per-timestep-rank bias, not a per-channel
-            // weight.
-            let ssm_dt_bias = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_dt.bias"),
-                &[usize_to_u64(config.ssm_time_step_rank, "ssm dt bias")?],
-            )?;
-            // ssm_a is shape [1, time_step_rank=96]. The A_log is the
-            // negative exponential of state decay.
-            let ssm_a_log = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_a"),
-                &[1, usize_to_u64(config.ssm_time_step_rank, "ssm a log")?],
-            )?;
-            // ssm_d is [1, time_step_rank] in this checkpoint.
-            let ssm_d = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_d"),
-                &[1, usize_to_u64(config.ssm_time_step_rank, "ssm d")?],
-            )?;
-            // ssm_norm.weight is (per_group, n_groups). per_group is
-            // 960 (= inner_size 7680 / n_groups 8) in this checkpoint;
-            // the per-group dim doesn't follow a standard formula
-            // (it's not d_state, dt_rank, or anything conventional).
-            let ssm_norm = load_f32_tensor(
-                source,
-                &format!("{prefix}.ssm_norm.weight"),
-                &[
-                    usize_to_u64(
-                        config.ssm_inner_size / config.ssm_group_count,
-                        "ssm norm per-group",
-                    )?,
-                    usize_to_u64(config.ssm_group_count, "ssm norm groups")?,
-                ],
-            )?;
-            let ssm_out = static_q8_into_weight(
-                source,
-                &format!("{prefix}.ssm_out.weight"),
-                config.n_embd,
-                config.ssm_inner_size,
-            );
-            (
-                Some(ssm_in),
-                Some(ssm_conv1d_w),
-                Some(ssm_conv1d_b),
-                Some(ssm_dt_bias),
-                Some(ssm_a_log),
-                Some(ssm_d),
-                Some(ssm_norm),
-                Some(ssm_out),
-            )
-        } else {
-            (None, None, None, None, None, None, None, None)
-        };
+                let ssm_in = static_q8_into_weight(
+                    source,
+                    &format!("{prefix}.ssm_in.weight"),
+                    d_in_proj,
+                    config.n_embd,
+                );
+                // Mamba2 SSM tensors in this checkpoint are F32 (not quantized).
+                // Layout per the reference:
+                //   ssm_conv1d.weight (4, 9728) — fused causal conv + b + c outputs
+                //   ssm_conv1d.bias   (9728,)   — bias for the same fused tensor
+                //   ssm_dt.bias       (inner,)  — dt bias
+                //   ssm_a             (1, inner) — A_log
+                //   ssm_d             (1, inner) — D skip
+                //   ssm_norm.weight   (per_group, n_groups) — group RMSNorm
+                //   ssm_out.weight    (n_embd, inner) — out_proj (Q5_K, quantized)
+                let ssm_conv1d_w = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_conv1d.weight"),
+                    &[
+                        usize_to_u64(config.ssm_conv_kernel, "ssm conv1d kernel")?,
+                        usize_to_u64(
+                            config.ssm_inner_size
+                                + 2 * config.ssm_state_size * config.ssm_group_count,
+                            "ssm conv1d cols",
+                        )?,
+                    ],
+                )?;
+                let ssm_conv1d_b = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_conv1d.bias"),
+                    &[usize_to_u64(
+                        config.ssm_inner_size + 2 * config.ssm_state_size * config.ssm_group_count,
+                        "ssm conv1d bias",
+                    )?],
+                )?;
+                // ssm_dt.bias is per-time_step_rank (96), not per-inner_size.
+                // A proper Mamba2 would project (B, L, dt_rank) → (B, L,
+                // inner_size); this checkpoint appears to broadcast dt to
+                // per-channel via the time_step_rank dim. The dt is
+                // effectively a per-timestep-rank bias, not a per-channel
+                // weight.
+                let ssm_dt_bias = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_dt.bias"),
+                    &[usize_to_u64(config.ssm_time_step_rank, "ssm dt bias")?],
+                )?;
+                // ssm_a is shape [1, time_step_rank=96]. The A_log is the
+                // negative exponential of state decay.
+                let ssm_a_log = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_a"),
+                    &[1, usize_to_u64(config.ssm_time_step_rank, "ssm a log")?],
+                )?;
+                // ssm_d is [1, time_step_rank] in this checkpoint.
+                let ssm_d = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_d"),
+                    &[1, usize_to_u64(config.ssm_time_step_rank, "ssm d")?],
+                )?;
+                // ssm_norm.weight is (per_group, n_groups). per_group is
+                // 960 (= inner_size 7680 / n_groups 8) in this checkpoint;
+                // the per-group dim doesn't follow a standard formula
+                // (it's not d_state, dt_rank, or anything conventional).
+                let ssm_norm = load_f32_tensor(
+                    source,
+                    &format!("{prefix}.ssm_norm.weight"),
+                    &[
+                        usize_to_u64(
+                            config.ssm_inner_size / config.ssm_group_count,
+                            "ssm norm per-group",
+                        )?,
+                        usize_to_u64(config.ssm_group_count, "ssm norm groups")?,
+                    ],
+                )?;
+                let ssm_out = static_q8_into_weight(
+                    source,
+                    &format!("{prefix}.ssm_out.weight"),
+                    config.n_embd,
+                    config.ssm_inner_size,
+                );
+                (
+                    Some(ssm_in),
+                    Some(ssm_conv1d_w),
+                    Some(ssm_conv1d_b),
+                    Some(ssm_dt_bias),
+                    Some(ssm_a_log),
+                    Some(ssm_d),
+                    Some(ssm_norm),
+                    Some(ssm_out),
+                )
+            } else {
+                (None, None, None, None, None, None, None, None)
+            };
         let _ = this_has_attn;
         layers.push(NemotronLayerWeights {
             attn_norm,
