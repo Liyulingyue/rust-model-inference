@@ -134,8 +134,8 @@ impl<'a> Kernel for F16Kernel<'a> {
     fn forward_prepared(
         &self,
         input_f32: &[f32],
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
@@ -143,16 +143,20 @@ impl<'a> Kernel for F16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        self.forward_scaled_rows(
-            input_f32,
-            output,
-            n_in,
-            n_out,
-            1.0,
-            &mut Vec::new(),
-            ith,
-            nth,
-        );
+        if input_f32.len() >= n_in {
+            self.forward_scaled_rows(
+                input_f32,
+                output,
+                n_in,
+                n_out,
+                1.0,
+                &mut Vec::new(),
+                ith,
+                nth,
+            );
+        } else {
+            self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
     }
 
     /// F16 converts the input to F16 before the dot product, matching ggml's

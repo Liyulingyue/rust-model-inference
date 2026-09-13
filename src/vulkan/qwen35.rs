@@ -1230,7 +1230,7 @@ mod tests {
         let f32_values = [1.000_000_1f32, -2.5, 0.0, -0.0, 70_000.0, 1e-8];
         let weights = [
             Weight {
-                kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(f32_values.to_vec())),
+                kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(f32_values.to_vec(), 0, 0)),
                 ggml_type: GGMLType::F32,
                 n_in: 3,
                 n_out: 2,
@@ -1299,7 +1299,7 @@ mod tests {
             .expect_err("short Q8_0 storage must be rejected");
         assert!(format!("{error:?}").contains("expected 34"));
 
-        let mut weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0; 5]));
+        let mut weight = Weight::from_quantized(QuantizedTensor::F32 { data: vec![1.0; 5], n_in: 0, n_out: 0 });
         weight.n_in = 3;
         weight.n_out = 2;
         assert!(validated_weight_bytes(&weight, "short F32")
@@ -1398,7 +1398,7 @@ mod tests {
                 values[0] = -1.0;
                 values[1] = 1.0 + f32::EPSILON;
                 Weight {
-                    kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(values)),
+                    kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(values, 0, 0)),
                     ggml_type: GGMLType::F32,
                     n_in,
                     n_out,

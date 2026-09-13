@@ -19,7 +19,7 @@ use crate::ops::quant::{self, BlockQ8K};
 use std::sync::Arc;
 
 fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
-    let mut weight = Weight::from_quantized(QuantizedTensor::F32(data));
+    let mut weight = Weight::from_quantized(QuantizedTensor::F32 { data, n_in, n_out });
     weight.n_in = n_in;
     weight.n_out = n_out;
     weight

@@ -16,7 +16,7 @@ use crate::{
 
 #[test]
 fn prepared_f32_matmul_does_not_require_q8k_alignment() {
-    let weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0, 2.0]));
+    let weight = Weight::from_quantized(QuantizedTensor::F32 { data: vec![1.0, 2.0], n_in: 0, n_out: 0 });
     let pool = ComputePool::new(1);
     let mut output = [0.0];
 

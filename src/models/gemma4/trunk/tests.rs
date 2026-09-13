@@ -261,7 +261,7 @@ fn f32_projection_rejects_missing_or_wrong_backing_storage() {
         (zero_weight(2, 1), "F32 kernel"),
         (
             Weight {
-                kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(vec![0.0])),
+                kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(vec![0.0], 0, 0)),
                 ggml_type: GGMLType::F32,
                 n_in: 2,
                 n_out: 1,
@@ -335,7 +335,7 @@ fn per_layer_f32_projection_matches_pinned_neon_dot_bits() {
     ]
     .map(f32::from_bits);
     let weight = Weight {
-        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights.to_vec())),
+        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights.to_vec(), 0, 0)),
         ggml_type: GGMLType::F32,
         n_in: input.len(),
         n_out: 1,
@@ -380,7 +380,7 @@ fn per_layer_f32_projection_matches_pinned_neon_long_rows() {
         })
         .collect::<Vec<_>>();
     let weight = Weight {
-        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights)),
+        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights, 0, 0)),
         ggml_type: GGMLType::F32,
         n_in: WIDTH,
         n_out: ROWS,
