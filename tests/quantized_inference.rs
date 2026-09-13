@@ -1,6 +1,6 @@
 use rust_model_inference::ops::kernel::q4_0::Q4_0Kernel;
 use rust_model_inference::ops::kernel::q4_1::Q4_1Kernel;
-use rust_model_inference::ops::kernel::q4_k::{Q4_KKernel, Q4_KWeight};
+use rust_model_inference::ops::kernel::q4_k::Q4_KKernel;
 use rust_model_inference::ops::kernel::q6_k::Q6_KKernel;
 use rust_model_inference::ops::kernel::Kernel;
 
@@ -39,7 +39,7 @@ fn q4_0_dot_scales_in_llama_scalar_order() {
     input_q8[23] = 1;
     let mut output = [0.0f32];
 
-    Q4_0Kernel::new(&weight).forward_prequantized(
+    Q4_0Kernel::new(&weight, 32, 1).forward_prequantized(
         &input_q8,
         &[3.439453125],
         &mut output,
@@ -74,10 +74,11 @@ fn q4_1_prepared_path_uses_llama_q8_1_sum_scale() {
     let input_scale = half::f16::from_f32(1.0 / 127.0).to_f32();
     let mut output = [0.0f32];
 
-    Q4_1Kernel::new(&weight).forward_prepared(
+    Q4_1Kernel::new(&weight, 32, 1).forward_prepared(
         &input,
         &input_q8,
         &[input_scale],
+        None,
         &mut output,
         32,
         1,
@@ -197,14 +198,10 @@ fn q4_k_prepared_path_matches_existing_scalar_dot_bits() {
         &weight,
         &rust_model_inference::ops::quant::quantize_row_q8_k(&input),
     );
-    let kernel = Q4_KKernel::new(Q4_KWeight {
-        data: &weight,
-        n_in: 256,
-        n_out: 1,
-    });
+    let kernel = Q4_KKernel::new(&weight, 256, 1);
     let mut actual = [0.0f32];
 
-    kernel.forward_prepared(&input, &[], &[], &mut actual, 256, 1, 0, 1);
+    kernel.forward_prepared(&input, &[], &[], None, &mut actual, 256, 1, 0, 1);
 
     assert_eq!(actual[0].to_bits(), expected.to_bits());
 }
@@ -222,10 +219,10 @@ fn q6_k_prepared_path_matches_existing_scalar_dot_bits() {
         &weight,
         &rust_model_inference::ops::quant::quantize_row_q8_k(&input),
     );
-    let kernel = Q6_KKernel::new(&weight);
+    let kernel = Q6_KKernel::new(&weight, 256, 1);
     let mut actual = [0.0f32];
 
-    kernel.forward_prepared(&input, &[], &[], &mut actual, 256, 1, 0, 1);
+    kernel.forward_prepared(&input, &[], &[], None, &mut actual, 256, 1, 0, 1);
 
     assert_eq!(actual[0].to_bits(), expected.to_bits());
 }
@@ -237,11 +234,7 @@ fn q4_k_kernel_multiplies_uniform_block() {
     weight[4..16].copy_from_slice(&[1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1]);
     weight[16..].fill(0x11);
 
-    let kernel = Q4_KKernel::new(Q4_KWeight {
-        data: &weight,
-        n_in: 256,
-        n_out: 1,
-    });
+    let kernel = Q4_KKernel::new(&weight, 256, 1);
     let mut output = [0.0];
     kernel.forward_prequantized(&[1; 256], &[1.0; 8], &mut output, 256, 1, 0, 1);
 
@@ -255,7 +248,7 @@ fn q6_k_kernel_multiplies_uniform_block() {
     weight[192..208].fill(1);
     weight[208..].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
 
-    let kernel = Q6_KKernel::new(&weight);
+    let kernel = Q6_KKernel::new(&weight, 256, 1);
     let mut output = [0.0];
     kernel.forward_prequantized(&[1; 1024], &[1.0; 8], &mut output, 256, 1, 0, 1);
 
