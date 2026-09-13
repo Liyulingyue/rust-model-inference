@@ -1,3 +1,5 @@
+#![cfg(feature = "parity-trace")]
+
 use serde_json::json;
 use std::sync::Mutex;
 
