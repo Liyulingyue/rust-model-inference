@@ -90,7 +90,10 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         .eos_id()
         .ok_or_else(|| "Gemma4 tokenizer is missing an EOS ID".to_string())?;
     let mut session = Gemma4Session::new(&model, request.kv_format)?;
+    let t_total = std::time::Instant::now();
     let mut logits = session.forward_rows(&rows)?;
+    let prefill_time = t_total.elapsed();
+    let prompt_tokens = rows.len();
     let mut output = Vec::with_capacity(request.max_tokens);
     for generated in 0..request.max_tokens {
         let id = greedy_token(&logits, tokenizer.vocab_size())?;
@@ -100,9 +103,32 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         }
         logits = session.forward_rows(&[Gemma4InputRow::Token(id)])?;
     }
+    let total_time = t_total.elapsed();
     std::io::stdout()
         .write_all(&tokenizer.decode_bytes(&output, false))
-        .map_err(|error| format!("Failed to print Gemma4 output: {error}"))
+        .map_err(|error| format!("Failed to print Gemma4 output: {error}"))?;
+    let decode_time = total_time.saturating_sub(prefill_time);
+    let decode_count = output.len();
+    let prompt_tps = if prefill_time.as_millis() > 0 {
+        prompt_tokens as f64 / prefill_time.as_millis() as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let decode_tps = if decode_time.as_millis() > 0 {
+        decode_count as f64 / decode_time.as_millis() as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let e2e_tps = if total_time.as_millis() > 0 {
+        decode_count as f64 / total_time.as_millis() as f64 * 1000.0
+    } else {
+        0.0
+    };
+    eprintln!(
+        "\nPrompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        prompt_tps, decode_tps, e2e_tps
+    );
+    Ok(())
 }
 
 fn construct_then_encode<ImageModel, AudioModel, ImageOutput, AudioOutput>(

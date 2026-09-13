@@ -1,4 +1,5 @@
 pub(crate) mod audio;
+pub(crate) mod breeze;
 pub mod cli;
 pub(crate) mod dots;
 pub(crate) mod dreamx;

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 enum TtsFrontend<'a> {
+    Breeze,
     Dots,
     Qwen3 {
         prompt_text: &'a str,
@@ -24,8 +25,27 @@ enum TtsFrontend<'a> {
 
 fn tts_frontend<'a>(
     options: &'a crate::app::cli::CliOptions,
+    model_arch: &str,
+    codec_arch: &str,
     is_dots_mmproj: bool,
 ) -> Result<TtsFrontend<'a>, String> {
+    if model_arch == "breeze" || codec_arch == "breeze_audio" {
+        if model_arch != "breeze" || codec_arch != "breeze_audio" {
+            return Err(
+                "Breeze --tts requires architecture breeze with a breeze_audio --mmproj".into(),
+            );
+        }
+        return Ok(TtsFrontend::Breeze);
+    }
+    if options.cfg_scale.is_some() {
+        return Err("--cfg-scale requires a Breeze TTS model".into());
+    }
+    if options.top_k.is_some() || options.top_p.is_some() {
+        return Err("--top-k/--top-p require a Breeze TTS model".into());
+    }
+    if options.instruction.is_some() && !(is_dots_mmproj && options.edit) {
+        return Err("--instruction requires Breeze --tts or dots --tts --edit".into());
+    }
     if is_dots_mmproj {
         return Ok(TtsFrontend::Dots);
     }
@@ -56,10 +76,28 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     // dots.tts uses an arch-qwen2 LLM gguf + a clip mmproj; dispatch on the
     // exact projector pair before the Qwen3-TTS path.
     let mmproj_probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    let codec_arch = mmproj_probe
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
     let (prompt_text, language) = match tts_frontend(
         options,
+        arch,
+        codec_arch,
         crate::models::dots::is_dots_tts_mmproj(mmproj_probe.as_ref()),
     )? {
+        TtsFrontend::Breeze => {
+            return crate::app::breeze::run_breeze_tts_cli(
+                options,
+                source.as_ref(),
+                mmproj_probe.as_ref(),
+            )
+        }
         TtsFrontend::Dots => return crate::app::dots::run_dots_tts_cli(options),
         TtsFrontend::Qwen3 {
             prompt_text,
@@ -68,11 +106,6 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
     };
     drop(mmproj_probe);
 
-    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|value| value.to_string_val())
-        .unwrap_or_default();
     crate::app::reject_incomplete_z_image_architecture(arch)?;
     eprintln!("Loading TTS talker from {}", options.model.display());
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
@@ -308,9 +341,32 @@ mod tests {
         crate::app::cli::validate_cli_options(&options).unwrap();
 
         assert!(matches!(
-            tts_frontend(&options, true).unwrap(),
+            tts_frontend(&options, "qwen2", "clip", true).unwrap(),
             TtsFrontend::Dots
         ));
+    }
+
+    #[test]
+    fn breeze_routes_before_qwen_tokenizer_and_rejects_mismatched_components() {
+        let options = crate::app::cli::CliOptions::default();
+        assert!(matches!(
+            tts_frontend(&options, "breeze", "breeze_audio", false).unwrap(),
+            TtsFrontend::Breeze
+        ));
+        assert!(tts_frontend(&options, "breeze", "clip", true).is_err());
+        assert!(tts_frontend(&options, "qwen3", "breeze_audio", false).is_err());
+        let options = crate::app::cli::CliOptions {
+            prompt: Some("hello".into()),
+            instruction: Some("soft voice".into()),
+            ..Default::default()
+        };
+        assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
+        assert!(tts_frontend(&options, "qwen2", "clip", true).is_err());
+        let options = crate::app::cli::CliOptions {
+            top_k: Some(50),
+            ..Default::default()
+        };
+        assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
     }
 
     #[test]

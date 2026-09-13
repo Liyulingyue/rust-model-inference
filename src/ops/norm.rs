@@ -49,6 +49,77 @@ pub fn rms_norm_inplace(x: &mut [f32], weight: &[f32], eps: f32) {
     scale_mul_inplace(scale, &weight[..n], &mut x[..n]);
 }
 
+/// In-place RMS normalization with unit weight: `x[i] *= 1.0 / rms(x)`.
+/// Equivalent to `rms_norm_inplace(x, &[1.0; x.len()], eps)` but skips the
+/// per-element weight multiply.
+pub fn rms_unit_inplace(x: &mut [f32], eps: f32) {
+    let n = x.len();
+    if n == 0 {
+        return;
+    }
+    let sum_sq = super::sum_sq_f32(x);
+    let mean_sq = (sum_sq / n as f64) as f32;
+    let scale = 1.0f32 / (mean_sq + eps).sqrt();
+    scale_inplace(scale, x);
+}
+
+fn scale_inplace(scale: f32, x: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::has_avx2_fma() {
+            unsafe { scale_avx2(scale, x) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if super::has_neon() {
+            unsafe { scale_neon(scale, x) };
+            return;
+        }
+    }
+    for value in x.iter_mut() {
+        *value *= scale;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn scale_avx2(scale: f32, x: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = x.len();
+    let n8 = n / 8 * 8;
+    let vscale = _mm256_set1_ps(scale);
+    let mut i = 0;
+    while i < n8 {
+        let vx = _mm256_loadu_ps(x.as_ptr().add(i));
+        _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(vx, vscale));
+        i += 8;
+    }
+    while i < n {
+        x[i] *= scale;
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scale_neon(scale: f32, x: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let n = x.len();
+    let vscale = vdupq_n_f32(scale);
+    let mut i = 0;
+    while i + 4 <= n {
+        let v = vmulq_f32(vld1q_f32(x.as_ptr().add(i)), vscale);
+        vst1q_f32(x.as_mut_ptr().add(i), v);
+        i += 4;
+    }
+    while i < n {
+        x[i] *= scale;
+        i += 1;
+    }
+}
+
 fn scale_mul_inplace(scale: f32, weight: &[f32], x: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     {

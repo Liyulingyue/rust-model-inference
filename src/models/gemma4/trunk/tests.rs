@@ -1,7 +1,7 @@
 use super::{
-    assemble_input_rows, attend, head_dim, kv_source_layer, load_weight, matmul, require_f32_kv,
-    softcap, Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, BASE_FFN_LAYERS, EMBED,
-    FULL_HEAD_DIM, HEADS, LAYERS, MAX_FFN, PER_LAYER, PER_LAYER_ALL, SWA_HEAD_DIM, VOCAB,
+    assemble_input_rows, attend, kv_source_layer, load_weight, matmul, require_f32_kv, softcap,
+    Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, FULL_HEAD_DIM, HEADS, PER_LAYER,
+    SWA_HEAD_DIM, VOCAB,
 };
 use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
@@ -9,6 +9,19 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::gemma4::Gemma4Config;
 use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use std::sync::Arc;
+
+const TEST_LAYERS: usize = 35;
+const TEST_EMBD: usize = 1536;
+const TEST_FFN_PER_LAYER: [usize; 35] = [
+    6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144, 6144,
+    12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288, 12288,
+    12288, 12288, 12288, 12288, 12288, 12288, 12288,
+];
+const TEST_SWA_PATTERN: [bool; 35] = [
+    true, true, true, true, false, true, true, true, true, false, true, true, true, true, false,
+    true, true, true, true, false, true, true, true, true, false, true, true, true, true, false,
+    true, true, true, true, false,
+];
 
 struct EmptySource;
 
@@ -100,59 +113,67 @@ fn zero_bf16_weight(n_in: usize, n_out: usize) -> Weight<'static> {
     }
 }
 
-fn zero_layer(layer: usize) -> Gemma4Layer {
-    let dim = head_dim(layer);
-    let ffn = if layer < BASE_FFN_LAYERS {
-        6144
-    } else {
-        MAX_FFN
-    };
+fn test_config() -> Gemma4Config {
+    Gemma4Config {
+        layers: TEST_LAYERS,
+        embd: TEST_EMBD,
+        heads: HEADS,
+        kv_heads: 1,
+        vocab: VOCAB,
+        full_head_dim: FULL_HEAD_DIM,
+        swa_head_dim: SWA_HEAD_DIM,
+        shared_kv_layers: 20,
+        per_layer_width: PER_LAYER,
+        sliding_window: 512,
+        logit_softcap: 30.0,
+        ffn_per_layer: TEST_FFN_PER_LAYER.to_vec(),
+        swa_pattern: TEST_SWA_PATTERN.to_vec(),
+    }
+}
+
+fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
+    let dim = cfg.head_dim(layer);
+    let ffn = cfg.ffn_per_layer[layer];
+    let embd = cfg.embd;
     Gemma4Layer {
         head_dim: dim,
-        attn_norm: vec![1.0; EMBED],
-        attn_q: zero_q8_weight(EMBED, HEADS * dim),
-        attn_k: zero_q8_weight(EMBED, dim),
-        attn_v: zero_q8_weight(EMBED, dim),
-        attn_output: zero_q8_weight(HEADS * dim, EMBED),
+        attn_norm: vec![1.0; embd],
+        attn_q: zero_q8_weight(embd, HEADS * dim),
+        attn_k: zero_q8_weight(embd, dim),
+        attn_v: zero_q8_weight(embd, dim),
+        attn_output: zero_q8_weight(HEADS * dim, embd),
         attn_q_norm: vec![1.0; dim],
         attn_k_norm: vec![1.0; dim],
-        post_attention_norm: vec![1.0; EMBED],
-        ffn_norm: vec![1.0; EMBED],
-        ffn_gate: zero_q8_weight(EMBED, ffn),
-        ffn_up: zero_q8_weight(EMBED, ffn),
-        ffn_down: zero_q8_weight(ffn, EMBED),
-        post_ffw_norm: vec![1.0; EMBED],
-        inp_gate: zero_weight(EMBED, PER_LAYER),
-        proj: zero_weight(PER_LAYER, EMBED),
-        post_norm: vec![1.0; EMBED],
+        post_attention_norm: vec![1.0; embd],
+        ffn_norm: vec![1.0; embd],
+        ffn_gate: zero_q8_weight(embd, ffn),
+        ffn_up: zero_q8_weight(embd, ffn),
+        ffn_down: zero_q8_weight(ffn, embd),
+        post_ffw_norm: vec![1.0; embd],
+        inp_gate: zero_weight(embd, PER_LAYER),
+        proj: zero_weight(PER_LAYER, embd),
+        post_norm: vec![1.0; embd],
         output_scale: 1.0,
     }
 }
 
 fn post_kv_failure_model() -> Gemma4Model {
-    let mut layers = (0..LAYERS).map(zero_layer).collect::<Vec<_>>();
+    let cfg = test_config();
+    let mut layers = (0..cfg.layers)
+        .map(|l| zero_layer(l, &cfg))
+        .collect::<Vec<_>>();
     layers[0].attn_output.n_in += 1;
+    let embd = cfg.embd;
+    let per_layer_all = cfg.per_layer_all();
     Gemma4Model {
         _source: Arc::new(EmptySource),
-        config: Gemma4Config {
-            layers: LAYERS,
-            embd: EMBED,
-            heads: HEADS,
-            kv_heads: 1,
-            vocab: VOCAB,
-            full_head_dim: FULL_HEAD_DIM,
-            swa_head_dim: SWA_HEAD_DIM,
-            shared_kv_layers: 20,
-            per_layer_width: PER_LAYER,
-            sliding_window: 512,
-            logit_softcap: 30.0,
-        },
+        config: cfg,
         pool: Arc::new(ComputePool::new(1)),
-        token_embedding: zero_weight(EMBED, VOCAB),
-        per_layer_token_embedding: zero_weight(PER_LAYER_ALL, VOCAB),
-        per_layer_model_proj: zero_bf16_weight(EMBED, PER_LAYER_ALL),
+        token_embedding: zero_weight(embd, VOCAB),
+        per_layer_token_embedding: zero_weight(per_layer_all, VOCAB),
+        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
         per_layer_proj_norm: vec![1.0; PER_LAYER],
-        output_norm: vec![1.0; EMBED],
+        output_norm: vec![1.0; embd],
         rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
         layers,
     }
@@ -160,13 +181,16 @@ fn post_kv_failure_model() -> Gemma4Model {
 
 #[test]
 fn raw_rows_are_not_embedding_scaled_and_use_padding_layer_id() {
-    let rows = assemble_input_rows(&[
-        Gemma4InputRow::Token(7),
-        Gemma4InputRow::Raw {
-            values: vec![2.0; 1536],
-            per_layer_token: 0,
-        },
-    ])
+    let rows = assemble_input_rows(
+        &[
+            Gemma4InputRow::Token(7),
+            Gemma4InputRow::Raw {
+                values: vec![2.0; 1536],
+                per_layer_token: 0,
+            },
+        ],
+        TEST_EMBD,
+    )
     .unwrap();
     assert!(rows[0].scale_token_embedding);
     assert!(!rows[1].scale_token_embedding);
@@ -210,6 +234,7 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
         &mut output,
         &mut Vec::new(),
         &mut Vec::new(),
+        &ComputePool::new(1),
     )
     .unwrap();
 
@@ -521,35 +546,46 @@ fn per_layer_projection_rejects_wrong_bf16_storage_length() {
 
 #[test]
 fn input_rows_reject_empty_invalid_and_nonfinite_values() {
-    assert!(assemble_input_rows(&[]).unwrap_err().contains("empty"));
-    assert!(assemble_input_rows(&[Gemma4InputRow::Token(262_144)])
+    assert!(assemble_input_rows(&[], TEST_EMBD)
         .unwrap_err()
-        .contains("token"));
-    assert!(assemble_input_rows(&[Gemma4InputRow::Raw {
-        values: vec![0.0; 1535],
-        per_layer_token: 0,
-    }])
+        .contains("empty"));
+    assert!(
+        assemble_input_rows(&[Gemma4InputRow::Token(262_144)], TEST_EMBD)
+            .unwrap_err()
+            .contains("token")
+    );
+    assert!(assemble_input_rows(
+        &[Gemma4InputRow::Raw {
+            values: vec![0.0; 1535],
+            per_layer_token: 0,
+        }],
+        TEST_EMBD
+    )
     .unwrap_err()
     .contains("1536"));
-    assert!(assemble_input_rows(&[Gemma4InputRow::Raw {
-        values: {
-            let mut values = vec![0.0; 1536];
-            values[7] = f32::NAN;
-            values
-        },
-        per_layer_token: 0,
-    }])
+    assert!(assemble_input_rows(
+        &[Gemma4InputRow::Raw {
+            values: {
+                let mut values = vec![0.0; 1536];
+                values[7] = f32::NAN;
+                values
+            },
+            per_layer_token: 0,
+        }],
+        TEST_EMBD
+    )
     .unwrap_err()
     .contains("non-finite"));
 }
 
 #[test]
 fn shared_kv_layers_map_by_attention_kind() {
-    assert_eq!(kv_source_layer(0), 0);
-    assert_eq!(kv_source_layer(14), 14);
-    assert_eq!(kv_source_layer(15), 13);
-    assert_eq!(kv_source_layer(19), 14);
-    assert_eq!(kv_source_layer(34), 14);
+    let cfg = test_config();
+    assert_eq!(kv_source_layer(&cfg, 0), 0);
+    assert_eq!(kv_source_layer(&cfg, 14), 14);
+    assert_eq!(kv_source_layer(&cfg, 15), 13);
+    assert_eq!(kv_source_layer(&cfg, 19), 14);
+    assert_eq!(kv_source_layer(&cfg, 34), 14);
 }
 
 #[test]
@@ -563,7 +599,7 @@ fn post_kv_failure_leaves_session_state_unchanged() {
     let model = post_kv_failure_model();
     let mut session = super::Gemma4Session::new(&model, KvFormat::F32).unwrap();
     let rows = [Gemma4InputRow::Raw {
-        values: vec![0.0; EMBED],
+        values: vec![0.0; TEST_EMBD],
         per_layer_token: 0,
     }];
 

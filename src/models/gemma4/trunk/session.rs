@@ -1,6 +1,6 @@
-use super::config::BASE_KV_LAYERS;
+use super::config::HEADS;
 use super::scratch::Gemma4Scratch;
-use super::weights::{head_dim, Gemma4Model};
+use super::weights::Gemma4Model;
 use crate::core::scratchpad::KvFormat;
 
 pub struct Gemma4Session<'model> {
@@ -11,7 +11,13 @@ pub struct Gemma4Session<'model> {
 }
 
 pub(super) struct KvLayer {
+    /// Per-head dimension (single K/V head).
     pub(super) head_dim: usize,
+    /// Per-position storage size: `kv_heads * head_dim` (GQA-aware).
+    pub(super) row_width: usize,
+    /// Q heads per KV head (= `q_heads / kv_heads`). For E2B: 8/1 = 8.
+    /// For E4B: 8/2 = 4.
+    pub(super) group_size: usize,
     pub(super) keys: Vec<f32>,
     pub(super) values: Vec<f32>,
 }
@@ -19,17 +25,24 @@ pub(super) struct KvLayer {
 impl<'model> Gemma4Session<'model> {
     pub fn new(model: &'model Gemma4Model, kv_format: KvFormat) -> Result<Self, String> {
         require_f32_kv(kv_format)?;
-        let kv = (0..BASE_KV_LAYERS)
-            .map(|layer| KvLayer {
-                head_dim: head_dim(layer),
-                keys: Vec::new(),
-                values: Vec::new(),
+        let cfg = &model.config;
+        let base = cfg.base_kv_layers();
+        let kv = (0..base)
+            .map(|layer| {
+                let head_dim = cfg.head_dim(layer);
+                KvLayer {
+                    head_dim,
+                    row_width: cfg.kv_heads * head_dim,
+                    group_size: HEADS / cfg.kv_heads,
+                    keys: Vec::new(),
+                    values: Vec::new(),
+                }
             })
             .collect();
         Ok(Self {
             model,
             kv,
-            scratch: Gemma4Scratch::new(),
+            scratch: Gemma4Scratch::new(cfg),
             seq_len: 0,
         })
     }
@@ -47,16 +60,16 @@ impl KvLayer {
         key: &[f32],
         value: &[f32],
     ) -> Result<(), String> {
-        if key.len() != self.head_dim || value.len() != self.head_dim {
+        if key.len() != self.row_width || value.len() != self.row_width {
             return Err(format!(
                 "blk.{layer} KV row length mismatch: key {}, value {}, expected {}",
                 key.len(),
                 value.len(),
-                self.head_dim
+                self.row_width
             ));
         }
         let expected = position
-            .checked_mul(self.head_dim)
+            .checked_mul(self.row_width)
             .ok_or_else(|| format!("blk.{layer} KV length overflow"))?;
         if self.keys.len() != expected || self.values.len() != expected {
             return Err(format!(
