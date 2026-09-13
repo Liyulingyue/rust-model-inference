@@ -605,6 +605,7 @@ pub fn run_shared_inference(
     temperature: f32,
     n_threads_arg: usize,
     thinking: bool,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     let started = Instant::now();
     let tokenizer = Arc::new(
@@ -653,7 +654,7 @@ pub fn run_shared_inference(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
-            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+            prefill_batch_size,
         },
     )?;
     print!("{}", generation.text);

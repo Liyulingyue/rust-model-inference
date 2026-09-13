@@ -1122,6 +1122,12 @@ mod tests {
 
     #[test]
     fn cli_parses_prefill_batch_size_strictly() {
+        assert_eq!(
+            CliOptions::default()
+                .effective_prefill_batch_size()
+                .unwrap(),
+            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE
+        );
         let parsed = parse_cli_options(&args(&["rmi", "--prefill-batch-size", "32"])).unwrap();
         assert_eq!(parsed.effective_prefill_batch_size().unwrap(), 32);
         assert!(parse_cli_options(&args(&["rmi", "--prefill-batch-size", "x"])).is_err());

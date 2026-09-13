@@ -76,6 +76,12 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    let prefill_batch_size = options
+        .effective_prefill_batch_size()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
     let dreamx_options = app::dreamx_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
@@ -199,7 +205,7 @@ fn main() {
         app::run_or_exit(validate_audio_route(route, image.is_some()));
         app::run_or_exit(validate_audio_temperature(route, options.temperature));
         if route == AudioRoute::Asr {
-            app::run_or_exit(app::run_asr_cli(&options));
+            app::run_or_exit(app::run_asr_cli(&options, prefill_batch_size));
             return;
         }
     }
@@ -216,6 +222,7 @@ fn main() {
             max_tokens,
             options.temperature.unwrap_or(0.0),
             n_threads,
+            prefill_batch_size,
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
         app::run_or_exit(app::run_multimodal_with_video(
@@ -229,6 +236,7 @@ fn main() {
             max_tokens,
             temperature,
             options.threads,
+            prefill_batch_size,
         ));
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
@@ -243,6 +251,7 @@ fn main() {
                 max_tokens,
                 temperature,
                 options.threads,
+                prefill_batch_size,
             ));
         } else if options.embedding {
             app::run_embedding(
@@ -268,6 +277,7 @@ fn main() {
                 temperature,
                 options.threads,
                 options.thinking,
+                prefill_batch_size,
             ));
         } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
             app::run_or_exit(app::run_inference(
@@ -280,6 +290,7 @@ fn main() {
                 options.bench,
                 options.profile,
                 options.kv_format,
+                prefill_batch_size,
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -292,6 +303,7 @@ fn main() {
                 options.bench,
                 options.profile,
                 options.kv_format,
+                prefill_batch_size,
             ));
         }
     } else {
@@ -308,6 +320,7 @@ fn main() {
             max_tokens,
             temperature,
             options.threads,
+            prefill_batch_size,
         ));
     }
 }

@@ -54,3 +54,7 @@ path = "src/bin/micro_bench.rs"
 [[bin]]
 name = "codec_test"
 path = "src/bin/codec_test.rs"
+
+[[bin]]
+name = "rust-model-server"
+path = "src/bin/server.rs"
