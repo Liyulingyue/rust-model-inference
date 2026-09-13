@@ -101,7 +101,7 @@ class ConversionTest(unittest.TestCase):
 
     def test_roundtrip_preserves_metadata_names_dims_types_and_raw_bytes(self):
         main, codec = convert_breeze.convert(self.model, self.out)
-        self.assertEqual((main.name, codec.name), ("breeze-tts-2-BF16.gguf", "breeze-tts-2-codec-F32.gguf"))
+        self.assertEqual((main.name, codec.name), ("breeze-tts-2-BF16.gguf", "breeze-tts-2-mmproj-F32.gguf"))
         metadata, tensors = read_gguf(main)
         self.assertEqual(metadata["general.architecture"], "breeze")
         self.assertEqual(metadata["breeze.config"], self.config)
@@ -179,7 +179,7 @@ class ConversionTest(unittest.TestCase):
 
     def test_existing_output_is_unchanged_and_other_output_is_not_created(self):
         self.out.mkdir()
-        existing = self.out / "breeze-tts-2-codec-F32.gguf"
+        existing = self.out / "breeze-tts-2-mmproj-F32.gguf"
         existing.write_bytes(b"user-owned")
         with self.assertRaises(FileExistsError):
             convert_breeze.convert(self.model, self.out)

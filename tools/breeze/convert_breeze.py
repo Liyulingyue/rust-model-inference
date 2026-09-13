@@ -179,7 +179,7 @@ def convert(model_dir: Path, out_dir: Path) -> tuple[Path, Path]:
     if not isinstance(audio_config, dict) or audio_config.get("model_type") != "qwen3_tts_tokenizer_12hz":
         raise ValueError("audio_tokenizer/config.json: invalid model_type")
     main_path = out_dir / "breeze-tts-2-BF16.gguf"
-    codec_path = out_dir / "breeze-tts-2-codec-F32.gguf"
+    codec_path = out_dir / "breeze-tts-2-mmproj-F32.gguf"
     if main_path.exists() or codec_path.exists():
         raise FileExistsError("output already exists")
     main_tensors, codec_tensors = _load_main(model_dir), _load_audio(model_dir)
