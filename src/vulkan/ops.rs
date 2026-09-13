@@ -632,10 +632,44 @@ impl BatchedLinearLayout {
 /// throughout its lifetime. Changing or reusing a source allocation requires a
 /// new runtime. Descriptor capacity includes the arena's descriptor set.
 pub(crate) struct BatchedLinearRuntime {
-    ops: Qwen3Ops<'static>,
+    ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
     weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
     weight_capacity: usize,
+    submission: LinearSubmission,
+    #[cfg(test)]
+    begin_commands: fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
+    #[cfg(test)]
+    wait_idle: Option<fn(&VulkanContext) -> Result<(), VulkanError>>,
+}
+
+#[derive(Default)]
+struct LinearSubmission {
+    uncertain: bool,
+}
+
+impl LinearSubmission {
+    fn submit(
+        &mut self,
+        submit: impl FnOnce() -> Result<(), VulkanError>,
+    ) -> Result<(), VulkanError> {
+        // Even an error from submission may leave work referring to our buffers.
+        self.uncertain = true;
+        submit()?;
+        self.uncertain = false;
+        Ok(())
+    }
+
+    fn confirm_idle(
+        &mut self,
+        wait: impl FnOnce() -> Result<(), VulkanError>,
+    ) -> Result<(), VulkanError> {
+        if self.uncertain {
+            wait()?;
+            self.uncertain = false;
+        }
+        Ok(())
+    }
 }
 
 impl BatchedLinearRuntime {
@@ -650,10 +684,36 @@ impl BatchedLinearRuntime {
         matmul_dispatch(max_n_out, max_rows, 1, &context.limits)?;
         let ops = Qwen3Ops::new_with_size(context, layout.size, descriptor_capacity)?;
         Ok(Self {
-            ops,
+            ops: std::mem::ManuallyDrop::new(ops),
             layout,
             weights: HashMap::new(),
             weight_capacity: descriptor_capacity.saturating_sub(1),
+            submission: LinearSubmission::default(),
+            #[cfg(test)]
+            begin_commands: TokenCommands::begin,
+            #[cfg(test)]
+            wait_idle: None,
+        })
+    }
+
+    fn recover(&mut self) -> Result<(), VulkanError> {
+        if !self.submission.uncertain {
+            return Ok(());
+        }
+        let context = self.ops.context;
+        let _guard = context
+            .mutex
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+        #[cfg(test)]
+        if let Some(wait_idle) = self.wait_idle {
+            return self.submission.confirm_idle(|| wait_idle(context));
+        }
+        self.submission.confirm_idle(|| unsafe {
+            context
+                .device
+                .device_wait_idle()
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))
         })
     }
 
@@ -678,6 +738,12 @@ impl BatchedLinearRuntime {
             n_out,
             output.len(),
         )?;
+        let context = self.ops.context;
+        self.recover()?;
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
         let key = (weight_bytes.as_ptr() as usize, weight_bytes.len());
         let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
             if bindings.weight_format(1)? != format {
@@ -700,11 +766,12 @@ impl BatchedLinearRuntime {
                     return Err(error);
                 }
             };
+            // Initialization succeeded. Retain this valid upload on later errors
+            // so every GPU allocation stays owned and can be reused or dropped.
             self.weights.insert(key, (buffer, bindings));
             bindings
         };
         self.ops.write_f32(self.layout.input, input)?;
-        let commands = TokenCommands::begin(self.ops.context)?;
         self.ops.record_weight_matmul_rows(
             &commands,
             bindings,
@@ -719,7 +786,7 @@ impl BatchedLinearRuntime {
             rows,
             n_in,
         )?;
-        commands.submit_and_wait()?;
+        self.submission.submit(|| commands.submit_and_wait())?;
         output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
         Ok(())
     }
@@ -727,10 +794,22 @@ impl BatchedLinearRuntime {
 
 impl Drop for BatchedLinearRuntime {
     fn drop(&mut self) {
-        let _guard = self.ops.context.mutex.lock().ok();
-        for (buffer, _) in self.weights.values() {
-            unsafe { self.ops.context.destroy_buffer(buffer) };
+        if self.recover().is_err() {
+            // Completion is unknown: leak only our handles rather than free
+            // buffers, descriptors or pipelines still referenced by the GPU.
+            return;
         }
+        let context = self.ops.context;
+        {
+            let Ok(_guard) = context.mutex.lock() else {
+                return;
+            };
+            for (buffer, _) in self.weights.values() {
+                unsafe { context.destroy_buffer(buffer) };
+            }
+        }
+        // Qwen3Ops acquires the same mutex in Drop.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
     }
 }
 
@@ -3893,6 +3972,173 @@ fn check_close(
 #[cfg(test)]
 mod tests {
     use super::{fill_rope_neox, ArenaLayout, TokenDispatchPlan};
+
+    #[test]
+    fn batched_linear_submission_failure_requires_confirmed_idle() {
+        use super::{LinearSubmission, VulkanError};
+        let mut submission = LinearSubmission::default();
+        submission
+            .confirm_idle(|| panic!("idle work needs no wait"))
+            .unwrap();
+        assert!(submission.submit(|| Err(VulkanError::Timeout)).is_err());
+        assert!(submission.uncertain);
+        assert!(submission
+            .confirm_idle(|| Err(VulkanError::Timeout))
+            .is_err());
+        assert!(submission.uncertain);
+        submission.confirm_idle(|| Ok(())).unwrap();
+        assert!(!submission.uncertain);
+        submission.submit(|| Ok(())).unwrap();
+        assert!(!submission.uncertain);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_begin_failure_preserves_state() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32, TokenCommands, VulkanError};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = [0u8; 16];
+        let mut runtime = BatchedLinearRuntime::new(context, 1, 4, 1, 2).unwrap();
+        runtime.begin_commands = |_| Err(VulkanError::InitFailed("injected begin failure".into()));
+        let before = runtime
+            .ops
+            .read_bytes(runtime.layout.input, 16)
+            .unwrap()
+            .to_vec();
+        let mut output = [123.0];
+        assert!(runtime
+            .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
+            .is_err());
+        assert!(runtime.weights.is_empty());
+        assert_eq!(
+            runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+            before
+        );
+        assert_eq!(output, [123.0]);
+        assert_eq!(context.submission_count(), 0);
+        runtime.begin_commands = TokenCommands::begin;
+        // A later pre-submit failure retains an owned, reusable upload.
+        let arena_size = runtime.ops.arena.size;
+        runtime.ops.arena.size = 0;
+        assert!(runtime
+            .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
+            .is_err());
+        assert_eq!(runtime.weights.len(), 1);
+        assert_eq!(context.submission_count(), 0);
+        let key = (weight.as_ptr() as usize, weight.len());
+        let buffer = runtime.weights[&key].0.buffer;
+        runtime.ops.arena.size = arena_size;
+        runtime
+            .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
+            .unwrap();
+        assert_eq!(output, [0.0]);
+        assert_eq!(runtime.weights.len(), 1);
+        assert_eq!(runtime.weights[&key].0.buffer, buffer);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_failed_recovery_blocks_retry_and_preserves_drop_resources() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32, TokenCommands, VulkanError};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = [1.0f32; 4];
+        let mut runtime = BatchedLinearRuntime::new(context, 1, 4, 1, 2).unwrap();
+        let mut output = [0.0];
+        runtime
+            .matmul_rows(
+                bytemuck::cast_slice(&weight),
+                F32,
+                &[1.0; 4],
+                1,
+                4,
+                1,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, [4.0]);
+        // Simulate a submit/wait failure without intentionally hanging hardware.
+        assert!(runtime
+            .submission
+            .submit(|| Err(VulkanError::Timeout))
+            .is_err());
+        runtime.wait_idle = Some(|_| Err(VulkanError::Timeout));
+        runtime.begin_commands = |_| panic!("must confirm idle before command reset");
+        let before = runtime
+            .ops
+            .read_bytes(runtime.layout.input, 16)
+            .unwrap()
+            .to_vec();
+        for _ in 0..2 {
+            assert!(runtime
+                .matmul_rows(
+                    bytemuck::cast_slice(&weight),
+                    F32,
+                    &[2.0; 4],
+                    1,
+                    4,
+                    1,
+                    &mut output
+                )
+                .is_err());
+            assert!(runtime.submission.uncertain);
+            assert_eq!(
+                runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+                before
+            );
+            assert_eq!(runtime.weights.len(), 1);
+            assert_eq!(output, [4.0]);
+            assert_eq!(context.submission_count(), 1);
+        }
+        runtime.wait_idle = None;
+        runtime.begin_commands = TokenCommands::begin;
+        runtime
+            .matmul_rows(
+                bytemuck::cast_slice(&weight),
+                F32,
+                &[2.0; 4],
+                1,
+                4,
+                1,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, [8.0]);
+        assert!(!runtime.submission.uncertain);
+
+        static DROP_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        runtime.submission.uncertain = true;
+        runtime.wait_idle = Some(|_| {
+            DROP_WAITS.fetch_add(1, super::Ordering::Relaxed);
+            Err(VulkanError::Timeout)
+        });
+        // Keep copies solely to reclaim the deliberately leaked resources after
+        // the real device confirms completion. The runtime must not free them.
+        let retained_ops = unsafe { std::ptr::read(&*runtime.ops) };
+        let retained_weights: Vec<_> = runtime
+            .weights
+            .values()
+            .map(|(buffer, _)| *buffer)
+            .collect();
+        drop(runtime);
+        assert_eq!(DROP_WAITS.load(super::Ordering::Relaxed), 1);
+        unsafe { context.device.device_wait_idle().unwrap() };
+        assert_eq!(
+            retained_ops
+                .read_f32(
+                    super::ArenaRegion {
+                        offset: 0,
+                        size: 16
+                    },
+                    4
+                )
+                .unwrap(),
+            &[2.0; 4]
+        );
+        for buffer in retained_weights {
+            unsafe { context.destroy_buffer(&buffer) };
+        }
+        drop(retained_ops);
+    }
 
     #[test]
     fn batched_linear_layout_bounds_and_shapes() {
