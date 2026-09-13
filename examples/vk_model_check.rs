@@ -58,7 +58,7 @@ fn arguments() -> Result<Arguments, String> {
         match argument.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
             "--benchmark" if mode == Mode::Qwen3 => benchmark = true,
-            "--compare-prefill-batches" if mode == Mode::Qwen3 => {
+            "--compare-prefill-batches" if mode != Mode::Embedding => {
                 compare_prefill_batches =
                     Some(parse_prefill_batches(&args.next().ok_or(
                         "--compare-prefill-batches needs comma-separated sizes",
@@ -523,6 +523,95 @@ fn qwen35_generate(
 }
 
 #[cfg(feature = "vulkan")]
+fn qwen35_state_bits(session: &Qwen35Session<'_, '_>) -> Vec<u32> {
+    let rust_model_inference::core::scratchpad::KvCache::F32(cache) = session.kv_cache() else {
+        unreachable!("Qwen3.5 requires F32 KV");
+    };
+    cache
+        .k
+        .iter()
+        .chain(&cache.v)
+        .chain(session.scratch().conv_states.iter().flatten())
+        .chain(session.scratch().ssm_states.iter().flatten())
+        .map(|value| value.to_bits())
+        .collect()
+}
+
+#[cfg(feature = "vulkan")]
+fn compare_qwen35_prefill_batches(
+    model: &mut Qwen35Model<'_>,
+    tokens: &[u32],
+    positions: &[[usize; 4]],
+    batches: &[usize],
+) -> Result<(), String> {
+    rust_model_inference::ops::enable_gpu();
+    let context = rust_model_inference::ops::get_vulkan_context()
+        .ok_or("Vulkan backend did not initialize")?;
+    let capacity = tokens
+        .len()
+        .checked_add(GREEDY_TOKENS + 1)
+        .ok_or("session capacity overflow")?;
+    let pool = Arc::new(ComputePool::new(4));
+    let mut baseline = None;
+    for &batch in batches {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(model, capacity, batch, Arc::clone(&pool))?;
+        let before = context.submission_count();
+        let mut logits = session.step_with_tokens(tokens, positions)?;
+        let prefill_submissions = context.submission_count() - before;
+        let expected = tokens.len().div_ceil(batch) as u64;
+        if prefill_submissions != expected {
+            return Err(format!(
+                "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
+            ));
+        }
+        let prompt_logits = logits
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+        let prompt_state = qwen35_state_bits(&session);
+        let mut generated = Vec::with_capacity(GREEDY_TOKENS);
+        for _ in 0..GREEDY_TOKENS {
+            let token = logits
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .ok_or("empty logits")?
+                .0 as u32;
+            generated.push(token);
+            let position = session.next_position();
+            logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
+        }
+        let total_submissions = context.submission_count() - before;
+        if total_submissions != expected + GREEDY_TOKENS as u64 {
+            return Err(format!(
+                "batch={batch} decode submission count changed: {total_submissions}"
+            ));
+        }
+        let result = (
+            prompt_logits,
+            prompt_state,
+            generated,
+            qwen35_state_bits(&session),
+            logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+        );
+        if let Some(previous) = &baseline {
+            if &result != previous {
+                return Err(format!("same-Vulkan Qwen3.5 prefill mismatch for batch={batch}: logits, dense KV, conv/SSM or greedy tokens differ"));
+            }
+        } else {
+            baseline = Some(result);
+        }
+        println!("device={} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", context.device_name(), tokens.len());
+    }
+    println!("check=same_vulkan_prefill exact_logits=true exact_dense_kv=true exact_conv_ssm=true exact_greedy_tokens=true exact_decode_state=true");
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
 fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     let source: Arc<dyn TensorSource> = Arc::from(
         open_model_source(&arguments.model, ComponentRole::Llm)
@@ -530,8 +619,16 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     );
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
     let mut model = Qwen35Model::from_source(source.as_ref())?;
-    let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
+    let prompt = if arguments.compare_prefill_batches.is_some() {
+        PROMPT.repeat(20)
+    } else {
+        PROMPT.to_string()
+    };
+    let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());
+    if let Some(batches) = &arguments.compare_prefill_batches {
+        return compare_qwen35_prefill_batches(&mut model, &prompt_tokens, &positions, batches);
+    }
     let capacity = prompt_tokens
         .len()
         .checked_add(GREEDY_TOKENS + 1)
@@ -566,10 +663,13 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
             "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
         ));
     }
-    let expected_submissions = prompt_tokens.len() + GREEDY_TOKENS;
+    let expected_submissions = prompt_tokens
+        .len()
+        .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
+        + GREEDY_TOKENS;
     if submissions != expected_submissions as u64 {
         return Err(format!(
-            "expected one submission per token ({expected_submissions}), got {submissions}"
+            "expected one submission per prompt chunk and decode token ({expected_submissions}), got {submissions}"
         ));
     }
     println!("formats=matmul={{BF16}};auxiliary={{F32}};backend=vulkan");

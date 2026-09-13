@@ -1835,9 +1835,11 @@ impl<'a> Qwen3Ops<'a> {
         head_dim: usize,
         rope_dim: usize,
         eps: f32,
+        rows: usize,
     ) -> Result<(), VulkanError> {
         if layer >= layer_count
-            || position >= capacity
+            || rows == 0
+            || position.checked_add(rows).is_none_or(|end| end > capacity)
             || q_heads == 0
             || kv_heads == 0
             || q_heads % kv_heads != 0
@@ -1862,21 +1864,48 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| count.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
         let delta_count = layer_count
-            .checked_mul(kv_count)
+            .checked_mul(rows)
+            .and_then(|count| count.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
         bindings.require(0, f32_bytes(head_dim)?, "Qwen3.5 Q norm")?;
         bindings.require(1, f32_bytes(head_dim)?, "Qwen3.5 K norm")?;
         let push = [
-            self.f32_word(raw_q, raw_q_count, "Qwen3.5 raw Q/gate")?,
-            self.f32_word(raw_k, kv_count, "Qwen3.5 raw K")?,
-            self.f32_word(v, kv_count, "Qwen3.5 V")?,
-            self.f32_word(q, q_count, "Qwen3.5 Q")?,
-            self.f32_word(gate, q_count, "Qwen3.5 attention gate")?,
+            self.f32_word(
+                raw_q,
+                raw_q_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 raw Q/gate",
+            )?,
+            self.f32_word(
+                raw_k,
+                kv_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 raw K",
+            )?,
+            self.f32_word(
+                v,
+                kv_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 V",
+            )?,
+            self.f32_word(
+                q,
+                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 Q",
+            )?,
+            self.f32_word(
+                gate,
+                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 attention gate",
+            )?,
             self.f32_word(cache_k, cache_count, "Qwen3.5 K cache")?,
             self.f32_word(cache_v, cache_count, "Qwen3.5 V cache")?,
             self.f32_word(delta_k, delta_count, "Qwen3.5 K delta")?,
             self.f32_word(delta_v, delta_count, "Qwen3.5 V delta")?,
-            self.f32_word(rope, rope_dim, "Qwen3.5 mRoPE coefficients")?,
+            self.f32_word(
+                rope,
+                rope_dim.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 mRoPE coefficients",
+            )?,
             as_u32(layer, "Qwen3.5 dense layer")?,
             as_u32(position, "Qwen3.5 dense position")?,
             as_u32(capacity, "Qwen3.5 dense capacity")?,
@@ -1887,6 +1916,7 @@ impl<'a> Qwen3Ops<'a> {
         let group_count = q_heads.max(kv_heads);
         if group_count > self.context.limits.max_compute_work_group_count[0] as usize
             || self.context.limits.max_compute_work_group_count[1] < 2
+            || rows > self.context.limits.max_compute_work_group_count[2] as usize
         {
             return Err(VulkanError::UnsupportedShape(
                 "Qwen3.5 dense head count exceeds device dispatch limits".into(),
@@ -1899,7 +1929,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(group_count as u32, 2, 1);
+            commands.dispatch(group_count as u32, 2, rows as u32);
             commands.barrier();
         }
         Ok(())
@@ -1916,12 +1946,17 @@ impl<'a> Qwen3Ops<'a> {
         output: ArenaRegion,
         layer: usize,
         layer_count: usize,
-        sequence_length: usize,
+        base_position: usize,
         capacity: usize,
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
+        rows: usize,
     ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .filter(|_| rows > 0)
+            .ok_or(VulkanError::OutOfMemory)?;
         validate_attention_shape(
             layer,
             layer_count,
@@ -1947,19 +1982,33 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| count.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
         let push = [
-            self.f32_word(q, q_count, "Qwen3.5 attention Q")?,
-            self.f32_word(gate, q_count, "Qwen3.5 attention gate")?,
+            self.f32_word(
+                q,
+                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 attention Q",
+            )?,
+            self.f32_word(
+                gate,
+                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 attention gate",
+            )?,
             self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?,
             self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?,
-            self.f32_word(output, q_count, "Qwen3.5 attention output")?,
+            self.f32_word(
+                output,
+                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 attention output",
+            )?,
             as_u32(layer, "Qwen3.5 attention layer")?,
-            as_u32(sequence_length, "Qwen3.5 attention sequence length")?,
+            as_u32(base_position, "Qwen3.5 attention base position")?,
             as_u32(capacity, "Qwen3.5 attention capacity")?,
             as_u32(q_heads, "Qwen3.5 attention Q heads")?,
             as_u32(kv_heads, "Qwen3.5 attention KV heads")?,
             as_u32(head_dim, "Qwen3.5 attention head dimension")?,
         ];
-        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize {
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || rows > self.context.limits.max_compute_work_group_count[1] as usize
+        {
             return Err(VulkanError::UnsupportedShape(
                 "Qwen3.5 attention head count exceeds device dispatch limits".into(),
             ));
@@ -1971,7 +2020,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(q_heads as u32, 1, 1);
+            commands.dispatch(q_heads as u32, rows as u32, 1);
             commands.barrier();
         }
         Ok(())
@@ -1997,6 +2046,7 @@ impl<'a> Qwen3Ops<'a> {
         v_heads: usize,
         head_dim: usize,
         eps: f32,
+        rows: usize,
     ) -> Result<(), VulkanError> {
         let expected_key = k_heads
             .checked_mul(head_dim)
@@ -2009,6 +2059,7 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| count.checked_add(value_dim))
             .ok_or(VulkanError::OutOfMemory)?;
         if layer >= layer_count
+            || rows == 0
             || d_conv == 0
             || k_heads == 0
             || v_heads == 0
@@ -2030,10 +2081,28 @@ impl<'a> Qwen3Ops<'a> {
             .ok_or(VulkanError::OutOfMemory)?;
         bindings.require(0, f32_bytes(weight_count)?, "Qwen3.5 convolution weight")?;
         let mut push = [
-            self.f32_word(qkv, conv_dim, "Qwen3.5 recurrent QKV")?,
-            self.f32_word(q, key_dim, "Qwen3.5 recurrent Q")?,
-            self.f32_word(k, key_dim, "Qwen3.5 recurrent K")?,
-            self.f32_word(v, value_dim, "Qwen3.5 recurrent V")?,
+            self.f32_word(
+                qkv,
+                conv_dim.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 recurrent QKV",
+            )?,
+            self.f32_word(
+                q,
+                key_dim.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 recurrent Q",
+            )?,
+            self.f32_word(
+                k,
+                key_dim.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 recurrent K",
+            )?,
+            self.f32_word(
+                v,
+                value_dim
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 recurrent V",
+            )?,
             self.f32_word(state, state_count, "Qwen3.5 convolution state")?,
             as_u32(layer, "Qwen3.5 recurrent layer")?,
             as_u32(conv_dim, "Qwen3.5 convolution width")?,
@@ -2045,6 +2114,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "Qwen3.5 recurrent head dimension")?,
             eps.to_bits(),
             0,
+            as_u32(rows, "Qwen3.5 convolution rows")?,
         ];
         let (x, y) = dispatch_invocations(conv_dim, &self.context.limits)?;
         unsafe {
@@ -2091,8 +2161,15 @@ impl<'a> Qwen3Ops<'a> {
         v_heads: usize,
         head_dim: usize,
         eps: f32,
+        rows: usize,
     ) -> Result<(), VulkanError> {
-        if layer >= layer_count || k_heads == 0 || v_heads == 0 || head_dim == 0 || head_dim > 128 {
+        if rows == 0
+            || layer >= layer_count
+            || k_heads == 0
+            || v_heads == 0
+            || head_dim == 0
+            || head_dim > 128
+        {
             return Err(VulkanError::UnsupportedShape(format!(
                 "invalid Qwen3.5 recurrent SSM layer={layer}/{layer_count} heads={k_heads}/{v_heads} dim={head_dim}"
             )));
@@ -2112,19 +2189,58 @@ impl<'a> Qwen3Ops<'a> {
         bindings.require(1, f32_bytes(v_heads)?, "Qwen3.5 SSM A")?;
         bindings.require(2, f32_bytes(head_dim)?, "Qwen3.5 SSM norm")?;
         let push = [
-            self.f32_word(q, key_count, "Qwen3.5 SSM Q")?,
-            self.f32_word(k, key_count, "Qwen3.5 SSM K")?,
-            self.f32_word(v, value_count, "Qwen3.5 SSM V")?,
-            self.f32_word(gate, value_count, "Qwen3.5 SSM gate")?,
-            self.f32_word(beta, v_heads, "Qwen3.5 SSM beta")?,
-            self.f32_word(alpha, v_heads, "Qwen3.5 SSM alpha")?,
-            self.f32_word(output, value_count, "Qwen3.5 SSM output")?,
+            self.f32_word(
+                q,
+                key_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM Q",
+            )?,
+            self.f32_word(
+                k,
+                key_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM K",
+            )?,
+            self.f32_word(
+                v,
+                value_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM V",
+            )?,
+            self.f32_word(
+                gate,
+                value_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM gate",
+            )?,
+            self.f32_word(
+                beta,
+                v_heads.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM beta",
+            )?,
+            self.f32_word(
+                alpha,
+                v_heads.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM alpha",
+            )?,
+            self.f32_word(
+                output,
+                value_count
+                    .checked_mul(rows)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "Qwen3.5 SSM output",
+            )?,
             self.f32_word(state, state_count, "Qwen3.5 SSM state")?,
             as_u32(layer, "Qwen3.5 SSM layer")?,
             as_u32(k_heads, "Qwen3.5 SSM key heads")?,
             as_u32(v_heads, "Qwen3.5 SSM value heads")?,
             as_u32(head_dim, "Qwen3.5 SSM head dimension")?,
             eps.to_bits(),
+            as_u32(rows, "Qwen3.5 SSM rows")?,
         ];
         let (x, y) = super::dispatch_grid(v_heads, &self.context.limits)?;
         unsafe {

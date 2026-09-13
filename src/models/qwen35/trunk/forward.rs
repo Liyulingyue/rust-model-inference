@@ -24,6 +24,16 @@ use crate::parity_trace;
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::Qwen35VulkanSession;
 
+#[cfg(test)]
+thread_local! {
+    static CPU_SCAN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_cpu_scan_failure(row: Option<usize>) {
+    CPU_SCAN_FAILURE.set(row);
+}
+
 impl<'a> super::weights::Qwen35Model<'a> {
     pub fn forward(
         &mut self,
@@ -265,11 +275,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         scratch,
                         pool,
                         trace_layer(il),
-                    )
+                    )?
                 }
                 #[cfg(not(feature = "parity-trace"))]
                 {
-                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool)
+                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool)?
                 }
             } else {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
@@ -676,7 +686,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, String> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
@@ -885,6 +895,12 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_scale,
                 );
             }
+            #[cfg(test)]
+            if CPU_SCAN_FAILURE.get() == Some(t) {
+                return Err(format!(
+                    "injected Qwen3.5 CPU chunk failure after recurrent row {t}"
+                ));
+            }
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -948,7 +964,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 il, t_matmul, tc, tssm, tnorm, t_out_matmul
             );
         }
-        result
+        Ok(result)
     }
 
     fn forward_ffn_parallel(

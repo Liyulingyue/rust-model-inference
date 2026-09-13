@@ -20,6 +20,7 @@ layout(push_constant) uniform PC {
     uint v_heads;
     uint head_dim;
     float eps;
+    uint rows;
 } pc;
 
 shared float output_values[128];
@@ -53,73 +54,89 @@ void main() {
     uint lane = gl_LocalInvocationID.x;
     uint key_head = value_head % pc.k_heads;
 
-    if (lane == 0u) {
-        float beta_raw = uintBitsToFloat(arena.data[pc.beta_word + value_head]);
-        beta_value = 1.0 / (1.0 + exp(-beta_raw));
-        float alpha_raw = uintBitsToFloat(arena.data[pc.alpha_word + value_head]);
-        float biased = alpha_raw + uintBitsToFloat(dt_bias.data[value_head]);
-        float softplus = biased > 20.0 ? biased : log(1.0 + exp(biased));
-        decay = exp(softplus * uintBitsToFloat(a_weight.data[value_head]));
-    }
-    barrier();
-
+    uint state_head = pc.state_word + (pc.layer * pc.v_heads + value_head) * pc.head_dim * pc.head_dim;
+    // Existing head_dim <= 128 bounds two state rows per lane.
+    float state_values[256];
     for (uint row = lane; row < pc.head_dim; row += 64u) {
-        uint state_head = pc.state_word
-            + (pc.layer * pc.v_heads + value_head) * pc.head_dim * pc.head_dim;
-        uint row_base = state_head + row * pc.head_dim;
-        uint key_base = pc.k_word + key_head * pc.head_dim;
-        precise float state_key = 0.0;
         for (uint column = 0u; column < pc.head_dim; column++) {
-            float state = uintBitsToFloat(arena.data[row_base + column]) * decay;
-            arena.data[row_base + column] = floatBitsToUint(state);
-            state_key = fma(state, uintBitsToFloat(arena.data[key_base + column]), state_key);
+            state_values[(row / 64u) * pc.head_dim + column] =
+                uintBitsToFloat(arena.data[state_head + row * pc.head_dim + column]);
         }
-        float value = uintBitsToFloat(
-            arena.data[pc.v_word + value_head * pc.head_dim + row]
-        );
-        float delta = (value - state_key) * beta_value;
-        precise float output_value = 0.0;
-        uint q_base = pc.q_word + key_head * pc.head_dim;
-        for (uint column = 0u; column < pc.head_dim; column++) {
-            float state = fma(
-                uintBitsToFloat(arena.data[key_base + column]),
-                delta,
-                uintBitsToFloat(arena.data[row_base + column])
-            );
-            arena.data[row_base + column] = floatBitsToUint(state);
-            output_value = fma(
-                state,
-                uintBitsToFloat(arena.data[q_base + column]),
-                output_value
-            );
-        }
-        output_values[row] = output_value * inversesqrt(float(pc.head_dim));
     }
-    barrier();
-
-    if (lane == 0u) {
-        precise float sum = 0.0;
-        precise float correction = 0.0;
-        for (uint index = 0u; index < pc.head_dim; index++) {
-            float square = output_values[index] * output_values[index];
-            precise float next = sum + square;
-            correction += sum >= square
-                ? (sum - next) + square
-                : (square - next) + sum;
-            sum = next;
+    for (uint token = 0u; token < pc.rows; token++) {
+        if (lane == 0u) {
+            float beta_raw = uintBitsToFloat(arena.data[pc.beta_word + token * pc.v_heads + value_head]);
+            beta_value = 1.0 / (1.0 + exp(-beta_raw));
+            float alpha_raw = uintBitsToFloat(arena.data[pc.alpha_word + token * pc.v_heads + value_head]);
+            float biased = alpha_raw + uintBitsToFloat(dt_bias.data[value_head]);
+            float softplus = biased > 20.0 ? biased : log(1.0 + exp(biased));
+            decay = exp(softplus * uintBitsToFloat(a_weight.data[value_head]));
         }
-        inverse_rms = inversesqrt((sum + correction) / float(pc.head_dim) + pc.eps);
-    }
-    barrier();
+        barrier();
 
+        for (uint row = lane; row < pc.head_dim; row += 64u) {
+            uint row_base = (row / 64u) * pc.head_dim;
+            uint key_base = pc.k_word + (token * pc.k_heads + key_head) * pc.head_dim;
+            precise float state_key = 0.0;
+            for (uint column = 0u; column < pc.head_dim; column++) {
+                float state = state_values[row_base + column] * decay;
+                state_values[row_base + column] = state;
+                state_key = fma(state, uintBitsToFloat(arena.data[key_base + column]), state_key);
+            }
+            float value = uintBitsToFloat(
+                arena.data[pc.v_word + (token * pc.v_heads + value_head) * pc.head_dim + row]
+            );
+            float delta = (value - state_key) * beta_value;
+            precise float output_value = 0.0;
+            uint q_base = pc.q_word + (token * pc.k_heads + key_head) * pc.head_dim;
+            for (uint column = 0u; column < pc.head_dim; column++) {
+                float state = fma(
+                    uintBitsToFloat(arena.data[key_base + column]),
+                    delta,
+                    state_values[row_base + column]
+                );
+                state_values[row_base + column] = state;
+                output_value = fma(
+                    state,
+                    uintBitsToFloat(arena.data[q_base + column]),
+                    output_value
+                );
+            }
+            output_values[row] = output_value * inversesqrt(float(pc.head_dim));
+        }
+        barrier();
+
+        if (lane == 0u) {
+            precise float sum = 0.0;
+            precise float correction = 0.0;
+            for (uint index = 0u; index < pc.head_dim; index++) {
+                float square = output_values[index] * output_values[index];
+                precise float next = sum + square;
+                correction += sum >= square
+                    ? (sum - next) + square
+                    : (square - next) + sum;
+                sum = next;
+            }
+            inverse_rms = inversesqrt((sum + correction) / float(pc.head_dim) + pc.eps);
+        }
+        barrier();
+
+        for (uint row = lane; row < pc.head_dim; row += 64u) {
+            float normalized = output_values[row] * inverse_rms
+                * uintBitsToFloat(norm_weight.data[row]);
+            float gate = uintBitsToFloat(
+                arena.data[pc.z_word + (token * pc.v_heads + value_head) * pc.head_dim + row]
+            );
+            float activated = gate / (1.0 + exp_approx(-gate));
+            arena.data[pc.output_word + (token * pc.v_heads + value_head) * pc.head_dim + row] =
+                floatBitsToUint(normalized * activated);
+        }
+        barrier();
+    }
     for (uint row = lane; row < pc.head_dim; row += 64u) {
-        float normalized = output_values[row] * inverse_rms
-            * uintBitsToFloat(norm_weight.data[row]);
-        float gate = uintBitsToFloat(
-            arena.data[pc.z_word + value_head * pc.head_dim + row]
-        );
-        float activated = gate / (1.0 + exp_approx(-gate));
-        arena.data[pc.output_word + value_head * pc.head_dim + row] =
-            floatBitsToUint(normalized * activated);
+        for (uint column = 0u; column < pc.head_dim; column++) {
+            arena.data[state_head + row * pc.head_dim + column] =
+                floatBitsToUint(state_values[(row / 64u) * pc.head_dim + column]);
+        }
     }
 }

@@ -24,7 +24,7 @@ use crate::core::prefill::{
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
 #[cfg(feature = "vulkan")]
-use crate::vulkan::qwen35::{commit_shadow_state, Qwen35VulkanSession};
+use crate::vulkan::qwen35::{commit_shadow_state_chunk, Qwen35VulkanSession};
 
 /// Per-request inference state for a `Qwen35Model`.
 ///
@@ -145,8 +145,16 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         let kv_cache = KvCache::new_f32(cfg.n_layer_impl(), capacity, cfg.n_embd_gqa());
         let scratch = Qwen35Scratchpad::new(cfg, capacity.min(prefill_batch_size));
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match crate::ops::get_vulkan_context() {
-            Some(context) => match Qwen35VulkanSession::try_new(model, capacity, context) {
+        let (gpu, full_model_gpu_failed) = match (!crate::core::thread_pool::gpu_matmul_disabled())
+            .then(crate::ops::get_vulkan_context)
+            .flatten()
+        {
+            Some(context) => match Qwen35VulkanSession::try_new_rows(
+                model,
+                capacity,
+                capacity.min(prefill_batch_size),
+                context,
+            ) {
                 Ok(gpu) => (gpu, false),
                 Err(error) => {
                     eprintln!(
@@ -260,8 +268,6 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     ) -> Result<Vec<f32>, String> {
         let n_embd = self.model.config.n_embd;
         #[cfg(feature = "vulkan")]
-        let vocab_size = self.model.config.vocab_size;
-        #[cfg(feature = "vulkan")]
         let kv_stride = self.model.config.n_embd_head() * self.model.config.n_head_kv;
         if n_tokens == 0 {
             return Err("Qwen3.5 step requires at least one token".into());
@@ -288,157 +294,158 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         }
         let required = required_token_count(self.processed_tokens, n_tokens, self.capacity)?;
 
+        // The trace schema is token-major and contains every prompt row's logits.
+        #[cfg(feature = "parity-trace")]
+        let trace_each_token = std::env::var_os("RMI_PARITY_TRACE").is_some();
+        #[cfg(not(feature = "parity-trace"))]
+        let trace_each_token = false;
         #[cfg(feature = "vulkan")]
-        let mut gpu_available = self.gpu.is_some();
-        #[cfg(all(test, feature = "vulkan"))]
-        {
-            gpu_available |= self.gpu_failure_for_test.is_some();
+        if trace_each_token {
+            self.gpu = None;
         }
-        #[cfg(feature = "vulkan")]
-        let mut cpu_start = 0;
-        #[cfg(feature = "vulkan")]
-        if gpu_available {
-            let mut logits = vec![0.0; vocab_size];
-            let mut completed = true;
-            for (token_index, (token, position)) in
-                embeddings.chunks_exact(n_embd).zip(positions).enumerate()
-            {
-                let cache_position = self.processed_tokens;
-                #[cfg(test)]
-                let forced_failure = self.gpu_failure_for_test.take();
-                #[cfg(not(test))]
-                let forced_failure: Option<String> = None;
-                let attempt = if let Some(error) = forced_failure {
-                    Err(error)
-                } else {
-                    let gpu = self.gpu.as_mut().expect("checked above");
-                    match gpu.forward_token(token, cache_position, *position) {
-                        Ok(result) => {
-                            let shadow_commit = commit_shadow_state(
-                                &mut self.kv_cache,
-                                &mut self.scratch.conv_states,
-                                &mut self.scratch.ssm_states,
-                                cache_position,
-                                self.capacity,
-                                kv_stride,
-                                result.k_delta,
-                                result.v_delta,
-                                result.conv_state,
-                                result.ssm_state,
-                            );
-                            match shadow_commit {
-                                Ok(()) => {
-                                    logits.copy_from_slice(result.logits);
-                                    gpu.commit_token();
-                                    Ok(())
-                                }
-                                Err(error) => {
-                                    gpu.abort_token();
-                                    Err(error)
-                                }
-                            }
-                        }
-                        Err(error) => Err(error.to_string()),
+        let batch_size = if trace_each_token {
+            1
+        } else {
+            self.prefill_batch_size
+        };
+        let mut logits = Vec::new();
+        for range in prefill_chunks(n_tokens, batch_size) {
+            let rows = range.len();
+            let base = self.processed_tokens;
+            let chunk_embeddings = &embeddings[range.start * n_embd..range.end * n_embd];
+            let chunk_positions = &positions[range.clone()];
+            #[cfg(all(test, feature = "vulkan"))]
+            let forced_failure = self.gpu_failure_for_test.take();
+            #[cfg(all(feature = "vulkan", not(test)))]
+            let forced_failure: Option<String> = None;
+            #[cfg(feature = "vulkan")]
+            let gpu_error = if self.gpu.is_some() || forced_failure.is_some() {
+                let attempt = (|| {
+                    if let Some(error) = forced_failure {
+                        return Err(error);
                     }
-                };
-
+                    let gpu = self.gpu.as_mut().expect("checked above");
+                    let result = if rows == 1 {
+                        gpu.forward_token(chunk_embeddings, base, chunk_positions[0])
+                    } else {
+                        gpu.forward_chunk(chunk_embeddings, base, chunk_positions, rows)
+                    }
+                    .map_err(|error| error.to_string())?;
+                    if result.logits.len() != self.model.config.vocab_size
+                        || result.logits.iter().any(|value| !value.is_finite())
+                    {
+                        return Err("invalid Qwen3.5 Vulkan logits".into());
+                    }
+                    commit_shadow_state_chunk(
+                        &mut self.kv_cache,
+                        &mut self.scratch.conv_states,
+                        &mut self.scratch.ssm_states,
+                        base,
+                        rows,
+                        self.capacity,
+                        kv_stride,
+                        result.k_delta,
+                        result.v_delta,
+                        result.conv_state,
+                        result.ssm_state,
+                    )?;
+                    logits = result.logits.to_vec();
+                    gpu.commit_token();
+                    Ok(())
+                })();
                 match attempt {
                     Ok(()) => {
-                        self.processed_tokens += 1;
-                        self.next_position = position[0].saturating_add(1);
+                        self.processed_tokens += rows;
+                        self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
+                        continue;
                     }
                     Err(error) => {
-                        eprintln!(
-                            "[GPU] Qwen3.5 Vulkan session disabled after error: {error}. Falling back to CPU."
-                        );
+                        if let Some(gpu) = &mut self.gpu {
+                            gpu.abort_token();
+                        }
+                        eprintln!("[GPU] Qwen3.5 Vulkan chunk {base}..{} failed: {error}. Recomputing the whole chunk on CPU.", base + rows);
                         self.gpu = None;
                         self.full_model_gpu_failed = true;
-                        cpu_start = token_index;
-                        completed = false;
-                        break;
+                        Some(error)
                     }
                 }
-            }
-            if completed {
-                return Ok(logits);
-            }
-        }
-        #[cfg(not(feature = "vulkan"))]
-        let cpu_start = 0;
+            } else {
+                None
+            };
 
-        #[cfg(feature = "vulkan")]
-        let _gpu_matmul_scope = self
-            .full_model_gpu_failed
-            .then(ComputePool::disable_gpu_matmul_for_scope);
-        let remaining_tokens = n_tokens - cpu_start;
-        let remaining_embeddings = &embeddings[cpu_start * n_embd..];
-        let remaining_positions = &positions[cpu_start..];
-        if remaining_tokens == 1 {
-            self.scratch.x[..n_embd].copy_from_slice(remaining_embeddings);
-            let logits = self.model.forward_at(
-                1,
-                self.processed_tokens,
-                &mut self.kv_cache,
-                &mut self.scratch,
-                &self.pool,
-                remaining_positions,
-            )?;
-            self.processed_tokens = required;
-            self.next_position = remaining_positions[0][0].saturating_add(1);
-            return Ok(logits);
-        }
-        #[cfg(feature = "parity-trace")]
-        let prefill_batch_size = 1;
-        #[cfg(not(feature = "parity-trace"))]
-        let prefill_batch_size = self.prefill_batch_size;
-        let mut logits = Vec::new();
-        for range in prefill_chunks(remaining_tokens, prefill_batch_size) {
-            let first = range.start * n_embd;
-            let last = range.end * n_embd;
-            self.scratch.x[..last - first].copy_from_slice(&remaining_embeddings[first..last]);
+            #[cfg(feature = "vulkan")]
+            let _gpu_matmul_scope = (self.full_model_gpu_failed || trace_each_token)
+                .then(ComputePool::disable_gpu_matmul_for_scope);
+            self.scratch.x[..rows * n_embd].copy_from_slice(chunk_embeddings);
+            // Preserve the existing CPU decode path; only a failed GPU chunk needs a retry snapshot.
+            let direct_decode = n_tokens == 1;
+            #[cfg(feature = "vulkan")]
+            let direct_decode = direct_decode && gpu_error.is_none();
+            #[cfg(test)]
+            let direct_decode = direct_decode && self.fail_cpu_chunk_after_row.is_none();
+            if direct_decode {
+                logits = self.model.forward_at(
+                    1,
+                    base,
+                    &mut self.kv_cache,
+                    &mut self.scratch,
+                    &self.pool,
+                    chunk_positions,
+                )?;
+                self.processed_tokens += 1;
+                self.next_position = chunk_positions[0][0].saturating_add(1);
+                continue;
+            }
             let mut working_conv = self.scratch.conv_states.clone();
             let mut working_ssm = self.scratch.ssm_states.clone();
-            let result = self.model.forward_chunk(
-                range.len(),
-                self.processed_tokens,
-                &mut self.kv_cache,
-                &mut self.scratch,
-                &mut working_conv,
-                &mut working_ssm,
-                &self.pool,
-                &remaining_positions[range.clone()],
-            );
-            #[cfg(test)]
-            let injected_failure = self
-                .fail_cpu_chunk_after_row
-                .take()
-                .is_some_and(|row| row < range.len());
-            #[cfg(not(test))]
-            let injected_failure = false;
-            if injected_failure {
-                return Err("injected Qwen3.5 CPU chunk failure".into());
-            }
-            logits = result?;
-            if logits.iter().any(|value| !value.is_finite())
-                || !dense_kv_chunk_is_finite(
-                    &self.kv_cache,
-                    &self.model.config,
-                    self.capacity,
-                    self.processed_tokens,
-                    range.len(),
-                )
-                || working_conv
-                    .iter()
-                    .flatten()
-                    .chain(working_ssm.iter().flatten())
-                    .any(|value| !value.is_finite())
-            {
-                return Err("Qwen3.5 prefill produced non-finite state".into());
-            }
+            let result = (|| {
+                #[cfg(test)]
+                super::forward::set_cpu_scan_failure(self.fail_cpu_chunk_after_row.take());
+                let result = self.model.forward_chunk(
+                    rows,
+                    base,
+                    &mut self.kv_cache,
+                    &mut self.scratch,
+                    &mut working_conv,
+                    &mut working_ssm,
+                    &self.pool,
+                    chunk_positions,
+                );
+                #[cfg(test)]
+                super::forward::set_cpu_scan_failure(None);
+                let logits = result?;
+                if logits.iter().any(|value| !value.is_finite())
+                    || !dense_kv_chunk_is_finite(
+                        &self.kv_cache,
+                        &self.model.config,
+                        self.capacity,
+                        base,
+                        rows,
+                    )
+                    || working_conv
+                        .iter()
+                        .flatten()
+                        .chain(working_ssm.iter().flatten())
+                        .any(|value| !value.is_finite())
+                {
+                    return Err("Qwen3.5 prefill produced non-finite state".into());
+                }
+                Ok(logits)
+            })();
+            logits = match result {
+                Ok(logits) => logits,
+                Err(error) => {
+                    #[cfg(feature = "vulkan")]
+                    if let Some(gpu_error) = gpu_error {
+                        return Err(format!("{error}; original Vulkan error: {gpu_error}"));
+                    }
+                    return Err(error);
+                }
+            };
             self.scratch.conv_states = working_conv;
             self.scratch.ssm_states = working_ssm;
-            self.processed_tokens += range.len();
-            self.next_position = remaining_positions[range.end - 1][0].saturating_add(1);
+            self.processed_tokens += rows;
+            self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
         }
         debug_assert_eq!(self.processed_tokens, required);
         Ok(logits)
@@ -452,6 +459,14 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     #[cfg(all(test, feature = "vulkan"))]
     pub(crate) fn fail_gpu_once_for_test(&mut self, reason: &str) {
         self.gpu_failure_for_test = Some(reason.into());
+    }
+
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(crate) fn fail_gpu_after_row_for_test(&mut self, row: usize) {
+        self.gpu
+            .as_mut()
+            .expect("Vulkan session required")
+            .fail_after_row = Some(row);
     }
 
     #[cfg(all(test, feature = "vulkan"))]

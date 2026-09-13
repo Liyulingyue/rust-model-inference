@@ -701,9 +701,233 @@ fn tiny_mixed_session_model() -> Qwen35Model<'static> {
     let mut model = tiny_dense_session_model();
     let mut recurrent = tiny_recurrent_session_model();
     model.config.n_layer = 2;
+    model.config.ssm_d_conv = 2;
+    model.config.rope_dimension_sections = [1, 1, 0, 0];
     model.config.is_recurrent = vec![false, true];
     model.layers.push(recurrent.layers.remove(0));
     model
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+fn run_qwen35_cpu_fixture(prompt_len: usize, batch_size: usize) -> Vec<u32> {
+    let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+    run_qwen35_chunk_fixture(prompt_len, batch_size, None)
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+fn run_qwen35_gpu_failure_fixture(
+    prompt_len: usize,
+    batch_size: usize,
+    fail_after_row: usize,
+) -> Vec<u32> {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    run_qwen35_chunk_fixture(prompt_len, batch_size, Some(fail_after_row))
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+fn run_qwen35_chunk_fixture(
+    prompt_len: usize,
+    batch_size: usize,
+    fail_after_row: Option<usize>,
+) -> Vec<u32> {
+    let mut session = mixed_fixture_session(prompt_len + 3, batch_size);
+    if let Some(row) = fail_after_row {
+        assert!(session.gpu_enabled_for_test());
+        session.fail_gpu_after_row_for_test(row);
+    }
+    let tokens = (0..prompt_len).map(|i| (i % 8) as u32).collect::<Vec<_>>();
+    let positions = (0..prompt_len)
+        .map(|i| [i, i + 1, i + 2, i + 3])
+        .collect::<Vec<_>>();
+    let logits = session.step_with_tokens(&tokens, &positions).unwrap();
+    let mut result = vec![session.processed_tokens() as u32];
+    result.extend(logits.iter().map(|v| v.to_bits()));
+    let KvCache::F32(cache) = session.kv_cache() else {
+        unreachable!()
+    };
+    result.extend(
+        cache
+            .k
+            .iter()
+            .chain(&cache.v)
+            .chain(session.scratch().conv_states.iter().flatten())
+            .chain(session.scratch().ssm_states.iter().flatten())
+            .map(|v| v.to_bits()),
+    );
+    result.extend(greedy_decode_three(&mut session, logits));
+    result
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_gpu_chunk_failure_restarts_from_chunk_base() {
+    let expected = run_qwen35_cpu_fixture(5, 5);
+    let actual = run_qwen35_gpu_failure_fixture(5, 5, 2);
+    assert_eq!(actual, expected);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_cpu_scope_skips_full_session_gpu() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+    let session = mixed_fixture_session(8, 5);
+    assert!(
+        !session.gpu_enabled_for_test(),
+        "CPU scope must exclude the full Vulkan executor too"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_gpu_chunk_failure_preserves_a_committed_gpu_prefix() {
+    crate::ops::enable_gpu();
+    let tokens = [0, 1, 2, 3, 4, 5, 6, 7];
+    let positions = (0..8).map(|i| [i, i + 1, i + 2, i + 3]).collect::<Vec<_>>();
+    let mut actual = mixed_fixture_session(11, 3);
+    let mut expected = mixed_fixture_session(11, 3);
+    for session in [&mut actual, &mut expected] {
+        session
+            .step_with_tokens(&tokens[..3], &positions[..3])
+            .unwrap();
+    }
+    let prefix = snapshot_qwen35_recurrent_state(&actual);
+    assert_eq!(prefix, snapshot_qwen35_recurrent_state(&expected));
+    actual.fail_gpu_after_row_for_test(2);
+    expected.fail_gpu_once_for_test("retry from the same committed GPU prefix");
+    let a = actual
+        .step_with_tokens(&tokens[3..], &positions[3..])
+        .unwrap();
+    let b = expected
+        .step_with_tokens(&tokens[3..], &positions[3..])
+        .unwrap();
+    assert_eq!(
+        a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        snapshot_qwen35_recurrent_state(&actual),
+        snapshot_qwen35_recurrent_state(&expected)
+    );
+    assert_eq!(
+        greedy_decode_three(&mut actual, a),
+        greedy_decode_three(&mut expected, b)
+    );
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_vulkan_chunks_match_token_bits_and_submission_count() {
+    crate::ops::enable_gpu();
+    let context = crate::ops::get_vulkan_context().unwrap();
+    let baseline = run_qwen35_chunk_fixture(5, 1, None);
+    for batch in [2, 3, 5] {
+        let before = context.submission_count();
+        let actual = run_qwen35_chunk_fixture(5, batch, None);
+        assert_eq!(actual, baseline, "batch={batch}");
+        assert_eq!(
+            context.submission_count() - before,
+            5usize.div_ceil(batch) as u64 + 3
+        );
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_vulkan_dense_chunks_preserve_four_mrope_axes() {
+    crate::ops::enable_gpu();
+    let run = |batch, positions: &[[usize; 4]]| {
+        let embedding = f32_test_weight((0..64).map(|i| i as f32 / 10.0).collect(), 8, 8);
+        let mut model = tiny_dense_session_model_with_embedding(embedding, 8, 8);
+        model.config.rope_dimension_sections = [1; 4];
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, 6, batch, session_pool())
+                .unwrap();
+        assert!(session.gpu_enabled_for_test());
+        let logits = session.step_with_tokens(&[1, 2, 3], positions).unwrap();
+        let KvCache::F32(cache) = session.kv_cache() else {
+            unreachable!()
+        };
+        logits
+            .iter()
+            .chain(&cache.k)
+            .chain(&cache.v)
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let positions = [[2, 3, 5, 7], [11, 13, 17, 19], [23, 29, 31, 37]];
+    let baseline = run(1, &positions);
+    assert_eq!(run(3, &positions), baseline);
+    for axis in 0..4 {
+        let mut changed = positions;
+        changed[1][axis] += 1;
+        assert_ne!(run(3, &changed), baseline, "mRoPE axis {axis} was ignored");
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn qwen35_gpu_and_cpu_chunk_failure_preserves_committed_state_and_both_errors() {
+    let _cpu = ComputePool::disable_gpu_matmul_for_scope();
+    let mut session = mixed_fixture_session(8, 5);
+    session.step_with_tokens(&[1], &[[0; 4]]).unwrap();
+    let before = snapshot_qwen35_recurrent_state(&session);
+    session.fail_gpu_once_for_test("Vulkan chunk error");
+    session.fail_cpu_chunk_after_row_for_test(2);
+    let error = session
+        .step_with_tokens(&[2, 3, 4, 5, 6], &[[1; 4], [2; 4], [3; 4], [4; 4], [5; 4]])
+        .unwrap_err();
+    assert!(
+        error.contains("CPU chunk failure")
+            && error.contains("original Vulkan error: Vulkan chunk error"),
+        "{error}"
+    );
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
+}
+
+#[test]
+fn qwen35_cpu_failure_stops_inside_recurrent_scan() {
+    let mut model = tiny_mixed_session_model();
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 5);
+    let embeddings = model.embed_tokens(&[0, 1, 2, 3, 4]).unwrap();
+    let positions = [[0; 4], [1; 4], [2; 4], [3; 4], [4; 4]];
+    let mut run = |rows, failure| {
+        let mut cache = KvCache::new_f32(2, 8, 4);
+        scratch.x[..embeddings.len()].copy_from_slice(&embeddings);
+        let mut conv = scratch.conv_states.clone();
+        let mut ssm = scratch.ssm_states.clone();
+        super::forward::set_cpu_scan_failure(failure);
+        let result = model.forward_chunk(
+            rows,
+            0,
+            &mut cache,
+            &mut scratch,
+            &mut conv,
+            &mut ssm,
+            &session_pool(),
+            &positions[..rows],
+        );
+        super::forward::set_cpu_scan_failure(None);
+        (
+            result,
+            ssm.into_iter()
+                .flatten()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let expected = run(3, None);
+    assert!(expected.0.is_ok());
+    let actual = run(5, Some(2));
+    assert!(actual.0.unwrap_err().contains("row 2"));
+    assert_eq!(actual.1, expected.1);
 }
 
 fn recurrent_fixture_session(
