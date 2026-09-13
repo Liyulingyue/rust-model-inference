@@ -318,3 +318,48 @@ F32 AVX2 把 F32 与 BF16 拉到同一量级；F16 AVX2 提升有限，因为 F1
 - `src/ops/kernel/{bf16,f16,f32}/scalar.rs` — 参考实现
 - `src/ops/kernel/{f16,f32}/neon.rs` — aarch64 NEON kernels
 - `src/ops/dot.rs:243` — `dot_f16_f16_bytes_avx2`（F16×F16 dot，遗留路径）
+
+## TODO-006: Q8_0 Breeze output drifts ~1 ULP under SIMD activation/matmul
+
+### 现状
+
+Breeze Q8_0 inference output md5 changes after enabling the SIMD
+slice paths added in TODO-005 (matmul macro, gelu/silu inplace, bf16
+round inplace).  BF16 / F16 / F32 outputs are bit-exact; Q8_0 drifts
+because Q8_0 routes through the dequant kernel which accumulates in a
+different order than scalar (1-ULP matmul reduction-order divergence
+multiplied by the 2-3× narrower weight precision, then propagated
+through the sampler).
+
+| Run | md5 | frames |
+|---|---|---|
+| `models/Breeze-TTS-2-gguf/q8.wav` (pre-macro) | `adf73de9...` | 26 |
+| `q8_macro.wav` (matmul macro only) | `3b6dd5b7...` | 26 |
+| `q8_fresh.wav` (matmul + activation SIMD) | `b051f3c1...` | 29 |
+
+Frame count drift (26 → 29) and 1-ULP bit difference are both
+within the ggml parity tolerance contract — Q8_0 was never
+"byte-exact" because the Q8_0 quantisation itself is lossy — but the
+old benchmark used `q8.wav` (pre-macro) as the de-facto reference.
+
+### 影响
+
+- 部署行为正常（听感没区别），只是 md5 变了
+- `tools/converter/README.md` 精度对照表里 Q8_0 的"可用"注释保留
+- 后续每次 SIMD 改动都会再次漂移 Q8_0 输出，需要重新回归基线
+
+### 选项
+
+1. **接受漂移**（当前）：BF16/F16/F32 bit-exact 是真正的硬约束；Q8_0 没有可参照的"标准答案"。
+2. **冻结 Q8_0 SIMD 路径**：Q8_0 走 scalar matmul 退回，保持与 pre-macro md5 一致。代价是 Q8_0 失去 3.6× 加速。
+3. **接受漂移 + 重写 README 对照表**：把 Q8_0 当前 md5 当作"v3 baseline"，后续每次 SIMD 改动后更新基线。
+
+### 推荐
+
+方案 1 或 3。Q8_0 的"byte-exact"从来没有真正的 ground truth，**继续优化 SIMD 收益 > 维持一个过期 md5 字符串**。
+
+### 关联文件
+
+- `tools/converter/README.md` — breeze 量化对照表（含 Q8_0 "可用"注释）
+- `models/Breeze-TTS-2-gguf/q8.wav` — 旧基线（pre-macro）
+- `models/Breeze-TTS-2-gguf/breeze-tts-2-Q8_0.gguf` — Q8_0 模型本身（GGU 字节不变）
