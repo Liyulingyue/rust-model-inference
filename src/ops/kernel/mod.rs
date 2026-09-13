@@ -32,6 +32,7 @@ pub mod q4_k;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
+pub mod simd_avx2;
 
 mod qtensor_owned;
 mod quantized_tensor;

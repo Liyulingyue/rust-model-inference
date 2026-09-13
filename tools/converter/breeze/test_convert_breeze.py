@@ -7,6 +7,8 @@ import struct
 import tempfile
 import unittest
 
+import numpy as np
+
 try:
     import convert_breeze
 except ModuleNotFoundError:
@@ -51,7 +53,13 @@ def read_gguf(path):
             for dim in dims:
                 elements *= dim
             source.seek(data_start + offset)
-            tensors[name] = (dims, kind, source.read(elements * {0: 4, 30: 2}[kind]))
+            if kind == 2:  # Q4_0: 18 bytes per 32-element block
+                bytes_len = (elements // 32) * 18
+            elif kind == 8:  # Q8_0: 34 bytes per 32-element block
+                bytes_len = (elements // 32) * 34
+            else:
+                bytes_len = elements * {0: 4, 1: 2, 30: 2}[kind]
+            tensors[name] = (dims, kind, source.read(bytes_len))
     return metadata, tensors
 
 
@@ -115,6 +123,116 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(metadata["general.architecture"], "breeze_audio")
         self.assertEqual(metadata["breeze_audio.config"], self.audio_config)
         self.assertEqual(tensors, {"decoder.conv.weight": ((1, 2, 1), 0, bytes.fromhex("0000803f0100c07f"))})
+
+    def test_q8_0_quantises_learned_2d_weights_and_keeps_codec_model_f32(self):
+        main, codec = convert_breeze.convert(self.model, self.out, main_quant="q8_0")
+        self.assertEqual((main.name, codec.name), ("breeze-tts-2-Q8_0.gguf", "breeze-tts-2-mmproj-F32.gguf"))
+        metadata, tensors = read_gguf(main)
+        self.assertEqual(metadata["general.architecture"], "breeze")
+        # backbone_model.layers.0.weight is shape (2,3) BF16 learned -> Q8_0
+        # gguf_dims reverses: (3, 2) and Q8_0 (kind=8) block size 32 -> nbytes 0
+        # since 6 elements not a multiple of 32, the converter should reject.
+        # Actually 6 < 32 so Q8_0 cannot apply; the tensor falls back to BF16.
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][0], (3, 2))
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 30)
+        # codec_model.* stays F32 even under main_quant=q8_0
+        self.assertEqual(tensors["codec_model.legacy.initialized"], ((1,), 0, bytes.fromhex("0000803f")))
+        # text_encoder.weight shape (1,) is not 2D learned, stays BF16
+        self.assertEqual(tensors["text_encoder.weight"], ((1,), 30, bytes.fromhex("003f")))
+
+    def _bf16_packed(self, f32_weight):
+        """Take the top 16 bits of each F32 word to form a BF16 byte stream."""
+        f32_bits = f32_weight.view(np.uint32)
+        bf16_bits = (f32_bits >> np.uint32(16)).astype("<u2")
+        return bf16_bits.tobytes()
+
+    def test_q8_0_actually_quantises_wide_2d_weight(self):
+        # Replace the shard with a learned 2D weight whose row width is a
+        # multiple of 32 so it goes through the Q8_0 path.
+        weight = np.arange(128, dtype=np.float32).reshape(2, 64) - 64
+        bf16_packed = self._bf16_packed(weight)
+        safetensors(self.model / "first.safetensors", [
+            ("backbone_model.layers.0.weight", "BF16", [2, 64], bf16_packed),
+            ("codec_model.legacy.initialized", "F32", [1], bytes.fromhex("0000803f")),
+        ])
+        self.index["metadata"]["total_size"] = len(bf16_packed) + 4 + 2
+        self.index["weight_map"] = {
+            "backbone_model.layers.0.weight": "first.safetensors",
+            "codec_model.legacy.initialized": "first.safetensors",
+            "text_encoder.weight": "second.safetensors",
+        }
+        self.write_index()
+        main, _ = convert_breeze.convert(self.model, self.out, main_quant="q8_0")
+        metadata, tensors = read_gguf(main)
+        # 128-element (2,64) -> gguf dims (64, 2), Q8_0 kind=8, 128/32=4 blocks, 4*34=136 bytes
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][0], (64, 2))
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 8)
+        self.assertEqual(len(tensors["backbone_model.layers.0.weight"][2]), 136)
+
+    def test_q4_0_quantises_wide_2d_weight(self):
+        weight = np.arange(128, dtype=np.float32).reshape(2, 64) - 64
+        bf16_packed = self._bf16_packed(weight)
+        safetensors(self.model / "first.safetensors", [
+            ("backbone_model.layers.0.weight", "BF16", [2, 64], bf16_packed),
+            ("codec_model.legacy.initialized", "F32", [1], bytes.fromhex("0000803f")),
+        ])
+        self.index["metadata"]["total_size"] = len(bf16_packed) + 4 + 2
+        self.index["weight_map"] = {
+            "backbone_model.layers.0.weight": "first.safetensors",
+            "codec_model.legacy.initialized": "first.safetensors",
+            "text_encoder.weight": "second.safetensors",
+        }
+        self.write_index()
+        main, codec = convert_breeze.convert(self.model, self.out, main_quant="q4_0")
+        self.assertEqual((main.name, codec.name), ("breeze-tts-2-Q4_0.gguf", "breeze-tts-2-mmproj-F32.gguf"))
+        metadata, tensors = read_gguf(main)
+        # Q4_0 kind=2, 128/32=4 blocks * 18 = 72 bytes
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][0], (64, 2))
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 2)
+        self.assertEqual(len(tensors["backbone_model.layers.0.weight"][2]), 72)
+        # codec_model.* still F32
+        self.assertEqual(tensors["codec_model.legacy.initialized"], ((1,), 0, bytes.fromhex("0000803f")))
+
+    def test_codec_q8_0_quantises_learned_2d_weights(self):
+        # audio codec F32 source, learned 2D weight goes to Q8_0
+        weight = np.arange(64, dtype=np.float32).reshape(2, 32)
+        safetensors(self.model / "audio_tokenizer" / "model.safetensors", [
+            ("decoder.conv.weight", "F32", [2, 32], weight.tobytes()),
+        ])
+        _, codec = convert_breeze.convert(self.model, self.out, codec_quant="q8_0")
+        self.assertEqual(codec.name, "breeze-tts-2-mmproj-Q8_0.gguf")
+        metadata, tensors = read_gguf(codec)
+        # learned 2D weight row_width=32 -> Q8_0, kind=8, 64/32=2 blocks, 68 bytes
+        self.assertEqual(tensors["decoder.conv.weight"][0], (32, 2))
+        self.assertEqual(tensors["decoder.conv.weight"][1], 8)
+        self.assertEqual(len(tensors["decoder.conv.weight"][2]), 68)
+
+    def test_f16_target_re_encodes_bf16_sources(self):
+        main, _ = convert_breeze.convert(self.model, self.out, main_quant="f16")
+        self.assertEqual(main.name, "breeze-tts-2-F16.gguf")
+        metadata, tensors = read_gguf(main)
+        # BF16 source -> F16 (kind=1) for non-codec tensors
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 1)
+        # 6 BF16 elements -> 6 F16 elements = 12 bytes
+        self.assertEqual(len(tensors["backbone_model.layers.0.weight"][2]), 12)
+        # codec_model stays F32
+        self.assertEqual(tensors["codec_model.legacy.initialized"][1], 0)
+        # text_encoder stays F16
+        self.assertEqual(tensors["text_encoder.weight"][1], 1)
+
+    def test_f32_target_re_encodes_bf16_sources(self):
+        main, _ = convert_breeze.convert(self.model, self.out, main_quant="f32")
+        self.assertEqual(main.name, "breeze-tts-2-F32.gguf")
+        metadata, tensors = read_gguf(main)
+        self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 0)
+        # 6 BF16 elements -> 6 F32 elements = 24 bytes
+        self.assertEqual(len(tensors["backbone_model.layers.0.weight"][2]), 24)
+
+    def test_rejects_unknown_quant(self):
+        with self.assertRaisesRegex(ValueError, "unsupported --quant"):
+            convert_breeze.convert(self.model, self.out, main_quant="bogus")
+        with self.assertRaisesRegex(ValueError, "unsupported --codec-quant"):
+            convert_breeze.convert(self.model, self.out, codec_quant="bogus")
 
     def test_rejects_missing_or_wrong_shard_membership_and_total_size(self):
         self.index["weight_map"]["text_encoder.weight"] = "first.safetensors"

@@ -1,7 +1,7 @@
 //! Bit-exact parity tests for the RoPE variants.
 
 use super::{
-    neox::{rope_neox_inplace_scalar, rope_sin_cos},
+    neox::{rope_neox_inplace_scalar, rope_neox_inplace_with_table, rope_sin_cos},
     rope_mrope, rope_neox_inplace, rope_neox_sleef, rope_norm, rope_sin_cos_sleef,
     rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
@@ -180,4 +180,60 @@ fn rope_norm_cached_table_matches_per_head_recurrence() {
 fn _exercise_rope_mrope() {
     let mut values = [0.0f32; 64];
     rope_mrope(&mut values, [1, 2, 1, 2], [16, 16, 16, 16], 64, 1.0);
+}
+
+/// Reference implementation of Breeze's rope: per-element bf-round
+/// after every mul/add.  Used as the bit-exact ground truth for the
+/// `rope_neox_inplace_with_table` SIMD path.
+fn breeze_rope_scalar(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
+    let half = head_dim / 2;
+    let n_heads = x.len() / head_dim;
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        for i in 0..half {
+            let x0 = x[base + i];
+            let x1 = x[base + i + half];
+            let bf = |v: f32| -> f32 {
+                let bits = v.to_bits();
+                let rounding = 0x7fff_u32 + ((bits >> 16) & 1);
+                let rounded = bits.wrapping_add(rounding) >> 16;
+                f32::from_bits(rounded << 16)
+            };
+            x[base + i] = bf(bf(x0 * cos[i]) + bf(-x1 * sin[i]));
+            x[base + i + half] = bf(bf(x1 * cos[i]) + bf(x0 * sin[i]));
+        }
+    }
+}
+
+#[test]
+fn rope_neox_inplace_with_table_matches_breeze_bf_round_reference() {
+    // Try a spread of head dims and head counts.  Breeze uses
+    // head_dim=64/128/256 depending on the transformer kind; we
+    // include half-divisible widths and a few wider cases for coverage.
+    for &(head_dim, n_heads, pos) in &[
+        (64usize, 4usize, 0usize),
+        (64, 4, 7),
+        (128, 4, 0),
+        (128, 8, 13),
+        (256, 4, 100),
+        (40, 3, 5),
+        (256, 1, 17),
+    ] {
+        let half = head_dim / 2;
+        let cos: Vec<f32> = (0..half).map(|i| ((i as f32) * 0.123).cos()).collect();
+        let sin: Vec<f32> = (0..half).map(|i| ((i as f32) * 0.123).sin()).collect();
+        let mut expected: Vec<f32> = (0..head_dim * n_heads)
+            .map(|i| (i as f32 * 0.07).sin() * 4.0 - 2.0)
+            .collect();
+        let mut simd = expected.clone();
+        breeze_rope_scalar(&mut expected, head_dim, &cos, &sin);
+        rope_neox_inplace_with_table(&mut simd, head_dim, &cos, &sin);
+        for (i, (a, b)) in expected.iter().zip(simd.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "head_dim={head_dim} n_heads={n_heads} pos={pos} idx={i}: expected={a} simd={b}"
+            );
+        }
+    }
 }
