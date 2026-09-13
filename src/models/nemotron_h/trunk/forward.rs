@@ -614,6 +614,17 @@ impl NemotronModel {
                 for h in 0..n_head {
                     dA_per_head[h] = (dt_per_head[h] * ssm_a_log[h]).exp();
                 }
+                // DEBUG: dump A_log[:8] for layer 6 to verify what's loaded
+                if layer_idx == 6 && t == length.saturating_sub(1) {
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} A_log[:8]={:?}",
+                        &ssm_a_log[..8]
+                    );
+                    eprintln!(
+                        "[OURS-M2] layer {layer_idx} dt*A_log[:8]={:?}",
+                        &(0..8).map(|h| dt_per_head[h] * ssm_a_log[h]).collect::<Vec<_>>()
+                    );
+                }
                 // DEBUG: dump y_buf for layer 6 last token multiple heads
                 if layer_idx == 6 && t == length.saturating_sub(1) {
                     // Print y_buf for first channel of each of heads 0, 1, 2, 3.
