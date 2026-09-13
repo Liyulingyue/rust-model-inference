@@ -134,7 +134,7 @@ fn matmul_group_rows<const N: usize>(
 }
 
 impl Qwen3Session<'_> {
-    pub(super) fn prefill_cpu(
+    pub(super) fn prefill(
         &mut self,
         input: &Qwen3Input<'_>,
         batch_size: usize,
@@ -194,11 +194,75 @@ impl Qwen3Session<'_> {
         for range in prefill_chunks(input.token_ids.len(), chunk_size) {
             let base = self.kv_state.seq_len;
             let project_logits = trace_each_token || range.end == input.token_ids.len();
+            #[cfg(feature = "vulkan")]
+            let gpu_error = if let Some(gpu) = &mut self.gpu {
+                let rows = range.len();
+                let width = self.model.config.n_embd;
+                for row in 0..rows {
+                    let token = range.start + row;
+                    let output = &mut self.prefill_scratch.x[row * width..(row + 1) * width];
+                    if let Some(embeddings) = input.embeddings {
+                        output.copy_from_slice(&embeddings[token * width..(token + 1) * width]);
+                    } else {
+                        self.model
+                            .token_embedding
+                            .embedding_lookup(input.token_ids[token], output);
+                    }
+                }
+                let result = (|| -> Result<(), String> {
+                    if trace_each_token
+                        || range
+                            .clone()
+                            .enumerate()
+                            .any(|(row, token)| input.positions[token][0] != base + row)
+                    {
+                        return Err("Qwen3 Vulkan prefill requires sequential positions and no active parity trace".into());
+                    }
+                    gpu.reserve_rows(self.model, max_rows)
+                        .map_err(|error| error.to_string())?;
+                    let result = gpu
+                        .forward_chunk(
+                            &self.prefill_scratch.x[..rows * width],
+                            base,
+                            rows,
+                            project_logits,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    crate::vulkan::qwen3::commit_shadow_kv_chunk(
+                        &mut self.kv_state,
+                        base,
+                        rows,
+                        result.k_delta,
+                        result.v_delta,
+                    )?;
+                    if project_logits {
+                        self.scratch.logits.copy_from_slice(result.logits);
+                    }
+                    gpu.commit_token();
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => continue,
+                    Err(error) => {
+                        gpu.abort_token();
+                        eprintln!("[GPU] Qwen3 Vulkan chunk {}..{} failed: {error}. Recomputing the whole chunk on CPU.", range.start, range.end);
+                        self.gpu = None;
+                        self.full_model_gpu_failed = true;
+                        Some(error)
+                    }
+                }
+            } else {
+                None
+            };
             if let Err(error) = self
                 .forward_cpu_chunk(input, range.clone(), project_logits)
                 .and_then(|()| self.validate_cpu_chunk(base, range.len(), project_logits))
             {
                 self.kv_state.seq_len = base;
+                #[cfg(feature = "vulkan")]
+                if let Some(gpu_error) = gpu_error {
+                    return Err(format!("{error}; original Vulkan error: {gpu_error}"));
+                }
                 return Err(error);
             }
             self.kv_state.seq_len = base + range.len();

@@ -209,7 +209,7 @@ fn f32_weight(n_in: usize, n_out: usize, seed: usize) -> Weight<'static> {
     weight
 }
 
-fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
+pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
     const WIDTH: usize = 32;
     const VOCAB: usize = 8;
     Qwen3Model {
@@ -303,7 +303,7 @@ fn prefill_qwen3_tokens(
         .map(|position| [position, 0, 0, 0])
         .collect::<Vec<_>>();
     session
-        .prefill_cpu(
+        .prefill(
             &Qwen3Input {
                 token_ids,
                 positions: &positions,

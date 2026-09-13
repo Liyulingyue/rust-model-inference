@@ -287,11 +287,7 @@ impl<'model> Qwen3Session<'model> {
         #[cfg(not(feature = "parity-trace"))]
         let _ = asr_trace;
 
-        #[cfg(feature = "vulkan")]
-        if self.gpu.take().is_some() {
-            self.full_model_gpu_failed = true;
-        }
-        let prompt_duration = self.prefill_cpu(&input, options.prefill_batch_size)?;
+        let prompt_duration = self.prefill(&input, options.prefill_batch_size)?;
         #[cfg(feature = "parity-trace")]
         if asr_trace {
             parity_trace::report(parity_trace::checkpoint(
@@ -427,5 +423,391 @@ impl<'model> Qwen3Session<'model> {
             prompt_duration,
             decode_duration,
         })
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_tests {
+    use super::*;
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    use crate::ops::kernel::{QuantizedTensor, Weight};
+    use crate::vulkan::VulkanContext;
+    use std::collections::HashMap;
+
+    struct FixtureSource(HashMap<String, (TensorInfo, &'static [u8])>);
+
+    impl TensorSource for FixtureSource {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.0.get(name).map(|value| &value.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.0.get(name).map(|value| value.1)
+        }
+    }
+
+    fn fixture_model() -> Qwen3Model {
+        let mut model = super::super::tests::deterministic_session_model(160);
+        let mut tensors = HashMap::new();
+        let layer = &mut model.layers[0];
+        for (name, weight, seed) in [
+            ("blk.0.attn_q.weight", &mut layer.wq, 1),
+            ("blk.0.attn_k.weight", &mut layer.wk, 2),
+            ("blk.0.attn_v.weight", &mut layer.wv, 3),
+            ("blk.0.attn_output.weight", &mut layer.wo, 4),
+            ("blk.0.ffn_gate.weight", &mut layer.w_gate, 5),
+            ("blk.0.ffn_up.weight", &mut layer.w_up, 6),
+            ("blk.0.ffn_down.weight", &mut layer.w_down, 7),
+            ("token_embd.weight", &mut model.token_embedding, 8),
+            ("output.weight", &mut model.output, 9),
+        ] {
+            let (n_in, n_out) = (weight.n_in, weight.n_out);
+            let bytes = (0..n_out)
+                .flat_map(|row| {
+                    (0..n_in).flat_map(move |column| {
+                        let value = ((row * 7 + column * 13 + seed) % 23) as f32 / 64.0 - 0.171875;
+                        crate::ops::f32_to_f16(value).to_le_bytes()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            *weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes,
+                GGMLType::F16,
+                n_in,
+                n_out,
+            ));
+            weight.n_in = n_in;
+            weight.n_out = n_out;
+            tensors.insert(
+                name.into(),
+                (
+                    TensorInfo {
+                        name: name.into(),
+                        dims: vec![n_in as u64, n_out as u64],
+                        ggml_type: GGMLType::F16,
+                        offset: 0,
+                    },
+                    bytes,
+                ),
+            );
+        }
+        model.source = Arc::new(FixtureSource(tensors));
+        model
+    }
+
+    fn snapshot(state: &KvState) -> (usize, Vec<u32>) {
+        let mut words = Vec::new();
+        let stride = state.arch.n_head_kv * state.arch.n_embd_head_k;
+        for layer in 0..state.arch.n_layer {
+            let start = layer * state.capacity * stride;
+            let end = start + state.seq_len * stride;
+            match &state.cache {
+                KvCache::F16(cache) => words.extend(
+                    cache.k[start..end]
+                        .iter()
+                        .chain(&cache.v[start..end])
+                        .map(|&word| word as u32),
+                ),
+                KvCache::F32(cache) => words.extend(
+                    cache.k[start..end]
+                        .iter()
+                        .chain(&cache.v[start..end])
+                        .map(|word| word.to_bits()),
+                ),
+            }
+        }
+        (state.seq_len, words)
+    }
+
+    fn run_failure_fixture(
+        prompt_len: usize,
+        failure: Option<usize>,
+    ) -> (Vec<u32>, (usize, Vec<u32>), Vec<u32>) {
+        let model = fixture_model();
+        let mut session = Qwen3Session::new(&model, prompt_len + 3).unwrap();
+        session.gpu = None;
+        session.full_model_gpu_failed = true;
+        let mut failure_context = None;
+        if let Some(row) = failure {
+            let context: &'static VulkanContext =
+                Box::leak(Box::new(VulkanContext::new().unwrap()));
+            let mut gpu = Qwen3VulkanSession::try_new(&model, session.capacity, context)
+                .unwrap()
+                .unwrap();
+            gpu.fail_after_row = Some(row);
+            session.gpu = Some(gpu);
+            session.full_model_gpu_failed = false;
+            failure_context = Some(context);
+        }
+        let token_ids: Vec<_> = (0..prompt_len).map(|row| (row % 7) as u32).collect();
+        let positions: Vec<_> = (0..prompt_len).map(|row| [row, 0, 0, 0]).collect();
+        let generation = session
+            .generate(
+                Qwen3Input {
+                    token_ids: &token_ids,
+                    positions: &positions,
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                Qwen3GenerateOptions {
+                    max_new_tokens: 3,
+                    temperature: 0.0,
+                    prefill_batch_size: 4,
+                },
+            )
+            .unwrap();
+        assert!(session.gpu.is_none());
+        if let Some(context) = failure_context {
+            assert_eq!(
+                context.submission_count(),
+                1,
+                "failure must occur after GPU row work"
+            );
+        }
+        (
+            session.last_logits().iter().map(|v| v.to_bits()).collect(),
+            snapshot(session.kv_state()),
+            generation.token_ids,
+        )
+    }
+
+    fn run_qwen3_forced_gpu_failure(
+        prompt_len: usize,
+        fail_after_row: usize,
+    ) -> (Vec<u32>, (usize, Vec<u32>), Vec<u32>) {
+        run_failure_fixture(prompt_len, Some(fail_after_row))
+    }
+
+    fn run_qwen3_cpu_only(prompt_len: usize) -> (Vec<u32>, (usize, Vec<u32>), Vec<u32>) {
+        run_failure_fixture(prompt_len, None)
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn qwen3_gpu_chunk_failure_recomputes_the_whole_chunk_on_cpu() {
+        assert_eq!(run_qwen3_forced_gpu_failure(4, 1), run_qwen3_cpu_only(4));
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn qwen3_gpu_chunk_failure_preserves_earlier_commit_and_cpu_error_context() {
+        let model = fixture_model();
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let mut actual = Qwen3Session::new(&model, 9).unwrap();
+        actual.gpu = Qwen3VulkanSession::try_new(&model, 9, context).unwrap();
+        let prefix = Qwen3Input {
+            token_ids: &[0, 1],
+            positions: &[[0, 0, 0, 0], [1, 0, 0, 0]],
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        actual.prefill(&prefix, 4).unwrap();
+        assert_eq!(context.submission_count(), 1);
+        let committed = snapshot(actual.kv_state());
+        let mut expected = Qwen3Session::new(&model, 9).unwrap();
+        expected.gpu = None;
+        expected.full_model_gpu_failed = true;
+        let (KvCache::F16(target), KvCache::F16(source)) =
+            (&mut expected.kv_state.cache, &actual.kv_state.cache)
+        else {
+            panic!("F16 fixture")
+        };
+        target.k.copy_from_slice(&source.k);
+        target.v.copy_from_slice(&source.v);
+        expected.kv_state.seq_len = actual.kv_state.seq_len;
+        actual.gpu.as_mut().unwrap().fail_after_row = Some(1);
+        actual.fail_cpu_prefill_after_layer = Some(0);
+        let input = Qwen3Input {
+            token_ids: &[2, 3, 4, 5],
+            positions: &[[2, 0, 0, 0], [3, 0, 0, 0], [4, 0, 0, 0], [5, 0, 0, 0]],
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let error = actual.prefill(&input, 4).unwrap_err();
+        assert!(
+            error.contains("CPU prefill failure after layer 0"),
+            "{error}"
+        );
+        assert!(error.contains("GPU failure after row 1"), "{error}");
+        assert_eq!(snapshot(actual.kv_state()), committed);
+        assert_eq!(context.submission_count(), 2);
+        assert!(actual.gpu.is_none());
+        let options = Qwen3GenerateOptions {
+            max_new_tokens: 3,
+            temperature: 0.0,
+            prefill_batch_size: 4,
+        };
+        let actual_tokens = actual.generate(input, options).unwrap().token_ids;
+        let expected_tokens = expected
+            .generate(
+                Qwen3Input {
+                    token_ids: &[2, 3, 4, 5],
+                    positions: &[[2, 0, 0, 0], [3, 0, 0, 0], [4, 0, 0, 0], [5, 0, 0, 0]],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                Qwen3GenerateOptions {
+                    max_new_tokens: 3,
+                    temperature: 0.0,
+                    prefill_batch_size: 4,
+                },
+            )
+            .unwrap()
+            .token_ids;
+        assert_eq!(actual_tokens, expected_tokens);
+        assert_eq!(snapshot(actual.kv_state()), snapshot(expected.kv_state()));
+        assert_eq!(
+            actual
+                .last_logits()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .last_logits()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn qwen3_gpu_second_chunk_failure_retries_original_nonzero_range() {
+        let model = fixture_model();
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let tokens = [0, 1, 2, 3, 4, 5, 6, 0];
+        let positions: Vec<_> = (0..8).map(|row| [row, 0, 0, 0]).collect();
+        let mut expected = Qwen3Session::new(&model, 11).unwrap();
+        expected.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        expected
+            .prefill(
+                &Qwen3Input {
+                    token_ids: &tokens[..4],
+                    positions: &positions[..4],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                4,
+            )
+            .unwrap();
+        assert_eq!(context.submission_count(), 1);
+        expected.gpu = None;
+        expected.full_model_gpu_failed = true;
+        let options = Qwen3GenerateOptions {
+            max_new_tokens: 3,
+            temperature: 0.0,
+            prefill_batch_size: 4,
+        };
+        let expected_tokens = expected
+            .generate(
+                Qwen3Input {
+                    token_ids: &tokens[4..],
+                    positions: &positions[4..],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                options.clone(),
+            )
+            .unwrap()
+            .token_ids;
+        let mut actual = Qwen3Session::new(&model, 11).unwrap();
+        actual.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        actual.gpu.as_mut().unwrap().fail_after_row = Some(5);
+        let actual_tokens = actual
+            .generate(
+                Qwen3Input {
+                    token_ids: &tokens,
+                    positions: &positions,
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                options,
+            )
+            .unwrap()
+            .token_ids;
+        assert!(
+            actual.gpu.is_none(),
+            "failure must target row one of the second chunk"
+        );
+        assert_eq!(context.submission_count(), 3);
+        assert_eq!(actual_tokens, expected_tokens);
+        assert_eq!(snapshot(actual.kv_state()), snapshot(expected.kv_state()));
+        assert_eq!(
+            actual
+                .last_logits()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .last_logits()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn qwen3_vulkan_prefill_batches_match_bits_kv_and_submissions() {
+        let model = fixture_model();
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let tokens: Vec<_> = (0..65).map(|row| (row % 7) as u32).collect();
+        let positions: Vec<_> = (0..65).map(|row| [row, 0, 0, 0]).collect();
+        let mut baseline = None;
+        for batch in [1, 4, 64, 128] {
+            let mut session = Qwen3Session::new(&model, 68).unwrap();
+            session.gpu = Qwen3VulkanSession::try_new(&model, 68, context).unwrap();
+            let before = context.submission_count();
+            let input = Qwen3Input {
+                token_ids: &tokens,
+                positions: &positions,
+                embeddings: None,
+                deepstack_embeddings: None,
+            };
+            session.prefill(&input, batch).unwrap();
+            assert!(session.gpu.is_some(), "batch {batch} fell back");
+            assert_eq!(
+                context.submission_count() - before,
+                65_usize.div_ceil(batch) as u64
+            );
+            let result = (
+                session
+                    .last_logits()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                snapshot(session.kv_state()),
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(&result, expected, "batch {batch}");
+            } else {
+                baseline = Some(result);
+            }
+            let before = context.submission_count();
+            let next = Qwen3Input {
+                token_ids: &[0],
+                positions: &[[65, 0, 0, 0]],
+                embeddings: None,
+                deepstack_embeddings: None,
+            };
+            session
+                .generate(
+                    next,
+                    Qwen3GenerateOptions {
+                        max_new_tokens: 3,
+                        temperature: 0.0,
+                        prefill_batch_size: batch,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                context.submission_count() - before,
+                3,
+                "decode must remain one submission per token"
+            );
+        }
     }
 }

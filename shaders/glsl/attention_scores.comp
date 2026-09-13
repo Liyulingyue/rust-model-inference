@@ -15,6 +15,8 @@ layout(push_constant) uniform PC {
     uint kv_heads;
     uint head_dim;
     float scale;
+    uint base_position;
+    uint rows;
 } pc;
 
 void add_pair(inout float high, inout float low, float value) {
@@ -26,14 +28,17 @@ void add_pair(inout float high, inout float low, float value) {
 }
 
 void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     uint total = pc.q_heads * pc.sequence_length;
     if (index >= total) return;
     uint head = index / pc.sequence_length;
     uint token = index - head * pc.sequence_length;
+    if (token >= pc.base_position + row + 1u) return;
     uint kv_head = head / (pc.q_heads / pc.kv_heads);
-    uint q_base = pc.q_word + head * pc.head_dim;
+    uint q_base = pc.q_word + (row * pc.q_heads + head) * pc.head_dim;
     uint key_base = pc.cache_k_word
         + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
         + kv_head * pc.head_dim;
@@ -46,5 +51,5 @@ void main() {
         precise float product = query * key;
         add_pair(sum, correction, product);
     }
-    arena.data[pc.scores_word + index] = floatBitsToUint((sum + correction) * pc.scale);
+    arena.data[pc.scores_word + row * total + index] = floatBitsToUint((sum + correction) * pc.scale);
 }

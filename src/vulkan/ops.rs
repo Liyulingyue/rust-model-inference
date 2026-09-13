@@ -178,6 +178,7 @@ pub(crate) struct ArenaLayout {
     pub(crate) kv_v: ArenaRegion,
     pub(crate) kv_delta_k: ArenaRegion,
     pub(crate) kv_delta_v: ArenaRegion,
+    pub(crate) rope: ArenaRegion,
     total_size: usize,
 }
 
@@ -192,14 +193,18 @@ impl ArenaLayout {
         Self::build(n_embd, n_ff, n_head, n_head_kv, head_dim, n_embd, 1, 1)
     }
 
-    pub(crate) fn qwen3(config: &Qwen3Config, capacity: usize) -> Result<Self, VulkanError> {
+    pub(crate) fn qwen3(
+        config: &Qwen3Config,
+        capacity: usize,
+        max_rows: usize,
+    ) -> Result<Self, VulkanError> {
         if config.n_embd_head_k != config.n_embd_head_v {
             return Err(VulkanError::UnsupportedShape(format!(
                 "different Qwen3 key/value head dimensions: {}/{}",
                 config.n_embd_head_k, config.n_embd_head_v
             )));
         }
-        Self::build(
+        Self::build_rows(
             config.n_embd,
             config.n_ff,
             config.n_head,
@@ -208,6 +213,7 @@ impl ArenaLayout {
             config.vocab,
             config.n_layer,
             capacity,
+            max_rows,
         )
     }
 
@@ -222,8 +228,25 @@ impl ArenaLayout {
         n_layer: usize,
         capacity: usize,
     ) -> Result<Self, VulkanError> {
+        Self::build_rows(
+            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, 1,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_rows(
+        n_embd: usize,
+        n_ff: usize,
+        n_head: usize,
+        n_head_kv: usize,
+        head_dim: usize,
+        vocab: usize,
+        n_layer: usize,
+        capacity: usize,
+        rows: usize,
+    ) -> Result<Self, VulkanError> {
         if [
-            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity,
+            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, rows,
         ]
         .contains(&0)
         {
@@ -235,32 +258,42 @@ impl ArenaLayout {
         let q_len = product("Q length", &[n_head, head_dim])?;
         let kv_len = product("KV length", &[n_head_kv, head_dim])?;
         let q8_len = n_embd.max(n_ff).max(q_len);
-        let score_len = product("attention scores", &[n_head, capacity])?;
+        let score_len = product("attention scores", &[rows, n_head, capacity])?;
         let kv_cache_len = product("KV cache", &[n_layer, capacity, kv_len])?;
-        let kv_delta_len = product("KV delta", &[n_layer, kv_len])?;
+        let kv_delta_len = product("KV delta", &[n_layer, rows, kv_len])?;
         let mut cursor = 0usize;
 
-        let x = f32_region(&mut cursor, n_embd)?;
-        let normed = f32_region(&mut cursor, n_embd)?;
-        let q = f32_region(&mut cursor, q_len)?;
-        let k = f32_region(&mut cursor, kv_len)?;
-        let v = f32_region(&mut cursor, kv_len)?;
-        let attn = f32_region(&mut cursor, q_len)?;
-        let projection = f32_region(&mut cursor, n_embd)?;
-        let gate = f32_region(&mut cursor, n_ff)?;
-        let up = f32_region(&mut cursor, n_ff)?;
-        let down = f32_region(&mut cursor, n_embd)?;
+        let x = f32_region(&mut cursor, product("x rows", &[rows, n_embd])?)?;
+        let normed = f32_region(&mut cursor, product("normed rows", &[rows, n_embd])?)?;
+        let q = f32_region(&mut cursor, product("q rows", &[rows, q_len])?)?;
+        let k = f32_region(&mut cursor, product("k rows", &[rows, kv_len])?)?;
+        let v = f32_region(&mut cursor, product("v rows", &[rows, kv_len])?)?;
+        let attn = f32_region(&mut cursor, product("attn rows", &[rows, q_len])?)?;
+        let projection = f32_region(&mut cursor, product("projection rows", &[rows, n_embd])?)?;
+        let gate = f32_region(&mut cursor, product("gate rows", &[rows, n_ff])?)?;
+        let up = f32_region(&mut cursor, product("up rows", &[rows, n_ff])?)?;
+        let down = f32_region(&mut cursor, product("down rows", &[rows, n_embd])?)?;
         let logits = f32_region(&mut cursor, vocab)?;
-        let q8 = region(&mut cursor, q8_len)?;
-        let q8_scales = f32_region(&mut cursor, q8_len.div_ceil(32))?;
-        let q4_1_input_sums = f32_region(&mut cursor, q8_len.div_ceil(32))?;
-        let q8k = region(&mut cursor, q8_len)?;
-        let q8k_scales = f32_region(&mut cursor, q8_len.div_ceil(256))?;
+        let q8 = region(&mut cursor, product("Q8 rows", &[rows, q8_len])?)?;
+        let q8_scales = f32_region(
+            &mut cursor,
+            product("q8_scales rows", &[rows, q8_len.div_ceil(32)])?,
+        )?;
+        let q4_1_input_sums = f32_region(
+            &mut cursor,
+            product("q4_1_input_sums rows", &[rows, q8_len.div_ceil(32)])?,
+        )?;
+        let q8k = region(&mut cursor, product("Q8K rows", &[rows, q8_len])?)?;
+        let q8k_scales = f32_region(
+            &mut cursor,
+            product("q8k_scales rows", &[rows, q8_len.div_ceil(256)])?,
+        )?;
         let scores = f32_region(&mut cursor, score_len)?;
         let kv_k = f32_region(&mut cursor, kv_cache_len)?;
         let kv_v = f32_region(&mut cursor, kv_cache_len)?;
         let kv_delta_k = f32_region(&mut cursor, kv_delta_len)?;
         let kv_delta_v = f32_region(&mut cursor, kv_delta_len)?;
+        let rope = f32_region(&mut cursor, product("RoPE rows", &[rows, head_dim])?)?;
 
         Ok(Self {
             x,
@@ -284,11 +317,12 @@ impl ArenaLayout {
             kv_v,
             kv_delta_k,
             kv_delta_v,
+            rope,
             total_size: cursor,
         })
     }
 
-    pub(crate) fn regions(&self) -> [ArenaRegion; 21] {
+    pub(crate) fn regions(&self) -> [ArenaRegion; 22] {
         [
             self.x,
             self.normed,
@@ -311,6 +345,7 @@ impl ArenaLayout {
             self.kv_v,
             self.kv_delta_k,
             self.kv_delta_v,
+            self.rope,
         ]
     }
 
@@ -961,15 +996,36 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
         eps: f32,
     ) -> Result<(), VulkanError> {
+        self.record_rms_norm_rows(
+            commands, bindings, input, output, count, eps, 1, count, count,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_rms_norm_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+        eps: f32,
+        rows: usize,
+        input_stride: usize,
+        output_stride: usize,
+    ) -> Result<(), VulkanError> {
         bindings.require(0, f32_bytes(count)?, "RMS norm weight")?;
         let push = [
-            self.f32_word(input, count, "RMS norm input")?,
+            self.f32_rows_word(input, rows, input_stride, count, "RMS norm input")?,
             0,
-            self.f32_word(output, count, "RMS norm output")?,
+            self.f32_rows_word(output, rows, output_stride, count, "RMS norm output")?,
             as_u32(count, "RMS norm length")?,
-            1,
+            as_u32(rows, "RMS norm rows")?,
             eps.to_bits(),
+            as_u32(input_stride, "RMS input stride")?,
+            as_u32(output_stride, "RMS output stride")?,
         ];
+        let (x, y) = super::dispatch_grid(rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[RMS_NORM],
@@ -977,7 +1033,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(1, 1, 1);
+            commands.dispatch(x, y, 1);
             commands.barrier();
         }
         Ok(())
@@ -1204,54 +1260,20 @@ impl<'a> Qwen3Ops<'a> {
         normalize_q: bool,
         normalize_k: bool,
     ) -> Result<(), VulkanError> {
-        if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
-            return Err(VulkanError::UnsupportedShape(
-                "Q/K heads and even head dimension must be nonzero".into(),
-            ));
-        }
-        let q_count = q_heads
-            .checked_mul(head_dim)
-            .ok_or(VulkanError::OutOfMemory)?;
-        let k_count = k_heads
-            .checked_mul(head_dim)
-            .ok_or(VulkanError::OutOfMemory)?;
-        if normalize_q {
-            bindings.require(0, f32_bytes(head_dim)?, "Q norm weight")?;
-        }
-        if normalize_k {
-            bindings.require(1, f32_bytes(head_dim)?, "K norm weight")?;
-        }
-        let push = [
-            self.f32_word(q, q_count, "Q vector")?,
-            self.f32_word(k, k_count, "K vector")?,
-            0,
-            0,
-            as_u32(q_heads, "Q head count")?,
-            as_u32(k_heads, "K head count")?,
-            as_u32(head_dim, "Q/K head dimension")?,
-            self.f32_word(rope, head_dim, "RoPE coefficients")?,
-            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
-            eps.to_bits(),
-        ];
-        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
-            || k_heads > self.context.limits.max_compute_work_group_count[0] as usize
-            || self.context.limits.max_compute_work_group_count[1] < 2
-        {
-            return Err(VulkanError::UnsupportedShape(
-                "Q/K head count exceeds device dispatch limits".into(),
-            ));
-        }
-        unsafe {
-            commands.bind(
-                self.pipelines[QK_NORM_ROPE],
-                self.context.pipeline_layout,
-                &[bindings.descriptor_set],
-                bytemuck::cast_slice(&push),
-            );
-            commands.dispatch(q_heads.max(k_heads) as u32, 2, 1);
-            commands.barrier();
-        }
-        Ok(())
+        self.record_qk_norm_rope_rows(
+            commands,
+            bindings,
+            q,
+            k,
+            q_heads,
+            k_heads,
+            head_dim,
+            rope,
+            eps,
+            normalize_q,
+            normalize_k,
+            1,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1270,42 +1292,21 @@ impl<'a> Qwen3Ops<'a> {
         capacity: usize,
         kv_count: usize,
     ) -> Result<(), VulkanError> {
-        if layer >= layer_count || position >= capacity || kv_count == 0 {
-            return Err(VulkanError::UnsupportedShape(format!(
-                "invalid KV write layer={layer}/{layer_count} position={position}/{capacity} width={kv_count}"
-            )));
-        }
-        let cache_count = layer_count
-            .checked_mul(capacity)
-            .and_then(|value| value.checked_mul(kv_count))
-            .ok_or(VulkanError::OutOfMemory)?;
-        let delta_count = layer_count
-            .checked_mul(kv_count)
-            .ok_or(VulkanError::OutOfMemory)?;
-        let push = [
-            self.f32_word(k, kv_count, "new K")?,
-            self.f32_word(v, kv_count, "new V")?,
-            self.f32_word(cache_k, cache_count, "K cache")?,
-            self.f32_word(cache_v, cache_count, "V cache")?,
-            self.f32_word(delta_k, delta_count, "K delta")?,
-            self.f32_word(delta_v, delta_count, "V delta")?,
-            as_u32(layer, "KV layer")?,
-            as_u32(position, "KV position")?,
-            as_u32(capacity, "KV capacity")?,
-            as_u32(kv_count, "KV width")?,
-        ];
-        let (x, y) = dispatch_invocations(kv_count, &self.context.limits)?;
-        unsafe {
-            commands.bind(
-                self.pipelines[KV_WRITE],
-                self.context.pipeline_layout,
-                &[self.arena_bindings.descriptor_set],
-                bytemuck::cast_slice(&push),
-            );
-            commands.dispatch(x, y, 1);
-            commands.barrier();
-        }
-        Ok(())
+        self.record_kv_write_rows(
+            commands,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            delta_k,
+            delta_v,
+            layer,
+            position,
+            layer_count,
+            capacity,
+            kv_count,
+            1,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1323,6 +1324,265 @@ impl<'a> Qwen3Ops<'a> {
         kv_heads: usize,
         head_dim: usize,
     ) -> Result<(), VulkanError> {
+        let base = sequence_length
+            .checked_sub(1)
+            .ok_or_else(|| VulkanError::UnsupportedShape("empty attention".into()))?;
+        self.record_attention_scores_rows(
+            commands,
+            q,
+            cache_k,
+            scores,
+            layer,
+            layer_count,
+            base,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+            1,
+        )
+    }
+
+    fn record_softmax(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        heads: usize,
+        sequence_length: usize,
+    ) -> Result<(), VulkanError> {
+        let base = sequence_length
+            .checked_sub(1)
+            .ok_or_else(|| VulkanError::UnsupportedShape("empty softmax".into()))?;
+        self.record_softmax_rows(commands, scores, heads, base, 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_attention_values(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        cache_v: ArenaRegion,
+        output: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        sequence_length: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), VulkanError> {
+        let base = sequence_length
+            .checked_sub(1)
+            .ok_or_else(|| VulkanError::UnsupportedShape("empty attention".into()))?;
+        self.record_attention_values_rows(
+            commands,
+            scores,
+            cache_v,
+            output,
+            layer,
+            layer_count,
+            base,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+            1,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        sequence_length: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), VulkanError> {
+        let base = sequence_length
+            .checked_sub(1)
+            .ok_or_else(|| VulkanError::UnsupportedShape("empty attention".into()))?;
+        self.record_attention_rows(
+            commands,
+            q,
+            cache_k,
+            cache_v,
+            scores,
+            output,
+            layer,
+            layer_count,
+            base,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+            1,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K heads and even head dimension must be nonzero".into(),
+            ));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k_count = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if normalize_q {
+            bindings.require(0, f32_bytes(head_dim)?, "Q norm weight")?;
+        }
+        if normalize_k {
+            bindings.require(1, f32_bytes(head_dim)?, "K norm weight")?;
+        }
+        let push = [
+            self.f32_rows_word(q, rows, q_count, q_count, "Q vector")?,
+            self.f32_rows_word(k, rows, k_count, k_count, "K vector")?,
+            0,
+            0,
+            as_u32(q_heads, "Q head count")?,
+            as_u32(k_heads, "K head count")?,
+            as_u32(head_dim, "Q/K head dimension")?,
+            self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
+            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            eps.to_bits(),
+            as_u32(rows, "Q/K rows")?,
+            as_u32(q_count, "Q stride")?,
+            as_u32(k_count, "K stride")?,
+            as_u32(head_dim, "RoPE stride")?,
+        ];
+        let z = row_dispatch(1, rows, &self.context.limits)?[2];
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || k_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || self.context.limits.max_compute_work_group_count[1] < 2
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QK_NORM_ROPE],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(q_heads.max(k_heads) as u32, 2, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_kv_write_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        layer: usize,
+        position: usize,
+        layer_count: usize,
+        capacity: usize,
+        kv_count: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if layer >= layer_count
+            || rows == 0
+            || position.checked_add(rows).is_none_or(|end| end > capacity)
+            || kv_count == 0
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid KV write layer={layer}/{layer_count} position={position}/{capacity} width={kv_count}"
+            )));
+        }
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|value| value.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let delta_count = layer_count
+            .checked_mul(rows)
+            .and_then(|count| count.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(k, rows, kv_count, kv_count, "new K")?,
+            self.f32_rows_word(v, rows, kv_count, kv_count, "new V")?,
+            self.f32_rows_word(cache_k, 1, cache_count, cache_count, "K cache")?,
+            self.f32_rows_word(cache_v, 1, cache_count, cache_count, "V cache")?,
+            self.f32_rows_word(delta_k, 1, delta_count, delta_count, "K delta")?,
+            self.f32_rows_word(delta_v, 1, delta_count, delta_count, "V delta")?,
+            as_u32(layer, "KV layer")?,
+            as_u32(position, "KV position")?,
+            as_u32(capacity, "KV capacity")?,
+            as_u32(kv_count, "KV width")?,
+            as_u32(rows, "KV rows")?,
+        ];
+        let [x, y, z] = row_dispatch(kv_count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[KV_WRITE],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention_scores_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        cache_k: ArenaRegion,
+        scores: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        base_position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
         validate_attention_shape(
             layer,
             layer_count,
@@ -1346,9 +1606,9 @@ impl<'a> Qwen3Ops<'a> {
             .checked_mul(sequence_length)
             .ok_or(VulkanError::OutOfMemory)?;
         let push = [
-            self.f32_word(q, q_count, "attention query")?,
-            self.f32_word(cache_k, cache_count, "attention K cache")?,
-            self.f32_word(scores, score_count, "attention scores")?,
+            self.f32_rows_word(q, rows, q_count, q_count, "attention query")?,
+            self.f32_rows_word(cache_k, 1, cache_count, cache_count, "attention K cache")?,
+            self.f32_rows_word(scores, rows, score_count, score_count, "attention scores")?,
             as_u32(layer, "attention layer")?,
             as_u32(sequence_length, "attention sequence length")?,
             as_u32(capacity, "attention capacity")?,
@@ -1356,8 +1616,10 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(kv_heads, "attention KV heads")?,
             as_u32(head_dim, "attention head dimension")?,
             (1.0 / (head_dim as f32).sqrt()).to_bits(),
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
         ];
-        let (x, y) = dispatch_invocations(score_count, &self.context.limits)?;
+        let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[ATTENTION_SCORES],
@@ -1365,20 +1627,24 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, 1);
+            commands.dispatch(x, y, z);
             commands.barrier();
         }
         Ok(())
     }
 
-    fn record_softmax(
+    fn record_softmax_rows(
         &self,
         commands: &TokenCommands<'_>,
         scores: ArenaRegion,
         heads: usize,
-        sequence_length: usize,
+        base_position: usize,
+        rows: usize,
     ) -> Result<(), VulkanError> {
-        if heads == 0 || sequence_length == 0 {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if heads == 0 || rows == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "softmax heads and sequence length must be nonzero".into(),
             ));
@@ -1387,11 +1653,13 @@ impl<'a> Qwen3Ops<'a> {
             .checked_mul(sequence_length)
             .ok_or(VulkanError::OutOfMemory)?;
         let push = [
-            self.f32_word(scores, count, "softmax scores")?,
+            self.f32_rows_word(scores, rows, count, count, "softmax scores")?,
             as_u32(heads, "softmax heads")?,
             as_u32(sequence_length, "softmax sequence length")?,
+            as_u32(base_position, "softmax base position")?,
+            as_u32(rows, "softmax rows")?,
         ];
-        let (x, y) = super::dispatch_grid(heads, &self.context.limits)?;
+        let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[SOFTMAX],
@@ -1399,14 +1667,14 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, 1);
+            commands.dispatch(x, y, z);
             commands.barrier();
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_attention_values(
+    fn record_attention_values_rows(
         &self,
         commands: &TokenCommands<'_>,
         scores: ArenaRegion,
@@ -1414,12 +1682,21 @@ impl<'a> Qwen3Ops<'a> {
         output: ArenaRegion,
         layer: usize,
         layer_count: usize,
-        sequence_length: usize,
+        base_position: usize,
         capacity: usize,
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
+        rows: usize,
     ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
         validate_attention_shape(
             layer,
             layer_count,
@@ -1443,17 +1720,25 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|value| value.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
         let push = [
-            self.f32_word(scores, score_count, "attention probabilities")?,
-            self.f32_word(cache_v, cache_count, "attention V cache")?,
-            self.f32_word(output, output_count, "attention output")?,
+            self.f32_rows_word(
+                scores,
+                rows,
+                score_count,
+                score_count,
+                "attention probabilities",
+            )?,
+            self.f32_rows_word(cache_v, 1, cache_count, cache_count, "attention V cache")?,
+            self.f32_rows_word(output, rows, output_count, output_count, "attention output")?,
             as_u32(layer, "attention layer")?,
             as_u32(sequence_length, "attention sequence length")?,
             as_u32(capacity, "attention capacity")?,
             as_u32(q_heads, "attention Q heads")?,
             as_u32(kv_heads, "attention KV heads")?,
             as_u32(head_dim, "attention head dimension")?,
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
         ];
-        let (x, y) = dispatch_invocations(output_count, &self.context.limits)?;
+        let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[ATTENTION_VALUES],
@@ -1461,14 +1746,14 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, 1);
+            commands.dispatch(x, y, z);
             commands.barrier();
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_attention(
+    pub(crate) fn record_attention_rows(
         &self,
         commands: &TokenCommands<'_>,
         q: ArenaRegion,
@@ -1478,38 +1763,51 @@ impl<'a> Qwen3Ops<'a> {
         output: ArenaRegion,
         layer: usize,
         layer_count: usize,
-        sequence_length: usize,
+        base_position: usize,
         capacity: usize,
         q_heads: usize,
         kv_heads: usize,
         head_dim: usize,
+        rows: usize,
     ) -> Result<(), VulkanError> {
-        self.record_attention_scores(
+        // Validate the later stages before scores records its first dispatch.
+        let output_count = product("attention output", &[q_heads, head_dim])?;
+        let cache_count = product(
+            "attention cache",
+            &[layer_count, capacity, kv_heads, head_dim],
+        )?;
+        self.f32_rows_word(output, rows, output_count, output_count, "attention output")?;
+        self.f32_rows_word(cache_v, 1, cache_count, cache_count, "attention V cache")?;
+        row_dispatch(q_heads, rows, &self.context.limits)?;
+        row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
+        self.record_attention_scores_rows(
             commands,
             q,
             cache_k,
             scores,
             layer,
             layer_count,
-            sequence_length,
+            base_position,
             capacity,
             q_heads,
             kv_heads,
             head_dim,
+            rows,
         )?;
-        self.record_softmax(commands, scores, q_heads, sequence_length)?;
-        self.record_attention_values(
+        self.record_softmax_rows(commands, scores, q_heads, base_position, rows)?;
+        self.record_attention_values_rows(
             commands,
             scores,
             cache_v,
             output,
             layer,
             layer_count,
-            sequence_length,
+            base_position,
             capacity,
             q_heads,
             kv_heads,
             head_dim,
+            rows,
         )
     }
 
@@ -1849,12 +2147,25 @@ impl<'a> Qwen3Ops<'a> {
         up: ArenaRegion,
         count: usize,
     ) -> Result<(), VulkanError> {
+        self.record_silu_mul_rows(commands, gate, up, count, 1)
+    }
+
+    pub(crate) fn record_silu_mul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        gate: ArenaRegion,
+        up: ArenaRegion,
+        count: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
         let push = [
-            self.f32_word(gate, count, "SiLU gate")?,
-            self.f32_word(up, count, "SiLU multiplier")?,
+            self.f32_rows_word(gate, rows, count, count, "SiLU gate")?,
+            self.f32_rows_word(up, rows, count, count, "SiLU multiplier")?,
             as_u32(count, "SiLU length")?,
+            as_u32(rows, "silu_mul rows")?,
+            as_u32(count, "silu_mul row stride")?,
         ];
-        let (x, y) = dispatch_invocations(count, &self.context.limits)?;
+        let [x, y, z] = row_dispatch(count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[SILU_MUL],
@@ -1862,7 +2173,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, 1);
+            commands.dispatch(x, y, z);
             commands.barrier();
         }
         Ok(())
@@ -1875,12 +2186,25 @@ impl<'a> Qwen3Ops<'a> {
         addition: ArenaRegion,
         count: usize,
     ) -> Result<(), VulkanError> {
+        self.record_add_rows(commands, target, addition, count, 1)
+    }
+
+    pub(crate) fn record_add_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        addition: ArenaRegion,
+        count: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
         let push = [
-            self.f32_word(target, count, "add target")?,
-            self.f32_word(addition, count, "add source")?,
+            self.f32_rows_word(target, rows, count, count, "add target")?,
+            self.f32_rows_word(addition, rows, count, count, "add source")?,
             as_u32(count, "add length")?,
+            as_u32(rows, "add rows")?,
+            as_u32(count, "add row stride")?,
         ];
-        let (x, y) = dispatch_invocations(count, &self.context.limits)?;
+        let [x, y, z] = row_dispatch(count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
                 self.pipelines[ADD],
@@ -1888,7 +2212,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, 1);
+            commands.dispatch(x, y, z);
             commands.barrier();
         }
         Ok(())
@@ -1898,6 +2222,24 @@ impl<'a> Qwen3Ops<'a> {
         self.byte_word(region, region.size, "zeroed Vulkan arena region")?;
         unsafe { std::ptr::write_bytes(self.arena.mapped.add(region.offset), 0, region.size) };
         Ok(())
+    }
+
+    fn f32_rows_word(
+        &self,
+        region: ArenaRegion,
+        rows: usize,
+        stride: usize,
+        width: usize,
+        label: &str,
+    ) -> Result<u32, VulkanError> {
+        row_word(
+            self.arena.size as usize,
+            region,
+            rows,
+            f32_bytes(stride)?,
+            f32_bytes(width)?,
+            label,
+        )
     }
 
     fn f32_word(&self, region: ArenaRegion, count: usize, label: &str) -> Result<u32, VulkanError> {
@@ -3864,6 +4206,94 @@ fn check_close(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn qwen3_chunk_attention_validates_all_spans_before_recording() {
+        use super::{ArenaLayout, ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        let layout = ArenaLayout::build_rows(32, 32, 2, 1, 16, 8, 2, 5, 3).unwrap();
+        let ops = Qwen3Ops::new(&context, layout, 1).unwrap();
+        ops.write_f32(layout.scores, &[9.0; 30]).unwrap();
+        let before = ops.read_f32(layout.scores, 30).unwrap().to_vec();
+        let mut output = layout.attn;
+        output.size = 3 * 32 * 4 - 1;
+        let commands = TokenCommands::begin(&context).unwrap();
+        assert!(ops
+            .record_attention_rows(
+                &commands,
+                layout.q,
+                layout.kv_k,
+                layout.kv_v,
+                layout.scores,
+                output,
+                1,
+                2,
+                2,
+                5,
+                2,
+                1,
+                16,
+                3
+            )
+            .is_err());
+        commands.submit_and_wait().unwrap();
+        assert_eq!(
+            ops.read_f32(layout.scores, 30).unwrap(),
+            before,
+            "an invalid output span must not record scores or softmax"
+        );
+        let commands = TokenCommands::begin(&context).unwrap();
+        for rows in [0, 4, usize::MAX] {
+            assert!(ops
+                .record_attention_rows(
+                    &commands,
+                    layout.q,
+                    layout.kv_k,
+                    layout.kv_v,
+                    layout.scores,
+                    layout.attn,
+                    1,
+                    2,
+                    2,
+                    5,
+                    2,
+                    1,
+                    16,
+                    rows
+                )
+                .is_err());
+        }
+        let mut short = layout.kv_delta_k;
+        short.size = 2 * 3 * 16 * 4 - 1;
+        assert!(ops
+            .record_kv_write_rows(
+                &commands,
+                layout.k,
+                layout.v,
+                layout.kv_k,
+                layout.kv_v,
+                short,
+                layout.kv_delta_v,
+                1,
+                2,
+                2,
+                5,
+                16,
+                3
+            )
+            .is_err());
+        let short = ArenaRegion {
+            size: 3 * 32 * 4 - 1,
+            ..layout.x
+        };
+        assert!(ops
+            .record_add_rows(&commands, short, layout.projection, 32, 3)
+            .is_err());
+        assert!(ops
+            .record_silu_mul_rows(&commands, short, layout.up, 32, 3)
+            .is_err());
+    }
+
     use super::{fill_rope_neox, ArenaLayout, TokenDispatchPlan};
 
     #[test]

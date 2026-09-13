@@ -606,7 +606,7 @@ impl Qwen35VulkanSession {
             layout,
             config,
             capacity,
-            commit_state: TokenCommitState::new(0),
+            commit_state: TokenCommitState::new(0, capacity),
             rope: vec![0.0; rope_dim],
             logits: vec![0.0; vocab],
             k_delta: vec![0.0; delta_count],
@@ -623,7 +623,7 @@ impl Qwen35VulkanSession {
         mrope_position: [usize; 4],
     ) -> Result<Qwen35GpuTokenResult<'a>, VulkanError> {
         self.commit_state
-            .begin(cache_position)
+            .begin(cache_position, 1)
             .map_err(VulkanError::UnsupportedShape)?;
         if let Err(error) = self.forward_token_inner(input, cache_position, mrope_position) {
             self.commit_state.abort();
