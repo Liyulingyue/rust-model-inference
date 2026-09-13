@@ -321,6 +321,15 @@ F32 AVX2 把 F32 与 BF16 拉到同一量级；F16 AVX2 提升有限，因为 F1
 
 ## TODO-006: Q8_0 Breeze output drifts ~1 ULP under SIMD activation/matmul
 
+### TL;DR — v3 baseline 已选定
+
+**Q8_0 当前 md5 `b051f3c1...` / 29 frames 是 baseline**。BF16 / F16 /
+F32 bit-exact 是硬约束；Q8_0 没有真正的 ground truth（量化本身
+有损），后续每次 SIMD 改动 Q8_0 会再次漂移——只要漂移在 ±1 ULP
+量级就接受，并把这个新 md5 记作下一 baseline。
+
+### 现状
+
 Breeze Q8_0 inference output md5 changes after enabling the SIMD
 slice paths added in TODO-005 (matmul macro, gelu/silu inplace, bf16
 round inplace).  BF16 / F16 / F32 outputs are bit-exact; Q8_0 drifts
@@ -329,37 +338,45 @@ different order than scalar (1-ULP matmul reduction-order divergence
 multiplied by the 2-3× narrower weight precision, then propagated
 through the sampler).
 
-| Run | md5 | frames |
-|---|---|---|
-| `models/Breeze-TTS-2-gguf/q8.wav` (pre-macro) | `adf73de9...` | 26 |
-| `q8_macro.wav` (matmul macro only) | `3b6dd5b7...` | 26 |
-| `q8_fresh.wav` (matmul + activation SIMD) | `b051f3c1...` | 29 |
+| Baseline | Commit | md5 | frames | 备注 |
+|---|---|---|---|---|
+| v1 (pre-macro) | 5821150 | `adf73de9...` | 26 | scalar matmul baseline |
+| v2 (matmul macro) | 5986de0 | `3b6dd5b7...` | 26 | FMA reduction order drift |
+| **v3 (current)** | 0ff1a7f + 6ccb85f | **`b051f3c1...`** | **29** | matmul macro + activation SIMD + rope SIMD；BF16/F16/F32 均 bit-exact |
 
 Frame count drift (26 → 29) and 1-ULP bit difference are both
 within the ggml parity tolerance contract — Q8_0 was never
-"byte-exact" because the Q8_0 quantisation itself is lossy — but the
-old benchmark used `q8.wav` (pre-macro) as the de-facto reference.
+"byte-exact" because the Q8_0 quantisation itself is lossy.
 
 ### 影响
 
 - 部署行为正常（听感没区别），只是 md5 变了
-- `tools/converter/README.md` 精度对照表里 Q8_0 的"可用"注释保留
-- 后续每次 SIMD 改动都会再次漂移 Q8_0 输出，需要重新回归基线
+- `tools/converter/README.md` 精度对照表里 Q8_0 的 v3 baseline
+  md5 已在 `q8_0` 行标注
+- 后续每次 SIMD 改动都会再次漂移 Q8_0 输出，需重新记录 baseline
 
-### 选项
+### Baseline 维护流程
 
-1. **接受漂移**（当前）：BF16/F16/F32 bit-exact 是真正的硬约束；Q8_0 没有可参照的"标准答案"。
-2. **冻结 Q8_0 SIMD 路径**：Q8_0 走 scalar matmul 退回，保持与 pre-macro md5 一致。代价是 Q8_0 失去 3.6× 加速。
-3. **接受漂移 + 重写 README 对照表**：把 Q8_0 当前 md5 当作"v3 baseline"，后续每次 SIMD 改动后更新基线。
+每次 SIMD / matmul kernel 改动后，跑一次 Q8_0 推理：
 
-### 推荐
+```bash
+./target/release/rust-model-inference --tts \
+  --model models/Breeze-TTS-2-gguf/breeze-tts-2-Q8_0.gguf \
+  --mmproj models/Breeze-TTS-2-gguf/breeze-tts-2-mmproj-F32.gguf \
+  --prompt "你好。" --out /tmp/q8_check.wav --seed 42 --threads 4
+md5sum /tmp/q8_check.wav
+```
 
-方案 1 或 3。Q8_0 的"byte-exact"从来没有真正的 ground truth，**继续优化 SIMD 收益 > 维持一个过期 md5 字符串**。
+如果与当前 baseline md5 漂移 ≤ 1 ULP（≈ bf16 mantissa 1 bit）：
+- 把新 md5 写入 `tools/converter/README.md` 的 Q8_0 行
+- 把新 md5 写入本 TODO 的基线表
+
+如果漂移 > 1 ULP：可能是更深的 SIMD bug，回到 TODO 排查。
 
 ### 关联文件
 
-- `tools/converter/README.md` — breeze 量化对照表（含 Q8_0 "可用"注释）
-- `models/Breeze-TTS-2-gguf/q8.wav` — 旧基线（pre-macro）
+- `tools/converter/README.md:40` — Q8_0 行的 v3 baseline md5
+- `models/Breeze-TTS-2-gguf/q8.wav` — v1 旧基线（pre-macro）
 - `models/Breeze-TTS-2-gguf/breeze-tts-2-Q8_0.gguf` — Q8_0 模型本身（GGU 字节不变）
 
 ## TODO-007: Breeze `rope()` SIMD 路径精度破坏（暂用 cfg(any()) 屏蔽）
