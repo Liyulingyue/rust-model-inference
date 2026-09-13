@@ -364,81 +364,58 @@ old benchmark used `q8.wav` (pre-macro) as the de-facto reference.
 
 ## TODO-007: Breeze `rope()` SIMD 路径精度破坏（暂用 cfg(any()) 屏蔽）
 
-### 现状
+### TL;DR
 
-`src/models/breeze/transformer.rs::rope` 自带的 SIMD 路径
-（`rope_simd_avx2` + `round_to_bf16_ps`）在 Breeze 推理下输出退化：
+**已修复**——`src/ops/rope/neox.rs::rope_neox_inplace_with_table` 新增
+public wrapper，BF16 round-trip 严格按 scalar op 顺序 (`mul → round →
+mul → round → add → round`)，AVX2 内核在每个乘加后立即 bf16
+round。`src/models/breeze/transformer.rs::rope` 现在一行调用
+`rope_neox_inplace_with_table`。Breeze 三档精度 (BF16/F16/F32/Q8_0)
+推理全部 bit-exact md5 等价（commit 待 push）。
 
-| 模式 | frames | md5 |
-|---|---|---|
-| rope scalar（dispatch 选） | 35 | `c19502ff...`（bit-exact） |
-| rope SIMD 启用，无 scalar fall-through | 7 | `fb0a06e8...`（崩） |
-| rope SIMD + scalar fall-through | 35 | `c19502ff...`（scalar 覆盖 SIMD） |
+### 现状（修复后）
 
-**当前 dispatch 用 `#[cfg(any())]` 强制走 scalar 路径**，SIMD 函数
-编译存在但永远不被调用。scalar fall-through 是保险丝——
-未来如果改回真实 cfg，Breeze 不会立刻崩但 SIMD 部分被 scalar 完全
-重写，没有任何加速收益。
+| 路径 | frames | md5 | 备注 |
+|---|---|---|---|
+| rope scalar (commit 0ff1a7f) | 35 | `c19502ff...` | bit-exact baseline |
+| rope_neox_inplace_with_table scalar | 35 | `c19502ff...` | bit-exact ✅ |
+| rope_neox_inplace_with_table AVX2 | 35 | `c19502ff...` | bit-exact ✅ |
 
-### 影响
+### 修复细节
 
-- Breeze rope 仍是 scalar。35 层 × 4 token × 16 heads × 128 elements
-  ≈ 286k ops/token；scalar ~30ns 含 bf round = **~8.6ms/token 估计**。
-- 修好后 Breeze 推理可能再省 **1-2s / 35-frame 推理**（绳 rope 调用 ~28 次/帧）。
+bug 在**两次**：
 
-### Bug 定位（不完整）
+1. **少了一层 round**：原 SIMD 把 3 次 bf round（`a*c`、`-b*s`、`sum`）
+   合并成 1 次，导致 1 bf16 mantissa ULP drift。
+2. **mul/add 顺序差**：scalar 是 `bf(bf(a*c) + bf(-b*s))`，SIMD 需要
+   在每次 mul 后立即 round，再 add，再 round。
 
-怀疑 `round_to_bf16_ps` 的舍入逻辑——`_mm256_add_epi32` 是 i32
-wrap-around，与 scalar 的 u32 wrap-around 在 f32 bit pattern 接近
-0x80000000 时**结果不同**（i32 仍正、u32 已 wrap）。改用 8-lane
-stack-array 调用 scalar `f32_to_bf16` 后**仍然错**——bug 在 rope
-其他位置（mul/add/sub 顺序或 store 边界）。
+修复方案：每次 mul 后立即 `bf16_round_ps(...)`，add 后再
+`bf16_round_ps(...)`——共 6 次 round per inner iteration，但 8-lane
+stack-array + scalar `f32_to_bf16` 的开销在 1ns/lane。
 
-可能原因：
-1. `_mm256_storeu_ps(head.as_mut_ptr().add(i + half), new_hi)` —
-   `head` 是 `chunks_exact_mut(hd)` 切出的 `&mut [f32]`，`as_mut_ptr().add(i+half)`
-   当 i+half > hd 时 OOB。**但** i 循环 `while i + 8 <= half`，i+half ≤ hd。
-2. 外层 `for head in x.chunks_exact_mut(hd)` 顺序与 scalar 不同——scalar
-   是 i in 0..half 嵌套 head 外层；SIMD 把 i 提到外层**不影响** head 顺序。
-3. `neg_b = _mm256_sub_ps(zero, b)` 在 b 是 bf-quantized 值时，可能产生
-   subnormal 或 sign bit flip——scalar `-b` 走 IEEE 754，SIMD 走 SSE 同
-   指令，应该一致。
+### 性能
 
-### 复现
-
-```bash
-# Edit src/models/breeze/transformer.rs:528-535 to remove `#[cfg(any())]`
-cargo build --release --bin rust-model-inference
-./target/release/rust-model-inference --tts \
-  --model models/Breeze-TTS-2-gguf/breeze-tts-2-BF16.gguf \
-  --mmproj models/Breeze-TTS-2-gguf/breeze-tts-2-mmproj-F32.gguf \
-  --prompt "你好。" --out /tmp/rope_bug.wav --seed 42
-# Expect: 7 frames, md5 fb0a06e8...
-```
-
-### 修复方向
-
-1. **最简绕路**：仿 `f32_to_bf16` 的做法，把 AVX2 8 lane × scalar `f32_to_bf16`
-   写成一个 `unsafe fn round_to_bf16_ps`（已做），逐 lane 测试是否真的等价。
-2. **关键怀疑点**：mul / add 之后的结果是否与 scalar 浮点 mul/add 一致。
-   FMA (`_mm256_fmadd_ps`) 会改变 reduction order；用 `mul + add`（已用）
-   应该等价——**确认 `_mm256_sub_ps(zero, b)` 与 `-b` bit-exact**。
-3. **A/B 对比**：把 SIMD 路径的中间值（a, b, ac, neg_bs, new_lo, new_hi）
-   与 scalar 路径逐 lane 比对——找到第一个不一致点。
-4. **替代方案**：参考 `ops/rope/neox.rs::rope_neox_inplace_avx2` 的成熟实现，
-   直接调用 `crate::ops::rope::neox_inplace_with_cos_sin(...)` 替代 Breeze
-   自带 rope——前提是 rope_neox_inplace_avx2 的 bf-round-trip 行为匹配 Breeze
-   的 bf-per-element 行为（要验证）。
-
-### 推荐
-
-A/B 对比 + 找到第一个不一致点。scalar rope 是 ground truth，差距在哪
-就改哪。修复前 rope SIMD 仍是 `cfg(any())` 屏蔽状态。
+rope SIMD 启用前后 Breeze 推理时间基本持平（34s → 34s），因为 rope
+本身只占总推理时间的 1-2%（28 layers × 4 tokens × ~16 heads）。激活
++ matmul 仍是主要优化点。
 
 ### 关联文件
 
-- `src/models/breeze/transformer.rs:504-...` — `rope()` 函数 + dispatch
-- `src/models/breeze/transformer.rs:540-...` — `rope_scalar`（已实现）
-- `src/models/breeze/transformer.rs:583-...` — `rope_simd_avx2`（有 bug，编译存在）
-- `src/models/breeze/transformer.rs:616-...` — `rope_simd_neon`（TODO 占位）
-- `src/ops/rope/neox.rs` — 仓库的成熟 rope_neox_inplace SIMD 实现（参考）
+- `src/ops/rope/neox.rs:179-...` — `rope_neox_inplace_with_table` 新增
+- `src/ops/rope/mod.rs:23,30` — `pub mod neox` + 重新导出
+- `src/models/breeze/transformer.rs:509-...` — `rope()` 改一行调用
+- `src/ops/rope/tests.rs:209-...` — bit-exact parity 测试
+
+### 关闭
+
+关闭条件：Breeze BF16 推理用 rope_neox_inplace_with_table + AVX2 +
+bit-exact md5 + 3 档精度等价。**已满足**。
+
+剩余 TODO-007 项目：
+- NEON 版本（aarch64）`rope_neox_inplace_with_table_neon`——暂未实现。
+  aarch64 没有 AVX2 但有 native f16 NEON，可以省去 bf16 模拟 stack
+  array；Breeze 路径不阻塞。
+- `round_to_bf16_ps` 仍用 stack-array（8-lane scalar round）。AVX2
+  f16c (`_mm256_cvtph_ps`) 可加速，但精度等价的 8-lane bf16
+  unpack 需要单独的 `_mm256_slli_epi32` 序列，复杂度高。后续按需。
