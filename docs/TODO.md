@@ -160,7 +160,11 @@ weight.n_out = n_out;
 - `src/core/tensor.rs:288-330` — `load_f32_tensor`（norm/bias 公共入口；与 `qwen35::load_weight_f32` 重叠）
 - `src/models/gemma4/trunk/config.rs:215` — Q4_0 类型在允许列表
 
-## TODO-004: Breeze Q4_0 不可用，需探索 Q4_K 与 per-tensor 混合精度
+## TODO-004: Breeze Q4_0 不可用 — 走 per-tensor 混合精度路径
+
+### TL;DR
+
+**Q4_0 单层全量化对 Breeze 不可用**（128 frames vs BF16 59 frames = 117% 偏差）。短期路线不是"再换一种 4-bit 格式"，而是 **per-tensor 混合精度**：embedding / lm_head / codebook 保留 BF16 或 Q8_0，hidden-attn / mlp 主矩阵走 Q4_0 或 Q4_K。长期再评估 Q4_K / Q6_K 全替换。
 
 ### 现状
 
@@ -168,10 +172,10 @@ weight.n_out = n_out;
 
 | 精度 | 帧数（prompt "你好。"，seed 42） | 文件大小 | 备注 |
 |---|---|---|---|
-| BF16 | 59 | 6.6 GB | 与原字节等价 |
-| F16 | 59 | 6.6 GB | 同源 |
-| F32 | 44 | 13 GB | 略早停 |
-| Q8_0 | 26 | 3.6 GB | 3.6× 加速，**可用** |
+| BF16 | 29 | 6.6 GB | 与原字节等价 |
+| F16 | 35 | 6.6 GB | 同源 |
+| F32 | 29 | 13 GB | md5 与 BF16 bit-exact |
+| Q8_0 | 37 | 3.6 GB | **3.6× 加速，推荐部署** |
 | **Q4_0** | **128** | 2.1 GB | **输出退化**（4-bit 噪声让 TTS 在补偿阶段不停 token） |
 
 128 frames 是模型"无法在合理帧数内停"的征兆——4-bit 量化误差在逐帧生成（每帧=一段音频 token）的场景被累积放大。
@@ -180,55 +184,94 @@ weight.n_out = n_out;
 
 Q4_0 失败不是形状问题（所有 `weight` 都是 2D 且行宽 % 32 == 0），而是**语义**问题：
 
-| 张量 | Q4_0 风险 | 原因 |
-|---|---|---|
-| `lm_head.weight` (HIDDEN × VOCAB+1) | 高 | 输出 token 概率分布对低比特敏感 |
-| `text_encoder.embed_tokens.weight` | 高 | embedding 单行精准取，4-bit 误差直达 hidden |
-| `depth_decoder.model.embed_tokens.weight` | 高 | 同上；codebook 偏移误差会污染所有 codec frame |
-| `depth_decoder.codebooks_head.weight` | 极高 | codebook 表 L2 距离对量化噪声敏感（已 `must_keep_source`） |
-| hidden × hidden / hidden × ff 大矩阵 | 中 | 冗余度高，4-bit 噪声被均摊；可量化但收益有限 |
-| norm weights / eoi_embedding | 极高 | 数值精度敏感（已 `must_keep_source`） |
+| 张量 | Q4_0 风险 | 原因 | 推荐最低精度 |
+|---|---|---|---|
+| `lm_head.weight` (HIDDEN × VOCAB+1) | 高 | 输出 token 概率分布对低比特敏感 | Q8_0 |
+| `text_encoder.embed_tokens.weight` | 高 | embedding 单行精准取，4-bit 误差直达 hidden | Q8_0 |
+| `depth_decoder.model.embed_tokens.weight` | 高 | 同上；codebook 偏移误差会污染所有 codec frame | Q8_0 |
+| `depth_decoder.codebooks_head.weight` | 极高 | codebook 表 L2 距离对量化噪声敏感 | BF16 / F32（保持源精度） |
+| `backbone_model.layers.{i}.self_attn.{q,k,v,o}_proj.weight` | 低 | 大矩阵冗余，4-bit 可接受 | Q4_0 |
+| `backbone_model.layers.{i}.mlp.{gate,up,down}_proj.weight` | 低 | 同上 | Q4_0 |
+| `text_encoder.layers.{i}.{q,k,v,o,gate,up,down}_proj.weight` | 中 | hidden_attn/MLP 矩阵 | Q8_0 |
+| `depth_decoder.model.layers.{i}.{q,k,v,o,gate,up,down}_proj.weight` | 中 | depth decoder 矩阵 | Q8_0 |
+| norm weights / eoi_embedding | 极高 | 数值精度敏感（已 `must_keep_source`） | BF16 / F32 |
+
+**关键洞察**：embedding / lm_head / codebook 占模型 20-30% 体积但**决定 token 输出**，不能让 Q4 0；attn / mlp 矩阵占 60-70% 体积但**冗余度高**，Q4_0 可接受。混合精度既达到 4-bit 压缩目标，又避免全 Q4_0 的退化。
 
 ### 何时触发
 
-部署场景需要 4-bit 压缩（< 2.5 GB 主模型），而当前 Q8_0 仍在 3.6 GB。
+部署场景需要 < 3.6 GB（Q8_0 体积）的主模型。当前 Q8_0 已经 3.6 GB 部署友好，但若需要更小（< 2.5 GB）就只能走混合精度或 Q4_K。
 
 ### 选项
 
-1. **加 Q4_K / Q5_K / Q6_K 支持**（K-quant；llama.cpp 现代 4-bit 标准）
-   - `QuantizedTensor::from_bytes` 已支持 K-quant；Kernel trait 也有 K-quant 实现（`q4_k.rs`/`q5_k.rs`/`q6_k.rs`）。
-   - 转换器侧 `quantize_q4_k()` 已存在于 `tools/dots/convert_dots_tts.py`（`k_quants.py`）——可复用。
-   - 预计 +1-2 天；Rust 端**无需**改（QuantizedTensor 已接）。
-   - K-quant 用混合精度（部分 6-bit + 部分 4-bit）+ super-block scale，4-bit 路径下比 Q4_0 鲁棒得多。
+1. **per-tensor 混合精度**（推荐短期路径）
+   - `--quant q4_mixed` 新模式：按 `_must_keep_source` 扩展成 `quant_floor(name) -> GGMLType`
+     - `lm_head`、`embed_tokens.*`、codebook 强制 Q8_0
+     - attn / mlp `weight` 走 Q4_0
+     - 其它保留源 dtype
+   - 预期主模型 ~2.7 GB（BF16 6.6 GB → 60% 压缩）
+   - 转换器侧扩展：`_must_keep_source` 加 `quant_floor` 表
+   - 预计 0.5-1 天
+   - Rust 端**无需改**——`QuantizedTensor::from_bytes` 已接 Q4_0 / Q8_0
+   - **优势**：保持现有 `_must_keep_source` 规则体系，最小改动
 
-2. **per-tensor 混合精度**（embed/lm_head/codebook 强制 Q8_0，hidden-attn/mlp 走 Q4_0）
-   - 比"要么全 Q4 要么全 BF16"细粒度：关键张量保留 Q8_0 精度，普通张量享受 Q4 压缩。
-   - 当前 `_must_keep_source` 已有这种"per-tensor 规则"骨架，可以扩展成"quant_floor"：每个张量声明 min_quant。
-   - 预计 +1 天；压缩比有限（整体大小 ≈ Q8_0 × 0.8）。
+2. **加 Q4_K / Q5_K / Q6_K 支持**（长期方案）
+   - `QuantizedTensor::from_bytes` 已支持 K-quant；Kernel trait 也有 K-quant 实现（`q4_k.rs`/`q5_k.rs`/`q6_k.rs`）
+   - 转换器侧 `quantize_q4_k()` 已存在于 `tools/dots/convert_dots_tts.py`（`k_quants.py`）——可复用
+   - K-quant 用混合精度（部分 6-bit + 部分 4-bit）+ super-block scale，比 Q4_0 鲁棒得多
+   - 预计 +1-2 天；Rust 端**无需改**
+   - 全模型 K-quant 可能仍需 per-tensor 保护 embedding/lm_head（与方案 1 正交）
 
-3. **撤掉 Q4_0，文档警告**（最小）
-   - 转换器代码保留，README 加"Breeze 不建议 Q4_0：embedding/lm_head/codebook 对低比特敏感"。
-   - 用户可选 Q8_0（推荐）或 BF16（精度优先）。
-   - 预计 0.5 小时；放弃 4-bit 部署。
+3. **per-tensor Q8_0 + per-tensor Q4_K**（方案 1+2 结合，最优）
+   - embedding / lm_head / codebook 走 Q8_0
+   - attn / mlp 走 Q4_K
+   - 体积最小、精度最高
+   - 预计 2 天
+
+4. **撤掉 Q4_0，仅支持 BF16 / F16 / F32 / Q8_0**（最小）
+   - 转换器代码保留 `--quant q4_0` 但 README 加"⚠️ 输出退化"警告
+   - 用户选 Q8_0（推荐）或 BF16（精度优先）
+   - 预计 0.5 小时
 
 ### 推荐
 
-**方案 1（Q4_K 路线）**——`QuantizedTensor::from_bytes` 已接 K-quant，转换器侧有现成的 `k_quants.py` 实现可参考；这是 llama.cpp 4-bit 的现代标准，比 Q4_0 鲁棒得多。方案 2 作为后续优化：即使有 K-quant，关键张量（embedding/codebook）仍应走 Q8_0 以保留精度。
+**方案 1 优先**（per-tensor 混合精度）。短期收益最大、改动最小，与现有 `_must_keep_source` 规则一致。`models/Breeze-TTS-2-gguf/` 当前 6 个 GGUF 已有完整 BF16/F16/F32/Q4_0/Q8_0 覆盖，下一步直接生成 `breeze-tts-2-Q4_MIXED.gguf`。
+
+**方案 2** 适合后续如果方案 1 仍不够紧凑。**方案 3** 是终极目标（attn/mlp 用 K-quant 4-bit + 关键张量 Q8_0）。
 
 ### 验证标准
 
 方案 1 落地后：
-- `--quant q4_K` 主模型大小 ≤ 2.5 GB
-- 推理帧数在 BF16 ±15% 范围内（vs 当前 Q4_0 的 128 vs 59 = 117% 偏差）
+- `--quant q4_mixed` 主模型大小 ≤ 2.7 GB
+- 推理帧数在 BF16 ±15% 范围内（vs 当前 Q4_0 的 128 vs 29 = 341% 偏差）
 - 主观听感与 Q8_0 接近（人工 spot-check）
+- attn/mlp 输出用 Q4_0，embedding/lm_head/codebook 用 Q8_0（不是 BF16），减少精度损失
+
+方案 3 落地后：
+- 主模型 ≤ 2.2 GB
+- 帧数偏差 ±10%
+
+### 实施计划（方案 1）
+
+1. `tools/converter/breeze/convert_breeze.py`:
+   - `_must_keep_source(name) -> bool` 扩展成 `_quant_floor(name) -> str`：
+     - `lm_head`, `embed_tokens.*`, `codebooks_head` → "Q8_0"
+     - 其余 `*.weight` (attn/mlp) → "Q4_0"
+     - norm/codebook/codec_model → "keep_source"（现状）
+   - 新增 `_MAIN_QUANTS = {... "q4_mixed"}` 入口
+   - `_source_ggml_type(name, dtype, target_quant)` 改为查 `_quant_floor(name)`
+2. 测试新增 `q4_mixed`：attn/mlp 走 Q4_0（kind=2），embedding 走 Q8_0（kind=8），norm 保持源
+3. 重新导出 `models/Breeze-TTS-2-gguf/breeze-tts-2-Q4_MIXED.gguf`
+4. 跑 Breeze 推理验证帧数（目标 ≤ BF16 × 1.15）
 
 ### 关联文件
 
-- `tools/converter/breeze/convert_breeze.py:206-238` — `_must_keep_source` / `_source_ggml_type`
+- `tools/converter/breeze/convert_breeze.py:206-238` — `_must_keep_source` / `_source_ggml_type`（待扩展为 `_quant_floor`）
 - `tools/converter/breeze/convert_breeze.py:53-66` — `_is_quantisable_2d_weight`（行宽 % 32 规则）
-- `tools/dots/convert_dots_tts.py:151-...` — K-quant quantize 函数族（参考实现）
-- `src/ops/kernel/quantized_tensor.rs:275-...` — `QuantizedTensor::from_bytes` 接受 Q4_K/Q5_K/Q6_K
-- `src/ops/kernel/{q4_k,q5_k,q6_k}.rs` — K-quant Kernel 实现
+- `tools/converter/utils/gguf.py` — `quantize_q4_0` / `quantize_q8_0`（已实现）
+- `tools/dots/convert_dots_tts.py` — K-quant quantize 函数族（方案 2/3 参考）
+- `src/ops/kernel/quantized_tensor.rs:275-...` — `QuantizedTensor::from_bytes` 接受 Q4_0 / Q8_0 / Q4_K
+- `src/ops/kernel/{q4_0,q4_k}.rs` — Q4_0 / K-quant Kernel 实现
 - `models/Breeze-TTS-2-gguf/breeze-tts-2-Q4_0.wav` — 当前 Q4_0 输出（128 frames，退化证据）
 - `tools/converter/README.md` — breeze 量化对照表
 
