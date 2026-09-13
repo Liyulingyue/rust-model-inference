@@ -45,6 +45,18 @@ LLM_FILENAME = "VibeVoice-ASR-Streaming-7B-Q8_0.gguf"
 MMPROJ_FILENAME = "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf"
 
 
+def model_basename(model_dir: Path) -> str:
+    return model_dir.resolve().name
+
+
+def llm_filename(model_dir: Path) -> str:
+    return f"{model_basename(model_dir)}-Q8_0.gguf"
+
+
+def mmproj_filename(model_dir: Path) -> str:
+    return f"mmproj-{model_basename(model_dir)}-BF16.gguf"
+
+
 # --------------------------------------------------------------------------- #
 # sharded safetensors reader
 # --------------------------------------------------------------------------- #
@@ -214,7 +226,7 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
 
     gguf = GgufWriter(out_path)
     gguf.add_meta("general.architecture", "qwen2")
-    gguf.add_meta("general.name", "VibeVoice-ASR-Streaming-7B")
+    gguf.add_meta("general.name", model_dir.name)
     gguf.add_meta("general.file_type", 7)  # mostly Q8_0
     gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta("qwen2.block_count", n_layer)
@@ -352,7 +364,7 @@ def export_mmproj(model_dir: Path, out_path: Path, shards: ShardedSafetensors, o
 
     gguf = GgufWriter(out_path)
     gguf.add_meta("general.architecture", "clip")
-    gguf.add_meta("general.name", "VibeVoice-ASR-Streaming-7B-mmproj")
+    gguf.add_meta("general.name", f"{model_dir.name}-mmproj")
     gguf.add_meta("general.file_type", 32)  # mostly BF16
     gguf.add_meta("clip.has_vision_encoder", False)
     gguf.add_meta("clip.has_audio_encoder", True)
@@ -423,8 +435,8 @@ def export_mmproj(model_dir: Path, out_path: Path, shards: ShardedSafetensors, o
 # --------------------------------------------------------------------------- #
 
 
-def output_paths(out_dir: Path) -> tuple[Path, Path]:
-    return out_dir / LLM_FILENAME, out_dir / MMPROJ_FILENAME
+def output_paths(model_dir: Path, out_dir: Path) -> tuple[Path, Path]:
+    return out_dir / llm_filename(model_dir), out_dir / mmproj_filename(model_dir)
 
 
 def export_model(model_dir: Path, out_dir: Path, overwrite: bool) -> tuple[Path, Path]:
@@ -434,7 +446,7 @@ def export_model(model_dir: Path, out_dir: Path, overwrite: bool) -> tuple[Path,
         if not (model_dir / name).is_file():
             raise FileNotFoundError(f"missing required input path: {model_dir / name}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_path, mmproj_path = output_paths(out_dir)
+    llm_path, mmproj_path = output_paths(model_dir, out_dir)
     if not overwrite and (llm_path.exists() or mmproj_path.exists()):
         existing = llm_path if llm_path.exists() else mmproj_path
         raise FileExistsError(f"output already exists: {existing}")
