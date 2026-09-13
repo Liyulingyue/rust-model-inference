@@ -2,6 +2,7 @@ use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::models::qwen3::trunk::Qwen3Config;
 use ash::vk;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
@@ -363,36 +364,20 @@ impl TokenDispatchPlan {
 pub(crate) struct TokenCommands<'a> {
     context: &'a VulkanContext,
     command: vk::CommandBuffer,
-    _guard: MutexGuard<'a, ()>,
+    guard: MutexGuard<'a, super::CommandSubmission>,
 }
 
 impl<'a> TokenCommands<'a> {
     pub(crate) fn begin(context: &'a VulkanContext) -> Result<Self, VulkanError> {
-        let guard = context
+        let mut guard = context
             .mutex
             .lock()
             .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
-        unsafe {
-            context
-                .device
-                .reset_command_buffer(
-                    context.command_buffer,
-                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
-                )
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            context
-                .device
-                .begin_command_buffer(
-                    context.command_buffer,
-                    &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-        }
+        context.begin_commands(&mut guard)?;
         Ok(Self {
             context,
             command: context.command_buffer,
-            _guard: guard,
+            guard,
         })
     }
 
@@ -436,35 +421,8 @@ impl<'a> TokenCommands<'a> {
         self.context.device.cmd_dispatch(self.command, x, y, z);
     }
 
-    pub(crate) fn submit_and_wait(self) -> Result<(), VulkanError> {
-        unsafe {
-            self.context
-                .device
-                .end_command_buffer(self.command)
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            self.context
-                .device
-                .reset_fences(std::slice::from_ref(&self.context.fence))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            let submit = vk::SubmitInfo::builder()
-                .command_buffers(std::slice::from_ref(&self.command))
-                .build();
-            self.context
-                .device
-                .queue_submit(self.context.queue, &[submit], self.context.fence)
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            self.context
-                .submission_count
-                .fetch_add(1, Ordering::Relaxed);
-            self.context
-                .device
-                .wait_for_fences(
-                    std::slice::from_ref(&self.context.fence),
-                    true,
-                    60_000_000_000,
-                )
-                .map_err(|_| VulkanError::Timeout)
-        }
+    pub(crate) fn submit_and_wait(mut self) -> Result<(), VulkanError> {
+        self.context.submit_commands(&mut self.guard)
     }
 }
 
@@ -636,40 +594,8 @@ pub(crate) struct BatchedLinearRuntime {
     layout: BatchedLinearLayout,
     weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
     weight_capacity: usize,
-    submission: LinearSubmission,
     #[cfg(test)]
     begin_commands: fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
-    #[cfg(test)]
-    wait_idle: Option<fn(&VulkanContext) -> Result<(), VulkanError>>,
-}
-
-#[derive(Default)]
-struct LinearSubmission {
-    uncertain: bool,
-}
-
-impl LinearSubmission {
-    fn submit(
-        &mut self,
-        submit: impl FnOnce() -> Result<(), VulkanError>,
-    ) -> Result<(), VulkanError> {
-        // Even an error from submission may leave work referring to our buffers.
-        self.uncertain = true;
-        submit()?;
-        self.uncertain = false;
-        Ok(())
-    }
-
-    fn confirm_idle(
-        &mut self,
-        wait: impl FnOnce() -> Result<(), VulkanError>,
-    ) -> Result<(), VulkanError> {
-        if self.uncertain {
-            wait()?;
-            self.uncertain = false;
-        }
-        Ok(())
-    }
 }
 
 impl BatchedLinearRuntime {
@@ -688,32 +614,8 @@ impl BatchedLinearRuntime {
             layout,
             weights: HashMap::new(),
             weight_capacity: descriptor_capacity.saturating_sub(1),
-            submission: LinearSubmission::default(),
             #[cfg(test)]
             begin_commands: TokenCommands::begin,
-            #[cfg(test)]
-            wait_idle: None,
-        })
-    }
-
-    fn recover(&mut self) -> Result<(), VulkanError> {
-        if !self.submission.uncertain {
-            return Ok(());
-        }
-        let context = self.ops.context;
-        let _guard = context
-            .mutex
-            .lock()
-            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
-        #[cfg(test)]
-        if let Some(wait_idle) = self.wait_idle {
-            return self.submission.confirm_idle(|| wait_idle(context));
-        }
-        self.submission.confirm_idle(|| unsafe {
-            context
-                .device
-                .device_wait_idle()
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))
         })
     }
 
@@ -739,7 +641,6 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        self.recover()?;
         #[cfg(test)]
         let commands = (self.begin_commands)(context)?;
         #[cfg(not(test))]
@@ -786,7 +687,7 @@ impl BatchedLinearRuntime {
             rows,
             n_in,
         )?;
-        self.submission.submit(|| commands.submit_and_wait())?;
+        commands.submit_and_wait()?;
         output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
         Ok(())
     }
@@ -794,19 +695,14 @@ impl BatchedLinearRuntime {
 
 impl Drop for BatchedLinearRuntime {
     fn drop(&mut self) {
-        if self.recover().is_err() {
-            // Completion is unknown: leak only our handles rather than free
-            // buffers, descriptors or pipelines still referenced by the GPU.
-            return;
-        }
         let context = self.ops.context;
+        if unsafe {
+            context.destroy_completed_buffers(self.weights.values().map(|(buffer, _)| buffer))
+        }
+        .is_err()
         {
-            let Ok(_guard) = context.mutex.lock() else {
-                return;
-            };
-            for (buffer, _) in self.weights.values() {
-                unsafe { context.destroy_buffer(buffer) };
-            }
+            // Keep runtime resources alive while shared completion is unknown.
+            return;
         }
         // Qwen3Ops acquires the same mutex in Drop.
         unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
@@ -2030,7 +1926,12 @@ impl<'a> Qwen3Ops<'a> {
 
 impl Drop for Qwen3Ops<'_> {
     fn drop(&mut self) {
-        let _guard = self.context.mutex.lock().ok();
+        let Ok(mut submission) = self.context.mutex.lock() else {
+            return;
+        };
+        if self.context.recover_commands(&mut submission).is_err() {
+            return;
+        }
         unsafe {
             self.context
                 .device
@@ -2582,12 +2483,8 @@ fn check_weight_matmul_rows(
         println!("operator=batched_matmul format={format:?} rows={rows} groups=3 input_stride={INPUT_STRIDE} padded_outputs=true exact_bits=true");
         Ok(())
     })();
-    unsafe {
-        for buffer in &buffers {
-            context.destroy_buffer(buffer);
-        }
-    }
-    result.map_err(|error| error.to_string())
+    let cleanup = unsafe { context.destroy_completed_buffers(&buffers) };
+    result.and(cleanup).map_err(|error| error.to_string())
 }
 
 pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
@@ -3020,12 +2917,8 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
         Ok(())
     })();
 
-    unsafe {
-        for buffer in &allocations {
-            context.destroy_buffer(buffer);
-        }
-    }
-    result
+    let cleanup = unsafe { context.destroy_completed_buffers(&allocations) };
+    result.and(cleanup.map_err(|error| error.to_string()))
 }
 
 fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String> {
@@ -3128,8 +3021,8 @@ fn check_weight_matvec(
             tolerance,
         )
     })();
-    unsafe { context.destroy_buffer(&buffer) };
-    result
+    let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
+    result.and(cleanup.map_err(|error| error.to_string()))
 }
 
 fn check_q4_1_zero_scale_min_fixture(
@@ -3975,8 +3868,9 @@ mod tests {
 
     #[test]
     fn batched_linear_submission_failure_requires_confirmed_idle() {
-        use super::{LinearSubmission, VulkanError};
-        let mut submission = LinearSubmission::default();
+        use super::super::CommandSubmission;
+        use super::VulkanError;
+        let mut submission = CommandSubmission::default();
         submission
             .confirm_idle(|| panic!("idle work needs no wait"))
             .unwrap();
@@ -4039,7 +3933,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_failed_recovery_blocks_retry_and_preserves_drop_resources() {
-        use super::{BatchedLinearRuntime, GpuWeightFormat::F32, TokenCommands, VulkanError};
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32, VulkanError};
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
         let weight = [1.0f32; 4];
         let mut runtime = BatchedLinearRuntime::new(context, 1, 4, 1, 2).unwrap();
@@ -4057,12 +3951,14 @@ mod tests {
             .unwrap();
         assert_eq!(output, [4.0]);
         // Simulate a submit/wait failure without intentionally hanging hardware.
-        assert!(runtime
-            .submission
+        assert!(context
+            .mutex
+            .lock()
+            .unwrap()
             .submit(|| Err(VulkanError::Timeout))
             .is_err());
-        runtime.wait_idle = Some(|_| Err(VulkanError::Timeout));
-        runtime.begin_commands = |_| panic!("must confirm idle before command reset");
+        context.fail_wait_idle.store(true, super::Ordering::Relaxed);
+        let resets = context.command_resets.load(super::Ordering::Relaxed);
         let before = runtime
             .ops
             .read_bytes(runtime.layout.input, 16)
@@ -4080,7 +3976,11 @@ mod tests {
                     &mut output
                 )
                 .is_err());
-            assert!(runtime.submission.uncertain);
+            assert!(context.mutex.lock().unwrap().uncertain);
+            assert_eq!(
+                context.command_resets.load(super::Ordering::Relaxed),
+                resets
+            );
             assert_eq!(
                 runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
                 before
@@ -4089,8 +3989,9 @@ mod tests {
             assert_eq!(output, [4.0]);
             assert_eq!(context.submission_count(), 1);
         }
-        runtime.wait_idle = None;
-        runtime.begin_commands = TokenCommands::begin;
+        context
+            .fail_wait_idle
+            .store(false, super::Ordering::Relaxed);
         runtime
             .matmul_rows(
                 bytemuck::cast_slice(&weight),
@@ -4103,14 +4004,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output, [8.0]);
-        assert!(!runtime.submission.uncertain);
+        assert!(!context.mutex.lock().unwrap().uncertain);
 
-        static DROP_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        runtime.submission.uncertain = true;
-        runtime.wait_idle = Some(|_| {
-            DROP_WAITS.fetch_add(1, super::Ordering::Relaxed);
-            Err(VulkanError::Timeout)
-        });
+        context.mutex.lock().unwrap().uncertain = true;
+        context.fail_wait_idle.store(true, super::Ordering::Relaxed);
+        let waits = context.idle_waits.load(super::Ordering::Relaxed);
         // Keep copies solely to reclaim the deliberately leaked resources after
         // the real device confirms completion. The runtime must not free them.
         let retained_ops = unsafe { std::ptr::read(&*runtime.ops) };
@@ -4120,8 +4018,13 @@ mod tests {
             .map(|(buffer, _)| *buffer)
             .collect();
         drop(runtime);
-        assert_eq!(DROP_WAITS.load(super::Ordering::Relaxed), 1);
-        unsafe { context.device.device_wait_idle().unwrap() };
+        assert_eq!(context.idle_waits.load(super::Ordering::Relaxed), waits + 1);
+        context
+            .fail_wait_idle
+            .store(false, super::Ordering::Relaxed);
+        context
+            .recover_commands(&mut context.mutex.lock().unwrap())
+            .unwrap();
         assert_eq!(
             retained_ops
                 .read_f32(
@@ -4211,6 +4114,110 @@ mod tests {
         ] {
             assert!(BatchedLinearLayout::new(maxima.0, maxima.1, maxima.2).is_err());
         }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_shared_context_recovers_across_runtimes_and_legacy() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32, Ordering};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = [1.0f32; 32];
+        let legacy_weight = super::synthetic_q8_weight(32, 1, 3);
+        let mut a = BatchedLinearRuntime::new(context, 1, 32, 1, 2).unwrap();
+        let mut b = BatchedLinearRuntime::new(context, 1, 32, 1, 2).unwrap();
+        for legacy_producer in [false, true] {
+            context.fail_fence_wait.store(true, Ordering::Relaxed);
+            let result = if legacy_producer {
+                unsafe { context.matmul_q8_0(&legacy_weight, &[1; 32], &[1.0], &mut [0.0], 32, 1) }
+            } else {
+                a.matmul_rows(
+                    bytemuck::cast_slice(&weight),
+                    F32,
+                    &[1.0; 32],
+                    1,
+                    32,
+                    1,
+                    &mut [0.0],
+                )
+            };
+            assert!(
+                result.is_err(),
+                "producer must report the injected uncertainty"
+            );
+            assert!(context.mutex.lock().unwrap().uncertain);
+            let resets = context.command_resets.load(Ordering::Relaxed);
+            let submissions = context.submission_count();
+            let cache_size = b.weights.len();
+            let arena = b.ops.read_bytes(b.layout.input, 128).unwrap().to_vec();
+            context.fail_wait_idle.store(true, Ordering::Relaxed);
+            let mut output = [123.0];
+            assert!(b
+                .matmul_rows(
+                    bytemuck::cast_slice(&weight),
+                    F32,
+                    &[2.0; 32],
+                    1,
+                    32,
+                    1,
+                    &mut output
+                )
+                .is_err());
+            assert!(unsafe {
+                context.matmul_q8_0(&legacy_weight, &[1; 32], &[1.0], &mut [0.0], 32, 1)
+            }
+            .is_err());
+            assert_eq!(context.command_resets.load(Ordering::Relaxed), resets);
+            assert_eq!(context.submission_count(), submissions);
+            assert_eq!(b.weights.len(), cache_size);
+            assert_eq!(b.ops.read_bytes(b.layout.input, 128).unwrap(), arena);
+            assert_eq!(output, [123.0]);
+            assert!(context.mutex.lock().unwrap().uncertain);
+            context.fail_wait_idle.store(false, Ordering::Relaxed);
+            b.matmul_rows(
+                bytemuck::cast_slice(&weight),
+                F32,
+                &[2.0; 32],
+                1,
+                32,
+                1,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(output, [64.0]);
+            assert!(!context.mutex.lock().unwrap().uncertain);
+            assert_eq!(context.command_resets.load(Ordering::Relaxed), resets + 1);
+            let generation = context.current_gen();
+            let mut legacy_output = [f32::NAN];
+            unsafe {
+                context
+                    .matmul_q8_0(&legacy_weight, &[1; 32], &[1.0], &mut legacy_output, 32, 1)
+                    .unwrap();
+            }
+            assert!(legacy_output[0].is_finite());
+            assert_eq!(context.current_gen(), generation + 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_owned_buffers_wait_before_cleanup() {
+        use super::{Ordering, VulkanContext};
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let mut owner = super::super::qwen3::UploadedBuffers::new(context);
+        let buffer = owner.upload(&[1, 2, 3, 4]).unwrap();
+        context.mutex.lock().unwrap().uncertain = true;
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        drop(owner);
+        assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(buffer.mapped, 4) },
+            &[1, 2, 3, 4]
+        );
+        assert!(unsafe { context.destroy_completed_buffers(&[buffer]) }.is_err());
+        assert!(context.mutex.lock().unwrap().uncertain);
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        unsafe { context.destroy_completed_buffers(&[buffer]).unwrap() };
+        assert!(!context.mutex.lock().unwrap().uncertain);
     }
 
     #[test]

@@ -55,7 +55,7 @@ pub fn mark_gpu_broken(reason: &str) {
 
 #[cfg(feature = "vulkan")]
 pub struct VulkanContext {
-    entry: ash::Entry,
+    entry: std::mem::ManuallyDrop<ash::Entry>,
     instance: ash::Instance,
     device: ash::Device,
     _physical_device: vk::PhysicalDevice,
@@ -74,7 +74,15 @@ pub struct VulkanContext {
     weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
-    mutex: Mutex<()>,
+    mutex: Mutex<CommandSubmission>,
+    #[cfg(test)]
+    fail_fence_wait: AtomicBool,
+    #[cfg(test)]
+    fail_wait_idle: AtomicBool,
+    #[cfg(test)]
+    command_resets: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    idle_waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     device_name: String,
     shader_float16: bool,
     limits: vk::PhysicalDeviceLimits,
@@ -92,6 +100,37 @@ struct IoState {
     input_q8: Option<GpuBuffer>,
     scales: Option<GpuBuffer>,
     output: Option<GpuBuffer>,
+}
+
+/// Protected by VulkanContext::mutex along with the shared command buffer/fence.
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+struct CommandSubmission {
+    uncertain: bool,
+}
+
+#[cfg(feature = "vulkan")]
+impl CommandSubmission {
+    fn submit(
+        &mut self,
+        submit: impl FnOnce() -> Result<(), VulkanError>,
+    ) -> Result<(), VulkanError> {
+        self.uncertain = true;
+        submit()?;
+        self.uncertain = false;
+        Ok(())
+    }
+
+    fn confirm_idle(
+        &mut self,
+        wait: impl FnOnce() -> Result<(), VulkanError>,
+    ) -> Result<(), VulkanError> {
+        if self.uncertain {
+            wait()?;
+            self.uncertain = false;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "vulkan")]
@@ -190,7 +229,7 @@ impl VulkanContext {
                     Ok(resources) => {
                         eprintln!("[GPU] Vulkan device: {}", candidate.name);
                         return Ok(Self {
-                            entry,
+                            entry: std::mem::ManuallyDrop::new(entry),
                             instance,
                             device: resources.device,
                             _physical_device: candidate.physical_device,
@@ -206,7 +245,15 @@ impl VulkanContext {
                             fence: resources.fence,
                             weight_cache: Mutex::new(HashMap::new()),
                             io_state: Mutex::new(IoState::default()),
-                            mutex: Mutex::new(()),
+                            mutex: Mutex::new(CommandSubmission::default()),
+                            #[cfg(test)]
+                            fail_fence_wait: AtomicBool::new(false),
+                            #[cfg(test)]
+                            fail_wait_idle: AtomicBool::new(false),
+                            #[cfg(test)]
+                            command_resets: std::sync::atomic::AtomicUsize::new(0),
+                            #[cfg(test)]
+                            idle_waits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                             device_name: candidate.name,
                             shader_float16: candidate.shader_float16,
                             limits: candidate.limits,
@@ -237,6 +284,74 @@ impl VulkanContext {
 
     pub fn submission_count(&self) -> u64 {
         self.submission_count.load(Ordering::Relaxed)
+    }
+
+    fn recover_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        submission.confirm_idle(|| {
+            #[cfg(test)]
+            {
+                self.idle_waits.fetch_add(1, Ordering::Relaxed);
+                if self.fail_wait_idle.load(Ordering::Relaxed) {
+                    return Err(VulkanError::Timeout);
+                }
+            }
+            unsafe { self.device.device_wait_idle() }
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))
+        })
+    }
+
+    /// Caller holds mutex, from recovery through recording and submission.
+    fn begin_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        self.recover_commands(submission)?;
+        unsafe {
+            self.device
+                .reset_command_buffer(
+                    self.command_buffer,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+            #[cfg(test)]
+            self.command_resets.fetch_add(1, Ordering::Relaxed);
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::builder()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))
+        }
+    }
+
+    fn submit_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        unsafe {
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+            self.device
+                .reset_fences(std::slice::from_ref(&self.fence))
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+            let submit = vk::SubmitInfo::builder()
+                .command_buffers(std::slice::from_ref(&self.command_buffer))
+                .build();
+            // queue_submit can fail without proving no work was accepted.
+            submission.submit(|| {
+                self.device
+                    .queue_submit(self.queue, &[submit], self.fence)
+                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                self.submission_count.fetch_add(1, Ordering::Relaxed);
+                // Allow driver JIT, preserving the existing 60-second timeout.
+                self.device
+                    .wait_for_fences(std::slice::from_ref(&self.fence), true, 60_000_000_000)
+                    .map_err(|_| VulkanError::Timeout)?;
+                // Inject ambiguity after real completion so RED tests can safely
+                // demonstrate a missing recovery/reset guard without hanging GPU work.
+                #[cfg(test)]
+                if self.fail_fence_wait.swap(false, Ordering::Relaxed) {
+                    return Err(VulkanError::Timeout);
+                }
+                Ok(())
+            })
+        }
     }
 
     /// Run one tiny matmul and wait for it. The driver JITs the compute
@@ -288,7 +403,10 @@ impl VulkanContext {
         n_in: usize,
         n_out: usize,
     ) -> Result<(), VulkanError> {
-        let _lock = self.mutex.lock().unwrap();
+        let mut submission = self
+            .mutex
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
         let blocks_per_row = n_in / 32;
         if blocks_per_row > 512 {
             // shader stages the input row in 4096 shared words (16 KiB);
@@ -302,6 +420,7 @@ impl VulkanContext {
         debug_assert_eq!(input_q8.len(), n_in);
         debug_assert_eq!(input_scales.len(), blocks_per_row);
         debug_assert_eq!(output.len(), n_out);
+        self.begin_commands(&mut submission)?;
 
         // 1. Weight buffer: cache by (ptr, len); upload on first sight.
         let weight_buffer = self.weight_for(weight)?;
@@ -325,24 +444,6 @@ impl VulkanContext {
             scale_buffer.buffer,
             output_buffer.buffer,
         )?;
-
-        self.device
-            .reset_command_buffer(
-                self.command_buffer,
-                vk::CommandBufferResetFlags::RELEASE_RESOURCES,
-            )
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-        self.device
-            .begin_command_buffer(
-                self.command_buffer,
-                &vk::CommandBufferBeginInfo {
-                    s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
-                    p_next: std::ptr::null(),
-                    flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-                    p_inheritance_info: std::ptr::null(),
-                },
-            )
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
 
         self.device.cmd_bind_pipeline(
             self.command_buffer,
@@ -377,34 +478,7 @@ impl VulkanContext {
         self.device
             .cmd_dispatch(self.command_buffer, groups_x, groups_y, 1);
 
-        self.device
-            .end_command_buffer(self.command_buffer)
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-
-        self.device
-            .reset_fences(std::slice::from_ref(&self.fence))
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-        let submit_info = vk::SubmitInfo {
-            s_type: vk::StructureType::SUBMIT_INFO,
-            p_next: std::ptr::null(),
-            wait_semaphore_count: 0,
-            p_wait_semaphores: std::ptr::null(),
-            p_wait_dst_stage_mask: std::ptr::null(),
-            command_buffer_count: 1,
-            p_command_buffers: &self.command_buffer,
-            signal_semaphore_count: 0,
-            p_signal_semaphores: std::ptr::null(),
-        };
-        self.device
-            .queue_submit(self.queue, &[submit_info], self.fence)
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
-        self.submission_count.fetch_add(1, Ordering::Relaxed);
-        // 60s: the driver JITs shaders on first dispatch (observed >5 s on
-        // Meteor Lake), so this timeout only catches true GPU hangs. The
-        // outer watchdog (5 s) abandons wedged calls long before this fires.
-        self.device
-            .wait_for_fences(std::slice::from_ref(&self.fence), true, 60_000_000_000u64)
-            .map_err(|_| VulkanError::Timeout)?;
+        self.submit_commands(&mut submission)?;
         self.completed_gen
             .fetch_add(1, std::sync::atomic::Ordering::Release);
 
@@ -515,6 +589,23 @@ impl VulkanContext {
         self.device.unmap_memory(buf.memory);
         self.device.destroy_buffer(buf.buffer, None);
         self.device.free_memory(buf.memory, None);
+    }
+
+    /// On error the caller must retain/leak these owned handles, never destroy
+    /// them while commands may still refer to them. Caller must not hold mutex.
+    unsafe fn destroy_completed_buffers<'a>(
+        &self,
+        buffers: impl IntoIterator<Item = &'a GpuBuffer>,
+    ) -> Result<(), VulkanError> {
+        let mut submission = self
+            .mutex
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+        self.recover_commands(&mut submission)?;
+        for buffer in buffers {
+            self.destroy_buffer(buffer);
+        }
+        Ok(())
     }
 
     pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
@@ -1192,6 +1283,14 @@ impl Copy for GpuBuffer {}
 #[cfg(feature = "vulkan")]
 impl Drop for VulkanContext {
     fn drop(&mut self) {
+        let Ok(mut submission) = self.mutex.lock() else {
+            return;
+        };
+        if self.recover_commands(&mut submission).is_err() {
+            // Keep device/instance/loader and all owned GPU resources alive if
+            // their completion cannot be confirmed.
+            return;
+        }
         unsafe {
             for (_, buf) in self.weight_cache.lock().unwrap().drain() {
                 self.destroy_buffer(&buf);
@@ -1218,6 +1317,7 @@ impl Drop for VulkanContext {
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
+            std::mem::ManuallyDrop::drop(&mut self.entry);
         }
     }
 }
@@ -1345,6 +1445,46 @@ mod tests {
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_context_drop_retains_uncertain_resources() {
+        let context = VulkanContext::new().unwrap();
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        assert!(super::ops::TokenCommands::begin(&context)
+            .unwrap()
+            .submit_and_wait()
+            .is_err());
+        let waits = context.idle_waits.clone();
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        let device = context.device.clone();
+        let instance = context.instance.clone();
+        // Copies let this test reclaim resources intentionally retained by Drop.
+        let mut entry = std::mem::ManuallyDrop::new(unsafe { std::ptr::read(&*context.entry) });
+        let handles = (
+            context.fence,
+            context.command_pool,
+            context.pipeline,
+            context.pipeline_layout,
+            context.descriptor_set_layout,
+            context.descriptor_pool,
+        );
+        drop(context);
+        assert_eq!(waits.load(Ordering::Relaxed), 1);
+        unsafe {
+            device.device_wait_idle().unwrap();
+            assert!(device.get_fence_status(handles.0).unwrap());
+            device.destroy_fence(handles.0, None);
+            device.destroy_command_pool(handles.1, None);
+            device.destroy_pipeline(handles.2, None);
+            device.destroy_pipeline_layout(handles.3, None);
+            device.destroy_descriptor_set_layout(handles.4, None);
+            device.destroy_descriptor_pool(handles.5, None);
+            device.destroy_device(None);
+            instance.destroy_instance(None);
+            std::mem::ManuallyDrop::drop(&mut entry);
+        }
+    }
 
     fn candidate_for_test(
         device_type: vk::PhysicalDeviceType,

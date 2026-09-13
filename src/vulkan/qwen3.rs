@@ -234,12 +234,7 @@ impl UploadedBuffers {
 
 impl Drop for UploadedBuffers {
     fn drop(&mut self) {
-        let _guard = self.context.mutex.lock().ok();
-        unsafe {
-            for buffer in &self.values {
-                self.context.destroy_buffer(buffer);
-            }
-        }
+        let _ = unsafe { self.context.destroy_completed_buffers(&self.values) };
     }
 }
 
