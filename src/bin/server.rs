@@ -1016,6 +1016,7 @@ fn generate_qwen3_streaming(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         },
         |text| {
             if !text.is_empty() {

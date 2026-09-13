@@ -227,6 +227,7 @@ impl AsrRuntime {
                 Qwen3GenerateOptions {
                     max_new_tokens: options.max_new_tokens,
                     temperature: 0.0,
+                    prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
                 },
             )
             .map_err(internal)?;

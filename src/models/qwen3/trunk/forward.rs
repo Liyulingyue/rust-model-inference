@@ -129,6 +129,7 @@ pub struct Qwen3Input<'a> {
 pub struct Qwen3GenerateOptions {
     pub max_new_tokens: usize,
     pub temperature: f32,
+    pub prefill_batch_size: usize,
 }
 
 #[derive(Clone)]
@@ -652,6 +653,7 @@ pub fn run_shared_inference(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         },
     )?;
     print!("{}", generation.text);

@@ -154,6 +154,7 @@ pub fn run_inference_tokens(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         },
         |text| {
             // 第一个 token 出来表示 prefill 结束

@@ -90,9 +90,6 @@ impl PreparedRows {
                 input.len()
             ));
         }
-        if need_q8 && need_q8k {
-            return Err("prepared rows cannot require both Q8_0 and Q8_K activations".into());
-        }
         if need_q8k && !n_in.is_multiple_of(crate::ops::quant::QK_K) {
             return Err(format!(
                 "Q8_K activation width {n_in} must be divisible by {}",
@@ -145,25 +142,36 @@ impl PreparedRows {
         output: &mut [f32],
         pool: &crate::core::thread_pool::ComputePool,
     ) -> Result<(), String> {
-        if self.rows == 0 || weight.n_in != self.n_in {
-            return Err("prepared rows do not match weight input width".into());
-        }
-        if self.need_q8 != weight.needs_q8_0_activation() || self.need_q8k != weight.uses_q8_k() {
-            return Err("prepared activation format does not match weight".into());
-        }
+        self.matmul_group(input, [(weight, output)], pool)
+    }
+
+    pub(crate) fn matmul_group<const N: usize>(
+        &self,
+        input: &[f32],
+        projections: [(&Weight<'_>, &mut [f32]); N],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) -> Result<(), String> {
         let input_len = self.rows * self.n_in;
-        let output_len = self.rows * weight.n_out;
-        if input.len() != input_len || output.len() != output_len {
-            return Err(format!(
-                "prepared matmul shape mismatch: input {} != {input_len} or output {} != {output_len}",
-                input.len(),
-                output.len()
-            ));
+        if self.rows == 0 || input.len() != input_len {
+            return Err("prepared matmul input shape mismatch".into());
+        }
+        for (weight, output) in &projections {
+            if weight.n_in != self.n_in {
+                return Err("prepared rows do not match weight input width".into());
+            }
+            if (weight.needs_q8_0_activation() && !self.need_q8)
+                || (weight.uses_q8_k() && !self.need_q8k)
+            {
+                return Err("prepared activation format does not match weight".into());
+            }
+            if output.len() != self.rows * weight.n_out {
+                return Err("prepared matmul output shape mismatch".into());
+            }
         }
 
         let blocks = self.n_in.div_ceil(32);
         let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
-        let output_ptr = output.as_mut_ptr();
+        let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
         pool.compute(|ith, nth| {
             for row in 0..self.rows {
                 let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
@@ -177,23 +185,28 @@ impl PreparedRows {
                 } else {
                     &[]
                 };
-                let q8k = self
-                    .need_q8k
-                    .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
-                let output_row = unsafe {
-                    std::slice::from_raw_parts_mut(output_ptr.add(row * weight.n_out), weight.n_out)
-                };
-                weight.kernel.forward_prepared(
-                    input_row,
-                    q8,
-                    scales,
-                    q8k,
-                    output_row,
-                    self.n_in,
-                    weight.n_out,
-                    ith,
-                    nth,
-                );
+                for (weight, output_ptr) in projections {
+                    let q8k = weight
+                        .uses_q8_k()
+                        .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
+                    let output_row = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            output_ptr.add(row * weight.n_out),
+                            weight.n_out,
+                        )
+                    };
+                    weight.kernel.forward_prepared(
+                        input_row,
+                        q8,
+                        scales,
+                        q8k,
+                        output_row,
+                        self.n_in,
+                        weight.n_out,
+                        ith,
+                        nth,
+                    );
+                }
             }
         });
         Ok(())

@@ -158,6 +158,38 @@ fn prepared_rows_match_sequential_matmul_bits_and_reuse_storage() {
 }
 
 #[test]
+fn prepared_group_matches_mixed_format_sequential_bits() {
+    let weights = prepared_row_test_weights();
+    let input = deterministic_rows(3, 256);
+    let selected = [&weights[0], &weights[3], &weights[6]];
+    let expected = selected.map(|weight| sequential_weight_rows(weight, &input, 3));
+    let mut prepared = PreparedRows::new(3, 256);
+    prepared.prepare(&input, 3, 256, true, true).unwrap();
+    let mut outputs = [vec![0.0f32; 6], vec![0.0f32; 6], vec![0.0f32; 6]];
+    let [first, second, third] = &mut outputs;
+    prepared
+        .matmul_group(
+            &input,
+            [
+                (selected[0], first.as_mut_slice()),
+                (selected[1], second.as_mut_slice()),
+                (selected[2], third.as_mut_slice()),
+            ],
+            &ComputePool::new(3),
+        )
+        .unwrap();
+    for (actual, expected) in outputs.iter().zip(expected) {
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn prepared_f32_matmul_does_not_require_q8k_alignment() {
     let weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0, 2.0]));
     let pool = ComputePool::new(1);

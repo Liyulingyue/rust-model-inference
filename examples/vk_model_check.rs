@@ -83,6 +83,7 @@ fn generate(
         Qwen3GenerateOptions {
             max_new_tokens,
             temperature: 0.0,
+            prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         },
     )
 }
