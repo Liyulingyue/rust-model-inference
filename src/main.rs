@@ -9,6 +9,8 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)]";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -62,6 +64,10 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{USAGE}");
+        return;
+    }
     let options = app::parse_cli_options(&args).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
