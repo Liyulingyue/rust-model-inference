@@ -10,9 +10,152 @@ use crate::ops::{
     vec_mad_self_f32, vec_scale_f32,
 };
 use crate::{
+    core::tensor::GGMLType,
     core::thread_pool::ComputePool,
-    ops::kernel::{QuantizedTensor, Weight},
+    ops::kernel::{PreparedRows, QuantizedTensor, Weight},
+    ops::quant::{BlockQ8K, BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, QK_K},
 };
+
+fn leaked_weight_bytes(bytes: Vec<u8>) -> &'static [u8] {
+    Box::leak(bytes.into_boxed_slice())
+}
+
+fn q8_weight_bytes(rows: usize, blocks_per_row: usize) -> &'static [u8] {
+    let mut bytes = vec![1; rows * blocks_per_row * 34];
+    for block in bytes.chunks_exact_mut(34) {
+        block[..2].copy_from_slice(&f32_to_f16(1.0).to_le_bytes());
+    }
+    leaked_weight_bytes(bytes)
+}
+
+fn prepared_row_test_weights() -> Vec<Weight<'static>> {
+    let mut f32_weight = Weight::from_quantized(QuantizedTensor::F32(
+        (0..512).map(|i| (i as f32 % 17.0 - 8.0) / 16.0).collect(),
+    ));
+    f32_weight.n_in = 256;
+    f32_weight.n_out = 2;
+
+    let f16 = (0..512)
+        .flat_map(|i| f32_to_f16((i as f32 % 13.0 - 6.0) / 8.0).to_le_bytes())
+        .collect::<Vec<_>>();
+    let bf16 = (0..512)
+        .flat_map(|i| {
+            half::bf16::from_f32((i as f32 % 11.0 - 5.0) / 8.0)
+                .to_bits()
+                .to_le_bytes()
+        })
+        .collect::<Vec<_>>();
+
+    let cases = [
+        (GGMLType::F16, leaked_weight_bytes(f16)),
+        (GGMLType::BF16, leaked_weight_bytes(bf16)),
+        (GGMLType::Q8_0, q8_weight_bytes(2, 8)),
+        (GGMLType::Q4_0, leaked_weight_bytes(vec![1; 2 * 8 * 18])),
+        (GGMLType::Q4_1, leaked_weight_bytes(vec![1; 2 * 8 * 20])),
+        (
+            GGMLType::Q4K,
+            leaked_weight_bytes(vec![1; 2 * BLOCK_Q4K_SIZE]),
+        ),
+        (
+            GGMLType::Q5K,
+            leaked_weight_bytes(vec![1; 2 * BLOCK_Q5K_SIZE]),
+        ),
+        (
+            GGMLType::Q6K,
+            leaked_weight_bytes(vec![1; 2 * BLOCK_Q6K_SIZE]),
+        ),
+    ];
+
+    std::iter::once(f32_weight)
+        .chain(cases.into_iter().map(|(kind, bytes)| {
+            Weight::from_quantized(QuantizedTensor::from_bytes(bytes, kind, 256, 2))
+        }))
+        .collect()
+}
+
+fn deterministic_rows(rows: usize, n_in: usize) -> Vec<f32> {
+    (0..rows * n_in)
+        .map(|i| (i as f32 % 29.0 - 14.0) / 16.0)
+        .collect()
+}
+
+fn sequential_weight_rows(weight: &Weight<'_>, input: &[f32], rows: usize) -> Vec<u32> {
+    let mut result = Vec::with_capacity(rows * weight.n_out);
+    let pool = ComputePool::new(3);
+    for row in input.chunks_exact(weight.n_in).take(rows) {
+        let mut q8k = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0; QK_K],
+                bsums: [0; QK_K / 16],
+            };
+            weight.n_in / QK_K
+        ];
+        let mut q8 = vec![0; weight.n_in];
+        let mut scales = vec![0.0; weight.n_in.div_ceil(32)];
+        let mut output = vec![0.0; weight.n_out];
+        weight.quantize_and_matmul_with_scratch(
+            row,
+            &mut q8k,
+            &mut q8,
+            &mut scales,
+            &mut output,
+            &pool,
+        );
+        result.extend(output.into_iter().map(f32::to_bits));
+    }
+    result
+}
+
+#[test]
+fn prepared_rows_match_sequential_matmul_bits_and_reuse_storage() {
+    for weight in prepared_row_test_weights() {
+        for rows in [1, 2, 3, 17] {
+            let input = deterministic_rows(rows, weight.n_in);
+            let expected = sequential_weight_rows(&weight, &input, rows);
+            let mut prepared = PreparedRows::new(rows, weight.n_in);
+            prepared
+                .prepare(
+                    &input,
+                    rows,
+                    weight.n_in,
+                    weight.needs_q8_0_activation(),
+                    weight.uses_q8_k(),
+                )
+                .unwrap();
+            let q8_ptr = prepared.q8_ptr_for_test();
+            let q8_capacity = prepared.q8_capacity_for_test();
+            let mut actual = vec![0.0; rows * weight.n_out];
+            prepared
+                .matmul(&weight, &input, &mut actual, &ComputePool::new(3))
+                .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected,
+                "format={:?} rows={rows}",
+                weight.ggml_type,
+            );
+            prepared
+                .prepare(
+                    &input,
+                    rows,
+                    weight.n_in,
+                    weight.needs_q8_0_activation(),
+                    weight.uses_q8_k(),
+                )
+                .unwrap();
+            assert_eq!(prepared.q8_ptr_for_test(), q8_ptr);
+            if weight.needs_q8_0_activation() {
+                assert!(q8_capacity >= rows * weight.n_in);
+            } else {
+                assert_eq!(q8_capacity, 0);
+            }
+        }
+    }
+}
 
 #[test]
 fn prepared_f32_matmul_does_not_require_q8k_alignment() {
