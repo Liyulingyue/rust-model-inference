@@ -11,6 +11,7 @@
 
 use super::config::Qwen35Config;
 use crate::core::scratchpad::KvCache;
+use crate::ops::kernel::PreparedRows;
 use crate::ops::quant;
 
 pub struct Qwen35Scratchpad {
@@ -37,6 +38,7 @@ pub struct Qwen35Scratchpad {
     pub q8k_buf: Vec<quant::BlockQ8K>,
     pub q8_buf: Vec<u8>,
     pub scale_buf: Vec<f32>,
+    pub(crate) prepared: PreparedRows,
 }
 
 impl Qwen35Scratchpad {
@@ -98,7 +100,36 @@ impl Qwen35Scratchpad {
             ],
             q8_buf: vec![0u8; max_matmul_input],
             scale_buf: vec![0.0; (max_matmul_input + 31) / 32],
+            prepared: PreparedRows::new(max_tokens, max_matmul_input),
         }
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        let f32_values = self.x.len()
+            + self.buf.len()
+            + self.normed_buf.len()
+            + self.q_buf.len()
+            + self.k_buf.len()
+            + self.v_buf.len()
+            + self.k_buf2.len()
+            + self.v_buf2.len()
+            + self.qkv_buf.len()
+            + self.z_buf.len()
+            + self.beta_buf.len()
+            + self.alpha_buf.len()
+            + self.score_buf.len()
+            + self.attention_value_buf.len()
+            + self.attn_out_buf.len()
+            + self.ffn_up_buf.len()
+            + self.ffn_gate_buf.len()
+            + self.matmul_out.len()
+            + self.scale_buf.len()
+            + self.conv_states.iter().map(Vec::len).sum::<usize>()
+            + self.ssm_states.iter().map(Vec::len).sum::<usize>();
+        f32_values * std::mem::size_of::<f32>()
+            + self.q8_buf.len()
+            + self.q8k_buf.len() * std::mem::size_of::<quant::BlockQ8K>()
+            + self.prepared.bytes()
     }
 }
 

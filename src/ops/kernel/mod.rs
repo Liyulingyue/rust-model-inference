@@ -212,6 +212,12 @@ impl PreparedRows {
         Ok(())
     }
 
+    pub(crate) fn bytes(&self) -> usize {
+        self.q8.capacity()
+            + self.scales.capacity() * std::mem::size_of::<f32>()
+            + self.q8k.capacity() * std::mem::size_of::<crate::ops::quant::BlockQ8K>()
+    }
+
     #[cfg(test)]
     pub(crate) fn q8_capacity_for_test(&self) -> usize {
         self.q8.capacity()
