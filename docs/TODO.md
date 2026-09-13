@@ -436,3 +436,58 @@ bit-exact md5 + 3 档精度等价。**已满足**。
 - `round_to_bf16_ps` 仍用 stack-array（8-lane scalar round）。AVX2
   f16c (`_mm256_cvtph_ps`) 可加速，但精度等价的 8-lane bf16
   unpack 需要单独的 `_mm256_slli_epi32` 序列，复杂度高。后续按需。
+
+## TODO-008: Breeze F16 合成听感更合理 / F32-BF16 需对齐
+
+### 现状
+
+人工听审发现：Breeze TTS 2 推理输出在三档精度（BF16 / F16 / F32）
+下的**比特级**输出一致（BF16 ↔ F32 严格 bit-exact，md5 `c19502ff...`），
+但**听感上 F16 比 BF16 / F32 更合理**。
+
+| 精度 | md5 | 听感（人工） |
+| --- | --- | --- |
+| BF16 | `c19502ff...` | 与 F32 一致，但听感不如 F16 |
+| F16 | `4dd19b6d...` | **听感更合理** |
+| F32 | `c19502ff...` | 与 BF16 一致 |
+
+数学上 BF16 = F32（BF16 是 F32 的高 16 位），所以两者 bit-exact 等价是数学正确；
+F16 与它们差异是 mantissa 精度 + exponent bias 不同（f16 vs bf16）。
+
+### 影响
+
+- BF16 / F32 路径下 Breeze 端到端输出**不符合用户预期**。
+- F16 路径下用户听感更合理——但当前 F16 的"推理路径"绕过了 input bf16 cast，
+  与 BF16 / F32 的"上游 bf16 量化激活"路径**不一致**。
+- 这是**听感 vs 数值精度**的张力：Breeze 上游训练 / 参考实现大概率用 BF16 模拟精度，
+  F16 路径数学上不对但听感更"干净"——需要在 BF16 / F32 路径上找到听感偏差的根因。
+
+### 选项
+
+1. **关闭 F16 路径**：当前 F16 路径已经数值偏离上游，但听感更佳——删除会回到
+   "BF16 / F32 听感差"的 baseline。无收益。
+2. **加 BF16 / F32 路径的 parity 复现**：用 `cargo test --release --test nemotron_h_parity`
+   抓 BF16 / F32 路径下每个 layer 的 hidden state 数值，看与上游 BF16 checkpoint
+   的 NRMSE。如果 NRMSE 远高于 Q8_0 / F16 路径（Q8_0 在 TTS 听感上反而 OK），
+   说明 BF16 / F32 路径有 SILENT BUG。
+3. **加 F16 的"上游契约"**：当前 F16 路径数学不对（跳过 input bf16 cast）——如果上游
+   训练用 F16 模拟精度，应该重构为 input 直接转 F16 后算 F16 dot（仓库已有
+   `dot_f16_f16_bytes_avx2`）。看 BF16 / F32 听感偏差是否因为"BF16 路径错误地
+   模拟精度损失"。
+4. **加 RMSE / 听感对比自动化**：收集 BF16 / F16 / F32 各 5-10 个 prompt 的 wav，
+   让用户评分（盲测），看是否 F16 听感优势跨 prompt 一致。
+
+### 推荐
+
+方案 2 + 方案 3。先看 BF16 / F32 路径的数值 NRMSE 是否真的异常高——
+如果 NRMSE ≤ 1e-3 是上游 BF16 训练的常态，那"听感偏差"是上游设计问题；
+如果 NRMSE 高，说明 BF16 / F32 路径有 SILENT BUG（如某个 op 没走 SIMD / 路径错误）。
+
+方案 3 是替代方向：如果发现上游设计就是 F16 模拟精度（很多 TTS 模型训练时用
+fp16 而非 bf16），F16 听感反而对齐上游训练——那就让 F16 路径成为默认。
+
+### 关联文件
+
+- `models/Breeze-TTS-2-gguf/README.md` — "Alignment" 段落标注 BF16 / F16 / F32 听感
+- `tools/breeze/test_convert_breeze.py` — 转换器 byte-for-byte 测试（确认 BF16 通路无损）
+- `models/Breeze-TTS-2-gguf/{bf16,f16,f32}_天气真好.wav` — 听感对比样本
