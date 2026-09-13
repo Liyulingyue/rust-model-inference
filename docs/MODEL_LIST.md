@@ -2,7 +2,7 @@
 
 | 模型                          | 版本       | 任务类型             | 参考实现                              | 参考推理权重 | 备注     |
 |-------------------------------|------------|----------------------|---------------------------------------|--------------|----------|
-| Breeze-TTS-2                  | 3.5B          | TTS、指令控制、参考音频声音克隆 |                              | https://huggingface.co/BreezeBlue/breeze-tts-2 | √ |
+| Breeze-TTS-2                  | 3.5B          | TTS、指令控制、参考音频声音克隆 | 原始开发                             | https://huggingface.co/BreezeBlue/breeze-tts-2 | √ |
 | dots.tts-base                 | base       | TTS                  | 原始开发 @ `32407a5`                  | https://huggingface.co/EvoAwaken-Workshop/dots-tts-base-gguf | 待核验 |
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | https://github.com/AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
