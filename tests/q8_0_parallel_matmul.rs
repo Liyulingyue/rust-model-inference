@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rust_model_inference::core::thread_pool::ComputePool;
 use rust_model_inference::ops::quant::BLOCK_Q80_SIZE;
 use rust_model_inference::ops::{
-    matmul_q8_0_quantized, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into,
+    matmul_q8_0_quantized_parallel_rows, matmul_q8_0_quantized_range, quantize_q8_0_into,
 };
 
 const Q8_0_BLOCK_ELEMS: usize = 32;
@@ -43,7 +43,7 @@ fn make_q8_0_weight(n_rows: usize, n_cols: usize, row_offset: i8) -> Vec<u8> {
     data
 }
 
-/// Reference single-threaded output: `matmul_q8_0_quantized`.
+/// Reference single-threaded output: one full-range dispatch.
 fn reference_output(
     weight: &[u8],
     input_q8: &[u8],
@@ -52,7 +52,7 @@ fn reference_output(
     n_out: usize,
 ) -> Vec<f32> {
     let mut out = vec![0.0f32; n_out];
-    matmul_q8_0_quantized(weight, input_q8, input_scales, &mut out, n_in, n_out);
+    matmul_q8_0_quantized_range(weight, input_q8, input_scales, &mut out, n_in, 0, n_out);
     out
 }
 

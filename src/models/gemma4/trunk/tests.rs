@@ -220,6 +220,8 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     .map(f32::from_bits);
     let cache = KvLayer {
         head_dim: 1,
+        row_width: 1,
+        group_size: HEADS,
         keys: keys.to_vec(),
         values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0].to_vec(),
     };

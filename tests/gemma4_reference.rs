@@ -1,7 +1,7 @@
-use rust_model_inference::app::{run_gemma4, Gemma4Request};
 use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::models::gemma4::asr::Gemma4AudioModel;
 use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
+use rust_model_inference::models::gemma4::{run_gemma4, Gemma4Request};
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use serde_json::Value;
 use std::collections::HashMap;
