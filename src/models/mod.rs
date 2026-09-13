@@ -6,6 +6,7 @@ pub mod lfm2;
 pub mod lfm25;
 pub mod lfm2moe;
 pub mod llama;
+pub mod nemotron_h;
 pub mod qwen3;
 pub mod qwen35;
 pub mod spark;

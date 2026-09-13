@@ -29,6 +29,7 @@
 | Gemma 4 E2B | `3173a56471c1753650cd806694145ffd6dcace67` | [`tools/gemma4/build_oracle.sh`](tools/gemma4/build_oracle.sh)、[`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) |
 | Qwen3-TTS Base | `201e50cc2076a20adc460c41598593c7cd7b0813` | [`tools/tts/build_qwen3_tts_oracle.sh`](tools/tts/build_qwen3_tts_oracle.sh)、[`tests/qwen3_tts_reference.rs`](tests/qwen3_tts_reference.rs) |
 | Apple Silicon 性能基准（2026-08-10） | `7ba604f1cb61cd14898138e9abc0b4ff2601f180` | [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md#rust-与-llamacpp-固定机器对比2026-08-10)；这是性能基准 pin，不是通用正确性 Oracle |
+| Nemotron-3 Nano 4B Mamba2 | `96013c511b8e2dc5b6a5dbcf6bf4ad9c10d2bf77`（2026-09-11） | 本地 `references/llama.cpp/build-release/bin/llama-cli`（version 10120），或重新 build；对应 [`tests/nemotron_h_parity.rs`](tests/nemotron_h_parity.rs) 和 [`docs/parity_fixtures/nemotron_h_4b/`](docs/parity_fixtures/nemotron_h_4b/README.md) |
 
 ## 本地 checkout 约定
 

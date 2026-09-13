@@ -120,6 +120,15 @@ pub fn run_inference(
             profile,
             kv_format,
         )
+    } else if arch == "nemotron_h" {
+        crate::models::nemotron_h::trunk::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            kv_format,
+        )
     } else {
         crate::models::qwen3::text::run_inference(
             source.clone(),
