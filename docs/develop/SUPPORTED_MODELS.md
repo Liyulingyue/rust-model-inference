@@ -49,7 +49,7 @@
 | Qwen3-VL 0.6B / 2B 配置 | `qwen3vl` | 文本、图像、视频 | `qwen3vl_merger` mmproj | 两组主模型维度白名单、视觉编码器和 CLI 路由 | `Supported` | 当前代码接受 1024-dim 与 2048-dim 两组配置；没有独立的生成式 VL Oracle 记录。 |
 | Qwen2.5-Omni 兼容 GGUF 对 | `qwen2vl` + `qwen2.5o` projector | 文本、图像、视频、音频 | 匹配 mmproj | 多媒体编码、投影和生成路径 | `Supported` | 架构级覆盖，不代表所有 Qwen2.5-Omni 尺寸均可用。 |
 | Qwen3-Omni MoE 兼容 GGUF 对 | `qwen3vlmoe` + `qwen3vl_merger` projector | 文本、图像、视频、音频 | 匹配 mmproj | MoE、媒体投影和生成路径 | `Supported` | shared-expert 张量仍会被明确拒绝。 |
-| Qwen-Drive-1.0-4B（感知） | `qwen35` + `qwen_drive_perception` | 六相机 3D 检测、占用和地图分割 | `clip` BF16 mmproj、F32 perception、官方 frame manifest | F32 存储、BF16 计算；固定 fixture 与真实 827-tensor 加载 | `Experimental` | ARM64 CPU 已核验 Tokenizer、预处理、FPN/view 与 head/postprocess 的原始 BF16 words；NVIDIA CUDA 端到端 parity 尚未执行，不据此声明 CUDA 等价。 |
+| Qwen-Drive-1.0-4B（感知） | `qwen35` + `qwen_drive_perception` | 六相机 3D 检测、占用和地图分割 | `clip` BF16 mmproj、F32 perception、官方 frame manifest | F32 存储、BF16 计算；固定 fixture、真实 827-tensor 加载与单帧 CPU CLI 输出 | `Experimental` | ARM64 CPU 已核验 Tokenizer、预处理、FPN/view 与 head/postprocess 的原始 BF16 words；官方 nuScenes 六相机帧的真实 CLI 产出 300 个检测框、`[200,200,16]` 占用和 `[200,400]` 地图。NVIDIA CUDA 端到端 parity 尚未执行，不据此声明 CUDA 等价。 |
 | Jina Embeddings v5 Omni retrieval | 带 `pooling_type` 的 Qwen-family arch | 文本、图像、视频、音频 Embedding | 媒体输入需要匹配 mmproj | pooling、媒体编码、CLI 参数和单元测试 | `Supported` | 当前仓库没有固定真实 GGUF/Oracle 的回归测试。 |
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
 | Hunyuan-MT2 1.8B | `hunyuan-dense` | 多语言翻译（33+5）、通用 chat | 无 | Q8_0 | `Verified` | 真实 GGUF 端到端翻译通过（中↔英三组用例），详见 [`docs/usage/hunyuan.md`](../usage/hunyuan.md)。Oracle pin 待补；其他 Hunyuan 尺寸（7B / 30B-A3B-MoE）尚未验证。 |

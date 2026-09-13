@@ -110,4 +110,9 @@ python3 tools/qwen_drive/convert_qwen_drive.py verify \
 The pinned Torch 2.8 Oracle fixtures compare token IDs and raw F32 `u32` /
 BF16 words; the checks do not use numerical tolerances.
 
-Full CUDA end-to-end perception parity is unverified until the NVIDIA gate runs.
+The release CPU CLI produced parseable, finite JSON for official nuScenes frame
+`90162f90eceb4ada9e595bc1adb71b5f`: 300 nine-value detections,
+`[200,200,16]` occupancy, and `[200,400]` map. It took 22,886 seconds and
+15,444,525,056 bytes maximum RSS on ARM64 macOS with 12 threads. Perception
+remains **Experimental**: full CUDA end-to-end parity is unverified until the
+NVIDIA gate runs.
