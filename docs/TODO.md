@@ -261,16 +261,17 @@ F32 AVX2 把 F32 与 BF16 拉到同一量级；F16 AVX2 提升有限，因为 F1
 
 1. **已完成**：F32 AVX2 kernel（`f32/avx2.rs`），结构镜像 `bf16/avx2.rs`，去掉 unpack 步骤。✅
 2. **已完成**：F16 AVX2 kernel（`f16/avx2.rs`），用 `_mm256_cvtph_ps` (F16C) 转换；新增 `forward_f16_dispatch` 让 `forward` / `forward_batched` 走 F16×F32 直通，跳过 input pre-conversion。✅
-3. **未做**：F32 / F16 NEON kernel（占位）；aarch64 落地时实现。
-4. **长期**：抽 `matmul_f32_vs_f32_simd` 公共核心，让 BF16 / F16 / F32 共享 AVX2 代码（去掉各自 unpack 后的版本）；优化空间是 cache blocking / 多线程。
+3. **已完成**：F32 / F16 NEON kernel（占位 → 实现）。✅
+4. **已完成**：抽 `matmul_f32_vs_f32_simd` 公共核心，让 BF16 / F16 / F32 共享 AVX2 代码。✅
 
 ### 推荐
 
-方案 1 + 2 已落地。NEON 是"加法"工作，按需触发。
+全部完成。后续优化空间是 cache blocking / 多线程，不在本 TODO 范围。
 
 ### 关联文件
 
-- `src/ops/kernel/f32/{mod,scalar,avx2,neon}.rs` — F32 SIMD 套件
-- `src/ops/kernel/f16/{mod,scalar,avx2,neon}.rs` — F16 SIMD 套件
-- `src/ops/kernel/bf16/avx2.rs` — 参考模板
+- `src/ops/kernel/simd_avx2.rs` — `avx2_matmul_packed!` 宏 + `hsum256` 共享工具
+- `src/ops/kernel/{bf16,f16,f32}/avx2.rs` — 三个 macro 实例化
+- `src/ops/kernel/{bf16,f16,f32}/scalar.rs` — 参考实现
+- `src/ops/kernel/{f16,f32}/neon.rs` — aarch64 NEON kernels
 - `src/ops/dot.rs:243` — `dot_f16_f16_bytes_avx2`（F16×F16 dot，遗留路径）

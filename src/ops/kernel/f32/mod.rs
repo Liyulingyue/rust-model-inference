@@ -118,8 +118,9 @@ pub(crate) fn forward_f32_rows_dispatch(
             let (start, end) = scalar::row_range(n_out, ith, nth);
             if end > start {
                 let my_out = &mut output[start..end];
+                let weight_bytes: &[u8] = bytemuck::cast_slice(weight);
                 unsafe {
-                    avx2::matmul_f32_vs_f32_avx2(weight, input, my_out, n_in, start, end);
+                    avx2::matmul_f32_vs_f32_avx2(weight_bytes, input, my_out, n_in, start, end);
                     return;
                 }
             }
