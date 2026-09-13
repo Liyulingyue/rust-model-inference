@@ -1,6 +1,6 @@
 use super::config::{CONTEXT, EPS, HEADS, PER_LAYER, VOCAB};
-use super::session::{Gemma4Session, KvLayer};
-use super::weights::kv_source_layer;
+use super::session::{Gemma4PrefillLinear, Gemma4Session, KvLayer};
+use super::weights::{kv_source_layer, Gemma4Model};
 use crate::core::prefill::prefill_chunks;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
@@ -45,6 +45,9 @@ impl Gemma4Session<'_> {
         }
         validate_input_rows(rows, self.model.config.embd)?;
 
+        // The app uses subsequent singleton calls for decode. Keep all chunks
+        // of the initial prompt on the same backend, including batch size one.
+        let prefill = self.seq_len == 0 || rows.len() != 1;
         let mut chunks = prefill_chunks(rows.len(), self.prefill_batch_size).peekable();
         while let Some(range) = chunks.next() {
             let chunk_rows = assemble_validated_input_rows(&rows[range.clone()]);
@@ -53,7 +56,9 @@ impl Gemma4Session<'_> {
                 .iter()
                 .map(|layer| (layer.keys.len(), layer.values.len()))
                 .collect::<Vec<_>>();
-            if let Err(error) = self.forward_chunk_inner(&chunk_rows, chunks.peek().is_none()) {
+            if let Err(error) =
+                self.forward_chunk_inner(&chunk_rows, chunks.peek().is_none(), prefill)
+            {
                 for (layer, (key_len, value_len)) in self.kv.iter_mut().zip(kv_lengths) {
                     layer.keys.truncate(key_len);
                     layer.values.truncate(value_len);
@@ -66,13 +71,14 @@ impl Gemma4Session<'_> {
     }
 
     pub(super) fn forward_chunk(&mut self, rows: &[AssembledInputRow]) -> Result<(), String> {
-        self.forward_chunk_inner(rows, true)
+        self.forward_chunk_inner(rows, true, true)
     }
 
     fn forward_chunk_inner(
         &mut self,
         rows: &[AssembledInputRow],
         project_logits: bool,
+        prefill: bool,
     ) -> Result<(), String> {
         if rows.is_empty() || rows.len() > self.prefill_batch_size {
             return Err("Invalid Gemma4 prefill chunk size".into());
@@ -81,6 +87,12 @@ impl Gemma4Session<'_> {
         let model = self.model;
         let cfg = &model.config;
         let scratch = &mut self.scratch;
+        let mut cpu_linear = Gemma4PrefillLinear::default();
+        let linear = if prefill {
+            &mut self.prefill_linear
+        } else {
+            &mut cpu_linear
+        };
         let row_count = rows.len();
         let embd = cfg.embd;
         let x_len = row_count * embd;
@@ -110,12 +122,14 @@ impl Gemma4Session<'_> {
         for value in &mut scratch.per_layer[..per_layer_len] {
             *value *= token_scale;
         }
-        matmul_rows(
+        prefill_matmul_rows(
             "per_layer_model_proj.weight",
             &model.per_layer_model_proj,
             &scratch.x[..x_len],
             &mut scratch.per_layer_projected[..per_layer_len],
             row_count,
+            model,
+            linear,
             model.pool(),
             &mut scratch.prepared,
             &mut scratch.q8,
@@ -185,6 +199,8 @@ impl Gemma4Session<'_> {
                     ],
                     &scratch.normed[..x_len],
                     row_count,
+                    model,
+                    linear,
                     model.pool(),
                     &mut scratch.prepared,
                     &mut scratch.q8,
@@ -203,12 +219,14 @@ impl Gemma4Session<'_> {
                     &scratch.v[..kv_len],
                 )?;
             } else {
-                matmul_rows(
+                prefill_matmul_rows(
                     &format!("blk.{layer_index}.attn_q.weight"),
                     &layer.attn_q,
                     &scratch.normed[..x_len],
                     &mut scratch.q[..q_len],
                     row_count,
+                    model,
+                    linear,
                     model.pool(),
                     &mut scratch.prepared,
                     &mut scratch.q8,
@@ -269,12 +287,14 @@ impl Gemma4Session<'_> {
                     model.pool(),
                 )?;
             }
-            matmul_rows(
+            prefill_matmul_rows(
                 &format!("blk.{layer_index}.attn_output.weight"),
                 &layer.attn_output,
                 &scratch.attn[..q_len],
                 &mut scratch.projected[..x_len],
                 row_count,
+                model,
+                linear,
                 model.pool(),
                 &mut scratch.prepared,
                 &mut scratch.q8,
@@ -324,6 +344,8 @@ impl Gemma4Session<'_> {
                 ],
                 &scratch.normed[..x_len],
                 row_count,
+                model,
+                linear,
                 model.pool(),
                 &mut scratch.prepared,
                 &mut scratch.q8,
@@ -343,12 +365,14 @@ impl Gemma4Session<'_> {
             {
                 ggml_geglu_fp16_inplace(gate, up);
             }
-            matmul_rows(
+            prefill_matmul_rows(
                 &format!("blk.{layer_index}.ffn_down.weight"),
                 &layer.ffn_down,
                 &scratch.gate[..ffn_len],
                 &mut scratch.down[..x_len],
                 row_count,
+                model,
+                linear,
                 model.pool(),
                 &mut scratch.prepared,
                 &mut scratch.q8,
@@ -371,12 +395,14 @@ impl Gemma4Session<'_> {
                 trace_layer("ffn_out", layer_index, hidden);
             }
 
-            matmul_rows(
+            prefill_matmul_rows(
                 &format!("blk.{layer_index}.inp_gate.weight"),
                 &layer.inp_gate,
                 &scratch.x[..x_len],
                 &mut scratch.per_layer_gate[..row_count * PER_LAYER],
                 row_count,
+                model,
+                linear,
                 model.pool(),
                 &mut scratch.prepared,
                 &mut scratch.q8,
@@ -389,12 +415,14 @@ impl Gemma4Session<'_> {
                     &scratch.per_layer[start..start + PER_LAYER],
                 );
             }
-            matmul_rows(
+            prefill_matmul_rows(
                 &format!("blk.{layer_index}.proj.weight"),
                 &layer.proj,
                 &scratch.per_layer_gate[..row_count * PER_LAYER],
                 &mut scratch.down[..x_len],
                 row_count,
+                model,
+                linear,
                 model.pool(),
                 &mut scratch.prepared,
                 &mut scratch.q8,
@@ -447,13 +475,56 @@ impl Gemma4Session<'_> {
     }
 }
 
+#[cfg(feature = "vulkan")]
 #[allow(clippy::too_many_arguments)]
-fn matmul_rows(
+fn try_vulkan_rows(
+    linear: &mut Gemma4PrefillLinear,
+    model: &Gemma4Model,
     name: &str,
     weight: &Weight<'_>,
     input: &[f32],
     output: &mut [f32],
     rows: usize,
+) -> bool {
+    use crate::vulkan::ops::GpuWeightFormat;
+    if crate::vulkan::gpu_broken() {
+        linear.runtime = None;
+    }
+    if !linear.active() {
+        return false;
+    }
+    let Ok(format) = GpuWeightFormat::from_ggml_type(weight.ggml_type) else {
+        return false;
+    };
+    #[cfg(test)]
+    if let Some(dispatcher) = &linear.dispatcher {
+        let result = dispatcher.lock().unwrap().dispatch(name, rows);
+        return linear.finish_dispatch(result);
+    }
+    let Some(bytes) = model._source.tensor_slice(name) else {
+        return false;
+    };
+    let result = linear.runtime.as_mut().unwrap().matmul_rows(
+        bytes,
+        format,
+        input,
+        rows,
+        weight.n_in,
+        weight.n_out,
+        output,
+    );
+    linear.finish_dispatch(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prefill_matmul_rows(
+    name: &str,
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+    rows: usize,
+    model: &Gemma4Model,
+    linear: &mut Gemma4PrefillLinear,
     pool: &ComputePool,
     prepared: &mut PreparedRows,
     q8: &mut [u8],
@@ -462,6 +533,14 @@ fn matmul_rows(
     if input.len() != rows * weight.n_in || output.len() != rows * weight.n_out {
         return Err(format!("Invalid {name} batched matmul lengths"));
     }
+    #[cfg(feature = "vulkan")]
+    if try_vulkan_rows(linear, model, name, weight, input, output, rows) {
+        return ensure_finite(name, output);
+    }
+    #[cfg(not(feature = "vulkan"))]
+    let _ = (model, linear);
+    #[cfg(feature = "vulkan")]
+    let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
     if name == "per_layer_model_proj.weight" || weight.ggml_type == GGMLType::F32 {
         for (input, output) in input
             .chunks_exact(weight.n_in)
@@ -487,21 +566,27 @@ fn matmul_group_rows<const N: usize>(
     projections: [(&str, &Weight<'_>, &mut [f32]); N],
     input: &[f32],
     rows: usize,
+    model: &Gemma4Model,
+    linear: &mut Gemma4PrefillLinear,
     pool: &ComputePool,
     prepared: &mut PreparedRows,
     q8: &mut [u8],
     scales: &mut [f32],
 ) -> Result<(), String> {
-    if projections.iter().any(|(_, weight, _)| {
-        weight.ggml_type == GGMLType::F32 || weight.ggml_type == GGMLType::BF16
-    }) {
+    if linear.active()
+        || projections.iter().any(|(_, weight, _)| {
+            weight.ggml_type == GGMLType::F32 || weight.ggml_type == GGMLType::BF16
+        })
+    {
         for (name, weight, output) in projections {
-            matmul_rows(
-                name, weight, input, output, rows, pool, prepared, q8, scales,
+            prefill_matmul_rows(
+                name, weight, input, output, rows, model, linear, pool, prepared, q8, scales,
             )?;
         }
         return Ok(());
     }
+    #[cfg(feature = "vulkan")]
+    let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
     let need_q8 = projections
         .iter()
         .any(|(_, weight, _)| weight.needs_q8_0_activation());
@@ -595,6 +680,8 @@ pub(super) fn matmul(
     q8: &mut [u8],
     scales: &mut [f32],
 ) -> Result<(), String> {
+    #[cfg(feature = "vulkan")]
+    let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
     if input.len() != weight.n_in || output.len() != weight.n_out {
         return Err(format!(
             "Invalid {name} matmul lengths: input {}, output {}; expected {}, {}",

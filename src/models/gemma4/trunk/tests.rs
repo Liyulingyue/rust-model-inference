@@ -399,6 +399,256 @@ fn run_counting_gemma4_fixture(prompt_len: usize, batch_size: usize) -> Counting
     }
 }
 
+#[cfg(feature = "vulkan")]
+#[derive(Debug, Clone)]
+pub(super) struct LinearCall {
+    name: String,
+    rows: usize,
+}
+
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+pub(super) struct LinearDispatcher {
+    pub(super) calls: Vec<LinearCall>,
+    pub(super) failures: usize,
+    pub(super) fail_at: Option<usize>,
+}
+
+#[cfg(feature = "vulkan")]
+impl LinearDispatcher {
+    pub(super) fn dispatch(
+        &mut self,
+        name: &str,
+        rows: usize,
+    ) -> Result<(), crate::vulkan::VulkanError> {
+        self.calls.push(LinearCall {
+            name: name.to_owned(),
+            rows,
+        });
+        if self.fail_at == Some(self.calls.len()) {
+            Err(crate::vulkan::VulkanError::Timeout)
+        } else {
+            Err(crate::vulkan::VulkanError::UnsupportedShape(
+                "injected CPU fallback".into(),
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn run_counting_gemma4_vulkan_fixture(prompt_len: usize, batch_size: usize) -> Vec<LinearCall> {
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch_size)
+            .unwrap();
+    let dispatcher = Arc::new(std::sync::Mutex::new(LinearDispatcher::default()));
+    session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
+    session.forward_rows(&fixture_rows(prompt_len)).unwrap();
+    session.prefill_linear.dispatcher = None;
+    Arc::try_unwrap(dispatcher)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap()
+        .calls
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn gemma4_vulkan_linear_dispatches_once_per_projection_chunk() {
+    let calls = run_counting_gemma4_vulkan_fixture(3, 3);
+    assert!(calls.iter().all(|call| call.rows == 3));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.name == "blk.0.attn_q.weight")
+            .count(),
+        1
+    );
+    assert_eq!(calls.len(), 26);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn gemma4_vulkan_linear_batch_one_and_decode_isolation() {
+    let calls = run_counting_gemma4_vulkan_fixture(3, 1);
+    assert_eq!(calls.len(), 78);
+    assert!(calls.iter().all(|call| call.rows == 1));
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 3).unwrap();
+    let dispatcher = Arc::new(std::sync::Mutex::new(LinearDispatcher::default()));
+    session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
+    session.forward_rows(&fixture_rows(1)).unwrap();
+    assert_eq!(dispatcher.lock().unwrap().calls.len(), 26);
+    model.pool().clear_gpu_disabled_workers_for_test();
+    session.forward_rows(&fixture_rows(1)).unwrap();
+    assert_eq!(dispatcher.lock().unwrap().calls.len(), 26);
+    assert_eq!(model.pool().gpu_disabled_workers_for_test(), 1);
+    assert_eq!(session.len(), 2);
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn gemma4_vulkan_linear_fallback_preserves_logits_and_kv() {
+    let expected = run_gemma4_fixture(3, 3);
+    for fail_at in [None, Some(3)] {
+        let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+        let mut session =
+            super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 3).unwrap();
+        let dispatcher = Arc::new(std::sync::Mutex::new(LinearDispatcher {
+            fail_at,
+            ..Default::default()
+        }));
+        session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
+        let logits = session.forward_rows(&fixture_rows(3)).unwrap();
+        assert_eq!(
+            logits.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected.logits
+        );
+        assert_eq!(snapshot_base_kv(&session), expected.base_kv);
+        assert_eq!(session.len(), expected.seq_len);
+        let calls = dispatcher.lock().unwrap();
+        assert_eq!(calls.calls.len(), fail_at.unwrap_or(26));
+        assert_eq!(calls.failures, usize::from(fail_at.is_some()));
+        drop(calls);
+        if fail_at.is_some() {
+            assert!(session.prefill_linear.runtime.is_none());
+            assert!(!session.prefill_linear.active());
+            session.forward_rows(&fixture_rows(3)).unwrap();
+            assert_eq!(dispatcher.lock().unwrap().calls.len(), 3);
+            assert_eq!(dispatcher.lock().unwrap().failures, 1);
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn gemma4_vulkan_linear_cpu_scope_disables_dispatch() {
+    let _scope = ComputePool::disable_gpu_matmul_for_scope();
+    assert!(run_counting_gemma4_vulkan_fixture(3, 3).is_empty());
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
+    use super::session::Gemma4PrefillLinear;
+    use std::collections::HashMap;
+
+    struct ProjectionSource(HashMap<String, (TensorInfo, Vec<u8>)>);
+    impl TensorSource for ProjectionSource {
+        fn metadata(&self, _: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.0.get(name).map(|entry| &entry.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.0.get(name).map(|entry| entry.1.as_slice())
+        }
+    }
+    let mut source = ProjectionSource(HashMap::new());
+    let mut install = |name: String, weight: &mut Weight<'static>, ggml_type: GGMLType| {
+        let elements = weight.n_in * weight.n_out;
+        let bytes = match ggml_type {
+            GGMLType::BF16 => (0..elements)
+                .flat_map(|i| crate::ops::f32_to_bf16((i % 7) as f32 / 1024.0).to_le_bytes())
+                .collect(),
+            GGMLType::F32 => (0..elements)
+                .flat_map(|i| ((i % 11) as f32 / 1024.0).to_le_bytes())
+                .collect(),
+            GGMLType::Q8_0 => (0..elements / 32)
+                .flat_map(|block| {
+                    let mut bytes = [0u8; 34];
+                    bytes[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0 / 128.0).to_le_bytes());
+                    for (i, value) in bytes[2..].iter_mut().enumerate() {
+                        *value = (((block + i * 3) % 9) as i8 - 4) as u8;
+                    }
+                    bytes
+                })
+                .collect(),
+            _ => unreachable!(),
+        };
+        let dims = vec![weight.n_in as u64, weight.n_out as u64];
+        source.0.insert(
+            name.clone(),
+            (
+                TensorInfo {
+                    name: name.clone(),
+                    dims: dims.clone(),
+                    ggml_type,
+                    offset: 0,
+                },
+                bytes,
+            ),
+        );
+        *weight = load_weight(&source, &name, &dims, ggml_type).unwrap();
+    };
+    let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    install(
+        "per_layer_model_proj.weight".into(),
+        &mut model.per_layer_model_proj,
+        GGMLType::BF16,
+    );
+    for (index, layer) in model.layers.iter_mut().enumerate() {
+        for (name, weight) in [
+            ("attn_q", &mut layer.attn_q),
+            ("attn_k", &mut layer.attn_k),
+            ("attn_v", &mut layer.attn_v),
+            ("attn_output", &mut layer.attn_output),
+            ("ffn_gate", &mut layer.ffn_gate),
+            ("ffn_up", &mut layer.ffn_up),
+            ("ffn_down", &mut layer.ffn_down),
+        ] {
+            install(format!("blk.{index}.{name}.weight"), weight, GGMLType::Q8_0);
+        }
+        install(
+            format!("blk.{index}.inp_gate.weight"),
+            &mut layer.inp_gate,
+            GGMLType::F32,
+        );
+        install(
+            format!("blk.{index}.proj.weight"),
+            &mut layer.proj,
+            GGMLType::F32,
+        );
+    }
+    model._source = Arc::new(source);
+    crate::ops::enable_gpu();
+    let context = crate::ops::get_vulkan_context().expect("Vulkan device and warmup");
+    let (n_in, n_out, descriptors) = Gemma4PrefillLinear::limits(&model).unwrap();
+    assert_eq!((n_in, n_out, descriptors), (4096, 4096, 27));
+    let run = |batch| {
+        let mut session =
+            super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch)
+                .unwrap();
+        assert!(session.prefill_linear.runtime.is_some());
+        let before = context.submission_count();
+        let logits = session.forward_rows(&fixture_rows(3)).unwrap();
+        assert_eq!(
+            context.submission_count() - before,
+            if batch == 1 { 78 } else { 26 }
+        );
+        let state = snapshot_gemma4_state(&session);
+        let before_decode = context.submission_count();
+        let decode = session
+            .forward_rows(&[Gemma4InputRow::Token(greedy_id(&logits))])
+            .unwrap();
+        assert_eq!(context.submission_count(), before_decode);
+        (
+            logits.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            state,
+            decode.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(run(3), run(1));
+    println!(
+        "Gemma4 Vulkan device={} BF16/F32/Q8_0 prompt_rows=3 exact_bits=true decode_dispatches=0",
+        context.device_name()
+    );
+}
+
 #[test]
 fn gemma4_prefill_matches_batch_one_across_chunk_boundaries() {
     for len in [1, 2, 3, 63, 64, 65, 127, 128] {
