@@ -915,7 +915,7 @@ impl VulkanContext {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             offset: 0,
-            size: 64,
+            size: 128,
         };
 
         let pipeline_layout = unsafe {

@@ -7,10 +7,14 @@ layout(push_constant) uniform PC {
     uint output_word;
     uint scales_word;
     uint count;
+    uint input_stride;
+    uint output_stride;
+    uint scales_stride;
+    uint token_rows;
 } pc;
 
 float value_at(uint index) {
-    return uintBitsToFloat(arena.data[pc.input_word + index]);
+    return uintBitsToFloat(arena.data[pc.input_word + gl_WorkGroupID.z * pc.input_stride + index]);
 }
 
 int nearest_int(float value) {
@@ -70,7 +74,8 @@ float divide_finite_normal(float numerator, float denominator) {
 
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
-    uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+        uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+        uint row = gl_WorkGroupID.z;
     uint base = block * 256u;
     if (base >= pc.count) return;
     float amax = 0.0;
@@ -85,9 +90,9 @@ void main() {
     }
     if (amax == 0.0) {
         for (uint index = 0u; index < 64u; ++index) {
-            arena.data[pc.output_word + block * 64u + index] = 0u;
+            arena.data[pc.output_word + row * pc.output_stride + block * 64u + index] = 0u;
         }
-        arena.data[pc.scales_word + block] = 0u;
+        arena.data[pc.scales_word + row * pc.scales_stride + block] = 0u;
         return;
     }
     precise float iscale = divide_finite_normal(-127.0, max_value);
@@ -98,8 +103,8 @@ void main() {
             int quantized = min(nearest_int(scaled), 127);
             packed |= uint(quantized & 255) << (byte * 8u);
         }
-        arena.data[pc.output_word + block * 64u + index] = packed;
+        arena.data[pc.output_word + row * pc.output_stride + block * 64u + index] = packed;
     }
     precise float scale = divide_finite_normal(1.0, iscale);
-    arena.data[pc.scales_word + block] = floatBitsToUint(scale);
+    arena.data[pc.scales_word + row * pc.scales_stride + block] = floatBitsToUint(scale);
 }

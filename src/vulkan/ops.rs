@@ -696,6 +696,8 @@ impl<'a> Qwen3Ops<'a> {
             self.f32_word(scales, count / 32, "quantize scales")?,
             self.f32_word(q4_1_input_sums, count / 32, "Q4_1 input sums")?,
             as_u32(count, "quantize length")?,
+            0, 0, 0, 0,
+            1,
         ];
         let (x, y) = super::dispatch_grid(count / 32, &self.context.limits)?;
         unsafe {
@@ -708,6 +710,26 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
+        Ok(())
+    }
+
+    fn record_quantize_q8_0_rows(
+        &self, commands: &TokenCommands<'_>, input: ArenaRegion, q8: ArenaRegion, scales: ArenaRegion,
+        sums: ArenaRegion, count: usize, token_rows: usize, input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        if count == 0 || count % 32 != 0 || token_rows == 0 || input_stride < count {
+            return Err(VulkanError::UnsupportedShape("invalid Q8_0 row shape".into()));
+        }
+        let blocks = count / 32;
+        let push = [
+            self.f32_word(input, count, "quantize input")?, self.byte_word(q8, count, "quantize output")?,
+            self.f32_word(scales, blocks, "quantize scales")?, self.f32_word(sums, blocks, "Q4_1 input sums")?,
+            as_u32(count, "quantize length")?, as_u32(input_stride, "quantize input stride")?,
+            as_u32(input_stride / 4, "quantize q8 stride")?, as_u32(blocks, "quantize scale stride")?,
+            as_u32(blocks, "quantize sum stride")?, as_u32(token_rows, "quantize rows")?,
+        ];
+        let (x, y) = super::dispatch_grid(blocks, &self.context.limits)?;
+        unsafe { commands.bind(self.pipelines[QUANTIZE], self.context.pipeline_layout, &[self.arena_bindings.descriptor_set], bytemuck::cast_slice(&push)); commands.dispatch(x, y, token_rows as u32); commands.barrier(); }
         Ok(())
     }
 
@@ -729,6 +751,8 @@ impl<'a> Qwen3Ops<'a> {
             self.byte_word(q8, count, "Q8_K quantize output")?,
             self.f32_word(scales, count / 256, "Q8_K quantize scales")?,
             as_u32(count, "Q8_K quantize length")?,
+            0, 0, 0,
+            1,
         ];
         let (x, y) = super::dispatch_grid(count / 256, &self.context.limits)?;
         unsafe {
@@ -742,6 +766,48 @@ impl<'a> Qwen3Ops<'a> {
             commands.barrier();
         }
         Ok(())
+    }
+
+    fn record_quantize_q8_k_rows(
+        &self, commands: &TokenCommands<'_>, input: ArenaRegion, q8: ArenaRegion, scales: ArenaRegion,
+        count: usize, token_rows: usize, input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        if count == 0 || count % 256 != 0 || token_rows == 0 || input_stride < count {
+            return Err(VulkanError::UnsupportedShape("invalid Q8_K row shape".into()));
+        }
+        let blocks = count / 256;
+        let push = [
+            self.f32_word(input, count, "Q8_K quantize input")?, self.byte_word(q8, count, "Q8_K quantize output")?,
+            self.f32_word(scales, blocks, "Q8_K quantize scales")?, as_u32(count, "Q8_K quantize length")?,
+            as_u32(input_stride, "Q8_K input stride")?, as_u32(input_stride / 4, "Q8_K output stride")?,
+            as_u32(blocks, "Q8_K scale stride")?, as_u32(token_rows, "Q8_K rows")?,
+        ];
+        let (x, y) = super::dispatch_grid(blocks, &self.context.limits)?;
+        unsafe { commands.bind(self.pipelines[QUANTIZE_K], self.context.pipeline_layout, &[self.arena_bindings.descriptor_set], bytemuck::cast_slice(&push)); commands.dispatch(x, y, token_rows as u32); commands.barrier(); }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matmul_dispatch_for_test(
+        output_rows: usize,
+        token_rows: usize,
+        grouped_weights: usize,
+    ) -> Result<[u32; 3], VulkanError> {
+        if output_rows == 0 || token_rows == 0 || grouped_weights == 0 || grouped_weights > 3 {
+            return Err(VulkanError::UnsupportedShape(
+                "matmul dispatch dimensions must be nonzero and grouped weights must be 1..=3".into(),
+            ));
+        }
+        Ok([
+            as_u32(output_rows, "matmul output rows")?,
+            1,
+            as_u32(
+                token_rows
+                    .checked_mul(grouped_weights)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                "matmul dispatch z",
+            )?,
+        ])
     }
 
     pub(crate) fn record_rms_norm(
@@ -810,29 +876,51 @@ impl<'a> Qwen3Ops<'a> {
         outputs: &[(ArenaRegion, usize)],
         n_in: usize,
     ) -> Result<(), VulkanError> {
+        let packed_outputs: Vec<_> = outputs
+            .iter()
+            .map(|&(region, n_out)| Ok((region, n_out, n_out.checked_mul(4).ok_or(VulkanError::OutOfMemory)?)))
+            .collect::<Result<_, _>>()?;
+        self.record_weight_matmul_rows(
+            commands, bindings, input, q8, q8_scales, q4_1_input_sums, q8k, q8k_scales,
+            &packed_outputs, n_in, 1, n_in,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matmul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        if token_rows == 0 || input_stride < n_in {
+            return Err(VulkanError::UnsupportedShape("invalid Vulkan matmul token rows or input stride".into()));
+        }
+        input_stride.checked_mul(token_rows).ok_or(VulkanError::OutOfMemory)?;
         let format = bindings.weight_format(outputs.len())?;
         let (activation, scales) = match format {
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
                 (input, q8_scales)
             }
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
-                self.record_quantize_q8_k(commands, input, q8k, q8k_scales, n_in)?;
+                self.record_quantize_q8_k_rows(commands, input, q8k, q8k_scales, n_in, token_rows, input_stride)?;
                 (q8k, q8k_scales)
             }
             _ => {
-                self.record_quantize_q8_0(commands, input, q8, q8_scales, q4_1_input_sums, n_in)?;
+                self.record_quantize_q8_0_rows(commands, input, q8, q8_scales, q4_1_input_sums, n_in, token_rows, input_stride)?;
                 (q8, q8_scales)
             }
         };
-        self.record_q8_matvec_group(
-            commands,
-            bindings,
-            activation,
-            scales,
-            outputs,
-            n_in,
-            Some(q4_1_input_sums),
-        )
+        self.record_q8_matmul_rows(commands, bindings, activation, scales, q4_1_input_sums, q8k, q8k_scales, outputs, n_in, token_rows, input_stride)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -874,6 +962,30 @@ impl<'a> Qwen3Ops<'a> {
         n_in: usize,
         q4_1_input_sums: Option<ArenaRegion>,
     ) -> Result<(), VulkanError> {
+        let outputs: Vec<_> = outputs
+            .iter()
+            .map(|&(region, n_out)| Ok((region, n_out, n_out.checked_mul(4).ok_or(VulkanError::OutOfMemory)?)))
+            .collect::<Result<_, _>>()?;
+        self.record_q8_matmul_rows(
+            commands, bindings, q8, scales, q4_1_input_sums.unwrap_or(q8), q8, scales, &outputs, n_in, 1, n_in,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_q8_matmul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
         let (block_elements, block_bytes, pipeline) = format.layout();
         if n_in == 0 || n_in % block_elements != 0 {
@@ -902,6 +1014,10 @@ impl<'a> Qwen3Ops<'a> {
         } else {
             self.byte_word(q8, n_in, "Q8_0 matvec input")?
         };
+        let input_total = input_stride.checked_mul(token_rows).ok_or(VulkanError::OutOfMemory)?;
+        if input_stride < n_in || input_total.checked_mul(if is_float { 4 } else { 1 }).ok_or(VulkanError::OutOfMemory)? > q8.size {
+            return Err(VulkanError::UnsupportedShape("Vulkan input region is too small for token rows".into()));
+        }
         let scales_word = if is_float {
             0
         } else {
@@ -909,9 +1025,7 @@ impl<'a> Qwen3Ops<'a> {
         };
         let q4_1_input_sum_word = if format == GpuWeightFormat::Q4_1 {
             self.f32_word(
-                q4_1_input_sums.ok_or_else(|| {
-                    VulkanError::UnsupportedShape("Q4_1 input sums are required".into())
-                })?,
+                q4_1_input_sums,
                 blocks_per_row,
                 "Q4_1 input sums",
             )?
@@ -923,8 +1037,9 @@ impl<'a> Qwen3Ops<'a> {
             .ok_or(VulkanError::OutOfMemory)?;
         let mut output_words = [0u32; 3];
         let mut rows = [0u32; 3];
+        let mut output_strides = [0u32; 3];
         let mut max_rows = 0usize;
-        for (index, &(region, row_count)) in outputs.iter().enumerate() {
+        for (index, &(region, row_count, row_stride)) in outputs.iter().enumerate() {
             if row_count == 0 {
                 return Err(VulkanError::UnsupportedShape(
                     "Q8_0 matvec output rows must be nonzero".into(),
@@ -937,8 +1052,16 @@ impl<'a> Qwen3Ops<'a> {
                     .ok_or(VulkanError::OutOfMemory)?,
                 "Vulkan weight",
             )?;
+            if row_stride < row_count.checked_mul(4).ok_or(VulkanError::OutOfMemory)? || row_stride % 4 != 0 {
+                return Err(VulkanError::UnsupportedShape("Vulkan output row stride is too small".into()));
+            }
+            let output_bytes = row_stride.checked_mul(token_rows - 1).and_then(|v| v.checked_add(row_count * 4)).ok_or(VulkanError::OutOfMemory)?;
+            if output_bytes > region.size {
+                return Err(VulkanError::UnsupportedShape("Vulkan output region is too small for token rows".into()));
+            }
             output_words[index] = self.f32_word(region, row_count, "Q8_0 matvec output")?;
             rows[index] = as_u32(row_count, "Q8_0 output rows")?;
+            output_strides[index] = as_u32(row_stride / 4, "Q8_0 output stride")?;
             max_rows = max_rows.max(row_count);
         }
         let push = [
@@ -946,14 +1069,17 @@ impl<'a> Qwen3Ops<'a> {
             scales_word,
             as_u32(n_in, "Q8_0 input length")?,
             as_u32(blocks_per_row, "Q8_0 blocks per row")?,
-            output_words[0],
-            rows[0],
-            output_words[1],
-            rows[1],
-            output_words[2],
-            rows[2],
-            as_u32(outputs.len(), "Q8_0 group count")?,
-            q4_1_input_sum_word,
+            output_words[0], rows[0], output_strides[0],
+            output_words[1], rows[1], output_strides[1],
+            output_words[2], rows[2], output_strides[2],
+            as_u32(outputs.len(), "Q8_0 group count")?, q4_1_input_sum_word,
+            as_u32(input_stride, "matmul input stride")?,
+            as_u32(if is_float { input_stride } else { input_stride / 4 }, "matmul q8 stride")?,
+            as_u32(if is_float { 0 } else { blocks_per_row }, "matmul scale stride")?,
+            as_u32(if is_float { 0 } else { blocks_per_row }, "matmul sum stride")?,
+            as_u32(if is_float { input_stride } else { input_stride / 4 }, "matmul q8k stride")?,
+            as_u32(if is_float { 0 } else { blocks_per_row }, "matmul q8k scale stride")?,
+            as_u32(token_rows, "matmul token rows")?,
         ];
         let (x, y) = super::dispatch_grid(max_rows, &self.context.limits)?;
         unsafe {
@@ -963,7 +1089,7 @@ impl<'a> Qwen3Ops<'a> {
                 &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
-            commands.dispatch(x, y, outputs.len() as u32);
+            commands.dispatch(x, y, token_rows.checked_mul(outputs.len()).and_then(|v| u32::try_from(v).ok()).ok_or(VulkanError::OutOfMemory)?);
             commands.barrier();
         }
         Ok(())
@@ -1798,6 +1924,15 @@ fn dispatch_invocations(
         ));
     }
     super::dispatch_grid(count.div_ceil(64), limits)
+}
+
+#[cfg(test)]
+pub(crate) fn matmul_dispatch_for_test(
+    output_rows: usize,
+    token_rows: usize,
+    grouped_weights: usize,
+) -> Result<[u32; 3], VulkanError> {
+    Qwen3Ops::matmul_dispatch_for_test(output_rows, token_rows, grouped_weights)
 }
 
 fn validate_attention_shape(
@@ -3206,6 +3341,22 @@ fn check_close(
 #[cfg(test)]
 mod tests {
     use super::{fill_rope_neox, ArenaLayout, TokenDispatchPlan};
+
+    #[test]
+    fn batched_matmul_dispatch_maps_output_weight_and_token_rows() {
+        let dispatch = super::matmul_dispatch_for_test(65, 3, 2).unwrap();
+        assert_eq!(dispatch, [65, 1, 6]);
+    }
+
+    #[test]
+    fn batched_matmul_dispatch_rejects_empty_and_overflow_shapes() {
+        assert!(super::matmul_dispatch_for_test(0, 1, 1).is_err());
+        assert!(super::matmul_dispatch_for_test(1, 0, 1).is_err());
+        assert!(super::matmul_dispatch_for_test(1, 1, 4).is_err());
+        assert!(super::matmul_dispatch_for_test(usize::MAX, 2, 2).is_err());
+        assert_eq!(super::matmul_dispatch_for_test(3, 1, 1).unwrap(), [3, 1, 1]);
+        assert_eq!(super::matmul_dispatch_for_test(3, 2, 3).unwrap(), [3, 1, 6]);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]

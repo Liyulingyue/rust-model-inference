@@ -31,18 +31,23 @@ fn main() -> ExitCode {
 
 fn formats() -> Result<Vec<String>, String> {
     let mut args = std::env::args().skip(1);
-    let Some(flag) = args.next() else {
-        return Ok(Vec::new());
-    };
-    let value = args
-        .next()
-        .ok_or("--formats needs a comma-separated list")?;
-    if flag != "--formats" || args.next().is_some() {
-        return Err("usage: vk_ops_check [--formats q4_0,q4_1,q4_k,q5_k,q6_k,f16,bf16,f32]".into());
+    let mut formats = Vec::new();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--all-formats" => formats = ["q4_0", "q4_1", "q4_k", "q5_k", "q6_k", "f16", "bf16", "f32"]
+                .into_iter().map(str::to_owned).collect(),
+            "--formats" => {
+                let value = args.next().ok_or("--formats needs a comma-separated list")?;
+                formats = value.split(',').filter(|format| !format.is_empty()).map(str::to_owned).collect();
+            }
+            "--rows" => {
+                let rows = args.next().ok_or("--rows needs a positive integer")?;
+                if rows.parse::<usize>().ok().filter(|&rows| rows > 0).is_none() {
+                    return Err("--rows needs a positive integer".into());
+                }
+            }
+            _ => return Err("usage: vk_ops_check [--all-formats|--formats list] [--rows N]".into()),
+        }
     }
-    Ok(value
-        .split(',')
-        .filter(|format| !format.is_empty())
-        .map(str::to_owned)
-        .collect())
+    Ok(formats)
 }
