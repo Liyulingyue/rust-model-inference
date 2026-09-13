@@ -4,8 +4,22 @@
 //! dominate). For tests this kernel still exposes a working f32 matmul on
 //! the `forward` path; the production `forward_prequantized` is a placeholder
 //! that emits zeros because F32 weights do not appear in `LayerWeights`.
+//!
+//! Module structure mirrors the BF16 kernel so we get x86_64 AVX2+FMA and
+//! aarch64 NEON paths transparently:
+//! - `scalar.rs` — scalar fallback (also the reference for SIMD tests).
+//! - `avx2.rs`    — AVX2+FMA f32×f32 matmul (Breeze `--quant f32` warm path).
+//! - `neon.rs`    — NEON f32×f32 matmul.
+//!
+//! TODO-005 in `docs/TODO.md` tracks the broader plan to share a single
+//! `matmul_f32_vs_f32_simd` core across BF16/F16/F32.
 
 use super::Kernel;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
+pub mod scalar;
 
 #[derive(Debug, Clone)]
 pub struct F32Kernel {
@@ -52,45 +66,29 @@ impl Kernel for F32Kernel {
         ith: usize,
         nth: usize,
     ) {
-        let start = ith * n_out.div_ceil(nth);
-        let end = (start + n_out.div_ceil(nth)).min(n_out);
-        for out_idx in start..end {
-            let row_off = out_idx * n_in;
-            let mut sum = 0.0;
-            for col in 0..n_in {
-                sum += self.weight[row_off + col] * input_f32[col];
-            }
-            output[out_idx] = sum;
-        }
+        scalar::forward_f32_rows(&self.weight, input_f32, output, n_in, n_out, ith, nth);
     }
 
     /// F32 has a native f32-input path. The trait default impl quantizes
     /// the input to Q8 then calls `forward_prequantized` (zero for F32);
-    /// we override here to do the real f32 matmul. Tests + any future
-    /// non-LayerWeights callers use this path.
+    /// we override here to do the real f32 matmul via SIMD when available.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
-        debug_assert_eq!(self.weight.len(), n_out * n_in);
-        debug_assert!(input.len() >= n_in);
-        debug_assert!(output.len() >= n_out);
-
-        for (out_idx, row) in (0..n_out).enumerate() {
-            let row_off = row * n_in;
-            let mut sum = 0.0f32;
-            for col in 0..n_in {
-                sum += self.weight[row_off + col] * input[col];
-            }
-            output[out_idx] = sum;
-        }
+        forward_f32_rows_dispatch(&self.weight, input, output, n_in, n_out, 0, 1);
     }
 
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
-        for t in 0..n_tokens {
-            self.forward(
-                &input[t * n_in..(t + 1) * n_in],
-                &mut output[t * n_out..(t + 1) * n_out],
+        debug_assert_eq!(input.len(), n_tokens * n_in);
+        debug_assert_eq!(output.len(), n_tokens * n_out);
+        for token in 0..n_tokens {
+            forward_f32_rows_dispatch(
+                &self.weight,
+                &input[token * n_in..(token + 1) * n_in],
+                &mut output[token * n_out..(token + 1) * n_out],
                 n_in,
                 n_out,
+                0,
+                1,
             );
         }
     }
@@ -99,6 +97,49 @@ impl Kernel for F32Kernel {
         let offset = token_id as usize * n_embd;
         output.copy_from_slice(&self.weight[offset..offset + n_embd]);
     }
+}
+
+/// F32×F32 row-dispatch helper that selects AVX2 / NEON / scalar at runtime.
+/// Mirrors `bf16::BF16Kernel::forward_f32_rows` and lives here so the BF16 /
+/// F32 SIMD paths stay symmetric and can later converge into a single
+/// `matmul_f32_vs_f32_simd` core (TODO-005).
+pub(crate) fn forward_f32_rows_dispatch(
+    weight: &[f32],
+    input: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                let weight_bytes: &[u8] = bytemuck::cast_slice(weight);
+                unsafe {
+                    avx2::matmul_f32_vs_f32_avx2(weight_bytes, input, my_out, n_in, start, end);
+                    return;
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    neon::matmul_f32_vs_f32_neon(weight, input, my_out, n_in, start, end);
+                    return;
+                }
+            }
+        }
+    }
+    scalar::forward_f32_rows(weight, input, output, n_in, n_out, ith, nth);
 }
 
 /// F32 scalar matmul kernel. Phase 2.7-final: moved from `ops::matmul`.
@@ -116,20 +157,7 @@ pub fn matmul_f32_scalar_range(
     ith: usize,
     nth: usize,
 ) {
-    let per_thread = (n_out + nth - 1) / nth;
-    let my_start = ith * per_thread;
-    let my_end = (my_start + per_thread).min(n_out);
-    if my_start >= my_end {
-        return;
-    }
-    for out_idx in my_start..my_end {
-        let mut sum = 0.0f32;
-        let row_off = out_idx * n_in;
-        for col in 0..n_in {
-            sum += weight[row_off + col];
-        }
-        output[out_idx] = sum;
-    }
+    scalar::row_dot_range(weight, output, n_in, n_out, ith, nth);
 }
 
 #[cfg(test)]
