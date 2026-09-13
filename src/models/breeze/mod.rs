@@ -1,10 +1,23 @@
-//! Breeze TTS 2: lossless BF16 text/backbone/depth inference and native 24 kHz codec.
+//! Breeze TTS 2: lossless text/backbone/depth inference and native 24 kHz codec.
+//!
+//! Tensor precision policy mirrors the loader used downstream:
+//!
+//! * learned 2D matrices (attn/MLP/embed/proj/head weights) go through
+//!   `crate::models::dots::weights::load_weight`, which accepts
+//!   `F32 | F16 | BF16 | Q8_0` via [`QuantizedTensor`] and is driven by the
+//!   actual `tensor_info.ggml_type` of each tensor — quantised GGUF outputs
+//!   produced by `tools/converter/breeze/convert_breeze.py --quant q8_0|q4_0`
+//!   are therefore loadable without further Rust changes.
+//! * 1D weight vectors (norms, eoi_embedding, codebooks_head) are loaded via
+//!   `load_f32_tensor`, which currently accepts `F32 | BF16` only.  The
+//!   `require_f32_compatible` preflight mirrors that constraint so failure
+//!   surfaces early rather than after iterating ~300 norm tensors.
 pub mod codec;
 #[cfg(test)]
 mod tests;
 mod transformer;
 
-use crate::core::tensor::{load_f32_tensor, MetaValue, TensorSource};
+use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::{Kernel, Weight};
 pub use codec::BreezeCodec;
 use rand::{Rng, SeedableRng};
@@ -37,19 +50,23 @@ pub struct BreezeModel<'a> {
 
 impl<'a> BreezeModel<'a> {
     pub fn from_source(source: &'a dyn TensorSource, threads: usize) -> Result<Self, String> {
-        // These tensors use the shared F32/BF16 loader, but the original checkpoint
-        // stores all of them as BF16. Missing tensors, shapes and bytes are checked below.
-        let require_bf16 = |name: &str| -> Result<(), String> {
-            if source
-                .tensor_info(name)
-                .is_some_and(|info| info.ggml_type != crate::core::tensor::GGMLType::BF16)
-            {
-                return Err(format!("{name}: Breeze requires original BF16 weights"));
+        // These tensors use the shared F32/BF16 loader (`load_f32_tensor`).
+        // The preflight mirrors that constraint so failure surfaces up front;
+        // keep this list in lockstep with `load_f32_tensor`'s accepted types
+        // and remove the preflight entirely once every norm tensor is also
+        // routed through a multi-precision loader.
+        let require_f32_compatible = |name: &str| -> Result<(), String> {
+            match source.tensor_info(name) {
+                None => Err(format!("Missing tensor: {name}")),
+                Some(info) if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) => Err(format!(
+                    "{name}: Breeze loader accepts F32 or BF16, got {:?}",
+                    info.ggml_type
+                )),
+                Some(_) => Ok(()),
             }
-            Ok(())
         };
-        require_bf16("depth_decoder.codebooks_head.weight")?;
-        require_bf16("text_encoder.embed_tokens.eoi_embedding")?;
+        require_f32_compatible("depth_decoder.codebooks_head.weight")?;
+        require_f32_compatible("text_encoder.embed_tokens.eoi_embedding")?;
         for (prefix, count, norms) in [
             (
                 "text_encoder",
@@ -79,10 +96,10 @@ impl<'a> BreezeModel<'a> {
                 &["input_layernorm", "post_attention_layernorm"][..],
             ),
         ] {
-            require_bf16(&format!("{prefix}.norm.weight"))?;
+            require_f32_compatible(&format!("{prefix}.norm.weight"))?;
             for index in 0..count {
                 for norm in norms {
-                    require_bf16(&format!("{prefix}.layers.{index}.{norm}.weight"))?;
+                    require_f32_compatible(&format!("{prefix}.layers.{index}.{norm}.weight"))?;
                 }
             }
         }

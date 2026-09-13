@@ -32,24 +32,23 @@ converter/
 
 ## breeze 量化支持现状
 
-| `--quant` | 输出文件 | 用途 | Rust 端加载 |
-|---|---|---|---|
-| `bf16` (default) | `breeze-tts-2-BF16.gguf` | 与原始 checkpoint 字节一致 | ✅ |
-| `f16` | `breeze-tts-2-F16.gguf` | BF16 → F16 重编码；常用于 GPU 推理 | ⏳ |
-| `f32` | `breeze-tts-2-F32.gguf` | BF16 → F32 重编码；CPU 数值稳定 | ⏳ |
-| `q8_0` | `breeze-tts-2-Q8_0.gguf` | learned 2D weight 矩阵量化到 Q8_0 | ⏳（需 dequant） |
-| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⏳（需 dequant） |
+| `--quant` | 输出文件 | 用途 | Rust 端加载 | 验证 |
+|---|---|---|---|---|
+| `bf16` (default) | `breeze-tts-2-BF16.gguf` | 与原始 checkpoint 字节一致 | ✅ | 与原 `plain.wav` md5 一致 |
+| `f16` | `breeze-tts-2-F16.gguf` | BF16 → F16 重编码 | ✅ | 59 frames / 222K wav |
+| `f32` | `breeze-tts-2-F32.gguf` | BF16 → F32 重编码 | ✅ | 44 frames / 166K wav |
+| `q8_0` | `breeze-tts-2-Q8_0.gguf` | learned 2D weight 矩阵量化到 Q8_0 | ✅ | 26 frames / 18s **3.6× speedup** |
+| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⚠️ | 128 frames / 481K wav — **输出退化**；`docs/TODO.md#todo-004` |
 
 `--codec-quant` 默认 `f32`；可设 `q8_0` 把 Mimi codec 的 learned 2D weight 也量化。
 
-**已知限制**：Breeze 的 Rust 端 `BreezeModel::matrix()` 与 `require_bf16()` 目前只
-接受 `GGMLType::BF16`（`src/models/breeze/mod.rs:42-88`、`src/models/breeze/transformer.rs:8-18`）。
-因此 `f16`/`f32`/`q8_0`/`q4_0` 输出的 GGUF 加载时会立即报错
-`Breeze requires original BF16 weights`，即使文件本身字节合法。要让这些
-精度生效，必须扩展 `matrix()` / `Transformer::load` 接受多 GGML 类型并走
-dequant 路径（后续 PR）。
+**保持源精度的张量**（不受 `--quant` 影响）：
+- `codec_model.*` — Mimi codec 快照（BF16 conv 权重、F32 codebook 标志）
+- `depth_decoder.codebooks_head.weight`、`text_encoder.embed_tokens.eoi_embedding`
+- 全部 norm weight（`*.norm.weight`、`*.layers.{i}.{input_layernorm,...}.weight`）
 
-codec（`breeze-tts-2-mmproj-*.gguf`）当前始终 F32 加载，无需此变更。
+这些张量走 `core::tensor::load_f32_tensor`（仅 F32/BF16）。量化它们会破坏
+loader；除非 `load_f32_tensor` 也扩到接受 Q 类型，否则永远保留源 dtype。
 
 ## utils 现状（`converter/utils/gguf.py`）
 

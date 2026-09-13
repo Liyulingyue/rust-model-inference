@@ -1,8 +1,21 @@
-//! Native BF16 T5Gemma2/Qwen3/Breeze-depth operations. Weight storage is unchanged.
+//! Native Breeze depth/text/backbone operations over the shared
+//! [`Weight`] + [`Kernel`] abstraction.  Weight storage follows the
+//! `tensor_info.ggml_type` of each tensor; the underlying
+//! `crate::ops::kernel::QuantizedTensor` accepts every GGML type the rest
+//! of the model zoo supports (F32 / F16 / BF16 / Q4_0 / Q4_1 / Q4_K / Q5_K
+//! / Q6_K / Q8_0 / Q2_K / Q3_K / IQ1_M / IQ1_S / IQ2_XXS / IQ2_XS / IQ2_S
+//! / IQ3_XXS / IQ3_S / IQ4_NL / IQ4_XS), so quantised GGUF outputs from
+//! the converter are loadable here without per-type branching.
+//!
+//! Follows the qwen3 / dots convention: no per-model `load_weight` shim —
+//! weights are constructed directly via `Weight::from_quantized(
+//! QuantizedTensor::from_bytes(...))` against the live `tensor_info`.
+//! See `docs/TODO.md` for the consolidation plan that would fold the
+//! remaining `load_weight`/`load_weight_any` variants into a single core
+//! helper.
 use super::{bf, trace};
-use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
-use crate::models::dots::weights::load_weight;
-use crate::ops::kernel::Weight;
+use crate::core::tensor::{load_f32_tensor, TensorSource};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use rayon::prelude::*;
 
 pub(super) fn matrix<'a>(
@@ -11,10 +24,32 @@ pub(super) fn matrix<'a>(
     input: usize,
     output: usize,
 ) -> Result<Weight<'a>, String> {
-    if source.tensor_info(name).map(|t| t.ggml_type) != Some(GGMLType::BF16) {
-        return Err(format!("{name}: Breeze requires original BF16 weights"));
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let n_in = input;
+    let n_out = output;
+    let expected = info
+        .checked_nbytes()
+        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
+    let expected = usize::try_from(expected)
+        .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
     }
-    load_weight(source, name, &[input as u64, output as u64])
+    let mut weight =
+        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, info.ggml_type, n_in, n_out));
+    // QuantizedTensor's F32 variant loses matrix shape; the rest of Breeze
+    // already relies on `Weight::n_in` / `Weight::n_out` being correct.
+    weight.n_in = n_in;
+    weight.n_out = n_out;
+    Ok(weight)
 }
 
 pub(super) fn linear(weight: &Weight<'_>, input: &[f32]) -> Vec<f32> {

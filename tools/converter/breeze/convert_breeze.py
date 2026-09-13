@@ -203,17 +203,55 @@ def _load_audio(model_dir: Path, codec_quant: str):
     return [(name, path, entry) for name, entry in sorted(header.items())]
 
 
-def _source_ggml_type(name: str, source_dtype: str, target_quant: str):
-    """Pick the GGUF tensor type for a tensor under target_quant.
-
-    ``codec_model.*`` tensors in the main GGUF are the Breeze codec module
-    snapshots shipped alongside the model.  They keep their source dtype
-    (BF16 for conv weights, F32 for codebook initialisation flags) so that
-    the Rust loader's dtype preflight matches.  Other tensors honour the
-    global ``target_quant``; learned 2D weights additionally get Q8_0/Q4_0
-    encoding via ``_quantized_payload``.
+def _must_keep_source(name: str) -> bool:
+    """Tensors the Breeze Rust loader reads via ``load_f32_tensor`` (F32/BF16
+    only).  Keeping their source dtype intact lets ``f16``/``f32``/``q8_0``/
+    ``q4_0`` GGUF outputs load under the relaxed preflight without touching
+    the per-tensor type for every norm in the model.
     """
-    if name.startswith("codec_model."):
+    if name == "depth_decoder.codebooks_head.weight":
+        return True
+    if name == "text_encoder.embed_tokens.eoi_embedding":
+        return True
+    if name.endswith(".norm.weight"):
+        return True
+    for prefix, count, norms in [
+        ("text_encoder", 26, [
+            "pre_self_attn_layernorm", "post_self_attn_layernorm",
+            "pre_feedforward_layernorm", "post_feedforward_layernorm",
+            "self_attn.q_norm", "self_attn.k_norm",
+        ]),
+        ("backbone_model", 28, [
+            "input_layernorm", "post_attention_layernorm",
+            "self_attn.q_norm", "self_attn.k_norm",
+        ]),
+        ("depth_decoder.model", 12, [
+            "input_layernorm", "post_attention_layernorm",
+        ]),
+    ]:
+        for index in range(count):
+            for norm in norms:
+                if name == f"{prefix}.layers.{index}.{norm}.weight":
+                    return True
+    return False
+
+
+def _source_ggml_type(name: str, source_dtype: str, target_quant: str):
+    """Pick the GGUF tensor type for a tensor under ``target_quant``.
+
+    The following tensors keep their source dtype regardless of
+    ``target_quant``:
+      * ``codec_model.*`` — Mimi codec module snapshots (BF16 conv weights,
+        F32 codebook initialisation flags).
+      * norm weights and codebook/eoi embedding vectors — the Rust loader
+        feeds these through ``load_f32_tensor`` (F32/BF16 only); quantising
+        them would break the loader even if the underlying kernels
+        supported it.
+
+    Other tensors honour ``target_quant``; learned 2D weights additionally
+    get Q8_0/Q4_0 encoding via ``_quantized_payload``.
+    """
+    if name.startswith("codec_model.") or _must_keep_source(name):
         return {"BF16": GGML_BF16, "F32": GGML_F32}[source_dtype]
     if target_quant in {"q8_0", "q4_0"}:
         return {"BF16": GGML_BF16, "F32": GGML_F32}[source_dtype]
@@ -329,8 +367,11 @@ def _build(
                     remaining -= len(chunk)
                     yield chunk
 
-        # codec_model.* tensors keep their source bytes verbatim
-        if name.startswith("codec_model."):
+        # codec_model.* tensors and F32-only tensors (norm / eoi / codebook
+        # head) keep their source bytes verbatim — they cannot be re-encoded
+        # to F16/F32/Q8_0/Q4_0 because the Rust loader pins them to F32 or
+        # BF16 via ``load_f32_tensor``.
+        if name.startswith("codec_model.") or _must_keep_source(name):
             encoded = b"".join(chunks())
         else:
             payload_iter = _quantized_payload(name, source_dtype, shape, chunks(), target_quant)
