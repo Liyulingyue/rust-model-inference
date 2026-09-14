@@ -825,7 +825,7 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
     let old_filter = std::env::var_os("RMI_PARITY_FILTER");
     std::env::set_var(
         "RMI_PARITY_FILTER",
-        "gemma4.prompt_logits,gemma4.generated_ids",
+        "gemma4.prompt_logits,gemma4.generated_ids,gemma4.kv",
     );
     let model = gemma4_model_path();
     let prompt = format!(
@@ -871,6 +871,18 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
             assert!(records
                 .iter()
                 .any(|record| record.checkpoint == "gemma4.generated_ids" && record.len == 32));
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.checkpoint == "gemma4.kv.0.keys"),
+                "real-model trace must include prompt-end KV keys"
+            );
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.checkpoint == "gemma4.kv.0.values"),
+                "real-model trace must include prompt-end KV values"
+            );
             if let Some(previous) = &baseline {
                 assert_trace_equal(backend, previous, &records).unwrap();
             } else {

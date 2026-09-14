@@ -67,6 +67,18 @@ impl Gemma4Session<'_> {
             }
             self.seq_len += range.len();
         }
+        #[cfg(feature = "parity-trace")]
+        if crate::parity_trace::enabled("gemma4.kv") {
+            for (layer, kv) in self.kv.iter().enumerate() {
+                trace(0, &format!("gemma4.kv.{layer}.keys"), Some(layer), &kv.keys);
+                trace(
+                    0,
+                    &format!("gemma4.kv.{layer}.values"),
+                    Some(layer),
+                    &kv.values,
+                );
+            }
+        }
         Ok(self.scratch.logits.clone())
     }
 
