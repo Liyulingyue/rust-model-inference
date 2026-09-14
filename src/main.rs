@@ -297,6 +297,53 @@ fn main() {
             options.kv_format,
             true,
         ));
+        // Qwen3.5 (qwen35) ships its own dense transformer; the generic
+        // qwen3 text dispatch would fail to load it because the
+        // per-layer tensor names differ (`blk.{i}.attn_norm` only, no
+        // `ffn_norm`).  Mirror `run_interactive` so the chat template,
+        // tokenizer and prompt token ids line up with the rest of the
+        // qwen35 family; the qwen35 multimodal stack handles the
+        // image-less case (it just skips the vision stage).
+        if arch == "qwen35" {
+            use std::io::{self, BufRead, Write};
+            println!("=== RustModelInference Interactive Mode (qwen35) ===");
+            println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
+            loop {
+                print!("> ");
+                if let Err(error) = io::stdout().flush() {
+                    app::run_or_exit(Err(format!("Failed to flush prompt: {error}")));
+                    return;
+                }
+                let mut line = String::new();
+                let read_result = io::stdin().read_line(&mut line);
+                match read_result {
+                    Err(error) => {
+                        app::run_or_exit(Err(format!("Failed to read prompt: {error}")));
+                        return;
+                    }
+                    Ok(0) => break,
+                    Ok(_) => {}
+                }
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                app::run_or_exit(app::run_multimodal_with_video(
+                    Arc::clone(&source),
+                    model_path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    line,
+                    max_tokens,
+                    temperature,
+                    options.threads,
+                ));
+                println!();
+            }
+            return;
+        }
         app::run_or_exit(app::run_interactive(
             source.clone(),
             max_tokens,
