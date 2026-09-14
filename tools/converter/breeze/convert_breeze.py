@@ -43,10 +43,24 @@ from converter.utils.gguf import (  # noqa: E402
 
 _ELEMENT_BYTES = {"BF16": 2, "F32": 4}
 
-_MAIN_QUANTS = {"bf16", "f16", "f32", "q8_0", "q4_0"}
+_MAIN_QUANTS = {"bf16", "f16", "f32", "q8_0", "q4_0", "q4_mixed"}
 _CODEC_QUANTS = {"f32", "q8_0"}
-_QUANT_TO_GGML = {"bf16": GGML_BF16, "f16": GGML_F16, "f32": GGML_F32, "q8_0": GGML_Q8_0, "q4_0": GGML_Q4_0}
-_QUANT_TO_SUFFIX = {"bf16": "BF16", "f16": "F16", "f32": "F32", "q8_0": "Q8_0", "q4_0": "Q4_0"}
+_QUANT_TO_GGML = {
+    "bf16": GGML_BF16,
+    "f16": GGML_F16,
+    "f32": GGML_F32,
+    "q8_0": GGML_Q8_0,
+    "q4_0": GGML_Q4_0,
+    "q4_mixed": GGML_BF16,
+}
+_QUANT_TO_SUFFIX = {
+    "bf16": "BF16",
+    "f16": "F16",
+    "f32": "F32",
+    "q8_0": "Q8_0",
+    "q4_0": "Q4_0",
+    "q4_mixed": "Q4_MIXED",
+}
 _LEARNED_LEAFS = {"weight"}
 
 
@@ -236,6 +250,63 @@ def _must_keep_source(name: str) -> bool:
     return False
 
 
+def _protected_layer_index(name: str) -> int | None:
+    """Return the layer index of a learned-2D-weight tensor, or None.
+
+    Recognised for `q4_mixed` mixed-precision export: the first few
+    layers of `text_encoder` and `depth_decoder` plus the LLM
+    `backbone_model` embeddings are kept at full precision because Q4
+    degradation there warps the global context the rest of the model
+    conditions on.  Anything else falls through to the q4_0 quant.
+    """
+    if name.startswith("text_encoder.layers."):
+        try:
+            return int(name.split(".", 2)[2].split(".", 1)[0])
+        except (IndexError, ValueError):
+            return None
+    if name.startswith("depth_decoder.model.layers."):
+        try:
+            return int(name.split(".", 3)[3].split(".", 1)[0])
+        except (IndexError, ValueError):
+            return None
+    if name.startswith("backbone_model.layers."):
+        try:
+            return int(name.split(".", 2)[2].split(".", 1)[0])
+        except (IndexError, ValueError):
+            return None
+    return None
+
+
+def _mixed_floor_quant(name: str) -> str:
+    """Return the floor quant for ``name`` under ``q4_mixed``.
+
+    Layers at or below the floor index keep BF16; everything else gets
+    Q4_0.  Heads/embeddings also keep BF16 because they sit at the
+    global context boundary.  NORM / codebook / codec tensors already
+    flow through ``_must_keep_source`` upstream.
+    """
+    # Embeddings and heads anchor the network; keep them at full
+    # precision regardless of layer index.
+    floor = "bf16"
+    if name.endswith(".embed_tokens.weight"):
+        return "bf16"
+    if name.endswith(".lm_head.weight") or name == "lm_head.weight":
+        return "bf16"
+    idx = _protected_layer_index(name)
+    if idx is not None:
+        if name.startswith("text_encoder.layers.") and idx <= 2:
+            return "bf16"
+        if name.startswith("depth_decoder.model.layers.") and idx <= 1:
+            return "bf16"
+        if name.startswith("backbone_model.layers.") and idx <= 1:
+            return "bf16"
+        return "q4_0"
+    # Anything not in a recognised layer pattern (output norms,
+    # codebooks, eoi) keeps source dtype via ``_must_keep_source``;
+    # this helper should not be reached for those.
+    return floor
+
+
 def _source_ggml_type(name: str, source_dtype: str, target_quant: str):
     """Pick the GGUF tensor type for a tensor under ``target_quant``.
 
@@ -249,10 +320,19 @@ def _source_ggml_type(name: str, source_dtype: str, target_quant: str):
         supported it.
 
     Other tensors honour ``target_quant``; learned 2D weights additionally
-    get Q8_0/Q4_0 encoding via ``_quantized_payload``.
+    get Q8_0/Q4_0 encoding via ``_quantized_payload``.  The ``q4_mixed``
+    mode quantises learned 2D weights on a per-tensor basis: layers at
+    or below the floor index (text_encoder[0..=2], depth_decoder[0..=1],
+    backbone_model[0..=1], plus embeddings/lm_head) keep BF16; the rest
+    go to Q4_0.
     """
     if name.startswith("codec_model.") or _must_keep_source(name):
         return {"BF16": GGML_BF16, "F32": GGML_F32}[source_dtype]
+    if target_quant == "q4_mixed":
+        per_tensor = _mixed_floor_quant(name)
+        if per_tensor == "bf16":
+            return {"BF16": GGML_BF16, "F32": GGML_F32}[source_dtype]
+        return GGML_Q4_0
     if target_quant in {"q8_0", "q4_0"}:
         return {"BF16": GGML_BF16, "F32": GGML_F32}[source_dtype]
     return _QUANT_TO_GGML[target_quant]
@@ -272,7 +352,27 @@ def _quantized_payload(
     the F32 view, quantise per 32-element block, and stream the encoded
     blocks back.  Quantised learned weights transposed to ``(row, n_out)``
     so the GGUF dims read as ``out_features x in_features``.
+
+    Under ``q4_mixed`` the per-tensor floor (``_mixed_floor_quant``)
+    decides between BF16 source bytes and Q4_0 block-encoded payload.
+    Tensors that should keep their source dtype (norms, codebooks, eoi,
+    codec_model.*) never reach this helper — they short-circuit in
+    ``_source_ggml_type``.
     """
+    if target_quant == "q4_mixed":
+        per_tensor = _mixed_floor_quant(name)
+        if per_tensor == "bf16":
+            # Same payload as the bf16 branch below — recurse to share.
+            for chunk in chunks_iter:
+                if source_dtype == "BF16":
+                    yield chunk
+                elif source_dtype == "F32":
+                    yield f32_to_bf16(chunk) if chunk else chunk
+                else:
+                    raise ValueError(f"{name}: unsupported source dtype {source_dtype}")
+            return
+        # Fall through to the q4_0 path below.
+        target_quant = "q4_0"
     if target_quant in {"bf16"}:
         if source_dtype == "BF16":
             for chunk in chunks_iter:
@@ -347,12 +447,23 @@ def _build(
         nbytes = end - start
         ggml_type = _source_ggml_type(name, source_dtype, target_quant)
         gguf_d = _resolve_gguf_dims(name, source_dtype, shape, target_quant)
+        # For q8_0 / q4_0 / q4_mixed-quantised learned 2D weights, override
+        # the ggml_type to the block-quantised variant.  q4_mixed is per-
+        # tensor via ``_mixed_floor_quant``; for `bf16` layers it stays at
+        # the source-dtype type already returned above.
         if (
             target_quant in {"q8_0", "q4_0"}
             and _is_quantisable_2d_weight(name, shape)
             and not name.startswith("codec_model.")
         ):
             ggml_type = GGML_Q8_0 if target_quant == "q8_0" else GGML_Q4_0
+        elif (
+            target_quant == "q4_mixed"
+            and _is_quantisable_2d_weight(name, shape)
+            and not name.startswith("codec_model.")
+            and _mixed_floor_quant(name) == "q4_0"
+        ):
+            ggml_type = GGML_Q4_0
 
         def chunks(source=source, entry=entry):
             _dtype, _shape, _start, _end = entry

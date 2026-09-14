@@ -17,8 +17,12 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_q8;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+#[cfg(target_arch = "aarch64")]
+pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,42 @@ impl Kernel for F32Kernel {
         let (start, end) = scalar::row_range(n_out, ith, nth);
         if start >= end {
             return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2_q8::matmul_f32_vs_q8_avx2(
+                        &self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::ops::has_neon() {
+                unsafe {
+                    neon_q8::matmul_f32_vs_q8_neon(
+                        &self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
         }
         scalar::forward_q8_rows_scalar(
             &self.weight,

@@ -207,6 +207,61 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(tensors["decoder.conv.weight"][1], 8)
         self.assertEqual(len(tensors["decoder.conv.weight"][2]), 68)
 
+    def test_q4_mixed_keeps_floor_layers_and_quantises_the_rest(self):
+        # q4_mixed protects embeddings/lm_head and the first few layers
+        # of text_encoder, depth_decoder and backbone_model; the rest of
+        # the learned 2D weights go to Q4_0.  codec_model.* stays F32.
+        bf16_bytes = lambda n: (b"\x00\x3f" * n)
+        # Q4_0 row width has to be a multiple of 32 — pick a [4, 32] / [32, 4]
+        # width so the 2D weight is eligible for block quantisation.
+        safetensors(self.model / "first.safetensors", [
+            ("codec_model.legacy.initialized", "F32", [1], bytes.fromhex("0000803f")),
+            # backbone_model.layers.0 (floor): BF16 retained
+            ("backbone_model.layers.0.weight", "BF16", [2, 3], bf16_bytes(6)),
+            # backbone_model.layers.5 (above floor): Q4_0
+            ("backbone_model.layers.5.weight", "BF16", [4, 32], bf16_bytes(128)),
+        ])
+        safetensors(self.model / "second.safetensors", [
+            ("text_encoder.weight", "BF16", [1], bf16_bytes(1)),
+            # text_encoder.layers.2 (floor): BF16 retained
+            ("text_encoder.layers.2.attn_q.weight", "BF16", [4, 4], bf16_bytes(16)),
+            # text_encoder.layers.10 (above floor): Q4_0
+            ("text_encoder.layers.10.attn_q.weight", "BF16", [4, 32], bf16_bytes(128)),
+            # lm_head anchored: BF16
+            ("lm_head.weight", "BF16", [2, 2], bf16_bytes(4)),
+        ])
+        self.index["weight_map"] = {
+            "backbone_model.layers.0.weight": "first.safetensors",
+            "backbone_model.layers.5.weight": "first.safetensors",
+            "codec_model.legacy.initialized": "first.safetensors",
+            "text_encoder.weight": "second.safetensors",
+            "text_encoder.layers.2.attn_q.weight": "second.safetensors",
+            "text_encoder.layers.10.attn_q.weight": "second.safetensors",
+            "lm_head.weight": "second.safetensors",
+        }
+        # total_size = sum of all safetensor tensors (BF16 = 2 bytes/elem,
+        # F32 = 4 bytes/elem).
+        first_size = 12 + (4 * 32 * 2) + 4  # backbone_model.layers.0 + .5 + codec_model
+        second_size = 2 + (4 * 4 * 2) + (4 * 32 * 2) + (2 * 2 * 2)
+        self.index["metadata"]["total_size"] = first_size + second_size
+        self.write_index()
+        main, codec = convert_breeze.convert(self.model, self.out, main_quant="q4_mixed")
+        self.assertEqual((main.name, codec.name), ("breeze-tts-2-Q4_MIXED.gguf", "breeze-tts-2-mmproj-F32.gguf"))
+        metadata, tensors = read_gguf(main)
+        # floor layers: kind=30 (BF16), bytes verbatim
+        self.assertEqual(tensors["backbone_model.layers.0.weight"], ((3, 2), 30, bf16_bytes(6)))
+        self.assertEqual(tensors["text_encoder.layers.2.attn_q.weight"], ((4, 4), 30, bf16_bytes(16)))
+        # lm_head anchored: BF16
+        self.assertEqual(tensors["lm_head.weight"], ((2, 2), 30, bf16_bytes(4)))
+        # above floor: kind=2 (Q4_0)
+        q4_kind = 2
+        for above in ("backbone_model.layers.5.weight", "text_encoder.layers.10.attn_q.weight"):
+            entry = tensors[above]
+            self.assertEqual(entry[1], q4_kind, f"{above}: expected Q4_0 kind, got {entry[1]}")
+            self.assertGreater(len(entry[2]), 0)
+        # codec model still F32
+        self.assertEqual(tensors["codec_model.legacy.initialized"], ((1,), 0, bytes.fromhex("0000803f")))
+
     def test_f16_target_re_encodes_bf16_sources(self):
         main, _ = convert_breeze.convert(self.model, self.out, main_quant="f16")
         self.assertEqual(main.name, "breeze-tts-2-F16.gguf")

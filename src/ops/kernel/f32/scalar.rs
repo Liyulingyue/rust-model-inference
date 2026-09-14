@@ -48,6 +48,17 @@ pub fn forward_q8_rows_scalar(
     start: usize,
     end: usize,
 ) {
+    assert!(
+        input_q8.len() >= n_in,
+        "F32 forward_q8: input_q8 len {} < n_in {n_in}",
+        input_q8.len()
+    );
+    assert!(
+        input_scales.len() >= n_in.div_ceil(32),
+        "F32 forward_q8: input_scales len {} < required {}",
+        input_scales.len(),
+        n_in.div_ceil(32)
+    );
     for out_idx in start..end {
         let row_off = out_idx * n_in;
         let mut sum = 0.0f32;
