@@ -17,6 +17,20 @@ cargo run --release --bin rust-model-inference -- \
 `--threads N` 默认 `min(available_parallelism, 8)`。`--bench` 分别报告
 `BENCH: pp`（prompt 处理）和 `BENCH: tg`（token 生成）。
 
+### Chunked prefill
+
+prompt 默认按最多 64 个 token 分块处理；`--prefill-batch-size 1` 是顺序诊断基线。
+
+```bash
+rust-model-inference --model model.gguf --prompt "Hello" --prefill-batch-size 64
+rust-model-inference --model model.gguf --prompt "Hello" --prefill-batch-size 1
+```
+
+Qwen3 和 Qwen3.5 在已支持的 CPU/Vulkan 路径执行分块 prefill。Gemma4 在 CPU/Vulkan
+路径支持分块 prefill；Vulkan 仅加速批量线性投影，attention 与 KV 保持模型控制的 CPU
+路径。chunk 状态整块原子提交；Vulkan 失败时从同一已提交状态在 CPU 重算完整 chunk，
+不会提交部分结果。decode 仍保持逐 token 行为。
+
 ## 2. Embedding
 
 ```bash

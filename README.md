@@ -232,6 +232,9 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json vulkaninfo --summary
 
 **注意**：当前仍是实验性 Q8_0 matmul offload；完整模型算子和更多权重格式的 Vulkan
 覆盖见 [VULKAN.md](./docs/develop/VULKAN.md)。未传 `--gpu` 时保持纯 CPU 路径。
+Qwen3、Qwen3.5 和 Gemma4 的 chunked prefill 已验证 CPU/Vulkan 支持范围；Gemma4
+仅在 Vulkan 加速批量线性投影，attention 与 KV 仍由模型控制的 CPU 路径执行。每个 chunk
+原子提交；Vulkan chunk 失败时从同一已提交状态在 CPU 重算完整相同 chunk。
 
 ### CLI 选项
 
@@ -246,6 +249,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json vulkaninfo --summary
 | `--max-tokens` | 128 | 最大生成 token 数 |
 | `--temp` | 0.6 | 采样温度 |
 | `--threads` | `min(available_parallelism, 8)` | 计算线程数 |
+| `--prefill-batch-size` | `64` | prompt 分块大小；`1` 是顺序诊断基线 |
 | `--kv-cache` | `f16` | KV cache 类型：`f16` 或 `f32` |
 | `--bench` | off | 打印 `BENCH: pp`（prompt）和 `BENCH: tg`（生成）评估速率 |
 | `--profile` | off | 打印逐层耗时分解 |
