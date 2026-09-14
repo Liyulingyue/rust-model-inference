@@ -1327,11 +1327,18 @@ mod tests {
     use std::path::Path;
 
     fn qwen35_embedding_model() -> Qwen35Model<'static> {
-        let mut tok_embd =
-            Weight::from_quantized(QuantizedTensor::F32 { data: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0], n_in: 0, n_out: 0 });
+        let mut tok_embd = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            n_in: 0,
+            n_out: 0,
+        });
         tok_embd.n_in = 2;
         tok_embd.n_out = 3;
-        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32 { data: Vec::new(), n_in: 0, n_out: 0 });
+        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32 {
+            data: Vec::new(),
+            n_in: 0,
+            n_out: 0,
+        });
         output_weight.n_in = 2;
         output_weight.n_out = 3;
         Qwen35Model {

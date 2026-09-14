@@ -64,11 +64,7 @@ pub unsafe fn matmul_f32_vs_q8_avx2(
                 scale_hi,
                 _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1)),
             );
-            let scale = _mm256_insertf128_ps(
-                _mm256_castps128_ps256(scale_lo),
-                scale_128,
-                1,
-            );
+            let scale = _mm256_insertf128_ps(_mm256_castps128_ps256(scale_lo), scale_128, 1);
 
             let w_f32 = _mm256_loadu_ps(w_ptr.add(row_off + col));
 
@@ -93,7 +89,11 @@ pub unsafe fn matmul_f32_vs_q8_avx2(
         }
 
         let total = hsum256(acc);
-        let output_index = if output.len() >= n_out { row } else { out_local };
+        let output_index = if output.len() >= n_out {
+            row
+        } else {
+            out_local
+        };
         *out_ptr.add(output_index) = total;
         out_local += 1;
     }
@@ -104,7 +104,13 @@ mod tests {
     use super::matmul_f32_vs_q8_avx2;
     use crate::ops::kernel::f32::scalar::forward_q8_rows_scalar;
 
-    fn assert_avx2_eq_scalar(label: &str, weight: &[f32], input: &[f32], n_in: usize, n_out: usize) {
+    fn assert_avx2_eq_scalar(
+        label: &str,
+        weight: &[f32],
+        input: &[f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
         let mut avx2_out = vec![0.0f32; n_out];
         let mut scalar_out = vec![0.0f32; n_out];
         let mut input_q8 = vec![0u8; n_in];

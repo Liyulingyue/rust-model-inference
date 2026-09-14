@@ -76,11 +76,7 @@ pub unsafe fn matmul_bf16_vs_q8_avx2(
                 scale_hi,
                 _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1)),
             );
-            let scale = _mm256_insertf128_ps(
-                _mm256_castps128_ps256(scale_lo),
-                scale_128,
-                1,
-            );
+            let scale = _mm256_insertf128_ps(_mm256_castps128_ps256(scale_lo), scale_128, 1);
 
             // unpack 8 BF16 weight lanes
             let chunk = _mm_loadu_si128(w_ptr.add(row_byte + col * 2) as *const __m128i);
@@ -115,7 +111,11 @@ pub unsafe fn matmul_bf16_vs_q8_avx2(
         }
 
         let total = hsum256(acc);
-        let output_index = if output.len() >= n_out { row } else { out_local };
+        let output_index = if output.len() >= n_out {
+            row
+        } else {
+            out_local
+        };
         *out_ptr.add(output_index) = total;
         out_local += 1;
     }

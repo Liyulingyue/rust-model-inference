@@ -184,7 +184,9 @@ impl<'a> QuantizedTensor<'a> {
             bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
         };
         match self {
-            Self::F32 { data, n_in, n_out } => Box::new(f32::F32Kernel::new(data.clone(), *n_in, *n_out)),
+            Self::F32 { data, n_in, n_out } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_in, *n_out))
+            }
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
             Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
@@ -283,7 +285,11 @@ impl<'a> QuantizedTensor<'a> {
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
-                Self::F32 { data: f32_data, n_in, n_out }
+                Self::F32 {
+                    data: f32_data,
+                    n_in,
+                    n_out,
+                }
             }
             GGMLType::F16 => Self::F16(F16Weight {
                 bytes: data,
@@ -705,7 +711,11 @@ mod tests {
     #[test]
     fn quantized_tensor_ggml_type_discriminator() {
         let f32_slice = vec![0.0f32; 32];
-        let q = QuantizedTensor::F32 { data: f32_slice, n_in: 0, n_out: 0 };
+        let q = QuantizedTensor::F32 {
+            data: f32_slice,
+            n_in: 0,
+            n_out: 0,
+        };
         assert_eq!(q.ggml_type(), GGMLType::F32);
 
         let q8_bytes = vec![0u8; 34];

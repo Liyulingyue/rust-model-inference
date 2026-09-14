@@ -763,11 +763,7 @@ unsafe fn vec_mad_per_channel_f32_neon(y: &mut [f32], x: &[f32], scale: &[f32]) 
 /// `scale` vector across the longer `x`/`y` pair.  Used by the VibeVoice
 /// ASR encoder to fuse its mixer/FFN `x[token*dim + c] += value * gamma[c]`
 /// pattern into a single SIMD FMA loop without re-staging `gamma`.
-pub fn vec_mad_per_channel_f32_broadcast(
-    y: &mut [f32],
-    x: &[f32],
-    scale: &[f32],
-) {
+pub fn vec_mad_per_channel_f32_broadcast(y: &mut [f32], x: &[f32], scale: &[f32]) {
     debug_assert_eq!(y.len(), x.len());
     let period = scale.len();
     assert!(period > 0, "vec_mad_per_channel_f32_broadcast: empty scale");
@@ -801,7 +797,10 @@ unsafe fn vec_mad_per_channel_f32_broadcast_avx2(
     period: usize,
 ) {
     use std::arch::x86_64::*;
-    assert!(period % 8 == 0, "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 8");
+    assert!(
+        period % 8 == 0,
+        "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 8"
+    );
     let n = y.len();
     let mut i = 0;
     while i + 8 <= n {
@@ -833,7 +832,10 @@ unsafe fn vec_mad_per_channel_f32_broadcast_neon(
     period: usize,
 ) {
     use std::arch::aarch64::*;
-    assert!(period % 4 == 0, "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 4");
+    assert!(
+        period % 4 == 0,
+        "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 4"
+    );
     let mut i = 0;
     while i + 4 <= y.len() {
         let c0 = i % period;

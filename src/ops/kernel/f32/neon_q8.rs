@@ -79,7 +79,11 @@ pub unsafe fn matmul_f32_vs_q8_neon(
             total += w_val * q_val * scale;
             col += 1;
         }
-        let output_index = if output.len() >= n_out { row } else { out_local };
+        let output_index = if output.len() >= n_out {
+            row
+        } else {
+            out_local
+        };
         *out_ptr.add(output_index) = total;
         out_local += 1;
     }
@@ -90,7 +94,13 @@ mod tests {
     use super::matmul_f32_vs_q8_neon;
     use crate::ops::kernel::f32::scalar::forward_q8_rows_scalar;
 
-    fn assert_neon_eq_scalar(label: &str, weight: &[f32], input: &[f32], n_in: usize, n_out: usize) {
+    fn assert_neon_eq_scalar(
+        label: &str,
+        weight: &[f32],
+        input: &[f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
         let mut neon_out = vec![0.0f32; n_out];
         let mut scalar_out = vec![0.0f32; n_out];
         let mut input_q8 = vec![0u8; n_in];

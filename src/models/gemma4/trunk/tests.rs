@@ -988,7 +988,11 @@ fn per_layer_f32_projection_matches_pinned_neon_dot_bits() {
     ]
     .map(f32::from_bits);
     let weight = Weight {
-        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(weights.to_vec(), 0, 0)),
+        kernel: Box::new(crate::ops::kernel::f32::F32Kernel::new(
+            weights.to_vec(),
+            0,
+            0,
+        )),
         ggml_type: GGMLType::F32,
         n_in: input.len(),
         n_out: 1,

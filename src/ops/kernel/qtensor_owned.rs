@@ -316,8 +316,17 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         // SIMD function as borrowed bytes.
         use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
-            Self::F32 { data, n_cols, .. } => Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1))
-                .forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth),
+            Self::F32 { data, n_cols, .. } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prequantized(
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                )
+            }
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice()))
                 .forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth),
             Self::BF16 { data, .. } => Box::new(bf16::BF16Kernel::new(data.as_slice()))
@@ -370,17 +379,19 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
     ) {
         use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
-            Self::F32 { data, n_cols, .. } => Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prepared(
-                input_f32,
-                input_q8,
-                input_scales,
-                q8_k,
-                output,
-                n_in,
-                n_out,
-                ith,
-                nth,
-            ),
+            Self::F32 { data, n_cols, .. } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prepared(
+                    input_f32,
+                    input_q8,
+                    input_scales,
+                    q8_k,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                )
+            }
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice()))
                 .forward_prepared(
                     input_f32,

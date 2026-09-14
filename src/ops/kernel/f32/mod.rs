@@ -34,7 +34,11 @@ pub struct F32Kernel {
 
 impl F32Kernel {
     pub fn new(weight: Vec<f32>, n_in: usize, n_out: usize) -> Self {
-        Self { weight, n_in, n_out }
+        Self {
+            weight,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -155,7 +159,10 @@ impl Kernel for F32Kernel {
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {
         let stride = if self.n_in != 0 { self.n_in } else { n_embd };
         let offset = token_id as usize * stride;
-        debug_assert!(output.len() >= n_embd, "F32 embedding_lookup output buffer too small");
+        debug_assert!(
+            output.len() >= n_embd,
+            "F32 embedding_lookup output buffer too small"
+        );
         debug_assert!(
             offset + n_embd <= self.weight.len(),
             "F32 embedding_lookup token_id {token_id} out of range"

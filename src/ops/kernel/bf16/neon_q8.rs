@@ -96,7 +96,11 @@ pub unsafe fn matmul_bf16_vs_q8_neon(
             total += w_val * q_val * scale;
             col += 1;
         }
-        let output_index = if output.len() >= n_out { row } else { out_local };
+        let output_index = if output.len() >= n_out {
+            row
+        } else {
+            out_local
+        };
         *out_ptr.add(output_index) = total;
         out_local += 1;
     }

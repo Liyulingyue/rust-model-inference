@@ -73,9 +73,7 @@ pub fn forward_f16_q8_rows_scalar(
                     weight[row_off + in_idx * 2],
                     weight[row_off + in_idx * 2 + 1],
                 ]);
-                sum += crate::ops::f16_to_f32(bits)
-                    * (input_q8[in_idx] as i8 as f32)
-                    * input_scale;
+                sum += crate::ops::f16_to_f32(bits) * (input_q8[in_idx] as i8 as f32) * input_scale;
             }
         }
         let output_index = if output.len() >= n_out {

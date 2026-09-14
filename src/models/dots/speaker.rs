@@ -670,9 +670,12 @@ mod campplus_tests {
 
     fn f32_weight(values: Vec<f32>, n_in: usize) -> crate::ops::kernel::Weight<'static> {
         let n_out = values.len() / n_in;
-        let mut weight = crate::ops::kernel::Weight::from_quantized(
-            crate::ops::kernel::QuantizedTensor::F32 { data: values, n_in: 0, n_out: 0 },
-        );
+        let mut weight =
+            crate::ops::kernel::Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+                data: values,
+                n_in: 0,
+                n_out: 0,
+            });
         weight.n_in = n_in;
         weight.n_out = n_out;
         weight
