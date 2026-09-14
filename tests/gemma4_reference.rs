@@ -827,6 +827,7 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
     let mut filter_names = vec![
         "gemma4.prompt_logits".to_owned(),
         "gemma4.generated_ids".to_owned(),
+        "gemma4.kv".to_owned(),
     ];
     for layer in 0..GEMMA4_LAYERS {
         filter_names.push(format!("gemma4.kv.{layer}.keys"));
@@ -879,15 +880,15 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
                 .any(|record| record.checkpoint == "gemma4.generated_ids" && record.len == 32));
             for layer in 0..GEMMA4_LAYERS {
                 assert!(
-                    records
-                        .iter()
-                        .any(|record| record.checkpoint == format!("gemma4.kv.{layer}.keys")),
+                    records.iter().any(|record| record.checkpoint
+                        == format!("gemma4.kv.{layer}.keys")
+                        && record.len > 0),
                     "real-model trace must include layer {layer} KV keys"
                 );
                 assert!(
-                    records
-                        .iter()
-                        .any(|record| record.checkpoint == format!("gemma4.kv.{layer}.values")),
+                    records.iter().any(|record| record.checkpoint
+                        == format!("gemma4.kv.{layer}.values")
+                        && record.len > 0),
                     "real-model trace must include layer {layer} KV values"
                 );
             }

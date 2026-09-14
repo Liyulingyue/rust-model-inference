@@ -397,10 +397,15 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}.gemma4.kv.0.keys.f32", path.display()));
         std::env::set_var("RMI_PARITY_TRACE", &path);
         std::env::set_var("RMI_PARITY_FILTER", "gemma4.kv");
+        assert!(enabled("gemma4.kv"));
         assert!(checkpoint("gemma4.kv.0.keys", Some(0), &[1], &[1.0])
             .unwrap()
             .is_none());
-        std::env::set_var("RMI_PARITY_FILTER", "gemma4.kv.0.keys,gemma4.kv.0.values");
+        std::env::set_var(
+            "RMI_PARITY_FILTER",
+            "gemma4.kv,gemma4.kv.0.keys,gemma4.kv.0.values",
+        );
+        assert!(enabled("gemma4.kv"));
         let keys = checkpoint("gemma4.kv.0.keys", Some(0), &[1], &[1.0])
             .unwrap()
             .unwrap();
