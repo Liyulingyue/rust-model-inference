@@ -1,15 +1,17 @@
 # Chunked prefill
 
 单个请求的 prompt 以固定大小的 chunk 处理。默认 `--prefill-batch-size` 为 `64`；
-设置为 `1` 可得到顺序诊断基线。该参数也可用于库级 session 入口。
+设置为 `1` 可得到顺序诊断基线。该参数也可用于库级 session 入口。下表仅适用于已验证
+的具体实物：Apple M3 Max 上的 Qwen3 Q4_0、Qwen3.5 0.8B BF16，以及 Gemma4 E2B Q8_0
+（F16 mmproj）；其他尺寸或量化仍受现有 Vulkan eligibility 约束。
 
 ## 支持范围
 
 | 模型 | CPU | Vulkan |
 |------|-----|--------|
-| Qwen3 | chunked prefill | 在现有 Vulkan eligibility 内执行 chunked prefill |
-| Qwen3.5 | chunked prefill | 在现有 Vulkan eligibility 内执行 chunked prefill |
-| Gemma4 | chunked prefill | 批量线性投影；attention 与 KV 为模型控制的 CPU 路径 |
+| Qwen3 Q4_0 | chunked prefill | 在现有 Vulkan eligibility 内执行 chunked prefill |
+| Qwen3.5 0.8B BF16 | chunked prefill | 在现有 Vulkan eligibility 内执行 chunked prefill |
+| Gemma4 E2B Q8_0 + F16 mmproj | chunked prefill | 批量线性投影；attention 与 KV 为模型控制的 CPU 路径 |
 
 decode 保持一次一个 token。
 
@@ -20,7 +22,7 @@ rust-model-inference --model model.gguf --prompt "Hello" --prefill-batch-size 64
 rust-model-inference --model model.gguf --prompt "Hello" --prefill-batch-size 1
 ```
 
-每个 chunk 的 KV、recurrent state 和 logits 在成功后一起提交。Vulkan 执行失败时，
+每个 chunk 的 KV、logits，以及适用时的 recurrent state 在成功后一起提交。Vulkan 执行失败时，
 运行时放弃该 chunk 的 GPU 结果，并从相同的已提交前缀在 CPU 重算完整 chunk；CPU 重试
 失败则保持已提交前缀不变并返回错误。
 

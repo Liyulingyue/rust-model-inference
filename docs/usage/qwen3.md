@@ -19,7 +19,9 @@ cargo run --release --bin rust-model-inference -- \
 
 ### Chunked prefill
 
-prompt 默认按最多 64 个 token 分块处理；`--prefill-batch-size 1` 是顺序诊断基线。
+prompt 默认按最多 64 个 token 分块处理；`--prefill-batch-size 1` 是顺序诊断基线。已验证的
+具体实物为 Qwen3 Q4_0、Qwen3.5 0.8B BF16，以及 Gemma4 E2B Q8_0（F16 mmproj），
+测试设备为 Apple M3 Max；其他尺寸或量化仍受现有 Vulkan eligibility 约束。
 
 ```bash
 rust-model-inference --model model.gguf --prompt "Hello" --prefill-batch-size 64

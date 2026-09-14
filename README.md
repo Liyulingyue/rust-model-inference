@@ -232,9 +232,10 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json vulkaninfo --summary
 
 **注意**：当前仍是实验性 Q8_0 matmul offload；完整模型算子和更多权重格式的 Vulkan
 覆盖见 [VULKAN.md](./docs/develop/VULKAN.md)。未传 `--gpu` 时保持纯 CPU 路径。
-Qwen3、Qwen3.5 和 Gemma4 的 chunked prefill 已验证 CPU/Vulkan 支持范围；Gemma4
-仅在 Vulkan 加速批量线性投影，attention 与 KV 仍由模型控制的 CPU 路径执行。每个 chunk
-原子提交；Vulkan chunk 失败时从同一已提交状态在 CPU 重算完整相同 chunk。
+在 Apple M3 Max 上，Qwen3 Q4_0、Qwen3.5 0.8B BF16、Gemma4 E2B Q8_0（F16 mmproj）
+的 chunked prefill 已验证 CPU/Vulkan 支持范围；其他尺寸或量化仍受现有 Vulkan eligibility
+约束。Gemma4 仅在 Vulkan 加速批量线性投影，attention 与 KV 仍由模型控制的 CPU 路径
+执行。每个 chunk 原子提交；Vulkan chunk 失败时从同一已提交状态在 CPU 重算完整相同 chunk。
 
 ### CLI 选项
 
