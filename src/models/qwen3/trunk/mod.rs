@@ -12,6 +12,7 @@
 pub mod config;
 pub mod forward;
 pub mod positions;
+mod prefill;
 pub mod session;
 pub mod tests;
 pub mod util;

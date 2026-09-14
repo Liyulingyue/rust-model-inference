@@ -1,3 +1,4 @@
+use crate::core::prefill::checked_prefill_batch_size;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{ComponentRole, GgufrsFile};
@@ -120,6 +121,7 @@ pub struct Transcription {
 pub struct AsrRuntime {
     decoder: Arc<Qwen3Model>,
     audio: Qwen3AudioModel,
+    prefill_batch_size: usize,
 }
 
 pub fn open_bundled_audio_source(
@@ -158,7 +160,10 @@ impl AsrRuntime {
     pub fn new(
         decoder: Arc<Qwen3Model>,
         audio_source: Arc<dyn TensorSource>,
+        prefill_batch_size: usize,
     ) -> Result<Self, AsrError> {
+        let prefill_batch_size =
+            checked_prefill_batch_size(Some(prefill_batch_size)).map_err(internal)?;
         let audio = Qwen3AudioModel::from_source(audio_source, decoder.pool()).map_err(internal)?;
         if audio.config().projection != decoder.config().n_embd {
             return Err(internal(format!(
@@ -167,7 +172,11 @@ impl AsrRuntime {
                 decoder.config().n_embd
             )));
         }
-        Ok(Self { decoder, audio })
+        Ok(Self {
+            decoder,
+            audio,
+            prefill_batch_size,
+        })
     }
 
     pub fn transcribe_wav(
@@ -227,6 +236,7 @@ impl AsrRuntime {
                 Qwen3GenerateOptions {
                     max_new_tokens: options.max_new_tokens,
                     temperature: 0.0,
+                    prefill_batch_size: self.prefill_batch_size,
                 },
             )
             .map_err(internal)?;

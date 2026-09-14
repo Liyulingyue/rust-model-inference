@@ -31,6 +31,7 @@ pub struct CliOptions {
     pub negative_prompt: Option<String>,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
+    pub prefill_batch_size: Option<usize>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
     pub seed: Option<i64>,
@@ -66,6 +67,12 @@ pub struct CliOptions {
     pub use_xvector: XVectorMode,
     pub use_xvector_supplied: bool,
     pub out: Option<PathBuf>,
+}
+
+impl CliOptions {
+    pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
+        crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
 }
 
 #[derive(Debug)]
@@ -221,6 +228,17 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     options.max_tokens = Some(args[i + 1].parse().unwrap_or(128));
                     i += 1;
                 }
+            }
+            "--prefill-batch-size" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --prefill-batch-size")?;
+                options.prefill_batch_size = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --prefill-batch-size value: {error}"))?,
+                );
+                i += 1;
             }
             "--steps" => {
                 let value = args.get(i + 1).ok_or("Missing value for --steps")?;
@@ -1100,6 +1118,21 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn cli_parses_prefill_batch_size_strictly() {
+        assert_eq!(
+            CliOptions::default()
+                .effective_prefill_batch_size()
+                .unwrap(),
+            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE
+        );
+        let parsed = parse_cli_options(&args(&["rmi", "--prefill-batch-size", "32"])).unwrap();
+        assert_eq!(parsed.effective_prefill_batch_size().unwrap(), 32);
+        assert!(parse_cli_options(&args(&["rmi", "--prefill-batch-size", "x"])).is_err());
+        let zero = parse_cli_options(&args(&["rmi", "--prefill-batch-size", "0"])).unwrap();
+        assert!(zero.effective_prefill_batch_size().is_err());
     }
 
     #[test]

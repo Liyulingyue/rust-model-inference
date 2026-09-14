@@ -4283,7 +4283,12 @@ mod tests {
         let decoder = Arc::new(
             Qwen3Model::from_source(llm_source, tokenizer, Arc::new(ComputePool::new(1))).unwrap(),
         );
-        AsrRuntime::new(decoder, audio_source).unwrap()
+        AsrRuntime::new(
+            decoder,
+            audio_source,
+            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+        )
+        .unwrap()
     }
 
     #[test]

@@ -14,6 +14,8 @@ layout(push_constant) uniform PC {
     uint q_heads;
     uint kv_heads;
     uint head_dim;
+    uint base_position;
+    uint rows;
 } pc;
 
 void add_pair(inout float high, inout float low, float value) {
@@ -25,6 +27,9 @@ void add_pair(inout float high, inout float low, float value) {
 }
 
 void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint visible = pc.base_position + row + 1u;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     uint total = pc.q_heads * pc.head_dim;
@@ -34,9 +39,9 @@ void main() {
     uint kv_head = head / (pc.q_heads / pc.kv_heads);
     precise float sum = 0.0;
     precise float correction = 0.0;
-    for (uint token = 0u; token < pc.sequence_length; token++) {
+    for (uint token = 0u; token < visible; token++) {
         float score = round_f16_rte(uintBitsToFloat(
-            arena.data[pc.scores_word + head * pc.sequence_length + token]
+            arena.data[pc.scores_word + (row * pc.q_heads + head) * pc.sequence_length + token]
         ));
         uint value_index = pc.cache_v_word
             + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
@@ -45,5 +50,5 @@ void main() {
         precise float product = score * value;
         add_pair(sum, correction, product);
     }
-    arena.data[pc.output_word + index] = floatBitsToUint(sum + correction);
+    arena.data[pc.output_word + row * total + index] = floatBitsToUint(sum + correction);
 }

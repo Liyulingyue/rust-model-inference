@@ -11,6 +11,11 @@ layout(push_constant) uniform PC {
     uint scales_word;
     uint input_sums_word;
     uint count;
+    uint input_stride;
+    uint q8_stride;
+    uint scales_stride;
+    uint input_sums_stride;
+    uint token_rows;
 } pc;
 
 shared float values[32];
@@ -72,12 +77,17 @@ float divide_finite_normal(float numerator, float denominator) {
 }
 
 void main() {
+    uint row = gl_WorkGroupID.z;
     uint block = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint blocks = pc.count / 32u;
     if (block >= blocks) return;
+    uint input_base = row * pc.input_stride;
+    uint q8_base = row * pc.q8_stride;
+    uint scales_base = row * pc.scales_stride;
+    uint sums_base = row * pc.input_sums_stride;
 
     uint lane = gl_LocalInvocationID.x;
-    float value = uintBitsToFloat(arena.data[pc.input_word + block * 32u + lane]);
+    float value = uintBitsToFloat(arena.data[pc.input_word + input_base + block * 32u + lane]);
     values[lane] = value;
     partial[lane] = abs(value);
     barrier();
@@ -94,7 +104,7 @@ void main() {
             ? 0.0
             : divide_finite_normal(127.0, partial[0]);
         float stored_scale = round_f16_rte(scale);
-        arena.data[pc.scales_word + block] = floatBitsToUint(stored_scale);
+        arena.data[pc.scales_word + scales_base + block] = floatBitsToUint(stored_scale);
     }
     barrier();
 
@@ -108,7 +118,7 @@ void main() {
             quantized_values[value_index] = quantized;
             packed |= (uint(quantized) & 0xffu) << (byte_index * 8u);
         }
-        arena.data[pc.q8_word + block * 8u + lane] = packed;
+        arena.data[pc.q8_word + q8_base + block * 8u + lane] = packed;
     }
     barrier();
 
@@ -120,6 +130,6 @@ void main() {
     }
     if (lane == 0u) {
         float input_sum = round_f16_rte(float(partial_sum[0]) * raw_scale);
-        arena.data[pc.input_sums_word + block] = floatBitsToUint(input_sum);
+        arena.data[pc.input_sums_word + sums_base + block] = floatBitsToUint(input_sum);
     }
 }

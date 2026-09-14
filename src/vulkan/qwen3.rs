@@ -3,7 +3,8 @@ use crate::core::tensor::GGMLType;
 use crate::models::qwen3::trunk::{Qwen3Config, Qwen3Model, Qwen3Rope};
 
 use super::ops::{
-    fill_rope_neox, ArenaLayout, GpuWeightFormat, OperatorBindings, Qwen3Ops, TokenCommands,
+    fill_rope_neox, ArenaLayout, ArenaRegion, GpuWeightFormat, OperatorBindings, Qwen3Ops,
+    TokenCommands,
 };
 use super::{GpuBuffer, VulkanContext, VulkanError};
 
@@ -68,20 +69,22 @@ fn check_device_eligibility(shader_float16: bool) -> Result<(), String> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TokenCommitState {
     committed_len: usize,
-    pending: bool,
+    capacity: usize,
+    pending: Option<(usize, usize)>,
 }
 
 impl TokenCommitState {
-    pub(crate) fn new(committed_len: usize) -> Self {
+    pub(crate) fn new(committed_len: usize, capacity: usize) -> Self {
         Self {
             committed_len,
-            pending: false,
+            capacity,
+            pending: None,
         }
     }
 
-    pub(crate) fn begin(&mut self, position: usize) -> Result<(), String> {
-        if self.pending {
-            return Err("a Vulkan token is already pending".into());
+    pub(crate) fn begin(&mut self, position: usize, rows: usize) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("a Vulkan chunk is already pending".into());
         }
         if position != self.committed_len {
             return Err(format!(
@@ -89,19 +92,25 @@ impl TokenCommitState {
                 self.committed_len
             ));
         }
-        self.pending = true;
+        if rows == 0
+            || position
+                .checked_add(rows)
+                .is_none_or(|end| end > self.capacity)
+        {
+            return Err("Vulkan chunk exceeds capacity or has zero rows".into());
+        }
+        self.pending = Some((position, rows));
         Ok(())
     }
 
     pub(crate) fn commit(&mut self) {
-        if self.pending {
-            self.committed_len += 1;
-            self.pending = false;
+        if let Some((base, rows)) = self.pending.take() {
+            self.committed_len = base + rows;
         }
     }
 
     pub(crate) fn abort(&mut self) {
-        self.pending = false;
+        self.pending = None;
     }
 
     pub(crate) fn committed_len(&self) -> usize {
@@ -110,13 +119,23 @@ impl TokenCommitState {
 
     pub(crate) fn reset(&mut self) {
         self.committed_len = 0;
-        self.pending = false;
+        self.pending = None;
     }
 }
 
 pub(crate) fn commit_shadow_kv(
     state: &mut KvState,
     position: usize,
+    k_delta: &[f32],
+    v_delta: &[f32],
+) -> Result<(), String> {
+    commit_shadow_kv_chunk(state, position, 1, k_delta, v_delta)
+}
+
+pub(crate) fn commit_shadow_kv_chunk(
+    state: &mut KvState,
+    position: usize,
+    rows: usize,
     k_delta: &[f32],
     v_delta: &[f32],
 ) -> Result<(), String> {
@@ -129,8 +148,21 @@ pub(crate) fn commit_shadow_kv(
         .arch
         .n_layer
         .checked_mul(stride)
+        .and_then(|len| len.checked_mul(rows))
         .ok_or_else(|| "KV delta length overflow".to_string())?;
-    if position >= state.capacity || k_delta.len() != delta_len || v_delta.len() != delta_len {
+    if rows == 0
+        || position != state.seq_len
+        || position
+            .checked_add(rows)
+            .is_none_or(|end| end > state.capacity)
+        || k_delta.len() != delta_len
+        || v_delta.len() != delta_len
+        || k_delta.iter().chain(v_delta).any(|value| {
+            !value.is_finite()
+                || (matches!(state.cache, KvCache::F16(_))
+                    && crate::ops::f32_to_f16(*value) & 0x7c00 == 0x7c00)
+        })
+    {
         return Err(format!(
             "Invalid Vulkan KV delta: position={position}/{} k={} v={} expected={delta_len}",
             state.capacity,
@@ -155,9 +187,9 @@ pub(crate) fn commit_shadow_kv(
     match &mut state.cache {
         KvCache::F16(cache) => {
             for layer in 0..state.arch.n_layer {
-                let source = layer * stride;
+                let source = layer * rows * stride;
                 let target = (layer * state.capacity + position) * stride;
-                for index in 0..stride {
+                for index in 0..rows * stride {
                     cache.k[target + index] = crate::ops::f32_to_f16(k_delta[source + index]);
                     cache.v[target + index] = crate::ops::f32_to_f16(v_delta[source + index]);
                 }
@@ -165,19 +197,21 @@ pub(crate) fn commit_shadow_kv(
         }
         KvCache::F32(cache) => {
             for layer in 0..state.arch.n_layer {
-                let source = layer * stride;
+                let source = layer * rows * stride;
                 let target = (layer * state.capacity + position) * stride;
-                cache.k[target..target + stride].copy_from_slice(&k_delta[source..source + stride]);
-                cache.v[target..target + stride].copy_from_slice(&v_delta[source..source + stride]);
+                cache.k[target..target + rows * stride]
+                    .copy_from_slice(&k_delta[source..source + rows * stride]);
+                cache.v[target..target + rows * stride]
+                    .copy_from_slice(&v_delta[source..source + rows * stride]);
             }
         }
     }
-    state.seq_len = state.seq_len.max(position + 1);
+    state.seq_len = position + rows;
     state.update_access();
     Ok(())
 }
 
-pub(crate) struct GpuTokenResult<'a> {
+pub(crate) struct GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
     pub(crate) k_delta: &'a [f32],
     pub(crate) v_delta: &'a [f32],
@@ -234,12 +268,7 @@ impl UploadedBuffers {
 
 impl Drop for UploadedBuffers {
     fn drop(&mut self) {
-        let _guard = self.context.mutex.lock().ok();
-        unsafe {
-            for buffer in &self.values {
-                self.context.destroy_buffer(buffer);
-            }
-        }
+        let _ = unsafe { self.context.destroy_completed_buffers(&self.values) };
     }
 }
 
@@ -253,6 +282,9 @@ pub(crate) struct Qwen3VulkanSession {
     layout: ArenaLayout,
     config: Qwen3Config,
     capacity: usize,
+    max_rows: usize,
+    #[cfg(test)]
+    pub(crate) fail_after_row: Option<usize>,
     commit_state: TokenCommitState,
     rope: Vec<f32>,
     logits: Vec<f32>,
@@ -264,6 +296,20 @@ impl Qwen3VulkanSession {
     pub(crate) fn try_new(
         model: &Qwen3Model,
         capacity: usize,
+        context: &'static VulkanContext,
+    ) -> Result<Option<Self>, VulkanError> {
+        Self::try_new_rows(
+            model,
+            capacity,
+            capacity.min(crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE),
+            context,
+        )
+    }
+
+    fn try_new_rows(
+        model: &Qwen3Model,
+        capacity: usize,
+        max_rows: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
         if let Err(reason) = check_device_eligibility(context.supports_shader_float16()) {
@@ -292,7 +338,7 @@ impl Qwen3VulkanSession {
             return Ok(None);
         }
 
-        let layout = ArenaLayout::qwen3(&config, capacity)?;
+        let layout = ArenaLayout::qwen3(&config, capacity, max_rows)?;
         let descriptor_capacity = config
             .n_layer
             .checked_mul(9)
@@ -394,6 +440,7 @@ impl Qwen3VulkanSession {
         let delta_count = config
             .n_layer
             .checked_mul(kv_count)
+            .and_then(|count| count.checked_mul(max_rows))
             .ok_or(VulkanError::OutOfMemory)?;
         let vocab = config.vocab;
         let head_dim = config.n_embd_head_k;
@@ -408,30 +455,82 @@ impl Qwen3VulkanSession {
             layout,
             config,
             capacity,
-            commit_state: TokenCommitState::new(0),
-            rope: vec![0.0; head_dim],
+            max_rows,
+            #[cfg(test)]
+            fail_after_row: None,
+            commit_state: TokenCommitState::new(0, capacity),
+            rope: vec![
+                0.0;
+                head_dim
+                    .checked_mul(max_rows)
+                    .ok_or(VulkanError::OutOfMemory)?
+            ],
             logits: vec![0.0; vocab],
             k_delta: vec![0.0; delta_count],
             v_delta: vec![0.0; delta_count],
         }))
     }
 
+    pub(crate) fn reserve_rows(
+        &mut self,
+        model: &Qwen3Model,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if rows <= self.max_rows {
+            return Ok(());
+        }
+        // ponytail: growing beyond the initial chunk capacity reuploads weights;
+        // retain uploads separately if resizing becomes frequent.
+        let mut replacement = Self::try_new_rows(model, self.capacity, rows, self.context)?
+            .ok_or_else(|| {
+                VulkanError::UnsupportedShape("Qwen3 Vulkan eligibility changed".into())
+            })?;
+        let count = self.layout.kv_k.size / 4;
+        replacement.ops.write_f32(
+            replacement.layout.kv_k,
+            self.ops.read_f32(self.layout.kv_k, count)?,
+        )?;
+        replacement.ops.write_f32(
+            replacement.layout.kv_v,
+            self.ops.read_f32(self.layout.kv_v, count)?,
+        )?;
+        replacement.commit_state = self.commit_state;
+        #[cfg(test)]
+        {
+            replacement.fail_after_row = self.fail_after_row;
+        }
+        *self = replacement;
+        Ok(())
+    }
+
     pub(crate) fn forward_token<'a>(
         &'a mut self,
         input: &[f32],
         position: usize,
-    ) -> Result<GpuTokenResult<'a>, VulkanError> {
-        self.commit_state
-            .begin(position)
-            .map_err(VulkanError::UnsupportedShape)?;
-        if let Err(error) = self.forward_token_inner(input, position, true) {
+    ) -> Result<GpuChunkResult<'a>, VulkanError> {
+        self.forward_chunk(input, position, 1, true)
+    }
+
+    pub(crate) fn forward_chunk<'a>(
+        &'a mut self,
+        input: &[f32],
+        base_position: usize,
+        rows: usize,
+        project_logits: bool,
+    ) -> Result<GpuChunkResult<'a>, VulkanError> {
+        if let Err(error) = self.commit_state.begin(base_position, rows) {
+            self.commit_state.abort();
+            return Err(VulkanError::UnsupportedShape(error));
+        }
+        if let Err(error) = self.forward_chunk_inner(input, base_position, rows, project_logits) {
             self.commit_state.abort();
             return Err(error);
         }
-        Ok(GpuTokenResult {
-            logits: &self.logits,
-            k_delta: &self.k_delta,
-            v_delta: &self.v_delta,
+        let count = self.config.n_layer * rows * self.config.n_head_kv * self.config.n_embd_head_k;
+        Ok(GpuChunkResult {
+            logits: if project_logits { &self.logits } else { &[] },
+            k_delta: &self.k_delta[..count],
+            v_delta: &self.v_delta[..count],
         })
     }
 
@@ -440,28 +539,70 @@ impl Qwen3VulkanSession {
         input: &[f32],
         position: usize,
     ) -> Result<&'a [f32], VulkanError> {
-        self.commit_state
-            .begin(position)
-            .map_err(VulkanError::UnsupportedShape)?;
-        if let Err(error) = self.forward_token_inner(input, position, false) {
-            self.commit_state.abort();
-            return Err(error);
+        self.forward_chunk(input, position, 1, false)?;
+        match self.ops.read_f32(self.layout.normed, self.config.n_embd) {
+            Ok(hidden) => Ok(hidden),
+            Err(error) => {
+                self.commit_state.abort();
+                Err(error)
+            }
         }
-        self.ops.read_f32(self.layout.normed, self.config.n_embd)
     }
 
-    fn forward_token_inner(
+    fn record_weights(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        outputs: &[(ArenaRegion, usize)],
+        n_in: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let outputs: Vec<_> = outputs
+            .iter()
+            .map(|&(region, width)| {
+                Ok((
+                    region,
+                    width,
+                    width.checked_mul(4).ok_or(VulkanError::OutOfMemory)?,
+                ))
+            })
+            .collect::<Result<_, VulkanError>>()?;
+        self.ops.record_weight_matmul_rows(
+            commands,
+            bindings,
+            input,
+            self.layout.q8,
+            self.layout.q8_scales,
+            self.layout.q4_1_input_sums,
+            self.layout.q8k,
+            self.layout.q8k_scales,
+            &outputs,
+            n_in,
+            rows,
+            n_in,
+        )
+    }
+
+    fn forward_chunk_inner(
         &mut self,
         input: &[f32],
-        position: usize,
+        base_position: usize,
+        rows: usize,
         project_logits: bool,
     ) -> Result<(), VulkanError> {
         let config = &self.config;
-        if input.len() != config.n_embd || position >= self.capacity {
+        let input_count = rows
+            .checked_mul(config.n_embd)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if input.len() != input_count
+            || rows > self.max_rows
+            || input.iter().any(|value| !value.is_finite())
+        {
             return Err(VulkanError::UnsupportedShape(format!(
-                "invalid Qwen3 token input={} position={position}/{}",
+                "invalid Qwen3 chunk input={} rows={rows}/{}",
                 input.len(),
-                self.capacity
+                self.max_rows
             )));
         }
         let q_count = config
@@ -476,56 +617,69 @@ impl Qwen3VulkanSession {
             .n_head
             .checked_mul(config.n_embd_head_v)
             .ok_or(VulkanError::OutOfMemory)?;
-        self.ops.write_f32(self.layout.x, input)?;
-        fill_rope_neox(&mut self.rope, position, config.freq_base);
-        self.ops.write_f32(self.layout.logits, &self.rope)?;
+        // Acquire the shared submission guard before touching mapped arena bytes.
         let commands = TokenCommands::begin(self.context)?;
+        self.ops.write_f32(self.layout.x, input)?;
+        #[cfg(test)]
+        let failure = match self.fail_after_row.take() {
+            Some(row) if row < rows => Some(row),
+            Some(row) => {
+                self.fail_after_row = Some(row - rows);
+                None
+            }
+            None => None,
+        };
+        #[cfg(test)]
+        let rows = failure.map_or(rows, |row| row + 1);
+        for row in 0..rows {
+            fill_rope_neox(
+                &mut self.rope[row * config.n_embd_head_k..(row + 1) * config.n_embd_head_k],
+                base_position + row,
+                config.freq_base,
+            );
+        }
+        self.ops
+            .write_f32(self.layout.rope, &self.rope[..rows * config.n_embd_head_k])?;
         for (layer_index, bindings) in self.layers.iter().enumerate() {
-            self.ops.record_rms_norm(
+            self.ops.record_rms_norm_rows(
                 &commands,
                 bindings.attn_norm,
                 self.layout.x,
                 self.layout.normed,
                 config.n_embd,
                 config.eps,
+                rows,
+                config.n_embd,
+                config.n_embd,
             )?;
-            let qkv_outputs = [
+            let outputs = [
                 (self.layout.q, q_count),
                 (self.layout.k, kv_count),
                 (self.layout.v, kv_count),
             ];
             match bindings.qkv {
-                QkvBindings::Grouped(grouped) => self.ops.record_weight_matvec_group(
+                QkvBindings::Grouped(grouped) => self.record_weights(
                     &commands,
                     grouped,
                     self.layout.normed,
-                    self.layout.q8,
-                    self.layout.q8_scales,
-                    self.layout.q4_1_input_sums,
-                    self.layout.q8k,
-                    self.layout.q8k_scales,
-                    &qkv_outputs,
+                    &outputs,
                     config.n_embd,
+                    rows,
                 )?,
                 QkvBindings::Split(split) => {
-                    for (binding, &(output, count)) in split.iter().zip(&qkv_outputs) {
-                        self.ops.record_weight_matvec(
+                    for (binding, output) in split.iter().zip(outputs) {
+                        self.record_weights(
                             &commands,
                             *binding,
                             self.layout.normed,
-                            self.layout.q8,
-                            self.layout.q8_scales,
-                            self.layout.q4_1_input_sums,
-                            self.layout.q8k,
-                            self.layout.q8k_scales,
-                            output,
+                            &[output],
                             config.n_embd,
-                            count,
+                            rows,
                         )?;
                     }
                 }
             }
-            self.ops.record_qk_norm_rope(
+            self.ops.record_qk_norm_rope_rows(
                 &commands,
                 bindings.qk_norm,
                 self.layout.q,
@@ -533,12 +687,13 @@ impl Qwen3VulkanSession {
                 config.n_head,
                 config.n_head_kv,
                 config.n_embd_head_k,
-                self.layout.logits,
+                self.layout.rope,
                 config.eps,
                 config.has_qk_norm,
                 config.has_qk_norm,
+                rows,
             )?;
-            self.ops.record_kv_write(
+            self.ops.record_kv_write_rows(
                 &commands,
                 self.layout.k,
                 self.layout.v,
@@ -547,12 +702,20 @@ impl Qwen3VulkanSession {
                 self.layout.kv_delta_k,
                 self.layout.kv_delta_v,
                 layer_index,
-                position,
+                base_position,
                 config.n_layer,
                 self.capacity,
                 kv_count,
+                rows,
             )?;
-            self.ops.record_attention(
+            #[cfg(test)]
+            if let Some(row) = failure {
+                commands.submit_and_wait()?;
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "injected Qwen3 GPU failure after row {row}"
+                )));
+            }
+            self.ops.record_attention_rows(
                 &commands,
                 self.layout.q,
                 self.layout.kv_k,
@@ -561,107 +724,143 @@ impl Qwen3VulkanSession {
                 self.layout.attn,
                 layer_index,
                 config.n_layer,
-                position + 1,
+                base_position,
                 self.capacity,
                 config.n_head,
                 config.n_head_kv,
                 config.n_embd_head_k,
+                rows,
             )?;
-            self.ops.record_weight_matvec(
+            self.record_weights(
                 &commands,
                 bindings.wo,
                 self.layout.attn,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                self.layout.projection,
+                &[(self.layout.projection, config.n_embd)],
                 attn_count,
-                config.n_embd,
+                rows,
             )?;
-            self.ops.record_add(
+            self.ops.record_add_rows(
                 &commands,
                 self.layout.x,
                 self.layout.projection,
                 config.n_embd,
+                rows,
             )?;
-            self.ops.record_rms_norm(
+            self.ops.record_rms_norm_rows(
                 &commands,
                 bindings.ffn_norm,
                 self.layout.x,
                 self.layout.normed,
                 config.n_embd,
                 config.eps,
+                rows,
+                config.n_embd,
+                config.n_embd,
             )?;
-            self.ops.record_weight_matvec_group(
+            self.record_weights(
                 &commands,
                 bindings.gate_up,
                 self.layout.normed,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
                 &[
                     (self.layout.gate, config.n_ff),
                     (self.layout.up, config.n_ff),
                 ],
                 config.n_embd,
+                rows,
             )?;
-            self.ops
-                .record_silu_mul(&commands, self.layout.gate, self.layout.up, config.n_ff)?;
-            self.ops.record_weight_matvec(
+            self.ops.record_silu_mul_rows(
+                &commands,
+                self.layout.gate,
+                self.layout.up,
+                config.n_ff,
+                rows,
+            )?;
+            self.record_weights(
                 &commands,
                 bindings.down,
                 self.layout.gate,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                self.layout.down,
+                &[(self.layout.down, config.n_embd)],
                 config.n_ff,
-                config.n_embd,
+                rows,
             )?;
-            self.ops
-                .record_add(&commands, self.layout.x, self.layout.down, config.n_embd)?;
+            self.ops.record_add_rows(
+                &commands,
+                self.layout.x,
+                self.layout.down,
+                config.n_embd,
+                rows,
+            )?;
         }
-
+        let last_offset = (rows - 1)
+            .checked_mul(config.n_embd)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let last = ArenaRegion {
+            offset: self
+                .layout
+                .x
+                .offset
+                .checked_add(last_offset)
+                .ok_or(VulkanError::OutOfMemory)?,
+            size: self
+                .layout
+                .x
+                .size
+                .checked_sub(last_offset)
+                .ok_or(VulkanError::OutOfMemory)?,
+        };
         self.ops.record_rms_norm(
             &commands,
             self.output_norm,
-            self.layout.x,
+            last,
             self.layout.normed,
             config.n_embd,
             config.eps,
         )?;
         if project_logits {
-            self.ops.record_weight_matvec(
+            self.record_weights(
                 &commands,
                 self.output,
                 self.layout.normed,
-                self.layout.q8,
-                self.layout.q8_scales,
-                self.layout.q4_1_input_sums,
-                self.layout.q8k,
-                self.layout.q8k_scales,
-                self.layout.logits,
+                &[(self.layout.logits, config.vocab)],
                 config.n_embd,
-                config.vocab,
+                1,
             )?;
         }
         commands.submit_and_wait()?;
-
         if project_logits {
             self.logits
                 .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab)?);
         }
-        let delta_count = self.k_delta.len();
-        self.k_delta
+        let delta_count = config
+            .n_layer
+            .checked_mul(rows)
+            .and_then(|count| count.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.k_delta[..delta_count]
             .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);
-        self.v_delta
+        self.v_delta[..delta_count]
             .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_v, delta_count)?);
+        if self.k_delta[..delta_count]
+            .iter()
+            .chain(&self.v_delta[..delta_count])
+            .any(|value| !value.is_finite())
+            || self
+                .ops
+                .read_f32(self.layout.x, input_count)?
+                .iter()
+                .any(|value| !value.is_finite())
+            || self
+                .ops
+                .read_f32(self.layout.normed, config.n_embd)?
+                .iter()
+                .any(|value| !value.is_finite())
+            || (project_logits && self.logits.iter().any(|value| !value.is_finite()))
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3 Vulkan chunk produced non-finite output".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -844,50 +1043,80 @@ mod tests {
     }
 
     #[test]
-    fn failed_token_does_not_advance_committed_kv() {
-        let mut state = TokenCommitState::new(7);
-        state.begin(7).unwrap();
+    fn token_commit_failed_chunk_does_not_advance_committed_kv() {
+        let mut state = TokenCommitState::new(7, 16);
+        state.begin(7, 3).unwrap();
         state.abort();
         assert_eq!(state.committed_len(), 7);
     }
 
     #[test]
-    fn committed_token_advances_exactly_once() {
-        let mut state = TokenCommitState::new(7);
-        assert!(state.begin(6).is_err());
-        state.begin(7).unwrap();
-        assert!(state.begin(7).is_err());
+    fn token_commit_chunk_advances_once_and_checks_capacity() {
+        let mut state = TokenCommitState::new(7, 9);
+        assert!(state.begin(6, 3).is_err());
+        assert!(state.begin(7, 0).is_err());
+        assert!(state.begin(7, 3).is_err());
+        assert!(state.begin(7, usize::MAX).is_err());
+        let mut state = TokenCommitState::new(7, 10);
+        state.begin(7, 3).unwrap();
+        assert!(state.begin(7, 3).is_err());
         state.commit();
         state.commit();
-        assert_eq!(state.committed_len(), 8);
+        assert_eq!(state.committed_len(), 10);
     }
 
     #[test]
     fn reset_rewinds_committed_length() {
-        let mut state = TokenCommitState::new(7);
+        let mut state = TokenCommitState::new(7, 10);
         state.reset();
         assert_eq!(state.committed_len(), 0);
-        state.begin(0).unwrap();
+        state.begin(0, 3).unwrap();
     }
 
     #[test]
-    fn shadow_kv_commits_only_a_complete_token() {
-        let arch = Arc::new(KvArch::new(2, 1, 2, 2, 4));
-        let mut state = KvState::new(arch, KvFormat::F32, 4);
-        let k = [1.0, 2.0, 3.0, 4.0];
-        let v = [5.0, 6.0, 7.0, 8.0];
-
-        assert!(commit_shadow_kv(&mut state, 1, &k[..3], &v).is_err());
-        assert_eq!(state.seq_len, 0);
-        commit_shadow_kv(&mut state, 1, &k, &v).unwrap();
-
-        let KvCache::F32(cache) = &state.cache else {
-            panic!("expected F32 cache");
-        };
-        assert_eq!(&cache.k[2..4], &[1.0, 2.0]);
-        assert_eq!(&cache.k[10..12], &[3.0, 4.0]);
-        assert_eq!(&cache.v[2..4], &[5.0, 6.0]);
-        assert_eq!(&cache.v[10..12], &[7.0, 8.0]);
-        assert_eq!(state.seq_len, 2);
+    fn shadow_kv_chunk_commits_all_layers_and_rows_atomically() {
+        for format in [KvFormat::F16, KvFormat::F32] {
+            let arch = Arc::new(KvArch::new(2, 1, 2, 2, 4));
+            let mut state = KvState::new(arch, format, 4);
+            commit_shadow_kv_chunk(&mut state, 0, 1, &[31.0; 4], &[32.0; 4]).unwrap();
+            let k = [
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ];
+            let v = k.map(|value| value + 12.0);
+            let snapshot = |state: &KvState| match &state.cache {
+                KvCache::F16(cache) => (
+                    cache.k.iter().map(|&v| v as u32).collect::<Vec<_>>(),
+                    cache.v.iter().map(|&v| v as u32).collect::<Vec<_>>(),
+                ),
+                KvCache::F32(cache) => (
+                    cache.k.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    cache.v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                ),
+            };
+            let before = snapshot(&state);
+            assert!(commit_shadow_kv_chunk(&mut state, 1, 3, &k[..11], &v).is_err());
+            let mut nonfinite = k;
+            nonfinite[11] = f32::NAN;
+            assert!(commit_shadow_kv_chunk(&mut state, 1, 3, &nonfinite, &v).is_err());
+            assert!(commit_shadow_kv_chunk(&mut state, 0, 3, &k, &v).is_err());
+            assert_eq!(state.seq_len, 1);
+            assert_eq!(snapshot(&state), before);
+            commit_shadow_kv_chunk(&mut state, 1, 3, &k, &v).unwrap();
+            let expected = |values: &[f32]| {
+                values
+                    .iter()
+                    .map(|&value| match format {
+                        KvFormat::F16 => crate::ops::f32_to_f16(value) as u32,
+                        KvFormat::F32 => value.to_bits(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (keys, values) = snapshot(&state);
+            assert_eq!(&keys[2..8], &expected(&k[..6]));
+            assert_eq!(&keys[10..16], &expected(&k[6..]));
+            assert_eq!(&values[2..8], &expected(&v[..6]));
+            assert_eq!(&values[10..16], &expected(&v[6..]));
+            assert_eq!(state.seq_len, 4);
+        }
     }
 }

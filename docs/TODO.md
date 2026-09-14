@@ -548,3 +548,42 @@ fp16 而非 bf16），F16 听感反而对齐上游训练——那就让 F16 路�
 - `src/ops/kernel/qtensor_owned.rs::from_quantized` + dispatch table
 - `src/{app/text,models/{diffusion/dreamx,dots/{dit,patch_encoder,speaker,vocoder}}}.rs`：把
   `QuantizedTensor::F32(values)` 改成 struct syntax
+
+## TODO-010: Prefill runtime 通用化，避免每个模型重复实现 chunk 调度
+
+### 现状
+
+`src/core/prefill.rs` 目前只提供 `prefill_chunks()` 和 batch size 校验。Qwen3、Qwen3.5、Gemma4 仍分别维护自己的 chunk loop、CPU/Vulkan fallback、KV/state snapshot、commit/rollback 和 logits 输出处理。新增模型时，除了实现模型自己的 forward，还要重复实现一套 prefill 调度逻辑。
+
+### 目标
+
+参考 llama.cpp 的 `llama_batch_allocr`、`llama_memory_context_i` 和 `process_ubatch` 分层：
+
+- 公共 `PrefillRunner` 负责输入校验、chunk 切分、`base_position`、输出顺序、失败重试、backend fallback 和 chunk 级事务；
+- 公共 `PrefillContext` / `ChunkTxn` 统一 row shape、状态快照、commit/rollback；
+- 模型只实现 `PrefillKernel::forward_chunk`，保留各自的 attention、SSM/conv、MoE 和多模态 position 语义；
+- 不支持多行 batch 的模型声明 singleton fallback，不阻塞模型接入；
+- `PreparedRows` 和 CPU/Vulkan row-aware matmul 继续作为共享 backend 能力。
+
+### 设计边界
+
+不要把所有模型强行抽成一个万能 `forward_batch()`。Transformer、hybrid/recurrent 和多模态模型的状态语义不同；通用化的是 runtime 调度和事务协议，模型专属的是 layer math 和 batch capability。避免在 row 内调用动态 dispatch，保持每个 chunk 只进入一次模型 kernel，不能因抽象增加性能回退。
+
+### 实施顺序
+
+1. 先抽 `PrefillRunner` 包裹现有 Qwen3/Qwen3.5/Gemma4 loop，不改变数值行为。
+2. 抽 `PrefillContext` / `ChunkTxn`，统一 KV/state commit、rollback 和 CPU/GPU fallback。
+3. 将模型接口收敛为 `PrefillKernel` + capability；无 batch 能力时自动走 batch=1。
+4. 复用 shape 兼容的 scratch/graph，补充 batch=1、跨 chunk、失败回滚和真实 GGUF parity/benchmark。
+
+### 参考实现
+
+- llama.cpp：`src/llama-batch.h`、`src/llama-memory.h`、`src/llama-context.cpp`、`src/llama-graph.h`
+- 当前 Rust：`src/core/prefill.rs`、`src/ops/kernel/mod.rs::PreparedRows`、`src/models/qwen3/trunk/prefill.rs`、`src/models/qwen35/trunk/session.rs`、`src/models/gemma4/trunk/forward.rs`
+
+### 验收
+
+- 新增一个普通 Transformer 模型时无需重新实现 chunk 调度、fallback 和 rollback；
+- Qwen3/Qwen3.5/Gemma4 的 batch=1、跨 chunk、KV/state、logits/token parity 保持现状；
+- prefill/decode 吞吐不低于当前实现，且 runner 不引入逐 token 动态 dispatch；
+- 失败 chunk 不推进已提交 KV/state。

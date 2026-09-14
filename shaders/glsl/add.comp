@@ -7,12 +7,17 @@ layout(push_constant) uniform PC {
     uint target_word;
     uint addition_word;
     uint count;
+    uint rows;
+    uint row_stride;
 } pc;
 
 void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     if (index >= pc.count) return;
+    index += row * pc.row_stride;
     float target = uintBitsToFloat(arena.data[pc.target_word + index]);
     float addition = uintBitsToFloat(arena.data[pc.addition_word + index]);
     arena.data[pc.target_word + index] = floatBitsToUint(target + addition);
