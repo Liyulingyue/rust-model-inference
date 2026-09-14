@@ -715,6 +715,15 @@ impl Qwen35VulkanSession {
         positions: &[[usize; 4]],
         rows: usize,
     ) -> Result<Qwen35GpuChunkResult<'a>, VulkanError> {
+        let count = qwen35_product(
+            "KV delta",
+            &[
+                self.config.n_layer_impl(),
+                rows,
+                self.config.n_head_kv,
+                self.config.n_embd_head(),
+            ],
+        )?;
         if let Err(error) = self.commit_state.begin(base_position, rows) {
             self.commit_state.abort();
             return Err(VulkanError::UnsupportedShape(error));
@@ -723,8 +732,6 @@ impl Qwen35VulkanSession {
             self.commit_state.abort();
             return Err(error);
         }
-        let count =
-            self.config.n_layer_impl() * rows * self.config.n_head_kv * self.config.n_embd_head();
         Ok(Qwen35GpuChunkResult {
             logits: &self.logits,
             k_delta: &self.k_delta[..count],
@@ -822,6 +829,7 @@ impl Qwen35VulkanSession {
             .n_head_kv
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
+        let delta_bytes = qwen35_product("KV delta bytes", &[layer_count, rows, dense_kv, 4])?;
         let key_dim = config.key_dim();
         let value_dim = config.value_dim();
         let conv_dim = config.conv_dim();
@@ -835,7 +843,7 @@ impl Qwen35VulkanSession {
         for region in [self.layout.kv_delta_k, self.layout.kv_delta_v] {
             self.ops.zero_region(ArenaRegion {
                 offset: region.offset,
-                size: layer_count * rows * dense_kv * 4,
+                size: delta_bytes,
             })?;
         }
         #[cfg(test)]
@@ -1096,7 +1104,7 @@ impl Qwen35VulkanSession {
 
         self.logits
             .copy_from_slice(self.ops.read_f32(self.layout.logits, config.vocab_size)?);
-        let delta_count = layer_count * rows * dense_kv;
+        let delta_count = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
         self.k_delta[..delta_count]
             .copy_from_slice(self.ops.read_f32(self.layout.kv_delta_k, delta_count)?);
         self.v_delta[..delta_count]
@@ -1341,12 +1349,18 @@ fn validate_executor_shape(config: &Qwen35Config, capacity: usize) -> Result<(),
 mod tests {
     use super::{
         check_device_eligibility, check_eligibility, commit_shadow_state, fill_mrope,
-        validated_weight_bytes, EligibilityFacts, Qwen35ArenaLayout,
+        qwen35_product, validated_weight_bytes, EligibilityFacts, Qwen35ArenaLayout,
     };
     use crate::core::scratchpad::KvCache;
     use crate::core::tensor::GGMLType;
     use crate::models::qwen35::Qwen35Config;
     use crate::ops::kernel::{QuantizedTensor, Weight};
+
+    #[test]
+    fn qwen35_product_rejects_size_overflow() {
+        let error = qwen35_product("test", &[usize::MAX, 2]).unwrap_err();
+        assert!(error.to_string().contains("size overflows usize"));
+    }
 
     #[test]
     fn commit_shadow_state_chunk_is_atomic_and_transposes_values() {

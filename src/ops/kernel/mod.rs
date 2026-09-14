@@ -99,8 +99,11 @@ impl PreparedRows {
 
         if need_q8 {
             let blocks = n_in.div_ceil(32);
+            let scale_count = rows
+                .checked_mul(blocks)
+                .ok_or("prepared rows Q8 scale shape overflow")?;
             self.q8.resize(input_len, 0);
-            self.scales.resize(rows * blocks, 0.0);
+            self.scales.resize(scale_count, 0.0);
             for row in 0..rows {
                 crate::ops::quantize_q8_0_into(
                     &input[row * n_in..(row + 1) * n_in],
@@ -112,8 +115,11 @@ impl PreparedRows {
         }
         if need_q8k {
             let blocks = n_in / crate::ops::quant::QK_K;
+            let q8k_count = rows
+                .checked_mul(blocks)
+                .ok_or("prepared rows Q8_K shape overflow")?;
             self.q8k.resize(
-                rows * blocks,
+                q8k_count,
                 crate::ops::quant::BlockQ8K {
                     d: 0.0,
                     qs: [0; crate::ops::quant::QK_K],
@@ -151,7 +157,10 @@ impl PreparedRows {
         projections: [(&Weight<'_>, &mut [f32]); N],
         pool: &crate::core::thread_pool::ComputePool,
     ) -> Result<(), String> {
-        let input_len = self.rows * self.n_in;
+        let input_len = self
+            .rows
+            .checked_mul(self.n_in)
+            .ok_or("prepared matmul input shape overflow")?;
         if self.rows == 0 || input.len() != input_len {
             return Err("prepared matmul input shape mismatch".into());
         }
@@ -205,6 +214,7 @@ impl PreparedRows {
                 }
                 return;
             }
+            let mut output_ptrs = projections.map(|(_, output_ptr)| output_ptr);
             for row in 0..self.rows {
                 let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
                 let q8 = if self.need_q8 {
@@ -217,16 +227,12 @@ impl PreparedRows {
                 } else {
                     &[]
                 };
-                for (weight, output_ptr) in projections {
+                for ((weight, _), output_ptr) in projections.iter().zip(&mut output_ptrs) {
                     let q8k = weight
                         .uses_q8_k()
                         .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
-                    let output_row = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            output_ptr.add(row * weight.n_out),
-                            weight.n_out,
-                        )
-                    };
+                    let output_row =
+                        unsafe { std::slice::from_raw_parts_mut(*output_ptr, weight.n_out) };
                     weight.kernel.forward_prepared(
                         input_row,
                         q8,
@@ -238,6 +244,9 @@ impl PreparedRows {
                         ith,
                         nth,
                     );
+                    // SAFETY: output lengths were checked above, so advancing
+                    // one row stays within each output allocation.
+                    *output_ptr = unsafe { output_ptr.add(weight.n_out) };
                 }
             }
         });
