@@ -25,5 +25,5 @@ jobs:
       - run: bash scripts/vulkan-shaders.sh check
       - run: cargo check --locked --features vulkan --lib
       - run: cargo check --locked --features vulkan --bin rust-model-inference
-      - run: cargo check --locked --features vulkan --bin server
+      - run: cargo check --locked --features vulkan --bin rust-model-server
       - run: cargo check --locked --features vulkan --examples
