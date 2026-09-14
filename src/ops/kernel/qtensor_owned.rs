@@ -170,9 +170,9 @@ impl QTensorOwned {
     /// Use when a model needs to take ownership of weights for fusion.
     pub fn from_quantized(q: QuantizedTensor<'_>) -> Self {
         match q {
-            QuantizedTensor::F32(v) => Self::F32 {
-                data: v.clone(),
-                n_cols: v.len(),
+            QuantizedTensor::F32 { data, n_in, .. } => Self::F32 {
+                data: data.clone(),
+                n_cols: if n_in != 0 { n_in } else { data.len() },
                 n_rows: 1,
             },
             QuantizedTensor::F16(w) => Self::F16 {
@@ -316,8 +316,17 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         // SIMD function as borrowed bytes.
         use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
-            Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone()))
-                .forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth),
+            Self::F32 { data, n_cols, .. } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prequantized(
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                )
+            }
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice()))
                 .forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth),
             Self::BF16 { data, .. } => Box::new(bf16::BF16Kernel::new(data.as_slice()))
@@ -370,17 +379,19 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
     ) {
         use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_k, q6_k};
         match self {
-            Self::F32 { data, .. } => Box::new(f32::F32Kernel::new(data.clone())).forward_prepared(
-                input_f32,
-                input_q8,
-                input_scales,
-                q8_k,
-                output,
-                n_in,
-                n_out,
-                ith,
-                nth,
-            ),
+            Self::F32 { data, n_cols, .. } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prepared(
+                    input_f32,
+                    input_q8,
+                    input_scales,
+                    q8_k,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                )
+            }
             Self::F16 { data, .. } => Box::new(f16::F16Kernel::new(data.as_slice()))
                 .forward_prepared(
                     input_f32,

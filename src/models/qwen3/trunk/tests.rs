@@ -468,9 +468,11 @@ fn qwen3_failed_cpu_chunk_keeps_visible_kv_at_base_position() {
 #[test]
 fn qwen3_nonfinite_tentative_kv_never_commits() {
     let mut model = deterministic_session_model(16);
-    let mut bad_key = Weight::from_quantized(QuantizedTensor::F32(vec![f32::NAN; 32 * 32]));
-    bad_key.n_in = 32;
-    bad_key.n_out = 32;
+    let mut bad_key = Weight::from_quantized(QuantizedTensor::F32 {
+        data: vec![f32::NAN; 32 * 32],
+        n_in: 32,
+        n_out: 32,
+    });
     model.layers[0].wk = bad_key;
     let mut session = Qwen3Session::new(&model, 8).unwrap();
     let before = snapshot_qwen3_kv(session.kv_state());

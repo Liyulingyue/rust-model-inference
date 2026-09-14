@@ -18,8 +18,12 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_q8;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+#[cfg(target_arch = "aarch64")]
+pub mod neon_q8;
 pub mod scalar;
 
 /// F16 matmul kernel: `output = weight × input`, all dequantized to f32.
@@ -112,6 +116,17 @@ impl<'a> Kernel for F16Kernel<'a> {
         nth: usize,
     ) {
         debug_assert_eq!(self.weight.len(), n_out * n_in * 2);
+        debug_assert!(
+            input_q8.len() >= n_in,
+            "F16Kernel::forward_prequantized: input_q8 len {} < n_in {n_in}",
+            input_q8.len()
+        );
+        debug_assert!(
+            input_scales.len() >= n_in.div_ceil(32),
+            "F16Kernel::forward_prequantized: input_scales len {} < required {}",
+            input_scales.len(),
+            n_in.div_ceil(32)
+        );
         let per_thread = n_out / nth.max(1);
         let start = ith * per_thread;
         let end = if ith + 1 == nth {
@@ -119,6 +134,45 @@ impl<'a> Kernel for F16Kernel<'a> {
         } else {
             (ith + 1) * per_thread
         };
+        if start >= end {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2_q8::matmul_f16_vs_q8_avx2(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::ops::has_neon() {
+                unsafe {
+                    neon_q8::matmul_f16_vs_q8_neon(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
         for i in start..end {
             let row = &self.weight[i * n_in * 2..(i + 1) * n_in * 2];
             let mut sum = 0.0f32;
@@ -134,8 +188,8 @@ impl<'a> Kernel for F16Kernel<'a> {
     fn forward_prepared(
         &self,
         input_f32: &[f32],
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
@@ -143,16 +197,20 @@ impl<'a> Kernel for F16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        self.forward_scaled_rows(
-            input_f32,
-            output,
-            n_in,
-            n_out,
-            1.0,
-            &mut Vec::new(),
-            ith,
-            nth,
-        );
+        if input_f32.len() >= n_in {
+            self.forward_scaled_rows(
+                input_f32,
+                output,
+                n_in,
+                n_out,
+                1.0,
+                &mut Vec::new(),
+                ith,
+                nth,
+            );
+        } else {
+            self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
     }
 
     /// F16 converts the input to F16 before the dot product, matching ggml's

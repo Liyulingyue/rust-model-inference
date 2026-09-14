@@ -3828,7 +3828,7 @@ fn cpu_weight_matvec(
                 .chunks_exact(4)
                 .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
                 .collect();
-            let kernel = crate::ops::kernel::f32::F32Kernel::new(values);
+            let kernel = crate::ops::kernel::f32::F32Kernel::new(values, 0, 0);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
         GpuWeightFormat::Q8_0 => unreachable!(),

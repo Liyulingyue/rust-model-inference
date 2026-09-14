@@ -29,11 +29,11 @@ fn q8_weight_bytes(rows: usize, blocks_per_row: usize) -> &'static [u8] {
 }
 
 fn prepared_row_test_weights() -> Vec<Weight<'static>> {
-    let mut f32_weight = Weight::from_quantized(QuantizedTensor::F32(
-        (0..512).map(|i| (i as f32 % 17.0 - 8.0) / 16.0).collect(),
-    ));
-    f32_weight.n_in = 256;
-    f32_weight.n_out = 2;
+    let mut f32_weight = Weight::from_quantized(QuantizedTensor::F32 {
+        data: (0..512).map(|i| (i as f32 % 17.0 - 8.0) / 16.0).collect(),
+        n_in: 256,
+        n_out: 2,
+    });
 
     let f16 = (0..512)
         .flat_map(|i| f32_to_f16((i as f32 % 13.0 - 6.0) / 8.0).to_le_bytes())
@@ -294,7 +294,11 @@ fn prepared_group_matches_mixed_format_sequential_bits() {
 
 #[test]
 fn prepared_f32_matmul_does_not_require_q8k_alignment() {
-    let weight = Weight::from_quantized(QuantizedTensor::F32(vec![1.0, 2.0]));
+    let weight = Weight::from_quantized(QuantizedTensor::F32 {
+        data: vec![1.0, 2.0],
+        n_in: 0,
+        n_out: 0,
+    });
     let pool = ComputePool::new(1);
     let mut output = [0.0];
 

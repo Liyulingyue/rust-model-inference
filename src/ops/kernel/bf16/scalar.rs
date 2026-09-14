@@ -54,6 +54,17 @@ pub fn forward_q8_rows_scalar(
     ith: usize,
     nth: usize,
 ) {
+    assert!(
+        input_q8.len() >= n_in,
+        "BF16 forward_q8: input_q8 len {} < n_in {n_in}",
+        input_q8.len()
+    );
+    assert!(
+        input_scales.len() >= n_in.div_ceil(32),
+        "BF16 forward_q8: input_scales len {} < required {}",
+        input_scales.len(),
+        n_in.div_ceil(32)
+    );
     let (start, end) = BF16Kernel::row_range(n_out, ith, nth);
     let blocks_per_row = n_in.div_ceil(32);
     for out_idx in start..end {

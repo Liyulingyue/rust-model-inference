@@ -12,8 +12,12 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_q8;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+#[cfg(target_arch = "aarch64")]
+pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +114,46 @@ impl<'a> BF16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        let (start, end) = Self::row_range(n_out, ith, nth);
+        if end <= start {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2_q8::matmul_bf16_vs_q8_avx2(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::ops::has_neon() {
+                unsafe {
+                    neon_q8::matmul_bf16_vs_q8_neon(
+                        self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
         scalar::forward_q8_rows_scalar(
             self.weight,
             input_q8,

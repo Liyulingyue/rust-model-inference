@@ -36,6 +36,55 @@ pub fn row_range(n_out: usize, ith: usize, nth: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// F16 weight × Q8_0 input matmul.  Reference for the AVX2 / NEON SIMD
+/// kernels; `input_scales[k]` scales `input_q8[k*32..(k+1)*32]`.
+pub fn forward_f16_q8_rows_scalar(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    assert!(
+        input_q8.len() >= n_in,
+        "F16 forward_q8: input_q8 len {} < n_in {n_in}",
+        input_q8.len()
+    );
+    assert!(
+        input_scales.len() >= n_in.div_ceil(32),
+        "F16 forward_q8: input_scales len {} < required {}",
+        input_scales.len(),
+        n_in.div_ceil(32)
+    );
+    let (start, end) = row_range(n_out, ith, nth);
+    let blocks_per_row = n_in.div_ceil(32);
+    for out_idx in start..end {
+        let row_off = out_idx * n_in * 2;
+        let mut sum = 0.0f32;
+        for block in 0..blocks_per_row {
+            let input_start = block * 32;
+            let input_end = (input_start + 32).min(n_in);
+            let input_scale = input_scales[block];
+            for in_idx in input_start..input_end {
+                let bits = u16::from_le_bytes([
+                    weight[row_off + in_idx * 2],
+                    weight[row_off + in_idx * 2 + 1],
+                ]);
+                sum += crate::ops::f16_to_f32(bits) * (input_q8[in_idx] as i8 as f32) * input_scale;
+            }
+        }
+        let output_index = if output.len() >= n_out {
+            out_idx
+        } else {
+            out_idx - start
+        };
+        output[output_index] = sum;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

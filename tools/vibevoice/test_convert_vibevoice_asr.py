@@ -10,14 +10,14 @@ from tools.vibevoice import convert_vibevoice_asr as converter
 from tools.vibevoice.convert_vibevoice_asr import (
     ENCODER_DEPTHS,
     GGML_Q8_0,
-    LLM_FILENAME,
-    MMPROJ_FILENAME,
+    llm_filename,
+    mmproj_filename,
     encoder_tensor_rules,
     encoder_tensor_shapes,
     output_paths,
-    quantize_q8_0,
     require_tensor,
 )
+from converter.utils.gguf import quantize_q8_0
 from tools.vibevoice.vibevoice_llm_oracle import (
     assemble_input_rows,
     safetensors_name,
@@ -42,12 +42,35 @@ class ConverterContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "row width"):
             shared_dots._tensor_nbytes(GGML_Q8_0, (16, 2))
 
-    def test_output_paths_include_storage_types(self):
-        llm, mmproj = output_paths(Path("/tmp/out"))
-        self.assertEqual(llm.name, LLM_FILENAME)
-        self.assertEqual(mmproj.name, MMPROJ_FILENAME)
-        self.assertEqual(LLM_FILENAME, "VibeVoice-ASR-Streaming-7B-Q8_0.gguf")
-        self.assertEqual(MMPROJ_FILENAME, "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf")
+    def test_output_paths_derive_from_model_dir_basename(self):
+        from pathlib import Path as _P
+        llm, mmproj = output_paths(_P("/tmp/models/VibeVoice-ASR-Streaming-7B"), _P("/tmp/out"))
+        self.assertEqual(llm.name, llm_filename(_P("/tmp/models/VibeVoice-ASR-Streaming-7B")))
+        self.assertEqual(mmproj.name, mmproj_filename(_P("/tmp/models/VibeVoice-ASR-Streaming-7B")))
+        self.assertEqual(llm.name, "VibeVoice-ASR-Streaming-7B-Q8_0.gguf")
+        self.assertEqual(mmproj.name, "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf")
+
+    def test_output_paths_work_for_1_5b(self):
+        from pathlib import Path as _P
+        llm, mmproj = output_paths(_P("/tmp/models/VibeVoice-ASR-Streaming-1.5B"), _P("/tmp/out"))
+        self.assertEqual(llm.name, "VibeVoice-ASR-Streaming-1.5B-Q8_0.gguf")
+        self.assertEqual(mmproj.name, "mmproj-VibeVoice-ASR-Streaming-1.5B-BF16.gguf")
+
+    def test_llm_filename_per_quant_suffix(self):
+        from pathlib import Path as _P
+        from tools.vibevoice.convert_vibevoice_asr import (
+            QUANT_KIND_BF16,
+            QUANT_KIND_F16,
+            QUANT_KIND_F32,
+            QUANT_KIND_Q4,
+            QUANT_KIND_Q8,
+        )
+        base = _P("/tmp/models/VibeVoice-ASR-Streaming-1.5B")
+        self.assertEqual(llm_filename(base, QUANT_KIND_Q8), "VibeVoice-ASR-Streaming-1.5B-Q8_0.gguf")
+        self.assertEqual(llm_filename(base, QUANT_KIND_Q4), "VibeVoice-ASR-Streaming-1.5B-Q4_0.gguf")
+        self.assertEqual(llm_filename(base, QUANT_KIND_BF16), "VibeVoice-ASR-Streaming-1.5B-BF16.gguf")
+        self.assertEqual(llm_filename(base, QUANT_KIND_F16), "VibeVoice-ASR-Streaming-1.5B-F16.gguf")
+        self.assertEqual(llm_filename(base, QUANT_KIND_F32), "VibeVoice-ASR-Streaming-1.5B-F32.gguf")
 
     def test_q8_0_rounds_half_away_from_zero_and_encodes_zero_block(self):
         values = np.zeros(64, dtype=np.float32)

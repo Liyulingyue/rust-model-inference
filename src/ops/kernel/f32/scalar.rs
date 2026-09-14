@@ -34,6 +34,50 @@ pub fn row_range(n_out: usize, ith: usize, nth: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// Real F32 weight × Q8_0 input matmul for rows in `[start, end)`. This
+/// is the production fast path for F32 GGUF layers; previously the
+/// module only exposed `forward_f32_rows` (full F32 input) and the
+/// placeholder `row_dot_range` (sum-only).
+pub fn forward_q8_rows_scalar(
+    weight: &[f32],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    start: usize,
+    end: usize,
+) {
+    assert!(
+        input_q8.len() >= n_in,
+        "F32 forward_q8: input_q8 len {} < n_in {n_in}",
+        input_q8.len()
+    );
+    assert!(
+        input_scales.len() >= n_in.div_ceil(32),
+        "F32 forward_q8: input_scales len {} < required {}",
+        input_scales.len(),
+        n_in.div_ceil(32)
+    );
+    for out_idx in start..end {
+        let row_off = out_idx * n_in;
+        let mut sum = 0.0f32;
+        for block in 0..n_in.div_ceil(32) {
+            let input_scale = input_scales[block];
+            let block_end = ((block + 1) * 32).min(n_in);
+            for in_idx in (block * 32)..block_end {
+                sum += weight[row_off + in_idx] * (input_q8[in_idx] as i8 as f32) * input_scale;
+            }
+        }
+        let output_index = if output.len() >= n_out {
+            out_idx
+        } else {
+            out_idx - start
+        };
+        output[output_index] = sum;
+    }
+}
+
 /// Per-row sum without input (used by the `forward_prequantized` placeholder).
 pub fn row_dot_range(
     weight: &[f32],

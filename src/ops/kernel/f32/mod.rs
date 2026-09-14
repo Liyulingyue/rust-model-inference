@@ -17,18 +17,28 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "x86_64")]
+pub mod avx2_q8;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+#[cfg(target_arch = "aarch64")]
+pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone)]
 pub struct F32Kernel {
     weight: Vec<f32>,
+    n_in: usize,
+    n_out: usize,
 }
 
 impl F32Kernel {
-    pub fn new(weight: Vec<f32>) -> Self {
-        Self { weight }
+    pub fn new(weight: Vec<f32>, n_in: usize, n_out: usize) -> Self {
+        Self {
+            weight,
+            n_in,
+            n_out,
+        }
     }
 }
 
@@ -43,22 +53,71 @@ impl Kernel for F32Kernel {
 
     fn forward_prequantized(
         &self,
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         output: &mut [f32],
-        n_out: usize,
         n_in: usize,
+        n_out: usize,
         ith: usize,
         nth: usize,
     ) {
-        matmul_f32_scalar_range(&self.weight, output, n_in, n_out, ith, nth);
+        let (start, end) = scalar::row_range(n_out, ith, nth);
+        if start >= end {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2_q8::matmul_f32_vs_q8_avx2(
+                        &self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::ops::has_neon() {
+                unsafe {
+                    neon_q8::matmul_f32_vs_q8_neon(
+                        &self.weight,
+                        input_q8,
+                        input_scales,
+                        output,
+                        n_in,
+                        n_out,
+                        start,
+                        end,
+                    );
+                }
+                return;
+            }
+        }
+        scalar::forward_q8_rows_scalar(
+            &self.weight,
+            input_q8,
+            input_scales,
+            output,
+            n_in,
+            n_out,
+            start,
+            end,
+        );
     }
 
     fn forward_prepared(
         &self,
         input_f32: &[f32],
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
         n_in: usize,
@@ -66,7 +125,11 @@ impl Kernel for F32Kernel {
         ith: usize,
         nth: usize,
     ) {
-        scalar::forward_f32_rows(&self.weight, input_f32, output, n_in, n_out, ith, nth);
+        if input_f32.len() >= n_in {
+            scalar::forward_f32_rows(&self.weight, input_f32, output, n_in, n_out, ith, nth);
+        } else {
+            self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
     }
 
     /// F32 has a native f32-input path. The trait default impl quantizes
@@ -94,7 +157,16 @@ impl Kernel for F32Kernel {
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {
-        let offset = token_id as usize * n_embd;
+        let stride = if self.n_in != 0 { self.n_in } else { n_embd };
+        let offset = token_id as usize * stride;
+        debug_assert!(
+            output.len() >= n_embd,
+            "F32 embedding_lookup output buffer too small"
+        );
+        debug_assert!(
+            offset + n_embd <= self.weight.len(),
+            "F32 embedding_lookup token_id {token_id} out of range"
+        );
         output.copy_from_slice(&self.weight[offset..offset + n_embd]);
     }
 }
@@ -170,7 +242,7 @@ mod tests {
         let input = [1.0f32, 1.0, 1.0];
         let mut output = [0.0f32; 2];
 
-        let kernel = F32Kernel::new(w);
+        let kernel = F32Kernel::new(w, 0, 0);
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [6.0, 15.0]);
@@ -182,7 +254,7 @@ mod tests {
         let input = [10.0f32, 20.0, 30.0];
         let mut output = [0.0f32; 2];
 
-        let kernel = F32Kernel::new(w);
+        let kernel = F32Kernel::new(w, 0, 0);
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [140.0, 320.0]);
@@ -194,7 +266,7 @@ mod tests {
         let input = [1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0];
         let mut output = [0.0f32; 6];
 
-        let kernel = F32Kernel::new(w);
+        let kernel = F32Kernel::new(w, 0, 0);
         kernel.forward_batched(&input, &mut output, 2, 2);
 
         assert_eq!(output, [3.0, 7.0, 6.0, 14.0, 9.0, 21.0]);

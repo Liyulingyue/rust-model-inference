@@ -492,7 +492,64 @@ fp16 而非 bf16），F16 听感反而对齐上游训练——那就让 F16 路�
 - `tools/breeze/test_convert_breeze.py` — 转换器 byte-for-byte 测试（确认 BF16 通路无损）
 - `models/Breeze-TTS-2-gguf/{bf16,f16,f32}_天气真好.wav` — 听感对比样本
 
-## TODO-009: Prefill runtime 通用化，避免每个模型重复实现 chunk 调度
+## TODO-009: VibeVoice F16/F32 kernel panic + F32 matmul placeholder
+
+### Context
+
+仓库只用过 BF16/Q8_0/Q4_0 加载 LLM 权重。VibeVoice ASR 新增的
+`--quant f16/f32` 把 F16/F32 推到了生产路径上，暴露了**三个
+独立的 kernel bug**，原本仓库里从未被触发：
+
+1. **`f16::Kernel::forward_prepared`** 总是把 `input_f32` 传给
+   `forward_scaled_rows`，即使 `input_f32.len() < n_in`（调用方
+   传 `&[]`，因为它已经在 `input_q8` 里准备好了激活）。结果
+   `&input[..n_in]` 直接越界 panic。
+2. **`f32::Kernel::forward_prepared`** 同样的问题——直接调
+   `scalar::forward_f32_rows(&self.weight, input_f32, ...)`，
+   `input[col]` 在空 slice 上 panic。
+3. **`f32::Kernel::forward_prequantized`** 的参数顺序和 trait
+   不一致——签名是 `(n_out, n_in, ith, nth)`，但 trait
+   是 `(n_in, n_out, ith, nth)`。即使参数顺序修正以后，`forward`
+   路径仍然是 `row_dot_range`（只把 weight 求和），文档明确说
+   "F32 weights do not appear in LayerWeights"——但现在出现了，
+   真实 matmul 没实现。
+
+### 修复
+
+* `f16::forward_prepared`：仿照 BF16 模式——`input_f32.len() >= n_in`
+  时走 `forward_scaled_rows`（真 f32 → f16 dot），否则 fallback 到
+  `forward_prequantized(input_q8, input_scales, ...)`（已有，按
+  f16 weight × q8 input 算 dot）。
+* `f32::forward_prepared`：同上，加 `input_f32.len()` 长度 fallback。
+* `f32::forward_prequantized`：参数顺序 `(n_in, n_out)`；真实实现
+  用新的 `scalar::forward_q8_rows_scalar(weight, input_q8,
+  input_scales, output, n_in, n_out, start, end)`，做 F32 weight ×
+  Q8 input 的真 matmul（替代之前的 `row_dot_range` 占位符）。
+* `QuantizedTensor::F32(Vec<f32>)` 改成 `F32 { data, n_in, n_out }`
+  struct variant——F32 GGUF 加载时也存 n_in（embedding stride），
+  避免 `Weight::n_in` 退化成 `slice.len()` 导致 `embedding_lookup`
+  按整张表（vocab × hidden）当 stride。QTensorOwned、F16Kernel、
+  F32Kernel 等 9 处调用点同步更新。
+
+### 验证
+
+* 全 4 个 VibeVoice LLM 精度（BF16/F16/F32/Q8_0）跑 zh.wav，2
+  chunks 输出全部 bit-equivalent "Speaker 0: 我认为跑步最重要
+  的就是给我带来了身体健康。"
+* `cargo test --lib --release`：651 passed；13 failed 全部
+  pre-existing（stash 后同样失败，与本次改动无关）。
+* Q4_0 仍是已知退化（TODO-004 同 Breeze），无新增变更。
+
+### 关联文件
+
+- `src/ops/kernel/f16/mod.rs::forward_prepared`
+- `src/ops/kernel/f32/{mod,scalar}.rs::{forward_prepared, forward_prequantized, embedding_lookup, forward_q8_rows_scalar}`
+- `src/ops/kernel/quantized_tensor.rs::QuantizedTensor::F32`
+- `src/ops/kernel/qtensor_owned.rs::from_quantized` + dispatch table
+- `src/{app/text,models/{diffusion/dreamx,dots/{dit,patch_encoder,speaker,vocoder}}}.rs`：把
+  `QuantizedTensor::F32(values)` 改成 struct syntax
+
+## TODO-010: Prefill runtime 通用化，避免每个模型重复实现 chunk 调度
 
 ### 现状
 

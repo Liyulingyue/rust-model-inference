@@ -747,7 +747,11 @@ mod tests {
 
     fn weight(values: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static> {
         assert_eq!(values.len(), n_in * n_out);
-        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(values));
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+            data: values,
+            n_in: 0,
+            n_out: 0,
+        });
         weight.n_in = n_in;
         weight.n_out = n_out;
         weight

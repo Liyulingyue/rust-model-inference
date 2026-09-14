@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import convert_dots_tts as _dots  # noqa: E402
 from convert_dots_tts import (  # noqa: E402
     GgufWriter,
@@ -34,15 +35,36 @@ from convert_dots_tts import (  # noqa: E402
     validated_dir,
 )
 from convert_dots_tts import bf16_to_f32, gguf_dims  # noqa: E402
-
-GGML_F32 = 0
-GGML_BF16 = 30
-GGML_Q8_0 = 8
+from converter.utils.gguf import (  # noqa: E402
+    GGML_BF16,
+    GGML_F16,
+    GGML_F32,
+    GGML_Q4_0,
+    GGML_Q8_0,
+    bf16_to_f16,
+    f32_to_f16,
+    quantize_q4_0,
+)
 
 Q8_BLOCK = 32
 Q8_BLOCK_BYTES = 34  # f16 scale + 32 x int8
 LLM_FILENAME = "VibeVoice-ASR-Streaming-7B-Q8_0.gguf"
 MMPROJ_FILENAME = "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf"
+
+
+def model_basename(model_dir: Path) -> str:
+    return model_dir.resolve().name
+
+
+def llm_filename(model_dir: Path, quant: str = "q8") -> str:
+    suffix = _QUANT_TO_SUFFIX.get(quant)
+    if suffix is None:
+        raise ValueError(f"unknown quant {quant!r}")
+    return f"{model_basename(model_dir)}-{suffix}.gguf"
+
+
+def mmproj_filename(model_dir: Path) -> str:
+    return f"mmproj-{model_basename(model_dir)}-BF16.gguf"
 
 
 # --------------------------------------------------------------------------- #
@@ -109,28 +131,13 @@ def _open_single_shard(path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# GGML Q8_0 quantization (numpy)
+# tensor emission (per-precision helpers)
 # --------------------------------------------------------------------------- #
 
 
-def quantize_q8_0(values: np.ndarray) -> bytes:
-    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
-
-    Rounding is round-half-away-from-zero to match ggml's roundf."""
-    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
-    if flat.size % Q8_BLOCK:
-        raise ValueError(f"q8_0 payload {flat.size} is not a multiple of {Q8_BLOCK}")
-    blocks = flat.reshape(-1, Q8_BLOCK)
-    amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 127.0).astype(np.float16)
-    scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
-    scaled = blocks / safe[:, None]
-    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
-    out = np.empty((blocks.shape[0], Q8_BLOCK_BYTES), dtype=np.uint8)
-    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
-    out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_BLOCK)
-    return out.tobytes()
+def _bf16_to_f32(raw_bf16: bytes) -> np.ndarray:
+    words = np.frombuffer(raw_bf16, dtype=np.uint16)
+    return (words.astype(np.uint32) << np.uint32(16)).view(np.float32)
 
 
 def emit_q8_0(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
@@ -148,10 +155,23 @@ def emit_q8_0(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
     gguf.add_tensor(name, GGML_Q8_0, gguf_dims(tensor.shape), b"".join(parts))
 
 
+def emit_q4_0(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
+    if tensor.dtype != "BF16":
+        raise ValueError(f"{name}: expected BF16, got {tensor.dtype}")
+    f32 = _bf16_to_f32(tensor.raw).reshape(tensor.shape)
+    gguf.add_tensor(name, GGML_Q4_0, gguf_dims(tensor.shape), quantize_q4_0(f32))
+
+
 def emit_bf16(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
     if tensor.dtype != "BF16":
         raise ValueError(f"{name}: expected BF16, got {tensor.dtype}")
     gguf.add_tensor(name, GGML_BF16, gguf_dims(tensor.shape), tensor.raw)
+
+
+def emit_f16(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
+    if tensor.dtype != "BF16":
+        raise ValueError(f"{name}: expected BF16, got {tensor.dtype}")
+    gguf.add_tensor(name, GGML_F16, gguf_dims(tensor.shape), bf16_to_f16(tensor.raw))
 
 
 def emit_f32(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
@@ -195,11 +215,56 @@ def add_tokenizer_metadata(gguf: GgufWriter, model_dir: Path, llm_cfg: dict) -> 
 
 
 # --------------------------------------------------------------------------- #
-# LLM export (arch qwen2, Q8_0)
+# LLM export (arch qwen2, configurable precision)
 # --------------------------------------------------------------------------- #
 
+QUANT_KIND_F32 = "f32"
+QUANT_KIND_BF16 = "bf16"
+QUANT_KIND_F16 = "f16"
+QUANT_KIND_Q8 = "q8"
+QUANT_KIND_Q4 = "q4"
 
-def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, overwrite: bool) -> None:
+_LLM_QUANTS = {QUANT_KIND_BF16, QUANT_KIND_F16, QUANT_KIND_F32, QUANT_KIND_Q8, QUANT_KIND_Q4}
+_QUANT_TO_FILE_TYPE = {
+    QUANT_KIND_F32: 0,
+    QUANT_KIND_F16: 1,
+    QUANT_KIND_BF16: 30,
+    QUANT_KIND_Q8: 7,
+    QUANT_KIND_Q4: 2,
+}
+_QUANT_TO_SUFFIX = {
+    QUANT_KIND_F32: "F32",
+    QUANT_KIND_F16: "F16",
+    QUANT_KIND_BF16: "BF16",
+    QUANT_KIND_Q8: "Q8_0",
+    QUANT_KIND_Q4: "Q4_0",
+}
+
+
+def _emit_for_kind(kind: str, gguf: GgufWriter, dst: str, tensor: Tensor) -> None:
+    if kind == QUANT_KIND_F32:
+        emit_f32(gguf, dst, tensor)
+    elif kind == QUANT_KIND_BF16:
+        emit_bf16(gguf, dst, tensor)
+    elif kind == QUANT_KIND_F16:
+        emit_f16(gguf, dst, tensor)
+    elif kind == QUANT_KIND_Q8:
+        emit_q8_0(gguf, dst, tensor)
+    elif kind == QUANT_KIND_Q4:
+        emit_q4_0(gguf, dst, tensor)
+    else:
+        raise ValueError(f"unknown quant kind {kind!r}")
+
+
+def export_llm(
+    model_dir: Path,
+    out_path: Path,
+    shards: ShardedSafetensors,
+    overwrite: bool,
+    quant: str = QUANT_KIND_Q8,
+) -> None:
+    if quant not in _LLM_QUANTS:
+        raise ValueError(f"unsupported --quant {quant!r}; choices: {sorted(_LLM_QUANTS)}")
     cfg = json.loads((model_dir / "config.json").read_text())
     llm_cfg = cfg["decoder_config"]
     n_layer = llm_cfg["num_hidden_layers"]
@@ -214,8 +279,8 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
 
     gguf = GgufWriter(out_path)
     gguf.add_meta("general.architecture", "qwen2")
-    gguf.add_meta("general.name", "VibeVoice-ASR-Streaming-7B")
-    gguf.add_meta("general.file_type", 7)  # mostly Q8_0
+    gguf.add_meta("general.name", model_dir.name)
+    gguf.add_meta("general.file_type", _QUANT_TO_FILE_TYPE[quant])
     gguf.add_meta("general.quantization_version", 2)
     gguf.add_meta("qwen2.block_count", n_layer)
     gguf.add_meta("qwen2.context_length", llm_cfg["max_position_embeddings"])
@@ -229,7 +294,24 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
     n_vocab = add_tokenizer_metadata(gguf, model_dir, llm_cfg)
     gguf.add_meta("qwen2.vocab_size", n_vocab)
 
-    emit_q8_0(
+    embed_kind = quant
+    output_kind = quant
+    layer_map = {
+        "input_layernorm.weight": ("attn_norm.weight", QUANT_KIND_F32, (n_embd,)),
+        "post_attention_layernorm.weight": ("ffn_norm.weight", QUANT_KIND_F32, (n_embd,)),
+        "self_attn.q_proj.weight": ("attn_q.weight", quant, (n_embd, n_embd)),
+        "self_attn.k_proj.weight": ("attn_k.weight", quant, (n_kv_embd, n_embd)),
+        "self_attn.v_proj.weight": ("attn_v.weight", quant, (n_kv_embd, n_embd)),
+        "self_attn.q_proj.bias": ("attn_q.bias", QUANT_KIND_F32, (n_embd,)),
+        "self_attn.k_proj.bias": ("attn_k.bias", QUANT_KIND_F32, (n_kv_embd,)),
+        "self_attn.v_proj.bias": ("attn_v.bias", QUANT_KIND_F32, (n_kv_embd,)),
+        "self_attn.o_proj.weight": ("attn_output.weight", quant, (n_embd, n_embd)),
+        "mlp.gate_proj.weight": ("ffn_gate.weight", quant, (n_ff, n_embd)),
+        "mlp.up_proj.weight": ("ffn_up.weight", quant, (n_ff, n_embd)),
+        "mlp.down_proj.weight": ("ffn_down.weight", quant, (n_embd, n_ff)),
+    }
+    _emit_for_kind(
+        embed_kind,
         gguf,
         "token_embd.weight",
         require_tensor(
@@ -238,7 +320,8 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
             (llm_cfg["vocab_size"], n_embd),
         ),
     )
-    emit_q8_0(
+    _emit_for_kind(
+        output_kind,
         gguf,
         "output.weight",
         require_tensor(shards, "lm_head.weight", (llm_cfg["vocab_size"], n_embd)),
@@ -249,20 +332,6 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
         require_tensor(shards, "model.language_model.norm.weight", (n_embd,)),
     )
 
-    layer_map = {
-        "input_layernorm.weight": ("attn_norm.weight", "f32", (n_embd,)),
-        "post_attention_layernorm.weight": ("ffn_norm.weight", "f32", (n_embd,)),
-        "self_attn.q_proj.weight": ("attn_q.weight", "q8", (n_embd, n_embd)),
-        "self_attn.k_proj.weight": ("attn_k.weight", "q8", (n_kv_embd, n_embd)),
-        "self_attn.v_proj.weight": ("attn_v.weight", "q8", (n_kv_embd, n_embd)),
-        "self_attn.q_proj.bias": ("attn_q.bias", "f32", (n_embd,)),
-        "self_attn.k_proj.bias": ("attn_k.bias", "f32", (n_kv_embd,)),
-        "self_attn.v_proj.bias": ("attn_v.bias", "f32", (n_kv_embd,)),
-        "self_attn.o_proj.weight": ("attn_output.weight", "q8", (n_embd, n_embd)),
-        "mlp.gate_proj.weight": ("ffn_gate.weight", "q8", (n_ff, n_embd)),
-        "mlp.up_proj.weight": ("ffn_up.weight", "q8", (n_ff, n_embd)),
-        "mlp.down_proj.weight": ("ffn_down.weight", "q8", (n_embd, n_ff)),
-    }
     for layer in range(n_layer):
         for src_key, (dst_key, kind, shape) in layer_map.items():
             tensor = require_tensor(
@@ -271,12 +340,9 @@ def export_llm(model_dir: Path, out_path: Path, shards: ShardedSafetensors, over
                 shape,
             )
             dst = f"blk.{layer}.{dst_key}"
-            if kind == "f32":
-                emit_f32(gguf, dst, tensor)
-            else:
-                emit_q8_0(gguf, dst, tensor)
+            _emit_for_kind(kind, gguf, dst, tensor)
     gguf.write(overwrite=overwrite)
-    print(f"wrote {out_path} ({len(gguf.tensors)} tensors)")
+    print(f"wrote {out_path} ({len(gguf.tensors)} tensors, quant={quant})")
 
 
 # --------------------------------------------------------------------------- #
@@ -352,7 +418,7 @@ def export_mmproj(model_dir: Path, out_path: Path, shards: ShardedSafetensors, o
 
     gguf = GgufWriter(out_path)
     gguf.add_meta("general.architecture", "clip")
-    gguf.add_meta("general.name", "VibeVoice-ASR-Streaming-7B-mmproj")
+    gguf.add_meta("general.name", f"{model_dir.name}-mmproj")
     gguf.add_meta("general.file_type", 32)  # mostly BF16
     gguf.add_meta("clip.has_vision_encoder", False)
     gguf.add_meta("clip.has_audio_encoder", True)
@@ -423,26 +489,31 @@ def export_mmproj(model_dir: Path, out_path: Path, shards: ShardedSafetensors, o
 # --------------------------------------------------------------------------- #
 
 
-def output_paths(out_dir: Path) -> tuple[Path, Path]:
-    return out_dir / LLM_FILENAME, out_dir / MMPROJ_FILENAME
+def output_paths(model_dir: Path, out_dir: Path, quant: str = QUANT_KIND_Q8) -> tuple[Path, Path]:
+    return out_dir / llm_filename(model_dir, quant), out_dir / mmproj_filename(model_dir)
 
 
-def export_model(model_dir: Path, out_dir: Path, overwrite: bool) -> tuple[Path, Path]:
+def export_model(
+    model_dir: Path,
+    out_dir: Path,
+    overwrite: bool,
+    quant: str = QUANT_KIND_Q8,
+) -> tuple[Path, Path]:
     model_dir = model_dir.resolve()
     out_dir = out_dir.resolve()
     for name in ("model.safetensors.index.json", "config.json", "vocab.json"):
         if not (model_dir / name).is_file():
             raise FileNotFoundError(f"missing required input path: {model_dir / name}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    llm_path, mmproj_path = output_paths(out_dir)
+    llm_path, mmproj_path = output_paths(model_dir, out_dir, quant)
     if not overwrite and (llm_path.exists() or mmproj_path.exists()):
         existing = llm_path if llm_path.exists() else mmproj_path
         raise FileExistsError(f"output already exists: {existing}")
 
-    print(f"exporting VibeVoice ASR from {model_dir}")
+    print(f"exporting VibeVoice ASR from {model_dir} (quant={quant})")
     shards = ShardedSafetensors(model_dir)
     try:
-        export_llm(model_dir, llm_path, shards, overwrite)
+        export_llm(model_dir, llm_path, shards, overwrite, quant)
         export_mmproj(model_dir, mmproj_path, shards, overwrite)
         covered = set(shards.weight_map)
         # the acoustic tokenizer decoder is intentionally not exported: ASR
@@ -489,12 +560,18 @@ def export_model(model_dir: Path, out_dir: Path, overwrite: bool) -> tuple[Path,
 def main() -> None:
     parser = argparse.ArgumentParser(description="export VibeVoice ASR to GGUF + mmproj")
     parser.add_argument("model_dir", type=str, help="models/VibeVoice-ASR-Streaming-7B")
+    parser.add_argument(
+        "--quant",
+        choices=sorted(_LLM_QUANTS),
+        default=QUANT_KIND_Q8,
+        help="LLM precision: bf16/f16/f32/q8_0/q4_0 (default q8_0)",
+    )
     parser.add_argument("--out-dir", default=None, help="output directory (default: model dir parent)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing output files")
     args = parser.parse_args()
     model_dir = validated_dir(args.model_dir, must_exist=True)
     out_dir = validated_dir(args.out_dir or str(model_dir.parent), must_exist=False)
-    export_model(model_dir, out_dir, args.overwrite)
+    export_model(model_dir, out_dir, args.overwrite, args.quant)
 
 
 if __name__ == "__main__":

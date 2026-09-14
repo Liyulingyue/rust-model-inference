@@ -37,7 +37,11 @@ pub struct BF16Weight<'a> {
 /// uses the dequantize-to-f32 path — they do not benefit from the
 /// Q8_0-prequantized fast path.
 pub enum QuantizedTensor<'a> {
-    F32(Vec<f32>),
+    F32 {
+        data: Vec<f32>,
+        n_in: usize,
+        n_out: usize,
+    },
     F16(F16Weight<'a>),
     BF16(BF16Weight<'a>),
     Q8_0 {
@@ -180,7 +184,9 @@ impl<'a> QuantizedTensor<'a> {
             bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
         };
         match self {
-            Self::F32(slice) => Box::new(f32::F32Kernel::new(slice.clone())),
+            Self::F32 { data, n_in, n_out } => {
+                Box::new(f32::F32Kernel::new(data.clone(), *n_in, *n_out))
+            }
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
             Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
@@ -279,7 +285,11 @@ impl<'a> QuantizedTensor<'a> {
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
-                Self::F32(f32_data)
+                Self::F32 {
+                    data: f32_data,
+                    n_in,
+                    n_out,
+                }
             }
             GGMLType::F16 => Self::F16(F16Weight {
                 bytes: data,
@@ -382,7 +392,7 @@ impl<'a> QuantizedTensor<'a> {
 
     pub fn ggml_type(&self) -> GGMLType {
         match self {
-            Self::F32(_) => GGMLType::F32,
+            Self::F32 { .. } => GGMLType::F32,
             Self::F16(_) => GGMLType::F16,
             Self::BF16(_) => GGMLType::BF16,
             Self::Q8_0 { .. } => GGMLType::Q8_0,
@@ -407,7 +417,18 @@ impl<'a> QuantizedTensor<'a> {
 
     pub fn n_in(&self) -> usize {
         match self {
-            Self::F32(slice) => slice.len(),
+            Self::F32 { data, n_in, .. } => {
+                // For F32 GGUF the "input dimension" is the embedding table
+                // stride used by `embedding_lookup` (= hidden_size for
+                // token_embd layers).  Fall back to the slice length only
+                // when the caller never populated it (legacy in-memory
+                // builds).
+                if *n_in != 0 {
+                    *n_in
+                } else {
+                    data.len()
+                }
+            }
             Self::F16(w) => w.n_in,
             Self::BF16(w) => w.n_in,
             Self::Q8_0 { n_cols, .. } => *n_cols,
@@ -436,7 +457,7 @@ impl<'a> QuantizedTensor<'a> {
             bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
         };
         match self {
-            Self::F32(slice) => Box::new(f32::F32Kernel::new(slice)),
+            Self::F32 { data, n_in, n_out } => Box::new(f32::F32Kernel::new(data, n_in, n_out)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
             Self::BF16(w) => Box::new(bf16::BF16Kernel::new(w.bytes)),
             Self::Q8_0 { data, .. } => Box::new(q8_0::Q8Kernel::new(data)),
@@ -525,7 +546,7 @@ impl<'a> QuantizedTensor<'a> {
 
     pub fn n_rows(&self) -> usize {
         match self {
-            Self::F32(values) => usize::from(!values.is_empty()),
+            Self::F32 { data, .. } => usize::from(!data.is_empty()),
             Self::F16(weight) => weight.n_out,
             Self::BF16(weight) => weight.n_out,
             Self::Q8_0 { n_rows, .. } => *n_rows,
@@ -690,7 +711,11 @@ mod tests {
     #[test]
     fn quantized_tensor_ggml_type_discriminator() {
         let f32_slice = vec![0.0f32; 32];
-        let q = QuantizedTensor::F32(f32_slice);
+        let q = QuantizedTensor::F32 {
+            data: f32_slice,
+            n_in: 0,
+            n_out: 0,
+        };
         assert_eq!(q.ggml_type(), GGMLType::F32);
 
         let q8_bytes = vec![0u8; 34];
