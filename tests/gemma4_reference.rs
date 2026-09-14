@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GEMMA4_MODEL_NAME: &str = "gemma-4-E2B-it-Q8_0.gguf";
+const GEMMA4_LAYERS: usize = 35;
 const GEMMA4_MMPROJ_NAME: &str = "mmproj-F16.gguf";
 const GEMMA4_THREADS: usize = 4;
 const GEMMA4_PROMPT: &str = "describe";
@@ -823,10 +824,15 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
     std::fs::create_dir_all(&root).unwrap();
     let old_trace = std::env::var_os("RMI_PARITY_TRACE");
     let old_filter = std::env::var_os("RMI_PARITY_FILTER");
-    std::env::set_var(
-        "RMI_PARITY_FILTER",
-        "gemma4.prompt_logits,gemma4.generated_ids,gemma4.kv",
-    );
+    let mut filter_names = vec![
+        "gemma4.prompt_logits".to_owned(),
+        "gemma4.generated_ids".to_owned(),
+    ];
+    for layer in 0..GEMMA4_LAYERS {
+        filter_names.push(format!("gemma4.kv.{layer}.keys"));
+        filter_names.push(format!("gemma4.kv.{layer}.values"));
+    }
+    std::env::set_var("RMI_PARITY_FILTER", filter_names.join(","));
     let model = gemma4_model_path();
     let prompt = format!(
         "Write a detailed story of at least 500 words about a traveler. Include these places: {}",
@@ -871,18 +877,20 @@ fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
             assert!(records
                 .iter()
                 .any(|record| record.checkpoint == "gemma4.generated_ids" && record.len == 32));
-            assert!(
-                records
-                    .iter()
-                    .any(|record| record.checkpoint == "gemma4.kv.0.keys"),
-                "real-model trace must include prompt-end KV keys"
-            );
-            assert!(
-                records
-                    .iter()
-                    .any(|record| record.checkpoint == "gemma4.kv.0.values"),
-                "real-model trace must include prompt-end KV values"
-            );
+            for layer in 0..GEMMA4_LAYERS {
+                assert!(
+                    records
+                        .iter()
+                        .any(|record| record.checkpoint == format!("gemma4.kv.{layer}.keys")),
+                    "real-model trace must include layer {layer} KV keys"
+                );
+                assert!(
+                    records
+                        .iter()
+                        .any(|record| record.checkpoint == format!("gemma4.kv.{layer}.values")),
+                    "real-model trace must include layer {layer} KV values"
+                );
+            }
             if let Some(previous) = &baseline {
                 assert_trace_equal(backend, previous, &records).unwrap();
             } else {

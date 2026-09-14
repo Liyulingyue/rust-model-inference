@@ -383,6 +383,41 @@ mod tests {
     }
 
     #[test]
+    fn exact_layered_filter_keeps_gemma4_kv_records() {
+        if isolated("exact_layered_filter_keeps_gemma4_kv_records") {
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "rmi-parity-trace-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.gemma4.kv.0.keys.f32", path.display()));
+        std::env::set_var("RMI_PARITY_TRACE", &path);
+        std::env::set_var("RMI_PARITY_FILTER", "gemma4.kv");
+        assert!(checkpoint("gemma4.kv.0.keys", Some(0), &[1], &[1.0])
+            .unwrap()
+            .is_none());
+        std::env::set_var("RMI_PARITY_FILTER", "gemma4.kv.0.keys,gemma4.kv.0.values");
+        let keys = checkpoint("gemma4.kv.0.keys", Some(0), &[1], &[1.0])
+            .unwrap()
+            .unwrap();
+        let values = checkpoint("gemma4.kv.0.values", Some(0), &[1], &[2.0])
+            .unwrap()
+            .unwrap();
+        let records = std::fs::read_to_string(&path).unwrap();
+        assert!(records.contains("gemma4.kv.0.keys"));
+        assert!(records.contains("gemma4.kv.0.values"));
+        std::fs::remove_file(keys).unwrap();
+        std::fs::remove_file(values).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::env::remove_var("RMI_PARITY_TRACE");
+        std::env::remove_var("RMI_PARITY_FILTER");
+    }
+
+    #[test]
     fn reporting_is_silent_only_when_trace_path_is_unset() {
         if isolated("reporting_is_silent_only_when_trace_path_is_unset") {
             return;
