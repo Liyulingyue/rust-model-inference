@@ -406,6 +406,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "lfm2"
             | "lfm2moe"
             | "nanbeige"
+            | "nemotron_h"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -421,6 +422,45 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             n_ff: 4096,
             n_ctx: 512,
             vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-5,
+        });
+    }
+    // Nemotron-3 Nano is a hybrid Mamba-Transformer; n_head / n_ff /
+    // n_head_kv are per-layer arrays that the trunk reads directly. We
+    // hand back a placeholder ModelConfig so the generic loader can pass
+    // through; the trunk's own config loader (see models::nemotron_h)
+    // re-reads the metadata with array awareness.
+    if arch == "nemotron_h" {
+        let n_embd = source
+            .metadata("nemotron_h.embedding_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let n_layer = source
+            .metadata("nemotron_h.block_count")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let vocab_size = source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(MetaValue::to_arr)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let n_ctx = source
+            .metadata("nemotron_h.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer,
+            n_head: 0,
+            n_head_kv: 0,
+            n_embd_head: 0,
+            n_ff: 0,
+            n_ctx,
+            vocab_size,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
         });
