@@ -253,7 +253,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             }
             #[cfg(feature = "parity-trace")]
             if !is_recr && trace_layer(il) {
-                parity_trace::report(parity_trace::checkpoint(
+                parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("attn_norm-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
@@ -347,7 +347,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             }
             #[cfg(feature = "parity-trace")]
             {
-                parity_trace::report(parity_trace::checkpoint(
+                parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("layer_output-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
@@ -374,32 +374,44 @@ impl<'a> super::weights::Qwen35Model<'a> {
             crate::ops::rms_norm_inplace(&mut normed[off..off + n_embd], &self.output_norm, eps);
         }
 
-        let last_normed = &normed[(n_tokens - 1) * n_embd..n_tokens * n_embd];
         #[cfg(feature = "parity-trace")]
-        parity_trace::report(parity_trace::checkpoint(
-            "result_norm",
-            None,
-            &[n_embd],
-            last_normed,
-        ));
-        self.output_weight.quantize_and_matmul_with_scratch(
-            last_normed,
-            &mut scratch.q8k_buf,
-            &mut scratch.q8_buf,
-            &mut scratch.scale_buf,
-            &mut scratch.matmul_out,
-            pool,
-        );
+        let trace_all = std::env::var_os("RMI_PARITY_TRACE").is_some();
+        #[cfg(not(feature = "parity-trace"))]
+        let trace_all = false;
         let mut result = vec![0.0f32; cfg.vocab_size];
-        let n = scratch.matmul_out.len().min(cfg.vocab_size);
-        result[..n].copy_from_slice(&scratch.matmul_out[..n]);
-        #[cfg(feature = "parity-trace")]
-        parity_trace::report(parity_trace::checkpoint(
-            "result_output",
-            None,
-            &[cfg.vocab_size],
-            &result[..cfg.vocab_size],
-        ));
+        for row in if trace_all {
+            0..n_tokens
+        } else {
+            n_tokens - 1..n_tokens
+        } {
+            let last_normed = &normed[row * n_embd..(row + 1) * n_embd];
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint_row(
+                row,
+                "result_norm",
+                None,
+                &[n_embd],
+                last_normed,
+            ));
+            self.output_weight.quantize_and_matmul_with_scratch(
+                last_normed,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            let n = scratch.matmul_out.len().min(cfg.vocab_size);
+            result[..n].copy_from_slice(&scratch.matmul_out[..n]);
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint_row(
+                row,
+                "result_output",
+                None,
+                &[cfg.vocab_size],
+                &result[..cfg.vocab_size],
+            ));
+        }
         Ok(result)
     }
 
@@ -494,13 +506,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
                 }
             }
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Qcur_normed-{il}"),
                 Some(il),
                 &[n_tokens, n_head, n_embd_head],
                 &q_trace,
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Kcur_normed-{il}"),
                 Some(il),
                 &[n_tokens, n_head_kv, n_embd_head],
@@ -563,13 +575,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
                 }
             }
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Qcur-{il}"),
                 Some(il),
                 &[n_tokens, n_head, n_embd_head],
                 &q_trace,
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Kcur-{il}"),
                 Some(il),
                 &[n_tokens, n_head_kv, n_embd_head],
@@ -777,7 +789,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("conv_output_raw-{il}"),
                 Some(il),
                 &[n_tokens, conv_dim],
@@ -816,13 +828,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("q_conv_predelta-{il}"),
                 Some(il),
                 &[n_tokens, num_k_heads, head_k_dim],
                 &scratch.q_buf[..n_tokens * key_dim],
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("k_conv_predelta-{il}"),
                 Some(il),
                 &[n_tokens, num_k_heads, head_k_dim],
@@ -834,23 +846,18 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
         let ts0 = std::time::Instant::now();
         let q_scale = 1.0 / (head_k_dim as f32).sqrt();
-        #[cfg(feature = "parity-trace")]
-        let state_before = if trace_layer {
-            Some(scratch.ssm_states[il].clone())
-        } else {
-            None
-        };
-        #[cfg(feature = "parity-trace")]
-        if let Some(state_before) = state_before.as_deref() {
-            parity_trace::report(parity_trace::checkpoint(
-                &format!("state_predelta-{il}"),
-                Some(il),
-                &[num_v_heads, head_v_dim, head_v_dim],
-                state_before,
-            ));
-        }
         let ssm_state = &mut scratch.ssm_states[il];
         for t in 0..n_tokens {
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_row(
+                    t,
+                    &format!("state_predelta-{il}"),
+                    Some(il),
+                    &[num_v_heads, head_v_dim, head_v_dim],
+                    ssm_state,
+                ));
+            }
             let q_off = t * key_dim;
             let k2_off = t * key_dim;
             let v2_off = t * value_dim;
@@ -901,15 +908,16 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     "injected Qwen3.5 CPU chunk failure after recurrent row {t}"
                 ));
             }
-        }
-        #[cfg(feature = "parity-trace")]
-        if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
-                &format!("new_state-{il}"),
-                Some(il),
-                &[num_v_heads, head_v_dim, head_v_dim],
-                ssm_state,
-            ));
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_row(
+                    t,
+                    &format!("new_state-{il}"),
+                    Some(il),
+                    &[num_v_heads, head_v_dim, head_v_dim],
+                    ssm_state,
+                ));
+            }
         }
 
         let tssm = ts0.elapsed().as_secs_f64();
@@ -931,7 +939,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("final_output-{il}"),
                 Some(il),
                 &[n_tokens, num_v_heads, head_v_dim],

@@ -287,7 +287,14 @@ impl<'model> Qwen3Session<'model> {
         #[cfg(not(feature = "parity-trace"))]
         let _ = asr_trace;
 
+        #[cfg(feature = "vulkan")]
+        let submission_count =
+            || crate::ops::get_vulkan_context().map_or(0, |ctx| ctx.submission_count());
+        #[cfg(feature = "vulkan")]
+        let before_prompt = submission_count();
         let prompt_duration = self.prefill(&input, options.prefill_batch_size)?;
+        #[cfg(feature = "vulkan")]
+        let after_prompt = submission_count();
         #[cfg(feature = "parity-trace")]
         if asr_trace {
             parity_trace::report(parity_trace::checkpoint(
@@ -422,6 +429,10 @@ impl<'model> Qwen3Session<'model> {
             prompt_tokens: n_prompt,
             prompt_duration,
             decode_duration,
+            #[cfg(feature = "vulkan")]
+            prompt_submissions: after_prompt - before_prompt,
+            #[cfg(feature = "vulkan")]
+            decode_submissions: submission_count() - after_prompt,
         })
     }
 }

@@ -615,6 +615,30 @@ fn qwen35_scratch_rows_are_bounded_by_prefill_batch_size() {
     assert_eq!(session.scratch().x.len(), 3 * width);
 }
 
+#[test]
+fn qwen35_scratch_is_independent_of_prompt_length_and_mrope_axes_are_batched() {
+    let embedding = f32_test_weight((0..64).map(|i| i as f32 / 10.0).collect(), 8, 8);
+    let mut model = tiny_dense_session_model_with_embedding(embedding, 8, 8);
+    model.config.n_ctx = 128;
+    model.config.rope_dimension_sections = [1; 4];
+    let positions = [[2, 3, 5, 7], [11, 13, 17, 19], [23, 29, 31, 37]];
+    let mut run = |batch| {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, 128, batch, session_pool())
+                .unwrap();
+        let logits = session.step_with_tokens(&[1, 2, 3], &positions).unwrap();
+        let before = session.scratch_bytes();
+        let snapshot = snapshot_qwen35_recurrent_state(&session);
+        session.step_with_tokens(&[1; 64], &[[40; 4]; 64]).unwrap();
+        assert_eq!(session.scratch_bytes(), before);
+        (
+            logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            snapshot,
+        )
+    };
+    assert_eq!(run(64), run(1));
+}
+
 fn greedy_decode_three(session: &mut Qwen35Session<'_, '_>, mut logits: Vec<f32>) -> Vec<u32> {
     let mut tokens = Vec::with_capacity(3);
     for _ in 0..3 {
@@ -667,9 +691,9 @@ fn run_qwen35_dense_fixture(
 
 #[test]
 fn qwen35_dense_prefill_matches_batch_one_bits() {
-    for len in [1, 2, 3, 15, 16] {
+    for len in [1, 2, 3, 63, 64, 65, 127, 128] {
         let expected = run_qwen35_dense_fixture(len, 1);
-        for batch_size in [2, 3, 16] {
+        for batch_size in [2, 3, 63, 64, 65, 127, 128] {
             assert_eq!(
                 run_qwen35_dense_fixture(len, batch_size),
                 expected,
@@ -725,17 +749,20 @@ fn run_qwen35_gpu_failure_fixture(
     run_qwen35_chunk_fixture(prompt_len, batch_size, Some(fail_after_row))
 }
 
-#[cfg(all(test, feature = "vulkan"))]
+#[cfg(test)]
 fn run_qwen35_chunk_fixture(
     prompt_len: usize,
     batch_size: usize,
     fail_after_row: Option<usize>,
 ) -> Vec<u32> {
     let mut session = mixed_fixture_session(prompt_len + 3, batch_size);
+    #[cfg(feature = "vulkan")]
     if let Some(row) = fail_after_row {
         assert!(session.gpu_enabled_for_test());
         session.fail_gpu_after_row_for_test(row);
     }
+    #[cfg(not(feature = "vulkan"))]
+    assert!(fail_after_row.is_none());
     let tokens = (0..prompt_len).map(|i| (i % 8) as u32).collect::<Vec<_>>();
     let positions = (0..prompt_len)
         .map(|i| [i, i + 1, i + 2, i + 3])
@@ -940,7 +967,20 @@ fn recurrent_fixture_session(
 
 fn mixed_fixture_session(capacity: usize, batch_size: usize) -> Qwen35Session<'static, 'static> {
     let model = Box::leak(Box::new(tiny_mixed_session_model()));
+    model.config.n_ctx = capacity;
     Qwen35Session::new_with_prefill_batch_size(model, capacity, batch_size, session_pool()).unwrap()
+}
+
+#[test]
+fn qwen35_mixed_boundaries_preserve_prompt_and_decode_state() {
+    for len in [1, 2, 3, 63, 64, 65, 127, 128] {
+        let baseline = run_qwen35_chunk_fixture(len, 1, None);
+        assert_eq!(
+            run_qwen35_chunk_fixture(len, 64, None),
+            baseline,
+            "len={len}"
+        );
+    }
 }
 
 fn snapshot_qwen35_recurrent_state(
@@ -1102,10 +1142,17 @@ fn qwen35_trace_two_tokens_child() {
         .unwrap()
         .parse::<usize>()
         .unwrap();
-    let mut model = tiny_dense_session_model();
-    let mut session =
-        Qwen35Session::new_with_prefill_batch_size(&mut model, 2, batch_size, session_pool())
-            .unwrap();
+    let mut session = mixed_fixture_session(2, batch_size);
+    if std::env::var_os("RMI_TEST_TRACE_FAIL_ROW").is_some() {
+        session.fail_cpu_chunk_after_row_for_test(1);
+        assert!(
+            session
+                .step_with_tokens(&[1, 2], &[[0; 4], [1; 4]])
+                .is_err(),
+            "trace must execute a real multi-row chunk"
+        );
+        return;
+    }
     session
         .step_with_tokens(&[1, 2], &[[0; 4], [1; 4]])
         .unwrap();
@@ -1117,7 +1164,7 @@ fn qwen35_trace_metadata_is_independent_of_prefill_batch_size() {
     use std::process::Command;
 
     let mut traces = Vec::new();
-    for batch_size in [1, 2] {
+    for batch_size in [1, 64] {
         let trace = std::env::temp_dir().join(format!(
             "rmi-qwen35-prefill-trace-{}-{batch_size}.jsonl",
             std::process::id()
@@ -1150,6 +1197,7 @@ fn qwen35_trace_metadata_is_independent_of_prefill_batch_size() {
                         value["name"].clone(),
                         value["layer"].clone(),
                         value["shape"].clone(),
+                        std::fs::read(value["binary_path"].as_str().unwrap()).unwrap(),
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -1160,6 +1208,26 @@ fn qwen35_trace_metadata_is_independent_of_prefill_batch_size() {
         std::fs::remove_file(trace).unwrap();
     }
     assert_eq!(traces[1], traces[0]);
+    let trace = std::env::temp_dir().join(format!(
+        "rmi-qwen35-trace-chunk-{}.jsonl",
+        std::process::id()
+    ));
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "models::qwen35::trunk::tests::qwen35_trace_two_tokens_child",
+        ])
+        .env("RMI_PARITY_TRACE", trace)
+        .env("RMI_TEST_TRACE_BATCH_SIZE", "64")
+        .env("RMI_TEST_TRACE_FAIL_ROW", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
@@ -1195,6 +1263,21 @@ fn session_step_rejects_tokens_above_capacity() {
         err.contains("session capacity is 1"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn session_step_fills_capacity_exactly_without_committing_an_extra_row() {
+    let mut model = tiny_dense_session_model();
+    let mut session = Qwen35Session::new(&mut model, 4, session_pool()).unwrap();
+    let logits = session
+        .step_with_tokens(&[0, 1, 2, 3], &[[0; 4], [1; 4], [2; 4], [3; 4]])
+        .unwrap();
+    assert_eq!(session.processed_tokens(), 4);
+    assert!(logits.iter().all(|value| value.is_finite()));
+    let before = snapshot_qwen35_recurrent_state(&session);
+    assert!(session.step_with_tokens(&[0], &[[4; 4]]).is_err());
+    assert_eq!(session.processed_tokens(), 4);
+    assert_eq!(snapshot_qwen35_recurrent_state(&session), before);
 }
 
 #[test]

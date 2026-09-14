@@ -123,10 +123,23 @@ fn compare_prefill_batches(
     tokens: &[u32],
     positions: &[[usize; 4]],
     batches: &[usize],
+    gpu: bool,
 ) -> Result<(), String> {
-    rust_model_inference::ops::enable_gpu();
-    let context = rust_model_inference::ops::get_vulkan_context()
-        .ok_or("Vulkan backend did not initialize")?;
+    let context = if gpu {
+        rust_model_inference::ops::enable_gpu();
+        Some(
+            rust_model_inference::ops::get_vulkan_context()
+                .ok_or("Vulkan backend did not initialize")?,
+        )
+    } else {
+        None
+    };
+    let submissions = || {
+        context
+            .as_ref()
+            .map_or(0, |context| context.submission_count())
+    };
+    let backend = if gpu { "vulkan" } else { "cpu" };
     let capacity = tokens
         .len()
         .checked_add(GREEDY_TOKENS + 1)
@@ -140,7 +153,7 @@ fn compare_prefill_batches(
             embeddings: None,
             deepstack_embeddings: None,
         };
-        let before = context.submission_count();
+        let before = submissions();
         session.generate(
             input.clone(),
             Qwen3GenerateOptions {
@@ -149,8 +162,12 @@ fn compare_prefill_batches(
                 prefill_batch_size: batch,
             },
         )?;
-        let prefill_submissions = context.submission_count() - before;
-        let expected = tokens.len().div_ceil(batch) as u64;
+        let prefill_submissions = submissions() - before;
+        let expected = if gpu {
+            tokens.len().div_ceil(batch) as u64
+        } else {
+            0
+        };
         if prefill_submissions != expected {
             return Err(format!(
                 "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
@@ -163,7 +180,7 @@ fn compare_prefill_batches(
             .collect();
         let prompt_kv = kv_bits(session.kv_state());
         session.reset_kv();
-        let before = context.submission_count();
+        let before = submissions();
         let generation = session.generate(
             input,
             Qwen3GenerateOptions {
@@ -175,10 +192,19 @@ fn compare_prefill_batches(
         let generated = generation
             .token_ids
             .get(..GREEDY_TOKENS)
-            .ok_or("Vulkan stopped before 32 greedy tokens")?
+            .ok_or("session stopped before 32 greedy tokens")?
             .to_vec();
-        let total_submissions = context.submission_count() - before;
-        if total_submissions != expected + GREEDY_TOKENS as u64 {
+        let total_submissions = submissions() - before;
+        let expected_decode = if gpu { GREEDY_TOKENS as u64 } else { 0 };
+        if generation.prompt_submissions != expected
+            || generation.decode_submissions != expected_decode
+        {
+            return Err(format!(
+                "batch={batch} phase submission counts changed: prompt={} decode={}",
+                generation.prompt_submissions, generation.decode_submissions
+            ));
+        }
+        if total_submissions != expected + expected_decode {
             return Err(format!(
                 "batch={batch} decode submission count changed: {total_submissions}"
             ));
@@ -186,14 +212,14 @@ fn compare_prefill_batches(
         let result = (logits, prompt_kv, generated, kv_bits(session.kv_state()));
         if let Some(previous) = &baseline {
             if &result != previous {
-                return Err(format!("same-Vulkan prefill mismatch for batch={batch}: logits, KV or greedy tokens differ"));
+                return Err(format!("same-{backend} prefill mismatch for batch={batch}: logits, KV or greedy tokens differ"));
             }
         } else {
             baseline = Some(result);
         }
-        println!("device={} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", context.device_name(), tokens.len());
+        println!("backend={backend} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", tokens.len());
     }
-    println!("check=same_vulkan_prefill exact_logits=true exact_prompt_kv=true exact_decode_kv=true exact_greedy_tokens=true");
+    println!("check=same_{backend}_prefill exact_logits=true exact_prompt_kv=true exact_decode_kv=true exact_greedy_tokens=true");
     Ok(())
 }
 
@@ -439,7 +465,8 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
     let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());
     if let Some(batches) = &arguments.compare_prefill_batches {
-        return compare_prefill_batches(&model, &prompt_tokens, &positions, batches);
+        compare_prefill_batches(&model, &prompt_tokens, &positions, batches, false)?;
+        return compare_prefill_batches(&model, &prompt_tokens, &positions, batches, true);
     }
     let capacity = prompt_tokens
         .len()
@@ -543,10 +570,23 @@ fn compare_qwen35_prefill_batches(
     tokens: &[u32],
     positions: &[[usize; 4]],
     batches: &[usize],
+    gpu: bool,
 ) -> Result<(), String> {
-    rust_model_inference::ops::enable_gpu();
-    let context = rust_model_inference::ops::get_vulkan_context()
-        .ok_or("Vulkan backend did not initialize")?;
+    let context = if gpu {
+        rust_model_inference::ops::enable_gpu();
+        Some(
+            rust_model_inference::ops::get_vulkan_context()
+                .ok_or("Vulkan backend did not initialize")?,
+        )
+    } else {
+        None
+    };
+    let submissions = || {
+        context
+            .as_ref()
+            .map_or(0, |context| context.submission_count())
+    };
+    let backend = if gpu { "vulkan" } else { "cpu" };
     let capacity = tokens
         .len()
         .checked_add(GREEDY_TOKENS + 1)
@@ -556,10 +596,14 @@ fn compare_qwen35_prefill_batches(
     for &batch in batches {
         let mut session =
             Qwen35Session::new_with_prefill_batch_size(model, capacity, batch, Arc::clone(&pool))?;
-        let before = context.submission_count();
+        let before = submissions();
         let mut logits = session.step_with_tokens(tokens, positions)?;
-        let prefill_submissions = context.submission_count() - before;
-        let expected = tokens.len().div_ceil(batch) as u64;
+        let prefill_submissions = submissions() - before;
+        let expected = if gpu {
+            tokens.len().div_ceil(batch) as u64
+        } else {
+            0
+        };
         if prefill_submissions != expected {
             return Err(format!(
                 "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
@@ -582,8 +626,9 @@ fn compare_qwen35_prefill_batches(
             let position = session.next_position();
             logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
         }
-        let total_submissions = context.submission_count() - before;
-        if total_submissions != expected + GREEDY_TOKENS as u64 {
+        let total_submissions = submissions() - before;
+        let expected_decode = if gpu { GREEDY_TOKENS as u64 } else { 0 };
+        if total_submissions != expected + expected_decode {
             return Err(format!(
                 "batch={batch} decode submission count changed: {total_submissions}"
             ));
@@ -600,14 +645,14 @@ fn compare_qwen35_prefill_batches(
         );
         if let Some(previous) = &baseline {
             if &result != previous {
-                return Err(format!("same-Vulkan Qwen3.5 prefill mismatch for batch={batch}: logits, dense KV, conv/SSM or greedy tokens differ"));
+                return Err(format!("same-{backend} Qwen3.5 prefill mismatch for batch={batch}: logits, dense KV, conv/SSM or greedy tokens differ"));
             }
         } else {
             baseline = Some(result);
         }
-        println!("device={} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", context.device_name(), tokens.len());
+        println!("backend={backend} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", tokens.len());
     }
-    println!("check=same_vulkan_prefill exact_logits=true exact_dense_kv=true exact_conv_ssm=true exact_greedy_tokens=true exact_decode_state=true");
+    println!("check=same_{backend}_prefill exact_logits=true exact_dense_kv=true exact_conv_ssm=true exact_greedy_tokens=true exact_decode_state=true");
     Ok(())
 }
 
@@ -627,7 +672,14 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());
     if let Some(batches) = &arguments.compare_prefill_batches {
-        return compare_qwen35_prefill_batches(&mut model, &prompt_tokens, &positions, batches);
+        compare_qwen35_prefill_batches(&mut model, &prompt_tokens, &positions, batches, false)?;
+        return compare_qwen35_prefill_batches(
+            &mut model,
+            &prompt_tokens,
+            &positions,
+            batches,
+            true,
+        );
     }
     let capacity = prompt_tokens
         .len()

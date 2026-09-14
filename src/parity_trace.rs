@@ -3,6 +3,101 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+struct RowCheckpoint {
+    name: String,
+    layer: Option<usize>,
+    shape: Vec<usize>,
+    values: Vec<f32>,
+}
+
+thread_local! {
+    static ROW_TRACE: std::cell::RefCell<Option<Vec<Vec<RowCheckpoint>>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Buffers only the current chunk, then emits the existing token-major contract.
+pub(crate) struct TokenMajorTrace(bool);
+
+impl TokenMajorTrace {
+    pub(crate) fn new(rows: usize) -> Self {
+        let enabled = std::env::var_os("RMI_PARITY_TRACE").is_some();
+        if enabled {
+            ROW_TRACE.with(|trace| {
+                assert!(trace.borrow().is_none(), "nested token-major trace");
+                *trace.borrow_mut() = Some((0..rows).map(|_| Vec::new()).collect());
+            });
+        }
+        Self(enabled)
+    }
+}
+
+impl Drop for TokenMajorTrace {
+    fn drop(&mut self) {
+        if self.0 {
+            let rows = ROW_TRACE.with(|trace| trace.borrow_mut().take().unwrap());
+            for row in rows {
+                for record in row {
+                    report(checkpoint(
+                        &record.name,
+                        record.layer,
+                        &record.shape,
+                        &record.values,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn checkpoint_row(
+    row: usize,
+    name: &str,
+    layer: Option<usize>,
+    shape: &[usize],
+    values: &[f32],
+) -> io::Result<Option<PathBuf>> {
+    if !selected(name) {
+        return Ok(None);
+    }
+    let buffered = ROW_TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if let Some(rows) = trace.as_mut() {
+            rows[row].push(RowCheckpoint {
+                name: name.into(),
+                layer,
+                shape: shape.into(),
+                values: values.into(),
+            });
+            true
+        } else {
+            false
+        }
+    });
+    if buffered {
+        Ok(None)
+    } else {
+        checkpoint(name, layer, shape, values)
+    }
+}
+
+pub(crate) fn checkpoint_rows(
+    name: &str,
+    layer: Option<usize>,
+    shape: &[usize],
+    values: &[f32],
+) -> io::Result<Option<PathBuf>> {
+    if !ROW_TRACE.with(|trace| trace.borrow().is_some()) {
+        return checkpoint(name, layer, shape, values);
+    }
+    let width: usize = shape[1..].iter().product();
+    assert_eq!(values.len(), shape[0] * width);
+    let mut row_shape = shape.to_vec();
+    row_shape[0] = 1;
+    for (row, values) in values.chunks_exact(width).enumerate() {
+        checkpoint_row(row, name, layer, &row_shape, values)?;
+    }
+    Ok(None)
+}
+
 fn trace_path() -> io::Result<PathBuf> {
     std::env::var_os("RMI_PARITY_TRACE")
         .map(PathBuf::from)
@@ -14,6 +109,10 @@ fn selected(name: &str) -> bool {
         .ok()
         .map(|filter| filter.split(',').any(|candidate| candidate == name))
         .unwrap_or(true)
+}
+
+pub(crate) fn enabled(name: &str) -> bool {
+    std::env::var_os("RMI_PARITY_TRACE").is_some() && selected(name)
 }
 
 fn append(value: &serde_json::Value) -> io::Result<()> {
@@ -170,8 +269,29 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn isolated(name: &str) -> bool {
+        if std::env::var_os("RMI_TRACE_TEST_CHILD").is_some() {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("parity_trace::tests::{name}")])
+            .env("RMI_TRACE_TEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     #[test]
     fn checkpoint_schema_has_deterministic_stats_and_names() {
+        if isolated("checkpoint_schema_has_deterministic_stats_and_names") {
+            return;
+        }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let path = std::env::temp_dir().join(format!(
             "rmi-parity-trace-{}-{}.jsonl",
@@ -212,6 +332,9 @@ mod tests {
 
     #[test]
     fn repeated_checkpoints_keep_every_full_buffer_and_record_its_sidecar() {
+        if isolated("repeated_checkpoints_keep_every_full_buffer_and_record_its_sidecar") {
+            return;
+        }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let path = std::env::temp_dir().join(format!(
             "rmi-parity-trace-{}-{}.jsonl",
@@ -261,6 +384,9 @@ mod tests {
 
     #[test]
     fn reporting_is_silent_only_when_trace_path_is_unset() {
+        if isolated("reporting_is_silent_only_when_trace_path_is_unset") {
+            return;
+        }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         std::env::remove_var("RMI_PARITY_TRACE");
         assert_eq!(

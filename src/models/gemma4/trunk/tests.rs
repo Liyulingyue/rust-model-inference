@@ -70,6 +70,7 @@ struct ZeroBf16Kernel {
 struct DeterministicKernel {
     seed: usize,
     output_projection_calls: Option<Arc<AtomicUsize>>,
+    fail_after: Option<usize>,
 }
 
 impl Kernel for DeterministicKernel {
@@ -84,7 +85,11 @@ impl Kernel for DeterministicKernel {
         nth: usize,
     ) {
         if let Some(calls) = &self.output_projection_calls {
-            calls.fetch_add(1, Ordering::Relaxed);
+            let call = calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_after.is_some_and(|limit| call >= limit) {
+                output[..n_out].fill(f32::NAN);
+                return;
+            }
         }
         let per_thread = n_out.div_ceil(nth);
         let start = ith * per_thread;
@@ -157,6 +162,7 @@ fn deterministic_weight(n_in: usize, n_out: usize, seed: usize) -> Weight<'stati
         kernel: Box::new(DeterministicKernel {
             seed,
             output_projection_calls: None,
+            fail_after: None,
         }),
         ggml_type: GGMLType::Q8_0,
         n_in,
@@ -173,6 +179,7 @@ fn counting_output_weight(
         kernel: Box::new(DeterministicKernel {
             seed: 1,
             output_projection_calls: Some(output_projection_calls),
+            fail_after: None,
         }),
         ggml_type: GGMLType::Q8_0,
         n_in,
@@ -265,8 +272,14 @@ fn deterministic_config() -> Gemma4Config {
 }
 
 fn deterministic_model(output_projection_calls: Arc<AtomicUsize>) -> Gemma4Model {
-    let cfg = deterministic_config();
-    let layers = (0..cfg.layers)
+    deterministic_model_with_config(deterministic_config(), output_projection_calls)
+}
+
+fn deterministic_model_with_config(
+    cfg: Gemma4Config,
+    output_projection_calls: Arc<AtomicUsize>,
+) -> Gemma4Model {
+    let layers: Vec<Gemma4Layer> = (0..cfg.layers)
         .map(|layer| {
             let dim = cfg.head_dim(layer);
             let ffn = cfg.ffn_per_layer[layer];
@@ -303,7 +316,7 @@ fn deterministic_model(output_projection_calls: Arc<AtomicUsize>) -> Gemma4Model
         per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
         per_layer_proj_norm: vec![1.0; PER_LAYER],
         output_norm: vec![1.0; embd],
-        rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
+        rope_freqs: vec![1.0; layers[1].head_dim / 2],
         layers,
     }
 }
@@ -653,7 +666,7 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
 fn gemma4_prefill_matches_batch_one_across_chunk_boundaries() {
     for len in [1, 2, 3, 63, 64, 65, 127, 128] {
         let expected = run_gemma4_fixture(len, 1);
-        for batch in [16, 32, 64, 128] {
+        for batch in [2, 3, 63, 64, 65, 127, 128] {
             assert_eq!(run_gemma4_fixture(len, batch), expected);
         }
     }
@@ -662,6 +675,153 @@ fn gemma4_prefill_matches_batch_one_across_chunk_boundaries() {
 #[test]
 fn gemma4_fixture_snapshots_prompt_state_before_decode() {
     assert_eq!(run_gemma4_fixture(3, 1).seq_len, 3);
+}
+
+#[test]
+fn gemma4_reset_reuses_scratch_and_matches_fresh_session() {
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 64).unwrap();
+    let expected = session
+        .forward_rows(&fixture_rows(3))
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect::<Vec<_>>();
+    let bytes = session.scratch_bytes();
+    let pointer = session.scratch.x.as_ptr();
+    session.reset();
+    assert_eq!(session.len(), 0);
+    assert!(session
+        .kv
+        .iter()
+        .all(|kv| kv.keys.is_empty() && kv.values.is_empty()));
+    let actual = session
+        .forward_rows(&fixture_rows(3))
+        .unwrap()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(session.scratch_bytes(), bytes);
+    assert_eq!(session.scratch.x.as_ptr(), pointer);
+}
+
+#[test]
+fn gemma4_scratch_is_bounded_by_batch_for_prompt_boundaries() {
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 64).unwrap();
+    assert!(session.forward_rows(&[]).is_err());
+    session.forward_rows(&fixture_rows(64)).unwrap();
+    let bytes = session.scratch_bytes();
+    session.forward_rows(&fixture_rows(64)).unwrap();
+    assert_eq!(session.scratch_bytes(), bytes);
+    let mut one =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 1).unwrap();
+    one.forward_rows(&fixture_rows(2)).unwrap();
+    assert!(one.scratch_bytes() < bytes);
+}
+
+#[cfg(feature = "parity-trace")]
+#[test]
+#[ignore = "child process isolates trace environment"]
+fn gemma4_trace_child() {
+    let batch = std::env::var("RMI_TEST_TRACE_BATCH_SIZE")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let model = deterministic_model(Arc::clone(&calls));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, batch).unwrap();
+    session.forward_rows(&fixture_rows(2)).unwrap();
+    if std::env::var_os("RMI_TEST_TRACE_END_ONLY").is_some() {
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "unselected per-row logits must not be evaluated"
+        );
+    }
+}
+
+#[cfg(feature = "parity-trace")]
+#[test]
+fn gemma4_trace_rows_match_batch_one_raw_bits() {
+    let mut baseline = None;
+    for batch in [1, 64] {
+        let trace = std::env::temp_dir().join(format!(
+            "rmi-gemma4-chunk-trace-{}-{batch}.jsonl",
+            std::process::id()
+        ));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "models::gemma4::trunk::tests::gemma4_trace_child",
+            ])
+            .env("RMI_PARITY_TRACE", &trace)
+            .env("RMI_TEST_TRACE_BATCH_SIZE", batch.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let records = std::fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let actual = records
+            .iter()
+            .map(|r| {
+                (
+                    r["name"].clone(),
+                    r["layer"].clone(),
+                    r["shape"].clone(),
+                    std::fs::read(r["binary_path"].as_str().unwrap()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r["name"] == "gemma4.logits")
+                .count(),
+            2
+        );
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected);
+        } else {
+            baseline = Some(actual);
+        }
+        for record in records {
+            std::fs::remove_file(record["binary_path"].as_str().unwrap()).unwrap();
+        }
+        std::fs::remove_file(trace).unwrap();
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "models::gemma4::trunk::tests::gemma4_trace_child",
+        ])
+        .env(
+            "RMI_PARITY_TRACE",
+            std::env::temp_dir().join("rmi-gemma4-filtered-trace.jsonl"),
+        )
+        .env("RMI_PARITY_FILTER", "gemma4.prompt_logits")
+        .env("RMI_TEST_TRACE_END_ONLY", "1")
+        .env("RMI_TEST_TRACE_BATCH_SIZE", "64")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
@@ -1072,6 +1232,39 @@ fn input_rows_reject_empty_invalid_and_nonfinite_values() {
 }
 
 #[test]
+fn gemma4_executes_rows_ending_at_capacity_and_rejects_the_next_row() {
+    let mut cfg = deterministic_config();
+    cfg.full_head_dim = 32;
+    cfg.swa_head_dim = 32;
+    let model = deterministic_model_with_config(cfg, Arc::new(AtomicUsize::new(0)));
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 64).unwrap();
+    // Seed a valid zero-valued prefix so the real attention/KV append runs at
+    // the actual 131072-token boundary without a quadratic full-prefix test.
+    session.seq_len = CONTEXT - 2;
+    for kv in &mut session.kv {
+        kv.keys.resize(session.seq_len * kv.row_width, 0.0);
+        kv.values.resize(session.seq_len * kv.row_width, 0.0);
+    }
+    let logits = session
+        .forward_rows(&[Gemma4InputRow::Token(1), Gemma4InputRow::Token(2)])
+        .unwrap();
+    assert_eq!(session.len(), CONTEXT);
+    assert_eq!(logits.len(), VOCAB);
+    assert!(logits.iter().all(|value| value.is_finite()));
+    for kv in &session.kv {
+        assert_eq!(kv.keys.len(), CONTEXT * kv.row_width);
+        assert_eq!(kv.values.len(), CONTEXT * kv.row_width);
+    }
+    let before = snapshot_gemma4_state(&session);
+    assert!(session
+        .forward_rows(&[Gemma4InputRow::Token(3)])
+        .unwrap_err()
+        .contains("exceeds context"));
+    assert_eq!(snapshot_gemma4_state(&session), before);
+}
+
+#[test]
 fn gemma4_rejects_over_capacity_before_validating_rows() {
     let output_projection_calls = Arc::new(AtomicUsize::new(0));
     let model = deterministic_model(output_projection_calls);
@@ -1163,6 +1356,38 @@ fn failed_gemma4_chunk_truncates_every_base_kv_layer() {
     let error = session.forward_rows(&fixture_rows(3)).unwrap_err();
     assert!(error.contains("blk.0.attn_output.weight"), "{error}");
     assert_eq!(snapshot_gemma4_state(&session), before);
+}
+
+#[test]
+fn failed_later_gemma4_chunk_preserves_successful_prefix() {
+    let expected = run_gemma4_fixture(2, 2);
+    let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    model.layers[0].attn_output.kernel = Box::new(DeterministicKernel {
+        seed: 4,
+        output_projection_calls: Some(Arc::new(AtomicUsize::new(0))),
+        fail_after: Some(2),
+    });
+    let mut session =
+        super::Gemma4Session::new_with_prefill_batch_size(&model, KvFormat::F32, 2).unwrap();
+    #[cfg(feature = "vulkan")]
+    let dispatcher = Arc::new(std::sync::Mutex::new(LinearDispatcher {
+        fail_at: Some(27),
+        ..Default::default()
+    }));
+    #[cfg(feature = "vulkan")]
+    {
+        session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
+    }
+    let error = session.forward_rows(&fixture_rows(5)).unwrap_err();
+    assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    assert_eq!(session.len(), 2);
+    assert_eq!(snapshot_base_kv(&session), expected.base_kv);
+    #[cfg(feature = "vulkan")]
+    {
+        assert_eq!(dispatcher.lock().unwrap().calls.len(), 27);
+        assert_eq!(dispatcher.lock().unwrap().failures, 1);
+        assert!(!session.prefill_linear.active());
+    }
 }
 
 #[test]

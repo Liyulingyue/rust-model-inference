@@ -303,14 +303,12 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         if trace_each_token {
             self.gpu = None;
         }
-        let batch_size = if trace_each_token {
-            1
-        } else {
-            self.prefill_batch_size
-        };
+        let batch_size = self.prefill_batch_size;
         let mut logits = Vec::new();
         for range in prefill_chunks(n_tokens, batch_size) {
             let rows = range.len();
+            #[cfg(feature = "parity-trace")]
+            let _trace = crate::parity_trace::TokenMajorTrace::new(rows);
             let base = self.processed_tokens;
             let chunk_embeddings = &embeddings[range.start * n_embd..range.end * n_embd];
             let chunk_positions = &positions[range.clone()];

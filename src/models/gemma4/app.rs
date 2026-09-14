@@ -97,6 +97,13 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
     )?;
     let t_total = std::time::Instant::now();
     let mut logits = session.forward_rows(&rows)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "gemma4.prompt_logits",
+        None,
+        &[logits.len()],
+        &logits,
+    ));
     let prefill_time = t_total.elapsed();
     let prompt_tokens = rows.len();
     let mut output = Vec::with_capacity(request.max_tokens);
@@ -109,6 +116,11 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         logits = session.forward_rows(&[Gemma4InputRow::Token(id)])?;
     }
     let total_time = t_total.elapsed();
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "gemma4.generated_ids",
+        &output,
+    ));
     std::io::stdout()
         .write_all(&tokenizer.decode_bytes(&output, false))
         .map_err(|error| format!("Failed to print Gemma4 output: {error}"))?;

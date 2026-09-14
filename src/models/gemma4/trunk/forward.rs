@@ -94,6 +94,8 @@ impl Gemma4Session<'_> {
             &mut cpu_linear
         };
         let row_count = rows.len();
+        #[cfg(feature = "parity-trace")]
+        let _trace = crate::parity_trace::TokenMajorTrace::new(row_count);
         let embd = cfg.embd;
         let x_len = row_count * embd;
         let per_layer_all = cfg.per_layer_all();
@@ -314,7 +316,7 @@ impl Gemma4Session<'_> {
                     *hidden += *attention;
                 }
                 ensure_finite(&format!("gemma4.layer.{layer_index}.attn_out"), hidden)?;
-                trace_layer("attn_out", layer_index, hidden);
+                trace_layer(row, "attn_out", layer_index, hidden);
             }
 
             for (input, output) in scratch.x[..x_len]
@@ -392,7 +394,7 @@ impl Gemma4Session<'_> {
                     *hidden += *ffn;
                 }
                 ensure_finite(&format!("gemma4.layer.{layer_index}.ffn_out"), hidden)?;
-                trace_layer("ffn_out", layer_index, hidden);
+                trace_layer(row, "ffn_out", layer_index, hidden);
             }
 
             prefill_matmul_rows(
@@ -442,34 +444,45 @@ impl Gemma4Session<'_> {
                     *hidden = (*hidden + *per_layer) * layer.output_scale;
                 }
                 ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
-                trace_layer("per_layer_out", layer_index, hidden);
+                trace_layer(row, "per_layer_out", layer_index, hidden);
             }
         }
 
-        if project_logits {
-            let last = &scratch.x[(row_count - 1) * embd..row_count * embd];
-            checked_rms_norm(
-                "output_norm.weight",
-                last,
-                &model.output_norm,
-                &mut scratch.normed[..embd],
-            )?;
-            ensure_finite("gemma4.final.norm", &scratch.normed[..embd])?;
-            trace("gemma4.final.norm", None, &scratch.normed[..embd]);
-            matmul(
-                "token_embd.weight (tied output)",
-                &model.token_embedding,
-                &scratch.normed[..embd],
-                &mut scratch.logits,
-                model.pool(),
-                &mut scratch.q8,
-                &mut scratch.scales,
-            )?;
-            for logit in &mut scratch.logits {
-                *logit = softcap(*logit, model.config.logit_softcap);
+        #[cfg(feature = "parity-trace")]
+        let trace_all = crate::parity_trace::enabled("gemma4.logits")
+            || crate::parity_trace::enabled("gemma4.final.norm");
+        #[cfg(not(feature = "parity-trace"))]
+        let trace_all = false;
+        if project_logits || trace_all {
+            for row in if trace_all {
+                0..row_count
+            } else {
+                row_count - 1..row_count
+            } {
+                let last = &scratch.x[row * embd..(row + 1) * embd];
+                checked_rms_norm(
+                    "output_norm.weight",
+                    last,
+                    &model.output_norm,
+                    &mut scratch.normed[..embd],
+                )?;
+                ensure_finite("gemma4.final.norm", &scratch.normed[..embd])?;
+                trace(row, "gemma4.final.norm", None, &scratch.normed[..embd]);
+                matmul(
+                    "token_embd.weight (tied output)",
+                    &model.token_embedding,
+                    &scratch.normed[..embd],
+                    &mut scratch.logits,
+                    model.pool(),
+                    &mut scratch.q8,
+                    &mut scratch.scales,
+                )?;
+                for logit in &mut scratch.logits {
+                    *logit = softcap(*logit, model.config.logit_softcap);
+                }
+                ensure_finite("gemma4.logits", &scratch.logits)?;
+                trace(row, "gemma4.logits", None, &scratch.logits);
             }
-            ensure_finite("gemma4.logits", &scratch.logits)?;
-            trace("gemma4.logits", None, &scratch.logits);
         }
         Ok(())
     }
@@ -1205,8 +1218,9 @@ fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-fn trace_layer(stage: &str, layer: usize, values: &[f32]) {
+fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
     trace(
+        row,
         &format!("gemma4.layer.{layer}.{stage}"),
         Some(layer),
         values,
@@ -1214,8 +1228,9 @@ fn trace_layer(stage: &str, layer: usize, values: &[f32]) {
 }
 
 #[cfg(feature = "parity-trace")]
-fn trace(name: &str, layer: Option<usize>, values: &[f32]) {
-    crate::parity_trace::report(crate::parity_trace::checkpoint(
+fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
+    crate::parity_trace::report(crate::parity_trace::checkpoint_row(
+        row,
         name,
         layer,
         &[1, values.len()],
@@ -1224,4 +1239,4 @@ fn trace(name: &str, layer: Option<usize>, values: &[f32]) {
 }
 
 #[cfg(not(feature = "parity-trace"))]
-fn trace(_name: &str, _layer: Option<usize>, _values: &[f32]) {}
+fn trace(_row: usize, _name: &str, _layer: Option<usize>, _values: &[f32]) {}

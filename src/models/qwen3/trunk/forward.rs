@@ -140,6 +140,10 @@ pub struct Qwen3Generation {
     pub prompt_tokens: usize,
     pub prompt_duration: Duration,
     pub decode_duration: Duration,
+    #[cfg(feature = "vulkan")]
+    pub prompt_submissions: u64,
+    #[cfg(feature = "vulkan")]
+    pub decode_submissions: u64,
 }
 
 // =============================================================================

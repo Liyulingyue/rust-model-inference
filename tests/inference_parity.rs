@@ -136,26 +136,39 @@ fn run_fixture(model_name: &str, model: &Path, prompt: &str, max_tokens: usize) 
         model_name.to_ascii_lowercase()
     ));
     std::fs::create_dir(&directory).unwrap();
-    let rust_trace = directory.join("rust.jsonl");
+    let rust_trace = directory.join("rust-batch-64.jsonl");
+    let scalar_trace = directory.join("rust-batch-1.jsonl");
     let oracle_trace = directory.join("oracle.jsonl");
     let max_tokens = max_tokens.to_string();
 
-    let mut rust = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
-    rust.args(["--model"])
-        .arg(model)
-        .args([
-            "--prompt",
-            prompt,
-            "--max-tokens",
-            &max_tokens,
-            "--threads",
-            "1",
-            "--dump-logits",
-            "--kv-cache",
-            "f32",
-        ])
-        .env("RMI_PARITY_TRACE", &rust_trace);
-    run(&mut rust, "Rust inference").unwrap();
+    for (batch, trace) in [("1", &scalar_trace), ("64", &rust_trace)] {
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
+        rust.args(["--model"])
+            .arg(model)
+            .args([
+                "--prompt",
+                prompt,
+                "--max-tokens",
+                &max_tokens,
+                "--threads",
+                "1",
+                "--dump-logits",
+                "--kv-cache",
+                "f32",
+                "--temp",
+                "0",
+                "--prefill-batch-size",
+                batch,
+            ])
+            .env("RMI_PARITY_TRACE", trace);
+        run(&mut rust, "Rust inference").unwrap();
+    }
+    compare_traces(model_name, prompt, &scalar_trace, &rust_trace).unwrap_or_else(|error| {
+        panic!(
+            "Rust batch=1/64: {error}; traces retained in {}",
+            directory.display()
+        )
+    });
 
     let oracle = std::env::var_os("RMI_LLAMA_ORACLE").expect("RMI_LLAMA_ORACLE is required");
     let mut reference = Command::new(oracle);
@@ -173,6 +186,7 @@ fn run_fixture(model_name: &str, model: &Path, prompt: &str, max_tokens: usize) 
     let rust_records = records(&rust_trace).unwrap();
     let oracle_records = records(&oracle_trace).unwrap();
     remove_trace(&rust_trace, &rust_records);
+    remove_trace(&scalar_trace, &records(&scalar_trace).unwrap());
     remove_trace(&oracle_trace, &oracle_records);
     std::fs::remove_dir(directory).unwrap();
 }

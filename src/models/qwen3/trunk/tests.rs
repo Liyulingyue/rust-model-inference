@@ -261,11 +261,6 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
     }
 }
 
-fn qwen3_fixture_session(capacity: usize, _batch_size: usize) -> Qwen3Session<'static> {
-    let model = Box::leak(Box::new(deterministic_session_model(capacity.max(160))));
-    Qwen3Session::new(model, capacity).unwrap()
-}
-
 fn snapshot_qwen3_kv(state: &KvState) -> KvSnapshot {
     let stride = state.arch.n_head_kv * state.arch.n_embd_head_k.max(state.arch.n_embd_head_v);
     let mut words = Vec::new();
@@ -316,7 +311,8 @@ fn prefill_qwen3_tokens(
 }
 
 fn run_qwen3_fixture(prompt_len: usize, batch_size: usize) -> (Vec<u32>, KvSnapshot, Vec<u32>) {
-    let mut session = qwen3_fixture_session(prompt_len + 3, batch_size);
+    let model = deterministic_session_model((prompt_len + 3).max(160));
+    let mut session = Qwen3Session::new(&model, prompt_len + 3).unwrap();
     let token_ids = (0..prompt_len)
         .map(|index| (index % 7) as u32)
         .collect::<Vec<_>>();
@@ -350,7 +346,8 @@ fn run_qwen3_fixture(prompt_len: usize, batch_size: usize) -> (Vec<u32>, KvSnaps
 }
 
 fn run_qwen3_prompt_snapshot(prompt_len: usize, batch_size: usize) -> (Vec<u32>, KvSnapshot) {
-    let mut session = qwen3_fixture_session(prompt_len, batch_size);
+    let model = deterministic_session_model(prompt_len.max(160));
+    let mut session = Qwen3Session::new(&model, prompt_len).unwrap();
     let token_ids = (0..prompt_len)
         .map(|index| (index % 7) as u32)
         .collect::<Vec<_>>();
@@ -370,7 +367,7 @@ fn qwen3_cpu_prefill_matches_batch_one_at_chunk_boundaries() {
     for len in [1, 2, 3, 63, 64, 65, 127, 128] {
         let prompt = run_qwen3_prompt_snapshot(len, 1);
         let baseline = run_qwen3_fixture(len, 1);
-        for batch_size in [16, 32, 64, 128] {
+        for batch_size in [2, 3, 63, 64, 65, 127, 128] {
             assert_eq!(
                 run_qwen3_prompt_snapshot(len, batch_size),
                 prompt,
@@ -386,8 +383,72 @@ fn qwen3_cpu_prefill_matches_batch_one_at_chunk_boundaries() {
 }
 
 #[test]
+fn qwen3_four_axis_positions_and_deepstack_match_across_chunks() {
+    let mut model = deterministic_session_model(128);
+    model.config.rope = Qwen3Rope::Interleaved {
+        sections: [4; 4],
+        n_dims: 32,
+    };
+    model.config.n_deepstack_layers = 1;
+    let tokens = (0..65).map(|i| (i % 8) as u32).collect::<Vec<_>>();
+    let positions = (0..65)
+        .map(|i| [i + 2, i * 2 + 3, i * 3 + 5, i * 5 + 7])
+        .collect::<Vec<_>>();
+    let deepstack = (0..65 * 32)
+        .map(|i| (i % 17) as f32 / 64.0)
+        .collect::<Vec<_>>();
+    let run = |batch| {
+        let mut session = Qwen3Session::new(&model, 128).unwrap();
+        #[cfg(feature = "vulkan")]
+        assert!(
+            session.gpu.is_none(),
+            "deepstack must be ineligible for the full Vulkan executor"
+        );
+        session
+            .prefill(
+                &Qwen3Input {
+                    token_ids: &tokens,
+                    positions: &positions,
+                    embeddings: None,
+                    deepstack_embeddings: Some(&deepstack),
+                },
+                batch,
+            )
+            .unwrap();
+        (
+            session
+                .last_logits()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            snapshot_qwen3_kv(session.kv_state()),
+        )
+    };
+    assert_eq!(run(64), run(1));
+}
+
+#[test]
+fn qwen3_capacity_and_scratch_boundaries() {
+    let model = deterministic_session_model(128);
+    let mut session = Qwen3Session::new(&model, 128).unwrap();
+    assert!(prefill_qwen3_tokens(&mut session, &[], 64).is_err());
+    prefill_qwen3_tokens(&mut session, &[1; 64], 64).unwrap();
+    let bytes = session.scratch_bytes();
+    prefill_qwen3_tokens(&mut session, &[1; 64], 64).unwrap();
+    assert_eq!(session.kv_state().seq_len, 128);
+    assert_eq!(session.scratch_bytes(), bytes);
+    let before = snapshot_qwen3_kv(session.kv_state());
+    assert!(prefill_qwen3_tokens(&mut session, &[1], 64).is_err());
+    assert_eq!(snapshot_qwen3_kv(session.kv_state()), before);
+    let mut one = Qwen3Session::new(&model, 128).unwrap();
+    prefill_qwen3_tokens(&mut one, &[1; 128], 1).unwrap();
+    assert!(one.scratch_bytes() < bytes);
+}
+
+#[test]
 fn qwen3_oversized_prompt_commits_nothing() {
-    let mut session = qwen3_fixture_session(4, 64);
+    let model = deterministic_session_model(4);
+    let mut session = Qwen3Session::new(&model, 4).unwrap();
     let before = snapshot_qwen3_kv(session.kv_state());
     assert!(prefill_qwen3_tokens(&mut session, &[1, 2, 3, 4, 5], 64).is_err());
     assert_eq!(snapshot_qwen3_kv(session.kv_state()), before);
@@ -395,7 +456,8 @@ fn qwen3_oversized_prompt_commits_nothing() {
 
 #[test]
 fn qwen3_failed_cpu_chunk_keeps_visible_kv_at_base_position() {
-    let mut session = qwen3_fixture_session(8, 4);
+    let model = deterministic_session_model(8);
+    let mut session = Qwen3Session::new(&model, 8).unwrap();
     prefill_qwen3_tokens(&mut session, &[1, 2], 4).unwrap();
     let before = snapshot_qwen3_kv(session.kv_state());
     session.fail_cpu_prefill_after_layer_for_test(0);
@@ -410,7 +472,7 @@ fn qwen3_nonfinite_tentative_kv_never_commits() {
     bad_key.n_in = 32;
     bad_key.n_out = 32;
     model.layers[0].wk = bad_key;
-    let mut session = Qwen3Session::new(Box::leak(Box::new(model)), 8).unwrap();
+    let mut session = Qwen3Session::new(&model, 8).unwrap();
     let before = snapshot_qwen3_kv(session.kv_state());
     assert!(prefill_qwen3_tokens(&mut session, &[1, 2], 2).is_err());
     assert_eq!(snapshot_qwen3_kv(session.kv_state()), before);
@@ -424,8 +486,16 @@ fn qwen3_trace_two_tokens_child() {
         .unwrap()
         .parse()
         .unwrap();
-    let mut session = qwen3_fixture_session(2, batch_size);
+    let model = deterministic_session_model(2);
+    let mut session = Qwen3Session::new(&model, 2).unwrap();
+    let singleton_scratch = session.scratch_bytes();
     prefill_qwen3_tokens(&mut session, &[1, 2], batch_size).unwrap();
+    if batch_size > 1 {
+        assert!(
+            session.scratch_bytes() > singleton_scratch,
+            "trace must retain the requested multi-row scratch"
+        );
+    }
 }
 
 #[cfg(feature = "parity-trace")]
@@ -445,7 +515,8 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
         "result_norm",
         "result_output",
     ];
-    for batch_size in [1, 2] {
+    let mut baseline = None;
+    for batch_size in [1, 64] {
         let trace = std::env::temp_dir().join(format!(
             "rmi-qwen3-prefill-trace-{}-{batch_size}.jsonl",
             std::process::id()
@@ -475,6 +546,22 @@ fn qwen3_trace_keeps_token_major_checkpoints_for_every_prompt_row() {
             .map(|value| value["name"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, expected_row.repeat(2), "batch={batch_size}");
+        let snapshot = values
+            .iter()
+            .map(|record| {
+                (
+                    record["name"].clone(),
+                    record["layer"].clone(),
+                    record["shape"].clone(),
+                    std::fs::read(record["binary_path"].as_str().unwrap()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(expected) = &baseline {
+            assert_eq!(&snapshot, expected, "batch={batch_size}");
+        } else {
+            baseline = Some(snapshot);
+        }
         for record in values {
             std::fs::remove_file(record["binary_path"].as_str().unwrap()).unwrap();
         }

@@ -164,7 +164,11 @@ impl PreparedRows {
             {
                 return Err("prepared activation format does not match weight".into());
             }
-            if output.len() != self.rows * weight.n_out {
+            let output_len = self
+                .rows
+                .checked_mul(weight.n_out)
+                .ok_or("prepared matmul output shape overflow")?;
+            if output.len() != output_len {
                 return Err("prepared matmul output shape mismatch".into());
             }
         }
@@ -172,7 +176,35 @@ impl PreparedRows {
         let blocks = self.n_in.div_ceil(32);
         let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
         let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
+        // ARM Q4_0 uses the scalar dot contract. Other kernels, including the
+        // x86 AVX2 contract, retain their original per-row execution.
+        let batched_q4 = self.rows >= 4
+            && self.need_q8
+            && projections
+                .iter()
+                .all(|(weight, _)| weight.kernel.scalar_q4_0_bytes().is_some());
         pool.compute(|ith, nth| {
+            if batched_q4 {
+                for (weight, output_ptr) in projections {
+                    // SAFETY: output lengths were checked above. Each worker
+                    // owns disjoint columns in every row; no full-output
+                    // mutable slice is constructed while workers are active.
+                    unsafe {
+                        q4_0::scalar::matmul_q4_0_batched_scalar_range(
+                            weight.kernel.scalar_q4_0_bytes().unwrap(),
+                            &self.q8,
+                            &self.scales,
+                            output_ptr,
+                            self.n_in,
+                            weight.n_out,
+                            self.rows,
+                            ith,
+                            nth,
+                        );
+                    }
+                }
+                return;
+            }
             for row in 0..self.rows {
                 let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
                 let q8 = if self.need_q8 {

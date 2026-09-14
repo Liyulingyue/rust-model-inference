@@ -187,7 +187,7 @@ impl Qwen3Session<'_> {
         let trace_each_token = std::env::var_os("RMI_PARITY_TRACE").is_some();
         #[cfg(not(feature = "parity-trace"))]
         let trace_each_token = false;
-        let chunk_size = if trace_each_token { 1 } else { batch_size };
+        let chunk_size = batch_size;
         let max_rows = chunk_size.min(self.capacity);
         self.prefill_scratch.reset_for(max_rows, self.model);
         let started = Instant::now();
@@ -268,7 +268,8 @@ impl Qwen3Session<'_> {
             self.kv_state.seq_len = base + range.len();
             self.kv_state.update_access();
         }
-        Ok(started.elapsed())
+        let elapsed = started.elapsed();
+        Ok(elapsed)
     }
 
     fn validate_cpu_chunk(
@@ -318,6 +319,8 @@ impl Qwen3Session<'_> {
             return Err("Invalid Qwen3 CPU prefill range".into());
         }
         let rows = range.len();
+        #[cfg(feature = "parity-trace")]
+        let _trace = parity_trace::TokenMajorTrace::new(rows);
         if rows > self.prefill_scratch.max_rows {
             return Err(format!(
                 "Qwen3 prefill rows {rows} exceed scratch capacity {}",
@@ -372,7 +375,8 @@ impl Qwen3Session<'_> {
                     .embedding_lookup(input.token_ids[token], output);
             }
             #[cfg(feature = "parity-trace")]
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_row(
+                row,
                 "model.input_embed",
                 None,
                 &[1, config.n_embd],
@@ -399,7 +403,8 @@ impl Qwen3Session<'_> {
             #[cfg(feature = "parity-trace")]
             if layer == 0 {
                 for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "attn_norm-0",
                         Some(0),
                         &[1, config.n_embd],
@@ -456,13 +461,15 @@ impl Qwen3Session<'_> {
                 }
                 #[cfg(feature = "parity-trace")]
                 if layer == 0 {
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "Qcur_normed-0",
                         Some(0),
                         &[config.n_head, config.n_embd_head_k],
                         q,
                     ));
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "Kcur_normed-0",
                         Some(0),
                         &[config.n_head_kv, config.n_embd_head_k],
@@ -507,13 +514,15 @@ impl Qwen3Session<'_> {
                 }
                 #[cfg(feature = "parity-trace")]
                 if layer == 0 {
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "Qcur-0",
                         Some(0),
                         &[config.n_head, config.n_embd_head_k],
                         q,
                     ));
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "Kcur-0",
                         Some(0),
                         &[config.n_head_kv, config.n_embd_head_k],
@@ -690,7 +699,8 @@ impl Qwen3Session<'_> {
             #[cfg(feature = "parity-trace")]
             if layer == 0 {
                 for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "kqv_out-0",
                         Some(0),
                         &[config.n_head, config.n_embd_head_v],
@@ -779,7 +789,8 @@ impl Qwen3Session<'_> {
             #[cfg(feature = "parity-trace")]
             if layer == 0 {
                 for row in 0..rows {
-                    parity_trace::report(parity_trace::checkpoint(
+                    parity_trace::report(parity_trace::checkpoint_row(
+                        row,
                         "ffn_out-0",
                         Some(0),
                         &[1, config.n_embd],
@@ -819,42 +830,50 @@ impl Qwen3Session<'_> {
             }
         }
 
-        if project_logits {
-            let last = (rows - 1) * config.n_embd;
-            self.scratch
-                .x
-                .copy_from_slice(&self.prefill_scratch.x[last..last + config.n_embd]);
-            rms_norm(
-                &self.scratch.x,
-                &model.output_norm,
-                &mut self.scratch.normed,
-                config.eps,
-            );
-            #[cfg(feature = "parity-trace")]
-            parity_trace::report(parity_trace::checkpoint(
-                "result_norm",
-                None,
-                &[1, config.n_embd],
-                &self.scratch.normed,
-            ));
-            let mut prepared_for = None;
-            matmul_rows(
-                &mut self.prefill_scratch.prepared,
-                &mut prepared_for,
-                &model.output,
-                &self.scratch.normed,
-                &mut self.scratch.logits,
-                1,
-                config.n_embd,
-                model,
-            )?;
-            #[cfg(feature = "parity-trace")]
-            parity_trace::report(parity_trace::checkpoint(
-                "result_output",
-                None,
-                &[config.vocab],
-                &self.scratch.logits,
-            ));
+        #[cfg(feature = "parity-trace")]
+        let trace_all = std::env::var_os("RMI_PARITY_TRACE").is_some();
+        #[cfg(not(feature = "parity-trace"))]
+        let trace_all = false;
+        if project_logits || trace_all {
+            for row in if trace_all { 0..rows } else { rows - 1..rows } {
+                let last = row * config.n_embd;
+                self.scratch
+                    .x
+                    .copy_from_slice(&self.prefill_scratch.x[last..last + config.n_embd]);
+                rms_norm(
+                    &self.scratch.x,
+                    &model.output_norm,
+                    &mut self.scratch.normed,
+                    config.eps,
+                );
+                #[cfg(feature = "parity-trace")]
+                parity_trace::report(parity_trace::checkpoint_row(
+                    row,
+                    "result_norm",
+                    None,
+                    &[1, config.n_embd],
+                    &self.scratch.normed,
+                ));
+                let mut prepared_for = None;
+                matmul_rows(
+                    &mut self.prefill_scratch.prepared,
+                    &mut prepared_for,
+                    &model.output,
+                    &self.scratch.normed,
+                    &mut self.scratch.logits,
+                    1,
+                    config.n_embd,
+                    model,
+                )?;
+                #[cfg(feature = "parity-trace")]
+                parity_trace::report(parity_trace::checkpoint_row(
+                    row,
+                    "result_output",
+                    None,
+                    &[config.vocab],
+                    &self.scratch.logits,
+                ));
+            }
         }
         Ok(())
     }

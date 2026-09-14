@@ -184,6 +184,15 @@ impl<'model> Gemma4Session<'model> {
         self.seq_len
     }
 
+    /// Reuse the scratch and projection runtime for an unrelated prompt.
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        for layer in &mut self.kv {
+            layer.keys.clear();
+            layer.values.clear();
+        }
+    }
+
     pub fn scratch_bytes(&self) -> usize {
         self.scratch.bytes()
     }

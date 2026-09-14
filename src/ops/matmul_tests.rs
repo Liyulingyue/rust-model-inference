@@ -73,6 +73,51 @@ fn prepared_row_test_weights() -> Vec<Weight<'static>> {
         .collect()
 }
 
+#[test]
+fn prepared_rows_preserve_custom_q4_kernel_semantics() {
+    use crate::ops::kernel::{q4_0::Q4_0Kernel, Kernel};
+
+    struct BiasedQ4(Q4_0Kernel<'static>);
+    impl Kernel for BiasedQ4 {
+        fn weight_bytes(&self) -> Option<&[u8]> {
+            self.0.weight_bytes()
+        }
+
+        fn forward_prequantized(
+            &self,
+            input: &[u8],
+            scales: &[f32],
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            ith: usize,
+            nth: usize,
+        ) {
+            self.0
+                .forward_prequantized(input, scales, output, n_in, n_out, ith, nth);
+            let per_thread = n_out.div_ceil(nth);
+            for index in ith * per_thread..((ith + 1) * per_thread).min(n_out) {
+                output[index] += 1.0;
+            }
+        }
+    }
+
+    let weight = Weight {
+        kernel: Box::new(BiasedQ4(Q4_0Kernel::new(&[0; 54], 32, 3))),
+        ggml_type: GGMLType::Q4_0,
+        n_in: 32,
+        n_out: 3,
+    };
+    let input = vec![0.0; 4 * 32];
+    let mut prepared = PreparedRows::new(4, 32);
+    prepared.prepare(&input, 4, 32, true, false).unwrap();
+    let mut output = [0.0; 12];
+    prepared
+        .matmul(&weight, &input, &mut output, &ComputePool::new(2))
+        .unwrap();
+    assert_eq!(output, [1.0; 12]);
+}
+
 fn deterministic_rows(rows: usize, n_in: usize) -> Vec<f32> {
     (0..rows * n_in)
         .map(|i| (i as f32 % 29.0 - 14.0) / 16.0)
@@ -152,6 +197,64 @@ fn prepared_rows_match_sequential_matmul_bits_and_reuse_storage() {
                 assert!(q8_capacity >= rows * weight.n_in);
             } else {
                 assert_eq!(q8_capacity, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_rows_reject_output_shape_overflow_before_dispatch() {
+    use crate::ops::kernel::q4_0::Q4_0Kernel;
+    let input = [0.0; 4 * 32];
+    let mut prepared = PreparedRows::new(4, 32);
+    prepared.prepare(&input, 4, 32, true, false).unwrap();
+    let weight = Weight {
+        kernel: Box::new(Q4_0Kernel::new(&[0; 18], 32, 1)),
+        ggml_type: GGMLType::Q4_0,
+        n_in: 32,
+        n_out: usize::MAX / 4 + 1,
+    };
+    let error = prepared
+        .matmul(&weight, &input, &mut [], &ComputePool::new(1))
+        .unwrap_err();
+    assert!(error.contains("overflow"), "{error}");
+}
+
+#[test]
+fn prepared_q4_rows_preserve_scalar_bits_across_row_and_output_tails() {
+    // Detect skipped tail rows/output partitions or changed F32 block accumulation.
+    for (n_in, n_out) in [(32, 3), (256, 131)] {
+        let mut bytes = vec![0u8; n_in / 32 * 18 * n_out];
+        for (block_index, block) in bytes.chunks_exact_mut(18).enumerate() {
+            let scale = [0.03125, -0.0078125, 2.0, 0.001][block_index % 4];
+            block[..2].copy_from_slice(&f32_to_f16(scale).to_le_bytes());
+            for (index, byte) in block[2..].iter_mut().enumerate() {
+                *byte = (block_index * 29 + index * 17 + 7) as u8;
+            }
+        }
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            &bytes,
+            GGMLType::Q4_0,
+            n_in,
+            n_out,
+        ));
+        for rows in [1, 2, 3, 4, 5, 63, 64, 65] {
+            let input = (0..rows * n_in)
+                .map(|i| ((i * 17 % 193) as f32 - 96.0) / 128.0)
+                .collect::<Vec<_>>();
+            let expected = sequential_weight_rows(&weight, &input, rows);
+            let mut prepared = PreparedRows::new(rows, n_in);
+            prepared.prepare(&input, rows, n_in, true, false).unwrap();
+            for threads in [1, 2, 4] {
+                let mut actual = vec![f32::NAN; rows * n_out];
+                prepared
+                    .matmul(&weight, &input, &mut actual, &ComputePool::new(threads))
+                    .unwrap();
+                assert_eq!(
+                    actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                    expected,
+                    "rows={rows} n_in={n_in} n_out={n_out} threads={threads}"
+                );
             }
         }
     }
