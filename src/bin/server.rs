@@ -18,7 +18,6 @@ use rust_model_inference::app::cli::{
     normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
 };
 use rust_model_inference::app::{compute_embedding, open_or_exit};
-use rust_model_inference::core::scratchpad::KvCache;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::core::thread_pool::ComputePool;
 use rust_model_inference::core::tokenizer::BPETokenizer;
@@ -38,8 +37,10 @@ use rust_model_inference::models::qwen3::tts::{
 use rust_model_inference::models::qwen3::{
     Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
 };
-use rust_model_inference::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Scratchpad};
+use rust_model_inference::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use rust_model_inference::{build_qwen_chat_prompt, KvLifecycle, QwenMessage};
+
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)]";
 
 // =============================================================================
 // Backend types
@@ -65,6 +66,7 @@ struct TextBackend {
     arch: String,
     pool: Arc<ComputePool>,
     tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
     inner: TextInner,
 }
 
@@ -958,7 +960,14 @@ fn generate_streaming(
     let prompt_text = extract_text_from_messages(messages)?;
     match &text.inner {
         TextInner::Qwen3 { model } => {
-            generate_qwen3_streaming(model, &text.tokenizer, &prompt_text, max_tokens, temperature)
+            generate_qwen3_streaming(
+                model,
+                &text.tokenizer,
+                &prompt_text,
+                max_tokens,
+                temperature,
+                text.prefill_batch_size,
+            )
         }
         TextInner::Qwen35 { model } => {
             let mut guard = model
@@ -971,6 +980,7 @@ fn generate_streaming(
                 &prompt_text,
                 max_tokens,
                 temperature,
+                text.prefill_batch_size,
             )
         }
         TextInner::Fallback { arch } => Err(format!(
@@ -994,6 +1004,7 @@ fn generate_qwen3_streaming(
     prompt_text: &str,
     max_tokens: usize,
     temperature: f32,
+    prefill_batch_size: usize,
 ) -> Result<GenerateResult, String> {
     let messages = [QwenMessage {
         role: "user",
@@ -1016,6 +1027,7 @@ fn generate_qwen3_streaming(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size,
         },
         |text| {
             if !text.is_empty() {
@@ -1038,68 +1050,37 @@ fn generate_qwen35_streaming(
     prompt_text: &str,
     max_tokens: usize,
     temperature: f32,
+    prefill_batch_size: usize,
 ) -> Result<GenerateResult, String> {
     let messages = [QwenMessage {
         role: "user",
         content: prompt_text,
     }];
     let prompt_ids = build_qwen_chat_prompt(tokenizer, &messages, false)?;
-    let (prompt_positions, mut next_text_position) =
-        build_qwen35_positions(&prompt_ids, None, &[])?;
-    let prompt_tokens: Vec<i32> = prompt_ids
-        .iter()
-        .copied()
-        .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
-        .collect::<Result<_, _>>()?;
-    let n_prompt = prompt_tokens.len();
+    let (prompt_positions, _) = build_qwen35_positions(&prompt_ids, None, &[])?;
+    let n_prompt = prompt_ids.len();
     let max_seq = (n_prompt + max_tokens).min(model.config.n_ctx);
-    let mut kv_cache = KvCache::new_f32(
-        model.config.n_layer_impl(),
-        max_seq,
-        model.config.n_embd_head() * model.config.n_head_kv,
-    );
-    let mut llm_scratch = Qwen35Scratchpad::new(&model.config, n_prompt.max(max_tokens));
-    let mut all_tokens = prompt_tokens.clone();
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(model, max_seq, prefill_batch_size, pool)?;
     let mut decoder = tokenizer.streaming_decoder(false);
     let mut rendered = Vec::<String>::new();
     let mut generated_ids = Vec::<u32>::new();
     for step in 0..max_tokens {
-        let tokens = if step == 0 {
-            &prompt_tokens[..]
-        } else {
-            &all_tokens[all_tokens.len() - 1..]
-        };
-        let token_ids = tokens
-            .iter()
-            .map(|&token| {
-                u32::try_from(token).map_err(|_| format!("invalid negative token id {token}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let embeddings = model.embed_tokens(&token_ids)?;
-        llm_scratch.x[..embeddings.len()].copy_from_slice(&embeddings);
         let decode_position = [[
-            next_text_position,
-            next_text_position,
-            next_text_position,
+            session.next_position(),
+            session.next_position(),
+            session.next_position(),
             0,
         ]];
-        let positions = if step == 0 {
-            &prompt_positions[..]
+        let (token_ids, positions) = if step == 0 {
+            (&prompt_ids[..], &prompt_positions[..])
         } else {
-            &decode_position[..]
+            (
+                &generated_ids[generated_ids.len() - 1..],
+                &decode_position[..],
+            )
         };
-        let logits = model.forward(
-            tokens.len(),
-            &mut kv_cache,
-            &mut llm_scratch,
-            &pool,
-            positions,
-        )?;
-        if step > 0 {
-            next_text_position = next_text_position
-                .checked_add(1)
-                .ok_or("Qwen3.5 server decode position overflow")?;
-        }
+        let logits = session.step_with_tokens(token_ids, positions)?;
         let next_token = sample_token_from_logits(&logits, temperature);
         let next_id = u32::try_from(next_token)
             .map_err(|_| format!("Model produced negative token ID {next_token}"))?;
@@ -1113,7 +1094,6 @@ fn generate_qwen35_streaming(
             rendered.push(text);
         }
         generated_ids.push(next_id);
-        all_tokens.push(next_token);
     }
     let tail = decoder.finish();
     if !tail.is_empty() {
@@ -1149,6 +1129,7 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 }
 
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = source
         .metadata("general.architecture")
@@ -1184,11 +1165,13 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         arch: arch.to_string(),
         pool,
         tokenizer,
+        prefill_batch_size,
         inner,
     })
 }
 
 fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
     let llm_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
@@ -1209,7 +1192,8 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
             open_bundled_audio_source(&options.model)?.ok_or("raw GGUF ASR requires --mmproj")?
         }
     };
-    let runtime = AsrRuntime::new(decoder, audio_source).map_err(|error| error.to_string())?;
+    let runtime = AsrRuntime::new(decoder, audio_source, prefill_batch_size)
+        .map_err(|error| error.to_string())?;
     Ok(AsrBackend {
         runtime: Arc::new(runtime),
     })
@@ -1256,6 +1240,13 @@ fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        println!("{USAGE}");
+        return;
+    }
 
     // Pre-parse --host/--port (server-only) before passing the rest to the
     // shared CLI parser so the rest of the surface stays in lockstep with
@@ -1322,7 +1313,7 @@ fn main() {
         && !options.embedding
         && options.model.as_os_str().is_empty()
     {
-        eprintln!("Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4]");
+        eprintln!("{USAGE}");
         std::process::exit(1);
     }
 

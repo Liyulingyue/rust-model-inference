@@ -13,19 +13,22 @@ layout(push_constant) uniform PC {
     uint delta_k_word;
     uint delta_v_word;
     uint layer;
-    uint position;
+    uint base_position;
     uint capacity;
     uint kv_count;
+    uint rows;
 } pc;
 
 void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     if (index >= pc.kv_count) return;
-    uint cache_index = (pc.layer * pc.capacity + pc.position) * pc.kv_count + index;
-    uint delta_index = pc.layer * pc.kv_count + index;
-    float key_f32 = uintBitsToFloat(arena.data[pc.k_word + index]);
-    float value_f32 = uintBitsToFloat(arena.data[pc.v_word + index]);
+    uint cache_index = (pc.layer * pc.capacity + pc.base_position + row) * pc.kv_count + index;
+    uint delta_index = (pc.layer * pc.rows + row) * pc.kv_count + index;
+    float key_f32 = uintBitsToFloat(arena.data[pc.k_word + row * pc.kv_count + index]);
+    float value_f32 = uintBitsToFloat(arena.data[pc.v_word + row * pc.kv_count + index]);
     uint key = floatBitsToUint(round_f16_rte(key_f32));
     uint value = floatBitsToUint(round_f16_rte(value_f32));
     arena.data[pc.cache_k_word + cache_index] = key;

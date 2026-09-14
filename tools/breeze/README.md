@@ -9,7 +9,7 @@ uv run --with numpy python tools/breeze/test_convert_breeze.py
 cargo build --release --bin rust-model-inference
 BIN=target/release/rust-model-inference
 MODEL="$MODEL_DIR/breeze-tts-2-BF16.gguf"
-CODEC="$MODEL_DIR/breeze-tts-2-codec-F32.gguf"
+CODEC="$MODEL_DIR/breeze-tts-2-mmproj-F32.gguf"
 ```
 
 Plain text, instruction, and reference voice modes (choose new output paths):

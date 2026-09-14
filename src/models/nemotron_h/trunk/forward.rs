@@ -125,8 +125,7 @@ impl NemotronScratch {
         // Per-layer SSM state. Sized so we can index by
         // [layer * stride + offset]. conv_cols =
         // d_inner + 2*n_group*d_state = 9728 for 4B Nano.
-        let conv_cols = config.ssm_inner_size
-            + 2 * config.ssm_group_count * config.ssm_state_size;
+        let conv_cols = config.ssm_inner_size + 2 * config.ssm_group_count * config.ssm_state_size;
         Self {
             hidden: vec![0.0; capacity * n_embd],
             normed: vec![0.0; n_embd],
@@ -140,16 +139,17 @@ impl NemotronScratch {
             scores: vec![0.0; capacity * capacity],
             logits: vec![0.0; config.vocab_size],
             ssm_state: vec![0.0; config.ssm_state_size * config.ssm_inner_size],
-            ssm_conv_hist: vec![0.0;
-                config.n_layer * config.ssm_conv_kernel * conv_cols],
+            ssm_conv_hist: vec![0.0; config.n_layer * config.ssm_conv_kernel * conv_cols],
             // Per-layer scan state shape: (n_head, headdim, d_state).
             // Total per layer = n_head * headdim * d_state
             //                  = dt_rank * (d_inner / dt_rank) * d_state
             //                  = d_inner * d_state.
             // For 4B Nano: 7680 * 128 = 983040 floats/layer = 3.75 MB,
             // 42 layers = 158 MB total. Reasonable.
-            ssm_scan_state: vec![0.0;
-                config.n_layer * config.ssm_inner_size * config.ssm_state_size],
+            ssm_scan_state: vec![
+                0.0;
+                config.n_layer * config.ssm_inner_size * config.ssm_state_size
+            ],
         }
     }
 
@@ -170,7 +170,11 @@ impl NemotronModel {
     /// for the last position. Per-layer attention + residual are wired;
     /// SSM and FFN outputs are zero placeholders until a parity test
     /// pins the SSM math.
-    pub fn prefill(&self, token_ids: &[u32], scratch: &mut NemotronScratch) -> Result<Vec<f32>, String> {
+    pub fn prefill(
+        &self,
+        token_ids: &[u32],
+        scratch: &mut NemotronScratch,
+    ) -> Result<Vec<f32>, String> {
         let n = token_ids.len();
         if n == 0 {
             return Err("Nemotron prefill: empty token sequence".into());
@@ -190,8 +194,10 @@ impl NemotronModel {
         // 1) Embed input tokens.
         for (i, &tid) in token_ids.iter().enumerate() {
             let row_start = i * self.config.n_embd;
-            self.tok_embd
-                .embedding_lookup(tid, &mut scratch.hidden[row_start..row_start + self.config.n_embd]);
+            self.tok_embd.embedding_lookup(
+                tid,
+                &mut scratch.hidden[row_start..row_start + self.config.n_embd],
+            );
         }
         // 2) Per-layer forward.
         for (layer_idx, lw) in self.layers.iter().enumerate() {
@@ -277,38 +283,55 @@ impl NemotronModel {
             // + out projection) only runs on attention layers. SSM / FFN
             // layers skip it; their pre-norm `attn_norm` is consumed by the
             // SSM/FFN branch below.
-                if let (Some(wq), Some(wk), Some(wv)) = (&lw.wq, &lw.wk, &lw.wv) {
-                    wq.kernel
-                        .forward_prepared(&scratch.normed, q8, sc, None, &mut q, n_embd, n_attn_q, 0, 1);
-                    wk.kernel
-                        .forward_prepared(&scratch.normed, q8, sc, None, &mut k, n_embd, n_attn_kv, 0, 1);
-                    wv.kernel
-                        .forward_prepared(&scratch.normed, q8, sc, None, &mut v, n_embd, n_attn_v, 0, 1);
-                    // Persist per-token K and V into the layer's
-                    // scratch cache so the next tokens can attend to
-                    // this token. Without this write, the K/V cache
-                    // access below reads only the current token (and
-                    // panics on out-of-bounds for j > 0).
-                    scratch.k[t * n_attn_kv..(t + 1) * n_attn_kv]
-                        .copy_from_slice(&k);
-                    scratch.v[t * n_attn_v..(t + 1) * n_attn_v]
-                        .copy_from_slice(&v);
+            if let (Some(wq), Some(wk), Some(wv)) = (&lw.wq, &lw.wk, &lw.wv) {
+                wq.kernel.forward_prepared(
+                    &scratch.normed,
+                    q8,
+                    sc,
+                    None,
+                    &mut q,
+                    n_embd,
+                    n_attn_q,
+                    0,
+                    1,
+                );
+                wk.kernel.forward_prepared(
+                    &scratch.normed,
+                    q8,
+                    sc,
+                    None,
+                    &mut k,
+                    n_embd,
+                    n_attn_kv,
+                    0,
+                    1,
+                );
+                wv.kernel.forward_prepared(
+                    &scratch.normed,
+                    q8,
+                    sc,
+                    None,
+                    &mut v,
+                    n_embd,
+                    n_attn_v,
+                    0,
+                    1,
+                );
+                // Persist per-token K and V into the layer's
+                // scratch cache so the next tokens can attend to
+                // this token. Without this write, the K/V cache
+                // access below reads only the current token (and
+                // panics on out-of-bounds for j > 0).
+                scratch.k[t * n_attn_kv..(t + 1) * n_attn_kv].copy_from_slice(&k);
+                scratch.v[t * n_attn_v..(t + 1) * n_attn_v].copy_from_slice(&v);
                 if let (Some(qn), Some(kn)) = (&lw.attn_q_norm, &lw.attn_k_norm) {
                     for h in 0..n_head {
                         let o = h * head_dim_k;
-                        crate::ops::rms_norm_inplace(
-                            &mut q[o..o + head_dim_k],
-                            qn,
-                            cfg.norm_eps,
-                        );
+                        crate::ops::rms_norm_inplace(&mut q[o..o + head_dim_k], qn, cfg.norm_eps);
                     }
                     for h in 0..n_head_kv {
                         let o = h * head_dim_k;
-                        crate::ops::rms_norm_inplace(
-                            &mut k[o..o + head_dim_k],
-                            kn,
-                            cfg.norm_eps,
-                        );
+                        crate::ops::rms_norm_inplace(&mut k[o..o + head_dim_k], kn, cfg.norm_eps);
                     }
                 }
                 for h in 0..n_head {
@@ -348,27 +371,21 @@ impl NemotronModel {
                 let mut v_storage: Vec<Vec<f32>> =
                     (0..=t).map(|_| vec![0.0f32; n_attn_v]).collect();
                 for j in 0..=t {
-                    v_storage[j].copy_from_slice(
-                        &scratch.v[j * n_attn_v..(j + 1) * n_attn_v],
-                    );
+                    v_storage[j].copy_from_slice(&scratch.v[j * n_attn_v..(j + 1) * n_attn_v]);
                 }
                 for h in 0..n_head {
                     let kv_h = h / group_size;
                     let mut scores = vec![0.0f32; t + 1];
                     for j in 0..=t {
-                        let k_row = &k_f16_storage[j]
-                            [kv_h * head_dim_k..(kv_h + 1) * head_dim_k];
+                        let k_row = &k_f16_storage[j][kv_h * head_dim_k..(kv_h + 1) * head_dim_k];
                         let q_row = &q_f16[h * head_dim_k..(h + 1) * head_dim_k];
-                        scores[j] =
-                            crate::ops::dot_f16(q_row, k_row, head_dim_k) * kq_scale;
+                        scores[j] = crate::ops::dot_f16(q_row, k_row, head_dim_k) * kq_scale;
                     }
                     softmax_inplace(&mut scores);
-                    let head_out =
-                        &mut attn_out[h * head_dim_v..(h + 1) * head_dim_v];
+                    let head_out = &mut attn_out[h * head_dim_v..(h + 1) * head_dim_v];
                     for j in 0..=t {
                         let s = scores[j];
-                        let v_row = &v_storage[j]
-                            [kv_h * head_dim_v..(kv_h + 1) * head_dim_v];
+                        let v_row = &v_storage[j][kv_h * head_dim_v..(kv_h + 1) * head_dim_v];
                         for d in 0..head_dim_v {
                             head_out[d] += s * v_row[d];
                         }
@@ -416,12 +433,12 @@ impl NemotronModel {
             // 9728 = 7680 (x after conv) + 1024 + 1024 (B, C groupings).
             //
             // (Historical comment: earlier revisions of this code approximated
-//  the scan with a scalar state per (group, rank) and per-rank
-//  dt/a/d broadcast, with a heuristic inner(g,r) channel mapping.
-//  That was rewritten to the canonical per-head d_state=128 vector
-//  scan structure in commit 5e970e1. The code below matches
-//  llama.cpp's ggml_compute_forward_ssm_scan_f32 directly. Stale
-//  comments above are kept to preserve history.)
+            //  the scan with a scalar state per (group, rank) and per-rank
+            //  dt/a/d broadcast, with a heuristic inner(g,r) channel mapping.
+            //  That was rewritten to the canonical per-head d_state=128 vector
+            //  scan structure in commit 5e970e1. The code below matches
+            //  llama.cpp's ggml_compute_forward_ssm_scan_f32 directly. Stale
+            //  comments above are kept to preserve history.)
             if let (
                 Some(ssm_in),
                 Some(ssm_conv1d_w),
@@ -464,9 +481,7 @@ impl NemotronModel {
                 //   [d_inner .. 2*d_inner)      = z (the gate)
                 //   [2*d_inner .. 2*d_inner + 2*n_group*d_state) = [B, C]
                 //   [2*d_inner + 2*n_group*d_state .. end) = dt (per dt_rank)
-                let d_in_proj = 2 * inner_size
-                    + 2 * n_group * d_state
-                    + dt_rank;
+                let d_in_proj = 2 * inner_size + 2 * n_group * d_state + dt_rank;
                 let z_offset = inner_size;
                 let b_offset = 2 * inner_size;
                 let dt_offset = 2 * inner_size + 2 * n_group * d_state;
@@ -503,8 +518,8 @@ impl NemotronModel {
                     let w_row = ki * conv_out_cols;
                     let hist_row = hist_base + ki * conv_out_cols;
                     for c in 0..conv_out_cols {
-                        conv_out[c] += ssm_conv1d_w[w_row + c]
-                            * scratch.ssm_conv_hist[hist_row + c];
+                        conv_out[c] +=
+                            ssm_conv1d_w[w_row + c] * scratch.ssm_conv_hist[hist_row + c];
                     }
                 }
                 // Shift history[1..K] <- history[0..K-1] so the
@@ -514,7 +529,8 @@ impl NemotronModel {
                 for k in (1..conv_kernel).rev() {
                     let dst_off = hist_base + k * conv_out_cols;
                     let src_off = hist_base + (k - 1) * conv_out_cols;
-                    scratch.ssm_conv_hist
+                    scratch
+                        .ssm_conv_hist
                         .copy_within(src_off..src_off + conv_out_cols, dst_off);
                 }
                 // Write current input into history[0].
@@ -593,11 +609,7 @@ impl NemotronModel {
                     // The GGUF stores ssm_dt.bias as (dt_rank,) but
                     // n_head = dt_rank for this model, so it pairs 1:1
                     // with heads in head order.
-                    let dt_bias_h = if h < dt_rank {
-                        ssm_dt_bias[h]
-                    } else {
-                        0.0
-                    };
+                    let dt_bias_h = if h < dt_rank { ssm_dt_bias[h] } else { 0.0 };
                     let dt_base = ssm_in_out[dt_offset + h];
                     let z = dt_base + dt_bias_h;
                     dt_per_head[h] = if z > 20.0 {
@@ -622,7 +634,9 @@ impl NemotronModel {
                     );
                     eprintln!(
                         "[OURS-M2] layer {layer_idx} dt*A_log[:8]={:?}",
-                        &(0..8).map(|h| dt_per_head[h] * ssm_a_log[h]).collect::<Vec<_>>()
+                        &(0..8)
+                            .map(|h| dt_per_head[h] * ssm_a_log[h])
+                            .collect::<Vec<_>>()
                     );
                 }
                 // DEBUG: dump y_buf for layer 6 last token multiple heads
@@ -638,22 +652,19 @@ impl NemotronModel {
                     // Also L2 norm of each head's 80 channels.
                     for h in 0..4 {
                         let off = h * headdim;
-                        let l2: f32 = y_buf[off..off+headdim].iter().map(|x| x*x).sum::<f32>().sqrt();
+                        let l2: f32 = y_buf[off..off + headdim]
+                            .iter()
+                            .map(|x| x * x)
+                            .sum::<f32>()
+                            .sqrt();
                         eprintln!("[OURS-Y-BEFORE-NORM] layer {layer_idx} head={h} L2={l2:.3}");
                     }
                 }
                 // DEBUG: dump dt + dA for layer 6 to match oracle m2_ prints.
                 if layer_idx == 6 && t == length.saturating_sub(1) {
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} dt[:8]={:?}",
-                        &dt_per_head[..8]
-                    );
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} dA[:8]={:?}",
-                        &dA_per_head[..8]
-                    );
-                    let l2_x_pre: f32 =
-                        x_pre.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!("[OURS-M2] layer {layer_idx} dt[:8]={:?}", &dt_per_head[..8]);
+                    eprintln!("[OURS-M2] layer {layer_idx} dA[:8]={:?}", &dA_per_head[..8]);
+                    let l2_x_pre: f32 = x_pre.iter().map(|x| x * x).sum::<f32>().sqrt();
                     eprintln!(
                         "[OURS-M2] layer {layer_idx} x_pre (silu(conv_x)) | l2={l2_x_pre:.3}"
                     );
@@ -709,27 +720,20 @@ impl NemotronModel {
                 // (equivalent to ggml_swiglu_split(z, y_buf)).
                 let z_slice = &ssm_in_out[z_offset..z_offset + inner_size];
                 if layer_idx == 6 && t == length.saturating_sub(1) {
-                    let l2_pre_gated: f32 =
-                        y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let l2_z_slice: f32 =
-                        z_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let l2_pre_gated: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let l2_z_slice: f32 = z_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
                     eprintln!(
                         "[OURS-M2] layer {layer_idx} y_buf (pre-z-gate) | l2={l2_pre_gated:.3}"
                     );
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} z_slice | l2={l2_z_slice:.3}"
-                    );
+                    eprintln!("[OURS-M2] layer {layer_idx} z_slice | l2={l2_z_slice:.3}");
                 }
                 for j in 0..inner_size {
                     y_buf[j] = crate::ops::silu(z_slice[j]) * y_buf[j];
                 }
                 // DEBUG: dump ssm_out input L2 (post-norm y) for parity
                 if layer_idx == 6 && t == length.saturating_sub(1) {
-                    let l2_post_norm: f32 =
-                        y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} post-norm y | l2={l2_post_norm:.3}"
-                    );
+                    let l2_post_norm: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!("[OURS-M2] layer {layer_idx} post-norm y | l2={l2_post_norm:.3}");
                 }
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
@@ -772,10 +776,7 @@ impl NemotronModel {
             // absent, fall back to attn_norm (the model's pre-norm is
             // reused as the FFN's pre-norm).
             if let (Some(w_up), Some(w_down)) = (&lw.w_up, &lw.w_down) {
-                let ffn_norm_ref: &[f32] = lw
-                    .ffn_norm
-                    .as_deref()
-                    .unwrap_or(&lw.attn_norm);
+                let ffn_norm_ref: &[f32] = lw.ffn_norm.as_deref().unwrap_or(&lw.attn_norm);
                 rms_norm(row, ffn_norm_ref, &mut scratch.normed, cfg.norm_eps);
                 let mut up_buf = vec![0.0f32; cfg.n_ff];
                 let blocks3 = (n_embd + 31) / 32;
@@ -823,7 +824,7 @@ impl NemotronModel {
                     cfg.n_ff,
                     n_embd,
                     0,
-            1,
+                    1,
                 );
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
@@ -886,24 +887,37 @@ pub fn run_inference(
         v: vec![0.0; scratch_capacity * n_attn_v],
         attn_out: vec![0.0; n_attn_v],
         ffn_out: vec![0.0; model.config.n_embd],
-        q8_buf: vec![0u8; model.config.n_embd
-            .max(model.config.n_ff)
-            .max(n_attn_v)
-            .max(model.config.n_embd_head_v * model.config.n_head)
-            .max(model.config.ssm_inner_size)],
-        scale_buf: vec![0.0; model.config.n_embd
-            .max(model.config.n_ff)
-            .max(n_attn_v)
-            .max(model.config.n_embd_head_v * model.config.n_head)
-            .max(model.config.ssm_inner_size)
-            .div_ceil(32)],
+        q8_buf: vec![
+            0u8;
+            model
+                .config
+                .n_embd
+                .max(model.config.n_ff)
+                .max(n_attn_v)
+                .max(model.config.n_embd_head_v * model.config.n_head)
+                .max(model.config.ssm_inner_size)
+        ],
+        scale_buf: vec![
+            0.0;
+            model
+                .config
+                .n_embd
+                .max(model.config.n_ff)
+                .max(n_attn_v)
+                .max(model.config.n_embd_head_v * model.config.n_head)
+                .max(model.config.ssm_inner_size)
+                .div_ceil(32)
+        ],
         scores: vec![0.0; scratch_capacity * scratch_capacity],
         logits: vec![0.0; model.config.vocab_size],
         ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
-        ssm_conv_hist: vec![0.0;
-            model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
-        ssm_scan_state: vec![0.0;
-            model.config.n_layer * model.config.ssm_inner_size * model.config.ssm_state_size],
+        ssm_conv_hist: vec![0.0; model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
+        ssm_scan_state: vec![
+            0.0;
+            model.config.n_layer
+                * model.config.ssm_inner_size
+                * model.config.ssm_state_size
+        ],
     };
 
     // Prefill each prompt token as a separate step (no KV cache yet).
@@ -936,9 +950,16 @@ pub fn run_inference(
             for (i, &v) in next_logits.iter().enumerate() {
                 let vv = v as f64;
                 l2 += vv * vv;
-                if v < mn { mn = v; }
-                if v > mx { mx = v; }
-                if v > best_v { best_v = v; best = i; }
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
+                if v > best_v {
+                    best_v = v;
+                    best = i;
+                }
             }
             eprintln!(
                 "[OURS-LOGITS] step {step}: L2={:.3} min={:.3} max={:.3} argmax={best} (logit={:.3})",
@@ -949,8 +970,11 @@ pub fn run_inference(
         // DEBUG: dump top-10 logits for first decode step (parity diff
         // vs llama.cpp oracle). Skip after first step.
         {
-            let mut idxs: Vec<(usize, f32)> = next_logits.iter().enumerate()
-                .map(|(i, &v)| (i, v)).collect();
+            let mut idxs: Vec<(usize, f32)> = next_logits
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i, v))
+                .collect();
             idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             eprintln!("  top10 logit:");
             for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {
@@ -958,8 +982,11 @@ pub fn run_inference(
             }
         }
         {
-            let mut idxs: Vec<(usize, f32)> = next_logits.iter().enumerate()
-                .map(|(i, &v)| (i, v)).collect();
+            let mut idxs: Vec<(usize, f32)> = next_logits
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i, v))
+                .collect();
             idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             eprintln!("  top10 logit:");
             for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {

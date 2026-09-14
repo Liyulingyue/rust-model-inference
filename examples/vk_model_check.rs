@@ -27,6 +27,7 @@ struct Arguments {
     mode: Mode,
     model: PathBuf,
     benchmark: bool,
+    compare_prefill_batches: Option<Vec<usize>>,
 }
 
 #[cfg(feature = "vulkan")]
@@ -46,16 +47,23 @@ fn arguments() -> Result<Arguments, String> {
         Some("embedding") => Mode::Embedding,
         _ => {
             return Err(
-                "usage: vk_model_check <qwen3|qwen35|embedding> --model PATH [--benchmark]".into(),
+                "usage: vk_model_check <qwen3|qwen35|embedding> --model PATH [--benchmark] [--compare-prefill-batches 1,64]".into(),
             )
         }
     };
     let mut model = None;
     let mut benchmark = false;
+    let mut compare_prefill_batches = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--model" => model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?)),
             "--benchmark" if mode == Mode::Qwen3 => benchmark = true,
+            "--compare-prefill-batches" if mode != Mode::Embedding => {
+                compare_prefill_batches =
+                    Some(parse_prefill_batches(&args.next().ok_or(
+                        "--compare-prefill-batches needs comma-separated sizes",
+                    )?)?);
+            }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
@@ -63,7 +71,156 @@ fn arguments() -> Result<Arguments, String> {
         mode,
         model: model.ok_or("--model is required")?,
         benchmark,
+        compare_prefill_batches,
     })
+}
+
+#[cfg(feature = "vulkan")]
+fn parse_prefill_batches(value: &str) -> Result<Vec<usize>, String> {
+    let batches = value
+        .split(',')
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "invalid prefill batch size".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if batches.len() < 2 || batches.contains(&0) {
+        return Err("prefill comparison requires at least two positive batch sizes".into());
+    }
+    Ok(batches)
+}
+
+#[cfg(feature = "vulkan")]
+fn kv_bits(state: &rust_model_inference::core::scratchpad::KvState) -> (usize, Vec<u32>) {
+    use rust_model_inference::core::scratchpad::KvCache;
+    let stride = state.arch.n_head_kv * state.arch.n_embd_head_k.max(state.arch.n_embd_head_v);
+    let mut words = Vec::new();
+    for layer in 0..state.arch.n_layer {
+        let start = layer * state.capacity * stride;
+        let end = start + state.seq_len * stride;
+        match &state.cache {
+            KvCache::F16(cache) => words.extend(
+                cache.k[start..end]
+                    .iter()
+                    .chain(&cache.v[start..end])
+                    .map(|&word| word as u32),
+            ),
+            KvCache::F32(cache) => words.extend(
+                cache.k[start..end]
+                    .iter()
+                    .chain(&cache.v[start..end])
+                    .map(|word| word.to_bits()),
+            ),
+        }
+    }
+    (state.seq_len, words)
+}
+
+#[cfg(feature = "vulkan")]
+fn compare_prefill_batches(
+    model: &Qwen3Model,
+    tokens: &[u32],
+    positions: &[[usize; 4]],
+    batches: &[usize],
+    gpu: bool,
+) -> Result<(), String> {
+    let context = if gpu {
+        rust_model_inference::ops::enable_gpu();
+        Some(
+            rust_model_inference::ops::get_vulkan_context()
+                .ok_or("Vulkan backend did not initialize")?,
+        )
+    } else {
+        None
+    };
+    let submissions = || {
+        context
+            .as_ref()
+            .map_or(0, |context| context.submission_count())
+    };
+    let backend = if gpu { "vulkan" } else { "cpu" };
+    let capacity = tokens
+        .len()
+        .checked_add(GREEDY_TOKENS + 1)
+        .ok_or("session capacity overflow")?;
+    let mut baseline = None;
+    for &batch in batches {
+        let mut session = Qwen3Session::new(model, capacity)?;
+        let input = Qwen3Input {
+            token_ids: tokens,
+            positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let before = submissions();
+        session.generate(
+            input.clone(),
+            Qwen3GenerateOptions {
+                max_new_tokens: 1,
+                temperature: 0.0,
+                prefill_batch_size: batch,
+            },
+        )?;
+        let prefill_submissions = submissions() - before;
+        let expected = if gpu {
+            tokens.len().div_ceil(batch) as u64
+        } else {
+            0
+        };
+        if prefill_submissions != expected {
+            return Err(format!(
+                "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
+            ));
+        }
+        let logits: Vec<_> = session
+            .last_logits()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let prompt_kv = kv_bits(session.kv_state());
+        session.reset_kv();
+        let before = submissions();
+        let generation = session.generate(
+            input,
+            Qwen3GenerateOptions {
+                max_new_tokens: GREEDY_TOKENS + 1,
+                temperature: 0.0,
+                prefill_batch_size: batch,
+            },
+        )?;
+        let generated = generation
+            .token_ids
+            .get(..GREEDY_TOKENS)
+            .ok_or("session stopped before 32 greedy tokens")?
+            .to_vec();
+        let total_submissions = submissions() - before;
+        let expected_decode = if gpu { GREEDY_TOKENS as u64 } else { 0 };
+        if generation.prompt_submissions != expected
+            || generation.decode_submissions != expected_decode
+        {
+            return Err(format!(
+                "batch={batch} phase submission counts changed: prompt={} decode={}",
+                generation.prompt_submissions, generation.decode_submissions
+            ));
+        }
+        if total_submissions != expected + expected_decode {
+            return Err(format!(
+                "batch={batch} decode submission count changed: {total_submissions}"
+            ));
+        }
+        let result = (logits, prompt_kv, generated, kv_bits(session.kv_state()));
+        if let Some(previous) = &baseline {
+            if &result != previous {
+                return Err(format!("same-{backend} prefill mismatch for batch={batch}: logits, KV or greedy tokens differ"));
+            }
+        } else {
+            baseline = Some(result);
+        }
+        println!("backend={backend} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", tokens.len());
+    }
+    println!("check=same_{backend}_prefill exact_logits=true exact_prompt_kv=true exact_decode_kv=true exact_greedy_tokens=true");
+    Ok(())
 }
 
 #[cfg(feature = "vulkan")]
@@ -83,6 +240,7 @@ fn generate(
         Qwen3GenerateOptions {
             max_new_tokens,
             temperature: 0.0,
+            prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         },
     )
 }
@@ -298,8 +456,18 @@ fn print_formats(model: &Qwen3Model, source: &dyn TensorSource) -> Result<(), St
 fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
     let (source, tokenizer, model) = load_model(arguments)?;
     print_formats(&model, source.as_ref())?;
-    let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
+    // Exercise a committed prefix and a short tail in the batch-64 comparison.
+    let prompt = if arguments.compare_prefill_batches.is_some() {
+        PROMPT.repeat(33)
+    } else {
+        PROMPT.to_string()
+    };
+    let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());
+    if let Some(batches) = &arguments.compare_prefill_batches {
+        compare_prefill_batches(&model, &prompt_tokens, &positions, batches, false)?;
+        return compare_prefill_batches(&model, &prompt_tokens, &positions, batches, true);
+    }
     let capacity = prompt_tokens
         .len()
         .checked_add(GREEDY_TOKENS + 1)
@@ -334,7 +502,10 @@ fn run_qwen3(arguments: &Arguments) -> Result<(), String> {
             "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
         ));
     }
-    let expected_submissions = prompt_tokens.len() + GREEDY_TOKENS;
+    let expected_submissions = prompt_tokens
+        .len()
+        .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
+        + GREEDY_TOKENS;
     if submissions != expected_submissions as u64 {
         return Err(format!(
             "expected one submission per token ({expected_submissions}), got {submissions}"
@@ -379,6 +550,113 @@ fn qwen35_generate(
 }
 
 #[cfg(feature = "vulkan")]
+fn qwen35_state_bits(session: &Qwen35Session<'_, '_>) -> Vec<u32> {
+    let rust_model_inference::core::scratchpad::KvCache::F32(cache) = session.kv_cache() else {
+        unreachable!("Qwen3.5 requires F32 KV");
+    };
+    cache
+        .k
+        .iter()
+        .chain(&cache.v)
+        .chain(session.scratch().conv_states.iter().flatten())
+        .chain(session.scratch().ssm_states.iter().flatten())
+        .map(|value| value.to_bits())
+        .collect()
+}
+
+#[cfg(feature = "vulkan")]
+fn compare_qwen35_prefill_batches(
+    model: &mut Qwen35Model<'_>,
+    tokens: &[u32],
+    positions: &[[usize; 4]],
+    batches: &[usize],
+    gpu: bool,
+) -> Result<(), String> {
+    let context = if gpu {
+        rust_model_inference::ops::enable_gpu();
+        Some(
+            rust_model_inference::ops::get_vulkan_context()
+                .ok_or("Vulkan backend did not initialize")?,
+        )
+    } else {
+        None
+    };
+    let submissions = || {
+        context
+            .as_ref()
+            .map_or(0, |context| context.submission_count())
+    };
+    let backend = if gpu { "vulkan" } else { "cpu" };
+    let capacity = tokens
+        .len()
+        .checked_add(GREEDY_TOKENS + 1)
+        .ok_or("session capacity overflow")?;
+    let pool = Arc::new(ComputePool::new(4));
+    let mut baseline = None;
+    for &batch in batches {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(model, capacity, batch, Arc::clone(&pool))?;
+        let before = submissions();
+        let mut logits = session.step_with_tokens(tokens, positions)?;
+        let prefill_submissions = submissions() - before;
+        let expected = if gpu {
+            tokens.len().div_ceil(batch) as u64
+        } else {
+            0
+        };
+        if prefill_submissions != expected {
+            return Err(format!(
+                "batch={batch} expected {expected} prefill submissions, got {prefill_submissions}"
+            ));
+        }
+        let prompt_logits = logits
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+        let prompt_state = qwen35_state_bits(&session);
+        let mut generated = Vec::with_capacity(GREEDY_TOKENS);
+        for _ in 0..GREEDY_TOKENS {
+            let token = logits
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .ok_or("empty logits")?
+                .0 as u32;
+            generated.push(token);
+            let position = session.next_position();
+            logits = session.step_with_tokens(&[token], &[[position, position, position, 0]])?;
+        }
+        let total_submissions = submissions() - before;
+        let expected_decode = if gpu { GREEDY_TOKENS as u64 } else { 0 };
+        if total_submissions != expected + expected_decode {
+            return Err(format!(
+                "batch={batch} decode submission count changed: {total_submissions}"
+            ));
+        }
+        let result = (
+            prompt_logits,
+            prompt_state,
+            generated,
+            qwen35_state_bits(&session),
+            logits
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+        );
+        if let Some(previous) = &baseline {
+            if &result != previous {
+                return Err(format!("same-{backend} Qwen3.5 prefill mismatch for batch={batch}: logits, dense KV, conv/SSM or greedy tokens differ"));
+            }
+        } else {
+            baseline = Some(result);
+        }
+        println!("backend={backend} batch={batch} prompt_tokens={} prefill_submissions={prefill_submissions} total_submissions={total_submissions} greedy_tokens={GREEDY_TOKENS}", tokens.len());
+    }
+    println!("check=same_{backend}_prefill exact_logits=true exact_dense_kv=true exact_conv_ssm=true exact_greedy_tokens=true exact_decode_state=true");
+    Ok(())
+}
+
+#[cfg(feature = "vulkan")]
 fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     let source: Arc<dyn TensorSource> = Arc::from(
         open_model_source(&arguments.model, ComponentRole::Llm)
@@ -386,8 +664,23 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
     );
     let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
     let mut model = Qwen35Model::from_source(source.as_ref())?;
-    let prompt_tokens = build_simple_prompt(&tokenizer, PROMPT);
+    let prompt = if arguments.compare_prefill_batches.is_some() {
+        PROMPT.repeat(20)
+    } else {
+        PROMPT.to_string()
+    };
+    let prompt_tokens = build_simple_prompt(&tokenizer, &prompt);
     let positions = qwen_text_positions(prompt_tokens.len());
+    if let Some(batches) = &arguments.compare_prefill_batches {
+        compare_qwen35_prefill_batches(&mut model, &prompt_tokens, &positions, batches, false)?;
+        return compare_qwen35_prefill_batches(
+            &mut model,
+            &prompt_tokens,
+            &positions,
+            batches,
+            true,
+        );
+    }
     let capacity = prompt_tokens
         .len()
         .checked_add(GREEDY_TOKENS + 1)
@@ -422,10 +715,13 @@ fn run_qwen35(arguments: &Arguments) -> Result<(), String> {
             "greedy token mismatch: gpu={gpu_tokens:?} cpu={cpu_tokens:?}"
         ));
     }
-    let expected_submissions = prompt_tokens.len() + GREEDY_TOKENS;
+    let expected_submissions = prompt_tokens
+        .len()
+        .div_ceil(rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE)
+        + GREEDY_TOKENS;
     if submissions != expected_submissions as u64 {
         return Err(format!(
-            "expected one submission per token ({expected_submissions}), got {submissions}"
+            "expected one submission per prompt chunk and decode token ({expected_submissions}), got {submissions}"
         ));
     }
     println!("formats=matmul={{BF16}};auxiliary={{F32}};backend=vulkan");
@@ -588,6 +884,14 @@ mod tests {
     use super::{format_summary, median, per_second};
     use rust_model_inference::GGMLType;
     use std::time::Duration;
+
+    #[test]
+    fn prefill_batch_comparison_requires_positive_sizes() {
+        assert_eq!(super::parse_prefill_batches("1,64").unwrap(), vec![1, 64]);
+        for value in ["", "0,64", "1,", "1,nope", "1"] {
+            assert!(super::parse_prefill_batches(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn format_summary_reports_later_layer_formats() {

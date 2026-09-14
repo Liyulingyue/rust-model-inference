@@ -54,6 +54,7 @@ pub fn run_inference(
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -88,6 +89,7 @@ pub fn run_inference(
         bench,
         profile,
         kv_format,
+        prefill_batch_size,
     )
 }
 
@@ -100,6 +102,7 @@ pub fn run_inference_tokens(
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     let _ = (bench, profile); // bench/profile 暂由 wall-clock 估算
     let t0 = Instant::now();
@@ -154,6 +157,7 @@ pub fn run_inference_tokens(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size,
         },
         |text| {
             // 第一个 token 出来表示 prefill 结束

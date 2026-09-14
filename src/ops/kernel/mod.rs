@@ -32,10 +32,244 @@ pub mod q4_k;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
+pub mod simd_avx2;
 
 mod qtensor_owned;
 mod quantized_tensor;
 mod trait_;
+
+pub(crate) struct PreparedRows {
+    max_rows: usize,
+    max_n_in: usize,
+    rows: usize,
+    n_in: usize,
+    need_q8: bool,
+    need_q8k: bool,
+    q8: Vec<u8>,
+    scales: Vec<f32>,
+    q8k: Vec<crate::ops::quant::BlockQ8K>,
+}
+
+impl PreparedRows {
+    pub(crate) fn new(max_rows: usize, max_n_in: usize) -> Self {
+        Self {
+            max_rows,
+            max_n_in,
+            rows: 0,
+            n_in: 0,
+            need_q8: false,
+            need_q8k: false,
+            q8: Vec::new(),
+            scales: Vec::new(),
+            q8k: Vec::new(),
+        }
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        input: &[f32],
+        rows: usize,
+        n_in: usize,
+        need_q8: bool,
+        need_q8k: bool,
+    ) -> Result<(), String> {
+        if rows == 0 || n_in == 0 {
+            return Err("prepared rows require non-zero rows and width".into());
+        }
+        if rows > self.max_rows || n_in > self.max_n_in {
+            return Err(format!(
+                "prepared rows shape {rows}x{n_in} exceeds maximum {}x{}",
+                self.max_rows, self.max_n_in
+            ));
+        }
+        let input_len = rows
+            .checked_mul(n_in)
+            .ok_or("prepared rows input shape overflow")?;
+        if input.len() != input_len {
+            return Err(format!(
+                "prepared rows input length mismatch: expected {input_len}, got {}",
+                input.len()
+            ));
+        }
+        if need_q8k && !n_in.is_multiple_of(crate::ops::quant::QK_K) {
+            return Err(format!(
+                "Q8_K activation width {n_in} must be divisible by {}",
+                crate::ops::quant::QK_K
+            ));
+        }
+
+        if need_q8 {
+            let blocks = n_in.div_ceil(32);
+            let scale_count = rows
+                .checked_mul(blocks)
+                .ok_or("prepared rows Q8 scale shape overflow")?;
+            self.q8.resize(input_len, 0);
+            self.scales.resize(scale_count, 0.0);
+            for row in 0..rows {
+                crate::ops::quantize_q8_0_into(
+                    &input[row * n_in..(row + 1) * n_in],
+                    n_in,
+                    &mut self.q8[row * n_in..(row + 1) * n_in],
+                    &mut self.scales[row * blocks..(row + 1) * blocks],
+                );
+            }
+        }
+        if need_q8k {
+            let blocks = n_in / crate::ops::quant::QK_K;
+            let q8k_count = rows
+                .checked_mul(blocks)
+                .ok_or("prepared rows Q8_K shape overflow")?;
+            self.q8k.resize(
+                q8k_count,
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; crate::ops::quant::QK_K],
+                    bsums: [0; crate::ops::quant::QK_K / 16],
+                },
+            );
+            for row in 0..rows {
+                crate::ops::quant::quantize_row_q8_k_into(
+                    &input[row * n_in..(row + 1) * n_in],
+                    &mut self.q8k[row * blocks..(row + 1) * blocks],
+                );
+            }
+        }
+
+        self.rows = rows;
+        self.n_in = n_in;
+        self.need_q8 = need_q8;
+        self.need_q8k = need_q8k;
+        Ok(())
+    }
+
+    pub(crate) fn matmul(
+        &self,
+        weight: &Weight<'_>,
+        input: &[f32],
+        output: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) -> Result<(), String> {
+        self.matmul_group(input, [(weight, output)], pool)
+    }
+
+    pub(crate) fn matmul_group<const N: usize>(
+        &self,
+        input: &[f32],
+        projections: [(&Weight<'_>, &mut [f32]); N],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) -> Result<(), String> {
+        let input_len = self
+            .rows
+            .checked_mul(self.n_in)
+            .ok_or("prepared matmul input shape overflow")?;
+        if self.rows == 0 || input.len() != input_len {
+            return Err("prepared matmul input shape mismatch".into());
+        }
+        for (weight, output) in &projections {
+            if weight.n_in != self.n_in {
+                return Err("prepared rows do not match weight input width".into());
+            }
+            if (weight.needs_q8_0_activation() && !self.need_q8)
+                || (weight.uses_q8_k() && !self.need_q8k)
+            {
+                return Err("prepared activation format does not match weight".into());
+            }
+            let output_len = self
+                .rows
+                .checked_mul(weight.n_out)
+                .ok_or("prepared matmul output shape overflow")?;
+            if output.len() != output_len {
+                return Err("prepared matmul output shape mismatch".into());
+            }
+        }
+
+        let blocks = self.n_in.div_ceil(32);
+        let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
+        let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
+        // ARM Q4_0 uses the scalar dot contract. Other kernels, including the
+        // x86 AVX2 contract, retain their original per-row execution.
+        let batched_q4 = self.rows >= 4
+            && self.need_q8
+            && projections
+                .iter()
+                .all(|(weight, _)| weight.kernel.scalar_q4_0_bytes().is_some());
+        pool.compute(|ith, nth| {
+            if batched_q4 {
+                for (weight, output_ptr) in projections {
+                    // SAFETY: output lengths were checked above. Each worker
+                    // owns disjoint columns in every row; no full-output
+                    // mutable slice is constructed while workers are active.
+                    unsafe {
+                        q4_0::scalar::matmul_q4_0_batched_scalar_range(
+                            weight.kernel.scalar_q4_0_bytes().unwrap(),
+                            &self.q8,
+                            &self.scales,
+                            output_ptr,
+                            self.n_in,
+                            weight.n_out,
+                            self.rows,
+                            ith,
+                            nth,
+                        );
+                    }
+                }
+                return;
+            }
+            let mut output_ptrs = projections.map(|(_, output_ptr)| output_ptr);
+            for row in 0..self.rows {
+                let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
+                let q8 = if self.need_q8 {
+                    &self.q8[row * self.n_in..(row + 1) * self.n_in]
+                } else {
+                    &[]
+                };
+                let scales = if self.need_q8 {
+                    &self.scales[row * blocks..(row + 1) * blocks]
+                } else {
+                    &[]
+                };
+                for ((weight, _), output_ptr) in projections.iter().zip(&mut output_ptrs) {
+                    let q8k = weight
+                        .uses_q8_k()
+                        .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
+                    let output_row =
+                        unsafe { std::slice::from_raw_parts_mut(*output_ptr, weight.n_out) };
+                    weight.kernel.forward_prepared(
+                        input_row,
+                        q8,
+                        scales,
+                        q8k,
+                        output_row,
+                        self.n_in,
+                        weight.n_out,
+                        ith,
+                        nth,
+                    );
+                    // SAFETY: output lengths were checked above, so advancing
+                    // one row stays within each output allocation.
+                    *output_ptr = unsafe { output_ptr.add(weight.n_out) };
+                }
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.q8.capacity()
+            + self.scales.capacity() * std::mem::size_of::<f32>()
+            + self.q8k.capacity() * std::mem::size_of::<crate::ops::quant::BlockQ8K>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn q8_capacity_for_test(&self) -> usize {
+        self.q8.capacity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn q8_ptr_for_test(&self) -> *const u8 {
+        self.q8.as_ptr()
+    }
+}
 
 /// A model weight whose concrete kernel is selected once at load time.
 ///
@@ -87,6 +321,15 @@ impl<'a> Weight<'a> {
                 | GGMLType::IQ3_S
                 | GGMLType::IQ4_NL
                 | GGMLType::IQ4_XS
+        )
+    }
+
+    pub(crate) fn needs_q8_0_activation(&self) -> bool {
+        matches!(
+            self.ggml_type,
+            crate::core::tensor::GGMLType::Q4_0
+                | crate::core::tensor::GGMLType::Q4_1
+                | crate::core::tensor::GGMLType::Q8_0
         )
     }
 

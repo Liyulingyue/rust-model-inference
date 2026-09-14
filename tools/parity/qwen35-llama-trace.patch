@@ -2,7 +2,7 @@ diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/e
 index 4ce8d600b..2f7f2f49b 100644
 --- a/examples/eval-callback/eval-callback.cpp
 +++ b/examples/eval-callback/eval-callback.cpp
-@@ -1,88 +1,352 @@
+@@ -1,88 +1,388 @@
  #include "arg.h"
  #include "common.h"
 -#include "debug.h"
@@ -138,7 +138,31 @@ index 4ce8d600b..2f7f2f49b 100644
 +    }
 
 -    common_debug_cb_user_data cb_data;
-+    void write(const std::vector<llama_token> & tokens, int n_layer, int n_embd, int n_vocab, bool prefill) {
++    void retain_prompt_row() {
++        prompt_rows_.push_back(std::move(tensors_));
++        tensors_.clear();
++    }
++
++    void write_prompt(const std::vector<llama_token> & tokens, int n_layer, int n_embd, int n_vocab) {
++        if (prompt_rows_.size() != tokens.size()) {
++            throw std::runtime_error("prompt checkpoint row count mismatch");
++        }
++        tensor_snapshot embedding;
++        embedding.type = GGML_TYPE_F32;
++        for (const auto & row : prompt_rows_) {
++            const auto & values = row.at("model.input_embed").f32;
++            embedding.f32.insert(embedding.f32.end(), values.begin(), values.end());
++        }
++        tensors_["model.input_embed"] = std::move(embedding);
++        write(tokens, n_layer, n_embd, n_vocab, true, true);
++        for (size_t row = 0; row < tokens.size(); ++row) {
++            tensors_ = std::move(prompt_rows_[row]);
++            write({tokens[row]}, n_layer, n_embd, n_vocab, false);
++        }
++        prompt_rows_.clear();
++    }
++
++    void write(const std::vector<llama_token> & tokens, int n_layer, int n_embd, int n_vocab, bool prefill, bool metadata_only = false) {
 +        if (prefill) {
 +            write_tokens("qwen35.prompt_ids", tokens);
 +            std::vector<int32_t> token_major_positions;
@@ -164,6 +188,7 @@ index 4ce8d600b..2f7f2f49b 100644
 +            write_tensor("model.input_embed", "qwen35.embedding", -1,
 +                    {int64_t(tokens.size()), n_embd});
 +        }
++        if (metadata_only) return;
 
 -    common_init();
 +        write_tensor("conv_output_raw-0", "conv_output_raw-0", 0,
@@ -323,6 +348,7 @@ index 4ce8d600b..2f7f2f49b 100644
 +    std::string path_;
 +    std::ofstream manifest_;
 +    std::map<std::string, tensor_snapshot> tensors_;
++    std::vector<std::map<std::string, tensor_snapshot>> prompt_rows_;
 +    std::set<std::string> seen_;
 +    std::map<std::string, size_t> occurrences_;
 +};
@@ -368,11 +394,21 @@ index 4ce8d600b..2f7f2f49b 100644
 +    const int n_vocab = llama_vocab_n_tokens(vocab);
 +    std::vector<llama_token> generated;
 +    for (int step = 0; step < params.n_predict; ++step) {
-+        if (llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size()))) {
-+            LOG_ERR("failed to evaluate tokens\n");
-+            return false;
++        if (step == 0) {
++            // Scalar Oracle: preserve every prompt-row state and logit while
++            // the context advances positions and recurrent state normally.
++            for (auto token : tokens) {
++                if (llama_decode(ctx, llama_batch_get_one(&token, 1))) return false;
++                trace.retain_prompt_row();
++            }
++            trace.write_prompt(tokens, n_layer, n_embd, n_vocab);
++        } else {
++            if (llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size()))) {
++                LOG_ERR("failed to evaluate tokens\n");
++                return false;
++            }
++            trace.write(tokens, n_layer, n_embd, n_vocab, false);
 +        }
-+        trace.write(tokens, n_layer, n_embd, n_vocab, step == 0);
 +        const llama_token token = greedy_token(ctx, n_vocab);
 +        generated.push_back(token);
 +        if (llama_vocab_is_eog(vocab, token)) break;
