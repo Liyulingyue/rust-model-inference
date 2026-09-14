@@ -7,6 +7,8 @@ layout(push_constant) uniform PC {
     uint gate_word;
     uint up_word;
     uint count;
+    uint rows;
+    uint row_stride;
 } pc;
 
 float exp_approx(float x) {
@@ -28,9 +30,12 @@ float exp_approx(float x) {
 }
 
 void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
     uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint index = group * 64u + gl_LocalInvocationID.x;
     if (index >= pc.count) return;
+    index += row * pc.row_stride;
     float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
     float up = uintBitsToFloat(arena.data[pc.up_word + index]);
     precise float denominator = 1.0 + exp_approx(0.0 - gate);

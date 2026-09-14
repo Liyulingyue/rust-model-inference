@@ -328,7 +328,7 @@ unsafe fn bf16_round_inplace_neon(values: &mut [f32]) {
     let mut i = 0;
     while i + 4 <= values.len() {
         let x = vld1q_f32(values.as_ptr().add(i));
-        let bits = vreinterpretq_u32_s32(x);
+        let bits = vreinterpretq_u32_f32(x);
         let lsb = vshrq_n_u32(vandq_u32(bits, vdupq_n_u32(0x00010000)), 16);
         let rounding = vaddq_u32(vdupq_n_u32(0x7fff), lsb);
         let rounded = vshrq_n_u32(vaddq_u32(bits, rounding), 16);

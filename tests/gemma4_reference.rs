@@ -1,7 +1,7 @@
-use rust_model_inference::app::{run_gemma4, Gemma4Request};
 use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::models::gemma4::asr::Gemma4AudioModel;
 use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
+use rust_model_inference::models::gemma4::{run_gemma4, Gemma4Request};
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GEMMA4_MODEL_NAME: &str = "gemma-4-E2B-it-Q8_0.gguf";
+const GEMMA4_LAYERS: usize = 35;
 const GEMMA4_MMPROJ_NAME: &str = "mmproj-F16.gguf";
 const GEMMA4_THREADS: usize = 4;
 const GEMMA4_PROMPT: &str = "describe";
@@ -438,10 +439,13 @@ fn run_rust_case(
     image: &Path,
     audio: &Path,
     trace: &Path,
+    batch: usize,
 ) -> Result<(), String> {
     let old_trace = std::env::var_os("RMI_PARITY_TRACE");
     let old_filter = std::env::var_os("RMI_PARITY_FILTER");
-    let filter = required_trace_names(case).join(",");
+    let mut names = required_trace_names(case);
+    names.extend(["gemma4.prompt_logits".into(), "gemma4.generated_ids".into()]);
+    let filter = names.join(",");
     std::env::set_var("RMI_PARITY_TRACE", trace);
     std::env::set_var("RMI_PARITY_FILTER", filter);
     let result = run_gemma4(Gemma4Request {
@@ -450,9 +454,10 @@ fn run_rust_case(
         image: case.image.then_some(image),
         audio: case.audio.then_some(audio),
         prompt: GEMMA4_PROMPT,
-        max_tokens: 1,
+        max_tokens: 3,
         threads: GEMMA4_THREADS,
         kv_format: KvFormat::F32,
+        prefill_batch_size: batch,
     });
     restore_env("RMI_PARITY_TRACE", old_trace);
     restore_env("RMI_PARITY_FILTER", old_filter);
@@ -554,8 +559,18 @@ fn run_parity_case(
     let oracle_trace = directory.join("oracle.jsonl");
     let required = required_trace_names(case);
 
-    run_rust_case(case, model, mmproj, image, audio, &rust_trace)?;
+    let scalar_trace = directory.join("rust-batch-1.jsonl");
+    run_rust_case(case, model, mmproj, image, audio, &scalar_trace, 1)?;
+    run_rust_case(case, model, mmproj, image, audio, &rust_trace, 64)?;
     let mut rust_records = trace_records(&rust_trace)?;
+    assert_trace_equal(case.name, &trace_records(&scalar_trace)?, &rust_records).map_err(
+        |error| {
+            format!(
+                "Rust batch=1/64 {error}; traces retained in {}",
+                directory.display()
+            )
+        },
+    )?;
     rust_records.retain(|record| required.contains(&record.checkpoint));
     require_trace_names(case, "Rust", &rust_records)?;
 
@@ -791,6 +806,105 @@ fn gemma4_matches_pinned_cpu_oracle_before_softmax() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(all(feature = "parity-trace", feature = "vulkan"))]
+#[test]
+#[ignore = "requires the Gemma4 model and a real Vulkan device"]
+fn gemma4_rust_prefill_batches_match_on_cpu_and_vulkan() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = std::env::temp_dir().join(format!(
+        "rmi-gemma4-batches-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let old_trace = std::env::var_os("RMI_PARITY_TRACE");
+    let old_filter = std::env::var_os("RMI_PARITY_FILTER");
+    let mut filter_names = vec![
+        "gemma4.prompt_logits".to_owned(),
+        "gemma4.generated_ids".to_owned(),
+        "gemma4.kv".to_owned(),
+    ];
+    for layer in 0..GEMMA4_LAYERS {
+        filter_names.push(format!("gemma4.kv.{layer}.keys"));
+        filter_names.push(format!("gemma4.kv.{layer}.values"));
+    }
+    std::env::set_var("RMI_PARITY_FILTER", filter_names.join(","));
+    let model = gemma4_model_path();
+    let prompt = format!(
+        "Write a detailed story of at least 500 words about a traveler. Include these places: {}",
+        "forest mountain river village ".repeat(40)
+    );
+    for backend in ["cpu", "vulkan"] {
+        let context = if backend == "vulkan" {
+            rust_model_inference::ops::enable_gpu();
+            Some(rust_model_inference::ops::get_vulkan_context().expect("real Vulkan device"))
+        } else {
+            None
+        };
+        let mut baseline: Option<Vec<TraceRecord>> = None;
+        for batch in [1, 64] {
+            let trace = root.join(format!("{backend}-{batch}.jsonl"));
+            std::env::set_var("RMI_PARITY_TRACE", &trace);
+            let before = context
+                .as_ref()
+                .map_or(0, |context| context.submission_count());
+            run_gemma4(Gemma4Request {
+                model: &model,
+                mmproj: None,
+                image: None,
+                audio: None,
+                prompt: &prompt,
+                max_tokens: 32,
+                threads: GEMMA4_THREADS,
+                kv_format: KvFormat::F32,
+                prefill_batch_size: batch,
+            })
+            .unwrap();
+            if let Some(context) = &context {
+                assert!(
+                    context.submission_count() > before,
+                    "must execute on Vulkan"
+                );
+            }
+            let records = trace_records(&trace).unwrap();
+            assert!(records
+                .iter()
+                .any(|record| record.checkpoint == "gemma4.prompt_logits"));
+            assert!(records
+                .iter()
+                .any(|record| record.checkpoint == "gemma4.generated_ids" && record.len == 32));
+            for layer in 0..GEMMA4_LAYERS {
+                assert!(
+                    records.iter().any(|record| record.checkpoint
+                        == format!("gemma4.kv.{layer}.keys")
+                        && record.len > 0),
+                    "real-model trace must include layer {layer} KV keys"
+                );
+                assert!(
+                    records.iter().any(|record| record.checkpoint
+                        == format!("gemma4.kv.{layer}.values")
+                        && record.len > 0),
+                    "real-model trace must include layer {layer} KV values"
+                );
+            }
+            if let Some(previous) = &baseline {
+                assert_trace_equal(backend, previous, &records).unwrap();
+            } else {
+                baseline = Some(records);
+            }
+        }
+        eprintln!("check=same_{backend}_prefill model=gemma4 exact_prompt_logits=true exact_greedy_tokens=true greedy_tokens=32");
+    }
+    restore_env("RMI_PARITY_TRACE", old_trace);
+    restore_env("RMI_PARITY_FILTER", old_filter);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 #[ignore = "requires the Gemma4 model"]
 fn gemma4_text_smoke() {
@@ -815,6 +929,7 @@ fn gemma4_text_smoke() {
         max_tokens: 1,
         threads: 4,
         kv_format: KvFormat::F32,
+        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
     })
     .unwrap();
 }
@@ -957,6 +1072,7 @@ fn gemma4_image_audio_smoke() {
         max_tokens: 1,
         threads: 4,
         kv_format: KvFormat::F32,
+        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
     });
     let _ = std::fs::remove_file(image_path);
     let _ = std::fs::remove_file(audio_path);
