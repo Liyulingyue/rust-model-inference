@@ -685,6 +685,170 @@ unsafe fn vec_mad_self_f32_neon(y: &mut [f32], x: &[f32]) {
     }
 }
 
+/// `y[i] += x[i] * scale[i]` with a per-element scale vector.
+///
+/// VibeVoice ASR encoder (ConvNeXt-style blocks) does a per-channel
+/// `x[token * dim + channel] += conv_out * gamma[channel]` loop for
+/// every mixer and FFN branch; with token counts in the low hundreds
+/// and channels in the 32-512 range the loop runs many times per
+/// streaming chunk.  The AVX2/NEON kernels collapse it into a single
+/// FMA per lane group and free the scalar fallback for unit tests.
+pub fn vec_mad_per_channel_f32(y: &mut [f32], x: &[f32], scale: &[f32]) {
+    debug_assert_eq!(y.len(), x.len());
+    debug_assert!(scale.len() >= x.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            unsafe { vec_mad_per_channel_f32_avx2(y, x, scale) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            unsafe { vec_mad_per_channel_f32_neon(y, x, scale) };
+            return;
+        }
+    }
+    for i in 0..y.len() {
+        y[i] += x[i] * scale[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn vec_mad_per_channel_f32_avx2(y: &mut [f32], x: &[f32], scale: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = y.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let yi = _mm256_loadu_ps(y.as_ptr().add(i));
+        let xi = _mm256_loadu_ps(x.as_ptr().add(i));
+        let si = _mm256_loadu_ps(scale.as_ptr().add(i));
+        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(xi, si, yi));
+        i += 8;
+    }
+    if i + 4 <= n {
+        let yi = _mm_loadu_ps(y.as_ptr().add(i));
+        let xi = _mm_loadu_ps(x.as_ptr().add(i));
+        let si = _mm_loadu_ps(scale.as_ptr().add(i));
+        _mm_storeu_ps(y.as_mut_ptr().add(i), _mm_fmadd_ps(xi, si, yi));
+        i += 4;
+    }
+    while i < n {
+        y[i] += x[i] * scale[i];
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn vec_mad_per_channel_f32_neon(y: &mut [f32], x: &[f32], scale: &[f32]) {
+    use std::arch::aarch64::*;
+    let mut i = 0;
+    while i + 4 <= y.len() {
+        let yi = vld1q_f32(y.as_ptr().add(i));
+        let xi = vld1q_f32(x.as_ptr().add(i));
+        let si = vld1q_f32(scale.as_ptr().add(i));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, si, yi));
+        i += 4;
+    }
+    while i < y.len() {
+        y[i] += x[i] * scale[i];
+        i += 1;
+    }
+}
+
+/// `y[i] += x[i] * scale[i % scale_len]` — broadcast a short per-channel
+/// `scale` vector across the longer `x`/`y` pair.  Used by the VibeVoice
+/// ASR encoder to fuse its mixer/FFN `x[token*dim + c] += value * gamma[c]`
+/// pattern into a single SIMD FMA loop without re-staging `gamma`.
+pub fn vec_mad_per_channel_f32_broadcast(
+    y: &mut [f32],
+    x: &[f32],
+    scale: &[f32],
+) {
+    debug_assert_eq!(y.len(), x.len());
+    let period = scale.len();
+    assert!(period > 0, "vec_mad_per_channel_f32_broadcast: empty scale");
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() {
+            unsafe { vec_mad_per_channel_f32_broadcast_avx2(y, x, scale, period) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            unsafe {
+                vec_mad_per_channel_f32_broadcast_neon(y, x, scale, period);
+            }
+            return;
+        }
+    }
+    for i in 0..y.len() {
+        y[i] += x[i] * scale[i % period];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn vec_mad_per_channel_f32_broadcast_avx2(
+    y: &mut [f32],
+    x: &[f32],
+    scale: &[f32],
+    period: usize,
+) {
+    use std::arch::x86_64::*;
+    assert!(period % 8 == 0, "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 8");
+    let n = y.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        // Pin c0 to an 8-aligned boundary so the 8-lane broadcast load
+        // reads exactly one chunk of the per-channel scale vector.
+        // Callers (VibeVoice encoder) always pass `period` divisible by 8
+        // (the channel count is a multiple of 32) and y.len() a multiple
+        // of `period`, so the (i % period == 0) invariant holds on the
+        // SIMD path and we never cross a scale boundary mid-vector.
+        let c0 = i % period;
+        let sc = _mm256_loadu_ps(scale.as_ptr().add(c0));
+        let yi = _mm256_loadu_ps(y.as_ptr().add(i));
+        let xi = _mm256_loadu_ps(x.as_ptr().add(i));
+        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(xi, sc, yi));
+        i += 8;
+    }
+    while i < n {
+        y[i] += x[i] * scale[i % period];
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn vec_mad_per_channel_f32_broadcast_neon(
+    y: &mut [f32],
+    x: &[f32],
+    scale: &[f32],
+    period: usize,
+) {
+    use std::arch::aarch64::*;
+    assert!(period % 4 == 0, "vec_mad_per_channel_f32_broadcast: period {period} must be a multiple of 4");
+    let mut i = 0;
+    while i + 4 <= y.len() {
+        let c0 = i % period;
+        let sc = vld1q_f32(scale.as_ptr().add(c0));
+        let yi = vld1q_f32(y.as_ptr().add(i));
+        let xi = vld1q_f32(x.as_ptr().add(i));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, sc, yi));
+        i += 4;
+    }
+    while i < y.len() {
+        y[i] += x[i] * scale[i % period];
+        i += 1;
+    }
+}
+
 /// `sum_f32(values) = Σ values[i]`，返回 f64 保证累加精度。
 /// 通用 reduce op：与 `sum_sq_f32` 配对，`qwen35/vision.rs` 用它构造
 /// `Σ(x - mean)² = sum_sq - 2·mean·sum + n·mean²`。
@@ -1028,7 +1192,10 @@ unsafe fn sum_sq_centered_f32_neon(values: &[f32], mean: f32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{sum_f32, sum_sq_centered_f32, sum_sq_f32};
+    use super::{
+        sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_per_channel_f32,
+        vec_mad_per_channel_f32_broadcast,
+    };
 
     #[test]
     fn f64_reductions_cover_vector_and_tail_lengths() {
@@ -1052,5 +1219,70 @@ mod tests {
             sum_sq_centered_f32(&values, 1.0).to_bits(),
             expected_centered.to_bits()
         );
+    }
+
+    fn mad_per_channel_scalar(y: &mut [f32], x: &[f32], scale: &[f32]) {
+        for i in 0..y.len() {
+            y[i] += x[i] * scale[i];
+        }
+    }
+
+    fn mad_broadcast_scalar(y: &mut [f32], x: &[f32], scale: &[f32]) {
+        let period = scale.len();
+        for i in 0..y.len() {
+            y[i] += x[i] * scale[i % period];
+        }
+    }
+
+    #[test]
+    fn vec_mad_per_channel_matches_scalar() {
+        let n = 257usize;
+        let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 4.0).collect();
+        let scale: Vec<f32> = (0..n).map(|i| (i as f32 * 0.07).cos() + 0.5).collect();
+        let mut avx2 = vec![1.0f32; n];
+        let mut scalar = vec![1.0f32; n];
+        vec_mad_per_channel_f32(&mut avx2, &x, &scale);
+        mad_per_channel_scalar(&mut scalar, &x, &scale);
+        for (i, (a, s)) in avx2.iter().zip(scalar.iter()).enumerate() {
+            let denom = s.abs().max(1.0);
+            assert!((a - s).abs() / denom < 1e-5, "row {i}: avx2={a} scalar={s}");
+        }
+    }
+
+    #[test]
+    fn vec_mad_per_channel_broadcast_matches_scalar() {
+        // VibeVoice encoder shape: y.len() == t * dim, scale.len() == dim.
+        let dim = 32usize;
+        let t = 7usize;
+        let n = t * dim;
+        let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.011).sin() * 3.0).collect();
+        let scale: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.21).cos()).collect();
+        let mut simd = vec![0.5f32; n];
+        let mut scalar = vec![0.5f32; n];
+        vec_mad_per_channel_f32_broadcast(&mut simd, &x, &scale);
+        mad_broadcast_scalar(&mut scalar, &x, &scale);
+        for (i, (a, s)) in simd.iter().zip(scalar.iter()).enumerate() {
+            let denom = s.abs().max(1.0);
+            assert!((a - s).abs() / denom < 1e-5, "row {i}: simd={a} scalar={s}");
+        }
+    }
+
+    #[test]
+    fn vec_mad_per_channel_broadcast_handles_non_multiple_dim() {
+        // dim = 24 forces the kernel into the scalar tail (NEON/AVX2 needs
+        // a multiple-of-4 / multiple-of-8 period).  Tests the fallback path.
+        let dim = 24usize;
+        let t = 5usize;
+        let n = t * dim;
+        let x: Vec<f32> = (0..n).map(|i| i as f32 * 0.07 - 3.0).collect();
+        let scale: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.13).cos() + 1.0).collect();
+        let mut simd = vec![0.1f32; n];
+        let mut scalar = vec![0.1f32; n];
+        vec_mad_per_channel_f32_broadcast(&mut simd, &x, &scale);
+        mad_broadcast_scalar(&mut scalar, &x, &scale);
+        for (i, (a, s)) in simd.iter().zip(scalar.iter()).enumerate() {
+            let denom = s.abs().max(1.0);
+            assert!((a - s).abs() / denom < 1e-5, "row {i}: simd={a} scalar={s}");
+        }
     }
 }
