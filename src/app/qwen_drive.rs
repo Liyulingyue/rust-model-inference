@@ -379,7 +379,8 @@ fn prefill_perception(
     )?;
     let (positions, _) = build_qwen35_positions(&tokens, Some(image), grids)?;
     let width = model.config.n_embd;
-    let mut session = Qwen35Session::new(model, tokens.len(), pool)?;
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(model, tokens.len(), tokens.len(), pool)?;
     session.step(&embeddings, tokens.len(), &positions)?;
     let hidden = session.last_hidden(tokens.len())?;
     let grid = grids

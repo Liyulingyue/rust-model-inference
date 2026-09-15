@@ -1048,7 +1048,11 @@ mod tests {
 
     fn constant_weight(n_in: usize, n_out: usize, value: f32) -> Weight<'static> {
         let values = vec![value; n_in * n_out];
-        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(values));
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+            data: values,
+            n_in: 0,
+            n_out: 0,
+        });
         weight.n_in = n_in;
         weight.n_out = n_out;
         weight
@@ -1077,7 +1081,11 @@ mod tests {
         // One selected input distinguishes the conditioned branch from CFG.
         let mut data = vec![0.0; 2 * hidden * hidden];
         data[0] = 1.0;
-        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32(data));
+        let mut weight = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::F32 {
+            data,
+            n_in: 0,
+            n_out: 0,
+        });
         weight.n_in = hidden;
         weight.n_out = 2 * hidden;
         dit.adaln_weights[1] = weight;

@@ -24,10 +24,90 @@ use crate::parity_trace;
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::Qwen35VulkanSession;
 
+#[cfg(test)]
+thread_local! {
+    static CPU_SCAN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_cpu_scan_failure(row: Option<usize>) {
+    CPU_SCAN_FAILURE.set(row);
+}
+
 impl<'a> super::weights::Qwen35Model<'a> {
     pub fn forward(
         &mut self,
         n_tokens: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        self.forward_impl(n_tokens, None, kv_cache, scratch, pool, mrope_positions)
+    }
+
+    pub(crate) fn forward_at(
+        &mut self,
+        n_tokens: usize,
+        base_position: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        self.forward_impl(
+            n_tokens,
+            Some(base_position),
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+        )
+    }
+
+    pub(crate) fn forward_chunk(
+        &mut self,
+        n_tokens: usize,
+        base_position: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        conv_states: &mut [Vec<f32>],
+        ssm_states: &mut [Vec<f32>],
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        if conv_states.len() != scratch.conv_states.len()
+            || ssm_states.len() != scratch.ssm_states.len()
+        {
+            return Err("Qwen3.5 recurrent state layer count mismatch".into());
+        }
+        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        let result = self.forward_at(
+            n_tokens,
+            base_position,
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+        );
+        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        result
+    }
+
+    fn forward_impl(
+        &mut self,
+        n_tokens: usize,
+        base_position: Option<usize>,
         kv_cache: &mut KvCache,
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
@@ -45,7 +125,9 @@ impl<'a> super::weights::Qwen35Model<'a> {
         // call is the prefill (n_tokens > 1), subsequent calls decode
         // (n_tokens == 1). We lazily build the session on the first decode.
         #[cfg(feature = "vulkan")]
-        let gpu_allowed = n_tokens == 1 && !crate::core::thread_pool::gpu_matmul_disabled();
+        let gpu_allowed = base_position.is_none()
+            && n_tokens == 1
+            && !crate::core::thread_pool::gpu_matmul_disabled();
         #[cfg(feature = "vulkan")]
         if gpu_allowed && self.gpu.is_none() {
             if let Some(context) = crate::ops::get_vulkan_context() {
@@ -143,7 +225,6 @@ impl<'a> super::weights::Qwen35Model<'a> {
         // ---- end GPU dispatch ----
 
         let cfg = &self.config;
-        let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_layer = cfg.n_layer_impl();
         let eps = cfg.norm_eps;
@@ -172,7 +253,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             }
             #[cfg(feature = "parity-trace")]
             if !is_recr && trace_layer(il) {
-                parity_trace::report(parity_trace::checkpoint(
+                parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("attn_norm-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
@@ -194,11 +275,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         scratch,
                         pool,
                         trace_layer(il),
-                    )
+                    )?
                 }
                 #[cfg(not(feature = "parity-trace"))]
                 {
-                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool)
+                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool)?
                 }
             } else {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
@@ -212,6 +293,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         scratch,
                         pool,
                         mrope_positions,
+                        base_position,
                         trace_layer(il),
                     )
                 }
@@ -225,6 +307,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         scratch,
                         pool,
                         mrope_positions,
+                        base_position,
                     )
                 }
             };
@@ -264,7 +347,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             }
             #[cfg(feature = "parity-trace")]
             {
-                parity_trace::report(parity_trace::checkpoint(
+                parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("layer_output-{il}"),
                     Some(il),
                     &[n_tokens, n_embd],
@@ -294,32 +377,44 @@ impl<'a> super::weights::Qwen35Model<'a> {
             );
         }
 
-        let last_normed = &scratch.normed_buf[(n_tokens - 1) * n_embd..n_tokens * n_embd];
         #[cfg(feature = "parity-trace")]
-        parity_trace::report(parity_trace::checkpoint(
-            "result_norm",
-            None,
-            &[n_embd],
-            last_normed,
-        ));
-        self.output_weight.quantize_and_matmul_with_scratch(
-            last_normed,
-            &mut scratch.q8k_buf,
-            &mut scratch.q8_buf,
-            &mut scratch.scale_buf,
-            &mut scratch.matmul_out,
-            pool,
-        );
+        let trace_all = std::env::var_os("RMI_PARITY_TRACE").is_some();
+        #[cfg(not(feature = "parity-trace"))]
+        let trace_all = false;
         let mut result = vec![0.0f32; cfg.vocab_size];
-        let n = scratch.matmul_out.len().min(cfg.vocab_size);
-        result[..n].copy_from_slice(&scratch.matmul_out[..n]);
-        #[cfg(feature = "parity-trace")]
-        parity_trace::report(parity_trace::checkpoint(
-            "result_output",
-            None,
-            &[cfg.vocab_size],
-            &result[..cfg.vocab_size],
-        ));
+        for row in if trace_all {
+            0..n_tokens
+        } else {
+            n_tokens - 1..n_tokens
+        } {
+            let last_normed = &scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint_row(
+                row,
+                "result_norm",
+                None,
+                &[n_embd],
+                last_normed,
+            ));
+            self.output_weight.quantize_and_matmul_with_scratch(
+                last_normed,
+                &mut scratch.q8k_buf,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                &mut scratch.matmul_out,
+                pool,
+            );
+            let n = scratch.matmul_out.len().min(cfg.vocab_size);
+            result[..n].copy_from_slice(&scratch.matmul_out[..n]);
+            #[cfg(feature = "parity-trace")]
+            parity_trace::report(parity_trace::checkpoint_row(
+                row,
+                "result_output",
+                None,
+                &[cfg.vocab_size],
+                &result[..cfg.vocab_size],
+            ));
+        }
         Ok(result)
     }
 
@@ -332,6 +427,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
+        base_position: Option<usize>,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -364,100 +460,27 @@ impl<'a> super::weights::Qwen35Model<'a> {
             crate::ops::quant::QK_K
         );
 
-        for t in 0..n_tokens {
-            let inp_off = t * n_embd;
-            let t0 = std::time::Instant::now();
-            let inp_slice = &input[inp_off..inp_off + n_embd];
-            // Quantize the shared input ONCE per token. The previous code
-            // called quantize_and_matmul_with_scratch three times (once per
-            // WQ/WK/WV), re-quantizing the same F32 input into Q8_0 + scales
-            // each time. For 27B-class models this is ~3× the AVX2
-            // quantize cost per layer per token.
-            crate::ops::quantize_q8_0_into(
-                inp_slice,
-                n_embd,
-                &mut scratch.q8_buf[..n_embd],
-                &mut scratch.scale_buf[..n_embd / 32],
-            );
-            if q8k_required {
-                crate::ops::quantize_row_q8_k_into(
-                    inp_slice,
-                    &mut scratch.q8k_buf[..n_embd / crate::ops::quant::QK_K],
-                );
-            }
-            let q8_ptr = scratch.q8_buf.as_ptr();
-            let sc_ptr = scratch.scale_buf.as_ptr();
-            let q8k_ptr = scratch.q8k_buf.as_ptr();
-            let q_dim_q8 = q_dim;
-            let k_dim_q8 = k_dim;
-            let v_dim_q8 = v_dim;
-            let n_embd_q8 = n_embd;
-            let n_embd_head_q = n_embd_head;
-            let matmul_out_ptr = scratch.matmul_out.as_mut_ptr();
-            let inp_ptr = inp_slice.as_ptr();
-            let q8k_len = n_embd / crate::ops::quant::QK_K;
-            pool.compute(move |ith: usize, nth: usize| {
-                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q8) };
-                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q8 / 32) };
-                let inp = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_q8) };
-                let q_out = unsafe { std::slice::from_raw_parts_mut(matmul_out_ptr, q_dim_q8) };
-                let q8k = if q8k_required {
-                    Some(unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) })
-                } else {
-                    None
-                };
-                wq.kernel.forward_prepared(
-                    inp,
-                    q8,
-                    sc,
-                    if wq.uses_q8_k() { q8k } else { None },
-                    q_out,
-                    n_embd_q8,
-                    q_dim_q8,
-                    ith,
-                    nth,
-                );
-                let k_out = unsafe {
-                    std::slice::from_raw_parts_mut(matmul_out_ptr.add(q_dim_q8), k_dim_q8)
-                };
-                wk.kernel.forward_prepared(
-                    inp,
-                    q8,
-                    sc,
-                    if wk.uses_q8_k() { q8k } else { None },
-                    k_out,
-                    n_embd_q8,
-                    k_dim_q8,
-                    ith,
-                    nth,
-                );
-                let v_out = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        matmul_out_ptr.add(q_dim_q8 + k_dim_q8),
-                        v_dim_q8,
-                    )
-                };
-                wv.kernel.forward_prepared(
-                    inp,
-                    q8,
-                    sc,
-                    if wv.uses_q8_k() { q8k } else { None },
-                    v_out,
-                    n_embd_q8,
-                    v_dim_q8,
-                    ith,
-                    nth,
-                );
-                let _ = n_embd_head_q;
-            });
-            scratch.q_buf[t * q_dim..t * q_dim + q_dim]
-                .copy_from_slice(&scratch.matmul_out[..q_dim]);
-            scratch.k_buf[t * k_dim..t * k_dim + k_dim]
-                .copy_from_slice(&scratch.matmul_out[q_dim..q_dim + k_dim]);
-            scratch.v_buf[t * v_dim..t * v_dim + v_dim]
-                .copy_from_slice(&scratch.matmul_out[q_dim + k_dim..q_dim + k_dim + v_dim]);
-            t_qkv += t0.elapsed().as_secs_f64();
-        }
+        let t0 = std::time::Instant::now();
+        let need_q8 = [wq, wk, wv]
+            .iter()
+            .any(|weight| weight.needs_q8_0_activation());
+        scratch
+            .prepared
+            .prepare(input, n_tokens, n_embd, need_q8, q8k_required)
+            .expect("validated Qwen3.5 dense projection shape");
+        scratch
+            .prepared
+            .matmul_group(
+                input,
+                [
+                    (wq, &mut scratch.q_buf[..n_tokens * q_dim]),
+                    (wk, &mut scratch.k_buf[..n_tokens * k_dim]),
+                    (wv, &mut scratch.v_buf[..n_tokens * v_dim]),
+                ],
+                pool,
+            )
+            .expect("validated Qwen3.5 dense projection shape");
+        t_qkv += t0.elapsed().as_secs_f64();
 
         for t in 0..n_tokens {
             for h in 0..n_head {
@@ -486,13 +509,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
                 }
             }
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Qcur_normed-{il}"),
                 Some(il),
                 &[n_tokens, n_head, n_embd_head],
                 &q_trace,
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Kcur_normed-{il}"),
                 Some(il),
                 &[n_tokens, n_head_kv, n_embd_head],
@@ -500,7 +523,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
             ));
         }
 
-        let kv_pos = kv_cache_pos(kv_cache, il, k_dim, cfg.n_layer_impl());
+        let kv_pos =
+            base_position.unwrap_or_else(|| kv_cache_pos(kv_cache, il, k_dim, cfg.n_layer_impl()));
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
         for t in 0..n_tokens {
@@ -554,13 +578,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_trace.extend_from_slice(&scratch.q_buf[offset..offset + n_embd_head]);
                 }
             }
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Qcur-{il}"),
                 Some(il),
                 &[n_tokens, n_head, n_embd_head],
                 &q_trace,
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("Kcur-{il}"),
                 Some(il),
                 &[n_tokens, n_head_kv, n_embd_head],
@@ -644,19 +668,21 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
         let mut result = vec![0.0f32; n_tokens * n_embd];
         let t0 = std::time::Instant::now();
-        for t in 0..n_tokens {
-            let wo_input = &scratch.attn_out_buf
-                [t * n_embd_heads_total..t * n_embd_heads_total + n_embd_heads_total];
-            wo.quantize_and_matmul_with_scratch(
+        let wo_input = &scratch.attn_out_buf[..n_tokens * n_embd_heads_total];
+        scratch
+            .prepared
+            .prepare(
                 wo_input,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
-        }
+                n_tokens,
+                n_embd_heads_total,
+                wo.needs_q8_0_activation(),
+                wo.uses_q8_k(),
+            )
+            .expect("validated Qwen3.5 output projection shape");
+        scratch
+            .prepared
+            .matmul(wo, wo_input, &mut result, pool)
+            .expect("validated Qwen3.5 output projection shape");
         t_wo += t0.elapsed().as_secs_f64();
         if profile {
             eprintln!(
@@ -675,7 +701,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, String> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
@@ -702,52 +728,31 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let ssm_out = layer.ssm_out.as_ref().unwrap();
 
         let t0 = std::time::Instant::now();
+        let projections = [wqkv, wqkv_gate, ssm_beta, ssm_alpha];
+        let need_q8 = projections
+            .iter()
+            .any(|weight| weight.needs_q8_0_activation());
+        let need_q8k = projections.iter().any(|weight| weight.uses_q8_k());
+        scratch
+            .prepared
+            .prepare(input, n_tokens, n_embd, need_q8, need_q8k)
+            .expect("validated Qwen3.5 recurrent projection shape");
+        scratch
+            .prepared
+            .matmul_group(
+                input,
+                [
+                    (wqkv, &mut scratch.qkv_buf[..n_tokens * conv_dim]),
+                    (wqkv_gate, &mut scratch.z_buf[..n_tokens * value_dim]),
+                    (ssm_beta, &mut scratch.beta_buf[..n_tokens * num_v_heads]),
+                    (ssm_alpha, &mut scratch.alpha_buf[..n_tokens * num_v_heads]),
+                ],
+                pool,
+            )
+            .expect("validated Qwen3.5 recurrent projection shape");
         for t in 0..n_tokens {
-            let inp_off = t * n_embd;
-            let inp_slice = &input[inp_off..inp_off + n_embd];
-            wqkv.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            scratch.qkv_buf[t * conv_dim..t * conv_dim + conv_dim]
-                .copy_from_slice(&scratch.matmul_out[..conv_dim]);
-            wqkv_gate.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            scratch.z_buf[t * value_dim..t * value_dim + value_dim]
-                .copy_from_slice(&scratch.matmul_out[..value_dim]);
-            ssm_beta.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
             let n_beta = num_v_heads;
-            scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]
-                .copy_from_slice(&scratch.matmul_out[..n_beta]);
             sigmoid_inplace(&mut scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]);
-            ssm_alpha.quantize_and_matmul_with_scratch(
-                inp_slice,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            let n_alpha = num_v_heads;
-            scratch.alpha_buf[t * num_v_heads..t * num_v_heads + n_alpha]
-                .copy_from_slice(&scratch.matmul_out[..n_alpha]);
             for v in 0..num_v_heads {
                 let a_biased = scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
                 scratch.alpha_buf[t * num_v_heads + v] =
@@ -787,7 +792,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("conv_output_raw-{il}"),
                 Some(il),
                 &[n_tokens, conv_dim],
@@ -826,13 +831,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("q_conv_predelta-{il}"),
                 Some(il),
                 &[n_tokens, num_k_heads, head_k_dim],
                 &scratch.q_buf[..n_tokens * key_dim],
             ));
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("k_conv_predelta-{il}"),
                 Some(il),
                 &[n_tokens, num_k_heads, head_k_dim],
@@ -844,23 +849,18 @@ impl<'a> super::weights::Qwen35Model<'a> {
 
         let ts0 = std::time::Instant::now();
         let q_scale = 1.0 / (head_k_dim as f32).sqrt();
-        #[cfg(feature = "parity-trace")]
-        let state_before = if trace_layer {
-            Some(scratch.ssm_states[il].clone())
-        } else {
-            None
-        };
-        #[cfg(feature = "parity-trace")]
-        if let Some(state_before) = state_before.as_deref() {
-            parity_trace::report(parity_trace::checkpoint(
-                &format!("state_predelta-{il}"),
-                Some(il),
-                &[num_v_heads, head_v_dim, head_v_dim],
-                state_before,
-            ));
-        }
         let ssm_state = &mut scratch.ssm_states[il];
         for t in 0..n_tokens {
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_row(
+                    t,
+                    &format!("state_predelta-{il}"),
+                    Some(il),
+                    &[num_v_heads, head_v_dim, head_v_dim],
+                    ssm_state,
+                ));
+            }
             let q_off = t * key_dim;
             let k2_off = t * key_dim;
             let v2_off = t * value_dim;
@@ -905,15 +905,22 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     q_scale,
                 );
             }
-        }
-        #[cfg(feature = "parity-trace")]
-        if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
-                &format!("new_state-{il}"),
-                Some(il),
-                &[num_v_heads, head_v_dim, head_v_dim],
-                ssm_state,
-            ));
+            #[cfg(test)]
+            if CPU_SCAN_FAILURE.get() == Some(t) {
+                return Err(format!(
+                    "injected Qwen3.5 CPU chunk failure after recurrent row {t}"
+                ));
+            }
+            #[cfg(feature = "parity-trace")]
+            if trace_layer {
+                parity_trace::report(parity_trace::checkpoint_row(
+                    t,
+                    &format!("new_state-{il}"),
+                    Some(il),
+                    &[num_v_heads, head_v_dim, head_v_dim],
+                    ssm_state,
+                ));
+            }
         }
 
         let tssm = ts0.elapsed().as_secs_f64();
@@ -935,7 +942,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
-            parity_trace::report(parity_trace::checkpoint(
+            parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("final_output-{il}"),
                 Some(il),
                 &[n_tokens, num_v_heads, head_v_dim],
@@ -946,18 +953,21 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let tnorm = tn0.elapsed().as_secs_f64();
         let mut result = vec![0.0f32; n_tokens * n_embd];
         let t0 = std::time::Instant::now();
-        for t in 0..n_tokens {
-            let inp = &scratch.attn_out_buf[t * value_dim..][..value_dim];
-            ssm_out.quantize_and_matmul_with_scratch(
-                inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
-            );
-            result[t * n_embd..t * n_embd + n_embd].copy_from_slice(&scratch.matmul_out[..n_embd]);
-        }
+        let output_input = &scratch.attn_out_buf[..n_tokens * value_dim];
+        scratch
+            .prepared
+            .prepare(
+                output_input,
+                n_tokens,
+                value_dim,
+                ssm_out.needs_q8_0_activation(),
+                ssm_out.uses_q8_k(),
+            )
+            .expect("validated Qwen3.5 recurrent output shape");
+        scratch
+            .prepared
+            .matmul(ssm_out, output_input, &mut result, pool)
+            .expect("validated Qwen3.5 recurrent output shape");
         let t_out_matmul = t0.elapsed().as_secs_f64();
         if profile {
             eprintln!(
@@ -965,7 +975,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 il, t_matmul, tc, tssm, tnorm, t_out_matmul
             );
         }
-        result
+        Ok(result)
     }
 
     fn forward_ffn_parallel(
@@ -985,94 +995,51 @@ impl<'a> super::weights::Qwen35Model<'a> {
             crate::ops::quant::QK_K
         );
 
-        for t in 0..n_tokens {
-            let off = t * n_embd;
-            let inp = &hidden[off..off + n_embd];
-            // Quantize shared FFN input ONCE per token (was 2x: gate + up).
-            crate::ops::quantize_q8_0_into(
-                inp,
-                n_embd,
-                &mut scratch.q8_buf[..n_embd],
-                &mut scratch.scale_buf[..n_embd / 32],
-            );
-            if q8k_required {
-                crate::ops::quantize_row_q8_k_into(
-                    inp,
-                    &mut scratch.q8k_buf[..n_embd / crate::ops::quant::QK_K],
-                );
-            }
-            let q8_ptr = scratch.q8_buf.as_ptr();
-            let sc_ptr = scratch.scale_buf.as_ptr();
-            let q8k_ptr = scratch.q8k_buf.as_ptr();
-            let q8k_len = n_embd / crate::ops::quant::QK_K;
-            let ffn_gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
-            let ffn_up_buf_ptr = scratch.ffn_up_buf.as_mut_ptr();
-            let inp_ptr = inp.as_ptr();
-            let n_ff_local = n_ff;
-            let n_embd_local = n_embd;
-            pool.compute(move |ith: usize, nth: usize| {
-                let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_local) };
-                let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_local / 32) };
-                let inp_local = unsafe { std::slice::from_raw_parts(inp_ptr, n_embd_local) };
-                let q8k = if q8k_required {
-                    Some(unsafe { std::slice::from_raw_parts(q8k_ptr, q8k_len) })
-                } else {
-                    None
-                };
-                let gate_out = unsafe {
-                    std::slice::from_raw_parts_mut(ffn_gate_buf_ptr.add(t * n_ff_local), n_ff_local)
-                };
-                layer.ffn_gate.kernel.forward_prepared(
-                    inp_local,
-                    q8,
-                    sc,
-                    if layer.ffn_gate.uses_q8_k() {
-                        q8k
-                    } else {
-                        None
-                    },
-                    gate_out,
-                    n_embd_local,
-                    n_ff_local,
-                    ith,
-                    nth,
-                );
-                let up_out = unsafe {
-                    std::slice::from_raw_parts_mut(ffn_up_buf_ptr.add(t * n_ff_local), n_ff_local)
-                };
-                layer.ffn_up.kernel.forward_prepared(
-                    inp_local,
-                    q8,
-                    sc,
-                    if layer.ffn_up.uses_q8_k() { q8k } else { None },
-                    up_out,
-                    n_embd_local,
-                    n_ff_local,
-                    ith,
-                    nth,
-                );
-            });
-            // copy_from_slice skipped: kernel wrote directly into
-            // ffn_gate_buf[t*n_ff..(t+1)*n_ff] / ffn_up_buf[t*n_ff..(t+1)*n_ff].
-        }
+        let need_q8 =
+            layer.ffn_gate.needs_q8_0_activation() || layer.ffn_up.needs_q8_0_activation();
+        scratch
+            .prepared
+            .prepare(hidden, n_tokens, n_embd, need_q8, q8k_required)
+            .expect("validated Qwen3.5 FFN input shape");
+        scratch
+            .prepared
+            .matmul_group(
+                hidden,
+                [
+                    (
+                        &layer.ffn_gate,
+                        &mut scratch.ffn_gate_buf[..n_tokens * n_ff],
+                    ),
+                    (&layer.ffn_up, &mut scratch.ffn_up_buf[..n_tokens * n_ff]),
+                ],
+                pool,
+            )
+            .expect("validated Qwen3.5 FFN input shape");
 
         silu_mul_approx_inplace(
             &scratch.ffn_gate_buf[..n_tokens * n_ff],
             &mut scratch.ffn_up_buf[..n_tokens * n_ff],
         );
 
-        for t in 0..n_tokens {
-            let down_inp = &scratch.ffn_up_buf[t * n_ff..][..n_ff];
-            layer.ffn_down.quantize_and_matmul_with_scratch(
-                down_inp,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
+        let down_input = &scratch.ffn_up_buf[..n_tokens * n_ff];
+        scratch
+            .prepared
+            .prepare(
+                down_input,
+                n_tokens,
+                n_ff,
+                layer.ffn_down.needs_q8_0_activation(),
+                layer.ffn_down.uses_q8_k(),
+            )
+            .expect("validated Qwen3.5 FFN output shape");
+        scratch
+            .prepared
+            .matmul(
+                &layer.ffn_down,
+                down_input,
+                &mut scratch.buf[..n_tokens * n_embd],
                 pool,
-            );
-            scratch.buf[t * n_embd..t * n_embd + n_embd]
-                .copy_from_slice(&scratch.matmul_out[..n_embd]);
-        }
+            )
+            .expect("validated Qwen3.5 FFN output shape");
     }
 }

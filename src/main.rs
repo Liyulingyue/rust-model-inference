@@ -9,6 +9,8 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)]";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -65,6 +67,10 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{USAGE}");
+        return;
+    }
     let options = app::parse_cli_options(&args).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
@@ -73,6 +79,12 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    let prefill_batch_size = options
+        .effective_prefill_batch_size()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        });
     let dreamx_options = app::dreamx_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
@@ -207,7 +219,7 @@ fn main() {
         app::run_or_exit(validate_audio_route(route, image.is_some()));
         app::run_or_exit(validate_audio_temperature(route, options.temperature));
         if route == AudioRoute::Asr {
-            app::run_or_exit(app::run_asr_cli(&options));
+            app::run_or_exit(app::run_asr_cli(&options, prefill_batch_size));
             return;
         }
     }
@@ -224,6 +236,7 @@ fn main() {
             max_tokens,
             options.temperature.unwrap_or(0.0),
             n_threads,
+            prefill_batch_size,
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
         app::run_or_exit(app::run_multimodal_with_video(
@@ -237,6 +250,7 @@ fn main() {
             max_tokens,
             temperature,
             options.threads,
+            prefill_batch_size,
         ));
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
@@ -251,6 +265,7 @@ fn main() {
                 max_tokens,
                 temperature,
                 options.threads,
+                prefill_batch_size,
             ));
         } else if options.embedding {
             app::run_embedding(
@@ -276,6 +291,7 @@ fn main() {
                 temperature,
                 options.threads,
                 options.thinking,
+                prefill_batch_size,
             ));
         } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
             app::run_or_exit(app::run_inference(
@@ -288,6 +304,7 @@ fn main() {
                 options.bench,
                 options.profile,
                 options.kv_format,
+                prefill_batch_size,
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -300,6 +317,7 @@ fn main() {
                 options.bench,
                 options.profile,
                 options.kv_format,
+                prefill_batch_size,
             ));
         }
     } else {
@@ -311,11 +329,60 @@ fn main() {
             options.kv_format,
             true,
         ));
+        // Qwen3.5 (qwen35) ships its own dense transformer; the generic
+        // qwen3 text dispatch would fail to load it because the
+        // per-layer tensor names differ (`blk.{i}.attn_norm` only, no
+        // `ffn_norm`).  Mirror `run_interactive` so the chat template,
+        // tokenizer and prompt token ids line up with the rest of the
+        // qwen35 family; the qwen35 multimodal stack handles the
+        // image-less case (it just skips the vision stage).
+        if arch == "qwen35" {
+            use std::io::{self, BufRead, Write};
+            println!("=== RustModelInference Interactive Mode (qwen35) ===");
+            println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
+            loop {
+                print!("> ");
+                if let Err(error) = io::stdout().flush() {
+                    app::run_or_exit(Err(format!("Failed to flush prompt: {error}")));
+                    return;
+                }
+                let mut line = String::new();
+                let read_result = io::stdin().read_line(&mut line);
+                match read_result {
+                    Err(error) => {
+                        app::run_or_exit(Err(format!("Failed to read prompt: {error}")));
+                        return;
+                    }
+                    Ok(0) => break,
+                    Ok(_) => {}
+                }
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                app::run_or_exit(app::run_multimodal_with_video(
+                    Arc::clone(&source),
+                    model_path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    line,
+                    max_tokens,
+                    temperature,
+                    options.threads,
+                    prefill_batch_size,
+                ));
+                println!();
+            }
+            return;
+        }
         app::run_or_exit(app::run_interactive(
             source.clone(),
             max_tokens,
             temperature,
             options.threads,
+            prefill_batch_size,
         ));
     }
 }

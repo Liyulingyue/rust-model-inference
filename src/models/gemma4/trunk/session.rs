@@ -1,6 +1,7 @@
-use super::config::HEADS;
+use super::config::{CONTEXT, HEADS};
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
+use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
 use crate::core::scratchpad::KvFormat;
 
 pub struct Gemma4Session<'model> {
@@ -8,6 +9,127 @@ pub struct Gemma4Session<'model> {
     pub(super) kv: Vec<KvLayer>,
     pub(super) scratch: Gemma4Scratch,
     pub(super) seq_len: usize,
+    pub(super) prefill_batch_size: usize,
+    pub(super) prefill_linear: Gemma4PrefillLinear,
+}
+
+#[derive(Default)]
+pub(super) struct Gemma4PrefillLinear {
+    #[cfg(feature = "vulkan")]
+    pub(super) runtime: Option<crate::vulkan::ops::BatchedLinearRuntime>,
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(super) dispatcher: Option<std::sync::Arc<std::sync::Mutex<super::tests::LinearDispatcher>>>,
+}
+
+impl Gemma4PrefillLinear {
+    fn new(_model: &Gemma4Model, _rows: usize) -> Self {
+        #[cfg(feature = "vulkan")]
+        {
+            use crate::vulkan::{ops::BatchedLinearRuntime, VulkanError};
+            if !crate::ops::gpu_requested()
+                || crate::core::thread_pool::gpu_matmul_disabled()
+                || crate::vulkan::gpu_broken()
+            {
+                return Self::default();
+            }
+            let Some(context) = crate::ops::get_vulkan_context() else {
+                crate::vulkan::mark_gpu_broken("Gemma4 prefill Vulkan initialization failed");
+                return Self::default();
+            };
+            let result = Self::limits(_model).and_then(|(n_in, n_out, descriptors)| {
+                BatchedLinearRuntime::new(context, _rows.min(CONTEXT), n_in, n_out, descriptors)
+            });
+            return match result {
+                Ok(runtime) => Self {
+                    runtime: Some(runtime),
+                    ..Self::default()
+                },
+                Err(VulkanError::UnsupportedShape(_)) => Self::default(),
+                Err(error) => {
+                    crate::vulkan::mark_gpu_broken(&error.to_string());
+                    Self::default()
+                }
+            };
+        }
+        #[cfg(not(feature = "vulkan"))]
+        Self::default()
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub(super) fn limits(
+        model: &Gemma4Model,
+    ) -> Result<(usize, usize, usize), crate::vulkan::VulkanError> {
+        // Each visited projection has a distinct tensor label. Shared-KV layers
+        // never project K/V; embeddings and the tied vocabulary output stay CPU.
+        std::iter::once(&model.per_layer_model_proj)
+            .chain(model.layers.iter().enumerate().flat_map(|(index, layer)| {
+                [
+                    Some(&layer.attn_q),
+                    Some(&layer.attn_output),
+                    Some(&layer.ffn_gate),
+                    Some(&layer.ffn_up),
+                    Some(&layer.ffn_down),
+                    Some(&layer.inp_gate),
+                    Some(&layer.proj),
+                    (index < model.config.base_kv_layers()).then_some(&layer.attn_k),
+                    (index < model.config.base_kv_layers()).then_some(&layer.attn_v),
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .try_fold((0, 0, 1usize), |(n_in, n_out, descriptors), weight| {
+                Ok((
+                    n_in.max(weight.n_in),
+                    n_out.max(weight.n_out),
+                    descriptors
+                        .checked_add(1)
+                        .ok_or(crate::vulkan::VulkanError::OutOfMemory)?,
+                ))
+            })
+    }
+
+    pub(super) fn active(&self) -> bool {
+        #[cfg(feature = "vulkan")]
+        {
+            if crate::core::thread_pool::gpu_matmul_disabled() || crate::vulkan::gpu_broken() {
+                return false;
+            }
+            #[cfg(test)]
+            if self.dispatcher.is_some() {
+                return true;
+            }
+            return self.runtime.is_some();
+        }
+        #[cfg(not(feature = "vulkan"))]
+        false
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub(super) fn finish_dispatch(
+        &mut self,
+        result: Result<(), crate::vulkan::VulkanError>,
+    ) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+            Err(error) => {
+                #[cfg(test)]
+                let injected = if let Some(dispatcher) = self.dispatcher.take() {
+                    dispatcher.lock().unwrap().failures += 1;
+                    true
+                } else {
+                    false
+                };
+                #[cfg(not(test))]
+                let injected = false;
+                if !injected {
+                    crate::vulkan::mark_gpu_broken(&error.to_string());
+                }
+                self.runtime = None;
+                false
+            }
+        }
+    }
 }
 
 pub(super) struct KvLayer {
@@ -24,7 +146,16 @@ pub(super) struct KvLayer {
 
 impl<'model> Gemma4Session<'model> {
     pub fn new(model: &'model Gemma4Model, kv_format: KvFormat) -> Result<Self, String> {
+        Self::new_with_prefill_batch_size(model, kv_format, DEFAULT_PREFILL_BATCH_SIZE)
+    }
+
+    pub fn new_with_prefill_batch_size(
+        model: &'model Gemma4Model,
+        kv_format: KvFormat,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
         require_f32_kv(kv_format)?;
+        let prefill_batch_size = checked_prefill_batch_size(Some(prefill_batch_size))?;
         let cfg = &model.config;
         let base = cfg.base_kv_layers();
         let kv = (0..base)
@@ -42,13 +173,28 @@ impl<'model> Gemma4Session<'model> {
         Ok(Self {
             model,
             kv,
-            scratch: Gemma4Scratch::new(cfg),
+            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(CONTEXT)),
             seq_len: 0,
+            prefill_batch_size,
+            prefill_linear: Gemma4PrefillLinear::new(model, prefill_batch_size),
         })
     }
 
     pub fn len(&self) -> usize {
         self.seq_len
+    }
+
+    /// Reuse the scratch and projection runtime for an unrelated prompt.
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        for layer in &mut self.kv {
+            layer.keys.clear();
+            layer.values.clear();
+        }
+    }
+
+    pub fn scratch_bytes(&self) -> usize {
+        self.scratch.bytes()
     }
 }
 

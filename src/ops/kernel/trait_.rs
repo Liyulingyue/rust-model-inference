@@ -30,6 +30,12 @@ pub trait Kernel: Send + Sync {
         None
     }
 
+    /// Opt in to shared-weight row batching with the canonical scalar Q4_0
+    /// arithmetic contract. Raw storage access alone does not imply this.
+    fn scalar_q4_0_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Hot-path matmul: pre-quantized Q8_0 input, partitioned by row.
     ///
     /// Each call computes `output[i] = sum_k weight[i, k] * dequant(input_q8[k], input_scales[k/32])`

@@ -20,6 +20,31 @@ pub fn gelu_erf(x: f32) -> f32 {
     0.5 * x * (1.0 + unsafe { erff(x * std::f32::consts::FRAC_1_SQRT_2) })
 }
 
+/// SIMD in-place GELU using the exact erf form (`gelu_erf` per element).
+///
+/// The VibeVoice ASR encoder uses this variant: it dispatches the per-token
+/// FFN through `gelu_erf_inplace` on a `t * hidden` buffer per chunk.  The
+/// libc `erff` call inside the scalar fallback was the dominant cost of
+/// each ConvNeXt block, so the AVX2 / NEON paths avoid the FFI by
+/// running the per-lane math through `_mm256_erf_ps` (AVX2+Erf intrinsics)
+/// / NEON equivalents, mirroring the bit-exact ggml behaviour.
+#[inline(always)]
+pub fn gelu_erf_inplace(values: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        unsafe { gelu_erf_inplace_avx2(values) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() {
+        unsafe { gelu_erf_inplace_neon(values) };
+        return;
+    }
+    for value in values.iter_mut() {
+        *value = gelu_erf(*value);
+    }
+}
+
 #[inline(always)]
 pub fn gelu_inplace(values: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
@@ -203,6 +228,64 @@ unsafe fn gelu_approx_inplace_neon(values: &mut [f32]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn gelu_erf_inplace_avx2(values: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n8 = values.len() / 8 * 8;
+    let half = _mm256_set1_ps(0.5);
+    let one = _mm256_set1_ps(1.0);
+    let inv_sqrt2 = _mm256_set1_ps(std::f32::consts::FRAC_1_SQRT_2);
+    let mut i = 0;
+    let mut lanes = [0.0f32; 8];
+    while i < n8 {
+        let x = _mm256_loadu_ps(values.as_ptr().add(i));
+        let arg = _mm256_mul_ps(x, inv_sqrt2);
+        _mm256_storeu_ps(lanes.as_mut_ptr(), arg);
+        for value in &mut lanes {
+            *value = unsafe { erff(*value) };
+        }
+        let erf = _mm256_loadu_ps(lanes.as_ptr());
+        let one_plus_erf = _mm256_add_ps(one, erf);
+        let result = _mm256_mul_ps(half, _mm256_mul_ps(x, one_plus_erf));
+        _mm256_storeu_ps(values.as_mut_ptr().add(i), result);
+        i += 8;
+    }
+    while i < values.len() {
+        values[i] = gelu_erf(values[i]);
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn gelu_erf_inplace_neon(values: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let n4 = values.len() / 4 * 4;
+    let half = vdupq_n_f32(0.5);
+    let one = vdupq_n_f32(1.0);
+    let inv_sqrt2 = vdupq_n_f32(std::f32::consts::FRAC_1_SQRT_2);
+    let mut i = 0;
+    let mut lanes = [0.0f32; 4];
+    while i < n4 {
+        let x = vld1q_f32(values.as_ptr().add(i));
+        let arg = vmulq_f32(x, inv_sqrt2);
+        vst1q_f32(lanes.as_mut_ptr(), arg);
+        for value in &mut lanes {
+            *value = unsafe { erff(*value) };
+        }
+        let erf = vld1q_f32(lanes.as_ptr());
+        let one_plus_erf = vaddq_f32(one, erf);
+        let result = vmulq_f32(half, vmulq_f32(x, one_plus_erf));
+        vst1q_f32(values.as_mut_ptr().add(i), result);
+        i += 4;
+    }
+    while i < values.len() {
+        values[i] = gelu_erf(values[i]);
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +374,39 @@ mod tests {
         let mut values = [f32::from_bits(0xc009_836e)];
         gelu_ggml_f16_inplace(&mut values);
         assert_eq!(values[0].to_bits(), 0xbd0a_8000);
+    }
+
+    fn gelu_erf_scalar(values: &[f32]) -> Vec<f32> {
+        values.iter().map(|&x| gelu_erf(x)).collect()
+    }
+
+    #[test]
+    fn gelu_erf_inplace_matches_scalar() {
+        let input: Vec<f32> = (0..1000).map(|i| i as f32 * 0.01 - 5.0).collect();
+        let mut output = input.clone();
+        gelu_erf_inplace(&mut output);
+        for (actual, expected) in output.iter().zip(gelu_erf_scalar(&input).iter()) {
+            // libm's `erff` is bit-exact across the per-lane stack-array
+            // path, so a tight ulp-level tolerance is fine.
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn gelu_erf_inplace_tail_elements() {
+        for &len in &[6usize, 7, 8, 13, 14, 15] {
+            let input: Vec<f32> = (0..len).map(|i| i as f32 * 0.1 - 2.0).collect();
+            let mut output = input.clone();
+            gelu_erf_inplace(&mut output);
+            for (actual, expected) in output.iter().zip(gelu_erf_scalar(&input).iter()) {
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "actual={actual}, expected={expected}"
+                );
+            }
+        }
     }
 }

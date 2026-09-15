@@ -10,18 +10,10 @@
 //! the stride-alignment `extra` right padding.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
-use crate::ops::{rms_norm, rms_norm_inplace};
-
-unsafe extern "C" {
-    fn erff(value: f32) -> f32;
-}
-
-/// transformers `ACT2FN["gelu"]` — the exact erf form.
-fn gelu_erf_inplace(values: &mut [f32]) {
-    for value in values.iter_mut() {
-        *value = 0.5 * *value * (1.0 + unsafe { erff(*value * std::f32::consts::FRAC_1_SQRT_2) });
-    }
-}
+use crate::ops::{
+    gelu_erf_inplace, rms_norm, rms_norm_inplace, vec_mad_per_channel_f32,
+    vec_mad_per_channel_f32_broadcast,
+};
 
 // --------------------------------------------------------------------------- //
 // GGUF tensor loading helpers (BF16 or F32 storage → f32)
@@ -304,11 +296,15 @@ impl EncoderBlock {
             self.mixer.kernel,
             &mut scratch.conv_out,
         );
-        for (token, out_row) in scratch.conv_out[..t * dim].chunks_exact(dim).enumerate() {
-            for (channel, &value) in out_row.iter().enumerate() {
-                x[token * dim + channel] += value * self.gamma[channel];
-            }
-        }
+        // Per-channel scale-add fused into a single SIMD FMA loop:
+        // for each (token, channel) in 0..t × 0..dim do
+        //     x[token*dim + c] += conv_out[token*dim + c] * gamma[c].
+        // gamma is broadcast across tokens; the helper handles the wrap.
+        vec_mad_per_channel_f32_broadcast(
+            &mut x[..t * dim],
+            &scratch.conv_out[..t * dim],
+            &self.gamma[..dim],
+        );
 
         // FFN branch: RMSNorm → fc1 → gelu(erf) → fc2 → scale
         for (token, normed_row) in scratch.normed[..t * dim].chunks_exact_mut(dim).enumerate() {
@@ -328,11 +324,11 @@ impl EncoderBlock {
         gelu_erf_inplace(&mut scratch.hidden[..t * self.ffn_in.n_out]);
         self.ffn_out
             .forward_rows(&scratch.hidden, t, &self.ffn_out_bias, &mut scratch.buffer);
-        for (token, out_row) in scratch.buffer[..t * dim].chunks_exact(dim).enumerate() {
-            for (channel, &value) in out_row.iter().enumerate() {
-                x[token * dim + channel] += value * self.ffn_gamma[channel];
-            }
-        }
+        vec_mad_per_channel_f32_broadcast(
+            &mut x[..t * dim],
+            &scratch.buffer[..t * dim],
+            &self.ffn_gamma[..dim],
+        );
     }
 }
 

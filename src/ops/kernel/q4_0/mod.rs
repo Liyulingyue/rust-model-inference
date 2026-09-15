@@ -30,6 +30,11 @@ impl<'a> Q4_0Kernel<'a> {
 }
 
 impl<'a> Kernel for Q4_0Kernel<'a> {
+    #[cfg(target_arch = "aarch64")]
+    fn scalar_q4_0_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     fn weight_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }

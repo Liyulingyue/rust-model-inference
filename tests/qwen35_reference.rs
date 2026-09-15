@@ -93,11 +93,22 @@ fn build_oracle(llama: &Path, artifacts: &Path) -> PathBuf {
         "{} is not an Oracle binary",
         oracle.display()
     );
+    use sha2::{Digest, Sha256};
+    eprintln!(
+        "Qwen3.5 Oracle pin={LLAMA_PIN} sha256={:x}",
+        Sha256::digest(std::fs::read(&oracle).unwrap())
+    );
     oracle
 }
 
-fn run_rust(model: &Path, prompt: &str, max_tokens: usize, artifacts: &Path) -> PathBuf {
-    let trace = artifacts.join("rust.jsonl");
+fn run_rust(
+    model: &Path,
+    prompt: &str,
+    max_tokens: usize,
+    artifacts: &Path,
+    batch: usize,
+) -> PathBuf {
+    let trace = artifacts.join(format!("rust-batch-{batch}.jsonl"));
     let source = rust_model_inference::GGUFLoader::from_file(model).unwrap();
     let config = rust_model_inference::models::qwen35::Qwen35Config::from_source(&source).unwrap();
     let filter = TRACE_FILTER.replace("63", &(config.n_layer_impl() - 1).to_string());
@@ -116,6 +127,8 @@ fn run_rust(model: &Path, prompt: &str, max_tokens: usize, artifacts: &Path) -> 
                 "1",
                 "--kv-cache",
                 "f32",
+                "--prefill-batch-size",
+                &batch.to_string(),
             ])
             .env("RMI_PARITY_TRACE", &trace)
             .env("RMI_PARITY_FILTER", filter),
@@ -236,6 +249,38 @@ fn close(got: f32, expected: f32, abs_tol: f32, rel_tol: f32) -> bool {
         && (got - expected).abs() <= abs_tol + rel_tol * expected.abs()
 }
 
+fn precision_bounds(name: &str, last_layer: Option<usize>) -> Option<(f32, f32)> {
+    let contract_name = last_layer
+        .and_then(|layer| name.strip_suffix(&format!("-{layer}")))
+        .map(|prefix| format!("{prefix}-63"));
+    LOSSY_BOUNDS
+        .iter()
+        .find(|(checkpoint, _, _)| *checkpoint == name)
+        .or_else(|| {
+            LOSSY_BOUNDS
+                .iter()
+                .find(|(checkpoint, _, _)| Some(*checkpoint) == contract_name.as_deref())
+        })
+        .map(|(_, abs_tol, rel_tol)| (*abs_tol, *rel_tol))
+}
+
+#[test]
+fn precision_contract_follows_only_the_actual_final_layer() {
+    assert_eq!(
+        precision_bounds("attn_norm-23", Some(23)),
+        Some((1.25, 1e-4))
+    );
+    assert_eq!(precision_bounds("attn_norm-22", Some(23)), None);
+    assert_eq!(
+        precision_bounds("attn_norm-3", Some(23)),
+        Some((2.5e-2, 1e-4))
+    );
+    assert_eq!(
+        precision_bounds("attn_norm-63", Some(63)),
+        Some((1.25, 1e-4))
+    );
+}
+
 fn compare_qwen35_traces(rust: &Path, llama: &Path, bitwise: bool) -> Result<(), String> {
     let rust = records(rust)?;
     let llama = records(llama)?;
@@ -246,6 +291,11 @@ fn compare_qwen35_traces(rust: &Path, llama: &Path, bitwise: bool) -> Result<(),
             llama.len()
         ));
     }
+    let last_layer = rust
+        .iter()
+        .find(|record| record["name"] == "qwen35.layer_is_recurrent")
+        .and_then(|record| record["bool_values"].as_array())
+        .and_then(|layers| layers.len().checked_sub(1));
     for (record_index, (got, expected)) in rust.iter().zip(&llama).enumerate() {
         for field in ["name", "layer", "step", "occurrence"] {
             if got.get(field) != expected.get(field) {
@@ -285,10 +335,7 @@ fn compare_qwen35_traces(rust: &Path, llama: &Path, bitwise: bool) -> Result<(),
                 expected_words.len()
             ));
         }
-        let bounds = LOSSY_BOUNDS
-            .iter()
-            .find(|(checkpoint, _, _)| *checkpoint == name)
-            .map(|(_, abs_tol, rel_tol)| (*abs_tol, *rel_tol));
+        let bounds = precision_bounds(name, last_layer);
         let mut max_abs = 0.0f32;
         let mut max_rel = 0.0f32;
         let mut first_mismatch = None;
@@ -366,8 +413,15 @@ fn qwen38_matches_pinned_llama_cpp_at_lossless_checkpoints() {
     assert_eq!(git_head(&llama), LLAMA_PIN);
     let artifacts = unique_temp_dir("rmi-qwen38-parity");
     let oracle = build_oracle(&llama, &artifacts);
-    let rust_trace = run_rust(&model, "你好", 1, &artifacts);
-    let llama_trace = run_oracle(&oracle, &model, "你好", 1, &artifacts);
+    let scalar_trace = run_rust(&model, "你好", 4, &artifacts, 1);
+    let rust_trace = run_rust(&model, "你好", 4, &artifacts, 64);
+    compare_qwen35_traces(&scalar_trace, &rust_trace, true).unwrap_or_else(|error| {
+        panic!(
+            "Rust batch=1/64: {error}; artifacts {}",
+            artifacts.display()
+        )
+    });
+    let llama_trace = run_oracle(&oracle, &model, "你好", 4, &artifacts);
     if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, false) {
         panic!("{error}\nartifacts retained in {}", artifacts.display());
     }
@@ -440,7 +494,7 @@ fn neohorse_matches_pinned_llama_cpp_bitwise() {
     let oracle = std::env::var_os("RMI_QWEN35_ORACLE")
         .map(PathBuf::from)
         .unwrap_or_else(|| build_oracle(&llama, &artifacts));
-    let rust_trace = run_rust(&model, "你好", 4, &artifacts);
+    let rust_trace = run_rust(&model, "你好", 4, &artifacts, 64);
     let llama_trace = run_oracle(&oracle, &model, "你好", 4, &artifacts);
     if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, true) {
         panic!("{error}\nartifacts retained in {}", artifacts.display());

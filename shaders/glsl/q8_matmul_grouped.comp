@@ -11,14 +11,10 @@ layout(push_constant) uniform PC {
     uint scales_word;
     uint n_in;
     uint blocks_per_row;
-    uint output0_word;
-    uint rows0;
-    uint output1_word;
-    uint rows1;
-    uint output2_word;
-    uint rows2;
-    uint group_count;
-    uint unused;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
 } pc;
 
 shared uint input_words[4096];
@@ -51,13 +47,14 @@ uint weight_word(uint slot, uint index) {
 
 void main() {
     uint lane = gl_LocalInvocationID.x;
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
     uint input_word_count = pc.blocks_per_row * 8u;
     for (uint index = lane; index < input_word_count; index += 64u) {
-        input_words[index] = arena.data[pc.q8_word + index];
+        input_words[index] = arena.data[pc.q8_word + token_row * pc.q8_stride + index];
     }
     barrier();
 
-    uint slot = gl_WorkGroupID.z;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
     if (slot >= pc.group_count) return;
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
@@ -86,7 +83,7 @@ void main() {
                 + i8_of(packed, 1u) * i8_of(input_value, 1u)
                 + i8_of(packed, 2u) * i8_of(input_value, 2u)
                 + i8_of(packed, 3u) * i8_of(input_value, 3u);
-            float input_scale = uintBitsToFloat(arena.data[pc.scales_word + block]);
+            float input_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             float scale = weight_scale * input_scale;
             sums[group] = fma(float(dot), scale, sums[group]);
         }
@@ -98,5 +95,5 @@ void main() {
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);
-    arena.data[output_word + row] = floatBitsToUint(sum);
+    arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum);
 }

@@ -20,6 +20,7 @@ pub struct Gemma4Request<'a> {
     pub max_tokens: usize,
     pub threads: usize,
     pub kv_format: KvFormat,
+    pub prefill_batch_size: usize,
 }
 
 pub fn build_turn_rows(
@@ -89,9 +90,20 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
     let eos = tokenizer
         .eos_id()
         .ok_or_else(|| "Gemma4 tokenizer is missing an EOS ID".to_string())?;
-    let mut session = Gemma4Session::new(&model, request.kv_format)?;
+    let mut session = Gemma4Session::new_with_prefill_batch_size(
+        &model,
+        request.kv_format,
+        request.prefill_batch_size,
+    )?;
     let t_total = std::time::Instant::now();
     let mut logits = session.forward_rows(&rows)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "gemma4.prompt_logits",
+        None,
+        &[logits.len()],
+        &logits,
+    ));
     let prefill_time = t_total.elapsed();
     let prompt_tokens = rows.len();
     let mut output = Vec::with_capacity(request.max_tokens);
@@ -104,6 +116,11 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         logits = session.forward_rows(&[Gemma4InputRow::Token(id)])?;
     }
     let total_time = t_total.elapsed();
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "gemma4.generated_ids",
+        &output,
+    ));
     std::io::stdout()
         .write_all(&tokenizer.decode_bytes(&output, false))
         .map_err(|error| format!("Failed to print Gemma4 output: {error}"))?;
@@ -467,6 +484,7 @@ mod tests {
             max_tokens: 1,
             threads: 1,
             kv_format: KvFormat::F32,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         })
         .unwrap_err();
 
@@ -484,6 +502,7 @@ mod tests {
             max_tokens: 1,
             threads: 1,
             kv_format: KvFormat::F32,
+            prefill_batch_size: crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         })
         .unwrap_err();
 

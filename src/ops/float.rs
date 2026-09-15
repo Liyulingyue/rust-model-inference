@@ -274,6 +274,75 @@ pub fn f32_to_bf16(v: f32) -> u16 {
     (bits.wrapping_add(rounding) >> 16) as u16
 }
 
+/// Round every f32 in `values` through `f32 -> bf16 -> f32` in place.
+/// Used by Breeze to mirror the upstream BF16-quantised activation path
+/// while staying on the AVX2/NEON slice-vector paths.
+#[inline]
+pub fn bf16_round_inplace(values: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        unsafe { bf16_round_inplace_avx2(values) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if has_neon() {
+        unsafe { bf16_round_inplace_neon(values) };
+        return;
+    }
+    for v in values.iter_mut() {
+        *v = bf16_to_f32(f32_to_bf16(*v));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bf16_round_inplace_avx2(values: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let n8 = values.len() / 8 * 8;
+    let mut i = 0;
+    while i < n8 {
+        let x = _mm256_loadu_ps(values.as_ptr().add(i));
+        let bits = _mm256_castps_si256(x);
+        // round-to-nearest-even: add (0x7fff + ((bits >> 16) & 1))
+        let lsb = _mm256_srli_epi32(_mm256_and_si256(bits, _mm256_set1_epi32(0x00010000)), 16);
+        let rounding = _mm256_add_epi32(_mm256_set1_epi32(0x7fff), lsb);
+        let rounded = _mm256_srli_epi32(_mm256_add_epi32(bits, rounding), 16);
+        // Reinterpret as f32 with the high 16 bits preserved.
+        let bf_bits = _mm256_slli_epi32(rounded, 16);
+        let result = _mm256_castsi256_ps(bf_bits);
+        _mm256_storeu_ps(values.as_mut_ptr().add(i), result);
+        i += 8;
+    }
+    while i < values.len() {
+        values[i] = bf16_to_f32(f32_to_bf16(values[i]));
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn bf16_round_inplace_neon(values: &mut [f32]) {
+    use std::arch::aarch64::*;
+
+    let mut i = 0;
+    while i + 4 <= values.len() {
+        let x = vld1q_f32(values.as_ptr().add(i));
+        let bits = vreinterpretq_u32_f32(x);
+        let lsb = vshrq_n_u32(vandq_u32(bits, vdupq_n_u32(0x00010000)), 16);
+        let rounding = vaddq_u32(vdupq_n_u32(0x7fff), lsb);
+        let rounded = vshrq_n_u32(vaddq_u32(bits, rounding), 16);
+        let bf_bits = vshlq_n_u32(rounded, 16);
+        let result = vreinterpretq_f32_u32(bf_bits);
+        vst1q_f32(values.as_mut_ptr().add(i), result);
+        i += 4;
+    }
+    while i < values.len() {
+        values[i] = bf16_to_f32(f32_to_bf16(values[i]));
+        i += 1;
+    }
+}
+
 pub fn f32_slice_to_f16(src: &[f32], dst: &mut [u16]) {
     debug_assert_eq!(src.len(), dst.len());
     #[cfg(target_arch = "x86_64")]
@@ -413,6 +482,36 @@ mod tests {
 
         for (actual, bits) in dst.into_iter().zip(src) {
             assert_eq!(actual.to_bits(), f16_to_f32(bits).to_bits());
+        }
+    }
+
+    #[test]
+    fn bf16_round_inplace_matches_scalar() {
+        let values: Vec<f32> = (0..128).map(|i| (i as f32 * 0.137).sin() * 4.0).collect();
+        let mut simd = values.clone();
+        let mut scalar = values.clone();
+        bf16_round_inplace(&mut simd);
+        for v in scalar.iter_mut() {
+            *v = bf16_to_f32(f32_to_bf16(*v));
+        }
+        for (i, (a, b)) in simd.iter().zip(scalar.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "lane {i}: {a} != {b}");
+        }
+    }
+
+    #[test]
+    fn bf16_round_inplace_handles_short_and_unaligned_lengths() {
+        for n in 0..20 {
+            let values: Vec<f32> = (0..n).map(|i| (i as f32 * 0.137).sin() * 4.0).collect();
+            let mut simd = values.clone();
+            let mut scalar = values.clone();
+            bf16_round_inplace(&mut simd);
+            for v in scalar.iter_mut() {
+                *v = bf16_to_f32(f32_to_bf16(*v));
+            }
+            for (i, (a, b)) in simd.iter().zip(scalar.iter()).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "n={n} lane {i}");
+            }
         }
     }
 }

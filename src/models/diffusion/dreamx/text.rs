@@ -327,7 +327,11 @@ impl DreamXTextEncoder {
                 .map(|index| (((index + seed) * 13 % 17) as f32 - 8.0) / 32.0)
                 .collect();
             let mut weight = crate::ops::kernel::Weight::from_quantized(
-                crate::ops::kernel::QuantizedTensor::F32(values),
+                crate::ops::kernel::QuantizedTensor::F32 {
+                    data: values,
+                    n_in: 0,
+                    n_out: 0,
+                },
             );
             weight.n_in = n_in;
             weight.n_out = n_out;

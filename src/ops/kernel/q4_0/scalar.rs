@@ -52,3 +52,83 @@ pub fn matmul_q4_0_scalar_range(
         output[out_idx] = sum;
     }
 }
+
+/// Reuse each Q4 block across four activation rows. Each output retains the
+/// single-row integer dot and sequential F32 block accumulation contract.
+///
+/// # Safety
+/// `output` points to `rows * n_out` writable floats. Concurrent calls must
+/// use distinct `ith < nth` values with the same positive `nth`, rows and shape.
+/// No other references may access the worker's output columns during this call.
+pub(crate) unsafe fn matmul_q4_0_batched_scalar_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: *mut f32,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+    ith: usize,
+    nth: usize,
+) {
+    let blocks = n_in / 32;
+    let scale_stride = n_in.div_ceil(32);
+    let row_stride = blocks * 18;
+    let per_thread = n_out.div_ceil(nth);
+    let start = ith * per_thread;
+    let end = (start + per_thread).min(n_out);
+    if start >= end {
+        return;
+    }
+    let full_rows = rows / 4 * 4;
+    for out in start..end {
+        for row_base in (0..full_rows).step_by(4) {
+            let mut sums = [0.0f32; 4];
+            for block in 0..blocks {
+                let offset = out * row_stride + block * 18;
+                let d = crate::ops::f16_to_f32(u16::from_le_bytes([
+                    weight[offset],
+                    weight[offset + 1],
+                ]));
+                let mut dots = [0i32; 4];
+                for lane in 0..16 {
+                    let packed = weight[offset + 2 + lane];
+                    let x0 = (packed & 15) as i32 - 8;
+                    let x1 = (packed >> 4) as i32 - 8;
+                    for row in 0..4 {
+                        let y = (row_base + row) * n_in + block * 32 + lane;
+                        dots[row] +=
+                            x0 * input_q8[y] as i8 as i32 + x1 * input_q8[y + 16] as i8 as i32;
+                    }
+                }
+                for row in 0..4 {
+                    sums[row] += dots[row] as f32
+                        * d
+                        * input_scales[(row_base + row) * scale_stride + block];
+                }
+            }
+            for row in 0..4 {
+                // SAFETY: this worker exclusively owns columns start..end.
+                unsafe {
+                    output.add((row_base + row) * n_out + out).write(sums[row]);
+                }
+            }
+        }
+    }
+    for row in full_rows..rows {
+        // Only this worker's columns become a mutable slice, including when
+        // another worker is processing a different partition of this row.
+        let tail =
+            unsafe { std::slice::from_raw_parts_mut(output.add(row * n_out + start), end - start) };
+        matmul_q4_0_scalar_range(
+            &weight[start * row_stride..end * row_stride],
+            &input_q8[row * n_in..(row + 1) * n_in],
+            &input_scales[row * scale_stride..(row + 1) * scale_stride],
+            tail,
+            n_in,
+            end - start,
+            0,
+            1,
+        );
+    }
+}

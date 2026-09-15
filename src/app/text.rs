@@ -43,6 +43,7 @@ pub fn run_inference(
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     let arch = source
         .metadata("general.architecture")
@@ -58,6 +59,7 @@ pub fn run_inference(
             n_threads_arg,
             profile,
             kv_format,
+            prefill_batch_size,
         )
     } else if arch == "lfm2" {
         let is_lfm25 = source
@@ -140,6 +142,7 @@ pub fn run_inference(
             bench,
             profile,
             kv_format,
+            prefill_batch_size,
         )
     }
 }
@@ -149,6 +152,7 @@ pub fn run_interactive(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -180,6 +184,7 @@ pub fn run_interactive(
             false,
             false,
             KvFormat::F16,
+            prefill_batch_size,
         )?;
         println!();
     }
@@ -193,6 +198,7 @@ pub fn run_shared_inference(
     temperature: f32,
     n_threads_arg: usize,
     thinking: bool,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     crate::models::qwen3::run_shared_inference(
         source,
@@ -201,6 +207,7 @@ pub fn run_shared_inference(
         temperature,
         n_threads_arg,
         thinking,
+        prefill_batch_size,
     )
 }
 
@@ -398,6 +405,7 @@ fn run_qwen3_family_multimodal(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     validate_single_qwen_media(
         image_path.is_some(),
@@ -632,6 +640,7 @@ fn run_qwen3_family_multimodal(
         Qwen3GenerateOptions {
             max_new_tokens: max_tokens,
             temperature,
+            prefill_batch_size,
         },
     )?;
     print!("{}", generation.text);
@@ -713,6 +722,7 @@ pub fn run_multimodal(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     run_multimodal_with_video_ref(
         llm_source,
@@ -725,6 +735,7 @@ pub fn run_multimodal(
         max_tokens,
         temperature,
         n_threads_arg,
+        prefill_batch_size,
         None,
     )
 }
@@ -740,6 +751,7 @@ pub fn run_multimodal_with_video(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -753,6 +765,7 @@ pub fn run_multimodal_with_video(
         max_tokens,
         temperature,
         n_threads_arg,
+        prefill_batch_size,
         Some(owned_source),
     )
 }
@@ -768,6 +781,7 @@ fn run_multimodal_with_video_ref(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
+    prefill_batch_size: usize,
     model_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -788,6 +802,7 @@ fn run_multimodal_with_video_ref(
             max_tokens,
             threads: n_threads_arg,
             kv_format: KvFormat::F32,
+            prefill_batch_size,
         });
     }
     if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")
@@ -804,6 +819,7 @@ fn run_multimodal_with_video_ref(
             max_tokens,
             temperature,
             n_threads_arg,
+            prefill_batch_size,
         );
     }
     if audio_path.is_some() {
@@ -1155,7 +1171,12 @@ fn run_multimodal_with_video_ref(
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
-    let mut session = Qwen35Session::new(&mut llm, max_seq, std::sync::Arc::clone(&pool))?;
+    let mut session = Qwen35Session::new_with_prefill_batch_size(
+        &mut llm,
+        max_seq,
+        prefill_batch_size,
+        std::sync::Arc::clone(&pool),
+    )?;
 
     let mut generated = String::new();
     #[cfg(feature = "parity-trace")]
@@ -1306,11 +1327,18 @@ mod tests {
     use std::path::Path;
 
     fn qwen35_embedding_model() -> Qwen35Model<'static> {
-        let mut tok_embd =
-            Weight::from_quantized(QuantizedTensor::F32(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]));
+        let mut tok_embd = Weight::from_quantized(QuantizedTensor::F32 {
+            data: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            n_in: 0,
+            n_out: 0,
+        });
         tok_embd.n_in = 2;
         tok_embd.n_out = 3;
-        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32(Vec::new()));
+        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32 {
+            data: Vec::new(),
+            n_in: 0,
+            n_out: 0,
+        });
         output_weight.n_in = 2;
         output_weight.n_out = 3;
         Qwen35Model {
@@ -1380,6 +1408,7 @@ mod tests {
             1,
             0.1,
             1,
+            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
         )
         .unwrap_err();
         assert!(error.contains("--temp"), "{error}");

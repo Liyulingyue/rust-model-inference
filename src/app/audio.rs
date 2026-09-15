@@ -9,7 +9,10 @@ use crate::models::qwen3::Qwen3Model;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
+pub fn run_asr_cli(
+    options: &crate::app::cli::CliOptions,
+    prefill_batch_size: usize,
+) -> Result<(), String> {
     let started = Instant::now();
     // VibeVoice ASR ships an arch-qwen2 LLM gguf + a vibevoice_asr mmproj;
     // dispatch on the projector metadata before the qwen3vl path.
@@ -54,7 +57,8 @@ pub fn run_asr_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
             open_bundled_audio_source(&options.model)?.ok_or("raw GGUF ASR requires --mmproj")?
         }
     };
-    let runtime = AsrRuntime::new(decoder, audio_source).map_err(|error| error.to_string())?;
+    let runtime = AsrRuntime::new(decoder, audio_source, prefill_batch_size)
+        .map_err(|error| error.to_string())?;
     let load_runtime_done = started.elapsed();
     let audio = options.audio.as_ref().expect("validated audio option");
     let wav = std::fs::read(audio)
