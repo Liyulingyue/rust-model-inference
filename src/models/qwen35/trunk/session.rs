@@ -26,6 +26,22 @@ use crate::core::thread_pool::ComputePool;
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::{commit_shadow_state_chunk, Qwen35VulkanSession};
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen35DenseKvSnapshot {
+    pub layer: usize,
+    pub tokens: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub key: Vec<f32>,
+    pub value: Vec<f32>,
+}
+
+impl Qwen35DenseKvSnapshot {
+    pub fn shape(&self) -> [usize; 3] {
+        [self.tokens, self.kv_heads, self.head_dim]
+    }
+}
+
 /// Per-request inference state for a `Qwen35Model`.
 ///
 /// Holds:
@@ -50,6 +66,7 @@ pub struct Qwen35Session<'a, 'm> {
     /// consume multiple positions.
     next_position: usize,
     processed_tokens: usize,
+    last_step_tokens: usize,
     #[cfg(feature = "vulkan")]
     gpu: Option<Qwen35VulkanSession>,
     #[cfg(feature = "vulkan")]
@@ -174,6 +191,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
             pool,
             next_position: 0,
             processed_tokens: 0,
+            last_step_tokens: 0,
             #[cfg(feature = "vulkan")]
             gpu,
             #[cfg(feature = "vulkan")]
@@ -203,6 +221,86 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     pub fn scratch_mut(&mut self) -> &mut Qwen35Scratchpad {
         &mut self.scratch
     }
+    pub fn last_hidden(&self, tokens: usize) -> Result<&[f32], String> {
+        if tokens > self.last_step_tokens {
+            return Err(format!(
+                "Qwen3.5 hidden request for {tokens} rows exceeds the last step of {} rows",
+                self.last_step_tokens
+            ));
+        }
+        let len = tokens
+            .checked_mul(self.model.config.n_embd)
+            .ok_or_else(|| "Qwen3.5 hidden length overflow".to_string())?;
+        self.scratch
+            .normed_buf
+            .get(..len)
+            .ok_or_else(|| "Qwen3.5 hidden request exceeds the last step".into())
+    }
+    pub fn dense_kv_snapshots(
+        &self,
+        layers: &[usize],
+        tokens: usize,
+    ) -> Result<Vec<Qwen35DenseKvSnapshot>, String> {
+        if tokens > self.processed_tokens {
+            return Err(format!(
+                "Qwen3.5 KV snapshot requests {tokens} tokens after {} processed",
+                self.processed_tokens
+            ));
+        }
+        let cfg = &self.model.config;
+        let head_dim = cfg.n_embd_head();
+        let kv_heads = cfg.n_head_kv;
+        let kv_width = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| "Qwen3.5 KV width overflow".to_string())?;
+        let layer_stride = self
+            .capacity
+            .checked_mul(kv_width)
+            .ok_or_else(|| "Qwen3.5 KV layer stride overflow".to_string())?;
+        let KvCache::F32(cache) = &self.kv_cache else {
+            return Err("Qwen3.5 dense KV snapshots require F32 cache".into());
+        };
+        let mut seen = std::collections::HashSet::with_capacity(layers.len());
+        let mut snapshots = Vec::with_capacity(layers.len());
+        for &layer in layers {
+            if layer >= cfg.n_layer_impl() {
+                return Err(format!("Qwen3.5 KV snapshot layer {layer} is out of range"));
+            }
+            if cfg.is_recurrent[layer] {
+                return Err(format!("Qwen3.5 KV snapshot layer {layer} is recurrent"));
+            }
+            if !seen.insert(layer) {
+                return Err(format!("Duplicate Qwen3.5 KV snapshot layer {layer}"));
+            }
+            let values = tokens
+                .checked_mul(kv_width)
+                .ok_or_else(|| "Qwen3.5 KV snapshot length overflow".to_string())?;
+            let base = layer
+                .checked_mul(layer_stride)
+                .ok_or_else(|| "Qwen3.5 KV snapshot offset overflow".to_string())?;
+            let mut key = vec![0.0; values];
+            let mut value = vec![0.0; values];
+            key.copy_from_slice(&cache.k[base..base + values]);
+            for token in 0..tokens {
+                for head in 0..kv_heads {
+                    for dim in 0..head_dim {
+                        let dst = (token * kv_heads + head) * head_dim + dim;
+                        let src = base + (head * head_dim + dim) * self.capacity + token;
+                        value[dst] = cache.v[src];
+                    }
+                }
+            }
+            snapshots.push(Qwen35DenseKvSnapshot {
+                layer,
+                tokens,
+                kv_heads,
+                head_dim,
+                key,
+                value,
+            });
+        }
+        Ok(snapshots)
+    }
     pub fn pool(&self) -> &ComputePool {
         &self.pool
     }
@@ -231,6 +329,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         // `fresh` is dropped here, freeing its buffers
         self.next_position = 0;
         self.processed_tokens = 0;
+        self.last_step_tokens = 0;
         #[cfg(feature = "vulkan")]
         if let Some(gpu) = &mut self.gpu {
             if let Err(error) = gpu.reset() {
@@ -293,6 +392,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
             return Err("Qwen3.5 embeddings contain NaN or infinity".into());
         }
         let required = required_token_count(self.processed_tokens, n_tokens, self.capacity)?;
+        self.last_step_tokens = 0;
 
         // The trace schema is token-major and contains every prompt row's logits.
         #[cfg(feature = "parity-trace")]
@@ -392,6 +492,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
                 )?;
                 self.processed_tokens += 1;
                 self.next_position = chunk_positions[0][0].saturating_add(1);
+                self.last_step_tokens = 1;
                 continue;
             }
             let mut working_conv = self.scratch.conv_states.clone();
@@ -444,6 +545,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
             self.scratch.ssm_states = working_ssm;
             self.processed_tokens += rows;
             self.next_position = chunk_positions[rows - 1][0].saturating_add(1);
+            self.last_step_tokens = rows;
         }
         debug_assert_eq!(self.processed_tokens, required);
         Ok(logits)

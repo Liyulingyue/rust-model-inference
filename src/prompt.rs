@@ -167,7 +167,7 @@ pub fn append_qwen_assistant_prefix(
     out.push(required_control(tokenizer, "im_start", "<|im_start|>")?);
     out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
     if !enable_thinking {
-        out.extend(tokenizer.encode("<think>\n\n</think>\n\n", PLAIN_TEXT));
+        out.extend(tokenizer.encode("<think>\n\n</think>\n\n", WITH_SPECIAL));
     }
     Ok(())
 }
@@ -186,6 +186,8 @@ mod tests {
             tokens.push("<|im_end|>");
             types.push(3);
         }
+        tokens.extend(["<think>", "</think>"]);
+        types.extend([3, 4]);
         let metadata: HashMap<String, MetaValue> = HashMap::from([
             (
                 "tokenizer.ggml.model".into(),
@@ -241,6 +243,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("<|im_end|>"), "{error}");
+    }
+
+    #[test]
+    fn qwen_generation_prefix_parses_think_control_token() {
+        let tokenizer = prompt_tokenizer(true);
+        let mut output = Vec::new();
+        append_qwen_assistant_prefix(&mut output, &tokenizer, false).unwrap();
+        assert!(output.ends_with(&[9, 4, 4, 10, 4, 4]), "{output:?}");
     }
 
     #[test]

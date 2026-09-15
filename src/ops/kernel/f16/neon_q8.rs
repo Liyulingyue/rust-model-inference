@@ -67,9 +67,10 @@ pub unsafe fn matmul_f16_vs_q8_neon(
             let w_hi = vcvt_f32_f16(f16_hi);
 
             // Q8 input: load 8 i8, sign-extend to s32 in two halves.
-            let q8_bytes = vld1q_s8(q_ptr.add(col));
-            let q_lo_i32 = vmovl_s16(vget_low_s16(vmovl_s8(vget_low_s8(q8_bytes))));
-            let q_hi_i32 = vmovl_s16(vget_high_s16(vmovl_s8(q8_bytes)));
+            let q8_bytes = vld1_s8(q_ptr.add(col) as *const i8);
+            let q8_i16 = vmovl_s8(q8_bytes);
+            let q_lo_i32 = vmovl_s16(vget_low_s16(q8_i16));
+            let q_hi_i32 = vmovl_s16(vget_high_s16(q8_i16));
             let q_lo_f32 = vcvtq_f32_s32(q_lo_i32);
             let q_hi_f32 = vcvtq_f32_s32(q_hi_i32);
 

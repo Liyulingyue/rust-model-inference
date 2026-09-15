@@ -367,11 +367,14 @@ impl<'a> super::weights::Qwen35Model<'a> {
             );
         }
 
-        let mut normed = vec![0.0f32; n_tokens * n_embd];
         for t in 0..n_tokens {
             let off = t * n_embd;
-            normed[off..off + n_embd].copy_from_slice(&scratch.x[off..off + n_embd]);
-            crate::ops::rms_norm_inplace(&mut normed[off..off + n_embd], &self.output_norm, eps);
+            scratch.normed_buf[off..off + n_embd].copy_from_slice(&scratch.x[off..off + n_embd]);
+            crate::ops::rms_norm_inplace(
+                &mut scratch.normed_buf[off..off + n_embd],
+                &self.output_norm,
+                eps,
+            );
         }
 
         #[cfg(feature = "parity-trace")]
@@ -384,7 +387,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         } else {
             n_tokens - 1..n_tokens
         } {
-            let last_normed = &normed[row * n_embd..(row + 1) * n_embd];
+            let last_normed = &scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
             #[cfg(feature = "parity-trace")]
             parity_trace::report(parity_trace::checkpoint_row(
                 row,

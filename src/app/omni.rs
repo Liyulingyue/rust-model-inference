@@ -301,7 +301,7 @@ fn encode_vision(
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "omni.vision.projected",
             None,
-            &[grid.token_count(), 1024],
+            &[grid.token_count(), encoder.config.projection_dim],
             &scratch.projected,
         ));
         values.extend_from_slice(&scratch.projected);

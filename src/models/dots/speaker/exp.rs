@@ -161,7 +161,7 @@ fn torch28_exp_double(value: DoubleF32) -> DoubleF32 {
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_exp(value: f32) -> f32 {
+pub(crate) fn torch28_exp(value: f32) -> f32 {
     let exponent = (value * R_LN2).round_ties_even() as i32;
     let exponent_f32 = exponent as f32;
     let mut reduced = exponent_f32.mul_add(-L2_UPPER, value);

@@ -9,5 +9,6 @@ pub mod llama;
 pub mod nemotron_h;
 pub mod qwen3;
 pub mod qwen35;
+pub mod qwen_drive;
 pub mod spark;
 pub mod vibevoice_asr;

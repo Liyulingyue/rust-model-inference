@@ -75,6 +75,45 @@ fn vision_rope_rotates_both_halves_with_independent_axes() {
     assert!((values[63] - (3.0 * sin_w + 4.0 * cos_w)).abs() < 1e-6);
 }
 
+#[test]
+fn vision_rope_matches_ggml_libc_trig_bits() {
+    let mut head = [0.0f32; 64];
+    head[16] = f32::from_bits(0x3fe7_a9d1);
+    head[48] = f32::from_bits(0x3f96_9600);
+
+    rope_vision(&mut head, [0, 1, 0, 1], [16, 16, 16, 16], 64, 10_000.0, 32);
+
+    assert_eq!(head[16].to_bits(), 0xbc45_d198);
+    assert_eq!(head[48].to_bits(), 0x400a_2663);
+
+    let mut scaled = [0.0f32; 64];
+    scaled[21] = f32::from_bits(0xc00b_8c18);
+    scaled[53] = f32::from_bits(0xc022_56db);
+    rope_vision(
+        &mut scaled,
+        [0, 11, 0, 11],
+        [16, 16, 16, 16],
+        64,
+        10_000.0,
+        32,
+    );
+    assert_eq!(scaled[21].to_bits(), 0xbe9c_6d3b);
+    assert_eq!(scaled[53].to_bits(), 0xc055_2dbd);
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn mrope_matches_ggml_sincos_bits() {
+    let mut head = [0.0f32; 64];
+    head[3] = f32::from_bits(0xbfcc_c51e);
+    head[35] = f32::from_bits(0x3d98_4d2e);
+
+    rope_mrope(&mut head, [1, 1, 1, 0], [11, 11, 10, 0], 64, 10_000_000.0);
+
+    assert_eq!(head[3].to_bits(), 0xbfc9_e34f);
+    assert_eq!(head[35].to_bits(), 0xbe8e_2239);
+}
+
 /// SIMD path must produce the same result as the scalar fallback.
 /// Compares public `rope_neox_inplace` against the explicit scalar helper used
 /// when SIMD is unavailable. Catches tail-handling, cache wiring, and
