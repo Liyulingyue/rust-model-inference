@@ -35,8 +35,11 @@ pub unsafe fn matmul_f16_vs_f32_neon(
             let f16_bits = vld1q_u16(weight_ptr.add(row_byte + index * 2).cast());
             // Reinterpret as f16x8 and convert to f32x8.
             let f16_lanes: float16x8_t = vreinterpretq_f16_u16(f16_bits);
-            let values = vcvt_f32_f16(vget_low_f16(f16_lanes));
-            sum = vfmaq_f32(sum, values, vld1q_f32(input_ptr.add(index)));
+            let input_lanes = vld1q_f32(input_ptr.add(index));
+            let low_values = vcvt_f32_f16(vget_low_f16(f16_lanes));
+            sum = vfmaq_f32(sum, low_values, input_lanes);
+            let high_values = vcvt_f32_f16(vget_high_f16(f16_lanes));
+            sum = vfmaq_f32(sum, high_values, vld1q_f32(input_ptr.add(index + 4)));
             index += 8;
         }
         while index + 4 <= n_in {
@@ -82,5 +85,25 @@ mod tests {
         for (a, e) in actual.into_iter().zip(expected) {
             assert!((a - e).abs() < 1e-3, "{a} != {e}");
         }
+    }
+
+    #[test]
+    fn neon_includes_high_half_of_eight_lane_chunk() {
+        let n_in = 8;
+        let weight: Vec<u8> = (0..n_in)
+            .map(|index| crate::ops::f32_to_f16(if index < 4 { 0.0 } else { 1.0 }))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let input = vec![1.0; n_in];
+        let mut actual = [0.0];
+        let mut expected = [0.0];
+
+        unsafe {
+            matmul_f16_vs_f32_neon(&weight, &input, &mut actual, n_in, 0, 1);
+        }
+        forward_f16_rows(&weight, &input, &mut expected, n_in, 1, 0, 1);
+
+        assert_eq!(actual[0], 4.0);
+        assert_eq!(actual[0], expected[0]);
     }
 }

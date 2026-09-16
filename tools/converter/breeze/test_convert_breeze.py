@@ -169,6 +169,22 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(tensors["backbone_model.layers.0.weight"][1], 8)
         self.assertEqual(len(tensors["backbone_model.layers.0.weight"][2]), 136)
 
+    def test_q4_0_uses_ggml_signed_scale_and_nibble_rounding(self):
+        values = np.zeros(32, dtype=np.float32)
+        values[:2] = [8.0, -7.0]
+        payload = convert_breeze.quantize_q4_0(values)
+        self.assertEqual(payload[:2], bytes.fromhex("00bc"))  # d = 8 / -8
+        self.assertEqual(payload[2], 0x80)  # element 0=0, element 16=8
+        self.assertEqual(payload[3], 0x8F)  # element 1=15, element 17=8
+
+        halfway = np.zeros(32, dtype=np.float32)
+        halfway[:2] = [8.0, 0.5]  # scaled second value is -0.5
+        self.assertEqual(convert_breeze.quantize_q4_0(halfway)[3], 0x87)
+
+        zero_payload = convert_breeze.quantize_q4_0(np.zeros(32, dtype=np.float32))
+        self.assertEqual(zero_payload[:2], bytes.fromhex("0080"))
+        self.assertEqual(zero_payload[2:], bytes([0x88]) * 16)
+
     def test_q4_0_quantises_wide_2d_weight(self):
         weight = np.arange(128, dtype=np.float32).reshape(2, 64) - 64
         bf16_packed = self._bf16_packed(weight)

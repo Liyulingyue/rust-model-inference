@@ -213,11 +213,11 @@ def quantize_q8_0(values: np.ndarray) -> bytes:
 
 
 def quantize_q4_0(values: np.ndarray) -> bytes:
-    """GGML Q4_0: per 32-element block, f16 scale = amax/7, 4-bit packed payload.
+    """GGML Q4_0: match the standard quantize_row_q4_0_ref block encoding.
 
     Layout per block (18 bytes):
-      * f16 scale (amax / 7, 0 if block is all-zero)
-      * 16 bytes of int4 nibbles (low nibble = element 2*i, high nibble = element 2*i+1)
+      * f16 scale (signed extremum / -8, 0 if block is all-zero)
+      * 16 bytes of int4 nibbles (low nibble = element i, high nibble = element 16+i)
         with bias +8 so each nibble is unsigned in [0, 15].
     """
     Q4_BLOCK = 32
@@ -228,16 +228,26 @@ def quantize_q4_0(values: np.ndarray) -> bytes:
             f"q4_0 payload {flat.size} elements is not a multiple of block size {Q4_BLOCK}"
         )
     blocks = flat.reshape(-1, Q4_BLOCK)
-    amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 7.0).astype(np.float16)
+    # GGML chooses the signed value with the largest magnitude.  Keeping the
+    # sign in d is part of the on-disk Q4_0 contract; using amax / 7 produces a
+    # loadable but nonstandard tensor with a systematically wrong scale.
+    max_abs_index = np.argmax(np.abs(blocks), axis=1)
+    max_value = blocks[np.arange(blocks.shape[0]), max_abs_index]
+    scale = (max_value / -8.0).astype(np.float16)
     scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
-    scaled = blocks / safe[:, None]
-    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-8.0, 7.0)
-    q_int = (q + 8.0).astype(np.uint8)  # unsigned in [0, 15]
-    # Pack low nibble first: low = element 2*i, high = element 2*i+1
-    low = q_int[:, 0::2]
-    high = q_int[:, 1::2]
+    inverse = np.zeros_like(scale_f32)
+    nonzero = scale_f32 != 0.0
+    inverse[nonzero] = 1.0 / scale_f32[nonzero]
+    scaled = blocks * inverse[:, None]
+    # ``roundf`` in the reference converter rounds halfway cases away from
+    # zero; ``np.rint`` would use ties-to-even instead.
+    rounded = np.where(scaled >= 0.0, np.floor(scaled + 0.5), np.ceil(scaled - 0.5))
+    q_int = (rounded + 8.0).clip(0.0, 15.0).astype(np.uint8)
+    # GGML stores the first and second 16-element halves in the low and high
+    # nibbles of each byte.  The runtime Q4_0 kernel consumes this layout as
+    # q[l] = element l and q[16 + l] = element 16 + l.
+    low = q_int[:, :16]
+    high = q_int[:, 16:]
     packed = (high << 4) | low
     out = np.empty((blocks.shape[0], Q4_BLOCK_BYTES), dtype=np.uint8)
     out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
