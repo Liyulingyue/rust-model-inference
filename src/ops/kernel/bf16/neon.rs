@@ -19,17 +19,22 @@ pub unsafe fn matmul_bf16_vs_f32_neon(
 
     for (output_index, row) in (row_start..row_end).enumerate() {
         let row_byte = row * n_in * 2;
-        let mut sum = vdupq_n_f32(0.0);
+        let mut total = 0.0f32;
         let mut index = 0;
 
+        // Preserve the scalar kernel's left-to-right F32 accumulation.  A
+        // vector accumulator changes rounding order and can cross a BF16
+        // boundary in autoregressive decoding.
         while index + 4 <= n_in {
             let bf16 = vld1_u16(weight_ptr.add(row_byte + index * 2).cast());
             let values = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(bf16), 16));
-            sum = vfmaq_f32(sum, values, vld1q_f32(input_ptr.add(index)));
+            let product = vmulq_f32(values, vld1q_f32(input_ptr.add(index)));
+            total += vget_lane_f32(vget_low_f32(product), 0);
+            total += vget_lane_f32(vget_low_f32(product), 1);
+            total += vget_lane_f32(vget_high_f32(product), 0);
+            total += vget_lane_f32(vget_high_f32(product), 1);
             index += 4;
         }
-
-        let mut total = vaddvq_f32(sum);
         while index < n_in {
             let offset = row_byte + index * 2;
             let bits = u16::from_le_bytes([*weight_ptr.add(offset), *weight_ptr.add(offset + 1)]);
@@ -69,6 +74,32 @@ mod tests {
 
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn neon_matches_scalar_wide() {
+        for &n_in in &[32usize, 40, 1152, 2048, 6144] {
+            let n_out = 3;
+            let values: Vec<f32> = (0..n_in * n_out)
+                .map(|i| (((i * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                .collect();
+            let weight: Vec<u8> = values
+                .iter()
+                .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
+                .collect();
+            let input: Vec<f32> = (0..n_in)
+                .map(|i| (((i * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let mut actual = vec![0.0f32; n_out];
+            let mut expected = vec![0.0f32; n_out];
+            unsafe {
+                matmul_bf16_vs_f32_neon(&weight, &input, &mut actual, n_in, 0, n_out);
+            }
+            forward_f32_rows_scalar(&weight, &input, &mut expected, n_in, n_out, 0, 1);
+            for (a, e) in actual.into_iter().zip(expected) {
+                assert_eq!(a.to_bits(), e.to_bits(), "n_in={n_in}: {a} != {e}");
+            }
         }
     }
 }
