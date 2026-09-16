@@ -139,14 +139,14 @@ unsafe fn quantize_q8_0_into_neon_range(
             vmaxq_f32(vmulq_f32(chunk8, v_inv), vdupq_n_f32(-127.0)),
             vdupq_n_f32(127.0),
         );
-        let i1 = vcvtnq_s32_f32(q1);
-        let i2 = vcvtnq_s32_f32(q2);
-        let i3 = vcvtnq_s32_f32(q3);
-        let i4 = vcvtnq_s32_f32(q4);
-        let i5 = vcvtnq_s32_f32(q5);
-        let i6 = vcvtnq_s32_f32(q6);
-        let i7 = vcvtnq_s32_f32(q7);
-        let i8 = vcvtnq_s32_f32(q8v);
+        let i1 = vcvtaq_s32_f32(q1);
+        let i2 = vcvtaq_s32_f32(q2);
+        let i3 = vcvtaq_s32_f32(q3);
+        let i4 = vcvtaq_s32_f32(q4);
+        let i5 = vcvtaq_s32_f32(q5);
+        let i6 = vcvtaq_s32_f32(q6);
+        let i7 = vcvtaq_s32_f32(q7);
+        let i8 = vcvtaq_s32_f32(q8v);
         let n1 = vminq_s32(vmaxq_s32(i1, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n2 = vminq_s32(vmaxq_s32(i2, vdupq_n_s32(-127)), vdupq_n_s32(127));
         let n3 = vminq_s32(vmaxq_s32(i3, vdupq_n_s32(-127)), vdupq_n_s32(127));
@@ -184,6 +184,16 @@ unsafe fn quantize_q8_0_into_avx2_range(
     let sign_mask = _mm256_set1_ps(-0.0f32);
     let max_i8 = _mm256_set1_ps(127.0);
     let min_i8 = _mm256_set1_ps(-128.0);
+    let round_away = |value| {
+        let whole = _mm256_round_ps(value, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
+        let fraction = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(value, whole));
+        let step = _mm256_or_ps(_mm256_and_ps(value, sign_mask), _mm256_set1_ps(1.0));
+        let increment = _mm256_and_ps(
+            _mm256_cmp_ps(fraction, _mm256_set1_ps(0.5), _CMP_GE_OQ),
+            step,
+        );
+        _mm256_add_ps(whole, increment)
+    };
     for b in b_start..b_end {
         let ptr = input.as_ptr().add(b * 32);
         let v0 = _mm256_loadu_ps(ptr);
@@ -205,13 +215,13 @@ unsafe fn quantize_q8_0_into_avx2_range(
         let m3 = _mm_movehl_ps(shuf, m2);
         let amax = _mm_cvtss_f32(_mm_max_ss(m2, m3));
         let d = if amax == 0.0 { 0.0 } else { amax / 127.0 };
-        let id = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
         scales[b] = super::super::f16_to_f32(super::super::f32_to_f16(d));
         let id_v = _mm256_set1_ps(id);
-        let r0 = _mm256_round_ps(_mm256_mul_ps(v0, id_v), _MM_FROUND_TO_NEAREST_INT);
-        let r1 = _mm256_round_ps(_mm256_mul_ps(v1, id_v), _MM_FROUND_TO_NEAREST_INT);
-        let r2 = _mm256_round_ps(_mm256_mul_ps(v2, id_v), _MM_FROUND_TO_NEAREST_INT);
-        let r3 = _mm256_round_ps(_mm256_mul_ps(v3, id_v), _MM_FROUND_TO_NEAREST_INT);
+        let r0 = round_away(_mm256_mul_ps(v0, id_v));
+        let r1 = round_away(_mm256_mul_ps(v1, id_v));
+        let r2 = round_away(_mm256_mul_ps(v2, id_v));
+        let r3 = round_away(_mm256_mul_ps(v3, id_v));
         let c0 = _mm256_min_ps(_mm256_max_ps(r0, min_i8), max_i8);
         let c1 = _mm256_min_ps(_mm256_max_ps(r1, min_i8), max_i8);
         let c2 = _mm256_min_ps(_mm256_max_ps(r2, min_i8), max_i8);
@@ -235,4 +245,97 @@ pub fn quantize_q8_0(input: &[f32], n: usize) -> (Vec<u8>, Vec<f32>) {
     let mut scales = vec![0.0f32; blocks];
     quantize_q8_0_into(input, n, &mut q8, &mut scales);
     (q8, scales)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q8_0_simd_matches_reference_rounding_and_reciprocal() {
+        let mut input = [0.0f32; 64];
+        input[..7].copy_from_slice(&[
+            -127.0,
+            127.0,
+            -0.5,
+            0.5,
+            1.5,
+            -1.5,
+            f32::from_bits(0x3eff_ffff),
+        ]);
+        let reciprocal_boundary = [
+            0x3f5a_427b,
+            0x3e5a_aef9,
+            0xbf13_3972,
+            0x3dee_e602,
+            0xbf40_b369,
+            0xbf67_7e81,
+            0xbe0d_f6c2,
+            0xbf44_871f,
+            0x3f4b_c359,
+            0x3f3b_c99f,
+            0x3f0b_f40d,
+            0xbf3e_dd3e,
+            0x3e55_876c,
+            0xbe59_c776,
+            0xbe94_1592,
+            0xbf0e_2e14,
+            0x3f47_2ac5,
+            0x3edc_482b,
+            0xbf02_087c,
+            0x3e0d_e04a,
+            0xbf7b_c73f,
+            0xbecd_38c3,
+            0x3f3c_de11,
+            0x3f26_7059,
+            0xbf7f_7978,
+            0xbe01_f7b9,
+            0x3e2c_9dca,
+            0x3ed0_5017,
+            0x3e82_4981,
+            0xbc6c_5386,
+            0xbf1b_f8c1,
+            0xbcf3_bce0,
+        ];
+        for (value, bits) in input[32..].iter_mut().zip(reciprocal_boundary) {
+            *value = f32::from_bits(bits);
+        }
+
+        let mut expected = [0i8; 64];
+        expected[..7].copy_from_slice(&[-127, 127, -1, 1, 2, -2, 0]);
+        expected[32..].copy_from_slice(&[
+            109, 27, -73, 15, -96, -115, -18, -98, 101, 93, 70, -95, 27, -27, -37, -71, 99, 55,
+            -65, 18, -125, -51, 94, 83, -127, -16, 21, 52, 32, -2, -78, -4,
+        ]);
+        let expected = expected.map(|value| value as u8);
+        let expected_scales = [0x3f80_0000, 0x3c00_c000];
+        let check = |q8: &[u8], scales: &[f32]| {
+            assert_eq!(q8, expected);
+            assert_eq!(
+                scales
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_scales
+            );
+        };
+
+        let (q8, scales) = quantize_q8_0(&input, input.len());
+        check(&q8, &scales);
+
+        let mut q8 = [0xa5; 64];
+        let mut scales = [f32::NAN; 2];
+        for ith in 0..7 {
+            quantize_q8_0_into_parallel(&input, input.len(), &mut q8, &mut scales, ith, 7);
+        }
+        check(&q8, &scales);
+
+        #[cfg(target_arch = "x86_64")]
+        if crate::ops::has_avx2_fma() {
+            let mut q8 = [0; 64];
+            let mut scales = [0.0; 2];
+            unsafe { quantize_q8_0_into_avx2(&input, input.len(), &mut q8, &mut scales) };
+            check(&q8, &scales);
+        }
+    }
 }

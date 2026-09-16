@@ -130,82 +130,81 @@ pub(crate) fn torch_rms_norm_with_eps(input: &[f32], weight: &[f32], output: &mu
 }
 
 fn torch_sum_squares(values: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        // For the encoder's 1024-wide rows this is the exact SumKernel
-        // NEON-W4 cascade: 4 interleaved rows × 4 lanes, reduced in 16-row
-        // groups before the final lane fold.
-        if values.len() >= 64 && values.len() % 4 == 0 {
-            let vec_size = values.len() / 4;
-            let size_ilp = vec_size / 4;
-            let level_power = 4usize;
-            let level_step = 1usize << level_power;
-            let level_mask = level_step - 1;
-            let mut acc = [[[0.0f32; 4]; 4]; 4];
-            let mut i = 0usize;
-            while i + level_step <= size_ilp {
-                for _ in 0..level_step {
-                    for row in 0..4 {
-                        for lane in 0..4 {
-                            let value = values[i * 16 + row * 4 + lane];
-                            acc[0][row][lane] += value * value;
-                        }
-                    }
-                    i += 1;
-                }
-                for level in 1..4 {
-                    for row in 0..4 {
-                        for lane in 0..4 {
-                            acc[level][row][lane] += acc[level - 1][row][lane];
-                            acc[level - 1][row][lane] = 0.0;
-                        }
-                    }
-                    let mask = level_mask << (level * level_power);
-                    if (i & mask) != 0 {
-                        break;
-                    }
+    #[cfg(target_arch = "x86_64")]
+    const LANES: usize = 8;
+    #[cfg(not(target_arch = "x86_64"))]
+    const LANES: usize = 4;
+    if values.len() < LANES {
+        torch_sum_squares_lanes::<1>(values)
+    } else {
+        torch_sum_squares_lanes::<LANES>(values)
+    }
+}
+
+fn torch_sum_squares_lanes<const LANES: usize>(values: &[f32]) -> f32 {
+    let vec_size = values.len() / LANES;
+    let size_ilp = vec_size / 4;
+    let level_power = (size_ilp.max(1).next_power_of_two().ilog2() as usize / 4).max(4);
+    let level_step = 1usize << level_power;
+    let level_mask = level_step - 1;
+    let mut acc = [[[0.0f32; LANES]; 4]; 4];
+    let mut i = 0usize;
+    while i + level_step <= size_ilp {
+        for _ in 0..level_step {
+            for row in 0..4 {
+                for lane in 0..LANES {
+                    let value = values[(i * 4 + row) * LANES + lane];
+                    acc[0][row][lane] += value * value;
                 }
             }
-            while i < size_ilp {
-                for row in 0..4 {
-                    for lane in 0..4 {
-                        let value = values[i * 16 + row * 4 + lane];
-                        acc[0][row][lane] += value * value;
-                    }
-                }
-                i += 1;
-            }
-            for level in 1..4 {
-                for row in 0..4 {
-                    for lane in 0..4 {
-                        acc[0][row][lane] += acc[level][row][lane];
-                    }
+            i += 1;
+        }
+        for level in 1..4 {
+            for row in 0..4 {
+                for lane in 0..LANES {
+                    acc[level][row][lane] += acc[level - 1][row][lane];
+                    acc[level - 1][row][lane] = 0.0;
                 }
             }
-            for vec_i in size_ilp * 4..vec_size {
-                for lane in 0..4 {
-                    let value = values[vec_i * 4 + lane];
-                    acc[0][0][lane] += value * value;
-                }
+            let mask = level_mask << (level * level_power);
+            if (i & mask) != 0 {
+                break;
             }
-            for row in 1..4 {
-                for lane in 0..4 {
-                    acc[0][0][lane] += acc[0][row][lane];
-                }
+        }
+    }
+    while i < size_ilp {
+        for row in 0..4 {
+            for lane in 0..LANES {
+                let value = values[(i * 4 + row) * LANES + lane];
+                acc[0][row][lane] += value * value;
             }
-            let mut total = 0.0f32;
-            for value in &values[vec_size * 4..] {
-                total += *value * *value;
+        }
+        i += 1;
+    }
+    for level in 1..4 {
+        for row in 0..4 {
+            for lane in 0..LANES {
+                acc[0][row][lane] += acc[level][row][lane];
             }
-            for lane in 0..4 {
-                total += acc[0][0][lane];
-            }
-            return total;
+        }
+    }
+    for vec_i in size_ilp * 4..vec_size {
+        for lane in 0..LANES {
+            let value = values[vec_i * LANES + lane];
+            acc[0][0][lane] += value * value;
+        }
+    }
+    for row in 1..4 {
+        for lane in 0..LANES {
+            acc[0][0][lane] += acc[0][row][lane];
         }
     }
     let mut total = 0.0f32;
-    for &value in values {
-        total += value * value;
+    for value in &values[vec_size * LANES..] {
+        total += *value * *value;
+    }
+    for lane in 0..LANES {
+        total += acc[0][0][lane];
     }
     total
 }
@@ -1302,6 +1301,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn patch_encoder_rms_norm_matches_torch28_x86_rows_and_tails() {
+        for (n, sum_bits, scale_bits) in [
+            (7, 0x42e9_4dd8, 0x3e7a_d7ed),
+            (63, 0x441a_2cb4, 0x3ea3_a539),
+            (65, 0x441b_b39b, 0x3ea5_67d3),
+            (1024, 0x4610_4466, 0x3eaa_8231),
+            (1025, 0x4610_45b0, 0x3eaa_96bc),
+            (1536, 0x4659_2e7a, 0x3eaa_33a9),
+        ] {
+            let input: Vec<f32> = (0..n)
+                .map(|i| ((i * 37 % 1009) as f32 - 500.0) / 97.0)
+                .collect();
+            let weight: Vec<f32> = (0..n)
+                .map(|i| 1.0 + ((i % 7) as f32 - 3.0) * 0.01)
+                .collect();
+            assert_eq!(torch_sum_squares(&input).to_bits(), sum_bits, "sum n={n}");
+            let mut output = vec![0.0; n];
+            torch_rms_norm(&input, &weight, &mut output);
+            let scale = f32::from_bits(scale_bits);
+            for i in 0..n {
+                assert_eq!(
+                    output[i].to_bits(),
+                    (input[i] * scale * weight[i]).to_bits(),
+                    "n={n} lane={i}"
+                );
+            }
+        }
     }
 
     #[test]
