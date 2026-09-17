@@ -347,6 +347,10 @@ impl crate::models::dspark::DSparkTarget for Lfm25Session<'_> {
         Ok(batch)
     }
 
+    fn evaluate_token(&mut self, token_id: u32) -> Result<(), String> {
+        self.evaluate_one(token_id, &[]).map(drop)
+    }
+
     fn current_logits(&self) -> &[f32] {
         &self.scratch.logits
     }

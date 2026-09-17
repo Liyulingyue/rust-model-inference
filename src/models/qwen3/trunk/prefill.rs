@@ -997,6 +997,27 @@ impl Qwen3Session<'_> {
         Ok(capture)
     }
 
+    pub(crate) fn forward_causal_token(&mut self, token_id: u32) -> Result<(), String> {
+        let base = self.kv_state.seq_len;
+        if base >= self.capacity {
+            return Err("Qwen3 DSpark target session capacity exceeded".into());
+        }
+        let token_ids = [token_id];
+        let positions = [[base, 0, 0, 0]];
+        self.prefill_scratch.reset_for(1, self.model);
+        let input = Qwen3Input {
+            token_ids: &token_ids,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        self.forward_cpu_chunk(&input, 0..1, true, true, None)?;
+        self.validate_cpu_chunk(base, 1, true)?;
+        self.kv_state.seq_len = base + 1;
+        self.kv_state.update_access();
+        Ok(())
+    }
+
     pub fn scratch_bytes(&self) -> usize {
         let scratch = &self.scratch;
         let f32_values = scratch.x.len()

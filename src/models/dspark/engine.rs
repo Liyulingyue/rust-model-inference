@@ -19,6 +19,7 @@ pub trait DSparkTarget {
         token_ids: &[u32],
         target_layers: &[usize],
     ) -> Result<TargetBatch, String>;
+    fn evaluate_token(&mut self, token_id: u32) -> Result<(), String>;
     fn current_logits(&self) -> &[f32];
 }
 
@@ -138,7 +139,11 @@ pub fn run_greedy<T: DSparkTarget>(
             .ok_or("DSpark drafted token counter overflow")?;
 
         let target_started = std::time::Instant::now();
-        let step = run_step(target, pending, &draft_ids, &target_layers)?;
+        let step = if target_only {
+            run_target_only_step(target, pending)?
+        } else {
+            run_step(target, pending, &draft_ids, &target_layers)?
+        };
         let target_elapsed = target_started.elapsed();
         stats.target_evaluations = stats
             .target_evaluations
@@ -204,6 +209,18 @@ struct Step {
     next_pending: u32,
     features: Vec<Vec<f32>>,
     target_evaluations: usize,
+}
+
+fn run_target_only_step<T: DSparkTarget>(target: &mut T, pending: u32) -> Result<Step, String> {
+    target.evaluate_token(pending)?;
+    let next_pending = greedy_token(target.current_logits())?;
+    Ok(Step {
+        verification: Verification::Accepted(0),
+        output_ids: vec![next_pending],
+        next_pending,
+        features: Vec::new(),
+        target_evaluations: 1,
+    })
 }
 
 fn run_step<T: DSparkTarget>(
@@ -376,6 +393,10 @@ impl DSparkTarget for Qwen3Session<'_> {
         Ok(TargetBatch { logits, features })
     }
 
+    fn evaluate_token(&mut self, token_id: u32) -> Result<(), String> {
+        self.forward_causal_token(token_id)
+    }
+
     fn current_logits(&self) -> &[f32] {
         self.last_logits()
     }
@@ -383,7 +404,10 @@ impl DSparkTarget for Qwen3Session<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_step, should_fallback, verify_ids, DSparkTarget, TargetBatch, Verification};
+    use super::{
+        run_step, run_target_only_step, should_fallback, verify_ids, DSparkTarget, TargetBatch,
+        Verification,
+    };
     use std::collections::VecDeque;
 
     struct FakeTarget {
@@ -391,6 +415,7 @@ mod tests {
         logits: Vec<f32>,
         plans: VecDeque<Vec<u32>>,
         evaluations: Vec<Vec<u32>>,
+        target_only_evaluations: Vec<u32>,
         restores: usize,
     }
 
@@ -401,6 +426,7 @@ mod tests {
                 logits: logits(0),
                 plans: plans.into_iter().collect(),
                 evaluations: Vec::new(),
+                target_only_evaluations: Vec::new(),
                 restores: 0,
             }
         }
@@ -440,6 +466,13 @@ mod tests {
             })
         }
 
+        fn evaluate_token(&mut self, token_id: u32) -> Result<(), String> {
+            self.target_only_evaluations.push(token_id);
+            self.position += 1;
+            self.logits = logits(10);
+            Ok(())
+        }
+
         fn current_logits(&self) -> &[f32] {
             &self.logits
         }
@@ -473,6 +506,20 @@ mod tests {
         assert!(!should_fallback(7, 4));
         assert!(!should_fallback(7, 7));
         assert!(should_fallback(0, 0));
+    }
+
+    #[test]
+    fn target_only_step_skips_speculative_evaluation() {
+        let mut target = FakeTarget::new([]);
+
+        let step = run_target_only_step(&mut target, 9).unwrap();
+
+        assert_eq!(step.output_ids, vec![10]);
+        assert_eq!(step.next_pending, 10);
+        assert!(step.features.is_empty());
+        assert!(target.evaluations.is_empty());
+        assert_eq!(target.target_only_evaluations, vec![9]);
+        assert_eq!(target.restores, 0);
     }
 
     #[test]
