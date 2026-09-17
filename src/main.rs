@@ -305,6 +305,7 @@ fn main() {
                 options.profile,
                 options.kv_format,
                 prefill_batch_size,
+                options.effective_max_context(),
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -318,6 +319,7 @@ fn main() {
                 options.profile,
                 options.kv_format,
                 prefill_batch_size,
+                options.effective_max_context(),
             ));
         }
     } else {

@@ -1,4 +1,4 @@
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::cli::{resolve_thread_count, CliOptions, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -44,6 +44,7 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
 ) -> Result<(), String> {
     let arch = source
         .metadata("general.architecture")
@@ -109,6 +110,7 @@ pub fn run_inference(
             bench,
             profile,
             kv_format,
+            max_context,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -185,6 +187,7 @@ pub fn run_interactive(
             false,
             KvFormat::F16,
             prefill_batch_size,
+            CliOptions::DEFAULT_MAX_CONTEXT,
         )?;
         println!();
     }
@@ -1264,11 +1267,19 @@ fn run_multimodal_with_video_ref(
         #[cfg(feature = "parity-trace")]
         greedy_token_ids.push(next_token as u32);
 
-        if next_token >= 0
-            && (tokenizer.eos_id() == Some(next_token as u32)
-                || tokenizer.special_token_id("im_end") == Some(next_token as u32))
-        {
-            break;
+        // Stop on EOS, on qwen-style `<|im_end|>`, and on K2-Horizon's
+        // `<|ifm|im_end|>`. The K2-Horizon literal is registered via
+        // `K2_HORIZON_SEMANTIC_TOKENS` so `special_token_id("ifm|im_end")`
+        // returns the right id; for other architectures that lookup is
+        // a no-op (the token isn't in their vocab).
+        if next_token >= 0 {
+            let nt = next_token as u32;
+            if tokenizer.eos_id() == Some(nt)
+                || tokenizer.special_token_id("im_end") == Some(nt)
+                || tokenizer.special_token_id("ifm|im_end") == Some(nt)
+            {
+                break;
+            }
         }
 
         let token_str = decoder.push(next_token as u32);
