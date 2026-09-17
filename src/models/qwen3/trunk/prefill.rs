@@ -28,6 +28,24 @@ pub(super) struct Qwen3PrefillScratch {
     prepared: PreparedRows,
 }
 
+pub(crate) struct Qwen3ChunkCapture {
+    requested_layers: Vec<usize>,
+    pub(crate) layer_inputs: Vec<Vec<f32>>,
+    pub(crate) hidden: Vec<f32>,
+    pub(crate) logits: Vec<f32>,
+}
+
+impl Qwen3ChunkCapture {
+    pub(crate) fn new(requested_layers: &[usize]) -> Self {
+        Self {
+            requested_layers: requested_layers.to_vec(),
+            layer_inputs: Vec::with_capacity(requested_layers.len()),
+            hidden: Vec::new(),
+            logits: Vec::new(),
+        }
+    }
+}
+
 impl Qwen3PrefillScratch {
     pub(super) fn new(max_rows: usize, model: &Qwen3Model) -> Self {
         let config = &model.config;
@@ -255,7 +273,7 @@ impl Qwen3Session<'_> {
                 None
             };
             if let Err(error) = self
-                .forward_cpu_chunk(input, range.clone(), project_logits)
+                .forward_cpu_chunk(input, range.clone(), project_logits, true, None)
                 .and_then(|()| self.validate_cpu_chunk(base, range.len(), project_logits))
             {
                 self.kv_state.seq_len = base;
@@ -314,6 +332,8 @@ impl Qwen3Session<'_> {
         input: &Qwen3Input<'_>,
         range: Range<usize>,
         project_logits: bool,
+        causal: bool,
+        mut capture: Option<&mut Qwen3ChunkCapture>,
     ) -> Result<(), String> {
         if range.is_empty() || range.end > input.token_ids.len() {
             return Err("Invalid Qwen3 CPU prefill range".into());
@@ -390,6 +410,13 @@ impl Qwen3Session<'_> {
             .then(crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope);
 
         for layer in 0..config.n_layer {
+            if let Some(capture) = capture.as_deref_mut() {
+                if capture.requested_layers.contains(&layer) {
+                    capture
+                        .layer_inputs
+                        .push(self.prefill_scratch.x[..rows * config.n_embd].to_vec());
+                }
+            }
             let weights = &model.layers[layer];
             for row in 0..rows {
                 rms_norm(
@@ -591,7 +618,11 @@ impl Qwen3Session<'_> {
                 let layer_base = layer * capacity * kv_stride;
                 for row in 0..rows {
                     let physical_row = base_position + row;
-                    let visible = physical_row + 1;
+                    let visible = if causal {
+                        physical_row + 1
+                    } else {
+                        base_position + rows
+                    };
                     let n_padded = visible.div_ceil(256) * 256;
                     let q = unsafe { std::slice::from_raw_parts(q_ptr.add(row * n_q), n_q) };
                     let attn = unsafe {
@@ -834,8 +865,9 @@ impl Qwen3Session<'_> {
         let trace_all = std::env::var_os("RMI_PARITY_TRACE").is_some();
         #[cfg(not(feature = "parity-trace"))]
         let trace_all = false;
-        if project_logits || trace_all {
-            for row in if trace_all { 0..rows } else { rows - 1..rows } {
+        if project_logits || trace_all || capture.is_some() {
+            let capture_all = trace_all || capture.is_some();
+            for row in if capture_all { 0..rows } else { rows - 1..rows } {
                 let last = row * config.n_embd;
                 self.scratch
                     .x
@@ -865,6 +897,10 @@ impl Qwen3Session<'_> {
                     config.n_embd,
                     model,
                 )?;
+                if let Some(capture) = capture.as_deref_mut() {
+                    capture.hidden.extend_from_slice(&self.scratch.normed);
+                    capture.logits.extend_from_slice(&self.scratch.logits);
+                }
                 #[cfg(feature = "parity-trace")]
                 parity_trace::report(parity_trace::checkpoint_row(
                     row,
@@ -876,6 +912,39 @@ impl Qwen3Session<'_> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn forward_non_causal_block(
+        &mut self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Qwen3ChunkCapture, String> {
+        if token_ids.is_empty() || token_ids.len() != positions.len() {
+            return Err("Invalid DSpark draft block".into());
+        }
+        let base = self.kv_state.seq_len;
+        let final_len = base
+            .checked_add(token_ids.len())
+            .ok_or_else(|| "DSpark draft length overflow".to_string())?;
+        if final_len > self.capacity {
+            return Err(format!(
+                "DSpark draft requires capacity {final_len}; session has {}",
+                self.capacity
+            ));
+        }
+        self.prefill_scratch.reset_for(token_ids.len(), self.model);
+        let input = Qwen3Input {
+            token_ids,
+            positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let mut capture = Qwen3ChunkCapture::new(&[]);
+        self.forward_cpu_chunk(&input, 0..token_ids.len(), true, false, Some(&mut capture))?;
+        self.validate_cpu_chunk(base, token_ids.len(), true)?;
+        self.kv_state.seq_len = final_len;
+        self.kv_state.update_access();
+        Ok(capture)
     }
 
     pub fn scratch_bytes(&self) -> usize {

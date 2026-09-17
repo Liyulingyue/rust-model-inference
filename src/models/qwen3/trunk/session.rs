@@ -392,7 +392,7 @@ impl<'model> Qwen3Session<'model> {
 
             if !used_vulkan {
                 let base = self.kv_state.seq_len;
-                self.forward_cpu_chunk(&decode_input, 0..1, true)?;
+                self.forward_cpu_chunk(&decode_input, 0..1, true, true, None)?;
                 self.kv_state.seq_len = base + 1;
                 self.kv_state.update_access();
             }

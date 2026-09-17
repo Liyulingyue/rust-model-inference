@@ -46,6 +46,12 @@ impl DSparkConfig {
         }
 
         let hidden = positive_usize(source, "dflash.embedding_length")?;
+        if hidden != target.hidden {
+            return Err(format!(
+                "DSpark hidden width mismatch: sidecar has {hidden}, target has {}",
+                target.hidden
+            ));
+        }
         let layers = positive_usize(source, "dflash.block_count")?;
         let heads = positive_usize(source, "dflash.attention.head_count")?;
         let kv_heads = positive_usize(source, "dflash.attention.head_count_kv")?;
@@ -182,7 +188,7 @@ mod tests {
     use std::collections::HashMap;
 
     const TARGET: TargetShape = TargetShape {
-        hidden: 8,
+        hidden: 4,
         vocab: 16,
         layers: 12,
     };
@@ -257,7 +263,7 @@ mod tests {
             .tensor("markov_w2.weight", &[2, TARGET.vocab as u64])
             .tensor("conf_proj.weight", &[6, 1])
             .tensor("conf_proj.bias", &[1])
-            .tensor("fc.weight", &[24, 4])
+            .tensor("fc.weight", &[12, 4])
     }
 
     #[test]
