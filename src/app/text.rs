@@ -1264,11 +1264,19 @@ fn run_multimodal_with_video_ref(
         #[cfg(feature = "parity-trace")]
         greedy_token_ids.push(next_token as u32);
 
-        if next_token >= 0
-            && (tokenizer.eos_id() == Some(next_token as u32)
-                || tokenizer.special_token_id("im_end") == Some(next_token as u32))
-        {
-            break;
+        // Stop on EOS, on qwen-style `<|im_end|>`, and on K2-Horizon's
+        // `<|ifm|im_end|>`. The K2-Horizon literal is registered via
+        // `K2_HORIZON_SEMANTIC_TOKENS` so `special_token_id("ifm|im_end")`
+        // returns the right id; for other architectures that lookup is
+        // a no-op (the token isn't in their vocab).
+        if next_token >= 0 {
+            let nt = next_token as u32;
+            if tokenizer.eos_id() == Some(nt)
+                || tokenizer.special_token_id("im_end") == Some(nt)
+                || tokenizer.special_token_id("ifm|im_end") == Some(nt)
+            {
+                break;
+            }
         }
 
         let token_str = decoder.push(next_token as u32);

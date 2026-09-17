@@ -258,7 +258,11 @@ pub fn run_inference_tokens(
     let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    let max_ctx = 512usize.min(config.n_ctx);
+    // Use the model's full context window, not an arbitrary cap. A previous
+    // 512-token cap silently truncated the KV cache and caused out-of-bounds
+    // panics on long generations (e.g. K2-Horizon-1B default generation
+    // produces several hundred tokens of chain-of-thought).
+    let max_ctx = config.n_ctx;
     let n_embd = config.n_embd;
     let n_layer = config.n_layer;
     let n_head = config.n_head;
