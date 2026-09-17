@@ -5,12 +5,12 @@
 | Breeze-TTS-2                  | 3.5B          | TTS、指令控制、参考音频声音克隆 | 原始开发                             | https://huggingface.co/BreezeBlue/breeze-tts-2 | √ |
 | dots.tts-base                 | base       | TTS                  | 原始开发 @ `32407a5`                  | https://huggingface.co/EvoAwaken-Workshop/dots-tts-base-gguf | 待核验 |
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
-| DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | https://github.com/AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
+| DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
 | Gemma-4                       | E2B        | 文本、图像、音频      | llama.cpp @ `3173a56`                 | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF             | √ |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B | 文本                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | 待核验 |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
-| K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
+| K2-Horizon                    | 0.9B / 3.7B / 7B         | 文本                 | MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
 | LFM2                          | 8B-A1B     | 文本          | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF             | √ |
 | LFM2.5                        | 230M / 1.2B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
 | LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF             | √ |
