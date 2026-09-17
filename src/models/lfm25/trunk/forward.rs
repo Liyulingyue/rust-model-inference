@@ -389,7 +389,11 @@ pub fn run_inference(
         input_tokens
     );
     let cfg = Lfm25Config::from_source(source.as_ref())?;
-    let max_ctx = 512usize.min(cfg.n_ctx);
+    let max_ctx = crate::models::qwen3::trunk::util::checked_session_capacity(
+        input_tokens.len(),
+        max_tokens,
+        cfg.n_ctx,
+    )?;
     let n_threads = if n_threads_arg > 0 {
         n_threads_arg
     } else {
@@ -420,15 +424,6 @@ pub fn run_inference(
     let mut decode_evals = 0usize;
 
     if let Some(options) = dspark {
-        let required = input_tokens
-            .len()
-            .checked_add(max_tokens)
-            .ok_or("DSpark session capacity overflow")?;
-        if required > max_ctx {
-            return Err(format!(
-                "Generation requires capacity {required}; session has {max_ctx}"
-            ));
-        }
         let draft_source: Arc<dyn TensorSource> = Arc::from(
             open_model_source(&options.draft_model, ComponentRole::Llm)
                 .map_err(|e| format!("Failed to open DSpark sidecar: {e}"))?,
@@ -438,11 +433,19 @@ pub fn run_inference(
             vocab: cfg.vocab_size,
             layers: cfg.n_layer,
         };
-        let shared_head =
-            SharedHead::new(Arc::clone(&source), Arc::clone(&tokenizer), target, max_ctx)?;
+        let shared_head = SharedHead::new(
+            Arc::clone(&source),
+            Arc::clone(&tokenizer),
+            target,
+            cfg.n_ctx,
+        )?;
         let draft_model = DSparkModel::from_source(draft_source, shared_head, Arc::clone(&pool))?;
         let draft_n_max = options.draft_n_max.unwrap_or(draft_model.config.block_size);
-        let mut draft_session = DSparkSession::new(&draft_model, max_ctx, kv_format)?;
+        // A draft evaluates the full block even when fewer output tokens remain.
+        let draft_capacity = max_ctx
+            .saturating_add(draft_model.config.block_size)
+            .min(cfg.n_ctx);
+        let mut draft_session = DSparkSession::new(&draft_model, draft_capacity, kv_format)?;
         dspark_prefill(&mut session, &mut draft_session, &input_tokens, 1)?;
         session.finish_prefill();
         prefill_time = t_infer.elapsed();

@@ -120,7 +120,11 @@ pub fn run_inference_tokens(
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
 
-    let max_ctx = 512usize.min(model_config_from_source(source.as_ref())?.n_ctx);
+    let max_ctx = crate::models::qwen3::trunk::util::checked_session_capacity(
+        input_tokens.len(),
+        max_tokens,
+        model_config_from_source(source.as_ref())?.n_ctx,
+    )?;
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -165,15 +169,6 @@ pub fn run_inference_tokens(
                 model.config.architecture
             ));
         }
-        let required = input_tokens
-            .len()
-            .checked_add(max_tokens)
-            .ok_or("DSpark session capacity overflow")?;
-        if required > max_ctx {
-            return Err(format!(
-                "Generation requires capacity {required}; session has {max_ctx}"
-            ));
-        }
         let draft_source: Arc<dyn TensorSource> = Arc::from(
             open_model_source(&options.draft_model, ComponentRole::Llm)
                 .map_err(|error| format!("Failed to open DSpark sidecar: {error}"))?,
@@ -183,13 +178,21 @@ pub fn run_inference_tokens(
             vocab: model.config.vocab,
             layers: model.config.n_layer,
         };
-        let shared_head =
-            SharedHead::new(Arc::clone(&source), Arc::clone(&tokenizer), target, max_ctx)?;
+        let shared_head = SharedHead::new(
+            Arc::clone(&source),
+            Arc::clone(&tokenizer),
+            target,
+            model.config.n_ctx,
+        )?;
         let draft_model = DSparkModel::from_source(draft_source, shared_head, Arc::clone(&pool))?;
         let draft_n_max = options.draft_n_max.unwrap_or(draft_model.config.block_size);
         let mut target_session =
             Qwen3Session::new_with_kv_state(&model, max_ctx, kv_format, KvLifecycle::Ephemeral)?;
-        let mut draft_session = DSparkSession::new(&draft_model, max_ctx, kv_format)?;
+        // A draft evaluates the full block even when fewer output tokens remain.
+        let draft_capacity = max_ctx
+            .saturating_add(draft_model.config.block_size)
+            .min(model.config.n_ctx);
+        let mut draft_session = DSparkSession::new(&draft_model, draft_capacity, kv_format)?;
         dspark_prefill(
             &mut target_session,
             &mut draft_session,
