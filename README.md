@@ -389,21 +389,21 @@ shaders/
 
 ```bash
 # 文本（qwen3、qwen35 等）
-cargo run --release --bin server -- \
+cargo run --release --bin rust-model-server -- \
   --model models/Qwen3-0.6B-Q8_0.gguf --host 0.0.0.0 --port 8080 --threads 4
 
 # Embedding（Qwen3-Embedding）
-cargo run --release --bin server -- \
+cargo run --release --bin rust-model-server -- \
   --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding
 
 # ASR（Qwen3-ASR + mmproj）
-cargo run --release --bin server -- \
+cargo run --release --bin rust-model-server -- \
   --model models/Qwen3-ASR-0.6B-Q8_0.gguf \
   --mmproj models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf \
   --audio models/001_16k.wav --language en
 
 # TTS（Qwen3-TTS + mmproj）
-cargo run --release --bin server -- \
+cargo run --release --bin rust-model-server -- \
   --model models/Qwen3-TTS/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
   --mmproj models/Qwen3-TTS/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
   --tts --language cn
@@ -415,7 +415,11 @@ cargo run --release --bin server -- \
 |------|------|------|------|
 | `/health` | GET | any | liveness probe |
 | `/v1/models` | GET | any | 模型列表 |
-| `/v1/chat/completions` | POST | text | OpenAI Chat Completions，支持 `stream: true` (SSE) |
+| `/v1/chat/completions` | POST | text | OpenAI Chat Completions，支持 SSE 与 function tools |
+| `/v1/responses` | POST | text | OpenAI Responses，支持 SSE、function tools 与 `previous_response_id` |
+| `/v1/responses/{id}` | GET/DELETE | text | 读取或删除本进程保存的 Response |
+| `/v1/messages` | POST | text | Anthropic Messages，支持 SSE 与 client tools |
+| `/v1/messages/count_tokens` | POST | text | Anthropic 输入 token 计数 |
 | `/v1/embeddings` | POST | embedding | OpenAI Embeddings（字符串或字符串数组） |
 | `/v1/audio/transcriptions` | POST | asr | OpenAI Audio Transcriptions（multipart：`file`、`language`、`prompt`） |
 | `/v1/audio/transcriptions_json` | POST | asr | 同上，但用 JSON 体，`input` 字段为 base64 WAV |
@@ -427,7 +431,18 @@ cargo run --release --bin server -- \
 # Chat Completions (stream)
 curl -N http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"1+1="}],"max_tokens":10,"temperature":0,"stream":true}'
+  -d '{"model":"Qwen3-0.6B-Q8_0","messages":[{"role":"user","content":"1+1="}],"max_tokens":10,"temperature":0,"stream":true}'
+
+# Responses
+curl -N http://localhost:8080/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3-0.6B-Q8_0","input":"1+1=","max_output_tokens":10,"stream":true}'
+
+# Anthropic Messages
+curl -N http://localhost:8080/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"Qwen3-0.6B-Q8_0","messages":[{"role":"user","content":"1+1="}],"max_tokens":10,"stream":true}'
 
 # Embeddings
 curl http://localhost:8080/v1/embeddings \
@@ -445,9 +460,20 @@ curl http://localhost:8080/v1/audio/speech \
   --output out.wav
 ```
 
-**当前未覆盖：** 单次请求级别传入图片/音频的视觉多模态（VL 模型的图像通过 CLI
-`--image` 在 server 启动时固定传入）；`gemma4 / hunyuan / lfm2 / llama` 等文本架构
-的服务端流式输出（CLI 仍可用，详见 `cargo run --bin rust-model-inference -- --help`）。
+官方 SDK 验收脚本：
+
+```bash
+python -m pip install openai anthropic openai-agents
+python tools/server/test_api.py --model Qwen3-0.6B-Q8_0
+```
+
+本地 GGUF 验收：Qwen3-0.6B-Q8_0 与 Qwen3.5-0.8B-UD-Q8_K_XL 通过上述全部
+SDK 与 Agent 工具循环；Qwen3VL-2B-Instruct-Q8_0 通过三套文本 JSON/SSE、token
+计数和 Responses continuation，但不支持 function tools。
+
+**当前边界：** 文本生成端点仅支持 Qwen3/Qwen3VL/Qwen3.5；工具由客户端执行；
+Responses 历史只保存在当前 server 进程内；同一时刻只运行一个生成请求。不支持请求内
+图片/音频、云端工具、结构化输出、reasoning 参数或自动上下文截断。
 
 ## License
 
