@@ -39,7 +39,7 @@ impl Qwen3ChunkCapture {
     pub(crate) fn new(requested_layers: &[usize]) -> Self {
         Self {
             requested_layers: requested_layers.to_vec(),
-            layer_inputs: Vec::with_capacity(requested_layers.len()),
+            layer_inputs: vec![Vec::new(); requested_layers.len()],
             hidden: Vec::new(),
             logits: Vec::new(),
         }
@@ -411,10 +411,14 @@ impl Qwen3Session<'_> {
 
         for layer in 0..config.n_layer {
             if let Some(capture) = capture.as_deref_mut() {
-                if capture.requested_layers.contains(&layer) {
-                    capture
-                        .layer_inputs
-                        .push(self.prefill_scratch.x[..rows * config.n_embd].to_vec());
+                for (slot, _) in capture
+                    .requested_layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, requested)| **requested == layer)
+                {
+                    capture.layer_inputs[slot] =
+                        self.prefill_scratch.x[..rows * config.n_embd].to_vec();
                 }
             }
             let weights = &model.layers[layer];
@@ -942,6 +946,50 @@ impl Qwen3Session<'_> {
         let mut capture = Qwen3ChunkCapture::new(&[]);
         self.forward_cpu_chunk(&input, 0..token_ids.len(), true, false, Some(&mut capture))?;
         self.validate_cpu_chunk(base, token_ids.len(), true)?;
+        self.kv_state.seq_len = final_len;
+        self.kv_state.update_access();
+        Ok(capture)
+    }
+
+    pub(crate) fn forward_causal_capture(
+        &mut self,
+        token_ids: &[u32],
+        requested_layers: &[usize],
+    ) -> Result<Qwen3ChunkCapture, String> {
+        if token_ids.is_empty()
+            || requested_layers.is_empty()
+            || requested_layers
+                .iter()
+                .any(|&layer| layer >= self.model.config.n_layer)
+        {
+            return Err("Invalid Qwen3 DSpark target batch".into());
+        }
+        let base = self.kv_state.seq_len;
+        let final_len = base
+            .checked_add(token_ids.len())
+            .ok_or_else(|| "Qwen3 DSpark target length overflow".to_string())?;
+        if final_len > self.capacity {
+            return Err(format!(
+                "Qwen3 DSpark target requires capacity {final_len}; session has {}",
+                self.capacity
+            ));
+        }
+        let positions = (base..final_len)
+            .map(|position| [position, 0, 0, 0])
+            .collect::<Vec<_>>();
+        self.prefill_scratch.reset_for(token_ids.len(), self.model);
+        let input = Qwen3Input {
+            token_ids,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let mut capture = Qwen3ChunkCapture::new(requested_layers);
+        self.forward_cpu_chunk(&input, 0..token_ids.len(), true, true, Some(&mut capture))?;
+        self.validate_cpu_chunk(base, token_ids.len(), true)?;
+        if capture.layer_inputs.iter().any(Vec::is_empty) {
+            return Err("Qwen3 did not capture every DSpark target layer".into());
+        }
         self.kv_state.seq_len = final_len;
         self.kv_state.update_access();
         Ok(capture)

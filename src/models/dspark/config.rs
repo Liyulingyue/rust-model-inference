@@ -38,7 +38,13 @@ impl DSparkConfig {
 
         let block_size = positive_usize(source, "dflash.block_size")?;
         let target_layers = usize_array(source, "dflash.target_layers")?;
-        if target_layers.is_empty() || target_layers.iter().any(|&layer| layer > target.layers) {
+        let invalid_target_layers = target_layers.is_empty()
+            || target_layers.iter().any(|&layer| layer >= target.layers)
+            || target_layers
+                .iter()
+                .enumerate()
+                .any(|(index, layer)| target_layers[..index].contains(layer));
+        if invalid_target_layers {
             return Err(format!(
                 "Invalid dflash.target_layers for target with {} layers",
                 target.layers

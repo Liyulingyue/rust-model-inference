@@ -252,6 +252,18 @@ impl<'model> DSparkSession<'model> {
         })
     }
 
+    pub fn position(&self) -> usize {
+        self.session.kv_state.seq_len
+    }
+
+    pub fn target_layers(&self) -> &[usize] {
+        &self.model.config.target_layers
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.model.config.block_size
+    }
+
     pub fn inject(&mut self, position: usize, features: &[f32]) -> Result<(), String> {
         if position > self.session.kv_state.seq_len || position >= self.session.capacity {
             return Err(format!("Invalid DSpark injection position: {position}"));

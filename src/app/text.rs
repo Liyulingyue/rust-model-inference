@@ -46,7 +46,6 @@ pub fn run_inference(
     prefill_batch_size: usize,
     dspark: Option<DSparkOptions>,
 ) -> Result<(), String> {
-    let _ = dspark;
     let arch = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -145,6 +144,7 @@ pub fn run_inference(
             profile,
             kv_format,
             prefill_batch_size,
+            dspark,
         )
     }
 }
