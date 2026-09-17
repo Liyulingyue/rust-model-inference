@@ -16,8 +16,8 @@ with weight-norm already folded, and the fixed kaiser filters are emitted too).
 Tensor naming rules follow docs/superpowers/specs/2026-09-01-dots-tts-gguf-rust-design.md.
 
 Usage:
-  python3 tools/dots/convert_dots_tts.py models/dots.tts-base [--variant base] [--out-dir DIR] [--quant bf16|q8_0]
-  python3 tools/dots/convert_dots_tts.py models/dots.tts.edit [--variant edit] [--out-dir DIR] [--quant bf16|q8_0]
+  python3 tools/converter/dots/convert_dots_tts.py models/dots.tts-base [--variant base] [--out-dir DIR] [--quant bf16|q8_0]
+  python3 tools/converter/dots/convert_dots_tts.py models/dots.tts.edit [--variant edit] [--out-dir DIR] [--quant bf16|q8_0]
 """
 
 from __future__ import annotations

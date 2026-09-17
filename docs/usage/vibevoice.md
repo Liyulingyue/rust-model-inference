@@ -8,6 +8,13 @@ VibeVoice ASR（microsoft/VibeVoice-ASR-Streaming-7B）是 arch-qwen2 LLM +
 > 必须**同时**传 `--mmproj`（含 `vibevoice_asr` projector 元数据）和
 > `--audio`（WAV）。
 
+从原始 checkpoint 导出时使用：
+
+```bash
+python3 tools/converter/vibevoice/convert_vibevoice_asr.py \
+  models/VibeVoice-ASR-Streaming-7B --out-dir models
+```
+
 ## 1. 推理
 
 ```bash

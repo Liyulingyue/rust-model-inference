@@ -97,7 +97,7 @@ cargo run --release --bin rust-model-inference -- \
 先把 [GD-ML/DreamX-Creator](https://modelscope.cn/models/GD-ML/DreamX-Creator) 的原始目录导出成匹配的 `DreamX-Creator-Q8_0.gguf` 和 `mmproj-DreamX-Creator-BF16.gguf`：
 
 ```bash
-python3 tools/dreamx/convert_dreamx_creator.py \
+python3 tools/converter/dreamx/convert_dreamx_creator.py \
   models/DreamX-Creator \
   --out-dir models/DreamX-Creator \
   --outtype q8_0
@@ -129,9 +129,9 @@ Rust 运行时不链接 OpenBLAS、BLIS、MKL、Accelerate、oneDNN、llama.cpp 
 从官方 checkpoint 导出，LLM 和 mmproj 同时量化：
 
 ```bash
-python3 tools/dots/convert_dots_tts.py models/dots.tts-base \
+python3 tools/converter/dots/convert_dots_tts.py models/dots.tts-base \
   --variant base --quant q8_0 --out-dir models/dots-base-q8
-python3 tools/dots/convert_dots_tts.py models/dots.tts.edit \
+python3 tools/converter/dots/convert_dots_tts.py models/dots.tts.edit \
   --variant edit --quant q8_0 --out-dir models/dots-edit-q8
 
 cargo run --release --bin rust-model-inference -- \

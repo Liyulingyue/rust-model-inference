@@ -24,8 +24,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from converter.utils.gguf import (  # noqa: E402
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from tools.converter.utils.gguf import (  # noqa: E402
     GGML_BF16,
     GGML_F16,
     GGML_F32,

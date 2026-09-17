@@ -1,34 +1,33 @@
 # tools/converter
 
-镜像 `tools/{breeze,dots,vibevoice}/` 的 GGUF 转换器副本，作为模块化
-重构的起点。原 `tools/<model>/` 目录**完全保留**，所有现有脚本、CI、
-文档路径不变；本目录只用于：
-
-1. 演进共享 GGUF / 量化 / safetensors 工具层（`utils/`）。
-2. 在不影响原路径的前提下，逐步把副本切换到 `utils` 共享层。
-3. 作为新转换器的入口（后续 `dreamx`、自定义模型优先放这里）。
+所有 GGUF 转换器、转换器测试和转换必需的数据都集中在这里。
+模型专用的 Oracle、trace、README 和构建脚本仍留在 `tools/<model>/`。
 
 ## 目录结构
 
 ```
 converter/
-├── README.md          ← 本文件
-├── __init__.py        ← 空，让 `converter.utils.gguf` 成为 canonical import
-├── utils/
-│   ├── __init__.py
-│   └── gguf.py        ← 共享 GGUF writer/reader、dtype 转换、quantize_q8_0
-├── breeze/            ← 1:1 副本；已切换 import 到 converter.utils.gguf
-├── dots/              ← 1:1 副本；自包含（含 GgufWriter 等定义），下一步切 utils
-└── vibevoice/         ← 1:1 副本；通过 sys.path 引用副本 dots
+├── breeze/       ← 原版与扩展精度转换器
+├── dots/         ← dots writer、转换器和测试
+├── dreamx/       ← DreamX 转换器和测试
+├── neohorse/     ← NeoHorse 转换器和测试
+├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
+├── vibevoice/    ← 原版与扩展精度转换器
+└── utils/        ← 共享 GGUF reader/writer、dtype 和量化工具
 ```
 
-## 切换进度
+## 实现边界
 
-| 子目录 | 状态 | 备注 |
-|---|---|---|
-| `breeze/convert_breeze.py` | ✅ 已切到 `converter.utils.gguf` | 支持 `--quant bf16/f16/f32/q8_0/q4_0` 和 `--codec-quant f32/q8_0` |
-| `dots/convert_dots_tts.py` | ⏳ 自包含副本 | 仍带本地 `GgufWriter` 等；下一步抽 |
-| `vibevoice/convert_vibevoice_asr.py` | ⏳ 自包含副本 | 通过 `sys.path` 引用副本 `dots` |
+| 路径 | 备注 |
+|---|---|
+| `breeze/convert_breeze_plain.py` | 原版未量化导出 |
+| `breeze/convert_breeze.py` | 支持 `--quant bf16/f16/f32/q8_0/q4_0/q4_mixed` 和 `--codec-quant f32/q8_0` |
+| `dots/convert_dots_tts.py` | dots 专用 writer 与 BF16/Q8_0 导出 |
+| `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
+| `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
+| `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
+| `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
+| `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
 
 ## breeze 量化支持现状
 
@@ -66,37 +65,25 @@ read_gguf_directory, read_gguf_tensor_bytes
 load_latent_stats
 ```
 
-`GgufWriter` 输出的 GGUF 文件与原 `tools/dots/convert_dots_tts.GgufWriter`
-**字节一致**（相同的 dialect：u64 字符串长度、tensor nbytes 字段存
-aligned 相对偏移、32-byte 对齐）。
+`utils` 的 writer 与 dots writer 在原子写入、覆盖及读回校验上行为不同，
+不可直接互换；dots 的 Q8 量化也使用不同的缩放计算方式，故未合并。
 
 ## 跑测试
 
 ```bash
-# breeze 副本
-.venv/bin/python tools/converter/breeze/test_convert_breeze.py
-
-# dots 副本（自包含）
-.venv/bin/python tools/converter/dots/test_convert_dots_tts.py
-
-# vibevoice 副本（sys.path 引用副本 dots）
-PYTHONPATH=tools .venv/bin/python tools/converter/vibevoice/test_convert_vibevoice_asr.py
+PYTHONPATH=. python3 -m unittest \
+  tools.converter.breeze.test_convert_breeze_plain \
+  tools.converter.breeze.test_convert_breeze \
+  tools.converter.dots.test_convert_dots_tts \
+  tools.converter.dreamx.test_convert_dreamx_creator \
+  tools.converter.neohorse.test_convert_neohorse \
+  tools.converter.qwen_drive.test_convert_qwen_drive \
+  tools.converter.vibevoice.test_convert_vibevoice_asr_original \
+  tools.converter.vibevoice.test_convert_vibevoice_asr
 ```
-
-## 渐进迁移步骤
-
-1. ✅ 抽 `converter/utils/gguf.py`（含 GgufWriter / reader / dtype / quant）。
-2. ✅ breeze 副本切换到 utils。
-3. ⏳ dots 副本去重：把 `convert_dots_tts.py` 内嵌的 GgufWriter / Tensor / 量化
-   删掉，改 import 自 `converter.utils.gguf`；保证 20/20 测试通过。
-4. ⏳ vibevoice 副本去重：把 `quantize_q8_0` 等本地定义删掉，改 import 自
-   `converter.utils.gguf`。
-5. ⏳ dreamx / 未来新转换器直接放 `converter/<model>/`，import 自 utils。
 
 ## 不变原则
 
-- `tools/<model>/` 原目录**永远不动**（用户明确指示）。
-- 本目录**不是**新对外约定，仓库其他子系统（CI、文档、脚本）仍以
-  `tools/<model>/` 为准。
-- utils API 变更必须保持字节兼容（与原 `convert_dots_tts.GgufWriter`
-  输出可逐字节对齐）。
+- 转换代码只放在 `tools/converter/<model>/`，旧路径不保留包装或软链接。
+- Oracle、trace 和构建脚本继续放在 `tools/<model>/`。
+- 更改已使用的 utils API 时，保持现有输出的字节兼容。

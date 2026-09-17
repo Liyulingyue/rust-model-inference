@@ -8,15 +8,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.dots.convert_dots_tts import (
+from tools.converter.dots.convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
     GgufWriter,
     read_gguf_directory,
     read_gguf_tensor_bytes,
 )
-from tools.qwen_drive import convert_qwen_drive as converter
-from tools.qwen_drive.convert_qwen_drive import (
+from tools.converter.qwen_drive import convert_qwen_drive as converter
+from tools.converter.qwen_drive.convert_qwen_drive import (
     export_head,
     export_model,
     output_paths,
@@ -304,9 +304,9 @@ class QwenDriveExportTest(unittest.TestCase):
                 verify_outputs(paths, model_dir=root, manifest=manifest)
 
     def test_script_entrypoint_imports_repo_tools(self):
-        repo = Path(__file__).resolve().parents[2]
+        repo = Path(__file__).resolve().parents[3]
         result = subprocess.run(
-            [sys.executable, str(repo / "tools/qwen_drive/convert_qwen_drive.py"), "--help"],
+            [sys.executable, str(repo / "tools/converter/qwen_drive/convert_qwen_drive.py"), "--help"],
             cwd=repo,
             capture_output=True,
             text=True,

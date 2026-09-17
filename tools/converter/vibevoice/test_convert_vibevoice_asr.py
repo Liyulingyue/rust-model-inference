@@ -1,4 +1,3 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,11 +5,10 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
-from converter.utils.gguf import Tensor  # noqa: E402
-from converter.utils.gguf import quantize_q8_0  # noqa: E402
-from converter.vibevoice import convert_vibevoice_asr as converter  # noqa: E402
-from converter.vibevoice.convert_vibevoice_asr import (  # noqa: E402
+from tools.converter.utils.gguf import Tensor
+from tools.converter.utils.gguf import quantize_q8_0
+from tools.converter.vibevoice import convert_vibevoice_asr as converter
+from tools.converter.vibevoice.convert_vibevoice_asr import (
     ENCODER_DEPTHS,
     GGML_Q8_0,
     LLM_FILENAME,
@@ -33,7 +31,7 @@ from tools.vibevoice.vibevoice_llm_oracle import (
     tensor_to_f32,
 )
 
-shared_dots = sys.modules["convert_dots_tts"]
+shared_dots = converter._dots
 
 
 class FakeReader:
@@ -47,6 +45,10 @@ class FakeReader:
 
 
 class ConverterContractTests(unittest.TestCase):
+    def test_converter_reuses_canonical_helpers(self):
+        self.assertIs(converter.quantize_q8_0, quantize_q8_0)
+        self.assertEqual(Path(shared_dots.__file__).resolve(), ROOT / "tools/converter/dots/convert_dots_tts.py")
+
     def test_import_keeps_shared_q8_row_width_validation(self):
         with self.assertRaisesRegex(ValueError, "row width"):
             shared_dots._tensor_nbytes(GGML_Q8_0, (16, 2))
@@ -77,7 +79,7 @@ class ConverterContractTests(unittest.TestCase):
     def test_q8_0_rounds_half_away_from_zero_and_encodes_zero_block(self):
         values = np.zeros(64, dtype=np.float32)
         values[:5] = [-127.0, -0.5, 0.5, 1.5, 127.0]
-        raw = quantize_q8_0(values)
+        raw = converter.quantize_q8_0(values)
         blocks = np.frombuffer(raw, dtype=np.uint8).reshape(2, 34)
         self.assertEqual(blocks[0, :2].copy().view(np.float16)[0], np.float16(1.0))
         self.assertEqual(blocks[0, 2:7].view(np.int8).tolist(), [-127, -1, 1, 2, 127])

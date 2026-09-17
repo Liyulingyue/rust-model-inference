@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from convert_neohorse import validate_source
+from tools.converter.neohorse.convert_neohorse import validate_source
 
 
 class SourceValidationTest(unittest.TestCase):
