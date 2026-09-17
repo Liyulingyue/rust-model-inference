@@ -19,7 +19,7 @@ Regenerate and review the manifest:
 ```bash
 python3 tools/converter/qwen_drive/convert_qwen_drive.py inspect \
   /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B \
-  --write-manifest tools/qwen_drive/source-tensors.json
+  --write-manifest tools/converter/qwen_drive/source-tensors.json
 ```
 
 ## Export and verify

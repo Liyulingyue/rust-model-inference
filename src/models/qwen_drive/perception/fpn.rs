@@ -425,7 +425,7 @@ pub(crate) struct TensorContract {
 pub(crate) fn perception_contracts() -> Result<Vec<TensorContract>, String> {
     serde_json::from_str::<SourceManifest>(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tools/qwen_drive/source-tensors.json"
+        "/tools/converter/qwen_drive/source-tensors.json"
     )))
     .map(|manifest| manifest.components.perception.tensors)
     .map_err(|error| format!("Invalid embedded Qwen-Drive tensor manifest: {error}"))
