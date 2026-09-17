@@ -52,6 +52,10 @@ pub fn verify_ids(draft: &[u32], target: &[u32]) -> Verification {
     Verification::Accepted(draft.len().min(target.len()))
 }
 
+fn should_fallback(drafted: usize, accepted: usize) -> bool {
+    drafted == 0 || accepted.saturating_mul(2) < drafted
+}
+
 pub fn prefill<T: DSparkTarget>(
     target: &mut T,
     draft: &mut DSparkSession<'_>,
@@ -101,15 +105,23 @@ pub fn run_greedy<T: DSparkTarget>(
 
     let target_layers = draft.target_layers().to_vec();
     let mut catch_up = false;
+    let mut target_only = false;
     while generated < options.max_tokens {
-        ensure_aligned(target, draft)?;
+        if !target_only {
+            ensure_aligned(target, draft)?;
+        }
         let remaining = options.max_tokens - generated;
-        let keep = if catch_up {
+        let keep = if target_only || catch_up {
             0
         } else {
             options.draft_n_max.min(remaining.saturating_sub(1))
         };
-        let base = draft.position();
+        let base = if target_only {
+            target.position()
+        } else {
+            draft.position()
+        };
+        let draft_started = std::time::Instant::now();
         let draft_ids = if keep == 0 {
             Vec::new()
         } else {
@@ -119,12 +131,15 @@ pub fn run_greedy<T: DSparkTarget>(
             token_ids.truncate(keep);
             token_ids
         };
+        let draft_elapsed = draft_started.elapsed();
         stats.drafted = stats
             .drafted
             .checked_add(draft_ids.len())
             .ok_or("DSpark drafted token counter overflow")?;
 
+        let target_started = std::time::Instant::now();
         let step = run_step(target, pending, &draft_ids, &target_layers)?;
+        let target_elapsed = target_started.elapsed();
         stats.target_evaluations = stats
             .target_evaluations
             .checked_add(step.target_evaluations)
@@ -145,8 +160,28 @@ pub fn run_greedy<T: DSparkTarget>(
             .checked_add(accepted)
             .ok_or("DSpark accepted token counter overflow")?;
         catch_up = matches!(step.verification, Verification::Rejected { .. });
-        inject_features(draft, base, &step.features)?;
-        ensure_aligned(target, draft)?;
+        let fallback = keep > 0
+            && std::env::var_os("RUST_DSPARK_TRACE_IDS").is_none()
+            && should_fallback(draft_ids.len(), accepted);
+        let inject_elapsed = if target_only || fallback {
+            target_only = true;
+            std::time::Duration::ZERO
+        } else {
+            let inject_started = std::time::Instant::now();
+            inject_features(draft, base, &step.features)?;
+            ensure_aligned(target, draft)?;
+            inject_started.elapsed()
+        };
+        if std::env::var_os("RUST_DSPARK_TRACE_TIMING").is_some() {
+            eprintln!(
+                "[DSPARK_TIMING] drafted={} accepted={} draft_ms={:.3} target_ms={:.3} inject_ms={:.3} target_only={target_only}",
+                draft_ids.len(),
+                accepted,
+                draft_elapsed.as_secs_f64() * 1000.0,
+                target_elapsed.as_secs_f64() * 1000.0,
+                inject_elapsed.as_secs_f64() * 1000.0,
+            );
+        }
 
         pending = step.next_pending;
         for token in step.output_ids {
@@ -284,13 +319,7 @@ fn inject_features(
     base: usize,
     features: &[Vec<f32>],
 ) -> Result<(), String> {
-    for (row, features) in features.iter().enumerate() {
-        let position = base
-            .checked_add(row)
-            .ok_or("DSpark injection position overflow")?;
-        draft.inject(position, features)?;
-    }
-    Ok(())
+    draft.inject_batch(base, features)
 }
 
 fn ensure_aligned<T: DSparkTarget>(target: &T, draft: &DSparkSession<'_>) -> Result<(), String> {
@@ -354,7 +383,7 @@ impl DSparkTarget for Qwen3Session<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_step, verify_ids, DSparkTarget, TargetBatch, Verification};
+    use super::{run_step, should_fallback, verify_ids, DSparkTarget, TargetBatch, Verification};
     use std::collections::VecDeque;
 
     struct FakeTarget {
@@ -435,6 +464,15 @@ mod tests {
                 target: 9,
             }
         );
+    }
+
+    #[test]
+    fn low_acceptance_falls_back_after_the_first_draft_block() {
+        assert!(should_fallback(7, 0));
+        assert!(should_fallback(7, 3));
+        assert!(!should_fallback(7, 4));
+        assert!(!should_fallback(7, 7));
+        assert!(should_fallback(0, 0));
     }
 
     #[test]

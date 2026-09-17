@@ -6,7 +6,7 @@ use crate::core::tokenizer::BPETokenizer;
 use crate::models::qwen3::trunk::{
     load_layers_static, Qwen3Config, Qwen3Model, Qwen3Rope, Qwen3Session,
 };
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 use crate::ops::{f32_slice_to_f16, rms_norm, rms_norm_inplace, rope_neox_inplace};
 use std::sync::Arc;
 
@@ -278,8 +278,12 @@ impl<'model> DSparkSession<'model> {
     }
 
     pub fn inject(&mut self, position: usize, features: &[f32]) -> Result<(), String> {
-        if position > self.session.kv_state.seq_len || position >= self.session.capacity {
-            return Err(format!("Invalid DSpark injection position: {position}"));
+        self.inject_rows(position, features, 1)
+    }
+
+    pub fn inject_batch(&mut self, base: usize, features: &[Vec<f32>]) -> Result<(), String> {
+        if features.is_empty() {
+            return Ok(());
         }
         let expected = self
             .model
@@ -288,42 +292,99 @@ impl<'model> DSparkSession<'model> {
             .len()
             .checked_mul(self.target_hidden)
             .ok_or("DSpark feature width overflow")?;
-        if features.len() != expected || features.iter().any(|value| !value.is_finite()) {
+        let mut flat = Vec::with_capacity(
+            features
+                .len()
+                .checked_mul(expected)
+                .ok_or("DSpark feature batch overflow")?,
+        );
+        for row in features {
+            if row.len() != expected || row.iter().any(|value| !value.is_finite()) {
+                return Err(format!(
+                    "Invalid DSpark feature width: expected {expected}, got {}",
+                    row.len()
+                ));
+            }
+            flat.extend_from_slice(row);
+        }
+        self.inject_rows(base, &flat, features.len())
+    }
+
+    fn inject_rows(&mut self, base: usize, features: &[f32], rows: usize) -> Result<(), String> {
+        let end = base
+            .checked_add(rows)
+            .ok_or("DSpark injection position overflow")?;
+        if rows == 0 || base > self.session.kv_state.seq_len || end > self.session.capacity {
+            return Err(format!("Invalid DSpark injection range: {base}..{end}"));
+        }
+        let expected = self
+            .model
+            .config
+            .target_layers
+            .len()
+            .checked_mul(self.target_hidden)
+            .ok_or("DSpark feature width overflow")?;
+        let feature_len = rows
+            .checked_mul(expected)
+            .ok_or("DSpark feature batch overflow")?;
+        if features.len() != feature_len || features.iter().any(|value| !value.is_finite()) {
             return Err(format!(
-                "Invalid DSpark feature width: expected {expected}, got {}",
+                "Invalid DSpark feature batch: expected {feature_len}, got {}",
                 features.len()
             ));
         }
         #[cfg(feature = "parity-trace")]
-        crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "dspark.target_features",
-            None,
-            &[features.len()],
-            features,
-        ));
+        for row in features.chunks_exact(expected) {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.target_features",
+                None,
+                &[row.len()],
+                row,
+            ));
+        }
         let hidden = self.model.config.hidden;
-        let mut fused = self.model.encoder.matmul(features);
-        #[cfg(feature = "parity-trace")]
-        crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "dspark.fc_out",
-            None,
-            &[hidden],
-            &fused,
-        ));
-        let mut normalized = vec![0.0; hidden];
-        rms_norm(
+        let mut fused = vec![0.0; rows * hidden];
+        let mut encoder_prepared = PreparedRows::new(rows, expected);
+        encoder_prepared.prepare(
+            features,
+            rows,
+            expected,
+            self.model.encoder.needs_q8_0_activation(),
+            self.model.encoder.uses_q8_k(),
+        )?;
+        encoder_prepared.matmul(
+            &self.model.encoder,
+            features,
             &mut fused,
-            &self.model.encoder_norm,
-            &mut normalized,
-            self.model.config.eps,
-        );
+            &self.model.backbone.pool,
+        )?;
         #[cfg(feature = "parity-trace")]
-        crate::parity_trace::report(crate::parity_trace::checkpoint(
-            "dspark.enc_norm_out",
-            None,
-            &[hidden],
-            &normalized,
-        ));
+        for row in fused.chunks_exact(hidden) {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.fc_out",
+                None,
+                &[hidden],
+                row,
+            ));
+        }
+        let mut normalized = vec![0.0; rows * hidden];
+        for row in 0..rows {
+            rms_norm(
+                &mut fused[row * hidden..(row + 1) * hidden],
+                &self.model.encoder_norm,
+                &mut normalized[row * hidden..(row + 1) * hidden],
+                self.model.config.eps,
+            );
+        }
+        #[cfg(feature = "parity-trace")]
+        for row in normalized.chunks_exact(hidden) {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.enc_norm_out",
+                None,
+                &[hidden],
+                row,
+            ));
+        }
         let kv_width = self
             .model
             .config
@@ -337,36 +398,55 @@ impl<'model> DSparkSession<'model> {
             .checked_mul(self.session.capacity)
             .and_then(|len| len.checked_mul(kv_width))
             .ok_or("DSpark cache length overflow")?;
+        let mut prepared = PreparedRows::new(rows, hidden);
+        let need_q8 = self.model.backbone.layers.iter().any(|weights| {
+            weights.wk.needs_q8_0_activation() || weights.wv.needs_q8_0_activation()
+        });
+        let need_q8k = self
+            .model
+            .backbone
+            .layers
+            .iter()
+            .any(|weights| weights.wk.uses_q8_k() || weights.wv.uses_q8_k());
+        prepared.prepare(&normalized, rows, hidden, need_q8, need_q8k)?;
+        let mut key = vec![0.0; rows * kv_width];
+        let mut value = vec![0.0; rows * kv_width];
         for (layer, weights) in self.model.backbone.layers.iter().enumerate() {
-            let mut key = weights.wk.matmul(&normalized);
-            let value = weights.wv.matmul(&normalized);
+            prepared.matmul_group(
+                &normalized,
+                [(&weights.wk, &mut key), (&weights.wv, &mut value)],
+                &self.model.backbone.pool,
+            )?;
             let key_norm = weights.k_norm.as_deref().ok_or("Missing DSpark key norm")?;
-            for head in key.chunks_exact_mut(self.model.config.head_dim) {
-                rms_norm_inplace(head, key_norm, self.model.config.eps);
-                rope_neox_inplace(
-                    head,
-                    position,
-                    self.model.config.head_dim,
-                    self.model.config.rope_base,
-                );
-            }
-            let offset = (layer * self.session.capacity + position) * kv_width;
-            match &mut self.session.kv_state.cache {
-                KvCache::F16(cache) => {
-                    debug_assert_eq!(cache.k.len(), cache_len);
-                    f32_slice_to_f16(&key, &mut cache.k[offset..offset + kv_width]);
-                    f32_slice_to_f16(&value, &mut cache.v[offset..offset + kv_width]);
+            for row in 0..rows {
+                let position = base + row;
+                let key = &mut key[row * kv_width..(row + 1) * kv_width];
+                let value = &value[row * kv_width..(row + 1) * kv_width];
+                for head in key.chunks_exact_mut(self.model.config.head_dim) {
+                    rms_norm_inplace(head, key_norm, self.model.config.eps);
+                    rope_neox_inplace(
+                        head,
+                        position,
+                        self.model.config.head_dim,
+                        self.model.config.rope_base,
+                    );
                 }
-                KvCache::F32(cache) => {
-                    debug_assert_eq!(cache.k.len(), cache_len);
-                    cache.k[offset..offset + kv_width].copy_from_slice(&key);
-                    cache.v[offset..offset + kv_width].copy_from_slice(&value);
+                let offset = (layer * self.session.capacity + position) * kv_width;
+                match &mut self.session.kv_state.cache {
+                    KvCache::F16(cache) => {
+                        debug_assert_eq!(cache.k.len(), cache_len);
+                        f32_slice_to_f16(key, &mut cache.k[offset..offset + kv_width]);
+                        f32_slice_to_f16(value, &mut cache.v[offset..offset + kv_width]);
+                    }
+                    KvCache::F32(cache) => {
+                        debug_assert_eq!(cache.k.len(), cache_len);
+                        cache.k[offset..offset + kv_width].copy_from_slice(key);
+                        cache.v[offset..offset + kv_width].copy_from_slice(value);
+                    }
                 }
             }
         }
-        self.session.kv_state.seq_len = position
-            .checked_add(1)
-            .ok_or("DSpark injection position overflow")?;
+        self.session.kv_state.seq_len = end;
         self.session.kv_state.update_access();
         Ok(())
     }
@@ -830,8 +910,8 @@ mod tests {
                 .tensor("blk.0.attn_k_norm.weight", &[2], &[1.0, 1.0])
                 .tensor("blk.0.ffn_norm.weight", &[2], &[1.0, 1.0])
                 .tensor("blk.0.attn_q.weight", &[2, 2], &zero_2x2)
-                .tensor("blk.0.attn_k.weight", &[2, 2], &zero_2x2)
-                .tensor("blk.0.attn_v.weight", &[2, 2], &zero_2x2)
+                .tensor("blk.0.attn_k.weight", &[2, 2], &[1.0, 0.0, 0.0, 1.0])
+                .tensor("blk.0.attn_v.weight", &[2, 2], &[0.5, -0.25, 1.5, 0.75])
                 .tensor("blk.0.attn_output.weight", &[2, 2], &zero_2x2)
                 .tensor("blk.0.ffn_gate.weight", &[2, 2], &zero_2x2)
                 .tensor("blk.0.ffn_up.weight", &[2, 2], &zero_2x2)
@@ -878,6 +958,55 @@ mod tests {
         let weight = load_weight(&source, "weight", 3, 1).unwrap();
 
         assert_eq!(weight.matmul(&[1.001, -1.0, 0.0]), vec![0.0]);
+    }
+
+    #[test]
+    fn batch_injection_matches_sequential_cache_bits() {
+        let features = vec![vec![1.0, 2.0], vec![-3.0, 0.5], vec![0.25, -0.75]];
+        let mut sequential = fixture_session();
+        let mut batched = fixture_session();
+        for (row, features) in features.iter().enumerate() {
+            sequential.inject(row, features).unwrap();
+        }
+
+        batched.inject_batch(0, &features).unwrap();
+
+        assert_eq!(batched.position(), sequential.position());
+        match (
+            &batched.session.kv_state.cache,
+            &sequential.session.kv_state.cache,
+        ) {
+            (
+                crate::core::scratchpad::KvCache::F32(actual),
+                crate::core::scratchpad::KvCache::F32(expected),
+            ) => {
+                assert_eq!(
+                    actual
+                        .k
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .k
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    actual
+                        .v
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .v
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+            }
+            _ => panic!("fixture must use F32 KV caches"),
+        }
     }
 
     #[test]

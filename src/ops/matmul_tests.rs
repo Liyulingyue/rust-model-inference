@@ -153,6 +153,73 @@ fn sequential_weight_rows(weight: &Weight<'_>, input: &[f32], rows: usize) -> Ve
 }
 
 #[test]
+fn prepared_rows_dispatches_one_multirow_call_per_worker() {
+    use crate::ops::kernel::Kernel;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct MultirowOnly(Arc<AtomicUsize>);
+    impl Kernel for MultirowOnly {
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("prepared rows must use the multirow entry point");
+        }
+
+        fn forward_prepared_rows(
+            &self,
+            input_f32: &[f32],
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _q8_k: Option<&[BlockQ8K]>,
+            output: &mut [f32],
+            rows: usize,
+            n_in: usize,
+            n_out: usize,
+            ith: usize,
+            nth: usize,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let per_thread = n_out.div_ceil(nth);
+            let start = ith * per_thread;
+            let end = (start + per_thread).min(n_out);
+            for row in 0..rows {
+                for out_idx in start..end {
+                    output[row * n_out + out_idx] = input_f32[row * n_in] + out_idx as f32;
+                }
+            }
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let weight = Weight {
+        kernel: Box::new(MultirowOnly(Arc::clone(&calls))),
+        ggml_type: GGMLType::F32,
+        n_in: 2,
+        n_out: 2,
+    };
+    let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let mut prepared = PreparedRows::new(3, 2);
+    prepared.prepare(&input, 3, 2, false, false).unwrap();
+    let mut output = [f32::NAN; 6];
+    prepared
+        .matmul(&weight, &input, &mut output, &ComputePool::new(1))
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(output, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
 fn prepared_rows_match_sequential_matmul_bits_and_reuse_storage() {
     for weight in prepared_row_test_weights() {
         for rows in [1, 2, 3, 17] {

@@ -17,6 +17,79 @@ pub(crate) fn dot_bf16(weight: &[u8], input: &[u8]) -> f32 {
     sum as f32
 }
 
+pub(crate) fn forward_bf16_input_rows(
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    rows: usize,
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    let (start, end) = BF16Kernel::row_range(n_out, ith, nth);
+    let mut sums = vec![0.0f64; rows];
+    for out_idx in start..end {
+        sums.fill(0.0);
+        let row_start = out_idx * n_in * 2;
+        for in_idx in 0..n_in {
+            let weight_offset = row_start + in_idx * 2;
+            let bits = u16::from_le_bytes([weight[weight_offset], weight[weight_offset + 1]]);
+            let weight = crate::ops::bf16_to_f32(bits);
+            for row in 0..rows {
+                sums[row] += f64::from(weight * input[row * n_in + in_idx]);
+            }
+        }
+        for row in 0..rows {
+            output[row * n_out + out_idx] = sums[row] as f32;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dot_bf16, forward_bf16_input_rows};
+
+    #[test]
+    fn bf16_input_rows_match_sequential_bits() {
+        let rows = 7;
+        let n_in = 32;
+        let n_out = 5;
+        let weight = (0..n_in * n_out)
+            .flat_map(|index| {
+                crate::ops::f32_to_bf16(((index * 17 % 101) as f32 - 50.0) * 0.013).to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        let input = (0..rows * n_in)
+            .map(|index| ((index * 29 % 73) as f32 - 36.0) * 0.017)
+            .collect::<Vec<_>>();
+        let rounded = input
+            .iter()
+            .map(|&value| crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(value)))
+            .collect::<Vec<_>>();
+        let expected = rounded
+            .chunks_exact(n_in)
+            .flat_map(|row| {
+                let row = row
+                    .iter()
+                    .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
+                    .collect::<Vec<_>>();
+                weight
+                    .chunks_exact(n_in * 2)
+                    .map(move |weight| dot_bf16(weight, &row).to_bits())
+            })
+            .collect::<Vec<_>>();
+        let mut actual = vec![0.0; rows * n_out];
+
+        forward_bf16_input_rows(&weight, &rounded, &mut actual, rows, n_in, n_out, 0, 1);
+
+        assert_eq!(
+            actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
 pub fn forward_f32_rows_scalar(
     weight: &[u8],
     input: &[f32],
