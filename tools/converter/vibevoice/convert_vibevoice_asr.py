@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "dots"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import convert_dots_tts as _dots  # noqa: E402
 from convert_dots_tts import (  # noqa: E402
@@ -35,7 +35,7 @@ from convert_dots_tts import (  # noqa: E402
     validated_dir,
 )
 from convert_dots_tts import bf16_to_f32, bf16_to_f16, f32_to_f16, gguf_dims  # noqa: E402
-from converter.utils.gguf import quantize_q4_0  # noqa: E402
+from converter.utils.gguf import quantize_q4_0, quantize_q8_0  # noqa: E402
 
 GGML_F32 = 0
 GGML_BF16 = 30
@@ -43,13 +43,11 @@ GGML_Q8_0 = 8
 GGML_F16 = 1
 GGML_Q4_0 = 2
 
-# The mirrored `convert_dots_tts` only registers Q8_0 in its block-size
+# The dots writer only registers Q8_0 in its block-size
 # table; teach it about Q4_0 (block 32 elements, 18 bytes per block) so
 # that GgufWriter.add_tensor can validate row widths for q4_0 weights.
 _dots._QUANT_BLOCK_BYTES[GGML_Q4_0] = (32, 18)
 
-Q8_BLOCK = 32
-Q8_BLOCK_BYTES = 34  # f16 scale + 32 x int8
 LLM_FILENAME = "VibeVoice-ASR-Streaming-7B-Q8_0.gguf"
 MMPROJ_FILENAME = "mmproj-VibeVoice-ASR-Streaming-7B-BF16.gguf"
 
@@ -134,31 +132,6 @@ def _open_single_shard(path: Path):
 
     reader.tensor = _tensor  # type: ignore[attr-defined]
     return reader
-
-
-# --------------------------------------------------------------------------- #
-# GGML Q8_0 quantization (numpy)
-# --------------------------------------------------------------------------- #
-
-
-def quantize_q8_0(values: np.ndarray) -> bytes:
-    """GGML Q8_0: per 32-element block, f16 scale = amax/127, int8 payload.
-
-    Rounding is round-half-away-from-zero to match ggml's roundf."""
-    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
-    if flat.size % Q8_BLOCK:
-        raise ValueError(f"q8_0 payload {flat.size} is not a multiple of {Q8_BLOCK}")
-    blocks = flat.reshape(-1, Q8_BLOCK)
-    amax = np.max(np.abs(blocks), axis=1)
-    scale = (amax / 127.0).astype(np.float16)
-    scale_f32 = scale.astype(np.float32)
-    safe = np.where(scale_f32 == 0.0, np.float32(1.0), scale_f32)
-    scaled = blocks / safe[:, None]
-    q = (np.floor(np.abs(scaled) + 0.5) * np.sign(scaled)).clip(-127, 127).astype(np.int8)
-    out = np.empty((blocks.shape[0], Q8_BLOCK_BYTES), dtype=np.uint8)
-    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
-    out[:, 2:] = q.view(np.uint8).reshape(-1, Q8_BLOCK)
-    return out.tobytes()
 
 
 def emit_q8_0(gguf: GgufWriter, name: str, tensor: Tensor) -> None:
