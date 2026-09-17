@@ -417,9 +417,8 @@ pub fn run_inference_tokens(
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
         if embedding_scale != 0.0 {
-            for v in scratch.x.iter_mut() {
-                *v *= embedding_scale;
-            }
+            // SIMD: vec_scale_f32 is AVX2+FMA on x86_64 / NEON on aarch64.
+            vec_scale_f32(&mut scratch.x, embedding_scale);
         }
         dbg_tensor(step, "embed_out", 0, &scratch.x);
 
