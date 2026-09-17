@@ -5,7 +5,6 @@ use crate::models::diffusion::dreamx::kernels::{
     conv2d, conv3d_with_options, group_norm_ncthw, Conv3dSpec,
 };
 use crate::models::qwen_drive::config::PerceptionConfig;
-use serde::Deserialize;
 use std::collections::BTreeMap;
 
 unsafe extern "C" {
@@ -401,34 +400,280 @@ pub fn voxel_to_bev_tokens(
     Ok(output)
 }
 
-#[derive(Deserialize)]
-struct SourceManifest {
-    components: SourceComponents,
-}
-
-#[derive(Deserialize)]
-struct SourceComponents {
-    perception: SourceComponent,
-}
-
-#[derive(Deserialize)]
-struct SourceComponent {
-    tensors: Vec<TensorContract>,
-}
-
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct TensorContract {
     pub(crate) name: String,
     pub(crate) shape: Vec<usize>,
 }
 
 pub(crate) fn perception_contracts() -> Result<Vec<TensorContract>, String> {
-    serde_json::from_str::<SourceManifest>(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tools/converter/qwen_drive/source-tensors.json"
-    )))
-    .map(|manifest| manifest.components.perception.tensors)
-    .map_err(|error| format!("Invalid embedded Qwen-Drive tensor manifest: {error}"))
+    const AFFINE: &[&str] = &[".weight", ".bias"];
+    const BATCH_NORM: &[&str] = &[".weight", ".bias", ".running_mean", ".running_var"];
+    // Released perception geometry, independent of the GGUF tensor directory.
+    const FIXED: &[(&str, &[usize])] = &[
+        ("adaptor.stages.0.1.weight", &[1280]),
+        ("adaptor.stages.0.1.bias", &[1280]),
+        ("depth_net.reduce_conv.0.weight", &[256, 256, 3, 3]),
+        ("depth_net.reduce_conv.0.bias", &[256]),
+        ("depth_net.depth_conv.3.conv1.weight", &[256, 480, 1, 1]),
+        (
+            "depth_net.depth_conv.3.global_avg_pool.1.weight",
+            &[96, 256, 1, 1],
+        ),
+        ("depth_net.depth_conv.4.weight", &[118, 256, 1, 1]),
+        ("depth_net.depth_conv.4.bias", &[118]),
+        ("uvtr_query_proj.weight", &[256, 4096, 1, 1]),
+        ("uvtr_query_proj.bias", &[256]),
+        ("head.bev_embedding.weight", &[40000, 256]),
+        ("head.query_embedding.weight", &[900, 512]),
+        ("head.positional_encoding.row_embed.weight", &[200, 128]),
+        ("head.positional_encoding.col_embed.weight", &[200, 128]),
+        ("head.feat_cropper.bev_start_position", &[3]),
+        ("head.transformer.level_embeds", &[4, 256]),
+        ("head.seg_decoder.conv1.weight", &[64, 256, 7, 7]),
+        ("head.seg_decoder.up1.conv.0.weight", &[256, 320, 3, 3]),
+        ("head.seg_decoder.up1.conv.3.weight", &[256, 256, 3, 3]),
+        ("head.seg_decoder.up2.1.weight", &[128, 256, 3, 3]),
+        ("head.seg_decoder.up2.4.weight", &[6, 128, 1, 1]),
+        ("head.seg_decoder.up2.4.bias", &[6]),
+        (
+            "head.transformer.occ_decoder.out_proj.0.weight",
+            &[32, 64, 3, 3, 3],
+        ),
+        (
+            "head.transformer.uvtr_occ_fuse.conv.weight",
+            &[16, 32, 1, 1, 1],
+        ),
+        ("head.transformer.uvtr_occ_proj.weight", &[16, 256, 1, 1, 1]),
+        ("head.transformer.uvtr_occ_proj.bias", &[16]),
+    ];
+    let mut contracts = Vec::new();
+    let mut add = |name: &str, shape: &[usize], suffixes: &[&str]| {
+        for suffix in suffixes {
+            contracts.push(TensorContract {
+                name: format!("bev_modeling.{name}{suffix}"),
+                shape: shape.to_vec(),
+            });
+        }
+    };
+    for &(name, shape) in FIXED {
+        add(name, shape, &[""]);
+    }
+    for (stage, layer, input, output) in [(0, 0, 2560, 1280), (0, 3, 1280, 640), (1, 0, 2560, 1280)]
+    {
+        let name = format!("adaptor.stages.{stage}.{layer}");
+        add(&name, &[input, output, 2, 2], &[".weight"]);
+        add(&name, &[output], &[".bias"]);
+    }
+    for (root, input, first) in [
+        ("adaptor.stages.0", 640, 4),
+        ("adaptor.stages.1", 1280, 1),
+        ("adaptor.stages.2", 2560, 0),
+        ("adaptor.stages.3", 2560, 1),
+        ("vit_neck.stages.0", 1024, 0),
+    ] {
+        add(
+            &format!("{root}.{first}"),
+            &[256, input, 1, 1],
+            &[".weight"],
+        );
+        add(&format!("{root}.{}", first + 1), &[256], AFFINE);
+        add(
+            &format!("{root}.{}", first + 2),
+            &[256, 256, 3, 3],
+            &[".weight"],
+        );
+        add(&format!("{root}.{}", first + 3), &[256], AFFINE);
+    }
+    for block in 0..3 {
+        for layer in 1..=2 {
+            add(
+                &format!("depth_net.depth_conv.{block}.conv{layer}"),
+                &[256, 256, 3, 3],
+                &[".weight"],
+            );
+            add(
+                &format!("depth_net.depth_conv.{block}.gn{layer}"),
+                &[256],
+                AFFINE,
+            );
+        }
+        add(
+            &format!("view_trans.conv_layer.{block}.0"),
+            &[256, 256, 3, 3, 3],
+            &[".weight"],
+        );
+        add(
+            &format!("view_trans.conv_layer.{block}.0"),
+            &[256],
+            &[".bias"],
+        );
+        add(
+            &format!("view_trans.conv_layer.{block}.1"),
+            &[256],
+            BATCH_NORM,
+        );
+    }
+    for (root, channels) in [
+        ("depth_net.reduce_conv.1", 256),
+        ("depth_net.depth_conv.3.bn1", 256),
+        ("depth_net.depth_conv.3.global_avg_pool.2", 96),
+        ("head.seg_decoder.bn1", 64),
+        ("head.seg_decoder.up1.conv.1", 256),
+        ("head.seg_decoder.up1.conv.4", 256),
+        ("head.seg_decoder.up2.2", 128),
+    ] {
+        add(root, &[channels], AFFINE);
+    }
+    for layer in 1..=4 {
+        let root = format!("depth_net.depth_conv.3.aspp{layer}");
+        let kernel = if layer == 1 { 1 } else { 3 };
+        add(
+            &format!("{root}.atrous_conv"),
+            &[96, 256, kernel, kernel],
+            &[".weight"],
+        );
+        add(&format!("{root}.bn"), &[96], AFFINE);
+    }
+    for layer in 0..6 {
+        for (branch, output) in [(0, 256), (3, 256), (6, 7)] {
+            let root = format!("head.cls_branches.{layer}.{branch}");
+            add(&root, &[output, 256], &[".weight"]);
+            add(&root, &[output], &[".bias"]);
+        }
+        for norm in [1, 4] {
+            add(&format!("head.cls_branches.{layer}.{norm}"), &[256], AFFINE);
+        }
+        for (kind, projections) in [
+            (
+                "encoder",
+                &[
+                    ("attentions.0.sampling_offsets", 512, 128),
+                    ("attentions.0.attention_weights", 512, 64),
+                    ("attentions.0.value_proj", 256, 256),
+                    ("attentions.0.output_proj", 256, 256),
+                    (
+                        "attentions.1.deformable_attention.sampling_offsets",
+                        256,
+                        512,
+                    ),
+                    (
+                        "attentions.1.deformable_attention.attention_weights",
+                        256,
+                        256,
+                    ),
+                    ("attentions.1.deformable_attention.value_proj", 256, 256),
+                    ("attentions.1.output_proj", 256, 256),
+                ][..],
+            ),
+            (
+                "decoder",
+                &[
+                    ("attentions.0.attn.out_proj", 256, 256),
+                    ("attentions.1.sampling_offsets", 256, 64),
+                    ("attentions.1.attention_weights", 256, 32),
+                    ("attentions.1.value_proj", 256, 256),
+                    ("attentions.1.output_proj", 256, 256),
+                ][..],
+            ),
+        ] {
+            let root = format!("head.transformer.{kind}.layers.{layer}");
+            for &(suffix, input, output) in projections {
+                add(&format!("{root}.{suffix}"), &[output, input], &[".weight"]);
+                add(&format!("{root}.{suffix}"), &[output], &[".bias"]);
+            }
+            add(
+                &format!("{root}.ffns.0.layers.0.0"),
+                &[512, 256],
+                &[".weight"],
+            );
+            add(&format!("{root}.ffns.0.layers.0.0"), &[512], &[".bias"]);
+            add(
+                &format!("{root}.ffns.0.layers.1"),
+                &[256, 512],
+                &[".weight"],
+            );
+            add(&format!("{root}.ffns.0.layers.1"), &[256], &[".bias"]);
+            for norm in 0..3 {
+                add(&format!("{root}.norms.{norm}"), &[256], AFFINE);
+            }
+        }
+        let root = format!("head.transformer.decoder.layers.{layer}.attentions.0.attn");
+        add(&format!("{root}.in_proj_weight"), &[768, 256], &[""]);
+        add(&format!("{root}.in_proj_bias"), &[768], &[""]);
+    }
+    for (stage, input, output) in [(1, 64, 64), (2, 64, 128), (3, 128, 256)] {
+        for block in 0..2 {
+            let root = format!("head.seg_decoder.layer{stage}.{block}");
+            let channels = if block == 0 { input } else { output };
+            add(
+                &format!("{root}.conv1"),
+                &[output, channels, 3, 3],
+                &[".weight"],
+            );
+            add(
+                &format!("{root}.conv2"),
+                &[output, output, 3, 3],
+                &[".weight"],
+            );
+            for norm in 1..=2 {
+                add(&format!("{root}.bn{norm}"), &[output], AFFINE);
+            }
+            if channels != output {
+                add(
+                    &format!("{root}.downsample.0"),
+                    &[output, channels, 1, 1],
+                    &[".weight"],
+                );
+                add(&format!("{root}.downsample.1"), &[output], AFFINE);
+            }
+        }
+    }
+    for (stage, input, output) in [
+        ("input_proj", 16, 64),
+        ("enc1", 64, 128),
+        ("enc2", 128, 256),
+        ("enc3", 256, 384),
+        ("bottleneck", 384, 384),
+        ("dec2", 640, 256),
+        ("dec1", 384, 128),
+        ("dec0", 192, 64),
+        ("out_block", 64, 64),
+    ] {
+        for block in 0..2 {
+            let root = format!("head.transformer.occ_decoder.{stage}.blocks.{block}");
+            let channels = if block == 0 { input } else { output };
+            add(
+                &format!("{root}.conv1"),
+                &[output, channels, 3, 3, 3],
+                &[".weight"],
+            );
+            add(
+                &format!("{root}.conv2"),
+                &[output, output, 3, 3, 3],
+                &[".weight"],
+            );
+            for norm in 1..=2 {
+                add(&format!("{root}.norm{norm}"), &[output], BATCH_NORM);
+            }
+            if channels != output {
+                add(
+                    &format!("{root}.downsample.0"),
+                    &[output, channels, 1, 1, 1],
+                    &[".weight"],
+                );
+                add(&format!("{root}.downsample.1"), &[output], BATCH_NORM);
+            }
+        }
+    }
+    add("head.transformer.occ_decoder.out_proj.1", &[32], BATCH_NORM);
+    add("head.transformer.uvtr_occ_fuse.bn", &[16], BATCH_NORM);
+    for (layer, input, output) in [(0, 32, 64), (2, 64, 10)] {
+        let root = format!("head.transformer.occ_pred_head.{layer}");
+        add(&root, &[output, input], &[".weight"]);
+        add(&root, &[output], &[".bias"]);
+    }
+    Ok(contracts)
 }
 
 pub(crate) struct F32Tensor {
@@ -1223,6 +1468,7 @@ impl ViewBackbone {
 mod tests {
     use super::*;
     use crate::core::thread_pool::ComputePool;
+    use serde::Deserialize;
 
     #[derive(Deserialize)]
     struct FixtureRoot {
