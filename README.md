@@ -97,7 +97,7 @@ cargo run --release --bin rust-model-inference -- \
 先把 [GD-ML/DreamX-Creator](https://modelscope.cn/models/GD-ML/DreamX-Creator) 的原始目录导出成匹配的 `DreamX-Creator-Q8_0.gguf` 和 `mmproj-DreamX-Creator-BF16.gguf`：
 
 ```bash
-python3 tools/dreamx/convert_dreamx_creator.py \
+python3 tools/converter/dreamx/convert_dreamx_creator.py \
   models/DreamX-Creator \
   --out-dir models/DreamX-Creator \
   --outtype q8_0

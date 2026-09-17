@@ -23,7 +23,7 @@ import numpy as np
 
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.converter.dots import convert_dots_tts as _gguf  # noqa: E402
 from tools.converter.dots.convert_dots_tts import (  # noqa: E402
