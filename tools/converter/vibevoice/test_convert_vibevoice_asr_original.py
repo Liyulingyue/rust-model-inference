@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 
 from tools.converter.dots.convert_dots_tts import Tensor
-from tools.vibevoice import convert_vibevoice_asr as converter
-from tools.vibevoice.convert_vibevoice_asr import (
+from tools.converter.vibevoice import convert_vibevoice_asr_original as converter
+from tools.converter.vibevoice.convert_vibevoice_asr_original import (
     ENCODER_DEPTHS,
     GGML_Q8_0,
     llm_filename,
@@ -57,7 +57,7 @@ class ConverterContractTests(unittest.TestCase):
 
     def test_llm_filename_per_quant_suffix(self):
         from pathlib import Path as _P
-        from tools.vibevoice.convert_vibevoice_asr import (
+        from tools.converter.vibevoice.convert_vibevoice_asr_original import (
             QUANT_KIND_BF16,
             QUANT_KIND_F16,
             QUANT_KIND_F32,
