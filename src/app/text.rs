@@ -1,4 +1,4 @@
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::cli::{resolve_thread_count, DSparkOptions, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -44,7 +44,9 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    dspark: Option<DSparkOptions>,
 ) -> Result<(), String> {
+    let _ = dspark;
     let arch = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -185,6 +187,7 @@ pub fn run_interactive(
             false,
             KvFormat::F16,
             prefill_batch_size,
+            None,
         )?;
         println!();
     }
