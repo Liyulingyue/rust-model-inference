@@ -13,7 +13,7 @@ mod tests {
     use super::perception::bev::BevFormer;
     use super::perception::fpn::{
         conv_transpose2d, depth_softmax, frustum_voxel_coordinates, layer_norm_2d,
-        voxel_to_bev_tokens, ViewBackbone, ViewGeometry,
+        perception_contracts, voxel_to_bev_tokens, ComponentWeights, ViewBackbone, ViewGeometry,
     };
     use super::perception::heads::PerceptionHeads;
     use super::perception::ops::{
@@ -168,6 +168,93 @@ mod tests {
             linear.forward_one(&[1.0, 1.0]).unwrap()[0].to_bits(),
             2.015625f32.to_bits()
         );
+    }
+
+    #[test]
+    fn qwen_drive_perception_contracts_cover_repeated_layers() {
+        let contracts = perception_contracts().unwrap();
+        let inventory = contracts
+            .iter()
+            .map(|contract| (contract.name.as_str(), contract.shape.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(contracts.len(), 741);
+        assert_eq!(inventory.len(), 741);
+        for (name, shape) in [
+            ("adaptor.stages.0.3.weight", &[1280, 640, 2, 2][..]),
+            ("adaptor.stages.3.4.weight", &[256][..]),
+            ("depth_net.depth_conv.3.aspp4.atrous_conv.weight", &[96, 256, 3, 3][..]),
+            ("head.transformer.encoder.layers.5.attentions.1.deformable_attention.sampling_offsets.weight", &[512, 256][..]),
+            ("head.transformer.decoder.layers.5.attentions.0.attn.in_proj_weight", &[768, 256][..]),
+            ("head.cls_branches.5.6.weight", &[7, 256][..]),
+            ("head.seg_decoder.layer3.1.conv1.weight", &[256, 256, 3, 3][..]),
+            ("head.transformer.occ_decoder.dec2.blocks.0.conv1.weight", &[256, 640, 3, 3, 3][..]),
+            ("head.transformer.occ_decoder.enc3.blocks.1.norm2.running_var", &[384][..]),
+            ("view_trans.conv_layer.2.1.running_mean", &[256][..]),
+        ] {
+            assert_eq!(inventory.get(format!("bev_modeling.{name}").as_str()), Some(&shape), "{name}");
+        }
+    }
+
+    #[test]
+    fn qwen_drive_perception_component_weights_validate_gguf() {
+        let contracts = perception_contracts().unwrap();
+        assert!(contracts
+            .iter()
+            .all(|contract| !contract.name.ends_with("num_batches_tracked")));
+        assert!(contracts
+            .iter()
+            .all(|contract| !contract.name.starts_with("bev_modeling.head.reg_branches.")));
+        assert!(contracts.iter().all(|contract| !contract
+            .name
+            .starts_with("bev_modeling.head.transformer.reference_points.")));
+
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.name == "bev_modeling.head.feat_cropper.bev_start_position")
+            .unwrap();
+        let load = |source: &Source| {
+            ComponentWeights::load(source, std::slice::from_ref(contract), &[&contract.name])
+        };
+        let name = "qwen_drive_perception.head.feat_cropper.bev_start_position";
+        let mut source = Source::default();
+        source.tensors.insert(
+            name.into(),
+            (
+                TensorInfo {
+                    name: name.into(),
+                    dims: vec![3],
+                    ggml_type: GGMLType::F32,
+                    offset: 0,
+                },
+                [1.0f32, 2.0, 3.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+        );
+        let loaded = load(&source).unwrap();
+        assert_eq!(
+            loaded.tensor(&contract.name, &[3]).unwrap().values,
+            [1.0, 2.0, 3.0]
+        );
+
+        assert!(load(&Source::default())
+            .err()
+            .unwrap()
+            .contains("Missing tensor"));
+        source.tensors.get_mut(name).unwrap().0.dims = vec![4];
+        assert!(load(&source).err().unwrap().contains("Invalid tensor"));
+        source.tensors.get_mut(name).unwrap().0.dims = vec![3];
+        source.tensors.get_mut(name).unwrap().0.ggml_type = GGMLType::BF16;
+        assert!(load(&source).err().unwrap().contains("Invalid tensor"));
+        source.tensors.get_mut(name).unwrap().0.ggml_type = GGMLType::F32;
+        source.tensors.get_mut(name).unwrap().1.pop();
+        assert!(load(&source).err().unwrap().contains("data length"));
+        source.tensors.get_mut(name).unwrap().1 = [f32::NAN, 2.0, 3.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        assert!(load(&source).err().unwrap().contains("non-finite"));
     }
 
     #[test]
