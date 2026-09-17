@@ -129,9 +129,9 @@ Rust 运行时不链接 OpenBLAS、BLIS、MKL、Accelerate、oneDNN、llama.cpp 
 从官方 checkpoint 导出，LLM 和 mmproj 同时量化：
 
 ```bash
-python3 tools/dots/convert_dots_tts.py models/dots.tts-base \
+python3 tools/converter/dots/convert_dots_tts.py models/dots.tts-base \
   --variant base --quant q8_0 --out-dir models/dots-base-q8
-python3 tools/dots/convert_dots_tts.py models/dots.tts.edit \
+python3 tools/converter/dots/convert_dots_tts.py models/dots.tts.edit \
   --variant edit --quant q8_0 --out-dir models/dots-edit-q8
 
 cargo run --release --bin rust-model-inference -- \

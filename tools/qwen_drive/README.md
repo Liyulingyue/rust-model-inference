@@ -100,7 +100,7 @@ temporary file and publishes it with an atomic rename.
 ## Validation
 
 ```bash
-python3 -m unittest tools.qwen_drive.test_convert_qwen_drive -v
+python3 -m unittest tools.converter.qwen_drive.test_convert_qwen_drive -v
 cargo test qwen_drive --lib --features parity-trace
 python3 tools/converter/qwen_drive/convert_qwen_drive.py verify \
   models/Qwen-Drive-1.0-4B \

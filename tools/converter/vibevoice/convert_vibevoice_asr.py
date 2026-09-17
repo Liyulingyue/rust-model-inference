@@ -14,7 +14,7 @@ Torch-free: sharded safetensors are read via mmap and the Q8_0 blocks are
 built with numpy (GGML layout: f16 scale + 32 int8 per block).
 
 Usage:
-  python3 tools/vibevoice/convert_vibevoice_asr.py models/VibeVoice-ASR-Streaming-7B [--out-dir DIR]
+  python3 tools/converter/vibevoice/convert_vibevoice_asr.py models/VibeVoice-ASR-Streaming-7B [--out-dir DIR]
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ def require_tensor(
 
 
 def _open_single_shard(path: Path):
-    from converter.utils.gguf import open_safetensors
+    from tools.converter.utils.gguf import open_safetensors
 
     reader = open_safetensors(path)
     reader._path_name = str(path)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run with: uv run --with numpy python tools/breeze/test_convert_breeze.py."""
+"""Run with: uv run --with numpy python tools/converter/breeze/test_convert_breeze.py."""
 
 import json
 from pathlib import Path
@@ -9,10 +9,7 @@ import unittest
 
 import numpy as np
 
-try:
-    import convert_breeze
-except ModuleNotFoundError:
-    convert_breeze = None
+from tools.converter.breeze import convert_breeze
 
 
 def safetensors(path, tensors):
