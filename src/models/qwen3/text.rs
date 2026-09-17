@@ -146,6 +146,12 @@ pub fn run_inference_tokens(
         load_ms
     );
     println!("Prompt: {} tokens", input_tokens.len());
+    if std::env::var_os("RUST_DSPARK_TRACE_IDS").is_some() {
+        eprintln!(
+            "[RUST_TOKENS] n={} ids={input_tokens:?}",
+            input_tokens.len()
+        );
+    }
 
     // 2) Streaming 调用 + bench 计时
     print!("Output: ");
@@ -183,7 +189,7 @@ pub fn run_inference_tokens(
         let draft_n_max = options.draft_n_max.unwrap_or(draft_model.config.block_size);
         let mut target_session =
             Qwen3Session::new_with_kv_state(&model, max_ctx, kv_format, KvLifecycle::Ephemeral)?;
-        let mut draft_session = DSparkSession::new(&draft_model, max_ctx)?;
+        let mut draft_session = DSparkSession::new(&draft_model, max_ctx, kv_format)?;
         dspark_prefill(
             &mut target_session,
             &mut draft_session,
@@ -222,6 +228,9 @@ pub fn run_inference_tokens(
             print!("{tail}");
             io::stdout().flush().unwrap();
         }
+        if std::env::var_os("RUST_DSPARK_TRACE_IDS").is_some() {
+            eprintln!("[RUST_GENERATED_IDS] {generated:?}");
+        }
         eprintln!(
             "DSpark: drafted={} accepted={} target_evaluations={}",
             stats.drafted, stats.accepted, stats.target_evaluations
@@ -256,6 +265,9 @@ pub fn run_inference_tokens(
                 io::stdout().flush().unwrap();
             },
         )?;
+        if std::env::var_os("RUST_DSPARK_TRACE_IDS").is_some() {
+            eprintln!("[RUST_GENERATED_IDS] {:?}", generation.token_ids);
+        }
         (
             generation.token_ids.len(),
             prefill_time,

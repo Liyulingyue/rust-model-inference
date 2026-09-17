@@ -145,15 +145,15 @@ fn rope_neox_inplace_simd_matches_scalar_fallback() {
         // shape as the AVX2/NEON tail loop, so SIMD-vs-scalar diffs are
         // caught bit-for-bit.
         let half = head_dim / 2;
-        let pos_f = pos as f32;
+        let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+        let mut theta = pos as f32;
         let mut cos_table = vec![0.0f32; half];
         let mut sin_table = vec![0.0f32; half];
         for i in 0..half {
-            let inv_freq = 1.0f32 / freq_base.powf((2 * i) as f32 / head_dim as f32);
-            let theta = pos_f * inv_freq;
             let (c, s) = rope_sin_cos(theta);
             cos_table[i] = c;
             sin_table[i] = s;
+            theta *= theta_scale;
         }
         rope_neox_inplace_scalar(&mut b, n_heads, head_dim, &cos_table, &sin_table);
 

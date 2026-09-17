@@ -33,6 +33,19 @@ fn uses_llama_trunk(arch: &str) -> bool {
     matches!(arch, "llama" | "k2-horizon" | "granite" | "nanbeige")
 }
 
+fn is_lfm25_source(source: &dyn TensorSource) -> bool {
+    ["general.basename", "general.name"].into_iter().any(|key| {
+        source
+            .metadata(key)
+            .and_then(|v| v.to_string_val())
+            .is_some_and(|name| {
+                name.contains("2.5")
+                // LiquidAI's pinned 1.2B GGUF uses an opaque name instead of a basename.
+                || name == "4cd563d5a96af9e7c738b76cd89a0a200db7608f"
+            })
+    })
+}
+
 pub fn run_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -51,6 +64,14 @@ pub fn run_inference(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
 
+    if dspark.is_some()
+        && !(arch == "qwen3" || (arch == "lfm2" && is_lfm25_source(source.as_ref())))
+    {
+        return Err(format!(
+            "DSpark supports Qwen3 and LFM2.5 text targets; got {arch:?}"
+        ));
+    }
+
     if arch == "hunyuan-dense" {
         crate::models::qwen3::hunyuan::run_inference(
             source.clone(),
@@ -63,21 +84,18 @@ pub fn run_inference(
             prefill_batch_size,
         )
     } else if arch == "lfm2" {
-        let is_lfm25 = source
-            .metadata("general.basename")
-            .and_then(|v| v.to_string_val())
-            .map(|v| v.contains("2.5"))
-            .unwrap_or(false);
+        let is_lfm25 = is_lfm25_source(source.as_ref());
 
         if is_lfm25 {
             crate::models::lfm25::run_inference(
-                source.as_ref(),
+                source.clone(),
                 prompt,
                 max_tokens,
                 temperature,
                 n_threads_arg,
                 profile,
                 kv_format,
+                dspark,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -1390,6 +1408,31 @@ mod tests {
 
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
             None
+        }
+    }
+
+    #[test]
+    fn dspark_rejects_unsupported_targets_before_loading_weights() {
+        for arch in ["llama", "hunyuan-dense", "lfm2", "unknown"] {
+            let error = super::run_inference(
+                std::sync::Arc::new(ArchSource(MetaValue::String(arch.into()))),
+                "hello",
+                1,
+                0.0,
+                1,
+                false,
+                false,
+                false,
+                crate::core::scratchpad::KvFormat::F32,
+                1,
+                Some(crate::app::cli::DSparkOptions {
+                    draft_model: "missing.gguf".into(),
+                    draft_n_max: None,
+                    confidence_min: 0.0,
+                }),
+            )
+            .unwrap_err();
+            assert!(error.contains("DSpark supports"), "{error}");
         }
     }
 

@@ -27,11 +27,11 @@ unsafe fn dot_f32_avx2(a: &[f32], b: &[f32], n: usize) -> f32 {
 
 #[inline(always)]
 fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
-    let mut s = 0.0f32;
+    let mut s = 0.0f64;
     for i in 0..n {
-        s += a[i] * b[i];
+        s += f64::from(a[i] * b[i]);
     }
-    s
+    s as f32
 }
 
 /// Same throughput as `dot_f32_avx2` but with **separate `mul` + `add`** instead of
@@ -182,7 +182,11 @@ pub fn dot_f16_f32(a: &[f32], b_f16: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n);
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    ))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
@@ -194,7 +198,11 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    )))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
     for index in tail_start..n {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
@@ -210,7 +218,11 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
             return unsafe { dot_f16_f16_bytes_avx2(a, b, n) };
         }
     }
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    ))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
@@ -224,7 +236,11 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    )))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
     for index in tail_start..n {
         let weight = u16::from_le_bytes(b[index * 2..index * 2 + 2].try_into().unwrap());

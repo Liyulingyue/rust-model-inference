@@ -61,11 +61,20 @@ impl DSparkConfig {
         let layers = positive_usize(source, "dflash.block_count")?;
         let heads = positive_usize(source, "dflash.attention.head_count")?;
         let kv_heads = positive_usize(source, "dflash.attention.head_count_kv")?;
-        let head_dim = positive_usize(source, "dflash.rope.dimension_count")?;
+        let head_dim = if source.metadata("dflash.rope.dimension_count").is_some() {
+            positive_usize(source, "dflash.rope.dimension_count")?
+        } else {
+            positive_usize(source, "dflash.attention.key_length")?
+        };
+        if source.metadata("dflash.attention.value_length").is_some()
+            && positive_usize(source, "dflash.attention.value_length")? != head_dim
+        {
+            return Err("DSpark key/value head dimensions differ".into());
+        }
         let ffn = positive_usize(source, "dflash.feed_forward_length")?;
         let eps = positive_f32(source, "dflash.attention.layer_norm_rms_epsilon")?;
         let rope_base = positive_f32(source, "dflash.rope.freq_base")?;
-        if heads.checked_mul(head_dim) != Some(hidden) || heads % kv_heads != 0 {
+        if heads.checked_mul(head_dim).is_none() || heads % kv_heads != 0 {
             return Err("Inconsistent dflash attention dimensions".into());
         }
 
@@ -86,7 +95,14 @@ impl DSparkConfig {
         let confidence_input = hidden
             .checked_add(markov_rank)
             .ok_or_else(|| "DSpark confidence input size overflow".to_string())?;
-        require_shape(source, "conf_proj.weight", &[confidence_input, 1])?;
+        let confidence_shape = tensor_dims(source, "conf_proj.weight")?;
+        if confidence_shape != [confidence_input as u64]
+            && confidence_shape != [confidence_input as u64, 1]
+        {
+            return Err(format!(
+                "Invalid tensor conf_proj.weight shape: {confidence_shape:?}"
+            ));
+        }
         if source.tensor_info("conf_proj.bias").is_some() {
             require_shape(source, "conf_proj.bias", &[1])?;
         }
@@ -285,6 +301,14 @@ mod tests {
         assert_eq!(config.ffn, 8);
         assert_eq!(config.vocab, TARGET.vocab);
         assert_eq!(config.markov_rank, 2);
+        let mut source = valid_source();
+        source.tensors.get_mut("conf_proj.weight").unwrap().dims = vec![6];
+        assert!(DSparkConfig::from_source(&source, TARGET).is_ok());
+        source.metadata.remove("dflash.rope.dimension_count");
+        source
+            .metadata
+            .insert("dflash.attention.key_length".into(), MetaValue::Uint32(2));
+        assert!(DSparkConfig::from_source(&source, TARGET).is_ok());
     }
 
     #[test]
@@ -314,6 +338,25 @@ mod tests {
         assert!(DSparkConfig::from_source(&source, TARGET)
             .unwrap_err()
             .contains("target_layers"));
+
+        let mut source = valid_source();
+        source.metadata.insert(
+            "dflash.target_layers".into(),
+            MetaValue::Array(
+                MetaValueType::Uint32,
+                vec![
+                    MetaValue::Uint32(5),
+                    MetaValue::Uint32(1),
+                    MetaValue::Uint32(9),
+                ],
+            ),
+        );
+        assert_eq!(
+            DSparkConfig::from_source(&source, TARGET)
+                .unwrap()
+                .target_layers,
+            vec![5, 1, 9]
+        );
     }
 
     #[test]

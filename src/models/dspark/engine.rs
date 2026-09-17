@@ -100,17 +100,24 @@ pub fn run_greedy<T: DSparkTarget>(
     generated += 1;
 
     let target_layers = draft.target_layers().to_vec();
+    let mut catch_up = false;
     while generated < options.max_tokens {
         ensure_aligned(target, draft)?;
         let remaining = options.max_tokens - generated;
-        let requested = options.draft_n_max.min(remaining.saturating_sub(1));
+        let keep = if catch_up {
+            0
+        } else {
+            options.draft_n_max.min(remaining.saturating_sub(1))
+        };
         let base = draft.position();
-        let draft_ids = if requested == 0 {
+        let draft_ids = if keep == 0 {
             Vec::new()
         } else {
-            draft
-                .draft(pending, requested, options.confidence_min)?
-                .token_ids
+            let mut token_ids = draft
+                .draft(pending, options.draft_n_max, options.confidence_min)?
+                .token_ids;
+            token_ids.truncate(keep);
+            token_ids
         };
         stats.drafted = stats
             .drafted
@@ -125,10 +132,19 @@ pub fn run_greedy<T: DSparkTarget>(
         let accepted = match step.verification {
             Verification::Accepted(accepted) | Verification::Rejected { accepted, .. } => accepted,
         };
+        if !draft_ids.is_empty() && std::env::var_os("RUST_DSPARK_TRACE_IDS").is_some() {
+            eprintln!(
+                "[DSPARK_BLOCK] {}",
+                serde_json::json!({
+                    "position": base, "draft_ids": draft_ids, "accepted": accepted,
+                })
+            );
+        }
         stats.accepted = stats
             .accepted
             .checked_add(accepted)
             .ok_or("DSpark accepted token counter overflow")?;
+        catch_up = matches!(step.verification, Verification::Rejected { .. });
         inject_features(draft, base, &step.features)?;
         ensure_aligned(target, draft)?;
 
@@ -423,7 +439,7 @@ mod tests {
 
     #[test]
     fn mismatch_restores_and_replays_only_committed_inputs() {
-        let mut target = FakeTarget::new([vec![2, 9, 4, 8], vec![2, 9]]);
+        let mut target = FakeTarget::new([vec![2, 9, 4, 8], vec![2, 9], vec![10]]);
         let step = run_step(&mut target, 1, &[2, 3, 4], &[0]).unwrap();
 
         assert_eq!(
@@ -439,5 +455,10 @@ mod tests {
         assert_eq!(target.evaluations, vec![vec![1, 2, 3, 4], vec![1, 2]]);
         assert_eq!(target.restores, 1);
         assert_eq!(target.position, 2);
+
+        let catch_up = run_step(&mut target, step.next_pending, &[], &[0]).unwrap();
+        assert_eq!(catch_up.output_ids, vec![10]);
+        assert_eq!(catch_up.next_pending, 10);
+        assert_eq!(target.evaluations.last(), Some(&vec![9]));
     }
 }

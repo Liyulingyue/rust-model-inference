@@ -1054,6 +1054,20 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if options.draft_model.is_some() && options.temperature.is_some_and(|value| value != 0.0) {
         return Err("DSpark currently requires greedy decoding; use --temperature 0".into());
     }
+    if options.draft_model.is_some()
+        && (options.prompt.is_none()
+            || options.audio.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.tts
+            || options.embedding
+            || options.gpu
+            || options.dreamx
+            || options.planner.is_some()
+            || options.vae.is_some())
+    {
+        return Err("DSpark requires a CPU text prompt; multimodal, embedding, GPU and interactive modes are unsupported".into());
+    }
     if (options.top_k.is_some() || options.top_p.is_some()) && (!options.tts || options.edit) {
         return Err("--top-k/--top-p require Breeze --tts without --edit".into());
     }
@@ -1323,6 +1337,20 @@ mod tests {
         assert!(validate_cli_options(&sampled)
             .unwrap_err()
             .contains("greedy"));
+        for flag in ["--gpu", "--tts", "--embedding"] {
+            let parsed = parse_cli_options(&args(&[
+                "rmi",
+                "--prompt",
+                "hello",
+                "--draft-model",
+                "draft.gguf",
+                flag,
+            ]))
+            .unwrap();
+            assert!(validate_cli_options(&parsed)
+                .unwrap_err()
+                .contains("CPU text prompt"));
+        }
     }
 
     struct TestTensorSource {

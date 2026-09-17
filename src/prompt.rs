@@ -119,7 +119,7 @@ pub fn build_lfm25_chat_prompt(
         prompt_text.push_str(message.role);
         prompt_text.push('\n');
         prompt_text.push_str(message.content);
-        prompt_text.push('\n');
+        prompt_text.push_str("<|im_end|>\n");
     }
     prompt_text.push_str("<|im_start|>assistant\n");
     let mut tokens = tokenizer.encode(&prompt_text, WITH_SPECIAL);

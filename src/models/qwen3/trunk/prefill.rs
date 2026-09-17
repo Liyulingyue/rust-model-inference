@@ -715,15 +715,17 @@ impl Qwen3Session<'_> {
                                 softmax_inplace(&mut scores[..n_padded]);
                                 let weights = &scores[..n_padded];
                                 for dimension in 0..config.n_embd_head_v {
-                                    let mut value = 0.0;
+                                    let mut value = 0.0f64;
                                     for token in 0..visible {
                                         let cache_row = layer_base + token * kv_stride;
-                                        value += weights[token]
-                                            * v_cache[cache_row
-                                                + kv_head * config.n_embd_head_v
-                                                + dimension];
+                                        value += f64::from(
+                                            weights[token]
+                                                * v_cache[cache_row
+                                                    + kv_head * config.n_embd_head_v
+                                                    + dimension],
+                                        );
                                     }
-                                    output[dimension] = value;
+                                    output[dimension] = value as f32;
                                 }
                             }
                         }

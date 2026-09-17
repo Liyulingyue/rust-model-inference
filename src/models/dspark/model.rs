@@ -1,6 +1,6 @@
 use super::{DSparkConfig, TargetShape};
 use crate::core::scratchpad::{KvCache, KvFormat, KvLifecycle};
-use crate::core::tensor::{load_f32_tensor, MetaValue, TensorInfo, TensorSource};
+use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::models::qwen3::trunk::{
@@ -136,7 +136,7 @@ impl DSparkModel {
             .kv_heads
             .checked_mul(config.head_dim)
             .ok_or("DSpark KV width overflow")?;
-        let layers = load_layers_static(
+        let mut layers = load_layers_static(
             Arc::clone(&combined),
             config.layers,
             config.hidden,
@@ -148,6 +148,15 @@ impl DSparkModel {
             false,
             None,
         )?;
+        for layer in &mut layers {
+            use_llama_bf16_input(&mut layer.wq);
+            use_llama_bf16_input(&mut layer.wk);
+            use_llama_bf16_input(&mut layer.wv);
+            use_llama_bf16_input(&mut layer.wo);
+            use_llama_bf16_input(&mut layer.w_gate);
+            use_llama_bf16_input(&mut layer.w_up);
+            use_llama_bf16_input(&mut layer.w_down);
+        }
         let output_norm = load_f32_tensor(
             &*combined,
             "output_norm.weight",
@@ -232,11 +241,15 @@ pub struct DraftBlock {
 }
 
 impl<'model> DSparkSession<'model> {
-    pub fn new(model: &'model DSparkModel, capacity: usize) -> Result<Self, String> {
+    pub fn new(
+        model: &'model DSparkModel,
+        capacity: usize,
+        kv_format: KvFormat,
+    ) -> Result<Self, String> {
         let mut session = Qwen3Session::new_with_kv_state(
             &model.backbone,
             capacity,
-            KvFormat::F16,
+            kv_format,
             KvLifecycle::Ephemeral,
         )?;
         #[cfg(feature = "vulkan")]
@@ -281,8 +294,22 @@ impl<'model> DSparkSession<'model> {
                 features.len()
             ));
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dspark.target_features",
+            None,
+            &[features.len()],
+            features,
+        ));
         let hidden = self.model.config.hidden;
         let mut fused = self.model.encoder.matmul(features);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dspark.fc_out",
+            None,
+            &[hidden],
+            &fused,
+        ));
         let mut normalized = vec![0.0; hidden];
         rms_norm(
             &mut fused,
@@ -290,6 +317,13 @@ impl<'model> DSparkSession<'model> {
             &mut normalized,
             self.model.config.eps,
         );
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "dspark.enc_norm_out",
+            None,
+            &[hidden],
+            &normalized,
+        ));
         let kv_width = self
             .model
             .config
@@ -376,6 +410,21 @@ impl<'model> DSparkSession<'model> {
         if capture.hidden.len() != hidden_len || capture.logits.len() != logits_len {
             return Err("DSpark backbone returned invalid output shapes".into());
         }
+        #[cfg(feature = "parity-trace")]
+        {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.result_norm",
+                None,
+                &[n, hidden],
+                &capture.hidden,
+            ));
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.result_output",
+                None,
+                &[n, vocab],
+                &capture.logits,
+            ));
+        }
 
         let rank = self.model.config.markov_rank;
         let mut previous = last_token;
@@ -390,6 +439,26 @@ impl<'model> DSparkSession<'model> {
             self.model.markov_w1.embedding_lookup(previous, &mut markov);
             let bias = self.model.markov_w2.matmul(&markov);
             let logits = &capture.logits[row * vocab..(row + 1) * vocab];
+            #[cfg(feature = "parity-trace")]
+            {
+                crate::parity_trace::report(crate::parity_trace::checkpoint(
+                    "dspark.markov_bias",
+                    Some(row),
+                    &[vocab],
+                    &bias,
+                ));
+                let biased = logits
+                    .iter()
+                    .zip(&bias)
+                    .map(|(logit, bias)| logit + bias)
+                    .collect::<Vec<_>>();
+                crate::parity_trace::report(crate::parity_trace::checkpoint(
+                    "dspark.markov_logits",
+                    Some(row),
+                    &[vocab],
+                    &biased,
+                ));
+            }
             let token = logits
                 .iter()
                 .zip(&bias)
@@ -405,6 +474,13 @@ impl<'model> DSparkSession<'model> {
             let score =
                 self.model.confidence.matmul(&confidence_input)[0] + self.model.confidence_bias;
             let probability = 1.0 / (1.0 + (-score).exp());
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "dspark.confidence",
+                Some(row),
+                &[1],
+                &[probability],
+            ));
             if !probability.is_finite() {
                 return Err("DSpark produced non-finite confidence".into());
             }
@@ -456,9 +532,19 @@ fn load_weight(
         n_in,
         n_out,
     ));
+    use_llama_bf16_input(&mut weight);
     weight.n_in = n_in;
     weight.n_out = n_out;
     Ok(weight)
+}
+
+fn use_llama_bf16_input(weight: &mut Weight<'static>) {
+    if weight.ggml_type != GGMLType::BF16 {
+        return;
+    }
+    let bytes: &'static [u8] =
+        unsafe { std::mem::transmute(weight.kernel.bf16_bytes().expect("BF16 weight bytes")) };
+    weight.kernel = Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(bytes));
 }
 
 fn require_tensor(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Result<(), String> {
@@ -470,7 +556,12 @@ fn require_tensor(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Resu
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != expected {
+    if info.dims != expected
+        && !(name == "conf_proj.weight"
+            && expected.len() == 2
+            && expected[1] == 1
+            && info.dims == expected[..1])
+    {
         return Err(format!(
             "Invalid tensor {name} shape {:?}; expected {expected:?}",
             info.dims
@@ -580,7 +671,7 @@ fn validate_backbone(
 
 #[cfg(test)]
 mod tests {
-    use super::{DSparkModel, DSparkSession, SharedHead};
+    use super::{load_weight, DSparkModel, DSparkSession, SharedHead};
     use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
     use crate::core::tokenizer::BPETokenizer;
@@ -617,6 +708,27 @@ mod tests {
                 values
                     .iter()
                     .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            );
+            self
+        }
+
+        fn tensor_bf16(mut self, name: &str, dims: &[u64], values: &[f32]) -> Self {
+            assert_eq!(dims.iter().product::<u64>() as usize, values.len());
+            self.tensors.insert(
+                name.into(),
+                TensorInfo {
+                    name: name.into(),
+                    dims: dims.to_vec(),
+                    ggml_type: GGMLType::BF16,
+                    offset: 0,
+                },
+            );
+            self.data.insert(
+                name.into(),
+                values
+                    .iter()
+                    .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
                     .collect(),
             );
             self
@@ -749,7 +861,7 @@ mod tests {
         let model = Box::leak(Box::new(
             DSparkModel::from_source(draft_source(), head, Arc::new(ComputePool::new(1))).unwrap(),
         ));
-        DSparkSession::new(model, 16).unwrap()
+        DSparkSession::new(model, 16, crate::core::scratchpad::KvFormat::F32).unwrap()
     }
 
     #[test]
@@ -757,6 +869,15 @@ mod tests {
         let block = fixture_session().draft(1, 3, 0.0).unwrap();
         assert_eq!(block.token_ids, vec![2, 3, 0]);
         assert_eq!(block.confidence.len(), 3);
+    }
+
+    #[test]
+    fn bf16_draft_weights_round_activations_like_llama_cpp() {
+        let source: Arc<dyn TensorSource> =
+            Arc::new(FixtureSource::default().tensor_bf16("weight", &[3, 1], &[1.0, 1.0, 1.0]));
+        let weight = load_weight(&source, "weight", 3, 1).unwrap();
+
+        assert_eq!(weight.matmul(&[1.001, -1.0, 0.0]), vec![0.0]);
     }
 
     #[test]

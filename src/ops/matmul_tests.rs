@@ -666,7 +666,7 @@ fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
 }
 
 #[test]
-fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
+fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_rotation_order() {
     let mut values = [0.0f32; 128];
     values[0] = f32::from_bits(0x402a_4f21);
     values[1] = f32::from_bits(0x3fad_b711);
@@ -677,7 +677,7 @@ fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
 
     assert_eq!(
         [values[0], values[1], values[64], values[65]].map(f32::to_bits),
-        [0x3fc7_0519, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
+        [0x3fc7_051a, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
     );
 }
 
@@ -738,6 +738,26 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
         unsafe { dot_f32_neon(&a, &b, a.len()) }.to_bits(),
         0x3d07_1678
     );
+}
+
+#[cfg(feature = "scalar-parity")]
+#[test]
+fn scalar_dot_f32_matches_ggml_f64_accumulation() {
+    assert_eq!(dot_f32(&[1.0e8, 1.0, -1.0e8], &[1.0; 3], 3), 1.0);
+}
+
+#[cfg(feature = "scalar-parity")]
+#[test]
+fn scalar_dot_f16_matches_ggml_f64_accumulation() {
+    let mut input = vec![f32_to_f16(0.0); 96];
+    input[0] = f32_to_f16(10_000.0);
+    input[32] = f32_to_f16(1.0);
+    input[64] = f32_to_f16(-10_000.0);
+    let weights = (0..96)
+        .flat_map(|_| f32_to_f16(1.0).to_le_bytes())
+        .collect::<Vec<_>>();
+
+    assert_eq!(dot_f16_f16_bytes(&input, &weights, input.len()), 1.0);
 }
 
 #[cfg(target_arch = "aarch64")]
