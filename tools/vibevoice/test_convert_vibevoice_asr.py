@@ -1,11 +1,10 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from tools.dots.convert_dots_tts import Tensor
+from tools.converter.dots.convert_dots_tts import Tensor
 from tools.vibevoice import convert_vibevoice_asr as converter
 from tools.vibevoice.convert_vibevoice_asr import (
     ENCODER_DEPTHS,
@@ -17,14 +16,14 @@ from tools.vibevoice.convert_vibevoice_asr import (
     output_paths,
     require_tensor,
 )
-from converter.utils.gguf import quantize_q8_0
+from tools.converter.utils.gguf import quantize_q8_0
 from tools.vibevoice.vibevoice_llm_oracle import (
     assemble_input_rows,
     safetensors_name,
     tensor_to_f32,
 )
 
-shared_dots = sys.modules["convert_dots_tts"]
+shared_dots = converter._dots
 
 
 class FakeReader:

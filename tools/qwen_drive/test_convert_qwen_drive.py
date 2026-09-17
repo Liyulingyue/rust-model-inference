@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.dots.convert_dots_tts import (
+from tools.converter.dots.convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
     GgufWriter,

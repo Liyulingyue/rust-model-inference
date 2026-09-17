@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 from tools.dreamx import convert_dreamx_creator as converter
-from tools.dots.convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes
+from tools.converter.dots.convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes
 from tools.dreamx.convert_dreamx_creator import (
     JOINT_LAYERS,
     SourceTensor,

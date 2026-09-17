@@ -26,16 +26,17 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "dots"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import convert_dots_tts as _dots  # noqa: E402
-from convert_dots_tts import (  # noqa: E402
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from tools.converter.dots import convert_dots_tts as _dots  # noqa: E402
+from tools.converter.dots.convert_dots_tts import (  # noqa: E402
     GgufWriter,
     Tensor,
     validated_dir,
 )
-from convert_dots_tts import bf16_to_f32, bf16_to_f16, f32_to_f16, gguf_dims  # noqa: E402
-from converter.utils.gguf import quantize_q4_0, quantize_q8_0  # noqa: E402
+from tools.converter.dots.convert_dots_tts import bf16_to_f32, bf16_to_f16, f32_to_f16, gguf_dims  # noqa: E402
+from tools.converter.utils.gguf import quantize_q4_0, quantize_q8_0  # noqa: E402
 
 GGML_F32 = 0
 GGML_BF16 = 30

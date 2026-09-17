@@ -1,4 +1,3 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,11 +5,10 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
-from converter.utils.gguf import Tensor  # noqa: E402
-from converter.utils.gguf import quantize_q8_0  # noqa: E402
-from converter.vibevoice import convert_vibevoice_asr as converter  # noqa: E402
-from converter.vibevoice.convert_vibevoice_asr import (  # noqa: E402
+from tools.converter.utils.gguf import Tensor
+from tools.converter.utils.gguf import quantize_q8_0
+from tools.converter.vibevoice import convert_vibevoice_asr as converter
+from tools.converter.vibevoice.convert_vibevoice_asr import (
     ENCODER_DEPTHS,
     GGML_Q8_0,
     LLM_FILENAME,
@@ -33,7 +31,7 @@ from tools.vibevoice.vibevoice_llm_oracle import (
     tensor_to_f32,
 )
 
-shared_dots = sys.modules["convert_dots_tts"]
+shared_dots = converter._dots
 
 
 class FakeReader:
@@ -49,7 +47,7 @@ class FakeReader:
 class ConverterContractTests(unittest.TestCase):
     def test_converter_reuses_canonical_helpers(self):
         self.assertIs(converter.quantize_q8_0, quantize_q8_0)
-        self.assertEqual(Path(shared_dots.__file__).resolve(), ROOT / "tools/dots/convert_dots_tts.py")
+        self.assertEqual(Path(shared_dots.__file__).resolve(), ROOT / "tools/converter/dots/convert_dots_tts.py")
 
     def test_import_keeps_shared_q8_row_width_validation(self):
         with self.assertRaisesRegex(ValueError, "row width"):

@@ -22,11 +22,11 @@ from typing import Any
 import numpy as np
 
 
-TOOLS_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOLS_DIR / "dots"))
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import convert_dots_tts as _gguf  # noqa: E402
-from convert_dots_tts import (  # noqa: E402
+from tools.converter.dots import convert_dots_tts as _gguf  # noqa: E402
+from tools.converter.dots.convert_dots_tts import (  # noqa: E402
     GGML_BF16,
     GGML_F16,
     GGML_F32,

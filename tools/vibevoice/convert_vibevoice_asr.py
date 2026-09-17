@@ -26,16 +26,17 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import convert_dots_tts as _dots  # noqa: E402
-from convert_dots_tts import (  # noqa: E402
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.converter.dots import convert_dots_tts as _dots  # noqa: E402
+from tools.converter.dots.convert_dots_tts import (  # noqa: E402
     GgufWriter,
     Tensor,
     validated_dir,
 )
-from convert_dots_tts import bf16_to_f32, gguf_dims  # noqa: E402
-from converter.utils.gguf import (  # noqa: E402
+from tools.converter.dots.convert_dots_tts import bf16_to_f32, gguf_dims  # noqa: E402
+from tools.converter.utils.gguf import (  # noqa: E402
     GGML_BF16,
     GGML_F16,
     GGML_F32,
@@ -123,7 +124,7 @@ def require_tensor(
 
 
 def _open_single_shard(path: Path):
-    from convert_dots_tts import open_safetensors
+    from tools.converter.dots.convert_dots_tts import open_safetensors
 
     reader = open_safetensors(path)
     reader._path_name = str(path)
