@@ -1,4 +1,4 @@
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::cli::{resolve_thread_count, CliOptions, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -44,6 +44,7 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
 ) -> Result<(), String> {
     let arch = source
         .metadata("general.architecture")
@@ -109,6 +110,7 @@ pub fn run_inference(
             bench,
             profile,
             kv_format,
+            max_context,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -185,6 +187,7 @@ pub fn run_interactive(
             false,
             KvFormat::F16,
             prefill_batch_size,
+            CliOptions::DEFAULT_MAX_CONTEXT,
         )?;
         println!();
     }

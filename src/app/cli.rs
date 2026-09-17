@@ -40,6 +40,7 @@ pub struct CliOptions {
     pub negative_prompt: Option<String>,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
+    pub max_context: Option<usize>,
     pub prefill_batch_size: Option<usize>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
@@ -81,6 +82,16 @@ pub struct CliOptions {
 impl CliOptions {
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
+
+    /// Default max-context cap. Most chat workloads fit in 8K; this
+    /// guards against models that declare an over-large
+    /// `context_length` (e.g. K2-Horizon-4B claims 524288, which would
+    /// require ~77 GB of F32 KV cache).
+    pub const DEFAULT_MAX_CONTEXT: usize = 8192;
+
+    pub fn effective_max_context(&self) -> usize {
+        self.max_context.unwrap_or(Self::DEFAULT_MAX_CONTEXT)
     }
 }
 
@@ -289,6 +300,12 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--max-tokens" | "--n-gen" => {
                 if i + 1 < args.len() {
                     options.max_tokens = Some(args[i + 1].parse().unwrap_or(128));
+                    i += 1;
+                }
+            }
+            "--max-context" => {
+                if i + 1 < args.len() {
+                    options.max_context = Some(args[i + 1].parse().unwrap_or(8192));
                     i += 1;
                 }
             }

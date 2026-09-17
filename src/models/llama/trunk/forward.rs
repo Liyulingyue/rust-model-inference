@@ -170,6 +170,7 @@ pub fn run_inference(
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
@@ -233,6 +234,7 @@ pub fn run_inference(
         bench,
         profile,
         kv_format,
+        max_context,
     )
 }
 
@@ -245,6 +247,7 @@ pub fn run_inference_tokens(
     bench: bool,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let config = model_config_from_source(source)
@@ -258,11 +261,12 @@ pub fn run_inference_tokens(
     let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    // Use the model's full context window, not an arbitrary cap. A previous
-    // 512-token cap silently truncated the KV cache and caused out-of-bounds
-    // panics on long generations (e.g. K2-Horizon-1B default generation
-    // produces several hundred tokens of chain-of-thought).
-    let max_ctx = config.n_ctx;
+    // Cap KV cache at the smaller of (model's claimed `context_length`,
+    // the CLI-provided `--max-context`). The previous hard cap of 512
+    // silently truncated the KV cache; using `config.n_ctx` directly
+    // blew up on K2-Horizon-4B which claims 524288 (~77 GB of F32 KV).
+    // The CLI default (8K) and any user override are applied here.
+    let max_ctx = config.n_ctx.min(max_context);
     let n_embd = config.n_embd;
     let n_layer = config.n_layer;
     let n_head = config.n_head;
