@@ -1,12 +1,11 @@
+#[path = "server/api.rs"]
+mod api;
 use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{DefaultBodyLimit, Multipart, State},
     http::{header, StatusCode},
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
-    },
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -38,7 +37,7 @@ use rust_model_inference::models::qwen3::{
     Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
 };
 use rust_model_inference::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use rust_model_inference::{build_qwen_chat_prompt, KvLifecycle, QwenMessage};
+use rust_model_inference::KvLifecycle;
 
 const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)]";
 
@@ -50,6 +49,8 @@ const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--m
 struct AppState {
     model: Arc<Backend>,
     model_name: String,
+    responses: Arc<Mutex<api::ResponsesStore>>,
+    generation_slot: Arc<tokio::sync::Semaphore>,
 }
 
 enum Backend {
@@ -67,6 +68,7 @@ struct TextBackend {
     pool: Arc<ComputePool>,
     tokenizer: Arc<BPETokenizer>,
     prefill_batch_size: usize,
+    context_length: usize,
     inner: TextInner,
 }
 
@@ -78,6 +80,7 @@ enum TextInner {
         // Qwen35Model borrows from its source; we leak the lifetime to 'static.
         // `Mutex` is needed because forward now takes `&mut self` (Vulkan state).
         model: Mutex<Qwen35Model<'static>>,
+        _source: Arc<dyn TensorSource>,
     },
     Fallback {
         arch: String,
@@ -108,79 +111,6 @@ struct TtsBackend {
 // =============================================================================
 // HTTP request/response shapes (subset of OpenAI)
 // =============================================================================
-
-#[derive(Deserialize)]
-struct ChatCompletionRequest {
-    #[serde(default)]
-    model: Option<String>,
-    messages: Vec<ChatMessage>,
-    #[serde(default)]
-    temperature: Option<f32>,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    stream: Option<bool>,
-}
-
-#[derive(Deserialize, Clone)]
-struct ChatMessage {
-    role: String,
-    content: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct ChatCompletionResponse {
-    id: String,
-    object: String,
-    created: u64,
-    model: String,
-    choices: Vec<ChatChoice>,
-    usage: Usage,
-}
-
-#[derive(Serialize)]
-struct ChatChoice {
-    index: usize,
-    message: ChatResponseMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ChatResponseMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct Usage {
-    prompt_tokens: usize,
-    completion_tokens: usize,
-    total_tokens: usize,
-}
-
-#[derive(Serialize)]
-struct ChatCompletionChunk {
-    id: String,
-    object: String,
-    created: u64,
-    model: String,
-    choices: Vec<ChunkChoice>,
-}
-
-#[derive(Serialize)]
-struct ChunkChoice {
-    index: usize,
-    delta: ChunkDelta,
-    finish_reason: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ChunkDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-}
 
 #[derive(Serialize)]
 struct ModelsResponse {
@@ -269,17 +199,6 @@ struct ErrorResponse {
 // Helpers
 // =============================================================================
 
-fn make_id() -> String {
-    format!("chatcmpl-{}", rand::random::<u64>())
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn sample_token_from_logits(logits: &[f32], temperature: f32) -> i32 {
     if temperature <= 0.0 {
         return logits
@@ -310,38 +229,6 @@ fn sample_token_from_logits(logits: &[f32], temperature: f32) -> i32 {
     (logits.len() - 1) as i32
 }
 
-fn extract_text_from_messages(messages: &[ChatMessage]) -> Result<String, String> {
-    let mut combined = String::new();
-    for message in messages {
-        if message.role != "user" && message.role != "system" {
-            continue;
-        }
-        match &message.content {
-            serde_json::Value::String(text) => {
-                combined.push_str(text);
-                combined.push('\n');
-            }
-            serde_json::Value::Array(parts) => {
-                for part in parts {
-                    let p = part
-                        .as_object()
-                        .ok_or_else(|| "Invalid message part".to_string())?;
-                    if p.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        let text = p
-                            .get("text")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| "Missing text".to_string())?;
-                        combined.push_str(text);
-                        combined.push('\n');
-                    }
-                }
-            }
-            _ => return Err("Unsupported message content".into()),
-        }
-    }
-    Ok(combined)
-}
-
 // =============================================================================
 // Routes
 // =============================================================================
@@ -360,165 +247,6 @@ async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
             owned_by: "local".to_string(),
         }],
     })
-}
-
-async fn chat_completions(
-    State(state): State<AppState>,
-    Json(req): Json<ChatCompletionRequest>,
-) -> impl IntoResponse {
-    let Backend::Text(_) = state.model.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Server is not running a text model".into(),
-            }),
-        )
-            .into_response();
-    };
-    let temperature = req.temperature.unwrap_or(0.6);
-    let max_tokens = req.max_tokens.unwrap_or(512);
-    let stream = req.stream.unwrap_or(false);
-
-    if stream {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, axum::Error>>(32);
-        let backend = state.model.clone();
-        let model_name = state.model_name.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let id = make_id();
-            let created = now_unix();
-
-            let chunk_zero = ChatCompletionChunk {
-                id: id.clone(),
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model: model_name.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta {
-                        role: Some("assistant".to_string()),
-                        content: None,
-                    },
-                    finish_reason: None,
-                }],
-            };
-            let data = match serde_json::to_string(&chunk_zero) {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            if tx.blocking_send(Ok(Event::default().data(data))).is_err() {
-                return;
-            }
-
-            let result = match generate_streaming(&backend, &req.messages, max_tokens, temperature)
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    let data = serde_json::to_string(&ErrorResponse { error }).unwrap();
-                    let _ = tx.blocking_send(Ok(Event::default().event("error").data(data)));
-                    return;
-                }
-            };
-
-            for text in &result.tokens {
-                let chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model_name.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: ChunkDelta {
-                            role: None,
-                            content: Some(text.clone()),
-                        },
-                        finish_reason: None,
-                    }],
-                };
-                let data = match serde_json::to_string(&chunk) {
-                    Ok(value) => value,
-                    Err(_) => return,
-                };
-                if tx.blocking_send(Ok(Event::default().data(data))).is_err() {
-                    return;
-                }
-            }
-
-            let chunk_end = ChatCompletionChunk {
-                id,
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model: model_name,
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta {
-                        role: None,
-                        content: None,
-                    },
-                    finish_reason: Some("stop".to_string()),
-                }],
-            };
-            let data = serde_json::to_string(&chunk_end).unwrap();
-            let _ = tx.blocking_send(Ok(Event::default().data(data)));
-        });
-
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        let sse = Sse::new(stream).keep_alive(KeepAlive::default());
-        return (
-            StatusCode::OK,
-            [("content-type", "text/event-stream")],
-            sse.into_response(),
-        )
-            .into_response();
-    }
-
-    let id = make_id();
-    let created = now_unix();
-    let backend = state.model.clone();
-    let result = match tokio::task::spawn_blocking(move || {
-        generate_full(&backend, &req.messages, max_tokens, temperature)
-    })
-    .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse { error }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("generation worker failed: {error}"),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let response = ChatCompletionResponse {
-        id,
-        object: "chat.completion".to_string(),
-        created,
-        model: state.model_name.clone(),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatResponseMessage {
-                role: "assistant".to_string(),
-                content: result.text,
-            },
-            finish_reason: Some("stop".to_string()),
-        }],
-        usage: Usage {
-            prompt_tokens: result.prompt_tokens,
-            completion_tokens: result.completion_tokens,
-            total_tokens: result.prompt_tokens + result.completion_tokens,
-        },
-    };
-    (StatusCode::OK, Json(response)).into_response()
 }
 
 async fn embeddings(
@@ -941,173 +669,6 @@ fn synthesize_tts_frames(
 // Text generation
 // =============================================================================
 
-struct GenerateResult {
-    text: String,
-    tokens: Vec<String>,
-    prompt_tokens: usize,
-    completion_tokens: usize,
-}
-
-fn generate_streaming(
-    backend: &Backend,
-    messages: &[ChatMessage],
-    max_tokens: usize,
-    temperature: f32,
-) -> Result<GenerateResult, String> {
-    let Backend::Text(text) = backend else {
-        return Err("Server is not running a text model".into());
-    };
-    let prompt_text = extract_text_from_messages(messages)?;
-    match &text.inner {
-        TextInner::Qwen3 { model } => {
-            generate_qwen3_streaming(
-                model,
-                &text.tokenizer,
-                &prompt_text,
-                max_tokens,
-                temperature,
-                text.prefill_batch_size,
-            )
-        }
-        TextInner::Qwen35 { model } => {
-            let mut guard = model
-                .lock()
-                .map_err(|error| format!("Qwen3.5 model lock poisoned: {error}"))?;
-            generate_qwen35_streaming(
-                &mut *guard,
-                &text.tokenizer,
-                text.pool.clone(),
-                &prompt_text,
-                max_tokens,
-                temperature,
-                text.prefill_batch_size,
-            )
-        }
-        TextInner::Fallback { arch } => Err(format!(
-            "Architecture {arch:?} is not yet supported by the server text endpoint; please use the CLI"
-        )),
-    }
-}
-
-fn generate_full(
-    backend: &Backend,
-    messages: &[ChatMessage],
-    max_tokens: usize,
-    temperature: f32,
-) -> Result<GenerateResult, String> {
-    generate_streaming(backend, messages, max_tokens, temperature)
-}
-
-fn generate_qwen3_streaming(
-    model: &Qwen3Model,
-    tokenizer: &BPETokenizer,
-    prompt_text: &str,
-    max_tokens: usize,
-    temperature: f32,
-    prefill_batch_size: usize,
-) -> Result<GenerateResult, String> {
-    let messages = [QwenMessage {
-        role: "user",
-        content: prompt_text,
-    }];
-    let input_tokens = build_qwen_chat_prompt(tokenizer, &messages, false)?;
-    let prompt_tokens = input_tokens.len();
-    let max_ctx = model.config().n_ctx.min(4096);
-    let mut session =
-        Qwen3Session::new_with_kv_state(model, max_ctx, KvFormat::F16, KvLifecycle::Ephemeral)?;
-    let positions: Vec<[usize; 4]> = (0..input_tokens.len()).map(|i| [i, 0, 0, 0]).collect();
-    let mut token_strings: Vec<String> = Vec::new();
-    let generation = session.generate_streaming(
-        Qwen3Input {
-            token_ids: &input_tokens,
-            positions: &positions,
-            embeddings: None,
-            deepstack_embeddings: None,
-        },
-        Qwen3GenerateOptions {
-            max_new_tokens: max_tokens,
-            temperature,
-            prefill_batch_size,
-        },
-        |text| {
-            if !text.is_empty() {
-                token_strings.push(text.to_string());
-            }
-        },
-    )?;
-    Ok(GenerateResult {
-        text: generation.text,
-        tokens: token_strings,
-        prompt_tokens,
-        completion_tokens: generation.token_ids.len(),
-    })
-}
-
-fn generate_qwen35_streaming(
-    model: &mut Qwen35Model<'_>,
-    tokenizer: &BPETokenizer,
-    pool: Arc<ComputePool>,
-    prompt_text: &str,
-    max_tokens: usize,
-    temperature: f32,
-    prefill_batch_size: usize,
-) -> Result<GenerateResult, String> {
-    let messages = [QwenMessage {
-        role: "user",
-        content: prompt_text,
-    }];
-    let prompt_ids = build_qwen_chat_prompt(tokenizer, &messages, false)?;
-    let (prompt_positions, _) = build_qwen35_positions(&prompt_ids, None, &[])?;
-    let n_prompt = prompt_ids.len();
-    let max_seq = (n_prompt + max_tokens).min(model.config.n_ctx);
-    let mut session =
-        Qwen35Session::new_with_prefill_batch_size(model, max_seq, prefill_batch_size, pool)?;
-    let mut decoder = tokenizer.streaming_decoder(false);
-    let mut rendered = Vec::<String>::new();
-    let mut generated_ids = Vec::<u32>::new();
-    for step in 0..max_tokens {
-        let decode_position = [[
-            session.next_position(),
-            session.next_position(),
-            session.next_position(),
-            0,
-        ]];
-        let (token_ids, positions) = if step == 0 {
-            (&prompt_ids[..], &prompt_positions[..])
-        } else {
-            (
-                &generated_ids[generated_ids.len() - 1..],
-                &decode_position[..],
-            )
-        };
-        let logits = session.step_with_tokens(token_ids, positions)?;
-        let next_token = sample_token_from_logits(&logits, temperature);
-        let next_id = u32::try_from(next_token)
-            .map_err(|_| format!("Model produced negative token ID {next_token}"))?;
-        if tokenizer.eos_id() == Some(next_id)
-            || tokenizer.special_token_id("im_end") == Some(next_id)
-        {
-            break;
-        }
-        let text = decoder.push(next_id);
-        if !text.is_empty() {
-            rendered.push(text);
-        }
-        generated_ids.push(next_id);
-    }
-    let tail = decoder.finish();
-    if !tail.is_empty() {
-        rendered.push(tail);
-    }
-    let text = rendered.concat();
-    Ok(GenerateResult {
-        text: text.clone(),
-        tokens: rendered,
-        prompt_tokens: n_prompt,
-        completion_tokens: generated_ids.len(),
-    })
-}
-
 // =============================================================================
 // Backend construction
 // =============================================================================
@@ -1155,17 +716,24 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
             let model: Qwen35Model<'static> = unsafe { std::mem::transmute(model) };
             TextInner::Qwen35 {
                 model: Mutex::new(model),
+                _source: source.clone(),
             }
         }
         _ => TextInner::Fallback {
             arch: arch.to_string(),
         },
     };
+    let context_length = match &inner {
+        TextInner::Qwen3 { model } => model.config().n_ctx,
+        TextInner::Qwen35 { model, .. } => model.lock().map_err(|e| e.to_string())?.config.n_ctx,
+        TextInner::Fallback { .. } => 0,
+    };
     Ok(TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
         prefill_batch_size,
+        context_length,
         inner,
     })
 }
@@ -1349,13 +917,15 @@ fn main() {
     let state = AppState {
         model: backend,
         model_name,
+        responses: Arc::new(Mutex::new(api::ResponsesStore::default())),
+        generation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
-        Backend::Text(_) => router.route("/v1/chat/completions", post(chat_completions)),
+        Backend::Text(_) => router.merge(api::routes()),
         Backend::Embedding(_) => router.route("/v1/embeddings", post(embeddings)),
         Backend::Asr(_) => router
             .route(
