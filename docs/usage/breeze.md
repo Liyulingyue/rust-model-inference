@@ -7,14 +7,14 @@ depth_decoder (0.4B) + Mimi codec (0.1B)。支持 Voice Clone / Voice Design
 `src/app/breeze.rs::run_breeze_tts_cli`。
 
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
-> 仓库自带导出脚本 `tools/breeze/convert_breeze.py`，是 torch-free 的 GGUF
+> 仓库自带导出脚本 `tools/converter/breeze/convert_breeze_plain.py`，是 torch-free 的 GGUF
 > 转换器（保留 BF16 / F32 原始字节、张量名）。**不是**基于 llama.cpp 的
 > converter 移植。
 
 ## 1. 准备 GGUF
 
 ```bash
-python tools/breeze/convert_breeze.py models/Breeze-TTS-2 --out-dir models/Breeze-TTS-2
+python tools/converter/breeze/convert_breeze_plain.py models/Breeze-TTS-2 --out-dir models/Breeze-TTS-2
 ```
 
 转换产物（输入路径与 README 同目录，输出落在 `--out-dir`）：
@@ -113,6 +113,6 @@ Voice Design 与 Voice Clone 是两条独立路径；同时给 `--ref-audio` +
 - `src/models/breeze/` — 主模型 + Mimi codec Rust 实现
 - `src/app/breeze.rs` — CLI 入口（`run_breeze_tts_cli`）与参数校验
 - `src/app/tts.rs` — `--tts` dispatcher；按 mmproj 类型分派
-- `tools/breeze/convert_breeze.py` — 仓库自带 GGUF 导出器
+- `tools/converter/breeze/convert_breeze_plain.py` — 仓库自带 GGUF 导出器
 - `tools/breeze/compare_breeze_trace.py` — 与原生修订的 F32 逐 bit 对比
 - `tools/breeze/README.md` — 仓库转换 / 采样说明

@@ -21,9 +21,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
-from convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes  # noqa: E402
-from tools.vibevoice.convert_vibevoice_asr import ShardedSafetensors  # noqa: E402
+from tools.converter.dots.convert_dots_tts import (  # noqa: E402
+    read_gguf_directory,
+    read_gguf_tensor_bytes,
+)
+from tools.converter.vibevoice.convert_vibevoice_asr_original import (  # noqa: E402
+    ShardedSafetensors,
+)
 
 
 def dequant_q8_0(raw: bytes, count: int) -> np.ndarray:

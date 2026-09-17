@@ -17,9 +17,9 @@ writes every output through a same-directory temporary file.
 Regenerate and review the manifest:
 
 ```bash
-python3 tools/qwen_drive/convert_qwen_drive.py inspect \
+python3 tools/converter/qwen_drive/convert_qwen_drive.py inspect \
   /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B \
-  --write-manifest tools/qwen_drive/source-tensors.json
+  --write-manifest tools/converter/qwen_drive/source-tensors.json
 ```
 
 ## Export and verify
@@ -28,12 +28,12 @@ At least 16 GiB must be free. The observed preflight on 2026-09-11 had 25 GiB
 available.
 
 ```bash
-python3 tools/qwen_drive/convert_qwen_drive.py export \
+python3 tools/converter/qwen_drive/convert_qwen_drive.py export \
   /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B \
   --llama-cpp /Users/gouzi/Documents/git/llama.cpp \
   --out-dir /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B
 
-python3 tools/qwen_drive/convert_qwen_drive.py verify \
+python3 tools/converter/qwen_drive/convert_qwen_drive.py verify \
   /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B \
   --out-dir /Users/gouzi/Documents/git/rust-model-inference/models/Qwen-Drive-1.0-4B
 ```
@@ -100,9 +100,9 @@ temporary file and publishes it with an atomic rename.
 ## Validation
 
 ```bash
-python3 -m unittest tools.qwen_drive.test_convert_qwen_drive -v
+python3 -m unittest tools.converter.qwen_drive.test_convert_qwen_drive -v
 cargo test qwen_drive --lib --features parity-trace
-python3 tools/qwen_drive/convert_qwen_drive.py verify \
+python3 tools/converter/qwen_drive/convert_qwen_drive.py verify \
   models/Qwen-Drive-1.0-4B \
   --out-dir models/Qwen-Drive-1.0-4B
 ```

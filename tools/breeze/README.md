@@ -4,8 +4,8 @@ Convert the complete original checkpoint, preserving BF16/F32 bytes and tensor n
 
 ```sh
 MODEL_DIR=/path/to/Breeze-TTS-2
-uv run --with numpy python tools/breeze/convert_breeze.py "$MODEL_DIR"
-uv run --with numpy python tools/breeze/test_convert_breeze.py
+uv run --with numpy python tools/converter/breeze/convert_breeze_plain.py "$MODEL_DIR"
+uv run --with numpy python tools/converter/breeze/test_convert_breeze_plain.py
 cargo build --release --bin rust-model-inference
 BIN=target/release/rust-model-inference
 MODEL="$MODEL_DIR/breeze-tts-2-BF16.gguf"

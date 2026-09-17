@@ -217,7 +217,7 @@ Q4_0 失败不是形状问题（所有 `weight` 都是 2D 且行宽 % 32 == 0）
 
 2. **加 Q4_K / Q5_K / Q6_K 支持**（长期方案）
    - `QuantizedTensor::from_bytes` 已支持 K-quant；Kernel trait 也有 K-quant 实现（`q4_k.rs`/`q5_k.rs`/`q6_k.rs`）
-   - 转换器侧 `quantize_q4_k()` 已存在于 `tools/dots/convert_dots_tts.py`（`k_quants.py`）——可复用
+   - 转换器侧 `quantize_q4_k()` 已存在于 `tools/converter/dots/convert_dots_tts.py`（`k_quants.py`）——可复用
    - K-quant 用混合精度（部分 6-bit + 部分 4-bit）+ super-block scale，比 Q4_0 鲁棒得多
    - 预计 +1-2 天；Rust 端**无需改**
    - 全模型 K-quant 可能仍需 per-tensor 保护 embedding/lm_head（与方案 1 正交）
@@ -269,7 +269,7 @@ Q4_0 失败不是形状问题（所有 `weight` 都是 2D 且行宽 % 32 == 0）
 - `tools/converter/breeze/convert_breeze.py:206-238` — `_must_keep_source` / `_source_ggml_type`（待扩展为 `_quant_floor`）
 - `tools/converter/breeze/convert_breeze.py:53-66` — `_is_quantisable_2d_weight`（行宽 % 32 规则）
 - `tools/converter/utils/gguf.py` — `quantize_q4_0` / `quantize_q8_0`（已实现）
-- `tools/dots/convert_dots_tts.py` — K-quant quantize 函数族（方案 2/3 参考）
+- `tools/converter/dots/convert_dots_tts.py` — K-quant quantize 函数族（方案 2/3 参考）
 - `src/ops/kernel/quantized_tensor.rs:275-...` — `QuantizedTensor::from_bytes` 接受 Q4_0 / Q8_0 / Q4_K
 - `src/ops/kernel/{q4_0,q4_k}.rs` — Q4_0 / K-quant Kernel 实现
 - `models/Breeze-TTS-2-gguf/breeze-tts-2-Q4_0.wav` — 当前 Q4_0 输出（128 frames，退化证据）
@@ -489,7 +489,7 @@ fp16 而非 bf16），F16 听感反而对齐上游训练——那就让 F16 路�
 ### 关联文件
 
 - `models/Breeze-TTS-2-gguf/README.md` — "Alignment" 段落标注 BF16 / F16 / F32 听感
-- `tools/breeze/test_convert_breeze.py` — 转换器 byte-for-byte 测试（确认 BF16 通路无损）
+- `tools/converter/breeze/test_convert_breeze_plain.py` — 转换器 byte-for-byte 测试（确认 BF16 通路无损）
 - `models/Breeze-TTS-2-gguf/{bf16,f16,f32}_天气真好.wav` — 听感对比样本
 
 ## TODO-009: VibeVoice F16/F32 kernel panic + F32 matmul placeholder

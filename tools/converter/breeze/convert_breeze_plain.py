@@ -11,8 +11,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dots"))
-from convert_dots_tts import GGML_BF16, GGML_F32, GgufWriter, gguf_dims  # noqa: E402
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from tools.converter.dots.convert_dots_tts import (  # noqa: E402
+    GGML_BF16,
+    GGML_F32,
+    GgufWriter,
+    gguf_dims,
+)
 
 _ELEMENT_BYTES = {"BF16": 2, "F32": 4}
 

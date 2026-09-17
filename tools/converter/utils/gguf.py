@@ -1,17 +1,17 @@
 """Shared GGUF / safetensors utilities for tool converters.
 
 This module hosts the cross-model building blocks that previously lived
-inside ``tools/dots/convert_dots_tts.py``.  Other converters import from
+inside ``tools/converter/dots/convert_dots_tts.py``.  Other converters import from
 here instead of duplicating GGML constants, dtype conversion, quantisation,
 or the GGUF writer/reader.
 
 Conventions:
 
 * All public symbols are re-exported from this module so callers can
-  write ``from converter.utils.gguf import GgufWriter, open_safetensors``.
+  write ``from tools.converter.utils.gguf import GgufWriter, open_safetensors``.
 * The module is intentionally pure-stdlib plus ``numpy`` (already used by
   every converter) so it works in the project's existing ``.venv``.
-* ``converter/__init__.py`` is empty so ``converter.utils.gguf`` is the
+* ``tools/converter/__init__.py`` is empty so ``tools.converter.utils.gguf`` is the
   canonical import path.
 """
 from __future__ import annotations

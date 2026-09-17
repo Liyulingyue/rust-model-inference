@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from convert_dots_tts import (
+from tools.converter.dots.convert_dots_tts import (
     GGML_BF16,
     GGML_F32,
     GGML_I64,
@@ -96,7 +96,7 @@ class ExportContractTest(unittest.TestCase):
                 (root / f"{name}.json").write_text(json.dumps(data))
             (root / "merges.txt").write_text("a b\n")
             for quant in ("bf16", "q8_0"):
-                with self.subTest(quant=quant), patch("convert_dots_tts.load_latent_stats",
+                with self.subTest(quant=quant), patch("tools.converter.dots.convert_dots_tts.load_latent_stats",
                         return_value=dict(mean=[0.] * 128, var=[1.] * 128)):
                     llm_path, mmproj_path = _export_open_model(root, "base", root, False, quant, *sources)
                 llm_meta, llm = read_gguf_directory(llm_path)
@@ -348,8 +348,8 @@ class ExportContractTest(unittest.TestCase):
                 (model / name).touch()
             sources = [Mock(), Mock(), Mock()]
             expected = (out / "dots-tts-base-BF16.gguf", out / "dots-tts-base-mmproj-BF16.gguf")
-            with patch("convert_dots_tts.open_safetensors", side_effect=sources) as opened:
-                with patch("convert_dots_tts._export_open_model", return_value=expected) as inner:
+            with patch("tools.converter.dots.convert_dots_tts.open_safetensors", side_effect=sources) as opened:
+                with patch("tools.converter.dots.convert_dots_tts._export_open_model", return_value=expected) as inner:
                     actual = export_model(model, "base", out, False, "bf16")
             self.assertEqual([call.args[0] for call in opened.call_args_list], [
                 model.resolve() / "model.safetensors",

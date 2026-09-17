@@ -10,7 +10,7 @@
 cd /path/to/rust-model-inference
 
 uv run --no-project --with torch --with transformers --with sentencepiece --with mistral-common --with gguf \
-  python tools/neohorse/convert_neohorse.py \
+  python tools/converter/neohorse/convert_neohorse.py \
   /path/to/models/NeoHorse-1-9B \
   --llama-cpp /path/to/llama.cpp \
   --outfile /path/to/models/NeoHorse-1-9B-BF16-NFC.gguf
