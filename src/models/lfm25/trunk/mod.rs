@@ -9,6 +9,9 @@ pub mod config;
 pub mod forward;
 pub mod weights;
 
+#[cfg(test)]
+mod tests;
+
 pub use config::Lfm25Config;
 pub use forward::run_inference;
 pub use weights::{get_f32_tensor, load_layers, Lfm25LayerWeights};

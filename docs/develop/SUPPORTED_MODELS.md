@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-08，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-09-17，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -20,6 +20,7 @@
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
+| Qwen3-4B + DSpark block7 | `qwen3` + `dflash` sidecar | greedy 文本生成、推测解码 | 匹配 DSpark GGUF | Q4_K_M target + 已发布 sidecar | `Verified` | [`tests/dspark_reference.rs`](../../tests/dspark_reference.rs) 对固定 llama.cpp `84075273c` 覆盖 token、接受块和 draft checkpoint 逐位一致；仅 CPU、temperature 0。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
 | Qwen3-ASR-0.6B | `qwen3vl` | 语音识别 | Qwen3-ASR mmproj、WAV | Q8_0 LLM + Q8_0 mmproj | `Verified` | [`src/format/ggufrs.rs`](src/format/ggufrs.rs) 有固定文件哈希的 raw GGUF/GGUFRS 转写等价测试；仅支持 greedy 解码，不能同时传图像。 |
 | Qwen3-TTS-12Hz-1.7B-Base | `qwen3tts` | TTS、参考音频声音克隆 | mmproj；克隆时还需参考 WAV/文本 | Q8_0 GGUF + mmproj | `Verified` | [`tests/qwen3_tts_reference.rs`](tests/qwen3_tts_reference.rs) 覆盖 pinned llama.cpp Oracle。 |
@@ -35,6 +36,7 @@
 | Ornith-1.5-9B | `qwen35` | 文本生成 | 无 | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | MiniCPM5-1B | `llama` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
+| LFM2.5-1.2B-Instruct + DSpark | `lfm2` + `dflash` sidecar | greedy 文本生成、推测解码 | 匹配 DSpark GGUF | Q4_K_M target + Q4_K_M sidecar | `Verified` | [`tests/dspark_reference.rs`](../../tests/dspark_reference.rs) 对固定 llama.cpp `84075273c` 覆盖 token、接受块和 draft checkpoint 逐位一致；仅 CPU、temperature 0。 |
 | LFM2-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0 | `Verified` | 真实 GGUF 可完整生成；与 llama.cpp 前 6 个生成 token 一致，随后在 MoE 近平局处可能分叉。 |
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
@@ -68,6 +70,7 @@
 | 不匹配当前两组维度的 Qwen3-VL 主模型 | `Unsupported` | 配置阶段返回 `Unsupported main-model configuration`。 |
 | 带 shared experts 的 `qwen3vlmoe` | `Unsupported` | 权重加载明确返回 shared experts not supported。 |
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
+| DSpark + 非 greedy、GPU、多模态、embedding 或 interactive | `Unsupported` | CLI 在加载权重前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
 | Z-Image Base、img2img、GPU 路径 | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust CPU 文生图。 |
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |

@@ -39,5 +39,6 @@ pub fn run_inference(
         profile,
         kv_format,
         prefill_batch_size,
+        None,
     )
 }

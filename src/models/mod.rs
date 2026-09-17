@@ -1,6 +1,7 @@
 pub mod breeze;
 pub mod diffusion;
 pub mod dots;
+pub mod dspark;
 pub mod gemma4;
 pub mod lfm2;
 pub mod lfm25;

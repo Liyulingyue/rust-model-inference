@@ -187,7 +187,7 @@ fn init_cpu_features() {
     INIT_DONE.store(true, Ordering::Relaxed);
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "scalar-parity")))]
 #[inline(always)]
 pub fn has_avx2_fma() -> bool {
     if !INIT_DONE.load(Ordering::Relaxed) {
@@ -196,13 +196,13 @@ pub fn has_avx2_fma() -> bool {
     HAS_AVX2_FMA.load(Ordering::Relaxed)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(any(not(target_arch = "x86_64"), feature = "scalar-parity"))]
 #[inline(always)]
 pub const fn has_avx2_fma() -> bool {
     false
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "scalar-parity")))]
 #[inline(always)]
 pub fn has_f16c() -> bool {
     if !INIT_DONE.load(Ordering::Relaxed) {
@@ -211,19 +211,19 @@ pub fn has_f16c() -> bool {
     HAS_F16C.load(Ordering::Relaxed)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(any(not(target_arch = "x86_64"), feature = "scalar-parity"))]
 #[inline(always)]
 pub const fn has_f16c() -> bool {
     false
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "scalar-parity")))]
 #[inline(always)]
 pub const fn has_neon() -> bool {
     true
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(any(not(target_arch = "aarch64"), feature = "scalar-parity"))]
 #[inline(always)]
 pub const fn has_neon() -> bool {
     false

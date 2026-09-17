@@ -183,8 +183,6 @@ impl PreparedRows {
             }
         }
 
-        let blocks = self.n_in.div_ceil(32);
-        let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
         let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
         // ARM Q4_0 uses the scalar dot contract. Other kernels, including the
         // x86 AVX2 contract, retain their original per-row execution.
@@ -215,40 +213,29 @@ impl PreparedRows {
                 }
                 return;
             }
-            let mut output_ptrs = projections.map(|(_, output_ptr)| output_ptr);
-            for row in 0..self.rows {
-                let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
-                let q8 = if self.need_q8 {
-                    &self.q8[row * self.n_in..(row + 1) * self.n_in]
-                } else {
-                    &[]
-                };
-                let scales = if self.need_q8 {
-                    &self.scales[row * blocks..(row + 1) * blocks]
-                } else {
-                    &[]
-                };
-                for ((weight, _), output_ptr) in projections.iter().zip(&mut output_ptrs) {
-                    let q8k = weight
-                        .uses_q8_k()
-                        .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
-                    let output_row =
-                        unsafe { std::slice::from_raw_parts_mut(*output_ptr, weight.n_out) };
-                    weight.kernel.forward_prepared(
-                        input_row,
-                        q8,
-                        scales,
-                        q8k,
-                        output_row,
-                        self.n_in,
-                        weight.n_out,
-                        ith,
-                        nth,
-                    );
-                    // SAFETY: output lengths were checked above, so advancing
-                    // one row stays within each output allocation.
-                    *output_ptr = unsafe { output_ptr.add(weight.n_out) };
-                }
+            let q8 = self.need_q8.then_some(self.q8.as_slice()).unwrap_or(&[]);
+            let scales = self
+                .need_q8
+                .then_some(self.scales.as_slice())
+                .unwrap_or(&[]);
+            for (weight, output_ptr) in projections {
+                let q8k = weight.uses_q8_k().then_some(self.q8k.as_slice());
+                // SAFETY: output lengths were checked above. Each worker owns
+                // disjoint columns in every row.
+                let output =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out) };
+                weight.kernel.forward_prepared_rows(
+                    input,
+                    q8,
+                    scales,
+                    q8k,
+                    output,
+                    self.rows,
+                    self.n_in,
+                    weight.n_out,
+                    ith,
+                    nth,
+                );
             }
         });
         Ok(())

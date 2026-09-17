@@ -12,7 +12,7 @@
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
 | K2-Horizon                    | 7B         | 文本                 | https://github.com/MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | BF16 已核验（ARM64 / x86_64） |
 | LFM2                          | 8B-A1B     | 文本          | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF             | √ |
-| LFM2.5                        | 230M / 1.2B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
+| LFM2.5                        | 230M / 1.2B    | 文本、DSpark 推测解码 | llama.cpp @ `8407527`                 | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | 1.2B Q4_K_M + 匹配 sidecar 已逐位核验；[用法](usage/dspark.md) |
 | LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF             | √ |
 | MiniCPM5                      | 1B         | 文本                 |                                       |              | 待核验 |
 | Nanbeige                      |            | 文本                 |                                       |              | 待核验 |
@@ -21,7 +21,7 @@
 | Ornith-1.5                    | 9B         | 文本                 |                                       |              | 待核验 |
 | Qwen2.5-Omni                  |            | 多模态               |                                       |              | 待核验 |
 | Qwen2.5-VL                    |            | 多模态               |                                       |              | 待核验 |
-| Qwen3                         | 0.6B       | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | √ |
+| Qwen3                         | 0.6B / 4B  | 文本、DSpark 推测解码 | llama.cpp @ `8407527`                          | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | 4B Q4_K_M + block7 sidecar 已逐位核验；[用法](usage/dspark.md) |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
 | Qwen3-ASR                     | 0.6B       | ASR                  | llama.cpp                                      |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | √ |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |
