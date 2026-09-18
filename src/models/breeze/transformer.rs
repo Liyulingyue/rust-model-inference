@@ -35,6 +35,13 @@ pub(super) fn matrix<'a>(
     let expected = info
         .checked_nbytes()
         .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
+    let expected_dims = [input as u64, output as u64];
+    if info.dims != expected_dims {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?}; expected {:?}",
+            info.dims, expected_dims
+        ));
+    }
     let expected = usize::try_from(expected)
         .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
     if bytes.len() != expected {

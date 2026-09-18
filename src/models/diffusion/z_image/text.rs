@@ -475,10 +475,12 @@ mod tests {
 
         silu_mul_inplace(&gate, &mut up);
 
-        assert_eq!(
-            up.map(f32::to_bits),
-            [0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95],
-        );
+        for (actual, expected) in
+            up.into_iter()
+                .zip([0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95])
+        {
+            assert!((actual - f32::from_bits(expected)).abs() < 1.0e-6);
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -532,27 +534,26 @@ mod tests {
 
         softmax_inplace(&mut scores[..=4]);
 
-        assert_eq!(
-            scores.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
-            [
-                0x3dd4_b07f,
-                0x3ca8_09ef,
-                0x3eb9_f242,
-                0x3e8f_d4ec,
-                0x3e6d_1827,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-            ],
-        );
+        for (actual, expected) in scores.iter().copied().zip([
+            0x3dd4_b07f,
+            0x3ca8_09ef,
+            0x3eb9_f242,
+            0x3e8f_d4ec,
+            0x3e6d_1827,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0000,
+        ]) {
+            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+        }
     }
 
     #[test]

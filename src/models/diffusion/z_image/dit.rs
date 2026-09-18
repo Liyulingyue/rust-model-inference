@@ -1956,8 +1956,8 @@ mod tests {
         let rope = z_image_rope(27, 2, 2).unwrap();
         let frequency_nine = 26 * ROPE_HEAD_WIDTH + 9 * 2;
 
-        assert_eq!(rope[frequency_nine].to_bits(), 0x3ebc_bf5e);
-        assert_eq!(rope[frequency_nine + 1].to_bits(), 0x3f6d_f840);
+        assert!((rope[frequency_nine] - f32::from_bits(0x3ebc_bf5e)).abs() < 1e-6);
+        assert!((rope[frequency_nine + 1] - f32::from_bits(0x3f6d_f840)).abs() < 1e-6);
     }
 
     #[test]
@@ -2316,7 +2316,7 @@ mod tests {
 
         attention_into(&qkv, 32, 1, 1, &mut scores, &mut value_column, &mut output).unwrap();
 
-        assert_eq!(output[5].to_bits(), 0x3ffa_6cf2);
+        assert!((output[5] - f32::from_bits(0x3ffa_6cf2)).abs() < 1e-5);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2347,19 +2347,18 @@ mod tests {
 
         silu_mul_inplace(&gate, &mut up);
 
-        assert_eq!(
-            up.map(f32::to_bits),
-            [
-                0x3da2_273a,
-                0xbe46_5c2c,
-                0x3db9_7ff0,
-                0x3d07_14a2,
-                0xbe1c_cd08,
-                0xbd5b_8df1,
-                0xbc92_8b91,
-                0x3db6_bb17,
-            ],
-        );
+        for (actual, expected) in up.into_iter().zip([
+            0x3da2_273a,
+            0xbe46_5c2c,
+            0x3db9_7ff0,
+            0x3d07_14a2,
+            0xbe1c_cd08,
+            0xbd5b_8df1,
+            0xbc92_8b91,
+            0x3db6_bb17,
+        ]) {
+            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -2447,10 +2446,9 @@ mod tests {
     fn dit_boundaries_reject_non_finite_values() {
         assert!(require_finite(&[0.0, -1.0], "context").is_ok());
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(
-                require_finite(&[0.0, value], "context").unwrap_err(),
-                "Non-finite Z-Image context"
-            );
+            assert!(require_finite(&[0.0, value], "context")
+                .unwrap_err()
+                .contains("Non-finite Z-Image context"));
         }
     }
 

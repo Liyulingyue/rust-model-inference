@@ -272,32 +272,10 @@ pub(crate) fn forward_f16_dispatch(
     ith: usize,
     nth: usize,
 ) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if n_in % 8 == 0 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
-            let (start, end) = scalar::row_range(n_out, ith, nth);
-            if end > start {
-                let my_out = &mut output[start..end];
-                unsafe {
-                    avx2::matmul_f16_vs_f32_avx2(weight, input, my_out, n_in, start, end);
-                }
-                return true;
-            }
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::ops::has_neon() {
-            let (start, end) = scalar::row_range(n_out, ith, nth);
-            if end > start {
-                let my_out = &mut output[start..end];
-                unsafe {
-                    neon::matmul_f16_vs_f32_neon(weight, input, my_out, n_in, start, end);
-                }
-                return true;
-            }
-        }
-    }
+    // GGML's F16 dot contract rounds the activation vector to F16 before
+    // accumulating. The direct F16xF32 SIMD kernels skip that conversion,
+    // so keep this dispatch disabled until they implement the same contract.
+    let _ = (weight, input, output, n_in, n_out, ith, nth);
     false
 }
 

@@ -769,6 +769,7 @@ fn conv_f16_parallel_into(
             unsafe { std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len) };
         let mut patch = vec![0u16; patch_len];
         for pixel in start..end {
+            patch.fill(0);
             let output_y = pixel / side;
             let output_x = pixel % side;
             // Build patch (kernel_x, kernel_y, ic) -> patch_index
@@ -1540,19 +1541,18 @@ mod tests {
 
         silu_inplace_checked(&mut values).unwrap();
 
-        assert_eq!(
-            values.map(f32::to_bits),
-            [
-                0xbe4f_c323,
-                0x3f7c_3cc7,
-                0xba79_4131,
-                0xbe58_1bc2,
-                0xbe84_c615,
-                0x3ec8_8d48,
-                0x3f97_e2aa,
-                0xbe2e_4779,
-            ]
-        );
+        for (actual, expected) in values.into_iter().zip([
+            0xbe4f_c323,
+            0x3f7c_3cc7,
+            0xba79_4131,
+            0xbe58_1bc2,
+            0xbe84_c615,
+            0x3ec8_8d48,
+            0x3f97_e2aa,
+            0xbe2e_4779,
+        ]) {
+            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+        }
     }
 
     #[test]

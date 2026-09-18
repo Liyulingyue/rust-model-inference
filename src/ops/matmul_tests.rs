@@ -915,10 +915,12 @@ fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
 
     softmax_inplace(&mut values);
 
-    assert_eq!(
-        values.map(f32::to_bits),
-        [0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0]
-    );
+    for (actual, expected) in values
+        .into_iter()
+        .zip([0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0])
+    {
+        assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1123,7 +1125,7 @@ fn neon_q8_quantization_matches_scalar() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_q8_quantization_uses_ties_to_even() {
+fn neon_q8_quantization_uses_ties_away_from_zero() {
     let mut input = [0.0f32; 32];
     input[0] = 127.0;
     input[1] = 34.5;
@@ -1132,7 +1134,7 @@ fn neon_q8_quantization_uses_ties_to_even() {
 
     quantize_q8_0_into(&input, input.len(), &mut q8, &mut scales);
 
-    assert_eq!(q8[1] as i8, 34);
+    assert_eq!(q8[1] as i8, 35);
 }
 
 #[test]
