@@ -1,3 +1,4 @@
+use rust_model_inference::ops::kernel::iq4_nl::IQ4NLKernel;
 use rust_model_inference::ops::kernel::q4_0::Q4_0Kernel;
 use rust_model_inference::ops::kernel::q4_1::Q4_1Kernel;
 use rust_model_inference::ops::kernel::q4_k::Q4_KKernel;
@@ -253,4 +254,89 @@ fn q6_k_kernel_multiplies_uniform_block() {
     kernel.forward_prequantized(&[1; 1024], &[1.0; 8], &mut output, 256, 1, 0, 1);
 
     assert_eq!(output, [256.0]);
+}
+
+#[test]
+fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
+    let mut weight = vec![0u8; 18];
+    weight[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+    for j in 0..16 {
+        weight[2 + j] = j as u8;
+    }
+
+    let kernel = IQ4NLKernel::new(&weight, 32, 1);
+    let mut output = vec![0.0f32; 32];
+    assert_eq!(weight[2], 0, "weight[2] should be 0 but is {}", weight[2]);
+    kernel.embedding_lookup(0, 32, &mut output);
+
+    let expected_lut = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+    for (i, &val) in output.iter().enumerate() {
+        let j = i / 2;
+        let is_low = i % 2 == 0;
+        let nibble = if is_low { j } else { j + 8 };
+        let expected_val = expected_lut[nibble] as f32;
+        assert!((val - expected_val).abs() < 1e-6, "output[{i}] = {} != LUT[{nibble}]={}", val, expected_val);
+    }
+}
+
+#[test]
+fn iq4_nl_prepared_path_matches_uniform_block_dot() {
+    let mut weight = vec![0u8; 144];
+    for sb in 0..8usize {
+        let boff = sb * 18;
+        weight[boff..boff + 2].copy_from_slice(&half::f16::from_f32(0.5).to_bits().to_le_bytes());
+        for j in 0..16 {
+            weight[boff + 2 + j] = 0x88;
+        }
+    }
+
+    let input = vec![1.0f32; 256];
+    let kernel = IQ4NLKernel::new(&weight, 256, 1);
+    let mut output = [0.0f32];
+    kernel.forward_prepared(&input, &[], &[], None, &mut output, 256, 1, 0, 1);
+    assert!((output[0] - 128.0).abs() < 1e-4, "got {}", output[0]);
+}
+
+#[test]
+fn iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp() {
+    use rust_model_inference::ops::quant::BlockQ8K;
+
+    let mut rng = rand_simple(0x1234_5678);
+    // 8 super-blocks of deterministic IQ4_NL data (f16 scale = 1.0, nibbles pattern)
+    let mut iq4nl_data = vec![0u8; 8 * 8 * 18];
+    for super_idx in 0..8 {
+        for sb in 0..8 {
+            let boff = super_idx * 8 * 18 + sb * 18;
+            iq4nl_data[boff..boff + 2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+            for j in 0..16 {
+                iq4nl_data[boff + 2 + j] = (j | ((j + 8) << 4)) as u8;
+            }
+        }
+    }
+    // 8 Q8K blocks with random but bounded values
+    let q8k: Vec<BlockQ8K> = (0..8).map(|_| {
+        let d_val = ((rng.next().unwrap() % 32) as f32 + 1.0) / 16.0;
+        let mut qs = [0i8; 256];
+        let mut bsums = [0i16; 16];
+        for qs in qs.iter_mut() {
+            *qs = (rng.next().unwrap() % 128) as i8;
+        }
+        for bs in bsums.iter_mut() {
+            *bs = (rng.next().unwrap() % 256) as i8 as i16;
+        }
+        BlockQ8K { d: d_val, qs, bsums }
+    }).collect();
+
+    let scalar = rust_model_inference::ops::quant::vec_dot_iq4_nl_q8k_scalar(&iq4nl_data, &q8k);
+    let simd = rust_model_inference::ops::quant::vec_dot_iq4_nl_q8k(&iq4nl_data, &q8k);
+    let diff = (simd - scalar).abs();
+    assert!(diff <= 1.0, "IQ4_NL AVX2/NEON vs scalar diff {} > 1 ULP: scalar={} simd={}", diff, scalar, simd);
+}
+
+fn rand_simple(seed: u32) -> impl Iterator<Item = u32> {
+    let mut state = seed;
+    std::iter::from_fn(move || {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        Some(state)
+    })
 }

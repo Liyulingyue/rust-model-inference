@@ -100,14 +100,15 @@ src/
 │   │   ├── f16/ f32/ bf16/       # 浮点权重子目录（mod/avx2/neon/scalar/avx2_q8/neon_q8）
 │   │   ├── q4_0/ q4_1/ q8_0/     # 旧量化子目录（mod + SIMD + scalar + dispatch + parallel）
 │   │   ├── q2_k.rs q3_k.rs q4_k.rs q5_k.rs q6_k.rs   # K-quant（多文件 scalar 路径，AVX2 在 quant/avx2_k.rs）
-│   │   └── iq4_nl.rs iq4_xs.rs                       # I-quant（仅 IQ4_NL/IQ4_XS）
+│   │   └── iq4_nl.rs iq4_xs.rs                       # I-quant（IQ4_NL / IQ4_XS kernel 入口）
 │   ├── math/              # 数学工具
 │   ├── matmul.rs          # matmul_tests
 │   ├── norm.rs            # rms_norm / rms_norm_inplace / rms_unit_inplace
 │   ├── quant/             # 量化辅助层（Q8_0 量化、K-quant AVX2 内核、IQ 表）
 │   │   ├── mod.rs         # BlockQ8K、quantize_row_q8_k_into
 │   │   ├── q8_0.rs        # Q8_0 量化
-│   │   ├── avx2_k.rs      # AVX2 K-quant 内核
+│   │   ├── avx2_k.rs      # AVX2 K-quant / IQ4_NL / IQ4_XS 内核（共享）
+│   │   ├── neon_k.rs      # aarch64 NEON：IQ4_NL × Q8K（与 AVX2 同源 1 ULP drift）
 │   │   ├── fuse.rs        # FFN 融合算子
 │   │   ├── iq_tables.rs / iq_tables_data.rs  # IQ 表查表
 │   ├── rope/              # RoPE（neox / mrope）

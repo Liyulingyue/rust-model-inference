@@ -27,12 +27,21 @@ NEON on aarch64; no AVX-512).
 - [x] **统一 embedding_lookup 函数** — qwen3 / main.rs 已使用统一入口
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
-- [x] **IQ4_NL scalar + IQ4_XS AVX2 kernel** (2026-09-18 验证) —
+- [x] **IQ4_NL + IQ4_XS AVX2 kernel** (2026-09-18 验证) —
       IQ4_NL scalar matmul（kvalues_iq4nl LUT）+ `embedding_lookup_iq4_nl` 已实现；
-      IQ4_XS AVX2 kernel 在 `src/ops/quant/avx2_k.rs` 共享路径，bit-exact（commit `b8d6b7c`）。
-      端到端验证：Qwen3-0.6B-IQ4_NL.gguf 产出 "Paris"，8.4 t/s gen；
-      Qwen3-0.6B-IQ4_XS.gguf 产出 "Paris"，36.7 t/s gen。`QTensorOwned` fuse 路径仍 panic
+      **IQ4_NL AVX2 kernel 新增**（`vec_dot_iq4_nl_q8k_avx2` 在 `src/ops/quant/avx2_k.rs`，
+      ≤ 1 ULP drift，端到端 8.6 → 16.1 t/s gen，1.87×）。
+      **IQ4_NL NEON kernel 新增**（`vec_dot_iq4_nl_q8k_neon` 在 `src/ops/quant/neon_k.rs`，
+      aarch64 128-bit SIMD，`vqtbl1q_u8` LUT + `vqdmull_s16` hadd/madd，同源 1 ULP drift）。
+      IQ4_XS AVX2 kernel 共享 `src/ops/quant/avx2_k.rs`，bit-exact（commit `b8d6b7c`）。
+      端到端验证：Qwen3-0.6B-IQ4_NL.gguf 产出 "Paris"，5 批中位 16.1 t/s gen；
+      Qwen3-0.6B-IQ4_XS.gguf 产出 "Paris"，34.9 t/s gen。`QTensorOwned` fuse 路径仍 panic
       （`src/ops/kernel/qtensor_owned.rs:228`）。
+      测试：`iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp`、
+      `iq4_nl_prepared_path_matches_uniform_block_dot`。
+      顺带修复：`IQ4NLKernel::embedding_lookup`（原本默认 panic）已实现 +
+      `forward_prequantized`（原本写 0）改为 Q4_K / Q6_K 同款 dequant-to-f32 + dot 兜底
+      （生产仍走 `forward_prepared`）。
 - [ ] **IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册但 kernel panic with TODO。
       仅 IQ3_XXS / IQ2_XXS / IQ1_M / IQ1_S 有 scalar kernel（精度受损，输出偶尔偏差）；
       IQ2_XS / IQ3_XS / IQ3_S / IQ2_S kernel 留 TODO panic。

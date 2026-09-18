@@ -77,7 +77,7 @@ dtype 轴是 **dequant + matmul** 的内层选择；op 轴是 **element-wise + a
 | op 级工具函数 | `ops/dot.rs` | **~15 处** AVX2/NEON if-链（`dot_f32_*`, `vec_scale_f32_*`, `vec_mad_f32_*`, `sum_*_f32_*` 等）；F16C、`fp16` 子特性在运行时再判一次 |
 | dtype 级 matmul 入口 | `ops/quant/q8_0.rs` | `quantize_q8_0_into` / `quantize_q8_0_into_parallel`：AVX2/NEON/scalar |
 | **dtype 级 SIMD 派发** | `ops/kernel/{bf16,f16,f32,q4_0,q4_1,q8_0}/mod.rs`（双 SIMD 后端）；`q4_0/mod.rs`、`q4_1/mod.rs`（仅 AVX2）；`q8_0/dispatch.rs`（三选一） | 每个 kernel 文件 `forward_prequantized / forward_prepared` 内独立 if-链 |
-| **k-quant 内核** | `ops/kernel/{q2_k, q3_k, q4_k, q5_k, q6_k, iq4_nl, iq4_xs}.rs` | `forward_prequantized` 多为 stub（零输出或 dequant-to-f32 兜底），真实路径在 `forward_prepared` 调 `ops::quant::vec_dot_*_q8k` |
+| **k-quant / IQ4 内核** | `ops/kernel/{q2_k, q3_k, q4_k, q5_k, q6_k, iq4_nl, iq4_xs}.rs` | `forward_prequantized` 多为 stub（dequant-to-f32 兜底），真实路径在 `forward_prepared` 调 `ops::quant::vec_dot_*_q8k`（Q8K 共享 activation；IQ4_NL / IQ4_XS 走 `avx2_k.rs` AVX2 路径，IQ4_NL 同步有 `neon_k.rs` aarch64 路径） |
 | 量化辅助 | `ops/quant/avx2_k.rs`（`vec_dot_q2k_q8k_avx2`、`vec_dot_q3k_q8k_avx2`、`vec_dot_iq4_xs_q8k_avx2` 等） | 一组独立的 AVX2/scalar vec_dot 函数，被 kernel `forward_prepared` 调用——和 dtype if-链正交 |
 | **Vulkan per-matmul 入口** | `ops/kernel/q8_0/parallel.rs:28-87` | 全范围 GPU 派发 + 失败回退到全行 CPU 重算（线程 0 独占） |
 | **模型级 GPU 会话** | `src/vulkan/qwen3.rs`、`src/vulkan/qwen35.rs` | 整段 forward 在 GPU 上跑，含 eligibility 检查、token-commit 状态机；调用方是 `models/{qwen3,qwen35}/trunk/forward.rs` |
@@ -233,7 +233,7 @@ src/kernel/   # 已经存在；命名不冲突但属同一族
 ├── q4_1/{avx2,scalar}.rs
 ├── q8_0/{avx2,dispatch,neon,parallel,scalar}.rs
 ├── q2_k.rs / q3_k.rs / q4_k.rs / q5_k.rs / q6_k.rs
-└── iq4_nl.rs（IQ4_NL scalar kernel）
+└── iq4_nl.rs（IQ4_NL kernel 入口；AVX2 实现在 src/ops/quant/avx2_k.rs 共享路径，NEON 实现在 src/ops/quant/neon_k.rs）
 └── iq4_xs.rs（IQ4_XS kernel 入口；AVX2 实现在 src/ops/quant/avx2_k.rs 共享路径）
 
 src/vulkan/

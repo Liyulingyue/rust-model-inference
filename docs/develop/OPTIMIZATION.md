@@ -98,7 +98,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 | Q4_K | bit-exact | Qwen3-0.6B Q4_K_M | 同上 |
 | Q6_K | 1-2 ULP drift（已知） | 输出与 scalar 一致 | 同上 |
 | BF16 | bit-exact | Qwen3.5 BF16 | `tests/qwen35_reference.rs` |
-| IQ4_NL / IQ4_XS | bit-exact | Qwen3-0.6B IQ4_NL/IQ4_XS | `tests/quantized_inference.rs` |
+| IQ4_NL / IQ4_XS | ≤ 1 ULP drift（已知） / bit-exact | 输出与 scalar 一致 | `tests/quantized_inference.rs`（IQ4_NL `iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp`，IQ4_XS `b8d6b7c` 长期 bit-exact） |
 
 `feature=parity-trace` 下的 `src/parity_trace.rs` 是 SIMD/GPU vs scalar 的运行时对照门禁。
 
@@ -120,6 +120,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 | Q3_K_S | 308 | 6.0 | ✅ | Q3K × Q8K scalar（format bug 修复；Lyon noise） |
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K AVX2（`avx2_k.rs`，3 个 bug 修复：qs_base / scale_b / hsum256_ps） |
 | IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2（共享 `src/ops/quant/avx2_k.rs`，bit-exact，commit `b8d6b7c`） |
+| **IQ4_NL** | 381 | **16.1** | ✅ | **IQ4_NL × Q8K AVX2 + NEON**（`vec_dot_iq4_nl_q8k_avx2` + `vec_dot_iq4_nl_q8k_neon` 共享 `avx2_k.rs` / 新增 `neon_k.rs`，≤ 1 ULP drift，2026-09-18） |
 | IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar（f64 block acc；"The capital of France is Paris."） |
 | IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 输出偏 | IQ2_XXS × Q8K scalar（单 block bit-exact，输出与 IQ3_XXS 略不同） |
 | IQ1_M (UD) | ~170 | 4.3 | ⚠️ 输出乱 | IQ1_M × Q8K scalar（1.75 bpw 本就精度极低） |
@@ -131,6 +132,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 - BF16：scalar 7.4 → AVX2 27.5 t/s（**3.7×**）
 - Q5_K：was 0 output → 40 t/s（修复 + dispatch 接入）
 - IQ4_XS：was panic → AVX2 4.8 t/s（修复 + 打开 dispatch）
+- **IQ4_NL**：scalar 8.6 t/s → AVX2 **16.1 t/s**（1.87×，`vec_dot_iq4_nl_q8k_avx2` 在 `src/ops/quant/avx2_k.rs`；同步新增 `vec_dot_iq4_nl_q8k_neon` 在 `src/ops/quant/neon_k.rs` 走 aarch64 路径；测试 `iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp`；端到端 Qwen3-0.6B-IQ4_NL.gguf 5 批中位 16.1 t/s gen，产出 "Paris"）
 - IQ3_XXS (UD)：was panic → scalar 4.3 t/s（修复 + f64 acc → 给出 "The capital of France is Paris."）
 - Q2_K：was 乱码（scalar 4.9 t/s）→ AVX2 4.9 t/s（启用 dispatch，3 bugs 修复）
 - Q3_K / Q3_K_M / Q3_K_S：scalar 5-9 t/s → AVX2 4.7-7.3 t/s（重写：修 `scale_shuffles` + `hsum256ps` 双 shuffle imm；scalar 改用 `_mm_extract` + `_mm_add_epi16`；Q3_K_M 现在输出 "The capital of France is **Paris**" 与 IQ4_XS 完全一致）
@@ -146,14 +148,15 @@ src/ops/kernel/
 ├── f16/{mod,avx2,neon,scalar,avx2_q8,neon_q8}.rs
 ├── f32/{mod,avx2,neon,scalar}.rs
 ├── q2_k.rs q3_k.rs q4_k.rs q5_k.rs q6_k.rs           # scalar + 共享 avx2_k.rs
-└── iq4_nl.rs iq4_xs.rs                                # IQ4_NL scalar / IQ4_XS AVX2
+└── iq4_nl.rs iq4_xs.rs                                # IQ4_NL kernel 入口 / IQ4_XS AVX2
 
 src/ops/quant/
-├── avx2_k.rs            # 共享 K-quant / IQ4_XS / Q2_K / Q3_K AVX2 内核
+├── avx2_k.rs            # 共享 K-quant / IQ4_XS / IQ4_NL / Q2_K / Q3_K AVX2 内核
+├── neon_k.rs            # aarch64 NEON：IQ4_NL × Q8K（与 AVX2 同源 1 ULP drift）
 ├── fuse.rs              # FFN gate+up 融合
-├── iq_tables.rs         # IQ 表查表（LUT）
+├── iq_tables.rs         # IQ 表查查表（LUT）
 ├── q8_0.rs              # Q8_0 量化
-└── mod.rs               # BlockQ8K / QK_K 常量
+└── mod.rs               # BlockQ8K / QK_K 常量 + AVX2/NEON dispatch
 ```
 
 ### 4.1 已知未实现
