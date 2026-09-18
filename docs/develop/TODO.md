@@ -13,35 +13,31 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **Q6_K embedding_lookup 调试** — 当前实现数值正确但模型挂起
-- [x] **Vulkan GPU matmul 后端可用 (2026-08)** — 权重常驻 + 持久 IO 缓冲 + 单 dispatch 全行覆盖 + 看门狗。
-      正确性（GPU vs CPU rel ≤ 3e-7）与稳定性已验证。详见 `docs/develop/VULKAN.md`。
-- [x] **统一 embedding_lookup 函数** — qwen3 / main.rs 已使用统一入口
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
-- [ ] **IQ4_XS / IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册（commit `402bc3d`）但 kernel panic with TODO。
-      IQ4_NL scalar 已实现（kvalues_iq4nl LUT）。qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS，
-      实现后这两个 model 就能加载。
+- [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
+      的 `iq_kernel_impl!` macro 给 IQ2_XXS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S 生成了
+      Kernel trait impl，`forward_prepared` 正确调 `vec_dot_*_q8k` scalar（生产走 Q8K 路径无 panic）；
+      但 `forward_prequantized` 是 stub（写 0）。`uses_q8_k()` 包含所有 IQ 类型 → 生产永远走
+      `forward_prepared` → stub 永不触发，但接口完整性差。
+      选项 1：把 macro 里的 stub 改成完整 dequant-to-f32 + dot 路径（与 IQ4_NL / Q4_K 同款），低成本。
+      选项 2：直接写 SIMD kernel（需要 IQ2_XS / IQ3_S 的 GGUF 测试模型 + llama.cpp Oracle；当前
+      `models/qwen3-0.6b-gguf/` 没有这些格式，按 `adapting-new-models` skill 暂无法做精度验证）。
 - [ ] **AVX-VNNI int8 dot 加速** — 见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速) 详细说明。
       当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
       K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
-- [ ] **llama trunk per-token SIMD 化** — 见 [TODO-LLAMA-PER-TOKEN-SIMD](#todo-llama-trunk-per-token-simd化)
-      列出 llama trunk 仍为 scalar 的小循环，AVX2 `vec_scale_f32` 可盖掉。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
       预期 1.5-2× 加速。
 
 ## Medium Priority
 
-- [x] **ASR audio encoder 加速 (F16 conv2d 路径)** — 已通过 `dot_f16_f16_bytes_avx2` 拿到 3-5× audio_encode、6.8× encode_convolution、26.7× project_f16、总 ASR 3.0×。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
-- [x] **Q6_K AVX2 精度 drift 调查** — 1-2 ULP drift 不可避免，parity 测试通过
-- [x] **Q8_0 AVX2 "diff=255" 调查** — 测试 bug，已修
 
 ### K-quant multi-row tile（vec_dot_q4k_q8k_avx2 / vec_dot_q6k_q8k_avx2）
 
