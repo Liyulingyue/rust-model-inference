@@ -244,3 +244,15 @@ fn prefill_history_matches_token_by_token_decode() {
         decoded.shortconv_state_bits()
     );
 }
+
+#[test]
+fn f32_attention_handles_more_than_512_cached_tokens() {
+    let mut source = fixture();
+    source
+        .metadata
+        .insert("lfm2.context_length".into(), MetaValue::Uint32(768));
+    let pool = Arc::new(ComputePool::new(1));
+    let mut session = Lfm25Session::new(&source, pool, 513, KvFormat::F32).unwrap();
+
+    session.evaluate(&vec![0; 513], &[0, 1]).unwrap();
+}
