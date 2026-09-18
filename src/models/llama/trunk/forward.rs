@@ -171,6 +171,7 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
@@ -235,6 +236,7 @@ pub fn run_inference(
         profile,
         kv_format,
         max_context,
+        repetition_penalty,
     )
 }
 
@@ -248,6 +250,7 @@ pub fn run_inference_tokens(
     profile: bool,
     kv_format: KvFormat,
     max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let config = model_config_from_source(source)
@@ -373,6 +376,10 @@ pub fn run_inference_tokens(
 
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
+    // Token counts for `apply_repetition_penalty`. We keep an explicit map so
+    // the penalty step is O(distinct tokens) instead of O(generated_tokens).
+    let mut generated_token_counts: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::new();
     let mut all_tokens: Vec<u32> = input_tokens.clone();
     let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
 
@@ -1029,6 +1036,13 @@ pub fn run_inference_tokens(
             }
             rng
         };
+        // Apply repetition penalty on logits for tokens already generated.
+        // `generated_token_counts` is built from `generated_tokens` below.
+        crate::ops::sampling::apply_repetition_penalty(
+            logits,
+            &generated_token_counts,
+            repetition_penalty,
+        );
         let chosen = crate::ops::sample_llama_cpp(logits, top_k, top_p, temperature, rng_u64);
 
         let chosen_id = chosen as u32;
@@ -1042,6 +1056,7 @@ pub fn run_inference_tokens(
 
         generated_tokens.push(chosen_id);
         all_tokens.push(chosen_id);
+        *generated_token_counts.entry(chosen_id).or_insert(0) += 1;
 
         let text = decoder.push(chosen_id);
         print!("{}", text);

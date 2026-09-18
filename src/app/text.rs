@@ -45,6 +45,7 @@ pub fn run_inference(
     kv_format: KvFormat,
     prefill_batch_size: usize,
     max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let arch = source
         .metadata("general.architecture")
@@ -61,6 +62,8 @@ pub fn run_inference(
             profile,
             kv_format,
             prefill_batch_size,
+            max_context,
+            repetition_penalty,
         )
     } else if arch == "lfm2" {
         let is_lfm25 = source
@@ -89,6 +92,7 @@ pub fn run_inference(
                 profile,
                 kv_format,
                 max_context,
+                repetition_penalty,
             )
         }
     } else if arch == "lfm2moe" {
@@ -100,6 +104,8 @@ pub fn run_inference(
             n_threads_arg,
             profile,
             kv_format,
+            max_context,
+            repetition_penalty,
         )
     } else if uses_llama_trunk(&arch) {
         crate::models::llama::run_inference(
@@ -112,6 +118,7 @@ pub fn run_inference(
             profile,
             kv_format,
             max_context,
+            repetition_penalty,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -146,6 +153,8 @@ pub fn run_inference(
             profile,
             kv_format,
             prefill_batch_size,
+            max_context,
+            repetition_penalty,
         )
     }
 }
@@ -156,6 +165,7 @@ pub fn run_interactive(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     println!("=== RustModelInference Interactive Mode ===");
     println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
@@ -189,7 +199,9 @@ pub fn run_interactive(
             KvFormat::F16,
             prefill_batch_size,
             CliOptions::DEFAULT_MAX_CONTEXT,
+            repetition_penalty,
         )?;
+        let _ = repetition_penalty; // suppress unused warning if not consumed
         println!();
     }
     Ok(())
@@ -727,6 +739,8 @@ pub fn run_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     run_multimodal_with_video_ref(
         llm_source,
@@ -740,7 +754,8 @@ pub fn run_multimodal(
         temperature,
         n_threads_arg,
         prefill_batch_size,
-        CliOptions::DEFAULT_MAX_CONTEXT,
+        max_context,
+        repetition_penalty,
         None,
     )
 }
@@ -758,6 +773,7 @@ pub fn run_multimodal_with_video(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -773,6 +789,7 @@ pub fn run_multimodal_with_video(
         n_threads_arg,
         prefill_batch_size,
         max_context,
+        repetition_penalty,
         Some(owned_source),
     )
 }
@@ -790,6 +807,7 @@ fn run_multimodal_with_video_ref(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     max_context: usize,
+    repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -1338,6 +1356,7 @@ mod tests {
         build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
         run_multimodal, uses_llama_trunk, validate_single_qwen_media,
     };
+    use crate::app::cli::CliOptions;
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use crate::models::qwen35::{Qwen35Config, Qwen35Model};
     use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -1426,6 +1445,8 @@ mod tests {
             0.1,
             1,
             crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+            CliOptions::DEFAULT_MAX_CONTEXT,
+            1.0,
         )
         .unwrap_err();
         assert!(error.contains("--temp"), "{error}");

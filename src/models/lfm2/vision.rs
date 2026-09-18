@@ -910,5 +910,6 @@ pub fn run_multimodal(
         false,
         kv_format,
         max_context,
+        1.0, // repetition_penalty disabled for multimodal path
     )
 }

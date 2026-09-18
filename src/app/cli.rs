@@ -42,6 +42,7 @@ pub struct CliOptions {
     pub max_tokens: Option<usize>,
     pub max_context: Option<usize>,
     pub prefill_batch_size: Option<usize>,
+    pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
     pub seed: Option<i64>,
@@ -92,6 +93,15 @@ impl CliOptions {
 
     pub fn effective_max_context(&self) -> usize {
         self.max_context.unwrap_or(Self::DEFAULT_MAX_CONTEXT)
+    }
+
+    /// Effective repetition penalty for sampling. `None` / `Some(1.0)` means
+    /// disabled; values > 1.0 suppress already-generated tokens (Hugging Face
+    /// / llama.cpp definition), values < 1.0 encourage repeats.  We don't
+    /// validate against `< 1.0` because users may intentionally want
+    /// repetition in some prompts.
+    pub fn effective_repetition_penalty(&self) -> f32 {
+        self.repetition_penalty.unwrap_or(1.0)
     }
 }
 
@@ -306,6 +316,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--max-context" => {
                 if i + 1 < args.len() {
                     options.max_context = Some(args[i + 1].parse().unwrap_or(8192));
+                    i += 1;
+                }
+            }
+            "--repetition-penalty" => {
+                if i + 1 < args.len() {
+                    let v: f32 = args[i + 1].parse().unwrap_or(1.0);
+                    if v <= 0.0 {
+                        return Err(format!(
+                            "--repetition-penalty must be > 0 (1.0 = disabled, > 1.0 = suppress repeats)"
+                        ));
+                    }
+                    options.repetition_penalty = Some(v);
                     i += 1;
                 }
             }

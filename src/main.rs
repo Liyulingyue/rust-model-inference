@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)]";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -238,6 +238,7 @@ fn main() {
             n_threads,
             prefill_batch_size,
             options.effective_max_context(),
+            options.effective_repetition_penalty(),
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
         app::run_or_exit(app::run_multimodal_with_video(
@@ -253,6 +254,7 @@ fn main() {
             options.threads,
             prefill_batch_size,
             options.effective_max_context(),
+            options.effective_repetition_penalty(),
         ));
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
@@ -269,6 +271,7 @@ fn main() {
                 options.threads,
                 prefill_batch_size,
                 options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         } else if options.embedding {
             app::run_embedding(
@@ -309,6 +312,7 @@ fn main() {
                 options.kv_format,
                 prefill_batch_size,
                 options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -323,6 +327,7 @@ fn main() {
                 options.kv_format,
                 prefill_batch_size,
                 options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         }
     } else {
@@ -378,6 +383,7 @@ fn main() {
                     options.threads,
                     prefill_batch_size,
                     options.effective_max_context(),
+                    options.effective_repetition_penalty(),
                 ));
                 println!();
             }
@@ -389,6 +395,7 @@ fn main() {
             temperature,
             options.threads,
             prefill_batch_size,
+            options.effective_repetition_penalty(),
         ));
     }
 }
