@@ -229,7 +229,7 @@ src/models/{model_name}/
 |--------|------|------------|
 | `b7509ef` | **Q5_K** kernel 之前是占位 `output = 0.0`。实现 `vec_dot_q5k_q8k_scalar`（仿 q4k 结构复用 `vec_dot_q5k_q8k_avx2`）。 | Q5_K_S/M、Q4_K_S 从乱码/全空 → 正确产出 `**Paris**` |
 | `9d04643` | **Q4_1 AVX2** 内核（4.7× 加速：11.6→54.5 t/s）；**BF16 AVX2+FMA**（3.7× 加速：7.4→27.5 t/s）；**Q2_K/Q3_K scalar** 内核接入 + `QuantizedTensor` 注册。Q3_K 已知输出乱码（format bug，待验证）。 | Q4_1: 11.6→54.5 t/s；BF16: 7.4→27.5 t/s |
-| `402bc3d` | **GGMLType 注册全部 I-quant**（IQ2_XXS/XS/S、IQ3_XXS/XS/S、IQ4_NL/XS）。**IQ4_NL scalar matmul** + `embedding_lookup_iq4_nl`。IQ4_XS/IQ2/IQ3 kernel 留 TODO panic。 | IQ4_NL 单 tensor 可用；模型加载不 panic |
+| `402bc3d` | **GGMLType 注册全部 I-quant**（IQ2_XXS/XS/S、IQ3_XXS/XS/S、IQ4_NL/XS）。**IQ4_NL scalar matmul** + `embedding_lookup_iq4_nl`。IQ4_XS kernel 在 `src/ops/quant/avx2_k.rs` AVX2 实现（commit `b8d6b7c`）；IQ2/IQ3 大部分 kernel 仍留 TODO panic。 | IQ4_NL / IQ4_XS 端到端可跑（实测产出 "Paris"）；IQ2/IQ3 panic |
 | `592ba28` | **Q3_K / Q2_K format 修复**（参照 llama.cpp `dequantize_row_q2_K`、`vec_dot_q3_K_q8_K_generic` 逐行移植）。详见 §9。 | Q2_K/L、Q3_K_S/M 全部产出 `Paris`** |
 
 新增结构：
@@ -240,7 +240,7 @@ src/ops/kernel/
 ├── q2_k.rs                       # Q2_K scalar（Q8K path）
 ├── q3_k.rs                       # Q3_K scalar（Q8K path）
 ├── iq4_nl.rs                     # IQ4_NL scalar
-└── iq4_xs.rs                     # IQ4_XS TODO panic
+└── iq4_xs.rs                     # IQ4_XS kernel 入口（AVX2 实现在 src/ops/quant/avx2_k.rs 共享）
 src/ops/quant/mod.rs 新增:
 - BLOCK_Q2K_SIZE / BLOCK_Q3K_SIZE 常量
 - dequantize_row_q2_k / dequantize_row_q3_k

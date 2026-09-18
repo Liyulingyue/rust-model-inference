@@ -54,6 +54,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 ### 1.2 已知未完全修复
 
 - **Q6_K AVX2** 仍有 1-2 ULP drift（commit `acb0a2b` 调查根因）：scalar `sumf += sums[l]` 是线性累加，AVX2 `hsum_ps` 是树形 reduction；f32 加法不满足结合律。尝试过多种缓解（FMA→mul+add 拆解、scalar 改 `mul_add`），均无改善——属于 IEEE 754 不可避免现象。生产验证：Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"（scalar 与 AVX2 一致）。
+  - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) high-priority 第一条（已划 ✅）。
 - **Q8_0 AVX2 "diff=255"** 是测试 bug（scalar 函数调用时 `(n_in, n_out, 0)` 把 `n_out` 错位传到 `row_start`，导致 scalar 没跑任何行返回 0）。修复后实测 `max_diff=0.000366 rel=1.6e-7`，AVX2 算法 bit-exact 正确。
 
 ---
@@ -118,7 +119,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 | Q3_K_M | 331 | 9.2 | ✅ | Q3K × Q8K scalar（`q3_k.rs`，format bug 修复） |
 | Q3_K_S | 308 | 6.0 | ✅ | Q3K × Q8K scalar（format bug 修复；Lyon noise） |
 | Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K AVX2（`avx2_k.rs`，3 个 bug 修复：qs_base / scale_b / hsum256_ps） |
-| IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2（`src/ops/kernel/iq4_xs.rs`，bit-exact，commit `b8d6b7c`） |
+| IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2（共享 `src/ops/quant/avx2_k.rs`，bit-exact，commit `b8d6b7c`） |
 | IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar（f64 block acc；"The capital of France is Paris."） |
 | IQ2_XXS (UD) | ~210 | 4.4 | ⚠️ 输出偏 | IQ2_XXS × Q8K scalar（单 block bit-exact，输出与 IQ3_XXS 略不同） |
 | IQ1_M (UD) | ~170 | 4.3 | ⚠️ 输出乱 | IQ1_M × Q8K scalar（1.75 bpw 本就精度极低） |

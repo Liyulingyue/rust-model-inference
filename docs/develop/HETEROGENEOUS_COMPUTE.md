@@ -233,7 +233,8 @@ src/kernel/   # 已经存在；命名不冲突但属同一族
 ├── q4_1/{avx2,scalar}.rs
 ├── q8_0/{avx2,dispatch,neon,parallel,scalar}.rs
 ├── q2_k.rs / q3_k.rs / q4_k.rs / q5_k.rs / q6_k.rs
-└── iq4_nl.rs / iq4_xs.rs（内含 IQ1_S/M/XXS/XS/S、IQ2_XXS/S/XS、IQ3_XXS/S）
+└── iq4_nl.rs（IQ4_NL scalar kernel）
+└── iq4_xs.rs（IQ4_XS kernel 入口；AVX2 实现在 src/ops/quant/avx2_k.rs 共享路径）
 
 src/vulkan/
 ├── ops.rs              # 23 个 shader 算子（不搬，作为 Vulkan Session 的内部实现）

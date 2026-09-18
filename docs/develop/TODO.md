@@ -13,15 +13,31 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **Q6_K embedding_lookup 调试** — 当前实现数值正确但模型挂起
+- [x] **Q6_K `forward_prepared` 与 scalar oracle 1 ULP drift** (2026-09-18 复现) —
+      `Q6_KKernel::forward_prepared` 调用 `vec_dot_q6k_q8k`，在 x86_64 上命中 `vec_dot_q6k_q8k_avx2`
+      路径，与 `vec_dot_q6k_q8k_scalar` 差 1 ULP（测试 `q6_k_prepared_path_matches_existing_scalar_dot_bits`）。
+      同根：FMA 单次舍入 vs scalar 顺序累加（参见 [`OPTIMIZATION.md`](OPTIMIZATION.md) §1.2）。
+      **当前无生产影响**：Q6_K fused path 尚未接入任何模型（实际推理走 `forward_prequantized`
+      → `matmul_q6_k_scalar_range` 全 scalar 路径，端到端 Qwen3-0.6B-Q6_K 实测 55.3 t/s 产出 "Paris"）。
+      `embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致；不影响 token embedding。
+      若 fused path 接入模型前需要 bit-exact：拆 `_mm256_fmadd_ps` 为 `mul+add`（参考
+      `src/ops/kernel/q4_0/avx2.rs` 经验），但会让 AVX2 路径性能退化到 scalar 水平。
 - [x] **Vulkan GPU matmul 后端可用 (2026-08)** — 权重常驻 + 持久 IO 缓冲 + 单 dispatch 全行覆盖 + 看门狗。
       正确性（GPU vs CPU rel ≤ 3e-7）与稳定性已验证。详见 `docs/develop/VULKAN.md`。
 - [x] **统一 embedding_lookup 函数** — qwen3 / main.rs 已使用统一入口
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
-- [ ] **IQ4_XS / IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册（commit `402bc3d`）但 kernel panic with TODO。
-      IQ4_NL scalar 已实现（kvalues_iq4nl LUT）。qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS，
-      实现后这两个 model 就能加载。
+- [x] **IQ4_NL scalar + IQ4_XS AVX2 kernel** (2026-09-18 验证) —
+      IQ4_NL scalar matmul（kvalues_iq4nl LUT）+ `embedding_lookup_iq4_nl` 已实现；
+      IQ4_XS AVX2 kernel 在 `src/ops/quant/avx2_k.rs` 共享路径，bit-exact（commit `b8d6b7c`）。
+      端到端验证：Qwen3-0.6B-IQ4_NL.gguf 产出 "Paris"，8.4 t/s gen；
+      Qwen3-0.6B-IQ4_XS.gguf 产出 "Paris"，36.7 t/s gen。`QTensorOwned` fuse 路径仍 panic
+      （`src/ops/kernel/qtensor_owned.rs:228`）。
+- [ ] **IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册但 kernel panic with TODO。
+      仅 IQ3_XXS / IQ2_XXS / IQ1_M / IQ1_S 有 scalar kernel（精度受损，输出偶尔偏差）；
+      IQ2_XS / IQ3_XS / IQ3_S / IQ2_S kernel 留 TODO panic。
+      TODO.md L30-32 旧描述 "qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS"
+      经验证不成立：实测两个文件分别命中 IQ4_NL / IQ4_XS kernel，AVX2 路径产出 "Paris" 无 panic。
 - [ ] **AVX-VNNI int8 dot 加速** — 见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速) 详细说明。
       当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
