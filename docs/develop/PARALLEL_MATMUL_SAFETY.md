@@ -171,15 +171,25 @@ A 与 B 在借用规则上等价（都是 caller 或 kernel 内构造 disjoint `
 
 按本文件 §6 路径 A 落地，下列代码层条目尚未补齐，列作 backlog：
 
+### 9.1 已完成（2026-09-18）
+
+下列 5 条全部以纯文档/属性方式落进 src/，无运行行为变化：
+
+* ✅ `ComputePool::compute` docstring（`core/thread_pool.rs:182`）：写明 closure 必须在 worker 间 disjoint partition；引用本文件 §1。
+* ✅ `Weight::quantize_and_matmul_with_scratch` docstring（`ops/kernel/mod.rs:336`）：写明 alias 模式 + 不变量依赖 kernel 行分区；引用本文件。
+* ✅ `QuantizedTensor::quantize_and_matmul_with_scratch` docstring（`ops/kernel/quantized_tensor.rs:611`）：同上。
+* ✅ `PreparedRows::matmul_group` 非 batched 分支 `// SAFETY:`（`ops/kernel/mod.rs:235`）：解释 `*output_ptr` 跨 worker 共享 + 每 worker 行内序列化 + kernel 按 `(ith, nth)` 写 disjoint `[start, end)`。
+* ✅ `matmul_q8_0_quantized_dynamic` `#[deprecated]`（`ops/kernel/q8_0/parallel.rs:131`）：note 指向 `# Bug` 注释 + 推荐替代。
+* 配套：`src/ops/matmul.rs` re-export 加 `#[allow(deprecated)]`，避免编译期 warning 噪声。
+
+验证：`cargo build --lib`（default + `--features vulkan` + `--features parity-trace`）✓；`cargo test --lib` 失败数与改动前一致（33 个全是环境/精度类预存在失败，与注释无关）。
+
+### 9.2 仍待处理
+
 | 缺口 | 描述 | 影响 | 推荐落地方式 |
 |---|---|---|---|
-| **`ComputePool::compute` docstring 缺失** | `core/thread_pool.rs:183` 没有 `///` docstring 写明「闭包内若构造跨 worker 的 `&mut`，caller 必须保证 disjoint」。新增调用方无文档可依。 | §1 表中的形态 B 一直会被新人复制。 | §6 路径 C 的第一步：加 docstring + `// SAFETY:` 注释。即使不修 B，也要把契约写明。 |
-| **`Weight::quantize_and_matmul_with_scratch` 缺不变量注释** | `ops/kernel/mod.rs:336` 函数顶部只有 `match self.ggml_type { ... }`，没有写「kernel 必须按 `(ith, nth)` 切，且只写自己那段」。 | 任何 follow-up 修改 partition 公式都可能引入静默 UB。 | §6 路径 C：加 docstring。 |
-| **`QuantizedTensor::quantize_and_matmul_with_scratch` 缺注释** | `ops/kernel/quantized_tensor.rs:610` 同样无 docstring。 | 同上。 | §6 路径 C。 |
-| **`gemma4_bf16_input_matmul` 闭包外的 `unsafe {}` 是误导** | `models/gemma4/trunk/forward.rs:761` 的 `pool.compute(\|thread, threads\| unsafe { ... })` 把整个闭包标 `unsafe`，但实际只在内部做 `from_raw_parts_*`，**闭包自身的 `pool.compute` 不是 unsafe 函数**。这个标记让人误以为闭包本身有特殊不安全责任。 | 阅读者误解 `compute` 的契约。 | 把 `unsafe { ... }` 缩到 `from_raw_parts_*` 那一行，或在 §6 路径 C 中一起说明。 |
-| **`PreparedRows::matmul_group` 非 batched 分支缺 `// SAFETY:`** | `ops/kernel/mod.rs:236` 是形态 B 变体（per-row 共享 `&mut [f32]`，kernel 内部按 `(ith, nth)` 行分区），但没有写明 disjoint 不变量。对比 `batched_q4` 分支（行 199）已写 `// SAFETY:`。 | 后续修改非 batched 路径的 partition 公式时容易引入 alias。 | 加 `// SAFETY: kernel.forward_prepared 按 (ith, nth) 行分区，共享 *output_ptr 在此闭包内仅按行递增使用，跨 worker disjoint 由内核 row_range 保证。` |
-| **`Kernel::forward_prepared` 签名阻碍形态 A 推广** | `&mut [f32]` 参数本身在 §1 表 B 站点是「整段 `&mut [f32]`」的来源。要根除需要走 §6 路径 B，或在 caller 端 pre-split（路径 A）。 | 路径 B 工作量 ~20 文件；路径 A 工作量 ~5 文件。 | 短期走 A，长期等下一次 Kernel trait 大重构时并入 B。 |
-| **CI 未跑 Miri / stacked-borrows** | `.github/workflows/ci.yml` 不含 `cargo +nightly miri test`。 | §1 表 B 站点任何回归都不会被 sanitizer 拦截。 | 加一个 CI job 跑 `cargo miri test -p <lib>`，至少覆盖 `Weight::quantize_and_matmul_with_scratch` 的两个调用方（Qwen3 + Gemma4）。 |
-| **新 dtype kernel 加进来没有 partition audit** | 没有 CI / lint 检查新 `forward_prepared` 是否遵守 `row_range` 不变量。 | §6 路径 C 提到的「新加 kernel 必须遵守 partition 不变量」无强制。 | 短期：PR template 加 checklist（§1 / §3 列出的审计条目）。长期：maturin-style 半自动 lint（`forward_prepared` 必须含 `(start, end) = row_range(...)` 调用）。 |
-| **`pool.compute_with_chunks` 的 barrier bug 仍可见** | `q8_0/parallel.rs:115-130` 的 `matmul_q8_0_quantized_dynamic` 自带 `// # Bug` 注释说「与 `pool.compute` 的 persistent worker 配合时输出会零化或未写」。 | 实际生产路径不走这条（注释明示走 `matmul_q8_0_quantized_parallel_rows`），但代码与注释并存容易误用。 | 要么把这条函数标记 `#[deprecated]`、要么把 `compute_with_chunks` 修到能配合 persistent worker。前者更安全。 |
-| **§1 表中 5 文件 8 处的 caller 端缺 `// SAFETY:`** | 8 处 `unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out_or_rows) }` 全部裸 `unsafe`，没有写「kernel 内部 row_range 切分保证 disjoint」。 | 与上述 `Weight::quantize_and_matmul_with_scratch` 缺注释同源。 | §6 路径 C 一次性补 8 行 `// SAFETY:`；若走 A 则随代码改动一并消失。 |
+| **`gemma4_bf16_input_matmul` 闭包外的 `unsafe {}` 是误导** | `models/gemma4/trunk/forward.rs:761` 的 `pool.compute(\|thread, threads\| unsafe { ... })` 把整个闭包标 `unsafe`，但实际只在内部做 `from_raw_parts_*`，**闭包自身的 `pool.compute` 不是 unsafe 函数**。这个标记让人误以为闭包本身有特殊不安全责任。 | 阅读者误解 `compute` 的契约。 | 把 `unsafe { ... }` 缩到 `from_raw_parts_*` 那一行——这正好与 §1 表 gemma4:767 的 pre-split 修复同一 PR。 |
+| **§1 表中 7 处 alias（其中 5 处涉及 GPU 协调）** | `kernel/mod.rs:384`、`quantized_tensor.rs:640`、`:663`、`qtensor_owned.rs:768`、`z_image/mod.rs:648`、`:728` 仍是 `from_raw_parts_mut(output_ptr, n_out)` 形态。 | Miri 跑会挂；任何新 kernel 改动 partition 公式都可能引入静默破坏。 | §6 路径 A 直接落地 2 处无 GPU 路径的（`quantized_tensor.rs:640` K-quant 分支、`gemma4:767` BF16 分支）；5 处涉及 `matmul_q8_0_quantized_parallel_rows` GPU 分支的需 GPU/CPU 分支并存或先做路径 B。 |
+| **`Kernel::forward_prepared` 签名阻碍路径 B 推广** | `&mut [f32]` 参数是形态 B 的源头。要根除需要走 §6 路径 B，或在 caller 端 pre-split（路径 A）。 | 路径 B 工作量 ~20 文件；路径 A 工作量 ~5 文件。 | 短期走 A；长期等 Kernel trait 大重构时并入 B。 |
+| **CI 未跑 Miri / stacked-borrows** | `.github/workflows/ci.yml` 不含 `cargo +nightly miri test`。 | §1 表 B 站点任何回归都不会被 sanitizer 拦截。 | 加 CI job。 |
+| **新 dtype kernel 加进来没有 partition audit** | 没有 CI / lint 检查新 `forward_prepared` 是否遵守 `row_range` 不变量。 | §6 路径 C 提到的「新加 kernel 必须遵守 partition 不变量」无强制。 | PR template 加 checklist；长期 maturin-style 半自动 lint。 |
