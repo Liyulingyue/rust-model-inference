@@ -88,6 +88,7 @@ pub fn run_inference(
                 n_threads_arg,
                 profile,
                 kv_format,
+                max_context,
             )
         }
     } else if arch == "lfm2moe" {
@@ -739,6 +740,7 @@ pub fn run_multimodal(
         temperature,
         n_threads_arg,
         prefill_batch_size,
+        CliOptions::DEFAULT_MAX_CONTEXT,
         None,
     )
 }
@@ -755,6 +757,7 @@ pub fn run_multimodal_with_video(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    max_context: usize,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
@@ -769,6 +772,7 @@ pub fn run_multimodal_with_video(
         temperature,
         n_threads_arg,
         prefill_batch_size,
+        max_context,
         Some(owned_source),
     )
 }
@@ -785,6 +789,7 @@ fn run_multimodal_with_video_ref(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    max_context: usize,
     model_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -846,6 +851,7 @@ fn run_multimodal_with_video_ref(
             temperature,
             n_threads_arg,
             crate::core::scratchpad::KvFormat::F16,
+            max_context,
         );
     }
     if arch != "qwen35" && arch != "qwen3vl" {

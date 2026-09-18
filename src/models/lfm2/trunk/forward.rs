@@ -65,6 +65,7 @@ pub fn run_inference(
     n_threads_arg: usize,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -87,6 +88,7 @@ pub fn run_inference(
         n_threads_arg,
         profile,
         kv_format,
+        max_context,
     )
 }
 
@@ -101,6 +103,7 @@ pub fn run_inference_stream(
     n_threads_arg: usize,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
@@ -114,7 +117,12 @@ pub fn run_inference_stream(
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    let max_ctx = 512usize.min(cfg.n_ctx);
+    // Cap KV cache at the smaller of (model's claimed `context_length`,
+    // the CLI-provided `--max-context`). The previous hard cap of 512
+    // silently truncated the KV cache and caused out-of-bounds panics
+    // on long generations. The CLI default (8K) and any user override
+    // are applied here.
+    let max_ctx = cfg.n_ctx.min(max_context);
     let eps = cfg.norm_eps;
     let freq_base = cfg.rope_freq_base;
 
@@ -930,7 +938,11 @@ fn forward_attention(
                             *v = f32::NEG_INFINITY;
                         }
                         softmax_inplace(&mut scores[..n_padded]);
-                        let mut values = [0.0f32; 512];
+                        // `values` was hard-coded to `[0.0f32; 512]` historically,
+                        // which silently truncated attention once the cache
+                        // exceeded 512 tokens. Allocating based on `max_ctx`
+                        // matches the score buffer and KV cache layout.
+                        let mut values = vec![0.0f32; max_ctx];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =

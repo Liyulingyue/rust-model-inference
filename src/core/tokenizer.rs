@@ -391,9 +391,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }
-                Some(MetaValue::String(value)) if value == "hunyuan" => {
-                    PreTokenizer::HunyuanDense
-                }
+                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::HunyuanDense,
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,

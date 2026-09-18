@@ -776,6 +776,7 @@ pub fn run_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let img = image::open(image_path)
         .map_err(|e| format!("Failed to open image {}: {e}", image_path.display()))?
@@ -908,5 +909,6 @@ pub fn run_multimodal(
         n_threads_arg,
         false,
         kv_format,
+        max_context,
     )
 }

@@ -770,10 +770,12 @@ fn forward_moe_ffn(
 
     // ---- Selected experts: gate/up for all experts in one parallel pass ----
     let selected: Vec<usize> = selection.iter().map(|&(e, _)| e).collect();
-    eprintln!(
-        "[RUST_MOE_SEL] step={} il={} sel={:?} w={:?}",
-        step, layer, selected, weights
-    );
+    if std::env::var_os("RUST_LFM2MOE_DEBUG").is_some() {
+        eprintln!(
+            "[RUST_MOE_SEL] step={} il={} sel={:?} w={:?}",
+            step, layer, selected, weights
+        );
+    }
     pool.compute({
         let selected = selected.clone();
         move |ith, nth| {

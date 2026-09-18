@@ -11,8 +11,8 @@
 | Hy-MT2                       | 1.8B / 7B | 文本（翻译）                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
 | K2-Horizon                    | 0.9B / 3.7B / 7B         | 文本                 | MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | √ |
-| LFM2                          | 8B-A1B     | 文本          | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF             | √ |
-| LFM2.5                        | 230M / 1.2B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
+| LFM2                          | 350M / 700M / 1.2B / 8B-A1B     | 文本          | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF             | √ |
+| LFM2.5                        | 230M / 1.2B / 8B-A1B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
 | LFM2.5-VL                     | 450M / 3B       | 文本、图像        | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF             | √ |
 | MiniCPM5                      | 1B         | 文本                 |                                       |              | 待核验 |
 | Nanbeige                      |            | 文本                 |                                       |              | 待核验 |

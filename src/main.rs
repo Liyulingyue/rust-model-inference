@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)]";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -237,6 +237,7 @@ fn main() {
             options.temperature.unwrap_or(0.0),
             n_threads,
             prefill_batch_size,
+            options.effective_max_context(),
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
         app::run_or_exit(app::run_multimodal_with_video(
@@ -251,6 +252,7 @@ fn main() {
             temperature,
             options.threads,
             prefill_batch_size,
+            options.effective_max_context(),
         ));
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
@@ -266,6 +268,7 @@ fn main() {
                 temperature,
                 options.threads,
                 prefill_batch_size,
+                options.effective_max_context(),
             ));
         } else if options.embedding {
             app::run_embedding(
@@ -374,6 +377,7 @@ fn main() {
                     temperature,
                     options.threads,
                     prefill_batch_size,
+                    options.effective_max_context(),
                 ));
                 println!();
             }
