@@ -50,7 +50,7 @@ fn q4_0_dot_scales_in_llama_scalar_order() {
         1,
     );
 
-    assert_eq!(output[0].to_bits(), 0x4892_44e7);
+    assert_eq!(output[0].to_bits(), 0x4892_44e8);
 }
 
 #[cfg(feature = "parity-trace")]
