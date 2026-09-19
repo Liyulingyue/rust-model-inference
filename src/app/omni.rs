@@ -40,13 +40,19 @@ pub fn validate_mmproj_capabilities(
         .metadata("clip.projector_type")
         .and_then(|v| v.to_string_val())
     {
-        let expected = match family {
-            ProjectorFamily::Qwen3VlMerger => "qwen3vl_merger",
-            ProjectorFamily::Qwen25Omni => "qwen2.5o",
+        // Accept the original Qwen2.5-Omni projector (`qwen2.5o`) and the
+        // plain Qwen2.5-VL / Qwen2.5-VL-3B-Instruct projector
+        // (`qwen2.5vl_merger`). They label the same `mm.0 / mm.2` matmul
+        // layout that `VisionEncoder35::project` consumes; the divergence
+        // is metadata-only.
+        let allowed: &[&str] = match family {
+            ProjectorFamily::Qwen3VlMerger => &["qwen3vl_merger"],
+            ProjectorFamily::Qwen25Omni => &["qwen2.5o", "qwen2.5vl_merger"],
         };
-        if projector != expected {
+        if !allowed.iter().any(|p| *p == projector) {
             return Err(format!(
-                "{llm_arch} requires projector {expected}, got {projector}"
+                "{llm_arch} requires one of {:?}, got {projector}",
+                allowed
             ));
         }
     }
