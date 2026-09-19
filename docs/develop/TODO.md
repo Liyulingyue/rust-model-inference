@@ -425,8 +425,9 @@ unpack → `_mm256_madd_epi16` → CVTPS) 基础上加一条 AVX-VNNI 路径
 
 **验收**：
 - Q8_0 Q4_0 matmul parity 测试通过（1 ULP 内）
-- Qwen3-0.6B-Q8_0 decode ≥ 36 t/s（vs 当前 ~28 t/s）
-- K2-Horizon-4B-Q8_0 decode ≥ 8 t/s（vs BF16 当前 4 t/s）
+- Qwen3-0.6B-Q8_0 decode ≥ 36 t/s（vs 当前 ~28 t/s），用 `--max-context 8192` 默认 cap
+- K2-Horizon-4B-Q8_0 decode ≥ 8 t/s（vs BF16 当前 4 t/s），关键前置：**必须** `--max-context 8192`
+  否则默认走 524288 → 77 GB OOM（见 TODO-MAX-CONTEXT-CLI）
 
 ### TODO-LLAMA-PER-TOKEN-SIMD化
 
@@ -449,6 +450,7 @@ unpack → `_mm256_madd_epi16` → CVTPS) 基础上加一条 AVX-VNNI 路径
 | Attention (F32) | ✅ SIMD `dot_f32`, `vec_mad_f32` | 636+ | - |
 | Residual add | ✅ `vec_add_into`, `vec_mad_f32` | 720-724, 910-914 | - |
 | silu_mul | ✅ SIMD `silu_mul_approx_inplace` | 831, 840 | - |
+| **KV cache / scores buffer size** | ❌ hardcoded `512.min(cfg.n_ctx)` + `[0.0f32; 512]` | 117, 941 | ✅ **已替换为 `cfg.n_ctx.min(max_context)` + `vec![0.0f32; max_ctx]`**（见 TODO-MAX-CONTEXT-CLI） |
 
 **结论**：除 `embedding_scale` 外 llama trunk 已是 SIMD 化。`embedding_scale` 修复已落地 K2check 分支
 （每个 token 节省约 1.3 µs @ n_embd=1536，对总推理时间影响 < 0.1%）。
@@ -462,3 +464,51 @@ SIMD 不能跨 token 加速——这部分要看 [TODO-010](#todo-010-prefill-ru
 **这是 autoregressive decode 慢的真凶**，不是 SIMD 缺位。
 
 修复路径见 TODO-010（batched prefill）+ 自动接受单 token decode 慢的现实（llama.cpp 同样慢）。
+
+### TODO-MAX-CONTEXT-CLI: `--max-context` 用户可调 KV cache 上限
+
+**背景**：`src/models/llama/trunk/forward.rs` 和 `src/models/lfm2/trunk/forward.rs` 历史上都把
+KV cache 上限硬编码到 512：
+
+```rust
+// llama trunk 历史硬编码
+let max_ctx = 512usize.min(config.n_ctx);
+// lfm2 trunk 历史硬编码
+let max_ctx = 512usize.min(cfg.n_ctx);
+// lfm2 attention `values` 数组
+let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
+```
+
+后果：512 token 以上的生成直接越界 panic，或更长生成被静默截断。多个用户的报告
+（VibeVoice ASR 1.5B 长音频、K2-Horizon 中文翻译模型 chat 段、K2-Horizon-4B 192K 长输出）
+都触及过同一类 bug。
+
+**修复**（已落地 K2check 分支）：
+
+- llama trunk / lfm2 trunk：`max_ctx = config.n_ctx.min(max_context)`，配套
+  `run_inference[_stream]` 加 `max_context: usize` 参数
+- lfm2 attention `values`：`vec![0.0f32; max_ctx]`
+- 新 CLI 参数 `--max-context N (default 8192)`（`CliOptions::DEFAULT_MAX_CONTEXT`），
+  `effective_max_context()` helper
+- 全链路贯通：`src/app/cli.rs` / `src/app/text.rs` / `src/main.rs` /
+  `src/models/lfm2/vision.rs`（multimodal LFM2-VL 也接 max_context）
+
+**为什么用 CLI 而不是无脑用 model claim**：部分模型 GGUF `context_length` 字段是
+"该 GGUF 可接受的 max"，而不是该模型实际有意义的长度。例如：
+
+| 模型 | claim `context_length` | 512-tok panic | CLI `--max-context 8192` |
+|------|------------------------|---------------|---------------------------|
+| K2-Horizon-1B | 131072 | 是 | KV cache 0.29 GB |
+| K2-Horizon-4B | **524288** | **77 GB OOM** | KV cache 0.86 GB |
+| LFM2-1.2B | 32768 | 是 | KV cache 0.5 GB |
+| Qwen3-0.6B | 32768 | 是 | KV cache 0.4 GB |
+
+用户按需 `--max-context` 即可（绝大多数 chat 8K 够，长上下文特殊任务手动加）。
+
+**后续**：
+
+- `docs/usage/llama.md` / `docs/usage/qwen3.md` 等可加一行 "默认 KV cache cap 是 8K，可用
+  `--max-context N` 覆盖"。
+- TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
+  对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
+  不会因为 KV 随机访问模式变慢）。

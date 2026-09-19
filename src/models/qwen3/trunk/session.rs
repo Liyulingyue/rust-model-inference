@@ -207,9 +207,10 @@ impl<'model> Qwen3Session<'model> {
         &mut self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
         mut on_token: impl FnMut(&str),
     ) -> Result<Qwen3Generation, String> {
-        self.generate_streaming_until(input, options, |text| {
+        self.generate_streaming_until(input, options, repetition_penalty, |text| {
             if !text.is_empty() {
                 on_token(text);
             }
@@ -223,6 +224,7 @@ impl<'model> Qwen3Session<'model> {
         &mut self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
         mut on_token: impl FnMut(&str) -> bool,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self.model, &input, &options)?;
@@ -237,7 +239,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, false, Some(&mut on_token))
+        self.generate_inner(input, options, repetition_penalty, false, Some(&mut on_token))
     }
 
     pub(crate) fn generate_with_asr_trace(
@@ -258,13 +260,14 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, asr_trace, None)
+        self.generate_inner(input, options, 1.0, asr_trace, None)
     }
 
     fn generate_inner(
         &mut self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
         asr_trace: bool,
         mut on_token: Option<&mut dyn FnMut(&str) -> bool>,
     ) -> Result<Qwen3Generation, String> {
@@ -330,8 +333,17 @@ impl<'model> Qwen3Session<'model> {
             .map_err(|error| format!("Failed to allocate rendered tokens: {error}"))?;
         let mut decoder = model.tokenizer.streaming_decoder(false);
         let mut decode_duration = Duration::ZERO;
+        let mut token_counts: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
 
         while generated_tokens.len() < options.max_new_tokens {
+            if repetition_penalty != 1.0 && !token_counts.is_empty() {
+                crate::ops::sampling::apply_repetition_penalty(
+                    &mut self.scratch.logits,
+                    &token_counts,
+                    repetition_penalty,
+                );
+            }
             let token_id = sample_token(&self.scratch.logits, options.temperature)?;
             if model.tokenizer.eos_id() == Some(token_id)
                 || model.tokenizer.special_token_id("im_end") == Some(token_id)
@@ -344,6 +356,9 @@ impl<'model> Qwen3Session<'model> {
                 rendered_tokens.push(text);
             }
             generated_tokens.push(token_id);
+            if repetition_penalty != 1.0 {
+                *token_counts.entry(token_id).or_insert(0) += 1;
+            }
             if !keep_going || generated_tokens.len() == options.max_new_tokens {
                 break;
             }
@@ -861,6 +876,7 @@ mod cancellation_tests {
                     temperature: 0.0,
                     prefill_batch_size: 1,
                 },
+                1.0,
                 |_| {
                     callbacks += 1;
                     false

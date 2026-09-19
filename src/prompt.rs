@@ -43,6 +43,27 @@ pub fn build_hunyuan_chat_prompt(
     messages: &[HunyuanMessage<'_>],
     add_generation_prompt: bool,
 ) -> Result<Vec<u32>, String> {
+    // The 1.8B GGUF uses Hy-MT's official `<|hy_*|>` control tokens, so
+    // we wrap the message in `<|hy_User|>{content}<|hy_Assistant|>`. The
+    // 7B GGUF (a separately distributed quantisation) does not use
+    // those tokens; its embedded `tokenizer.chat_template` describes a
+    // Qwen2-style header but in practice the model was trained on raw
+    // text (`--no-conversation` in llama.cpp gives clean translation,
+    // `--jinja` produces repetitive output).  Match llama.cpp's actual
+    // behaviour: prepend a BOS token (if any) and pass the prompt
+    // through unchanged.
+    if tokenizer.special_token_id("hy_user").is_some() {
+        build_hunyuan_v1_prompt(tokenizer, messages, add_generation_prompt)
+    } else {
+        build_hunyuan_v2_prompt(tokenizer, messages, add_generation_prompt)
+    }
+}
+
+fn build_hunyuan_v1_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
     let hy_user = required_control(tokenizer, "hy_user", "<｜hy_User｜>")?;
     let hy_assistant = required_control(tokenizer, "hy_assistant", "<｜hy_Assistant｜>")?;
     let hy_placeholder_2 =
@@ -72,6 +93,23 @@ pub fn build_hunyuan_chat_prompt(
         output.push(hy_assistant);
     } else {
         output.push(hy_placeholder_8);
+    }
+    Ok(output)
+}
+
+/// 7B-style Hunyuan prompt. The 7B GGUF was trained with raw-text
+/// prompts (no chat template, no BOS), confirmed against llama.cpp
+/// where `--no-conversation` produces correct translations while
+/// `--jinja` repeats itself. The tokenizer GGUF sets
+/// `add_bos_token = false`, so we likewise emit the prompt verbatim.
+fn build_hunyuan_v2_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    _add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
+    let mut output = Vec::new();
+    for message in messages {
+        output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
     }
     Ok(output)
 }

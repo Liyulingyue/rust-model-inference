@@ -1,5 +1,39 @@
 //! Sampling utilities aligned with llama.cpp's sampler chain:
-//!   top_k -> top_p -> temperature -> dist sample.
+//!   repetition_penalty -> top_k -> top_p -> temperature -> dist sample.
+//!
+//! Repetition penalty divides the logit of any token that has already
+//! appeared by `penalty^count` (Hugging Face / llama.cpp definition).
+//! `penalty == 1.0` is a no-op; values > 1.0 suppress repeats, < 1.0
+//! encourage them. Callers must pass a count map that tracks each
+//! generated token.
+
+pub fn apply_repetition_penalty(
+    logits: &mut [f32],
+    token_counts: &std::collections::HashMap<u32, u32>,
+    penalty: f32,
+) {
+    if penalty == 1.0 || token_counts.is_empty() {
+        return;
+    }
+    debug_assert!(penalty > 0.0, "repetition penalty must be positive");
+    for (&token, &count) in token_counts {
+        if count == 0 {
+            continue;
+        }
+        let idx = token as usize;
+        if let Some(l) = logits.get_mut(idx) {
+            // Negative logits get multiplied by penalty (closer to 0);
+            // positive logits get divided (smaller). Both make the token
+            // less likely to win argmax / sampling again.
+            let factor = penalty.powi(count as i32);
+            if *l > 0.0 {
+                *l /= factor;
+            } else {
+                *l *= factor;
+            }
+        }
+    }
+}
 
 pub fn argmax(x: &[f32]) -> usize {
     let mut best_idx = 0;

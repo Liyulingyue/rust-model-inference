@@ -776,6 +776,7 @@ pub fn run_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     kv_format: KvFormat,
+    max_context: usize,
 ) -> Result<(), String> {
     let img = image::open(image_path)
         .map_err(|e| format!("Failed to open image {}: {e}", image_path.display()))?
@@ -838,6 +839,7 @@ pub fn run_multimodal(
 
     let mut stream: Vec<Lfm2StreamItem> = Vec::new();
     stream.push(tok("<|startoftext|>")?);
+    stream.push(tok("<|im_start|>")?);
     stream.extend(
         tokenizer
             .encode(
@@ -878,7 +880,7 @@ pub fn run_multimodal(
     stream.extend(
         tokenizer
             .encode(
-                &format!("\n{prompt}\n"),
+                &format!("{prompt}<|im_end|>"),
                 crate::core::tokenizer::EncodeOptions {
                     add_special: false,
                     parse_special: true,
@@ -887,6 +889,7 @@ pub fn run_multimodal(
             .into_iter()
             .map(Lfm2StreamItem::Token),
     );
+    stream.push(tok("<|im_start|>")?);
     stream.extend(
         tokenizer
             .encode(
@@ -908,5 +911,7 @@ pub fn run_multimodal(
         n_threads_arg,
         false,
         kv_format,
+        max_context,
+        1.0, // repetition_penalty disabled for multimodal path
     )
 }

@@ -51,10 +51,10 @@ Vision 路径与文本路径**共用** `arch == "lfm2"` 分派，不走 basename
 
 ```bash
 cargo run --release --bin rust-model-inference -- \
-  --model models/lfm2.5-vl/LFM2.5-VL-450M-Q8_0.gguf \
+  --model models/lfm2.5-vl/LFM2.5-VL-1.6B-Q8_0.gguf \
   --mmproj models/lfm2.5-vl/mmproj-F16.gguf \
   --image path/to/image.jpg \
-  --prompt "描述这张图片"
+  --prompt "Describe this image."
 ```
 
 约束：
@@ -71,6 +71,24 @@ cargo run --release --bin rust-model-inference -- \
   feed_forward_length, attention.layer_norm_epsilon, projection_dim, image_mean,
   image_std}`，见 `src/models/lfm2/vision.rs:73-83`。
 
+### 4.0 Prompt 模板（重要）
+
+代码内部把 user / assistant turn 包成 ChatML：
+
+```
+<|startoftext|><|im_start|>user\n
+<|image_start|><|img_row_*_col_*|>...<|img_thumbnail|>...<|image_end|>
+{prompt}<|im_end|>
+<|im_start|>assistant\n
+```
+
+CLI 不需要手动拼 `<|im_start|>` / `<|im_end|>`，但用户传入的 `--prompt`
+应避免重复这些标记。**裸的 `user\n...assistant\n` 模板会让模型输出退化**
+（实测：Q8_0 1.6B + 768×768 图 + 裸 `user/assistant` 模板 → 输出
+"A / Answer: / A" 循环）。ChatML 模板 + 实际物体图片可正确识别
+（实测：apple.png → "fresh-looking apple with a glossy red and yellow skin,
+green leaf attached to its stem, plain white background"）。
+
 ### 4.1 图片大小与 vision token 数（CPU 实测，2026-09）
 
 Vision encoder 把图切成 512×512 tile + 1 张 overview。tile 数和总 vision tokens
@@ -79,14 +97,14 @@ Vision encoder 把图切成 512×512 tile + 1 张 overview。tile 数和总 visi
 | 原图分辨率 | Tile grid | Vision tokens | 备注 |
 |---|---|---|---|
 | ≤ 512（任一维） | 0×0 | ~64–128 | 单 overview，prefill ~1s |
-| ~768×768 | 2×2 (4 tiles) + overview | ~1100+ | CPU prefill > 10 分钟（实际不要用） |
-| 401×287（实测 `references/apple.png`） | 0×0 | 117 | 端到端 3.8 tok/s @ 8 thread |
+| ~768×768 | 2×2 (4 tiles) + overview | ~1100+ | prefill 约 30s（8 线程 Q8_0）；后续生成 ~24 t/s；首 token 出得很慢但非卡死 |
+| 401×287（实测 `references/apple.png`） | 0×0 | 117 | 端到端 8.9 tok/s @ 8 thread (LFM2.5-VL-1.6B Q8_0) |
 
 **建议**：CPU 路径下使用 ≤ 512×512 的输入图。`references/apple.png`（401×287）
-是个不错的示例尺寸。`models/test768.png`（768×768）这种分辨率在 CPU 上
-prefill 阶段会卡死，需要 ≥ 10 分钟才能出第一个 token。
+是个不错的示例尺寸。`models/test768.png`（768×768）CPU 上 prefill ~30s，
+之后每 token 约 24 t/s，输出受 prompt template 影响大（见 §4.0）。
 
-3B VL 模型 + 1024 vision tokens 的 CPU prefill 主要成本是 30 层 × 1024
+1.6B VL 模型 + 1024 vision tokens 的 CPU prefill 主要成本是 16 层 × 1024
 tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（Vulkan
 未对 `lfm2` arch 完整覆盖，仅在分片 matmul 上生效——见 §6）。
 
