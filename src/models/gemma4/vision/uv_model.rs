@@ -142,6 +142,16 @@ impl<'a> Gemma4UvVisionModel<'a> {
             "Gemma4-uv embedded patches",
             checked_len("Gemma4-uv embedded patches", &[n_patches, self.config.embd])?,
         )?;
+        eprintln!("[debug-matmul] patches.len()={}, patch_weight.len()={}, patch_dim={}, embd={}, n_patches={}",
+            patches.len(), self.patch_weight.len(), patch_dim, self.config.embd, n_patches);
+        eprintln!("[debug-matmul] patches[0..8]={:?}", &patches[..8]);
+        eprintln!("[debug-matmul] patch_weight[0..8]={:?}", &self.patch_weight[..8]);
+        let test_val = crate::ops::dot_f32(
+            &patches[..patch_dim],
+            &self.patch_weight[..patch_dim],
+            patch_dim,
+        );
+        eprintln!("[debug-matmul] scalar output[0,0]={}", test_val);
         f32_matmul(
             &self.pool,
             &self.patch_weight,
@@ -151,9 +161,12 @@ impl<'a> Gemma4UvVisionModel<'a> {
             n_patches,
             &mut embedded,
         )?;
+        eprintln!("[debug-matmul] embedded[0..8]={:?}", &embedded[..8]);
         for (target, bias) in embedded.iter_mut().zip(self.patch_bias.iter().cycle()) {
             *target += *bias;
         }
+        eprintln!("[debug-after-bias] embedded[0..8]={:?}", &embedded[..8]);
+        eprintln!("[debug-patch_bias] first 8: {:?}", &self.patch_bias[..8]);
 
         layer_norm_rows_inplace(
             &mut embedded,
@@ -161,6 +174,35 @@ impl<'a> Gemma4UvVisionModel<'a> {
             &self.patch_norm_2_b,
             self.config.norm_eps,
         )?;
+        eprintln!("[debug-after-LN2] embedded[0..8]={:?}", &embedded[..8]);
+
+        if std::env::var("DUMP_AFTER_PATCH_EMBD").is_ok() {
+            let mut f = std::fs::File::create("after_patch_embd.bin").map_err(|e| e.to_string())?;
+            for v in &embedded {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!("[dump] wrote after_patch_embd.bin ({} floats)", embedded.len());
+        }
+        if std::env::var("DUMP_BEFORE_PATCH_EMBD").is_ok() {
+            let mut f = std::fs::File::create("before_patch_embd.bin").map_err(|e| e.to_string())?;
+            for v in &patches {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!("[dump] wrote before_patch_embd.bin ({} floats)", patches.len());
+        }
+        if std::env::var("DUMP_PREPROCESSED_IMAGE").is_ok() {
+            let mut f = std::fs::File::create("preprocessed_image.bin").map_err(|e| e.to_string())?;
+            for v in &image.values {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!(
+                "[dump] wrote preprocessed_image.bin ({} floats, shape {}x{}x{})",
+                image.values.len(),
+                image.width,
+                image.height,
+                3,
+            );
+        }
 
         let mut pos_x = Vec::with_capacity(n_patches);
         let mut pos_y = Vec::with_capacity(n_patches);
@@ -172,6 +214,14 @@ impl<'a> Gemma4UvVisionModel<'a> {
         }
         add_positions(&self.positions, &mut embedded, &pos_x, &pos_y, self.config.embd)?;
 
+        if std::env::var("DUMP_AFTER_POS").is_ok() {
+            let mut f = std::fs::File::create("after_pos.bin").map_err(|e| e.to_string())?;
+            for v in &embedded {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!("[dump] wrote after_pos.bin ({} floats)", embedded.len());
+        }
+
         layer_norm_rows_inplace(
             &mut embedded,
             &self.patch_norm_3_w,
@@ -179,7 +229,23 @@ impl<'a> Gemma4UvVisionModel<'a> {
             self.config.norm_eps,
         )?;
 
+        if std::env::var("DUMP_AFTER_LN3").is_ok() {
+            let mut f = std::fs::File::create("after_ln3.bin").map_err(|e| e.to_string())?;
+            for v in &embedded {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!("[dump] wrote after_ln3.bin ({} floats)", embedded.len());
+        }
+
         rms_norm_rows_inplace(&mut embedded, self.config.embd, self.config.rms_eps)?;
+
+        if std::env::var("DUMP_AFTER_RMSN").is_ok() {
+            let mut f = std::fs::File::create("after_rmsn.bin").map_err(|e| e.to_string())?;
+            for v in &embedded {
+                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            eprintln!("[dump] wrote after_rmsn.bin ({} floats)", embedded.len());
+        }
 
         let output_len = checked_len(
             "Gemma4-uv projected vision",
