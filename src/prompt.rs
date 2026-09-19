@@ -25,16 +25,13 @@ const WITH_SPECIAL: EncodeOptions = EncodeOptions {
     parse_special: true,
 };
 
-/// K2-Horizon chat prompt template (uses `llama` trunk).
+/// K2-Horizon chat prompt template (used by `llama` trunk).
 ///
-/// Default: emits `\n` after `<|ifm|im_start|>assistant\n`, which triggers
-/// the model's thinking block (`<ifm|think>`). Pass
-/// `enable_thinking = false` (via `--no-thinking`) to emit `\n\n` instead
-/// so the model skips straight to the assistant answer.
-pub fn format_k2_horizon_chat_prompt(prompt: &str) -> String {
-    format_k2_horizon_chat_prompt_with_thinking(prompt, true)
-}
-
+/// Default (`enable_thinking = true`): emits `\n` after
+/// `<|ifm|im_start|>assistant\n`, which triggers the model's thinking
+/// block (`<ifm|think>`). Pass `enable_thinking = false` (via
+/// `--no-thinking`) to emit `\n\n` instead so the model skips straight
+/// to the assistant answer.
 pub fn format_k2_horizon_chat_prompt_with_thinking(
     prompt: &str,
     enable_thinking: bool,
@@ -360,7 +357,7 @@ mod tests {
     #[test]
     fn k2_horizon_prompt_matches_reference_template() {
         assert_eq!(
-            format_k2_horizon_chat_prompt("Hello"),
+            format_k2_horizon_chat_prompt_with_thinking("Hello", true),
             "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
         );
     }
