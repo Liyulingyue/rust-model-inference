@@ -12,6 +12,12 @@ silu_mul_approx_inplace + AVX2/NEON matmul）。
 > 
 > 常用生成参数：
 > 
+> - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2 GGUF
+>   `context_length=524288`，大值会一次性占用 GB 级 KV 内存。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）。对
+>   Hy-MT2-7B Q4_K_M 翻译时陷入复读循环的问题尤其有用（α ≥ 1.3 起效）。
+> - `--temperature`：Hy-MT2 路径已直通到 sampling，仓库默认 0（greedy）。
+> 
 > - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2-7B 的 GGUF
 >   `context_length=524288` 不受 `--max-context` 影响 KV 分配本身（实际容量取
 >   `min(model.n_ctx, --max-context)`），但可避免 524k × 36 层 × 4096 维 ≈ 77 GB
@@ -149,15 +155,14 @@ prompt 里 `target_lang` 字段名要使用**对应语言的全称**：
 而非 `Verified`，跑通后再升级状态。
 
 **Hy-MT2-7B Q4_K_M 实测警告（2026-09）**：在 greedy 解码下，模型会陷入
-「」+短语循环的退化输出（实测：仅循环 `Hello world` 的若干变体）。
+`` + 短语循环的退化输出（实测：仅循环 `Hello world` 的若干变体）。
 配合 `--repetition-penalty 1.3~1.5` 可缓解但无法彻底消除。这是模型侧
 Q4_K_M + 翻译 prompt + greedy 三者组合的退化，不是代码 bug。llama.cpp
 同样的 Q4_K_M + 同样 prompt 也复现该问题。绕开方法：
 
 1. 加 `--repetition-penalty 1.4`
-2. 或者使用温度 > 0 的采样（仓库 CLI 当前未暴露 `--temperature`/采样选项
-   的 Hunyuan 直通路径，需自行在 `src/app/text.rs` 加）
-3. 或者换 Q8_0 量化（仓库已实测 1.8B Q8_0 18.6 t/s）
+2. 或换 Q8_0 量化（仓库已实测 1.8B Q8_0 18.6 t/s）
+3. 或启用温度 > 0 采样（Hy-MT2 路径已支持 `--temperature`，见 §1）
 
 ---
 

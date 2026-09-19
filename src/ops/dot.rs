@@ -205,8 +205,38 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     };
     #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
-    for index in tail_start..n {
-        sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
+    // Tail SIMD: handle the `n % 32` remainder with 8-wide NEON FP16 +
+    // F32 lanes (NEON's `fmla` works on F16 directly so the conversion
+    // is implicit). Edge cases like Qwen3-TTS DAC always have
+    // `dot_len = in_channels * kernel_size` divisible by 8 (Q8_0/F16
+    // layout), so this loop usually doesn't run, but it removes the
+    // last scalar fallback for callers with arbitrary strides.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        let mut i = tail_start;
+        unsafe {
+            use std::arch::aarch64::*;
+            while i + 8 <= n {
+                let av = vld1q_u16(a.as_ptr().add(i));
+                let bv = vld1q_u16(b.as_ptr().add(i));
+                let acc = vfmaq_f16(vdupq_n_f16(0.0), vreinterpretq_f16_u16(av), vreinterpretq_f16_u16(bv));
+                let lo = vcvtn_f32_f16(vget_low_f16(acc));
+                let hi = vcvtn_f32_f16(vget_high_f16(acc));
+                let pair = vaddq_f32(lo, hi);
+                sum += f64::from(vaddvq_f32(pair));
+                i += 8;
+            }
+        }
+        while i < n {
+            sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(b[i]));
+            i += 1;
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    {
+        for index in tail_start..n {
+            sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
+        }
     }
     sum as f32
 }
