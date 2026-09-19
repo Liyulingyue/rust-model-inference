@@ -18,7 +18,7 @@
 | Nanbeige                      |            | 文本                 |                                       |              | 待核验 |
 | NeoHorse-1                   | 4B / 9B        | 文本                 | llama.cpp @ `b96806d`                 | https://huggingface.co/TokenRhythm/NeoHorse-1-4B-GGUF | √ |
 | Ornith-1.5                    | 9B         | 文本                 |                                       |              | 待核验 |
-| Qwen2.5-Omni                  | 3B           | 多模态               |                                       |              | 待核验 |
+| Qwen2.5-Omni                  | 3B           | 文本、音频、视频、图像（文本、音频输出）               | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF             | √ |
 | Qwen2.5-VL                    |            | 多模态               |                                       |              | 待核验 |
 | Qwen3                         | 0.6B       | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | √ |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
