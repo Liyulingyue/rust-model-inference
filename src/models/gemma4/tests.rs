@@ -1,4 +1,4 @@
-use super::{gemma4_token_table_digest, Gemma4AudioConfig, Gemma4Config, Gemma4VisionConfig};
+use super::{gemma4_token_table_digest, Gemma4AudioConfig, Gemma4Config, Gemma4UvConfig, Gemma4VisionConfig};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use std::collections::HashMap;
 
@@ -420,13 +420,12 @@ fn gemma4_e2b_contract_is_exact() {
         Gemma4Config {
             layers: 35,
             embd: 1536,
-            heads: 8,
-            kv_heads: 1,
+            n_heads: 8,
+            kv_heads_per_layer: vec![1; 35],
             vocab: 262_144,
             full_head_dim: 512,
             swa_head_dim: 256,
             shared_kv_layers: 20,
-            per_layer_width: 256,
             sliding_window: 512,
             logit_softcap: 30.0,
             ffn_per_layer: [
@@ -441,6 +440,10 @@ fn gemma4_e2b_contract_is_exact() {
                 true, true, true, false, true, true, true, true, false,
             ]
             .to_vec(),
+            per_layer_width: 256,
+            n_ctx: 131_072,
+            rope_freq_base: 1_000_000.0,
+            rope_freq_base_swa: 10_000.0,
         }
     );
 }
@@ -459,6 +462,101 @@ fn gemma4_vision_contract_is_exact() {
             projection: 1536,
         }
     );
+}
+
+fn valid_mmproj_source_gemma4uv() -> MapTensorSource {
+    let mut source = valid_mmproj_source();
+    source.metadata.insert(
+        "clip.vision.projector_type".into(),
+        MetaValue::String("gemma4uv".into()),
+    );
+    // 12B has no transformer blocks, no audio encoder, and different
+    // projection dimensions; replace the E2B-shaped tensors with the
+    // tensors the 12B mmproj actually carries.
+    source.tensors.clear();
+    for (name, dims, ty) in [
+        (
+            "v.patch_embd.weight",
+            &[6912u64, 3840][..],
+            GGMLType::F32,
+        ),
+        ("v.patch_embd.bias", &[3840][..], GGMLType::F32),
+        (
+            "v.patch_norm.1.weight",
+            &[6912u64][..],
+            GGMLType::F32,
+        ),
+        (
+            "v.patch_norm.1.bias",
+            &[6912u64][..],
+            GGMLType::F32,
+        ),
+        ("v.patch_norm.2.weight", &[3840][..], GGMLType::F32),
+        ("v.patch_norm.2.bias", &[3840][..], GGMLType::F32),
+        ("v.patch_norm.3.weight", &[3840][..], GGMLType::F32),
+        ("v.patch_norm.3.bias", &[3840][..], GGMLType::F32),
+        (
+            "v.position_embd.weight",
+            &[3840, 1120, 2][..],
+            GGMLType::F32,
+        ),
+        (
+            "mm.input_projection.weight",
+            &[3840, 3840][..],
+            GGMLType::F16,
+        ),
+    ] {
+        add_tensor(&mut source, name, dims, ty);
+    }
+    // The 12B mmproj also carries an audio projector; mirror the 12B
+    // tensor list without bringing in audio test fixtures (audio support
+    // is orthogonal to the vision gemma4uv path).
+    add_tensor(
+        &mut source,
+        "mm.a.input_projection.weight",
+        &[640, 3840],
+        GGMLType::F16,
+    );
+    source
+        .metadata
+        .insert("clip.vision.projection_dim".into(), MetaValue::Uint32(3840));
+    source
+        .metadata
+        .insert("clip.vision.embedding_length".into(), MetaValue::Uint32(3840));
+    source
+        .metadata
+        .insert("clip.vision.feed_forward_length".into(), MetaValue::Uint32(0));
+    source
+        .metadata
+        .insert("clip.vision.block_count".into(), MetaValue::Uint32(0));
+    source.metadata.insert(
+        "clip.vision.attention.head_count".into(),
+        MetaValue::Uint32(1),
+    );
+    source
+}
+
+#[test]
+fn gemma4_vision_rejects_gemma4uv_projector() {
+    // The 12B mmproj's projector_type is "gemma4uv", which must NOT be
+    // accepted by the E2B (`gemma4v`) config — they have different
+    // tensor shapes and forward graphs.
+    let error = Gemma4VisionConfig::from_source(&valid_mmproj_source_gemma4uv()).unwrap_err();
+    assert!(
+        error.contains("projector_type"),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn gemma4_uv_vision_contract_is_exact() {
+    let config = Gemma4UvConfig::from_source(&valid_mmproj_source_gemma4uv()).unwrap();
+    assert_eq!(config.embd, 3840);
+    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.image_size, 224);
+    assert_eq!(config.in_channels, 27);
+    assert_eq!(config.projection, 3840);
+    assert_eq!(config.position_size, 1120);
 }
 
 #[test]

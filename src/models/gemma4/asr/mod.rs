@@ -93,6 +93,15 @@ pub struct Gemma4AudioModel<'a> {
     multimodal_projection: F16Linear<'a>,
 }
 
+impl<'a> Gemma4AudioModel<'a> {
+    /// Width of the multimodal projection (`mm.a.input_projection.weight`
+    /// output). The audio encoder writes its outputs in this width so the
+    /// chat composer can chunk the flat slice into per-token rows.
+    pub fn audio_projection(&self) -> usize {
+        self.multimodal_projection.output
+    }
+}
+
 struct AudioScratch {
     activation_f16: Vec<u16>,
     x: Vec<f32>,

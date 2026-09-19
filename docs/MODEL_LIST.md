@@ -6,7 +6,7 @@
 | dots.tts-base                 | base       | TTS                  | 原始开发 @ `32407a5`                  | https://huggingface.co/EvoAwaken-Workshop/dots-tts-base-gguf | 待核验 |
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
-| Gemma-4                       | E2B / E4B        | 文本、图像、音频      | llama.cpp @ `3173a56`                 | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF             | √ |
+| Gemma-4                       | E2B / E4B / 12B | 文本、图像、音频      | llama.cpp @ `3173a56`（gemma4v）/ `gemma4uv` 来自 `tools/mtmd/models/gemma4uv.cpp` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF，https://www.modelscope.cn/models/unsloth/gemma-4-12b-it-GGUF | √ |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B | 文本                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |

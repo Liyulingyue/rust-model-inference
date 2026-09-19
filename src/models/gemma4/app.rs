@@ -3,14 +3,15 @@ use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::gemma4::asr::Gemma4AudioModel;
-use crate::models::gemma4::vision::Gemma4VisionModel;
+use crate::models::gemma4::vision::build_vision_encoder;
 use crate::models::gemma4::{Gemma4InputRow, Gemma4Model, Gemma4Session};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-const EMBED: usize = 1536;
-const CONTEXT: usize = 131_072;
+/// Default trunk embedding width used when only an audio projector is in
+/// play (the E2B vision encoder matches the trunk embedding width 1536).
+const DEFAULT_EMBED: usize = 1536;
 pub struct Gemma4Request<'a> {
     pub model: &'a Path,
     pub mmproj: Option<&'a Path>,
@@ -28,16 +29,18 @@ pub fn build_turn_rows(
     prompt: &str,
     image: Option<&[f32]>,
     audio: Option<&[f32]>,
+    image_embed: Option<usize>,
+    audio_embed: Option<usize>,
 ) -> Result<Vec<Gemma4InputRow>, String> {
     let mut rows = encoded_rows(tokenizer, "<|turn>user\n", true, true)?;
     if let Some(values) = image {
         rows.extend(encoded_rows(tokenizer, "<|image>", false, true)?);
-        append_raw_rows(&mut rows, "image", values)?;
+        append_raw_rows(&mut rows, "image", values, image_embed.unwrap_or(DEFAULT_EMBED))?;
         rows.extend(encoded_rows(tokenizer, "<image|>", false, true)?);
     }
     if let Some(values) = audio {
         rows.extend(encoded_rows(tokenizer, "<|audio>", false, true)?);
-        append_raw_rows(&mut rows, "audio", values)?;
+        append_raw_rows(&mut rows, "audio", values, audio_embed.unwrap_or(DEFAULT_EMBED))?;
         rows.extend(encoded_rows(tokenizer, "<audio|>", false, true)?);
     }
     rows.extend(encoded_rows(tokenizer, prompt, false, false)?);
@@ -63,19 +66,36 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         .map_err(|error| format!("Failed to initialize Gemma4 tokenizer: {error}"))?;
     let model = Gemma4Model::from_source(source, request.threads)?;
 
-    let (image, audio) = if request.image.is_some() || request.audio.is_some() {
+    let (image, audio, image_embed, audio_embed) = if request.image.is_some() || request.audio.is_some() {
         let mmproj = GGUFLoader::from_file(request.mmproj.expect("checked media mmproj"))
             .map_err(|error| format!("Failed to load Gemma4 mmproj: {error}"))?;
-        construct_then_encode(
-            request.image.is_some(),
-            request.audio.is_some(),
-            || Gemma4VisionModel::from_source(&mmproj, request.threads),
-            || Gemma4AudioModel::from_source(&mmproj, request.threads),
-            |model| model.encode_path(request.image.expect("requested image")),
-            |model| model.encode_wav_path(request.audio.expect("requested audio")),
-        )?
+        let vision_encoder = if request.image.is_some() {
+            let encoder = build_vision_encoder(&mmproj, request.threads)?;
+            let embed = encoder.projection();
+            Some((encoder, embed))
+        } else {
+            None
+        };
+        let audio_model = if request.audio.is_some() {
+            Some(Gemma4AudioModel::from_source(&mmproj, request.threads)?)
+        } else {
+            None
+        };
+        let image = if let Some((encoder, _)) = &vision_encoder {
+            Some(encoder.encode_path(request.image.expect("requested image"))?)
+        } else {
+            None
+        };
+        let audio = if let Some(model) = &audio_model {
+            Some(model.encode_wav_path(request.audio.expect("requested audio"))?)
+        } else {
+            None
+        };
+        let image_embed = vision_encoder.as_ref().map(|(_, e)| *e);
+        let audio_embed = audio_model.as_ref().map(|m| m.audio_projection());
+        (image, audio, image_embed, audio_embed)
     } else {
-        (None, None)
+        (None, None, None, None)
     };
 
     let rows = build_turn_rows(
@@ -83,8 +103,10 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         request.prompt,
         image.as_deref(),
         audio.as_deref(),
+        image_embed,
+        audio_embed,
     )?;
-    check_context(rows.len(), CONTEXT, request.max_tokens)?;
+    check_context(rows.len(), model.config.n_ctx, request.max_tokens)?;
     trace_tokens(&rows);
 
     let eos = tokenizer
@@ -193,14 +215,15 @@ fn append_raw_rows(
     rows: &mut Vec<Gemma4InputRow>,
     kind: &str,
     values: &[f32],
+    embed: usize,
 ) -> Result<(), String> {
-    if values.is_empty() || values.len() % EMBED != 0 {
+    if values.is_empty() || values.len() % embed != 0 {
         return Err(format!(
-            "Gemma4 {kind} projection has length {}; expected non-empty rows of {EMBED}",
+            "Gemma4 {kind} projection has length {}; expected non-empty rows of {embed}",
             values.len()
         ));
     }
-    for (index, values) in values.chunks_exact(EMBED).enumerate() {
+    for (index, values) in values.chunks_exact(embed).enumerate() {
         if let Some((column, value)) = values
             .iter()
             .enumerate()
@@ -386,6 +409,8 @@ mod tests {
             "hello",
             Some(&vec![1.0; 2 * 1536]),
             Some(&vec![2.0; 1536]),
+            Some(1536),
+            Some(1536),
         )
         .unwrap();
         assert_eq!(
@@ -422,6 +447,8 @@ mod tests {
         let rows = build_turn_rows(
             &tokenizer,
             "<turn|><|turn>model<|image><|audio>",
+            None,
+            None,
             None,
             None,
         )
@@ -512,10 +539,10 @@ mod tests {
     #[test]
     fn composer_requires_full_finite_rows_and_context_budget() {
         let tokenizer = gemma4_test_tokenizer();
-        assert!(build_turn_rows(&tokenizer, "x", Some(&vec![0.0; 1535]), None).is_err());
+        assert!(build_turn_rows(&tokenizer, "x", Some(&vec![0.0; 1535]), None, Some(1536), None).is_err());
         let mut nonfinite = vec![0.0; 1536];
         nonfinite[0] = f32::NAN;
-        assert!(build_turn_rows(&tokenizer, "x", None, Some(&nonfinite)).is_err());
+        assert!(build_turn_rows(&tokenizer, "x", None, Some(&nonfinite), None, Some(1536)).is_err());
         assert!(check_context(8192, 8192, 1).is_err());
         assert!(check_context(8191, 8192, 1).is_ok());
     }

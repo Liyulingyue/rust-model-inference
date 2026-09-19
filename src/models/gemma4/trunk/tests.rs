@@ -1,8 +1,7 @@
-use super::config::CONTEXT;
+use super::config::{CONTEXT, EPS};
 use super::{
     assemble_input_rows, attend, kv_source_layer, load_weight, matmul, require_f32_kv, softcap,
-    Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, FULL_HEAD_DIM, HEADS, PER_LAYER,
-    SWA_HEAD_DIM, VOCAB,
+    Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, PER_LAYER, VOCAB,
 };
 use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
@@ -191,42 +190,50 @@ fn test_config() -> Gemma4Config {
     Gemma4Config {
         layers: TEST_LAYERS,
         embd: TEST_EMBD,
-        heads: HEADS,
-        kv_heads: 1,
+        n_heads: 8,
+        kv_heads_per_layer: vec![1; TEST_LAYERS],
         vocab: VOCAB,
-        full_head_dim: FULL_HEAD_DIM,
-        swa_head_dim: SWA_HEAD_DIM,
+        full_head_dim: 512,
+        swa_head_dim: 256,
         shared_kv_layers: 20,
         per_layer_width: PER_LAYER,
         sliding_window: 512,
         logit_softcap: 30.0,
         ffn_per_layer: TEST_FFN_PER_LAYER.to_vec(),
         swa_pattern: TEST_SWA_PATTERN.to_vec(),
+        n_ctx: CONTEXT,
+        rope_freq_base: 1_000_000.0,
+        rope_freq_base_swa: 10_000.0,
     }
 }
 
 fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
     let dim = cfg.head_dim(layer);
+    let q_heads = cfg.n_heads;
+    let kv_heads = cfg.kv_heads(layer);
     let ffn = cfg.ffn_per_layer[layer];
     let embd = cfg.embd;
     Gemma4Layer {
+        q_heads,
+        kv_heads,
         head_dim: dim,
+        kv_shared_with_k: false,
         attn_norm: vec![1.0; embd],
-        attn_q: zero_q8_weight(embd, HEADS * dim),
-        attn_k: zero_q8_weight(embd, dim),
-        attn_v: zero_q8_weight(embd, dim),
-        attn_output: zero_q8_weight(HEADS * dim, embd),
+        attn_q: zero_q8_weight(embd, q_heads * dim),
+        attn_k: zero_q8_weight(embd, kv_heads * dim),
+        attn_v: Some(zero_q8_weight(embd, kv_heads * dim)),
+        attn_output: zero_q8_weight(q_heads * dim, embd),
         attn_q_norm: vec![1.0; dim],
-        attn_k_norm: vec![1.0; dim],
+        attn_k_norm: Some(vec![1.0; dim]),
         post_attention_norm: vec![1.0; embd],
         ffn_norm: vec![1.0; embd],
         ffn_gate: zero_q8_weight(embd, ffn),
         ffn_up: zero_q8_weight(embd, ffn),
         ffn_down: zero_q8_weight(ffn, embd),
         post_ffw_norm: vec![1.0; embd],
-        inp_gate: zero_weight(embd, PER_LAYER),
-        proj: zero_weight(PER_LAYER, embd),
-        post_norm: vec![1.0; embd],
+        inp_gate: Some(zero_weight(embd, PER_LAYER)),
+        proj: Some(zero_weight(PER_LAYER, embd)),
+        post_norm: Some(vec![1.0; embd]),
         output_scale: 1.0,
     }
 }
@@ -239,16 +246,17 @@ fn post_kv_failure_model() -> Gemma4Model {
     layers[0].attn_output.n_in += 1;
     let embd = cfg.embd;
     let per_layer_all = cfg.per_layer_all();
+    let head_dim_half = cfg.full_head_dim / 2;
     Gemma4Model {
         _source: Arc::new(EmptySource),
         config: cfg,
         pool: Arc::new(ComputePool::new(1)),
         token_embedding: zero_weight(embd, VOCAB),
-        per_layer_token_embedding: zero_weight(per_layer_all, VOCAB),
-        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
-        per_layer_proj_norm: vec![1.0; PER_LAYER],
+        per_layer_token_embedding: Some(zero_weight(per_layer_all, VOCAB)),
+        per_layer_model_proj: Some(zero_bf16_weight(embd, per_layer_all)),
+        per_layer_proj_norm: Some(vec![1.0; PER_LAYER]),
         output_norm: vec![1.0; embd],
-        rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
+        rope_freqs: vec![1.0; head_dim_half],
         layers,
     }
 }
@@ -257,17 +265,20 @@ fn deterministic_config() -> Gemma4Config {
     Gemma4Config {
         layers: 3,
         embd: 32,
-        heads: HEADS,
-        kv_heads: 1,
+        n_heads: 8,
+        kv_heads_per_layer: vec![1; 3],
         vocab: VOCAB,
-        full_head_dim: FULL_HEAD_DIM,
-        swa_head_dim: SWA_HEAD_DIM,
+        full_head_dim: 512,
+        swa_head_dim: 256,
         shared_kv_layers: 1,
         per_layer_width: PER_LAYER,
         sliding_window: 512,
         logit_softcap: 30.0,
         ffn_per_layer: vec![64; 3],
         swa_pattern: vec![true, false, true],
+        n_ctx: 128,
+        rope_freq_base: 1_000_000.0,
+        rope_freq_base_swa: 10_000.0,
     }
 }
 
@@ -282,41 +293,47 @@ fn deterministic_model_with_config(
     let layers: Vec<Gemma4Layer> = (0..cfg.layers)
         .map(|layer| {
             let dim = cfg.head_dim(layer);
+            let q_heads = cfg.n_heads;
+            let kv_heads = cfg.kv_heads(layer);
             let ffn = cfg.ffn_per_layer[layer];
             Gemma4Layer {
+                q_heads,
+                kv_heads,
                 head_dim: dim,
+                kv_shared_with_k: false,
                 attn_norm: vec![1.0; cfg.embd],
-                attn_q: deterministic_weight(cfg.embd, HEADS * dim, layer * 11 + 1),
-                attn_k: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 2),
-                attn_v: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 3),
-                attn_output: deterministic_weight(HEADS * dim, cfg.embd, layer * 11 + 4),
+                attn_q: deterministic_weight(cfg.embd, q_heads * dim, layer * 11 + 1),
+                attn_k: deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 2),
+                attn_v: Some(deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 3)),
+                attn_output: deterministic_weight(q_heads * dim, cfg.embd, layer * 11 + 4),
                 attn_q_norm: vec![1.0; dim],
-                attn_k_norm: vec![1.0; dim],
+                attn_k_norm: Some(vec![1.0; dim]),
                 post_attention_norm: vec![1.0; cfg.embd],
                 ffn_norm: vec![1.0; cfg.embd],
                 ffn_gate: deterministic_weight(cfg.embd, ffn, layer * 11 + 5),
                 ffn_up: deterministic_weight(cfg.embd, ffn, layer * 11 + 6),
                 ffn_down: deterministic_weight(ffn, cfg.embd, layer * 11 + 7),
                 post_ffw_norm: vec![1.0; cfg.embd],
-                inp_gate: deterministic_weight(cfg.embd, PER_LAYER, layer * 11 + 8),
-                proj: deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9),
-                post_norm: vec![1.0; cfg.embd],
+                inp_gate: Some(deterministic_weight(cfg.embd, PER_LAYER, layer * 11 + 8)),
+                proj: Some(deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9)),
+                post_norm: Some(vec![1.0; cfg.embd]),
                 output_scale: 0.75 + layer as f32 / 16.0,
             }
         })
         .collect();
     let embd = cfg.embd;
     let per_layer_all = cfg.per_layer_all();
+    let head_dim_half = layers[1].head_dim / 2;
     Gemma4Model {
         _source: Arc::new(EmptySource),
         config: cfg,
         pool: Arc::new(ComputePool::new(1)),
         token_embedding: counting_output_weight(embd, VOCAB, output_projection_calls),
-        per_layer_token_embedding: deterministic_weight(per_layer_all, VOCAB, 41),
-        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
-        per_layer_proj_norm: vec![1.0; PER_LAYER],
+        per_layer_token_embedding: Some(deterministic_weight(per_layer_all, VOCAB, 41)),
+        per_layer_model_proj: Some(zero_bf16_weight(embd, per_layer_all)),
+        per_layer_proj_norm: Some(vec![1.0; PER_LAYER]),
         output_norm: vec![1.0; embd],
-        rope_freqs: vec![1.0; layers[1].head_dim / 2],
+        rope_freqs: vec![1.0; head_dim_half],
         layers,
     }
 }
@@ -872,18 +889,19 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     let cache = KvLayer {
         head_dim: 1,
         row_width: 1,
-        group_size: HEADS,
+        group_size: 8,
         keys: keys.to_vec(),
         values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0].to_vec(),
     };
-    let mut output = [0.0; HEADS];
+    let mut output = [0.0; 8];
 
     attend(
         12,
         7,
-        &[1.0; HEADS],
+        &[1.0; 8],
         &cache,
         true,
+        512,
         &mut output,
         &mut Vec::new(),
         &mut Vec::new(),
@@ -891,7 +909,7 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     )
     .unwrap();
 
-    assert_eq!(output.map(f32::to_bits), [0x3f15_89fd; HEADS]);
+    assert_eq!(output.map(f32::to_bits), [0x3f15_89fd; 8]);
 }
 
 #[test]
@@ -1292,7 +1310,7 @@ fn gemma4_prevalidates_later_chunks_before_running_any_projection() {
     let dim = model.config.head_dim(0);
     model.layers[0].attn_q = counting_output_weight(
         model.config.embd,
-        HEADS * dim,
+        model.config.n_heads * dim,
         Arc::clone(&projection_calls),
     );
     let mut session =

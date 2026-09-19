@@ -7,7 +7,9 @@ pub mod vision;
 pub use app::{run_gemma4, Gemma4Request};
 pub use asr::{Gemma4AudioConfig, Gemma4AudioFeatures, Gemma4AudioModel};
 pub use trunk::{Gemma4Config, Gemma4InputRow, Gemma4Model, Gemma4Session};
-pub use vision::{Gemma4VisionConfig, Gemma4VisionModel};
+pub use vision::{
+    Gemma4UvConfig, Gemma4UvVisionModel, Gemma4VisionConfig, Gemma4VisionEncoder,
+};
 
 // Compatibility for callers that used the pre-organization module name.
 pub use asr as audio;

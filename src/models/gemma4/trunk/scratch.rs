@@ -1,4 +1,4 @@
-use super::config::{Gemma4Config, FULL_HEAD_DIM, HEADS, PER_LAYER, VOCAB};
+use super::config::{Gemma4Config, VOCAB};
 use crate::ops::kernel::PreparedRows;
 
 pub(super) struct Gemma4Scratch {
@@ -29,32 +29,39 @@ impl Gemma4Scratch {
         let embd = cfg.embd;
         let max_ffn = cfg.max_ffn();
         let per_layer_all = cfg.per_layer_all();
-        let max_kv_width = cfg.kv_heads * FULL_HEAD_DIM;
-        let max_input = max_ffn.max(HEADS * FULL_HEAD_DIM);
+        let max_kv_width = cfg.max_kv_width();
+        let max_q_width = cfg.max_q_width();
+        let max_input = max_ffn.max(max_q_width);
         // Score / value buffers are bounded by the sliding-window length
-        // (512 for Gemma4) when SWA is on, or full KV context otherwise.
-        // Allocate 512 once so per-decode `resize` is a no-op and we don't
-        // grow during prefill (where padded length steps up to 256).
-        let max_attn_buffer = 512usize.next_power_of_two();
+        // (512 for E2B/E4B, 1024 for 12B) when SWA is on, or full KV
+        // context otherwise. Allocate per the model's sliding window so
+        // per-decode `resize` is a no-op and we don't grow during
+        // prefill (where padded length steps up to 256).
+        let max_attn_buffer = cfg.sliding_window.next_power_of_two();
+        let per_layer_gate_width = if cfg.use_per_layer_projection() {
+            cfg.per_layer_width
+        } else {
+            0
+        };
         Self {
             x: vec![0.0; max_rows * embd],
             normed: vec![0.0; max_rows * embd],
-            q: vec![0.0; max_rows * HEADS * FULL_HEAD_DIM],
+            q: vec![0.0; max_rows * max_q_width],
             k: vec![0.0; max_rows * max_kv_width],
             v: vec![0.0; max_rows * max_kv_width],
-            attn: vec![0.0; max_rows * HEADS * FULL_HEAD_DIM],
+            attn: vec![0.0; max_rows * max_q_width],
             projected: vec![0.0; max_rows * embd],
             gate: vec![0.0; max_rows * max_ffn],
             up: vec![0.0; max_rows * max_ffn],
             down: vec![0.0; max_rows * embd],
             per_layer: vec![0.0; max_rows * per_layer_all],
             per_layer_projected: vec![0.0; max_rows * per_layer_all],
-            per_layer_gate: vec![0.0; max_rows * PER_LAYER],
+            per_layer_gate: vec![0.0; max_rows * per_layer_gate_width],
             q8: vec![0; max_input],
             scales: vec![0.0; max_input.div_ceil(32)],
             scores: vec![f32::NEG_INFINITY; max_attn_buffer],
             attention_values: vec![0.0; max_attn_buffer],
-            v_norm_weight: vec![1.0; FULL_HEAD_DIM],
+            v_norm_weight: vec![1.0; cfg.full_head_dim],
             logits: vec![0.0; VOCAB],
             prepared: PreparedRows::new(max_rows, max_input.max(embd)),
         }
