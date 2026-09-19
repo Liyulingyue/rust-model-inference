@@ -11,6 +11,7 @@
 
 use rayon::prelude::*;
 
+use crate::ops::dot::dot_f32;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::dot::dot_f32_neon;
 use crate::ops::{dot_f16, f32_to_f16};
@@ -367,13 +368,12 @@ pub fn conv_transpose1d_causal(
                 for (output_channel, value) in row.iter_mut().enumerate() {
                     let start = (output_channel * kernel_size + kernel_index) * in_channels;
                     let weights = &transposed_kernel[start..start + in_channels];
-                    #[cfg(target_arch = "aarch64")]
-                    let dot = unsafe { dot_f32_neon(input_row, weights, in_channels) };
-                    #[cfg(not(target_arch = "aarch64"))]
-                    let dot = input_row
-                        .iter()
-                        .zip(weights)
-                        .fold(0.0f32, |sum, (&input, &weight)| sum + input * weight);
+                    // Use `dot_f32` (which has AVX2/NEON paths) instead
+                    // of an inlined scalar fold — `iter().zip().fold()`
+                    // forces a per-element FP multiply + add with no SIMD
+                    // and was a major hot-path bottleneck on x86_64 before
+                    // this fix.
+                    let dot = dot_f32(input_row, weights, in_channels);
                     *value += dot;
                 }
             }

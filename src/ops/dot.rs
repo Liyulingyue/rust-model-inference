@@ -182,12 +182,21 @@ pub fn dot_f16_f32(a: &[f32], b_f16: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n);
+    // x86_64 SIMD: AVX2 + F16C converts 8 halfs to 8 f32 per `_mm256_cvtph_ps`,
+    // then FMA accumulates. This is the hot path for Qwen3-TTS DAC conv1
+    // (which uses F16 weights × F32 inputs, pre-quantized to F16 here).
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 8 {
+            return unsafe { dot_f16_avx2(a, b, n) };
+        }
+    }
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
-                f64::from(unsafe { dot_f16_fp16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
+                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
             )
         } else {
@@ -200,6 +209,42 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
     }
     sum as f32
+}
+
+/// AVX2 + F16C + FMA implementation of `dot_f16`.
+///
+/// `a` and `b` are both little-endian `u16` F16 arrays. Loads 8 elements at a
+/// time via `_mm_loadu_si128` (treats as raw bytes), converts to FP32 lanes
+/// with `_mm256_cvtph_ps`, then FMA accumulates. Mirrors the existing
+/// `dot_f16_f16_bytes_avx2` for the case where both inputs are already
+/// `u16`-aligned.
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i) as *const __m128i));
+        acc = _mm256_fmadd_ps(va, vb, acc);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    // 4-element tail with `_mm_cvtph_ps` (SSE conversion of 4 F16).
+    if i + 4 <= n {
+        let va = _mm_cvtph_ps(_mm_loadl_epi64(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm_cvtph_ps(_mm_loadl_epi64(b.as_ptr().add(i) as *const __m128i));
+        let v = _mm_fmadd_ps(va, vb, _mm_setzero_ps());
+        let tail = _mm_hsum_ps_4(v);
+        let t = std::mem::transmute::<__m128, [f32; 4]>(tail);
+        sum += t[0];
+        i += 4;
+    }
+    while i < n {
+        sum += f16_to_f32(a[i]) * f16_to_f32(b[i]);
+        i += 1;
+    }
+    sum
 }
 
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
@@ -216,7 +261,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
                 f64::from(unsafe {
-                    dot_f16_fp16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix)
+                    dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix)
                 }),
                 prefix,
             )
@@ -282,7 +327,7 @@ unsafe fn _mm_hsum_ps_4(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m1
 }
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-unsafe fn dot_f16_fp16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
+unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
     debug_assert_eq!(n % 32, 0);
     let bits: u32;
     asm!(
