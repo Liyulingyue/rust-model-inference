@@ -894,14 +894,16 @@ pub fn run_multimodal_with_tts_postproc(
         tts_mmproj,
         &reply,
         internal_language,
-        // The TTS side has its own token budget: the user's --max-tokens
-        // bounds the Omni reply length, but the Qwen3-TTS Talker emits
-        // ~12 audio codebook tokens per 80 ms frame and needs hundreds of
-        // tokens for any intelligible speech. Use a fixed 1024 here so
-        // short prompts (e.g. 30-token captions) still produce useful
-        // audio instead of crashing the embedding lookup. The TTS EOS
-        // token stops generation early once the codec is finished.
-        1024,
+        // TTS frame budget: the user's --max-tokens bounds the Omni reply
+        // length; the Qwen3-TTS Talker emits one 80 ms audio frame per
+        // step and stops on EOS, so `max_tokens * 4` frames (~80 ms per
+        // frame) caps audio at ~3.2 seconds per Omni token. Clamp to a
+        // floor of 128 so short captions (e.g. 30 tokens) still produce
+        // usable audio; cap at 1024 so very long replies don't run the
+        // expensive DAC decoder for minutes on end.
+        max_tokens
+            .saturating_mul(4)
+            .clamp(128, 1024),
         temperature,
         n_threads_arg,
         None,

@@ -601,17 +601,20 @@ impl AudioLinear {
         output: usize,
         kind: GGMLType,
     ) -> Result<Self, String> {
-        let kind = if kind == GGMLType::Q8_0 {
-            source
-                .tensor_info(weight_name)
-                .map(|info| info.ggml_type)
-                .unwrap_or(kind)
-        } else {
-            kind
-        };
-        let allowed = (weight_name == "a.conv_out.weight" && kind == GGMLType::F16)
-            || (kind == GGMLType::F16 && is_qwen25_omni_audio_linear(weight_name))
-            || (matches!(kind, GGMLType::Q8_0 | GGMLType::BF16) && is_q8_audio_linear(weight_name));
+        // Trust the tensor's actual ggml_type when present — some
+        // Unsloth re-quantization rounds trip Q8_0 → BF16 (or F16 ↔ BF16)
+        // and we want to accept any of them. Only fall back to the
+        // caller's hint when the tensor is missing (which becomes a
+        // "Missing tensor" error from `static_tensor` anyway).
+        let kind = source
+            .tensor_info(weight_name)
+            .map(|info| info.ggml_type)
+            .unwrap_or(kind);
+        let allowed = (weight_name == "a.conv_out.weight" && matches!(kind, GGMLType::F16 | GGMLType::BF16))
+            || (matches!(kind, GGMLType::F16 | GGMLType::BF16)
+                && is_qwen25_omni_audio_linear(weight_name))
+            || (matches!(kind, GGMLType::Q8_0 | GGMLType::BF16)
+                && is_q8_audio_linear(weight_name));
         if !allowed {
             return Err(format!(
                 "Unsupported audio linear tensor {weight_name} type {kind:?}"
@@ -646,7 +649,9 @@ impl AudioLinear {
         rows: usize,
         result: &mut Vec<f32>,
     ) -> Result<(), String> {
-        if self.weight.ggml_type != GGMLType::F16
+        // Accept F16 or BF16 — the matmul contract is identical and the
+        // F16/BF16 kernel dispatch handles both.
+        if !matches!(self.weight.ggml_type, GGMLType::F16 | GGMLType::BF16)
             || (!self.bias.is_empty() && self.bias.len() != self.output)
         {
             return Err("Invalid F16 audio projection".into());
