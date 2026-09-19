@@ -1,5 +1,6 @@
 use crate::app::cli::EmbeddingOutput;
 use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::models::qwen3::embedding::{print_embedding, run_embedding_tokens, MediaEmbeddings};
@@ -286,6 +287,13 @@ fn encode_vision(
     let mut values = Vec::new();
     let mut block_rows = Vec::with_capacity(pairs.len());
     let mut scratch = VisionScratchpad::new(&encoder.config);
+    // Local ComputePool for vision matmuls. Embedding path is one-shot per
+    // invocation, so a default-sized pool (auto-detect threads) is fine.
+    let pool = std::sync::Arc::new(ComputePool::new(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    ));
     for (a, b) in pairs {
         let encoded_grid = encoder.encode_pair(
             &normalized[a],
@@ -293,6 +301,7 @@ fn encode_vision(
             grid.image_width(),
             grid.image_height(),
             &mut scratch,
+            &pool,
         )?;
         if encoded_grid != grid {
             return Err("Vision grid changed during encoding".into());

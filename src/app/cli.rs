@@ -78,6 +78,8 @@ pub struct CliOptions {
     pub use_xvector: XVectorMode,
     pub use_xvector_supplied: bool,
     pub out: Option<PathBuf>,
+    pub tts_model: Option<PathBuf>,
+    pub tts_mmproj: Option<PathBuf>,
 }
 
 impl CliOptions {
@@ -518,6 +520,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--mmproj" => {
                 if i + 1 < args.len() {
                     options.mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--tts-model" => {
+                if i + 1 < args.len() {
+                    options.tts_model = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--tts-mmproj" => {
+                if i + 1 < args.len() {
+                    options.tts_mmproj = Some(args[i + 1].as_str().into());
                     i += 1;
                 }
             }

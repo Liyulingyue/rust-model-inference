@@ -1,7 +1,9 @@
 pub mod clip_config;
 
 use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
+use std::sync::Arc;
 use crate::ops::{
     dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, sum_sq_f32, vec_add,
     vec_add_into, vec_mad_f32,
@@ -73,6 +75,63 @@ fn matmul_weight_batch(weight: &Weight<'_>, input: &[f32], output: &mut [f32]) {
     weight
         .kernel
         .forward_batched(input, output, weight.n_in, weight.n_out);
+}
+
+/// Parallel batched matmul for vision-encoder prefill: partitions the
+/// `n_tokens` input rows across the pool's worker threads. Each worker
+/// runs `forward_batched` on its slice of tokens; the kernel still owns
+/// the inner SIMD path. Used by `encode_pair` and `project` to avoid
+/// the single-threaded bottleneck we measured at 247 s for a 401×287
+/// apple.png image (vit_layers ≈ 97.5 % of total).
+fn matmul_weight_batch_pooled(
+    pool: &Arc<ComputePool>,
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) {
+    let n_in = weight.n_in;
+    let n_out = weight.n_out;
+    let n_tokens = input.len() / n_in;
+    debug_assert_eq!(input.len(), n_tokens * n_in);
+    debug_assert_eq!(output.len(), n_tokens * n_out);
+    if n_tokens < pool.n_threads() * 4 {
+        // Not enough work to justify dispatch overhead: fall back to the
+        // single-threaded batched path (matches the original behaviour).
+        weight.kernel.forward_batched(input, output, n_in, n_out);
+        return;
+    }
+    // ComputePool's `compute` takes an `Fn` (not `FnMut`) closure, so we
+    // cannot move `&mut output[start * n_out..]` into the closure directly.
+    // Wrap the output pointer so each worker can borrow a disjoint slice
+    // from raw pointer arithmetic; this matches the pattern used by the
+    // in-tree attention path (see `PtrWrap` in `forward_vit_layer`).
+    struct OutputWrap(*mut f32, usize);
+    unsafe impl Sync for OutputWrap {}
+    unsafe impl Send for OutputWrap {}
+    impl OutputWrap {
+        unsafe fn slice(&self, start: usize, end: usize) -> &mut [f32] {
+            std::slice::from_raw_parts_mut(self.0.add(start * self.1), (end - start) * self.1)
+        }
+    }
+    let out_ptr = OutputWrap(output.as_mut_ptr(), n_out);
+    let inp_ptr = input.as_ptr();
+    let n_threads = pool.n_threads();
+    pool.compute(move |ith, nth| {
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+        if start >= end {
+            return;
+        }
+        unsafe {
+            let inp_slice = std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in);
+            let out_slice = out_ptr.slice(start, end);
+            // The kernel's `forward_batched` is `&self -> &mut [...]`, so
+            // we still need a `Weight<'_>` here; it borrows from outside.
+            weight.kernel.forward_batched(inp_slice, out_slice, n_in, n_out);
+        }
+    });
+    // Touch `n_threads` to silence the unused warning when the early
+    // return path above is taken in single-threaded testing builds.
+    let _ = n_threads;
 }
 
 fn f32_weight_as_f16(weight: &Weight<'_>) -> Option<Vec<u16>> {
@@ -741,8 +800,9 @@ impl<'a> VisionEncoder<'a> {
         img_w: usize,
         img_h: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) -> Result<VisionGrid, String> {
-        self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch)
+        self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch, pool)
     }
 
     pub fn encode_pair(
@@ -752,6 +812,7 @@ impl<'a> VisionEncoder<'a> {
         img_w: usize,
         img_h: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) -> Result<VisionGrid, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
@@ -866,7 +927,7 @@ impl<'a> VisionEncoder<'a> {
         let t_layers = std::time::Instant::now();
         let mrope_positions = build_vit_mrope_positions(n_patches_x, n_patches_y, merge);
         for layer in 0..cfg.n_layer {
-            self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions);
+            self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions, pool);
             #[cfg(feature = "parity-trace")]
             if layer == 0 || layer + 1 == cfg.n_layer {
                 crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -918,7 +979,7 @@ impl<'a> VisionEncoder<'a> {
         let t_postln = t_postln.elapsed();
 
         let t_proj = std::time::Instant::now();
-        self.project(n_patches_x, n_patches_y, n_embd, merge, scratch);
+        self.project(n_patches_x, n_patches_y, n_embd, merge, scratch, pool);
         let t_proj = t_proj.elapsed();
 
         let total = t_embed + t_merge + t_bias + t_pos + t_layers + t_postln + t_proj;
@@ -1122,6 +1183,7 @@ impl<'a> VisionEncoder<'a> {
         scratch: &mut VisionScratchpad,
         n_tokens: usize,
         mrope_positions: &[[usize; 4]],
+        pool: &Arc<ComputePool>,
     ) {
         let do_profile = std::env::var("PROFILE_VIT_LAYER").is_ok();
         let cfg = &self.config;
@@ -1170,7 +1232,8 @@ impl<'a> VisionEncoder<'a> {
             }
 
             if let Some(ref qkv) = pc.qkv_weights[il] {
-                matmul_weight_batch(
+                matmul_weight_batch_pooled(
+                    pool,
                     qkv,
                     &scratch.merged[..n_tokens * n_embd],
                     &mut scratch.qkv_buf[..n_tokens * n_embd * 3],
@@ -1188,7 +1251,8 @@ impl<'a> VisionEncoder<'a> {
                     (&pc.k_weights[il], &pc.k_biases[il], n_tokens * n_embd),
                     (&pc.v_weights[il], &pc.v_biases[il], 2 * n_tokens * n_embd),
                 ] {
-                    matmul_weight_batch(
+                    matmul_weight_batch_pooled(
+                        pool,
                         weight
                             .as_ref()
                             .expect("missing separate vision attention weight"),
@@ -1462,7 +1526,8 @@ impl<'a> VisionEncoder<'a> {
         }
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 &pc.out_weights[il],
                 &scratch.attn_concat[..n_tokens * n_embd],
                 &mut scratch.proj_buf[..n_tokens * n_embd],
@@ -1529,7 +1594,8 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
 
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 pc.ffn_up_weights[il]
                     .as_ref()
                     .expect("missing vision ffn up weight"),
@@ -1543,7 +1609,8 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
             if let Some(ref gate) = pc.ffn_gate_weights[il] {
-                matmul_weight_batch(
+                matmul_weight_batch_pooled(
+                    pool,
                     gate,
                     &scratch.merged[..n_tokens * n_embd],
                     &mut scratch.ffn_gate_buf[..n_tokens * cfg.n_ff],
@@ -1626,7 +1693,8 @@ impl<'a> VisionEncoder<'a> {
 
         let t_ffn_down_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 pc.ffn_down_weights[il]
                     .as_ref()
                     .expect("missing vision ffn down weight"),
@@ -1688,6 +1756,7 @@ impl<'a> VisionEncoder<'a> {
         n_embd: usize,
         merge: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) {
         let cfg = &self.config;
         let n_merged_x = n_patches_x / merge;
@@ -1711,7 +1780,7 @@ impl<'a> VisionEncoder<'a> {
         concat_buf.copy_from_slice(&hidden[..concat_size]);
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(&pc.mm_0_weight, concat_buf, mm0_out);
+            matmul_weight_batch_pooled(pool, &pc.mm_0_weight, concat_buf, mm0_out);
             if let Some(ref bias) = pc.mm_0_bias {
                 for t in 0..n_projected {
                     for j in 0..bias.len().min(merged_embd) {
@@ -1744,7 +1813,8 @@ impl<'a> VisionEncoder<'a> {
         gelu_ggml_f16_inplace(&mut mm0_out[..n_projected * merged_embd]);
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 &pc.mm_2_weight,
                 &mm0_out[..n_projected * merged_embd],
                 &mut out[..n_projected * proj_dim],
@@ -2535,6 +2605,10 @@ unsafe fn attn_scaled_add_avx2(out: &mut [f32], v: *const f32, scale: f32, d: us
 mod tests {
     use super::*;
 
+    fn test_pool() -> Arc<ComputePool> {
+        Arc::new(ComputePool::new(1))
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn qwen35_vision_attention_value_matches_ggml_reduction() {
@@ -2745,7 +2819,7 @@ mod tests {
         scratch.projected.resize(2, 0.0);
         scratch.merged[..block_order.len()].copy_from_slice(&block_order);
 
-        encoder.project(4, 2, 1, 2, &mut scratch);
+        encoder.project(4, 2, 1, 2, &mut scratch, &test_pool());
 
         assert_eq!(&scratch.project_concat_buf[..8], &block_order);
     }
