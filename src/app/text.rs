@@ -81,6 +81,7 @@ pub fn run_inference(
                 n_threads_arg,
                 profile,
                 kv_format,
+                max_context,
             )
         } else {
             crate::models::lfm2::run_inference(

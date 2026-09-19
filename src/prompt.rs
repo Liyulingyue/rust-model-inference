@@ -133,6 +133,17 @@ pub fn build_lfm2_chat_prompt(
     if let Some(bos) = tokenizer.bos_id() {
         out.push(bos);
     }
+    let has_system = messages.iter().any(|m| m.role == "system");
+    if !has_system {
+        // LFM2.5 official template requires a system turn. The README / HF
+        // chat template starts with `system\nYou are a helpful assistant
+        // trained by Liquid AI.\n` before the user turn. Inject the default
+        // so instruct/thinking models don't have to be told to introduce
+        // themselves via the user prompt.
+        out.extend(
+            tokenizer.encode("system\nYou are a helpful assistant trained by Liquid AI.\n", PLAIN_TEXT),
+        );
+    }
     for message in messages {
         // The role itself can include a trailing newline so that the role
         // name and the content are separated by a single `\n`. We use
