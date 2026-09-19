@@ -301,7 +301,13 @@ fn encode_perception_images(
             image_size[1],
         )?;
         let normalized = normalize_rgb(&rgb, encoder.config.image_mean, encoder.config.image_std)?;
-        let grid = encoder.encode_image(&normalized, image_size[0], image_size[1], &mut scratch, pool)?;
+        let grid = encoder.encode_image(
+            &normalized,
+            image_size[0],
+            image_size[1],
+            &mut scratch,
+            pool,
+        )?;
         if grids.first().is_some_and(|first| *first != grid) {
             return Err("Qwen-Drive perception cameras produced different vision grids".into());
         }

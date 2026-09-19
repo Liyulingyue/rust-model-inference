@@ -610,11 +610,11 @@ impl AudioLinear {
             .tensor_info(weight_name)
             .map(|info| info.ggml_type)
             .unwrap_or(kind);
-        let allowed = (weight_name == "a.conv_out.weight" && matches!(kind, GGMLType::F16 | GGMLType::BF16))
+        let allowed = (weight_name == "a.conv_out.weight"
+            && matches!(kind, GGMLType::F16 | GGMLType::BF16))
             || (matches!(kind, GGMLType::F16 | GGMLType::BF16)
                 && is_qwen25_omni_audio_linear(weight_name))
-            || (matches!(kind, GGMLType::Q8_0 | GGMLType::BF16)
-                && is_q8_audio_linear(weight_name));
+            || (matches!(kind, GGMLType::Q8_0 | GGMLType::BF16) && is_q8_audio_linear(weight_name));
         if !allowed {
             return Err(format!(
                 "Unsupported audio linear tensor {weight_name} type {kind:?}"

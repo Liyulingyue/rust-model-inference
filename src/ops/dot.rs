@@ -219,7 +219,11 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
             while i + 8 <= n {
                 let av = vld1q_u16(a.as_ptr().add(i));
                 let bv = vld1q_u16(b.as_ptr().add(i));
-                let acc = vfmaq_f16(vdupq_n_f16(0.0), vreinterpretq_f16_u16(av), vreinterpretq_f16_u16(bv));
+                let acc = vfmaq_f16(
+                    vdupq_n_f16(0.0),
+                    vreinterpretq_f16_u16(av),
+                    vreinterpretq_f16_u16(bv),
+                );
                 let lo = vcvtn_f32_f16(vget_low_f16(acc));
                 let hi = vcvtn_f32_f16(vget_high_f16(acc));
                 let pair = vaddq_f32(lo, hi);
@@ -290,9 +294,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
-                f64::from(unsafe {
-                    dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix)
-                }),
+                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,
             )
         } else {

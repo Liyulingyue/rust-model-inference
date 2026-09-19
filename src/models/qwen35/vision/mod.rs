@@ -3,13 +3,13 @@ pub mod clip_config;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use std::sync::Arc;
 use crate::ops::{
     dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, sum_sq_f32, vec_add,
     vec_add_into, vec_mad_f32,
 };
 use clip_config::ClipVisionConfig;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 fn load_source_weight<'a, S: TensorSource + ?Sized>(
     source: &'a S,
@@ -122,11 +122,14 @@ fn matmul_weight_batch_pooled(
             return;
         }
         unsafe {
-            let inp_slice = std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in);
+            let inp_slice =
+                std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in);
             let out_slice = out_ptr.slice(start, end);
             // The kernel's `forward_batched` is `&self -> &mut [...]`, so
             // we still need a `Weight<'_>` here; it borrows from outside.
-            weight.kernel.forward_batched(inp_slice, out_slice, n_in, n_out);
+            weight
+                .kernel
+                .forward_batched(inp_slice, out_slice, n_in, n_out);
         }
     });
     // Touch `n_threads` to silence the unused warning when the early

@@ -15,13 +15,13 @@
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::models::qwen3::trunk::util::{load_f32_tensor, static_q8_matrix, usize_to_u64};
-use crate::ops::gelu_ggml_f16_inplace;
 use crate::models::qwen3::tts::codec::conv::{
     conv1d_causal, conv1d_causal_depthwise, conv_transpose1d_causal, CausalConv1dState,
     ConvTranspose1dState,
 };
 use crate::models::qwen3::tts::codec::snake::snake1d_inplace;
 use crate::models::qwen3::tts::{load_f16_or_f32_tensor, load_f16_tensor};
+use crate::ops::gelu_ggml_f16_inplace;
 use crate::ops::{f16_to_f32, f32_to_f16, matmul_q8_0_quantized_parallel, quantize_q8_0_into};
 
 #[cfg(unix)]

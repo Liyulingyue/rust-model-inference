@@ -332,7 +332,8 @@ fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
         assert_eq!((grid.image_width(), grid.image_height()), (256, 256));
         let pixels = vec![1.0f32; 256 * 256 * 3];
         let mut scratch = VisionScratchpad::new(&encoder.config);
-        let pool = std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
+        let pool =
+            std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
         encoder.encode_image(&pixels, 256, 256, &mut scratch, &pool)?;
         rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint(
             "omni.vision.projected",

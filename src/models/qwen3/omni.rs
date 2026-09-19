@@ -499,16 +499,12 @@ impl Qwen25OmniAudioConfig {
         // contract is identical); accept either to match Unsloth's BF16
         // re-quantization.
         let type_ok = matches!(projector.ggml_type, GGMLType::F16 | GGMLType::BF16);
-        if projector.dims.first() != Some(&(hidden as u64))
-            || projector.dims.len() != 2
-            || !type_ok
+        if projector.dims.first() != Some(&(hidden as u64)) || projector.dims.len() != 2 || !type_ok
         {
             return Err(format!(
                 "Invalid Qwen2.5-Omni audio tensor: mm.a.fc.weight \
                  (shape {:?} type {:?}; expected [{}, ?] F16/BF16)",
-                projector.dims,
-                projector.ggml_type,
-                hidden
+                projector.dims, projector.ggml_type, hidden
             ));
         }
         let projection = projector.dims[1] as usize;
