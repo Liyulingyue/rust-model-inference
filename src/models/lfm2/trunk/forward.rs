@@ -40,7 +40,7 @@ use crate::ops::{
     rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace,
     vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
 };
-use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
+use crate::prompt::{build_lfm2_chat_prompt_with_thinking, Lfm2Message};
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -67,15 +67,17 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
+    thinking: bool,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    let input_tokens = build_lfm2_chat_prompt(
+    let input_tokens = build_lfm2_chat_prompt_with_thinking(
         &tokenizer,
         &[Lfm2Message {
             role: "user",
             content: prompt,
         }],
+        thinking,
     )?;
     let stream: Vec<Lfm2StreamItem> = input_tokens
         .iter()

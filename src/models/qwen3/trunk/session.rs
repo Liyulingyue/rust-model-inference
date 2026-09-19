@@ -239,7 +239,13 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, repetition_penalty, false, Some(&mut on_token))
+        self.generate_inner(
+            input,
+            options,
+            repetition_penalty,
+            false,
+            Some(&mut on_token),
+        )
     }
 
     pub(crate) fn generate_with_asr_trace(

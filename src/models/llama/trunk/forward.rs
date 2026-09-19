@@ -17,7 +17,7 @@ use crate::ops::{
     rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
     vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
-use crate::prompt::format_k2_horizon_chat_prompt;
+use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -172,6 +172,7 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
+    thinking: bool,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
@@ -190,7 +191,7 @@ pub fn run_inference(
         // a base model with no chat template — feed the prompt as-is and let
         // the BOS token mark the start of generation.
         let prompt_text = if arch == "k2-horizon" {
-            format_k2_horizon_chat_prompt(prompt)
+            format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
         } else if arch == "granite" {
             format!(
                 "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"

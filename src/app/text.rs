@@ -82,6 +82,7 @@ pub fn run_inference(
                 profile,
                 kv_format,
                 max_context,
+                thinking,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -94,6 +95,7 @@ pub fn run_inference(
                 kv_format,
                 max_context,
                 repetition_penalty,
+                thinking,
             )
         }
     } else if arch == "lfm2moe" {
@@ -120,6 +122,7 @@ pub fn run_inference(
             kv_format,
             max_context,
             repetition_penalty,
+            thinking,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -645,10 +648,7 @@ fn run_qwen3_family_multimodal(
     // system turn when the projector family matches `Qwen25Omni`, so
     // qwen3vl / qwen3vlmoe (Qwen3-VL family) keep their existing
     // system-less behaviour.
-    if matches!(
-        family,
-        crate::app::omni::ProjectorFamily::Qwen25Omni
-    ) {
+    if matches!(family, crate::app::omni::ProjectorFamily::Qwen25Omni) {
         let system_text = match media_kind {
             crate::app::omni::MediaKind::Audio => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
@@ -901,9 +901,7 @@ pub fn run_multimodal_with_tts_postproc(
         // floor of 128 so short captions (e.g. 30 tokens) still produce
         // usable audio; cap at 1024 so very long replies don't run the
         // expensive DAC decoder for minutes on end.
-        max_tokens
-            .saturating_mul(4)
-            .clamp(128, 1024),
+        max_tokens.saturating_mul(4).clamp(128, 1024),
         temperature,
         n_threads_arg,
         None,
