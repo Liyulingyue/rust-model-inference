@@ -9,6 +9,16 @@ silu_mul_approx_inplace + AVX2/NEON matmul）。
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
 > KV cache 默认 F16；与 llama.cpp 位级对比时显式传 `--kv-cache f16`。
 > 当前仅 CPU 路径；Vulkan dispatch 不在 `hunyuan-dense` 的覆盖范围内。
+> 
+> 常用生成参数：
+> 
+> - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2-7B 的 GGUF
+>   `context_length=524288` 不受 `--max-context` 影响 KV 分配本身（实际容量取
+>   `min(model.n_ctx, --max-context)`），但可避免 524k × 36 层 × 4096 维 ≈ 77 GB
+>   KV cache 一次性分配。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0。Hy-MT2-7B Q4_K_M
+>   在 greedy 解码下会陷入短语循环，配合 `--repetition-penalty 1.3~1.5`
+>   可缓解；详见 §4。
 
 ---
 
@@ -138,16 +148,34 @@ prompt 里 `target_lang` 字段名要使用**对应语言的全称**：
 **未实测**的量化格式（Q4_K_M / Q3_K_M / Q5_K_M / Q6_K）应视为 `Supported`
 而非 `Verified`，跑通后再升级状态。
 
+**Hy-MT2-7B Q4_K_M 实测警告（2026-09）**：在 greedy 解码下，模型会陷入
+「」+短语循环的退化输出（实测：仅循环 `Hello world` 的若干变体）。
+配合 `--repetition-penalty 1.3~1.5` 可缓解但无法彻底消除。这是模型侧
+Q4_K_M + 翻译 prompt + greedy 三者组合的退化，不是代码 bug。llama.cpp
+同样的 Q4_K_M + 同样 prompt 也复现该问题。绕开方法：
+
+1. 加 `--repetition-penalty 1.4`
+2. 或者使用温度 > 0 的采样（仓库 CLI 当前未暴露 `--temperature`/采样选项
+   的 Hunyuan 直通路径，需自行在 `src/app/text.rs` 加）
+3. 或者换 Q8_0 量化（仓库已实测 1.8B Q8_0 18.6 t/s）
+
 ---
 
 ## 5. CLI 路由速查
 
-| GGUF `general.architecture` | 进入 trunk | 入口 |
-|---|---|---|
-| `hunyuan-dense` | qwen3 trunk（委托） | `src/models/qwen3/hunyuan.rs` → `qwen3::text::run_inference_tokens` |
+| GGUF `general.architecture` | tokenizer.ggml.pre | 进入 trunk | chat template | 入口 |
+|---|---|---|---|---|
+| `hunyuan-dense` | `hunyuan-dense` | qwen3 trunk（委托） | `<|hy_User|>...<|hy_Assistant|>` | `src/models/qwen3/hunyuan.rs` → `qwen3::text::run_inference_tokens` |
+| `hunyuan` | `hunyuan` | qwen3 trunk（委托） | **无 chat 模板**，raw 文本（无 BOS） | 同上；`build_hunyuan_chat_prompt` 自动判别 |
 
-`src/app/text.rs` 按 `arch == "hunyuan-dense"` 把 CLI 路由到 hunyuan.rs。
+`src/app/text.rs` 按 `arch == "hunyuan-dense"` 或 `arch == "hunyuan"` 把 CLI 路由到 hunyuan.rs。
 forward / matmul / KV cache / RMSNorm / RoPE 全部走 qwen3 的 SIMD 实现。
+
+`build_hunyuan_chat_prompt` (`src/prompt.rs:41`) 按 tokenizer metadata 分流：
+
+- 含 `hy_user` special token → 1.8B 的 `<|hy_User|>...<|hy_Assistant|>` 官方模板
+- 否则 → 7B 的 raw 文本 prompt，无 BOS、无 chat header（与 llama.cpp
+  `--no-conversation` 一致）
 
 ---
 

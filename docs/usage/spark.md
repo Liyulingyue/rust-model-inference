@@ -24,16 +24,19 @@ Spark 2.5 chat template 在生成 prompt 末尾区分 `<|Bot|><think>` 与
 `<|Bot|></think>`，分别对应「先推理再回答」与「直接回答」：
 
 ```bash
-# reasoning + answer（默认）
+# reasoning + answer：显式传 --thinking
 cargo run --release --bin rust-model-inference -- \
   --model models/Spark-X2.5-1.7B.gguf \
   --prompt "法国的首都是" --thinking
 
-# 直接回答
+# 直接回答：默认行为（不传 --thinking）
 cargo run --release --bin rust-model-inference -- \
   --model models/Spark-X2.5-1.7B.gguf \
-  --prompt "法国的首都是" --no-thinking
+  --prompt "法国的首都是"
 ```
+
+CLI 当前**只暴露 `--thinking`**（默认 false）；没有 `--no-thinking` 标志。
+要切换到直接回答，省略 `--thinking` 即可。
 
 chat template 来源（`src/models/spark/trunk/forward.rs:423-428`）：
 
@@ -41,7 +44,7 @@ chat template 来源（`src/models/spark/trunk/forward.rs:423-428`）：
 <sos><|System|>\nyou are a helpful assistant.<eos>
 <sos><|User|>{prompt}<eos>
 <sos><|Bot|><think>          # thinking=true
-<sos><|Bot|></think>          # thinking=false
+<sos><|Bot|></think>          # thinking=false（默认）
 ```
 
 ## 3. 4B 版本
@@ -58,7 +61,7 @@ cargo run --release --bin rust-model-inference -- \
 
 | GGUF `general.architecture` | 进入 trunk | Modes |
 |---|---|---|
-| `spark2_5` | `src/models/spark/trunk/forward.rs` | 文本（仅 `--thinking` / `--no-thinking`） |
+| `spark2_5` | `src/models/spark/trunk/forward.rs` | 文本（仅 `--thinking`） |
 
 `src/app/text.rs:110-121` 把 `arch == "spark2_5"` 路由到 spark run_inference，
 其余 arch 走默认 qwen3 fallback。
@@ -86,7 +89,7 @@ cargo run --release --bin rust-model-inference -- \
 |---|---|
 | 量化 | 当前仅 BF16；其他量化格式未验证 |
 | Oracle pin | `Pending pin`（XHToken/llama.cpp 未固定 commit） |
-| thinking 切换 | 通过 `--thinking` / `--no-thinking` 显式控制，**不是**用户提示前缀 |
+| thinking 切换 | 仅 `--thinking` 显式控制；默认 false（直接回答）。没有 `--no-thinking` 标志 |
 | 计算性能 | 4B CPU 较慢；通过 ComputePool + BF16 AVX2 kernel 缓解但仍未与兄弟模型持平 |
 
 ## 7. 已知 bug 与修复历史
