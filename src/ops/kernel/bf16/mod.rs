@@ -101,7 +101,20 @@ impl<'a> BF16Kernel<'a> {
                 }
             }
         }
-        scalar::forward_f32_rows_scalar(self.weight, input, output, n_in, n_out, ith, nth);
+        // Fallback when `n_in` is not a multiple of 8 (e.g. FFN_down with
+        // n_in=3420 in Qwen2.5-Omni). The packed SIMD kernels require
+        // `n_in % 8 == 0`; for the tail we use a per-row SIMD dot product
+        // that handles arbitrary `n` (8 lanes per AVX2 iteration via
+        // PMOVZX + SHL + FMA, scalar tail).
+        let (start, end) = Self::row_range(n_out, ith, nth);
+        for row in start..end {
+            let row_off = row * n_in * 2;
+            output[row] = crate::ops::dot_bf16_f32(
+                &input[..n_in],
+                &self.weight[row_off..row_off + n_in * 2],
+                n_in,
+            );
+        }
     }
 
     fn forward_q8_rows(

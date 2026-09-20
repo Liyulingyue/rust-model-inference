@@ -1,5 +1,6 @@
 use crate::app::cli::EmbeddingOutput;
 use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::models::qwen3::embedding::{print_embedding, run_embedding_tokens, MediaEmbeddings};
@@ -39,13 +40,19 @@ pub fn validate_mmproj_capabilities(
         .metadata("clip.projector_type")
         .and_then(|v| v.to_string_val())
     {
-        let expected = match family {
-            ProjectorFamily::Qwen3VlMerger => "qwen3vl_merger",
-            ProjectorFamily::Qwen25Omni => "qwen2.5o",
+        // Accept the original Qwen2.5-Omni projector (`qwen2.5o`) and the
+        // plain Qwen2.5-VL / Qwen2.5-VL-3B-Instruct projector
+        // (`qwen2.5vl_merger`). They label the same `mm.0 / mm.2` matmul
+        // layout that `VisionEncoder35::project` consumes; the divergence
+        // is metadata-only.
+        let allowed: &[&str] = match family {
+            ProjectorFamily::Qwen3VlMerger => &["qwen3vl_merger"],
+            ProjectorFamily::Qwen25Omni => &["qwen2.5o", "qwen2.5vl_merger"],
         };
-        if projector != expected {
+        if !allowed.iter().any(|p| *p == projector) {
             return Err(format!(
-                "{llm_arch} requires projector {expected}, got {projector}"
+                "{llm_arch} requires one of {:?}, got {projector}",
+                allowed
             ));
         }
     }
@@ -194,7 +201,12 @@ pub(crate) fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, Stri
 }
 
 pub(crate) fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
-    let decoded = Command::new("ffmpeg")
+    // Try ffmpeg first: it handles arbitrary formats (mp3, opus, flac,
+    // multichannel, non-16kHz, ...) and can resample + downmix on the
+    // fly. When ffmpeg is not installed, fall back to a pure-Rust PCM16
+    // WAV reader (the Omni README requires the input to already be
+    // 16 kHz mono PCM16, so this is the common case).
+    if let Ok(decoded) = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
         .args([
@@ -209,26 +221,61 @@ pub(crate) fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
             "pipe:1",
         ])
         .output()
-        .map_err(|error| format!("Failed to run ffmpeg; install FFmpeg: {error}"))?;
-    if !decoded.status.success() {
+    {
+        if decoded.status.success() {
+            if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+                return Err("ffmpeg returned invalid F32 audio".into());
+            }
+            let samples = decoded
+                .stdout
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+                .collect::<Vec<_>>();
+            if samples.iter().any(|sample| !sample.is_finite()) {
+                return Err("ffmpeg returned non-finite audio".into());
+            }
+            return Ok(samples);
+        }
+        // ffmpeg ran but errored — surface its stderr to the user.
         return Err(format!(
             "ffmpeg failed for {}: {}",
             path.display(),
             String::from_utf8_lossy(&decoded.stderr).trim()
         ));
     }
-    if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
-        return Err("ffmpeg returned invalid F32 audio".into());
+
+    // ffmpeg not on PATH. Fall back to pure-Rust PCM16 WAV decoding.
+    // Qwen2.5-Omni's audio encoder requires 16 kHz mono PCM16 (see the
+    // upstream README and SUPPORTED_MODELS.md), so any input that is
+    // already in that format works directly.
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Failed to read audio {}: {error}", path.display()))?;
+    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
+        .map_err(|error| {
+            format!(
+                "Pure-Rust audio decode failed for {}: {:?}",
+                path.display(),
+                error
+            )
+        })?;
+    if decoded.channels != 1 {
+        return Err(format!(
+            "Audio {} has {} channels; Omni requires mono. Install ffmpeg to mix-down, \
+             or pre-convert with `ffmpeg -i <in> -ac 1 -ar 16000 out.wav`.",
+            path.display(),
+            decoded.channels
+        ));
     }
-    let samples = decoded
-        .stdout
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
-        .collect::<Vec<_>>();
-    if samples.iter().any(|sample| !sample.is_finite()) {
-        return Err("ffmpeg returned non-finite audio".into());
+    if decoded.sample_rate != 16_000 {
+        return Err(format!(
+            "Audio {} has {} Hz sample rate; Omni requires 16000 Hz. Install ffmpeg to \
+             resample, or pre-convert with `ffmpeg -i <in> -ac 1 -ar 16000 out.wav`.",
+            path.display(),
+            decoded.sample_rate
+        ));
     }
-    Ok(samples)
+    // `decode_pcm16_wav_any` returns F32 PCM samples in [-1, 1].
+    Ok(decoded.samples)
 }
 
 fn encode_vision(
@@ -286,6 +333,13 @@ fn encode_vision(
     let mut values = Vec::new();
     let mut block_rows = Vec::with_capacity(pairs.len());
     let mut scratch = VisionScratchpad::new(&encoder.config);
+    // Local ComputePool for vision matmuls. Embedding path is one-shot per
+    // invocation, so a default-sized pool (auto-detect threads) is fine.
+    let pool = std::sync::Arc::new(ComputePool::new(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    ));
     for (a, b) in pairs {
         let encoded_grid = encoder.encode_pair(
             &normalized[a],
@@ -293,6 +347,7 @@ fn encode_vision(
             grid.image_width(),
             grid.image_height(),
             &mut scratch,
+            &pool,
         )?;
         if encoded_grid != grid {
             return Err("Vision grid changed during encoding".into());

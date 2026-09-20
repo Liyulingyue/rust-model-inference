@@ -9,6 +9,22 @@ silu_mul_approx_inplace + AVX2/NEON matmul）。
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
 > KV cache 默认 F16；与 llama.cpp 位级对比时显式传 `--kv-cache f16`。
 > 当前仅 CPU 路径；Vulkan dispatch 不在 `hunyuan-dense` 的覆盖范围内。
+>
+> 常用生成参数：
+>
+> - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2 GGUF
+>   `context_length=524288`，大值会一次性占用 GB 级 KV 内存。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）。对
+>   Hy-MT2-7B Q4_K_M 翻译时陷入复读循环的问题尤其有用（α ≥ 1.3 起效）。
+> - `--temperature`：Hy-MT2 路径已直通到 sampling，仓库默认 0（greedy）。
+>
+> - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2-7B 的 GGUF
+>   `context_length=524288` 不受 `--max-context` 影响 KV 分配本身（实际容量取
+>   `min(model.n_ctx, --max-context)`），但可避免 524k × 36 层 × 4096 维 ≈ 77 GB
+>   KV cache 一次性分配。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0。Hy-MT2-7B Q4_K_M
+>   在 greedy 解码下会陷入短语循环，配合 `--repetition-penalty 1.3~1.5`
+>   可缓解；详见 §4。
 
 ---
 
@@ -138,16 +154,33 @@ prompt 里 `target_lang` 字段名要使用**对应语言的全称**：
 **未实测**的量化格式（Q4_K_M / Q3_K_M / Q5_K_M / Q6_K）应视为 `Supported`
 而非 `Verified`，跑通后再升级状态。
 
+**Hy-MT2-7B Q4_K_M 实测警告（2026-09）**：在 greedy 解码下，模型会陷入
+`` + 短语循环的退化输出（实测：仅循环 `Hello world` 的若干变体）。
+配合 `--repetition-penalty 1.3~1.5` 可缓解但无法彻底消除。这是模型侧
+Q4_K_M + 翻译 prompt + greedy 三者组合的退化，不是代码 bug。llama.cpp
+同样的 Q4_K_M + 同样 prompt 也复现该问题。绕开方法：
+
+1. 加 `--repetition-penalty 1.4`
+2. 或换 Q8_0 量化（仓库已实测 1.8B Q8_0 18.6 t/s）
+3. 或启用温度 > 0 采样（Hy-MT2 路径已支持 `--temperature`，见 §1）
+
 ---
 
 ## 5. CLI 路由速查
 
-| GGUF `general.architecture` | 进入 trunk | 入口 |
-|---|---|---|
-| `hunyuan-dense` | qwen3 trunk（委托） | `src/models/qwen3/hunyuan.rs` → `qwen3::text::run_inference_tokens` |
+| GGUF `general.architecture` | tokenizer.ggml.pre | 进入 trunk | chat template | 入口 |
+|---|---|---|---|---|
+| `hunyuan-dense` | `hunyuan-dense` | qwen3 trunk（委托） | `<|hy_User|>...<|hy_Assistant|>` | `src/models/qwen3/hunyuan.rs` → `qwen3::text::run_inference_tokens` |
+| `hunyuan` | `hunyuan` | qwen3 trunk（委托） | **无 chat 模板**，raw 文本（无 BOS） | 同上；`build_hunyuan_chat_prompt` 自动判别 |
 
-`src/app/text.rs` 按 `arch == "hunyuan-dense"` 把 CLI 路由到 hunyuan.rs。
+`src/app/text.rs` 按 `arch == "hunyuan-dense"` 或 `arch == "hunyuan"` 把 CLI 路由到 hunyuan.rs。
 forward / matmul / KV cache / RMSNorm / RoPE 全部走 qwen3 的 SIMD 实现。
+
+`build_hunyuan_chat_prompt` (`src/prompt.rs:41`) 按 tokenizer metadata 分流：
+
+- 含 `hy_user` special token → 1.8B 的 `<|hy_User|>...<|hy_Assistant|>` 官方模板
+- 否则 → 7B 的 raw 文本 prompt，无 BOS、无 chat header（与 llama.cpp
+  `--no-conversation` 一致）
 
 ---
 
@@ -192,3 +225,52 @@ llama.cpp GGUF 量化版本。`docs/REFERENCE_IMPLEMENTATIONS.md` 当前**未固
 - `src/prompt.rs:41` — `build_hunyuan_chat_prompt`（`<hy_user>…<hy_assistant>` 模板）
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — 参考实现清单
 - `docs/SUPPORTED_MODELS.md` — 验证状态
+
+## 9. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 9.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `hunyuan-dense` | `app/text.rs::run_jev_decision_hunyuan` → `qwen3::Qwen3Session::forward_logits`（复用 qwen3 base） |
+
+> Hunyuan 走 qwen3 trunk 的 `run_inference_tokens`，JEV 同样复用
+> `Qwen3Session::forward_logits` —— Hunyuan 没有自己的 forward_logits
+> 实现，模型加载阶段共用 qwen3。
+
+Hunyuan 1.8B 用 `<|hy_User|>` / `<|hy_Assistant|>` 模板（1.8B GGUF），
+Hunyuan 7B 用 raw 文本（无 chat header）。`build_hunyuan_chat_prompt`
+根据 tokenizer metadata 自动分流。
+
+### 9.2 示例
+
+```bash
+# Hy-MT2-1.8B — Choice mode（用 JEV 做语言判定）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "用户输入: 'machine learning is fun'" \
+  --jev-question "这句话是什么语言？" \
+  --jev-option "英语" --jev-option "中文" --jev-option "法语" \
+  --threads 8
+
+# Hy-MT2-1.8B — Binary mode（用 JEV 做领域分类）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "Translate this sentence to Chinese." \
+  --jev-question "用户是要中→英还是英→中？" \
+  --jev-option "中→英" --jev-option "英→中" --jev-positive A \
+  --threads 8
+
+# Score mode（翻译难度评估）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "The cat sat on the mat." \
+  --jev-question "翻译难度？" \
+  --jev-option "容易:1" --jev-option "中等:2" --jev-option "困难:3" \
+  --threads 8
+```
+
+> 注意：Hy-MT2 是翻译模型，JEV 拿来做分类 / 评分也能跑但不是它的
+> 设计目标。准确率受限于模型本身的训练分布。建议优先用 Hunyuan
+> Dense（非翻译版本）做 JEV 决策评分。

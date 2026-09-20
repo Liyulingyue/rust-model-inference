@@ -180,6 +180,24 @@ impl ComputePool {
         self.inner.gpu_disabled_workers.load(Ordering::Relaxed)
     }
 
+    /// Dispatch `f(ith, nth)` to each worker in the pool, including the main
+    /// thread (as `f(0, n_threads)`). Single-thread pools fall back to a
+    /// direct `f(0, 1)` call.
+    ///
+    /// # Safety contract for the closure
+    ///
+    /// `f` runs concurrently across workers. The caller MUST ensure that
+    /// any `&mut` references (or raw pointers later coerced to `&mut`)
+    /// passed into `f` are partitioned disjoint across workers — typically
+    /// by deriving a per-worker `&mut [f32]` from `(ith, nth)` via
+    /// `row_range` before any SIMD/GPU call.
+    ///
+    /// Holding a shared `&mut [T]` (or a raw pointer that multiple workers
+    /// reuse to construct overlapping `&mut [T]`) is **not safe** under
+    /// stacked borrows / tree borrows, even when the actual writes are
+    /// kernel-disjoint. See
+    /// `docs/develop/PARALLEL_MATMUL_SAFETY.md` §1 for the audited
+    /// pattern.
     pub fn compute<F: Fn(usize, usize)>(&self, f: F) {
         if self.n_threads <= 1 {
             #[cfg(all(test, feature = "vulkan"))]

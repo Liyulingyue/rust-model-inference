@@ -55,6 +55,8 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
@@ -90,6 +92,8 @@ pub fn run_inference(
         profile,
         kv_format,
         prefill_batch_size,
+        max_context,
+        repetition_penalty,
     )
 }
 
@@ -103,6 +107,8 @@ pub fn run_inference_tokens(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let _ = (bench, profile); // bench/profile 暂由 wall-clock 估算
     let t0 = Instant::now();
@@ -110,7 +116,8 @@ pub fn run_inference_tokens(
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    let max_ctx = 512usize.min(model_config_from_source(source.as_ref())?.n_ctx);
+    let model_config = model_config_from_source(source.as_ref())?;
+    let max_ctx = max_context.min(model_config.n_ctx).max(1);
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -159,6 +166,7 @@ pub fn run_inference_tokens(
             temperature,
             prefill_batch_size,
         },
+        repetition_penalty,
         |text| {
             // 第一个 token 出来表示 prefill 结束
             if prefill_time.is_zero() {

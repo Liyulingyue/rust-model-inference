@@ -68,6 +68,8 @@ pub fn run_inference(
     n_threads_arg: usize,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm2MoeConfig::from_source(source)?;
@@ -81,7 +83,7 @@ pub fn run_inference(
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    let max_ctx = 512usize.min(cfg.n_ctx);
+    let max_ctx = max_context.min(cfg.n_ctx).max(1);
     let eps = cfg.norm_eps;
     let freq_base = cfg.rope_freq_base;
 
@@ -175,6 +177,8 @@ pub fn run_inference(
 
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
+    let mut generated_token_counts: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::new();
     let mut all_tokens: Vec<u32> = input_tokens.clone();
     let mut decoder = tokenizer.streaming_decoder(false);
 
@@ -334,6 +338,11 @@ pub fn run_inference(
             let _ = io::stderr().write_all(line.as_bytes());
             let _ = io::stderr().flush();
         }
+        crate::ops::sampling::apply_repetition_penalty(
+            logits,
+            &generated_token_counts,
+            repetition_penalty,
+        );
         let chosen = if temperature <= 0.0 {
             logits
                 .iter()
@@ -770,10 +779,12 @@ fn forward_moe_ffn(
 
     // ---- Selected experts: gate/up for all experts in one parallel pass ----
     let selected: Vec<usize> = selection.iter().map(|&(e, _)| e).collect();
-    eprintln!(
-        "[RUST_MOE_SEL] step={} il={} sel={:?} w={:?}",
-        step, layer, selected, weights
-    );
+    if std::env::var_os("RUST_LFM2MOE_DEBUG").is_some() {
+        eprintln!(
+            "[RUST_MOE_SEL] step={} il={} sel={:?} w={:?}",
+            step, layer, selected, weights
+        );
+    }
     pool.compute({
         let selected = selected.clone();
         move |ith, nth| {
@@ -1164,7 +1175,7 @@ fn forward_attention(
                             *v = f32::NEG_INFINITY;
                         }
                         softmax_inplace(&mut scores[..n_padded]);
-                        let mut values = [0.0f32; 512];
+                        let mut values = vec![0.0f32; max_ctx];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =

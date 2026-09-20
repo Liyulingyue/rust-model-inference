@@ -1,12 +1,20 @@
 # LFM 家族用法
 
-本仓库对 LFM2 / LFM2.5 / LFM2-MoE / LFM2.5-VL 的端到端命令行示例。
+本仓库对 LFM2 / LFM2.5 / LFM2-MoE / LFM2.5-VL / LFM2.5-Thinking 的端到端命令行示例。
 
 > 通用前置：构建 `cargo build --release --bin rust-model-inference`。
 > 所有 LFM 文本 / 视觉模型在 GGUF 里的 `general.architecture` 都是字符串 `"lfm2"`。
 > LFM2 与 LFM2.5 文本的变体由 CLI 路由阶段通过 `general.basename` 含 `"2.5"` 区分
 > （`src/app/text.rs:62-66`），分别进入 `src/models/lfm2/` 与 `src/models/lfm25/`。
 > 详见 `docs/ISSUE.md` 的 LFM2 / LFM2.5 命名不一致条目。
+>
+> 常用生成参数（适用于所有 LFM 路径）：
+>
+> - `--max-context N`：KV cache 容量上限，默认 8192。LFM2.5 文本模型
+>   `context_length=128000`，过大的 `--max-context` 会一次性占用 GB 级 KV 内存。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）；α > 1
+>   抑制重复（与 llama.cpp / Hugging Face `repetition_penalty` 等价）。
+>   对低质量量化（如 Q4_K_M）下陷入复读循环的模型尤其有用。
 
 ## 1. LFM2 文本（`src/models/lfm2/`）
 
@@ -28,6 +36,32 @@ cargo run --release --bin rust-model-inference -- \
 
 如果 `general.basename` 不含 `"2.5"`，同样的 GGUF 仍能加载但会走 LFM2 trunk，
 可能与 LFM2.5 实际架构不一致。建议显式选 basename 正确的 GGUF。
+
+### 2.1 LFM2.5-Thinking（reasoning 模型）
+
+`LFM2.5-1.2B-Thinking`（arch = `lfm2`,basename 含 `"2.5"`）走 `src/models/lfm25/`
+trunk。模型默认输出会包含 ``…`` reasoning 段 + 答案文字。仓库代码
+会在构造 chat prompt 时自动注入 LFM2.5 官方 system prompt：
+
+> "You are a helpful assistant trained by Liquid AI. Your goal is to be helpful, accurate, and concise."
+
+不带 system turn 也能加载但可能输出退化。建议显式走默认 chat 路径。
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/LFM2.5-1.2B-Thinking-GGUF/LFM2.5-1.2B-Thinking-Q8_0.gguf \
+  --prompt "What is 2 + 3?" --max-tokens 200 \
+  --max-context 8192 --repetition-penalty 1.05
+```
+
+实测 `LFM2.5-1.2B-Thinking-Q8_0` 在 8 线程 Q8_0 下：
+
+- arch 路由：`lfm2.5`（`src/models/lfm25/trunk/`）
+- 文本生成：~28 t/s（短 prompt）
+- 完整 reasoning + 答案：约 5–10 秒（typical reasoning 长度 50–150 tokens）
+
+注：本仓库**未实现** `--thinking` / `--no-thinking` 切换标志 — 当前所有 LFM2.5
+生成都包含 `` 段。若需去除，使用下游工具（如 `awk`）按 `` 切分。
 
 ## 3. LFM2-MoE
 
@@ -51,10 +85,10 @@ Vision 路径与文本路径**共用** `arch == "lfm2"` 分派，不走 basename
 
 ```bash
 cargo run --release --bin rust-model-inference -- \
-  --model models/lfm2.5-vl/LFM2.5-VL-450M-Q8_0.gguf \
+  --model models/lfm2.5-vl/LFM2.5-VL-1.6B-Q8_0.gguf \
   --mmproj models/lfm2.5-vl/mmproj-F16.gguf \
   --image path/to/image.jpg \
-  --prompt "描述这张图片"
+  --prompt "Describe this image."
 ```
 
 约束：
@@ -71,6 +105,24 @@ cargo run --release --bin rust-model-inference -- \
   feed_forward_length, attention.layer_norm_epsilon, projection_dim, image_mean,
   image_std}`，见 `src/models/lfm2/vision.rs:73-83`。
 
+### 4.0 Prompt 模板（重要）
+
+代码内部把 user / assistant turn 包成 ChatML：
+
+```
+<|startoftext|><|im_start|>user\n
+<|image_start|><|img_row_*_col_*|>...<|img_thumbnail|>...<|image_end|>
+{prompt}<|im_end|>
+<|im_start|>assistant\n
+```
+
+CLI 不需要手动拼 `<|im_start|>` / `<|im_end|>`，但用户传入的 `--prompt`
+应避免重复这些标记。**裸的 `user\n...assistant\n` 模板会让模型输出退化**
+（实测：Q8_0 1.6B + 768×768 图 + 裸 `user/assistant` 模板 → 输出
+"A / Answer: / A" 循环）。ChatML 模板 + 实际物体图片可正确识别
+（实测：apple.png → "fresh-looking apple with a glossy red and yellow skin,
+green leaf attached to its stem, plain white background"）。
+
 ### 4.1 图片大小与 vision token 数（CPU 实测，2026-09）
 
 Vision encoder 把图切成 512×512 tile + 1 张 overview。tile 数和总 vision tokens
@@ -79,14 +131,14 @@ Vision encoder 把图切成 512×512 tile + 1 张 overview。tile 数和总 visi
 | 原图分辨率 | Tile grid | Vision tokens | 备注 |
 |---|---|---|---|
 | ≤ 512（任一维） | 0×0 | ~64–128 | 单 overview，prefill ~1s |
-| ~768×768 | 2×2 (4 tiles) + overview | ~1100+ | CPU prefill > 10 分钟（实际不要用） |
-| 401×287（实测 `references/apple.png`） | 0×0 | 117 | 端到端 3.8 tok/s @ 8 thread |
+| ~768×768 | 2×2 (4 tiles) + overview | ~1100+ | prefill 约 30s（8 线程 Q8_0）；后续生成 ~24 t/s；首 token 出得很慢但非卡死 |
+| 401×287（实测 `references/apple.png`） | 0×0 | 117 | 端到端 8.9 tok/s @ 8 thread (LFM2.5-VL-1.6B Q8_0) |
 
 **建议**：CPU 路径下使用 ≤ 512×512 的输入图。`references/apple.png`（401×287）
-是个不错的示例尺寸。`models/test768.png`（768×768）这种分辨率在 CPU 上
-prefill 阶段会卡死，需要 ≥ 10 分钟才能出第一个 token。
+是个不错的示例尺寸。`models/test768.png`（768×768）CPU 上 prefill ~30s，
+之后每 token 约 24 t/s，输出受 prompt template 影响大（见 §4.0）。
 
-3B VL 模型 + 1024 vision tokens 的 CPU prefill 主要成本是 30 层 × 1024
+1.6B VL 模型 + 1024 vision tokens 的 CPU prefill 主要成本是 16 层 × 1024
 tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（Vulkan
 未对 `lfm2` arch 完整覆盖，仅在分片 matmul 上生效——见 §6）。
 
@@ -95,10 +147,14 @@ tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（V
 | 输入 GGUF `general.architecture` | `general.basename` | 进入 trunk | Modes |
 |---|---|---|---|
 | `lfm2` | 不含 `2.5` | `src/models/lfm2/`（文本） | 文本 |
-| `lfm2` | 含 `2.5` | `src/models/lfm25/`（文本） | 文本 |
+| `lfm2` | 含 `2.5`（含 Instruct / Thinking） | `src/models/lfm25/`（文本） | 文本 |
 | `lfm2` | 任意 | `src/models/lfm2/vision.rs`（VL，需 `--mmproj --image`） | 多模态 |
 | `lfm2moe` | — | `src/models/lfm2moe/` | 文本（MoE） |
 | `nanbeige` | — | `src/models/llama/` | 文本（Experimental） |
+
+`LFM2.5-Thinking` 区别于 `LFM2.5-Instruct`：Thinking 模型默认在 `<think>...</think>`
+内输出 reasoning；本仓库代码会用同一个 `lfm25` trunk，但**思考文本会直接流
+到 stdout**。后续若需去除可引入 `--no-thinking` 标志（当前未实现）。
 
 ## 6. 与 llama.cpp 的对齐
 
@@ -138,3 +194,45 @@ cargo run --release --bin server -- \
 - `src/app/text.rs:61-83` — LFM2 / LFM2.5 文本路由（basename 分流）
 - `src/app/text.rs:809-824` — LFM2.5-VL 视觉路由
 - `docs/ISSUE.md` — LFM2 / LFM2.5 命名不一致（arch vs 目录名）
+
+## 10. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 10.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `lfm2` | `app/text.rs::run_jev_decision_lfm2` → `lfm2::run_forward_logits_lfm2` |
+| `lfm25` (含 `"2.5"` 的 basename) | `app/text.rs::run_jev_decision_lfm25` → `lfm25::run_forward_logits_lfm25` |
+| `lfm2moe` | ❌ 暂未支持（JEV 路由只覆盖 `lfm2` / `lfm25`） |
+
+LFM2 与 LFM2.5 的 chat template **完全相同**（`{role}\n{content}\n` 序列），
+与 Qwen3 模板几乎一致。
+
+### 10.2 示例
+
+```bash
+# LFM2-1.2B dense — Choice mode
+rust-model-inference --model models/lfm2/LFM2-1.2B-Q8_0.gguf \
+  --jev --jev-context "用户咨询账户安全问题" \
+  --jev-question "这是哪种类型的请求？" \
+  --jev-option "密码重置" --jev-option "2FA 启用" --jev-option "可疑活动" \
+  --threads 4
+
+# LFM2.5-1.2B-Instruct — Binary mode
+rust-model-inference --model models/lfm2.5/LFM2.5-1.2B-Instruct-Q8_0.gguf \
+  --jev --jev-context "用户已通过身份验证" \
+  --jev-question "问题是否已解决？" \
+  --jev-option "是" --jev-option "否" --jev-positive A \
+  --threads 4
+
+# LFM2-8B-A1B (MoE) — 暂不支持 JEV
+# Will return: --jev is not yet supported for architecture "lfm2moe"
+```
+
+> 注意：LFM2 是 hybrid（attention + shortconv）架构，JEV prefill 走
+> 完整 prefill 路径（不是 KV cache 共享）。每个 question 都是一次
+> 独立 prefill，多 question 模式下耗时为 N × prefill_time。

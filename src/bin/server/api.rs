@@ -710,6 +710,7 @@ fn generate(
                     temperature: request.temperature,
                     prefill_batch_size: text.prefill_batch_size,
                 },
+                1.0,
                 &mut on_token,
             )?;
             generation.token_ids.len()

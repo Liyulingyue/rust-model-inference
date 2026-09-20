@@ -24,16 +24,19 @@ Spark 2.5 chat template 在生成 prompt 末尾区分 `<|Bot|><think>` 与
 `<|Bot|></think>`，分别对应「先推理再回答」与「直接回答」：
 
 ```bash
-# reasoning + answer（默认）
+# reasoning + answer：显式传 --thinking
 cargo run --release --bin rust-model-inference -- \
   --model models/Spark-X2.5-1.7B.gguf \
   --prompt "法国的首都是" --thinking
 
-# 直接回答
+# 直接回答：默认行为（不传 --thinking）
 cargo run --release --bin rust-model-inference -- \
   --model models/Spark-X2.5-1.7B.gguf \
-  --prompt "法国的首都是" --no-thinking
+  --prompt "法国的首都是"
 ```
+
+CLI 当前**只暴露 `--thinking`**（默认 false）；没有 `--no-thinking` 标志。
+要切换到直接回答，省略 `--thinking` 即可。
 
 chat template 来源（`src/models/spark/trunk/forward.rs:423-428`）：
 
@@ -41,7 +44,7 @@ chat template 来源（`src/models/spark/trunk/forward.rs:423-428`）：
 <sos><|System|>\nyou are a helpful assistant.<eos>
 <sos><|User|>{prompt}<eos>
 <sos><|Bot|><think>          # thinking=true
-<sos><|Bot|></think>          # thinking=false
+<sos><|Bot|></think>          # thinking=false（默认）
 ```
 
 ## 3. 4B 版本
@@ -58,7 +61,7 @@ cargo run --release --bin rust-model-inference -- \
 
 | GGUF `general.architecture` | 进入 trunk | Modes |
 |---|---|---|
-| `spark2_5` | `src/models/spark/trunk/forward.rs` | 文本（仅 `--thinking` / `--no-thinking`） |
+| `spark2_5` | `src/models/spark/trunk/forward.rs` | 文本（仅 `--thinking`） |
 
 `src/app/text.rs:110-121` 把 `arch == "spark2_5"` 路由到 spark run_inference，
 其余 arch 走默认 qwen3 fallback。
@@ -86,7 +89,7 @@ cargo run --release --bin rust-model-inference -- \
 |---|---|
 | 量化 | 当前仅 BF16；其他量化格式未验证 |
 | Oracle pin | `Pending pin`（XHToken/llama.cpp 未固定 commit） |
-| thinking 切换 | 通过 `--thinking` / `--no-thinking` 显式控制，**不是**用户提示前缀 |
+| thinking 切换 | 仅 `--thinking` 显式控制；默认 false（直接回答）。没有 `--no-thinking` 标志 |
 | 计算性能 | 4B CPU 较慢；通过 ComputePool + BF16 AVX2 kernel 缓解但仍未与兄弟模型持平 |
 
 ## 7. 已知 bug 与修复历史
@@ -107,3 +110,50 @@ cargo run --release --bin rust-model-inference -- \
 - `src/models/spark/trunk/weights.rs` — 权重加载
 - `src/app/text.rs:110-121` — CLI 路由
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — XHToken/llama.cpp 参考条目
+
+## 9. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 9.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `spark2_5` | `app/text.rs::run_jev_decision_spark` → `spark::SparkSession::forward_logits` |
+
+Spark 2.5 的 chat template 用 `<｜start▁of▁sentence｜>` / `<｜end▁of▁sentence｜>`
+包裹每个 role block。JEV 在 `run_jev_decision_spark` 中用对应格式拼
+prompt（始终以 `</think>` 收尾，跳过 thinking block）。
+
+### 9.2 示例
+
+```bash
+# Spark-X2.5-1.7B — Choice mode
+rust-model-inference --model models/Spark-X2.5-1.7B.gguf \
+  --jev --jev-context "用户咨询产品保修" \
+  --jev-question "应该归到哪个类别？" \
+  --jev-option "保修期内" --jev-option "保修期外" --jev-option "其他" \
+  --threads 4
+
+# Spark-X2.5-4B — Binary mode（首选 instruct-tuned 大模型，准确率更高）
+rust-model-inference --model models/Spark-X2.5-4B.gguf \
+  --jev --jev-context "用户已经提供了订单号" \
+  --jev-question "客服可以立即处理吗？" \
+  --jev-option "可以" --jev-option "不可以" --jev-positive A \
+  --threads 4
+
+# Score mode（带 value 评分）
+rust-model-inference --model models/Spark-X2.5-1.7B.gguf \
+  --jev --jev-context "投诉工单内容" \
+  --jev-question "用户情绪强度？" \
+  --jev-option "极低:1" --jev-option "低:2" --jev-option "中:3" \
+  --jev-option "高:4" --jev-option "极高:5" \
+  --threads 4
+```
+
+> Spark 2.5 是 hybrid（fused QKV + SWA + GeGLU + per-head gating），JEV
+> prefill 复用 `SparkSession::forward_logits`（thin wrapper over
+> `forward_step_logits`），与 `decode_step` 共享同一份 forward 路径，
+> 但只跑 prefill 不做 sampling。

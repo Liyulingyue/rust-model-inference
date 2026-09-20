@@ -13,35 +13,79 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **Q6_K embedding_lookup 调试** — 当前实现数值正确但模型挂起
-- [x] **Vulkan GPU matmul 后端可用 (2026-08)** — 权重常驻 + 持久 IO 缓冲 + 单 dispatch 全行覆盖 + 看门狗。
-      正确性（GPU vs CPU rel ≤ 3e-7）与稳定性已验证。详见 `docs/develop/VULKAN.md`。
-- [x] **统一 embedding_lookup 函数** — qwen3 / main.rs 已使用统一入口
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
-- [ ] **IQ4_XS / IQ2_XS / IQ3_XS kernel 实现** — GGMLType 已注册（commit `402bc3d`）但 kernel panic with TODO。
-      IQ4_NL scalar 已实现（kvalues_iq4nl LUT）。qwen3-0.6b 的 IQ4_NL/Q4_XS 文件实际权重是 IQ2_XS/IQ3_XS，
-      实现后这两个 model 就能加载。
+- [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
+      的 `iq_kernel_impl!` macro 给 IQ2_XXS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S 生成了
+      Kernel trait impl，`forward_prepared` 正确调 `vec_dot_*_q8k` scalar（生产走 Q8K 路径无 panic）；
+      但 `forward_prequantized` 是 stub（写 0）。`uses_q8_k()` 包含所有 IQ 类型 → 生产永远走
+      `forward_prepared` → stub 永不触发，但接口完整性差。
+      选项 1：把 macro 里的 stub 改成完整 dequant-to-f32 + dot 路径（与 IQ4_NL / Q4_K 同款），低成本。
+      选项 2：直接写 SIMD kernel（需要 IQ2_XS / IQ3_S 的 GGUF 测试模型 + llama.cpp Oracle；当前
+      `models/qwen3-0.6b-gguf/` 没有这些格式，按 `adapting-new-models` skill 暂无法做精度验证）。
 - [ ] **AVX-VNNI int8 dot 加速** — 见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速) 详细说明。
       当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
       K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
-- [ ] **llama trunk per-token SIMD 化** — 见 [TODO-LLAMA-PER-TOKEN-SIMD](#todo-llama-trunk-per-token-simd化)
-      列出 llama trunk 仍为 scalar 的小循环，AVX2 `vec_scale_f32` 可盖掉。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
       预期 1.5-2× 加速。
 
+### JEV 决策评分 follow-ups
+
+`--jev` 已在 `src/app/text.rs::run_jev_decision` 中按 `general.architecture` 自动路由
+到 9 个 trunk 的 `forward_logits` / `run_forward_logits_*`（Qwen3 / Qwen3.5 /
+Llama / Gemma4 / LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan）。通用协议与
+per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
+[`docs/develop/jev.md`](jev.md)。
+
+- [ ] **JEV Multi-question KV 共享** — 当前多 question 模式（`--jev-question × N`）
+      每个 question 都会新建 session 重新 prefill 一遍 context + question 文本，
+      耗时 N × prefill_time。KV 共享方案：让 session 支持 `reset_kv(seq_len)`
+      把 KV cache 截到 context 之后的长度，对每个 question 只 prefill
+      `{"question": ..., "candidates": ...}` 部分复用同一份 context KV。
+      预期 N 个 question 总耗时从 `N × t` 降到 `t + (N-1) × t'`，其中 `t'`
+      是 question-only 部分。
+      适用 trunk：qwen3 / qwen35 / gemma4 / spark（有 Session API）；
+      llama / lfm2 / lfm25 / nemotron_h / hunyuan 需要先把 monolith
+      拆出 session API。
+- [ ] **JEV Shared prefix batching** — 多个 `--jev-question` 不仅共享 prefix，
+      还可以把 K 个不同 question 的最后 token batch 成一次前向（拼接
+      成 `[prefix; q1_suffix; q2_suffix; ...; qK_suffix]`，attention 阶段
+      mask 让 K 个问题互不干扰）。当 K 个 question 文本相似度高时（典型
+      客服路由、FAQ 分类场景），可以把 prefill 提速近 K×。
+      需要先解决：不同 question 的 last-token 位置索引；padding 到统一
+      长度；attention mask 的构造。当前架构（每 question 一个独立 session）
+      完全不支持此模式，需要结构化改造。
+- [ ] **JEV instruct-tuned GGUF 文档** — 现状：本地 `models/qwen3-0.6b-gguf/`
+      只有 base model Qwen3-0.6B（IQ4_NL / Q4_0 / Q8_0 等量化），不是
+      Instruct 变体。OpenJEV 锁定 Qwen3-4B-Instruct-2507。要让 JEV 输出
+      真正准确的 label，需要：
+      1. 找/下载 `Qwen3-0.6B-Instruct` 的 GGUF（huggingface 上有）
+      2. 同 §1（用 base model + IQ4_NL 跑通作为 baseline）
+      3. 加 `tests/qwen3_instruct_jev_reference.rs` 比对 base vs instruct
+- [ ] **JEV 与生成模式共享 KV（暂留）** — 当 `--prompt` 后面接 `--jev` 时，
+      可以复用生成模式 prefill 出来的 KV cache，避免重复编码同一段 context。
+      当前架构下两者用不同的 session path，需要在 dispatch 入口统一
+      KV lifecycle（`KvLifecycle::Shared`）。
+- [ ] **JEV Cardinality 扩展（26 → 255）** — 当前 label 固定 A-Z（最多 26 候选）。
+      TypeSafe Jev 官方支持最高 255 cardinality。扩展路径：
+      1. 候选 ≤ 26 时继续用 A-Z label（现有逻辑不变）
+      2. 候选 > 26 时自动切换到数字 label（1, 2, 3, ...），验证每个数字 token
+         在 tokenizer 中是单 token（0-9 在所有 BPE tokenizer 中都是单 token；
+         10-99 大部分也是；100-255 需要逐个验证）
+      3. 更高基数时参考 TypeSafe 的 2-stage 方案：先 score 所有候选（并行），
+         再 top-K choose（第二次 forward pass）
+      注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
+      实际使用的 label set（数字或字母）。
+
 ## Medium Priority
 
-- [x] **ASR audio encoder 加速 (F16 conv2d 路径)** — 已通过 `dot_f16_f16_bytes_avx2` 拿到 3-5× audio_encode、6.8× encode_convolution、26.7× project_f16、总 ASR 3.0×。
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**
 - [ ] **讨论：GPU 后端架构设计** — Vulkan / wgpu / CUDA 等多后端抽象
 - [ ] **讨论：SIMD 扩展路线** — 当前 AVX2+FMA、NEON。后续可考虑 AVX-512 (高端 CPU)、ARM SVE、AVX-VNNI (int8 dot)
 - [ ] **讨论：两套线程调度统一** — ComputePool vs rayon。暂不统一（LLM 热路径不应轻易改动）
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
-- [x] **Q6_K AVX2 精度 drift 调查** — 1-2 ULP drift 不可避免，parity 测试通过
-- [x] **Q8_0 AVX2 "diff=255" 调查** — 测试 bug，已修
 
 ### K-quant multi-row tile（vec_dot_q4k_q8k_avx2 / vec_dot_q6k_q8k_avx2）
 
@@ -429,8 +473,9 @@ unpack → `_mm256_madd_epi16` → CVTPS) 基础上加一条 AVX-VNNI 路径
 
 **验收**：
 - Q8_0 Q4_0 matmul parity 测试通过（1 ULP 内）
-- Qwen3-0.6B-Q8_0 decode ≥ 36 t/s（vs 当前 ~28 t/s）
-- K2-Horizon-4B-Q8_0 decode ≥ 8 t/s（vs BF16 当前 4 t/s）
+- Qwen3-0.6B-Q8_0 decode ≥ 36 t/s（vs 当前 ~28 t/s），用 `--max-context 8192` 默认 cap
+- K2-Horizon-4B-Q8_0 decode ≥ 8 t/s（vs BF16 当前 4 t/s），关键前置：**必须** `--max-context 8192`
+  否则默认走 524288 → 77 GB OOM（见 TODO-MAX-CONTEXT-CLI）
 
 ### TODO-LLAMA-PER-TOKEN-SIMD化
 
@@ -453,6 +498,7 @@ unpack → `_mm256_madd_epi16` → CVTPS) 基础上加一条 AVX-VNNI 路径
 | Attention (F32) | ✅ SIMD `dot_f32`, `vec_mad_f32` | 636+ | - |
 | Residual add | ✅ `vec_add_into`, `vec_mad_f32` | 720-724, 910-914 | - |
 | silu_mul | ✅ SIMD `silu_mul_approx_inplace` | 831, 840 | - |
+| **KV cache / scores buffer size** | ❌ hardcoded `512.min(cfg.n_ctx)` + `[0.0f32; 512]` | 117, 941 | ✅ **已替换为 `cfg.n_ctx.min(max_context)` + `vec![0.0f32; max_ctx]`**（见 TODO-MAX-CONTEXT-CLI） |
 
 **结论**：除 `embedding_scale` 外 llama trunk 已是 SIMD 化。`embedding_scale` 修复已落地 K2check 分支
 （每个 token 节省约 1.3 µs @ n_embd=1536，对总推理时间影响 < 0.1%）。
@@ -466,3 +512,51 @@ SIMD 不能跨 token 加速——这部分要看 [TODO-010](#todo-010-prefill-ru
 **这是 autoregressive decode 慢的真凶**，不是 SIMD 缺位。
 
 修复路径见 TODO-010（batched prefill）+ 自动接受单 token decode 慢的现实（llama.cpp 同样慢）。
+
+### TODO-MAX-CONTEXT-CLI: `--max-context` 用户可调 KV cache 上限
+
+**背景**：`src/models/llama/trunk/forward.rs` 和 `src/models/lfm2/trunk/forward.rs` 历史上都把
+KV cache 上限硬编码到 512：
+
+```rust
+// llama trunk 历史硬编码
+let max_ctx = 512usize.min(config.n_ctx);
+// lfm2 trunk 历史硬编码
+let max_ctx = 512usize.min(cfg.n_ctx);
+// lfm2 attention `values` 数组
+let mut values = [0.0f32; 512];  // attention 长生成时越界 panic
+```
+
+后果：512 token 以上的生成直接越界 panic，或更长生成被静默截断。多个用户的报告
+（VibeVoice ASR 1.5B 长音频、K2-Horizon 中文翻译模型 chat 段、K2-Horizon-4B 192K 长输出）
+都触及过同一类 bug。
+
+**修复**（已落地 K2check 分支）：
+
+- llama trunk / lfm2 trunk：`max_ctx = config.n_ctx.min(max_context)`，配套
+  `run_inference[_stream]` 加 `max_context: usize` 参数
+- lfm2 attention `values`：`vec![0.0f32; max_ctx]`
+- 新 CLI 参数 `--max-context N (default 8192)`（`CliOptions::DEFAULT_MAX_CONTEXT`），
+  `effective_max_context()` helper
+- 全链路贯通：`src/app/cli.rs` / `src/app/text.rs` / `src/main.rs` /
+  `src/models/lfm2/vision.rs`（multimodal LFM2-VL 也接 max_context）
+
+**为什么用 CLI 而不是无脑用 model claim**：部分模型 GGUF `context_length` 字段是
+"该 GGUF 可接受的 max"，而不是该模型实际有意义的长度。例如：
+
+| 模型 | claim `context_length` | 512-tok panic | CLI `--max-context 8192` |
+|------|------------------------|---------------|---------------------------|
+| K2-Horizon-1B | 131072 | 是 | KV cache 0.29 GB |
+| K2-Horizon-4B | **524288** | **77 GB OOM** | KV cache 0.86 GB |
+| LFM2-1.2B | 32768 | 是 | KV cache 0.5 GB |
+| Qwen3-0.6B | 32768 | 是 | KV cache 0.4 GB |
+
+用户按需 `--max-context` 即可（绝大多数 chat 8K 够，长上下文特殊任务手动加）。
+
+**后续**：
+
+- `docs/usage/llama.md` / `docs/usage/qwen3.md` 等可加一行 "默认 KV cache cap 是 8K，可用
+  `--max-context N` 覆盖"。
+- TODO-AVX-VNNI / TODO-LLAMA-PER-TOKEN-SIMD 实现后，再跑一遍 K2-Horizon-4B
+  对比 `--max-context 8192` vs `--max-context 32768` 的 prefill 时间（验证大 context
+  不会因为 KV 随机访问模式变慢）。

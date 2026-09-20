@@ -43,6 +43,18 @@ tensor 数据之后不追加任何组件或目录。最后一个段在声明的�
 
 读取方会拒绝：不支持的版本、非零 flags/保留字节、无序或不连续的表、非零表填充、无效范围、追加的数据、以及声明大小与实际文件大小不符的情况。
 
+## 加载时不变量
+
+下列规则在 `validate_index` 中强制执行，违反任一项即拒收：
+
+- **包至少含一个组件**；`role == Llm` 必须恰好 1 个；`role == Mmproj` 至多 1 个。
+- **`general.alignment`**：必须是 2 的非零次幂；缺省视为 32。每个 tensor 的 `segment_offset` 必须按 `max(32, general.alignment)` 对齐。
+- **段**：段表按表索引顺序连续写入；`absolute_offset` 与 `stored_len` 都是 64 KiB 的倍数；LLM 段数严格等于 `block_count + 1`（1 个 shared + `block_count` 个 layer），layer 索引恰好覆盖 `0..block_count` 无缺、无重。
+- **段内零填充**：每个段在加载时通过 `mmap` 读取完整 `stored_len`，先校验 SHA-256，再要求 tensor 范围之外的所有字节必须为 0（段头对齐间隙与段尾填充同理）。任何非零 padding 即拒收。
+- **段排序**：段在其所属组件内按 `(kind, layer)` 升序排序——`Shared < Layer < Component`、layer 段按 layer 索引升序。`segment_id` 是段在全表中的索引，由该排序导出。
+- **元数据与张量排序**：每个组件内的 metadata 按 key 字节升序、tensor 按 name 字节升序；同一组件内 key/name 重复即拒收。不同组件允许持有同名 key（按 `(component_id, key)` 独立寻址）。
+- **无组件重叠**：tensor 字节范围按偏移排序后，相邻对不得相交。
+
 ## 组件表（Component Table）
 
 每个条目为：
@@ -72,7 +84,7 @@ i32 GGUF value_type
 typed GGUF value
 ```
 
-数组编码为 `i32 element_type`、`u64 count`，然后是同构值。元数据按组件和 key 字节排序。一个组件内重复的 key 无效；不同组件中相同的 key 保持独立。
+数组编码为 `i32 element_type`、`u64 count`，然后是同构值；嵌套数组被拒收。整张元数据表按 `(component_id, key 字节)` 全序排序——等价于先按组件表序，再按组件内 key 升序。一个组件内重复的 key 无效；不同组件允许持有同名 key（loader 按 `(component_id, key)` 寻址，互不干扰）。`TensorSource::metadata(key)` 只返回当前组件作用域内的值。
 
 ## 段表（Segment Table）
 
@@ -90,7 +102,7 @@ u32 tensor_count
 u8 sha256[32]
 ```
 
-LLM 有一个共享段和每个 layer 一个段。mmproj 有一个组件段。段起始和存储长度是 64 KiB 的倍数且段是连续的。SHA-256 覆盖完整存储段，包括 tensor 间和尾部零填充。因此段可以独立验证、映射和释放。
+LLM 段数严格等于 `block_count + 1`：1 个 shared 段 + 每个 layer 一个 layer 段。mmproj 只有 1 个 component 段。段在其组件内按 `(kind, layer)` 升序排序——`Shared < Layer < Component`，layer 段按层索引升序。`segment_id` 是段在段表中的索引，由该排序导出。段起始和存储长度是 64 KiB 的倍数且段是连续的。SHA-256 覆盖完整存储段，包括 tensor 间和尾部零填充；加载时进一步要求所有非 tensor 字节必须为 0。因此段可以独立验证、映射和释放。
 
 ## Tensor 表与字节（Tensor Table and Bytes）
 
@@ -121,7 +133,31 @@ cargo run --release --bin ggufrs -- \
   --output model.ggufrs
 ```
 
-`--mmproj` 是可选的。默认不会覆盖已有输出。`--overwrite` 请求原子替换。导出在输出目录写入唯一文件，保留并同步其 `create_new` 句柄，通过该句柄的克隆和生产者读者验证每个段，然后发布。不支持的原子发布返回错误，且从不先删除目标。
+`--mmproj` 是可选的。默认不会覆盖已有输出。`--overwrite` 请求原子替换。
+
+### 源 GGUF 校验
+
+导出在搬运字节之前先校验源：
+
+- **LLM**：要求 `general.architecture` ∈ `{qwen2, qwen2vl, qwen3, qwen3vl, qwen3vlmoe, qwen35, llama}` 之一，并要求 `{arch}.block_count` 存在且 ≥ 1；否则直接报错。其他架构需先经上游 `convert` 脚本走 GGUF 再打包。
+- **mmproj**：按 `clip.has_audio_encoder` 分支——若为 `true`，要求 `clip.audio.projector_type = qwen3a` 或 `clip.projector_type = qwen2.5o` 之一并通过对应的音频配置校验（`mel_encoder::validate_qwen3a_source` 或 `Qwen25OmniAudioConfig::from_source`）；否则走 vision 路径，要求 `clip.vision.projection_dim / image_size / patch_size / embedding_length / feed_forward_length / block_count / attention.head_count` 与 `clip.vision.attention.layer_norm_epsilon` 全齐，并存在 `v.patch_embd.weight`、`mm.0.weight`、`mm.2.weight` 三个必备张量。
+
+### 字节来源与生命周期
+
+导出器通过 `GGUFLoader::tensor_slice(name)` 直接读取源 `.gguf` 的 mmap 切片，**不做反量化、再量化、重打包或浮点转换**。`ExportSource` 持有 loader 直到写盘结束，因此源文件全程不能删除或被截断（其 mmap 必须保持有效）。
+
+### 原子发布
+
+导出在目标目录的同一文件系统下创建唯一临时文件（`.ggufrs-{pid}-{id}.tmp`，由 `create_new(true)` 保证独占），写完后执行 `flush` + `sync_all`；随后从临时文件的克隆句柄重新打开并跑 `verify_all()`（对每个段重新计算 SHA-256 并与表头比对），最后做身份校验：
+
+- **Unix**：`st_dev + st_ino` 比对，强度高。
+- **Windows**：仅比较 `file.len()`（无 `dev/ino`），强度弱于 Unix。
+
+身份校验失败即拒收，临时文件随 `Drop` 清理。**默认发布路径是 `hard_link` 临时文件到目标**——这要求目标不存在且文件系统支持 hard link；任一条件不满足即报错，**绝不先删除目标**。`--overwrite` 走 `rename(临时, 目标)` 的原地原子替换；若底层文件系统不支持 rename 跨设备/跨路径也会报错。两条路径都不留半成品给读者。
+
+### 确定性前提
+
+"相同源 + 相同选项 → 字节完全一致" 成立的前提：源 `.gguf` 的 mmap 视图稳定（不被截断/重写）、元数据 key 集合固定、临时文件名生成序列的全局计数器与并发无关（同进程内多次调用是确定的）。一旦源 GGUF 内容变化或选项变化，输出随之变化；SHA-256、段偏移、表长度都会变。
 
 ## 运行时与加载规划
 
@@ -186,22 +222,26 @@ GGUFRS 真正超出前两者的能力是：
 
 ## 多模态组件：V2 role 扩展的依据
 
-现状差距：V1 硬性限定"恰好一个 LLM + 最多一个 mmproj"，而本项目内已存在三类实际需求——
-Z-Image 需要 diffusion / text-encoder / vae 三组件单文件分发；ASR/TTS 的 mmproj 组件已在
-`models/` 中出现；Omni 类模型（视觉 + 语音 + 语音生成）是明确趋势。
+### 当前实际路径（V1 仍生效）
 
-参照 llama.cpp 的做法（源码核实，`tools/mtmd/clip.cpp`）：**一个 mmproj GGUF 可同时容纳
-视觉/语音/语音生成编码器**（`loader.has_vision / has_audio / has_gen_audio` 分别建
-`clip_ctx`），元数据冲突靠 **key 字符串前缀**解决（`clip.vision.n_embd` /
-`clip.audio.n_embd` / `clip.gen.audio.*`），张量同理用 `mm.*` 等前缀。这是"单文件单表 +
-字符串前缀命名空间"的方案——可行但无结构保证，新增模态要改 clip.cpp 的前缀清单。
+V1 硬性限定"恰好一个 LLM + 最多一个 mmproj"。项目里已有的多模型需求，**当前**都是用 **多个独立 `.gguf` 文件 + 多 CLI flag** 解决的——三者均以 `ComponentRole::Llm` 打开：
 
-GGUFRS 的**组件级元数据表**（每个 component 独立 scoped metadata）是该需求的结构性解法：
-llm / vision-encoder / audio-encoder / audio-decoder 各自成组件，天然隔离、无前缀约定，
-新增模态 = 新增一个 role 值。引擎侧按 role 取组件，加载逻辑不感知命名空间细节。
+- **Z-Image（pig）**：`--model <diffusion>` + `--text-encoder <qwen3>` + `--vae <flux_vae>`，三个独立 `.gguf`，见 `src/main.rs:140-163` 与 `src/app/cli.rs:516-530`。
+- **DreamX-Creator / Qwen-Drive / ASR / TTS / 多模态视觉问答**：LLM + mmproj 两个独立 `.gguf`，mmproj 以 `ComponentRole::Mmproj` 打开；这条路径**可以直接走 v1 打包**进单文件 `.ggufrs`，无需等 v2。
 
-**V2 待办（按依赖顺序）**：
-1. role 枚举扩展（diffusion / text-encoder / vae / audio-*），解除 mmproj 单组件限制；
-2. `ggufrs` CLI 补 `verify` / `info` 子命令（发布侧校验与检视是分发格式基本功）；
-3. release 流水线接入打包（脚本或直接调用 export）；
-4. 远期：HF 直转原型（先选 qwen3 系验证映射表工作量）+ 视需要自研量化。
+也就是说，V1 不是"够用但不够美"，而是**真正的多组件单文件分发尚未启用**——多文件分布既是当前态，也是 v2 role 扩展要收敛的目标。
+
+### llama.cpp 的对照做法
+
+参照 llama.cpp（源码核实，`tools/mtmd/clip.cpp`）：**一个 mmproj GGUF 可同时容纳视觉/语音/语音生成编码器**（`loader.has_vision / has_audio / has_gen_audio` 分别建 `clip_ctx`），元数据冲突靠 **key 字符串前缀**解决（`clip.vision.n_embd` / `clip.audio.n_embd` / `clip.gen.audio.*`），张量同理用 `mm.*` 等前缀。这是"单文件单表 + 字符串前缀命名空间"的方案——可行但无结构保证，新增模态要改 clip.cpp 的前缀清单。
+
+### GGUFRS 的结构性解法
+
+GGUFRS 的**组件级元数据表**（每个 component 独立 scoped metadata）天然就是该需求的解法：`llm / diffusion / text-encoder / vae / vision-encoder / audio-encoder / audio-decoder / omni` 各自成组件，**作用域隔离、无前缀约定**，新增模态 = 新增一个 role 值 + 引擎侧 `load_component(role)`。loader 完全不感知命名空间细节。
+
+### V2 待办（按依赖顺序）
+
+1. **role 枚举扩展**——`diffusion / text-encoder / vae / audio-encoder / audio-decoder / omni` 等新 role（omni 涵盖视觉+语音+语音生成的多模态编码器合一组件）。同时调整 V1 的"恰好一个 LLM + 最多一个 mmproj"为"包至少含一个 LLM，按 role 限额接受其它角色"。
+2. **`ggufrs` CLI 补 `verify` / `info` 子命令**——发布侧校验与检视是分发格式基本功。底层 API 已就绪（`GgufrsFile::verify_all` + `components() / segments_for_component() / tensors_for_segment()`），CLI 只差胶水。
+3. **release 流水线接入打包**——脚本或直接调用 `export_ggufrs`；附 `verify_all` 作为发版前门禁。
+4. **远期**：HF 直转原型（先选 qwen3 系验证映射表工作量）+ 视需要自研量化。

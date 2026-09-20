@@ -584,4 +584,20 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         let embeddings = self.embed_tokens(token_ids)?;
         self.step(&embeddings, token_ids.len(), positions)
     }
+
+    /// Single forward pass: prefill a prompt and return the last-position
+    /// logits. Used by JEV / classification modes that do not need
+    /// autoregressive decoding. The caller is responsible for building
+    /// mrope `positions`; this method does NOT reset KV state, so reuse
+    /// the session for at most one call or recreate it between questions.
+    pub fn forward_logits(
+        &mut self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        if token_ids.is_empty() {
+            return Err("Qwen3.5 prompt must contain at least one token".into());
+        }
+        self.step_with_tokens(token_ids, positions)
+    }
 }

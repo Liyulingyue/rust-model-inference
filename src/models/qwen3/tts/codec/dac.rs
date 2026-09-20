@@ -21,6 +21,7 @@ use crate::models::qwen3::tts::codec::conv::{
 };
 use crate::models::qwen3::tts::codec::snake::snake1d_inplace;
 use crate::models::qwen3::tts::{load_f16_or_f32_tensor, load_f16_tensor};
+use crate::ops::gelu_ggml_f16_inplace;
 use crate::ops::{f16_to_f32, f32_to_f16, matmul_q8_0_quantized_parallel, quantize_q8_0_into};
 
 #[cfg(unix)]
@@ -638,7 +639,7 @@ fn upsample_block_forward(
             output[channel] += block.norm_b[channel];
         }
     }
-    let expanded = matmul_2d_pw(
+    let mut expanded = matmul_2d_pw(
         &block.pw1_w,
         Some(&block.pw1_b),
         &normalized,
@@ -646,7 +647,9 @@ fn upsample_block_forward(
         1024,
         upsampled_len,
     )?;
-    let expanded = gelu_inplace(expanded);
+    // GELU with ggml's F16 round-trip — matches the bit-exact oracle and
+    // removes the need for the previous local `gelu_inplace` clone.
+    gelu_ggml_f16_inplace(&mut expanded);
     let projected = matmul_2d_pw(
         &block.pw2_w,
         Some(&block.pw2_b),
@@ -707,23 +710,6 @@ fn matmul_2d_pw(
         }
     }
     Ok(out)
-}
-
-fn gelu_inplace(mut x: Vec<f32>) -> Vec<f32> {
-    for v in x.iter_mut() {
-        if *v <= -10.0 {
-            *v = 0.0;
-        } else if *v < 10.0 {
-            let value = f16_to_f32(f32_to_f16(*v));
-            let inner = 0.7978845608028654 * value * (1.0 + 0.044715 * value * value);
-            #[cfg(unix)]
-            let activation = unsafe { tanhf(inner) };
-            #[cfg(not(unix))]
-            let activation = inner.tanh();
-            *v = f16_to_f32(f32_to_f16(0.5 * value * (1.0 + activation)));
-        }
-    }
-    x
 }
 
 fn dac_block_channels(block_idx: usize) -> Result<(usize, usize, usize), String> {

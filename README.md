@@ -356,6 +356,8 @@ shaders/
 
 ## 依赖
 
+### Rust crate（已在 `Cargo.toml` 中）
+
 | 包 | 版本 | 用途 |
 |----|------|------|
 | `memmap2` | 0.9 | mmap 零拷贝文件加载 |
@@ -367,6 +369,32 @@ shaders/
 | `rand` | 0.8 | 采样工具 |
 | `ash` | 0.37 | Vulkan API 绑定（vulkan feature） |
 | `bytemuck` | 1.0 | 类型转换（vulkan feature） |
+
+### 系统二进制
+
+`Qwen2.5-Omni` 多模态的视频/音频/图像抽取依赖外部编解码器。仓库自带
+[ffmpeg](https://ffmpeg.org/) 与 [ffprobe](https://ffmpeg.org/ffprobe.html)
+作为子进程调用,缺失时会报错：
+
+- 视频输入 (`--video`) → `ffprobe` 取分辨率、`ffmpeg` 解码
+- 任意格式音频输入 (`--audio`) → `ffmpeg` 重采样到 16 kHz mono PCM16
+
+`Ubuntu` / `Debian`：
+
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg
+```
+
+`macOS`：
+
+```bash
+brew install ffmpeg
+```
+
+仅在直接喂 16 kHz mono PCM16 WAV 给 Omni 时,二进制可省略 — 此时
+仓库内置的 pure-Rust 解码器 (`src/app/omni.rs::decode_audio` 的
+PCM16 WAV 分支)接管。Qwen3-ASR / Qwen3-TTS / Qwen3-VL / LFM2-VL
+**不需要** ffmpeg。
 
 ## 路线图
 

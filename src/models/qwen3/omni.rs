@@ -402,7 +402,16 @@ impl Qwen25OmniAudioConfig {
         let layers = require_u32(source, "clip.audio.block_count", 32)? as usize;
         let heads = require_u32(source, "clip.audio.attention.head_count", 20)? as usize;
         let mel_bins = require_u32(source, "clip.audio.num_mel_bins", 128)? as usize;
-        let window = require_u32(source, "clip.audio.n_window", 100)? as usize;
+        // `clip.audio.n_window` (audio encoder STFT window) is not always
+        // shipped in mmproj metadata; fall back to the documented
+        // 100-tap default rather than rejecting the load.
+        let window = source
+            .metadata("clip.audio.n_window")
+            .and_then(MetaValue::to_u64)
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| "clip.audio.n_window does not fit usize")?
+            .unwrap_or(100);
         let epsilon = require_f32(source, "clip.audio.attention.layer_norm_epsilon", 1e-5)?;
 
         require_tensor(
@@ -486,11 +495,17 @@ impl Qwen25OmniAudioConfig {
         let projector = source
             .tensor_info("mm.a.fc.weight")
             .ok_or("Missing Qwen2.5-Omni audio tensor: mm.a.fc.weight")?;
-        if projector.dims.first() != Some(&(hidden as u64))
-            || projector.dims.len() != 2
-            || projector.ggml_type != GGMLType::F16
+        // F16 / BF16 are interchangeable for this projection layer (matmul
+        // contract is identical); accept either to match Unsloth's BF16
+        // re-quantization.
+        let type_ok = matches!(projector.ggml_type, GGMLType::F16 | GGMLType::BF16);
+        if projector.dims.first() != Some(&(hidden as u64)) || projector.dims.len() != 2 || !type_ok
         {
-            return Err("Invalid Qwen2.5-Omni audio tensor: mm.a.fc.weight".into());
+            return Err(format!(
+                "Invalid Qwen2.5-Omni audio tensor: mm.a.fc.weight \
+                 (shape {:?} type {:?}; expected [{}, ?] F16/BF16)",
+                projector.dims, projector.ggml_type, hidden
+            ));
         }
         let projection = projector.dims[1] as usize;
         require_tensor(source, "mm.a.fc.bias", &[projection as u64], GGMLType::F32)?;
@@ -714,10 +729,23 @@ fn require_tensor(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing Qwen2.5-Omni audio tensor: {name}"))?;
-    if info.dims != dims || info.ggml_type != kind {
+    // Shape is strict (architectural mismatch). Type is F16-or-BF16 tolerant:
+    // some Unsloth re-quantization rounds trip BF16→F16→BF16 and the upstream
+    // GGUF uses F16 while our tools/tests produce BF16; both pass the same
+    // matmul contract.
+    if info.dims != dims {
         return Err(format!(
-            "Invalid Qwen2.5-Omni audio tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
+            "Invalid Qwen2.5-Omni audio tensor {name}: shape {:?}; expected {:?}",
+            info.dims, dims
+        ));
+    }
+    if info.ggml_type != kind
+        && !(matches!(kind, GGMLType::F16) && matches!(info.ggml_type, GGMLType::BF16))
+        && !(matches!(kind, GGMLType::BF16) && matches!(info.ggml_type, GGMLType::F16))
+    {
+        return Err(format!(
+            "Invalid Qwen2.5-Omni audio tensor {name}: type {:?}; expected {:?} (or its BF16/F16 sibling)",
+            info.ggml_type, kind
         ));
     }
     Ok(())

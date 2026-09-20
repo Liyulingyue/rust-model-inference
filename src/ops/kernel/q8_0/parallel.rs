@@ -128,6 +128,11 @@ pub fn matmul_q8_0_quantized_parallel_rows(
 /// `matmul_q8_0_quantized_parallel_rows` directly, which divides work by
 /// thread index — matching how Qwen3 and all other models achieve parallelism.
 /// See `matmul_q8_0_quantized_parallel_rows` for the working implementation.
+#[deprecated(
+    note = "broken with ComputePool::compute (barrier expects all pool.n_threads() \
+        participants but persistent workers cannot reach it); use \
+        matmul_q8_0_quantized_parallel_rows directly inside pool.compute instead"
+)]
 pub fn matmul_q8_0_quantized_dynamic(
     weight: &[u8],
     input_q8: &[u8],
