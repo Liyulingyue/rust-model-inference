@@ -65,9 +65,6 @@ fn load_source_weight<'a, S: TensorSource + ?Sized>(
     ));
     weight.n_in = n_in;
     weight.n_out = n_out;
-    if info.ggml_type == GGMLType::BF16 {
-        weight.kernel = Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(bytes));
-    }
     Ok(weight)
 }
 
@@ -2914,9 +2911,19 @@ mod tests {
         {
             let weight = load_source_weight(&source, "v.test.weight", &[4, 1], 4, 1).unwrap();
             assert_eq!(weight.ggml_type, GGMLType::BF16);
+            // The vision encoder feeds F32 inputs (layer-norm outputs);
+            // the BF16 kernel must NOT coerce those inputs to BF16 before
+            // the dot product. With F32 inputs the dot is computed in F32
+            // precision and includes the input's full mantissa (1.00390625
+            // has a sub-BF16-representable increment), giving:
+            //   1.0*1.00390625 + -2.0*1.0 + 0.5*2.0 + 3.0*-1.0 = -2.99609375
+            let expected = (1.0f32).mul_add(
+                1.00390625,
+                (-2.0f32).mul_add(1.0, (0.5f32).mul_add(2.0, 3.0 * -1.0)),
+            );
             assert_eq!(
                 weight.matmul(&[1.00390625, 1.0, 2.0, -1.0])[0].to_bits(),
-                (-3.0f32).to_bits()
+                expected.to_bits()
             );
         }
 
@@ -2929,9 +2936,13 @@ mod tests {
                 .collect(),
         );
         let patch = load_source_weight(&source, "v.test.weight", &[1, 1, 3, 1], 3, 1).unwrap();
+        // F32 input path: 1.0*1.00390625 + -2.0*1.0 + 0.5*2.0 ≈ 0.00390625
+        // (the OLD bug coerced F32→BF16 first, dropping 1.00390625 to 1.0
+        // and producing a clean 0.0 — that was the bug we just fixed.)
+        let patch_expected = (1.0f32).mul_add(1.00390625, (-2.0f32).mul_add(1.0, 0.5 * 2.0));
         assert_eq!(
             patch.matmul(&[1.00390625, 1.0, 2.0])[0].to_bits(),
-            0.0f32.to_bits()
+            patch_expected.to_bits()
         );
     }
 
