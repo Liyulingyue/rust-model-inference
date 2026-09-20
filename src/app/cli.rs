@@ -43,7 +43,9 @@ pub struct CliOptions {
     pub negative_prompt: Option<String>,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
+    pub max_context: Option<usize>,
     pub prefill_batch_size: Option<usize>,
+    pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     pub resolution: Option<usize>,
     pub seed: Option<i64>,
@@ -79,6 +81,19 @@ pub struct CliOptions {
     pub use_xvector: XVectorMode,
     pub use_xvector_supplied: bool,
     pub out: Option<PathBuf>,
+    pub tts_model: Option<PathBuf>,
+    pub tts_mmproj: Option<PathBuf>,
+    pub jev: bool,
+    pub jev_context: Option<String>,
+    pub jev_questions: Vec<JevQuestion>,
+    pub jev_positive: Option<String>,
+    pub jev_output_json: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JevQuestion {
+    pub text: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +114,25 @@ impl CliOptions {
             draft_n_max: self.spec_draft_n_max,
             confidence_min: self.spec_draft_conf_min,
         })
+    }
+
+    /// Default max-context cap. Most chat workloads fit in 8K; this
+    /// guards against models that declare an over-large
+    /// `context_length` (e.g. K2-Horizon-4B claims 524288, which would
+    /// require ~77 GB of F32 KV cache).
+    pub const DEFAULT_MAX_CONTEXT: usize = 8192;
+
+    pub fn effective_max_context(&self) -> usize {
+        self.max_context.unwrap_or(Self::DEFAULT_MAX_CONTEXT)
+    }
+
+    /// Effective repetition penalty for sampling. `None` / `Some(1.0)` means
+    /// disabled; values > 1.0 suppress already-generated tokens (Hugging Face
+    /// / llama.cpp definition), values < 1.0 encourage repeats.  We don't
+    /// validate against `< 1.0` because users may intentionally want
+    /// repetition in some prompts.
+    pub fn effective_repetition_penalty(&self) -> f32 {
+        self.repetition_penalty.unwrap_or(1.0)
     }
 }
 
@@ -329,6 +363,24 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--max-context" => {
+                if i + 1 < args.len() {
+                    options.max_context = Some(args[i + 1].parse().unwrap_or(8192));
+                    i += 1;
+                }
+            }
+            "--repetition-penalty" => {
+                if i + 1 < args.len() {
+                    let v: f32 = args[i + 1].parse().unwrap_or(1.0);
+                    if v <= 0.0 {
+                        return Err(format!(
+                            "--repetition-penalty must be > 0 (1.0 = disabled, > 1.0 = suppress repeats)"
+                        ));
+                    }
+                    options.repetition_penalty = Some(v);
+                    i += 1;
+                }
+            }
             "--prefill-batch-size" => {
                 let value = args
                     .get(i + 1)
@@ -502,6 +554,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
             "--bench" => options.bench = true,
             "--thinking" => options.thinking = true,
+            "--no-thinking" => options.thinking = false,
             "--profile" => options.profile = true,
             "--gpu" => options.gpu = true,
             "--kv-cache" => {
@@ -516,6 +569,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--mmproj" => {
                 if i + 1 < args.len() {
                     options.mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--tts-model" => {
+                if i + 1 < args.len() {
+                    options.tts_model = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--tts-mmproj" => {
+                if i + 1 < args.len() {
+                    options.tts_mmproj = Some(args[i + 1].as_str().into());
                     i += 1;
                 }
             }
@@ -627,6 +692,69 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .filter(|value| !value.starts_with("--"))
                     .ok_or("Missing value for --out")?;
                 options.out = Some(value.as_str().into());
+                i += 1;
+            }
+            "--jev" => options.jev = true,
+            "--jev-context" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-context")?;
+                options.jev_context = Some(value.clone());
+                i += 1;
+            }
+            "--jev-question" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-question")?;
+                options.jev_questions.push(JevQuestion {
+                    text: value.clone(),
+                    options: Vec::new(),
+                });
+                i += 1;
+            }
+            "--jev-option" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-option")?;
+                if options.jev_questions.is_empty() {
+                    return Err(
+                        "--jev-option must follow a --jev-question (or be the first argument after --jev)"
+                            .into(),
+                    );
+                }
+                options
+                    .jev_questions
+                    .last_mut()
+                    .unwrap()
+                    .options
+                    .push(value.clone());
+                i += 1;
+            }
+            "--jev-positive" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-positive")?;
+                options.jev_positive = Some(value.clone());
+                i += 1;
+            }
+            "--jev-output" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-output")?;
+                match value.as_str() {
+                    "text" => options.jev_output_json = false,
+                    "json" => options.jev_output_json = true,
+                    other => {
+                        return Err(format!(
+                            "--jev-output must be 'text' or 'json', got {other:?}"
+                        ));
+                    }
+                }
                 i += 1;
             }
             _ => {
@@ -1059,6 +1187,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.audio.is_some()
             || options.image.is_some()
             || options.video.is_some()
+            || options.mmproj.is_some()
             || options.tts
             || options.embedding
             || options.gpu
@@ -1351,6 +1480,19 @@ mod tests {
                 .unwrap_err()
                 .contains("CPU text prompt"));
         }
+        let mmproj = parse_cli_options(&args(&[
+            "rmi",
+            "--prompt",
+            "hello",
+            "--draft-model",
+            "draft.gguf",
+            "--mmproj",
+            "projector.gguf",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&mmproj)
+            .unwrap_err()
+            .contains("CPU text prompt"));
     }
 
     struct TestTensorSource {

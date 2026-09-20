@@ -99,6 +99,7 @@ impl DSparkModel {
     ) -> Result<Self, String> {
         let config = DSparkConfig::from_source(&*source, head.target)?;
         validate_backbone(&*source, &config, head.target.hidden)?;
+        validate_tokenizer_metadata(&*source, &*head.source)?;
         let mask_token_id = source
             .metadata("tokenizer.ggml.mask_token_id")
             .and_then(metadata_u32)
@@ -226,6 +227,31 @@ impl DSparkModel {
             mask_token_id,
         })
     }
+}
+
+fn validate_tokenizer_metadata(
+    draft: &dyn TensorSource,
+    target: &dyn TensorSource,
+) -> Result<(), String> {
+    for key in [
+        "tokenizer.ggml.model",
+        "tokenizer.ggml.pre",
+        "tokenizer.ggml.tokens",
+        "tokenizer.ggml.token_type",
+        "tokenizer.ggml.merges",
+        "tokenizer.ggml.bos_token_id",
+        "tokenizer.ggml.eos_token_id",
+        "tokenizer.ggml.unknown_token_id",
+        "tokenizer.ggml.separator_token_id",
+        "tokenizer.ggml.padding_token_id",
+        "tokenizer.ggml.add_bos_token",
+        "tokenizer.ggml.add_eos_token",
+    ] {
+        if draft.metadata(key) != target.metadata(key) {
+            return Err(format!("DSpark sidecar {key} does not match the target"));
+        }
+    }
+    Ok(())
 }
 
 pub struct DSparkSession<'model> {
@@ -751,7 +777,7 @@ fn validate_backbone(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_weight, DSparkModel, DSparkSession, SharedHead};
+    use super::{load_weight, validate_tokenizer_metadata, DSparkModel, DSparkSession, SharedHead};
     use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
     use crate::core::thread_pool::ComputePool;
     use crate::core::tokenizer::BPETokenizer;
@@ -827,6 +853,27 @@ mod tests {
         fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
             self.data.get(name).map(Vec::as_slice)
         }
+    }
+
+    #[test]
+    fn sidecar_tokenizer_must_match_target() {
+        let target = FixtureSource::default().metadata(
+            "tokenizer.ggml.tokens",
+            MetaValue::Array(
+                MetaValueType::String,
+                vec![MetaValue::String("target".into())],
+            ),
+        );
+        let draft = FixtureSource::default().metadata(
+            "tokenizer.ggml.tokens",
+            MetaValue::Array(
+                MetaValueType::String,
+                vec![MetaValue::String("draft".into())],
+            ),
+        );
+
+        let error = validate_tokenizer_metadata(&draft, &target).unwrap_err();
+        assert!(error.contains("tokenizer.ggml.tokens"), "{error}");
     }
 
     fn tokenizer() -> Arc<BPETokenizer> {

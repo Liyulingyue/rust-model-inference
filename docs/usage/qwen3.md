@@ -5,6 +5,15 @@
 > 通用前置：构建 `cargo build --release --bin rust-model-inference`。所有命令均以
 > 工作目录为仓库根目录为前提；GGUF / 音频 / 图像路径请按本地调整。
 > KV cache 默认 F16；与 llama.cpp 做位级对比时显式传 `--kv-cache f16`。
+>
+> 常用生成参数（适用于所有 Qwen3 路径）：
+>
+> - `--max-context N`：KV cache 容量上限，默认 8192。超过此值的输入会触发预
+>   警告或分配错误；显式调小可避免大上下文模型（如 Qwen3.5-27B 128k、
+>   K2-Horizon-4B/7B 524k）一次性占用 GB~TB 级 KV 内存。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）；α > 1 抑制
+>   重复（与 llama.cpp / Hugging Face `repetition_penalty` 等价）。对低质量量化
+>   （如 Q4_K_M）下陷入复读循环的模型尤其有用。
 
 ## 1. 文本（Qwen3 / Qwen3.5 / Qwen3.8）
 
@@ -95,6 +104,58 @@ cargo run --release --bin rust-model-inference -- \
 Pinned llama.cpp Oracle：`201e50c2076a20adc460c41598593c7cd7b0813`，
 通过 `tests/qwen3_tts_reference.rs` 与 `tools/tts/build_qwen3_tts_oracle.sh` 覆盖。
 
+### 5.1 TTS 作为多模态回复后处理（`--tts-model` / `--tts-mmproj`）
+
+Qwen2.5-Omni 等多模态模型官方输出包含**文本 + 语音**两路,本仓库在
+`Qwen2.5-Omni` GGUF 集合中只包含 Thinker（文本 LLM）+ mmproj（视觉/音频
+编码器）,不含独立 Talker。补齐语音输出：将 `Qwen3-TTS-12Hz-1.7B-Base`
+作为后处理器,在文本生成完成后自动合成 24 kHz mono WAV。
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen2.5-Omni-3B-GGUF/Qwen2.5-Omni-3B-Q8_0.gguf \
+  --mmproj models/Qwen2.5-Omni-3B-GGUF/mmproj-BF16.gguf \
+  --image references/apple.png \
+  --prompt "Describe the image briefly." \
+  --tts-model models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --tts-mmproj models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --out speech.wav
+```
+
+触发条件（全部满足）：
+- 入口路径包含 `--mmproj`/`--image`/`--audio`/`--video` 任一（即
+  `run_multimodal_with_video` 路径）
+- 同时传 `--tts-model` 与 `--tts-mmproj`
+- 传 `--out <wav>` 指向可写路径
+
+TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
+`--max-tokens 30` 时 TTS 跑 128 帧（约 1.6 秒音频）,`--max-tokens 200` 时
+800 帧（约 10 秒）。
+
+支持所有 Omni 输入模态：
+- `--image <file>`：视觉
+- `--audio <16kHz WAV>`：语音（听写、转写）
+- `--video <mp4>`：视频（需要 `ffmpeg`+`ffprobe`，见 README）
+
+实测 `models/Qwen2.5-Omni-3B-Q8_0.gguf` 在 18 线程下：
+
+| 输入 → 输出 | vision encode | TTS frame_loop | TTS dac_decode | 总耗时 |
+|-----------|--------------|---------------|---------------|-------|
+| apple.png → text + 24k WAV | ~11s | ~20s | ~20s | ~1.5min |
+| zh.wav → text + 24k WAV | ~5s（encoder） | ~20s | ~20s | ~3min |
+| test.mp4 (320×240) → text + 24k WAV | ~5min（4 帧） | ~20s | ~20s | ~10min |
+
+> 注：`vision encode` 一项 Omni 早期为 ~60s，本仓库 `lfm&qwen25omni`
+> 分支做了两个修复后降至 ~11s（5× 加速）：
+> 1. 视觉编码器加载 BF16 权重时不再用 `with_bf16_input(true)`
+>    强制走 F32 输入的 SIMD 路径（之前因误用 BF16 输入走 scalar
+>    `dot_bf16`，约慢 2.5×）。
+> 2. `BF16Kernel` 的 `n_in % 8 != 0` fallback（如 Omni `ffn_down` 的
+>    `n_in=3420`）用新增的 `dot_bf16_f32`（AVX2+NEON）替代纯 scalar
+>    `forward_f32_rows_scalar`（约再快 4.5×）。
+
+完整输出验证参考 `models/omni_apple_reply.wav` 等。
+
 ## 6. 与 llama.cpp 的数值对齐
 
 ### 通用 scalar 位级对比（Qwen3-0.6B）
@@ -178,4 +239,39 @@ cargo run --release --bin server -- \
 - `src/app/tts.rs` — TTS CLI 入口
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
+
+## 10. JEV 决策评分（Qwen3 用法）
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
+跨 trunk 实现现状、chat template 差异、限制等全局性内容见
+[`docs/develop/jev.md`](../develop/jev.md)。
+
+Qwen3 上 `--jev` 的具体用法：
+
+```bash
+# Choice mode（默认 K≥2）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "明天下午2点要去机场接人" \
+  --jev-question "明天的天气怎么样？" \
+  --jev-option "晴天" --jev-option "阴天" --jev-option "雨天"
+
+# Binary mode（K=2 + --jev-positive）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
+  --jev-question "现在在下雨吗？" \
+  --jev-option "是的" --jev-option "没有" --jev-positive A
+
+# Score mode（description:value）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "今天股市整体上涨，科技板块表现强劲" \
+  --jev-question "市场情绪如何？" \
+  --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
+  --jev-option "悲观:2" --jev-option "极度悲观:1"
+```
+
+Qwen3 使用的 chat template 是标准 `<|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n`，
+由 `src/prompt.rs::append_qwen_message_tokens` / `append_qwen_assistant_prefix`
+构造。Qwen3-VL 走同一个 chat template，只是文本 + 图像拼接；多模态路径
+见 [`docs/usage/qwen3.md` §3](#3-视觉语言qwen3-vl--qwen35--qwen38)。
+
 - `docs/SUPPORTED_MODELS.md` — 验证状态与量化格式支持

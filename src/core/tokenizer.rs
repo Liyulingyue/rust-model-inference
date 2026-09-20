@@ -152,6 +152,38 @@ const LLAMA_BPE_SEMANTIC_TOKENS: &[(&str, &str)] = &[
     ("<|thought_end|>", "think_end"),
 ];
 
+const K2_HORIZON_SEMANTIC_TOKENS: &[(&str, &str)] = &[
+    // Chat turn delimiters (mirror Qwen's <|im_start|> / <|im_end|>).
+    ("<|ifm|im_start|>", "ifm|im_start"),
+    ("<|ifm|im_end|>", "ifm|im_end"),
+    // System segment delimiters.
+    ("<|sys_start|>", "ifm|sys_start"),
+    ("<|sys_end|>", "ifm|sys_end"),
+    // Reasoning block tags. The chat template renders the open tag at
+    // the assistant turn start and the model is expected to close with
+    // the matching end tag.
+    ("<|begin_of_thought|>", "ifm|begin_of_thought"),
+    ("<|end_of_thought|>", "ifm|end_of_thought"),
+    ("<ifm|think>", "ifm|think_start"),
+    ("</ifm|think>", "ifm|think_end"),
+    // Solution block tags (alternate answer segment).
+    ("<|begin_of_solution|>", "ifm|begin_of_solution"),
+    ("<|end_of_solution|>", "ifm|end_of_solution"),
+    // Multimodal placeholders (not used by 1B text-only path, but
+    // registered for tokenizer consistency).
+    ("<image>", "ifm|image"),
+    ("</image>", "ifm|/image"),
+    ("<video>", "ifm|video"),
+    ("</video>", "ifm|/video"),
+    ("<audio>", "ifm|audio"),
+    ("</audio>", "ifm|/audio"),
+    // Per-role turn delimiters (the chat template uses these too).
+    ("<|user_start|>", "ifm|user_start"),
+    ("<|user_end|>", "ifm|user_end"),
+    ("<|assistant_start|>", "ifm|assistant_start"),
+    ("<|assistant_end|>", "ifm|assistant_end"),
+];
+
 fn string_array(value: Option<MetaValue>, key: &str) -> Result<Vec<String>, String> {
     let Some(MetaValue::Array(MetaValueType::String, values)) = value else {
         return Err(format!("Missing or invalid {key}: expected string array"));
@@ -359,6 +391,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }
+                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::HunyuanDense,
                 Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
@@ -367,7 +400,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan-dense, lfm2, llama-bpe, pixtral, k2-horizon, or minicpm5"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, k2-horizon, or minicpm5"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -472,6 +505,7 @@ impl BPETokenizer {
         let semantic_literals: &[(&str, &str)] = match pre {
             PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
             PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
+            PreTokenizer::K2Horizon => K2_HORIZON_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
         };
         if matches!(pre, PreTokenizer::Minicpm5) {

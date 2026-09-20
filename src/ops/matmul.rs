@@ -3,6 +3,7 @@
 // so existing callers (`bin/server.rs`, `bin/micro_bench.rs`,
 // `app/embedding.rs`, `app/text.rs`) keep working without rewrites.
 pub use super::kernel::q8_0::dispatch::matmul_q8_0_quantized_range;
+#[allow(deprecated)]
 pub use super::kernel::q8_0::parallel::{
     matmul_q8_0_quantized_dynamic, matmul_q8_0_quantized_parallel,
     matmul_q8_0_quantized_parallel_rows,

@@ -8,7 +8,7 @@ Flow-Matching DiT → CAM++ speaker → BigVGAN-style AudioVAE。
 CAM++ speaker + AudioVAE vocoder）。代码侧入口 `src/app/dots.rs::run_dots_tts_cli`。
 
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
-> 仓库自带导出脚本 `tools/dots/convert_dots_tts.py`，是 torch-free 的 GGUF
+> 仓库自带导出脚本 `tools/converter/dots/convert_dots_tts.py`，是 torch-free 的 GGUF
 > 转换器（weight_norm 折叠、Kaiser 滤波器、latent_stats）。**不是**基于
 > llama.cpp 的 converter 移植。详见 `docs/REFERENCE_IMPLEMENTATIONS.md`：
 > studio-dots-ai/dots.tts @ `32407a55228630475c48ecdb2c4e2c0f9c09e030` 用作
@@ -19,7 +19,7 @@ CAM++ speaker + AudioVAE vocoder）。代码侧入口 `src/app/dots.rs::run_dots
 参考仓库的转换脚本（仓库内自带）：
 
 ```bash
-python tools/dots/convert_dots_tts.py \
+python tools/converter/dots/convert_dots_tts.py \
   --input path/to/studio-dots-ai-dots.tts-checkpoint \
   --output models/dots.tts
 ```
@@ -125,6 +125,6 @@ export and pure-Rust TTS inference (#37)`）：
   CAM++ + AudioVAE）
 - `src/app/dots.rs` — CLI 入口（`run_dots_tts_cli`）
 - `src/app/tts.rs` — `--tts` dispatcher；按 mmproj 类型分派 Qwen3-TTS 或 dots
-- `tools/dots/convert_dots_tts.py` — 仓库自带 GGUF 导出器
+- `tools/converter/dots/convert_dots_tts.py` — 仓库自带 GGUF 导出器
 - `tests/dots_tts_reference.rs` — pinned Oracle 对齐
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Oracle pin 与脚本列表

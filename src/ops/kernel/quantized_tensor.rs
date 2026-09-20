@@ -614,6 +614,14 @@ impl<'a> QuantizedTensor<'a> {
         );
     }
 
+    /// Quantize-then-matmul using caller-provided scratch buffers.
+    ///
+    /// Parallel path partitions `output` rows across workers. Same alias
+    /// pattern as `Weight::quantize_and_matmul_with_scratch` — see
+    /// `docs/develop/PARALLEL_MATMUL_SAFETY.md` §1 for the disjointness
+    /// invariant.
+    ///
+    /// `output.len()` must equal `self.n_rows()`.
     pub fn quantize_and_matmul_with_scratch(
         &self,
         input: &[f32],

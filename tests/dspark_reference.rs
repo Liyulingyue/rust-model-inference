@@ -1,10 +1,11 @@
 //! Real GGUF checks; these fail closed when artifacts or the pinned Oracle are absent.
+//! Run bitwise Oracle checks with `--features parity-trace,scalar-parity`.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ struct Oracle {
     process: Child,
     url: String,
     log: PathBuf,
+    trace: PathBuf,
 }
 impl Drop for Oracle {
     fn drop(&mut self) {
@@ -91,6 +93,7 @@ impl Oracle {
         drop(listener);
         let log =
             std::env::temp_dir().join(format!("rmi-dspark-{label}-{}.log", std::process::id()));
+        let trace = std::env::temp_dir().join(format!("rmi-dspark-{label}-{port}.jsonl"));
         let output = File::create(&log).unwrap();
         let process = Command::new(binary)
             .args([
@@ -129,6 +132,7 @@ impl Oracle {
                 &port,
             ])
             .env("RUST_DSPARK_TRACE_IDS", "1")
+            .env("RMI_DSPARK_PARITY_TRACE", &trace)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output.try_clone().unwrap()))
             .stderr(Stdio::from(output))
@@ -138,6 +142,7 @@ impl Oracle {
             process,
             url: format!("http://127.0.0.1:{port}"),
             log,
+            trace,
         };
         let started = Instant::now();
         loop {
@@ -196,7 +201,235 @@ fn blocks(log: &str) -> Vec<Value> {
         .collect()
 }
 
-fn rust(target: &str, draft: Option<&str>, prompt: &str, count: &str) -> String {
+#[derive(Debug)]
+struct Checkpoint {
+    block: usize,
+    name: String,
+    row: Option<usize>,
+    shape: Vec<usize>,
+    words: Vec<u32>,
+}
+
+fn checkpoint(
+    value: &Value,
+    block: usize,
+    name: &str,
+    row: Option<usize>,
+    oracle: bool,
+) -> Checkpoint {
+    let raw_shape = value["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| usize::try_from(value.as_u64().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    let shape = if oracle && matches!(name, "dspark.result_norm" | "dspark.result_output") {
+        vec![raw_shape[1], raw_shape[0]]
+    } else if oracle {
+        vec![raw_shape[0]]
+    } else {
+        raw_shape
+    };
+    let binary = value
+        .get(if oracle { "binary" } else { "binary_path" })
+        .and_then(Value::as_str)
+        .unwrap();
+    let bytes = std::fs::read(binary).unwrap();
+    assert_eq!(bytes.len() % 4, 0, "partial F32 word in {binary}");
+    let words = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(shape.iter().product::<usize>(), words.len(), "{name} shape");
+    Checkpoint {
+        block,
+        name: name.into(),
+        row,
+        shape,
+        words,
+    }
+}
+
+fn rust_checkpoints(path: &Path) -> Vec<Checkpoint> {
+    let mut checkpoints = Vec::new();
+    let mut block = None;
+    let mut next_block = 0;
+    for line in std::fs::read_to_string(path).unwrap().lines() {
+        let value: Value = serde_json::from_str(line).unwrap();
+        let name = value["name"].as_str().unwrap();
+        if name == "dspark.result_norm" {
+            block = Some(next_block);
+            next_block += 1;
+        }
+        if matches!(
+            name,
+            "dspark.result_norm"
+                | "dspark.result_output"
+                | "dspark.markov_bias"
+                | "dspark.markov_logits"
+                | "dspark.confidence"
+        ) {
+            checkpoints.push(checkpoint(
+                &value,
+                block.expect("DSpark row trace before result_norm"),
+                name,
+                value
+                    .get("layer")
+                    .and_then(Value::as_u64)
+                    .map(|row| row as usize),
+                false,
+            ));
+        }
+    }
+    checkpoints
+}
+
+fn oracle_checkpoints(path: &Path) -> Vec<Checkpoint> {
+    let mut checkpoints = Vec::new();
+    let mut result_norm = None;
+    let mut result_output = None;
+    let mut block = None;
+    let mut next_block = 0;
+    for line in std::fs::read_to_string(path).unwrap().lines() {
+        let value: Value = serde_json::from_str(line).unwrap();
+        let name = value["name"].as_str().unwrap();
+        if name == "result_norm" {
+            result_norm = Some(value);
+            result_output = None;
+            block = None;
+            continue;
+        }
+        if name == "result_output" {
+            result_output = Some(value);
+            continue;
+        }
+        let Some((name, row)) = [
+            ("dspark_markov_bias-", "dspark.markov_bias"),
+            ("dspark_markov_logits-", "dspark.markov_logits"),
+            ("dspark_confidence-", "dspark.confidence"),
+        ]
+        .into_iter()
+        .find_map(|(prefix, canonical)| {
+            name.strip_prefix(prefix)
+                .and_then(|row| row.parse().ok())
+                .map(|row| (canonical, row))
+        }) else {
+            continue;
+        };
+        let active_block = match block {
+            Some(block) => block,
+            None => {
+                let active_block = next_block;
+                next_block += 1;
+                checkpoints.push(checkpoint(
+                    result_norm
+                        .as_ref()
+                        .expect("Oracle DSpark trace missing result_norm"),
+                    active_block,
+                    "dspark.result_norm",
+                    None,
+                    true,
+                ));
+                checkpoints.push(checkpoint(
+                    result_output
+                        .as_ref()
+                        .expect("Oracle DSpark trace missing result_output"),
+                    active_block,
+                    "dspark.result_output",
+                    None,
+                    true,
+                ));
+                block = Some(active_block);
+                active_block
+            }
+        };
+        checkpoints.push(checkpoint(&value, active_block, name, Some(row), true));
+    }
+    checkpoints
+}
+
+fn assert_checkpoint_parity(rust: &Path, oracle: &Path, label: &str) {
+    let rust = rust_checkpoints(rust);
+    let oracle = oracle_checkpoints(oracle);
+    let rust_blocks = rust.iter().map(|record| record.block).max().unwrap() + 1;
+    let oracle_blocks = oracle.iter().map(|record| record.block).max().unwrap() + 1;
+    let rows = |records: &[Checkpoint], block| {
+        records
+            .iter()
+            .filter(|record| record.block == block && record.name == "dspark.markov_bias")
+            .count()
+    };
+    let first_rows = rows(&rust, 0);
+    let first_oracle = (0..oracle_blocks)
+        .find(|&block| rows(&oracle, block) >= first_rows)
+        .expect("Oracle DSpark trace has no matching draft block");
+    assert_eq!(
+        oracle_blocks - first_oracle,
+        rust_blocks,
+        "{label} logical checkpoint block count"
+    );
+
+    for rust_block in 0..rust_blocks {
+        let oracle_block = first_oracle + rust_block;
+        let rust_rows = rows(&rust, rust_block);
+        assert!(
+            rows(&oracle, oracle_block) >= rust_rows,
+            "{label} Oracle draft block is shorter than Rust block {rust_block}"
+        );
+        for rust in rust.iter().filter(|record| record.block == rust_block) {
+            let oracle = oracle
+                .iter()
+                .find(|record| {
+                    record.block == oracle_block
+                        && record.name == rust.name
+                        && record.row == rust.row
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label} missing Oracle checkpoint {} row {:?} in block {rust_block}",
+                        rust.name, rust.row
+                    )
+                });
+            if matches!(
+                rust.name.as_str(),
+                "dspark.result_norm" | "dspark.result_output"
+            ) {
+                assert_eq!(
+                    &oracle.shape[1..],
+                    &rust.shape[1..],
+                    "{label} checkpoint width"
+                );
+                assert!(
+                    oracle.shape[0] >= rust.shape[0],
+                    "{label} Oracle checkpoint rows"
+                );
+            } else {
+                assert_eq!(oracle.shape, rust.shape, "{label} checkpoint shape");
+            }
+            let oracle_words = &oracle.words[..rust.words.len()];
+            if rust.words != oracle_words {
+                let index = rust
+                    .words
+                    .iter()
+                    .zip(oracle_words)
+                    .position(|(rust, oracle)| rust != oracle)
+                    .unwrap();
+                panic!(
+                    "{label} block {} {} row {:?} index {index}: Rust=0x{:08x} Oracle=0x{:08x}",
+                    rust.block, rust.name, rust.row, rust.words[index], oracle.words[index]
+                );
+            }
+        }
+    }
+}
+
+fn rust(
+    target: &str,
+    draft: Option<&str>,
+    prompt: &str,
+    count: &str,
+    trace: Option<&Path>,
+) -> String {
     let binary = std::env::var("RMI_DSPARK_RUST")
         .unwrap_or_else(|_| env!("CARGO_BIN_EXE_rust-model-inference").into());
     let mut command = Command::new(binary);
@@ -226,7 +459,17 @@ fn rust(target: &str, draft: Option<&str>, prompt: &str, count: &str) -> String 
             "0",
         ]);
     }
-    let output = command.env("RUST_DSPARK_TRACE_IDS", "1").output().unwrap();
+    if target.contains("LFM2.5") || target.contains("lfm") {
+        command.arg("--thinking");
+    }
+    command.env("RUST_DSPARK_TRACE_IDS", "1");
+    if let Some(trace) = trace {
+        command.env("RMI_PARITY_TRACE", trace).env(
+            "RMI_PARITY_FILTER",
+            "dspark.result_norm,dspark.result_output,dspark.markov_bias,dspark.markov_logits,dspark.confidence",
+        );
+    }
+    let output = command.output().unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "Rust CLI failed: {stderr}");
     stderr
@@ -245,8 +488,19 @@ fn check(label: &str, target_hash: &str, draft_hash: &str, compare_oracle: bool)
     };
     let mut accepted_total = 0;
     for (prompt, count) in prompts {
-        let baseline = rust(&target, None, prompt, count);
-        let speculative = rust(&target, Some(&draft), prompt, count);
+        let rust_trace = std::env::temp_dir().join(format!(
+            "rmi-dspark-rust-{label}-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&rust_trace);
+        let baseline = rust(&target, None, prompt, count, None);
+        let speculative = rust(
+            &target,
+            Some(&draft),
+            prompt,
+            count,
+            oracle.as_ref().map(|_| rust_trace.as_path()),
+        );
         let prompt_ids = ids(&baseline, "[RUST_TOKENS] ");
         assert_eq!(ids(&speculative, "[RUST_TOKENS] "), prompt_ids);
         let generated = ids(&speculative, "[RUST_GENERATED_IDS] ");
@@ -300,6 +554,7 @@ fn check(label: &str, target_hash: &str, draft_hash: &str, compare_oracle: bool)
             reference[start_blocks..],
             "Oracle draft/acceptance blocks: {prompt}"
         );
+        assert_checkpoint_parity(&rust_trace, &oracle.trace, label);
         eprintln!("{label}: prompt={prompt:?}, generated={generated}, blocks={ours:?}");
     }
     assert!(accepted_total > 0, "no accepted draft tokens");

@@ -60,6 +60,8 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
     dspark: Option<DSparkOptions>,
 ) -> Result<(), String> {
     let input_tokens = {
@@ -96,6 +98,8 @@ pub fn run_inference(
         profile,
         kv_format,
         prefill_batch_size,
+        max_context,
+        repetition_penalty,
         dspark,
     )
 }
@@ -110,6 +114,8 @@ pub fn run_inference_tokens(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
     dspark: Option<DSparkOptions>,
 ) -> Result<(), String> {
     let _ = (bench, profile); // bench/profile 暂由 wall-clock 估算
@@ -120,10 +126,11 @@ pub fn run_inference_tokens(
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
 
+    let model_context = model_config_from_source(source.as_ref())?.n_ctx;
     let max_ctx = crate::models::qwen3::trunk::util::checked_session_capacity(
         input_tokens.len(),
         max_tokens,
-        model_config_from_source(source.as_ref())?.n_ctx,
+        model_context.min(max_context).max(1),
     )?;
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -188,11 +195,7 @@ pub fn run_inference_tokens(
         let draft_n_max = options.draft_n_max.unwrap_or(draft_model.config.block_size);
         let mut target_session =
             Qwen3Session::new_with_kv_state(&model, max_ctx, kv_format, KvLifecycle::Ephemeral)?;
-        // A draft evaluates the full block even when fewer output tokens remain.
-        let draft_capacity = max_ctx
-            .saturating_add(draft_model.config.block_size)
-            .min(model.config.n_ctx);
-        let mut draft_session = DSparkSession::new(&draft_model, draft_capacity, kv_format)?;
+        let mut draft_session = DSparkSession::new(&draft_model, max_ctx, kv_format)?;
         dspark_prefill(
             &mut target_session,
             &mut draft_session,
@@ -260,6 +263,7 @@ pub fn run_inference_tokens(
                 temperature,
                 prefill_batch_size,
             },
+            repetition_penalty,
             |text| {
                 if prefill_time.is_zero() {
                     prefill_time = t_infer.elapsed();

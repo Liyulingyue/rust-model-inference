@@ -220,8 +220,8 @@ impl PreparedRows {
                 .unwrap_or(&[]);
             for (weight, output_ptr) in projections {
                 let q8k = weight.uses_q8_k().then_some(self.q8k.as_slice());
-                // SAFETY: output lengths were checked above. Each worker owns
-                // disjoint columns in every row.
+                // SAFETY: output lengths were checked above. The kernel
+                // contract assigns each worker disjoint output columns.
                 let output =
                     unsafe { std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out) };
                 weight.kernel.forward_prepared_rows(
@@ -320,6 +320,17 @@ impl<'a> Weight<'a> {
         )
     }
 
+    /// Quantize-then-matmul using caller-provided scratch buffers.
+    ///
+    /// Parallel path partitions `output` rows across workers. Each worker
+    /// currently derives a full-length `&mut [f32]` slice and relies on the
+    /// kernel's internal `row_range(ith, nth)` partition for disjoint
+    /// writes — this is the alias pattern audited in
+    /// `docs/develop/PARALLEL_MATMUL_SAFETY.md` §1. The disjointness
+    /// invariant depends on every kernel `forward_prepared` /
+    /// `forward_prequantized` honouring `(ith, nth)`.
+    ///
+    /// `output.len()` must equal `self.n_out`.
     pub fn quantize_and_matmul_with_scratch(
         &self,
         input: &[f32],

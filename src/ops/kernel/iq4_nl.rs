@@ -27,10 +27,14 @@ impl<'a> IQ4NLKernel<'a> {
 }
 
 impl<'a> Kernel for IQ4NLKernel<'a> {
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_iq4_nl(self.weight, token_id, n_embd, out);
+    }
+
     fn forward_prequantized(
         &self,
-        _input_q8: &[u8],
-        _input_scales: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
@@ -44,6 +48,12 @@ impl<'a> Kernel for IQ4NLKernel<'a> {
             return;
         }
 
+        let input: Vec<f32> = input_q8
+            .iter()
+            .take(n_in)
+            .enumerate()
+            .map(|(i, &q)| q as i8 as f32 * input_scales[i / 32])
+            .collect();
         let row_bytes = n_in / Self::BLOCK_ELEMENTS * Self::BLOCK_BYTES;
         let mut row = vec![0.0f32; n_in];
         for out_idx in start..end {
@@ -52,7 +62,7 @@ impl<'a> Kernel for IQ4NLKernel<'a> {
                 &self.weight[offset..offset + row_bytes],
                 &mut row,
             );
-            output[out_idx] = 0.0;
+            output[out_idx] = row.iter().zip(&input).map(|(x, y)| x * y).sum();
         }
     }
 

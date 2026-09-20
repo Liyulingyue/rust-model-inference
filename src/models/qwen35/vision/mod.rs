@@ -1,6 +1,7 @@
 pub mod clip_config;
 
 use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, sum_sq_f32, vec_add,
@@ -8,6 +9,7 @@ use crate::ops::{
 };
 use clip_config::ClipVisionConfig;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 fn load_source_weight<'a, S: TensorSource + ?Sized>(
     source: &'a S,
@@ -63,9 +65,6 @@ fn load_source_weight<'a, S: TensorSource + ?Sized>(
     ));
     weight.n_in = n_in;
     weight.n_out = n_out;
-    if info.ggml_type == GGMLType::BF16 {
-        weight.kernel = Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(bytes));
-    }
     Ok(weight)
 }
 
@@ -73,6 +72,66 @@ fn matmul_weight_batch(weight: &Weight<'_>, input: &[f32], output: &mut [f32]) {
     weight
         .kernel
         .forward_batched(input, output, weight.n_in, weight.n_out);
+}
+
+/// Parallel batched matmul for vision-encoder prefill: partitions the
+/// `n_tokens` input rows across the pool's worker threads. Each worker
+/// runs `forward_batched` on its slice of tokens; the kernel still owns
+/// the inner SIMD path. Used by `encode_pair` and `project` to avoid
+/// the single-threaded bottleneck we measured at 247 s for a 401×287
+/// apple.png image (vit_layers ≈ 97.5 % of total).
+fn matmul_weight_batch_pooled(
+    pool: &Arc<ComputePool>,
+    weight: &Weight<'_>,
+    input: &[f32],
+    output: &mut [f32],
+) {
+    let n_in = weight.n_in;
+    let n_out = weight.n_out;
+    let n_tokens = input.len() / n_in;
+    debug_assert_eq!(input.len(), n_tokens * n_in);
+    debug_assert_eq!(output.len(), n_tokens * n_out);
+    if n_tokens < pool.n_threads() * 4 {
+        // Not enough work to justify dispatch overhead: fall back to the
+        // single-threaded batched path (matches the original behaviour).
+        weight.kernel.forward_batched(input, output, n_in, n_out);
+        return;
+    }
+    // ComputePool's `compute` takes an `Fn` (not `FnMut`) closure, so we
+    // cannot move `&mut output[start * n_out..]` into the closure directly.
+    // Wrap the output pointer so each worker can borrow a disjoint slice
+    // from raw pointer arithmetic; this matches the pattern used by the
+    // in-tree attention path (see `PtrWrap` in `forward_vit_layer`).
+    struct OutputWrap(*mut f32, usize);
+    unsafe impl Sync for OutputWrap {}
+    unsafe impl Send for OutputWrap {}
+    impl OutputWrap {
+        unsafe fn slice(&self, start: usize, end: usize) -> &mut [f32] {
+            std::slice::from_raw_parts_mut(self.0.add(start * self.1), (end - start) * self.1)
+        }
+    }
+    let out_ptr = OutputWrap(output.as_mut_ptr(), n_out);
+    let inp_ptr = input.as_ptr();
+    let n_threads = pool.n_threads();
+    pool.compute(move |ith, nth| {
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+        if start >= end {
+            return;
+        }
+        unsafe {
+            let inp_slice =
+                std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in);
+            let out_slice = out_ptr.slice(start, end);
+            // The kernel's `forward_batched` is `&self -> &mut [...]`, so
+            // we still need a `Weight<'_>` here; it borrows from outside.
+            weight
+                .kernel
+                .forward_batched(inp_slice, out_slice, n_in, n_out);
+        }
+    });
+    // Touch `n_threads` to silence the unused warning when the early
+    // return path above is taken in single-threaded testing builds.
+    let _ = n_threads;
 }
 
 fn f32_weight_as_f16(weight: &Weight<'_>) -> Option<Vec<u16>> {
@@ -741,8 +800,9 @@ impl<'a> VisionEncoder<'a> {
         img_w: usize,
         img_h: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) -> Result<VisionGrid, String> {
-        self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch)
+        self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch, pool)
     }
 
     pub fn encode_pair(
@@ -752,6 +812,7 @@ impl<'a> VisionEncoder<'a> {
         img_w: usize,
         img_h: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) -> Result<VisionGrid, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
@@ -866,7 +927,7 @@ impl<'a> VisionEncoder<'a> {
         let t_layers = std::time::Instant::now();
         let mrope_positions = build_vit_mrope_positions(n_patches_x, n_patches_y, merge);
         for layer in 0..cfg.n_layer {
-            self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions);
+            self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions, pool);
             #[cfg(feature = "parity-trace")]
             if layer == 0 || layer + 1 == cfg.n_layer {
                 crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -918,7 +979,7 @@ impl<'a> VisionEncoder<'a> {
         let t_postln = t_postln.elapsed();
 
         let t_proj = std::time::Instant::now();
-        self.project(n_patches_x, n_patches_y, n_embd, merge, scratch);
+        self.project(n_patches_x, n_patches_y, n_embd, merge, scratch, pool);
         let t_proj = t_proj.elapsed();
 
         let total = t_embed + t_merge + t_bias + t_pos + t_layers + t_postln + t_proj;
@@ -1122,6 +1183,7 @@ impl<'a> VisionEncoder<'a> {
         scratch: &mut VisionScratchpad,
         n_tokens: usize,
         mrope_positions: &[[usize; 4]],
+        pool: &Arc<ComputePool>,
     ) {
         let do_profile = std::env::var("PROFILE_VIT_LAYER").is_ok();
         let cfg = &self.config;
@@ -1149,37 +1211,58 @@ impl<'a> VisionEncoder<'a> {
         let t_ln1_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln1_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_with_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln1_weights[il],
-                        b,
-                        eps,
-                    );
-                }
+                let weight = &pc.ln1_weights[il];
+                let bias = b.as_slice();
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                            layer_norm_with_bias(row, weight, bias, eps);
+                        }
+                    }
+                });
             } else {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_without_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln1_weights[il],
-                        eps,
-                    );
-                }
+                let weight = &pc.ln1_weights[il];
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                            layer_norm_without_bias(row, weight, eps);
+                        }
+                    }
+                });
             }
 
             if let Some(ref qkv) = pc.qkv_weights[il] {
-                matmul_weight_batch(
+                matmul_weight_batch_pooled(
+                    pool,
                     qkv,
                     &scratch.merged[..n_tokens * n_embd],
                     &mut scratch.qkv_buf[..n_tokens * n_embd * 3],
                 );
                 if let Some(ref bias) = pc.qkv_biases[il] {
-                    for t in 0..n_tokens {
-                        let off = t * n_embd * 3;
-                        vec_add_into(bias.as_slice(), &mut scratch.qkv_buf[off..off + n_embd * 3]);
-                    }
+                    let bias_slice = bias.as_slice();
+                    let qkv_ptr = scratch.qkv_buf.as_mut_ptr();
+                    let chunk = n_embd * 3;
+                    pool.compute(move |ith, nth| {
+                        let (start, end) =
+                            crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                        for t in start..end {
+                            unsafe {
+                                let row =
+                                    std::slice::from_raw_parts_mut(qkv_ptr.add(t * chunk), chunk);
+                                vec_add_into(bias_slice, row);
+                            }
+                        }
+                    });
                 }
             } else {
                 let input = &scratch.merged[..n_tokens * n_embd];
@@ -1188,7 +1271,8 @@ impl<'a> VisionEncoder<'a> {
                     (&pc.k_weights[il], &pc.k_biases[il], n_tokens * n_embd),
                     (&pc.v_weights[il], &pc.v_biases[il], 2 * n_tokens * n_embd),
                 ] {
-                    matmul_weight_batch(
+                    matmul_weight_batch_pooled(
+                        pool,
                         weight
                             .as_ref()
                             .expect("missing separate vision attention weight"),
@@ -1462,7 +1546,8 @@ impl<'a> VisionEncoder<'a> {
         }
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 &pc.out_weights[il],
                 &scratch.attn_concat[..n_tokens * n_embd],
                 &mut scratch.proj_buf[..n_tokens * n_embd],
@@ -1488,20 +1573,36 @@ impl<'a> VisionEncoder<'a> {
             }
             if let Some(bias_data) = layer.out_bias {
                 let bias = decode_f32_slice(bias_data);
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let proj_ptr = scratch.proj_buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
+                            let row =
+                                std::slice::from_raw_parts_mut(proj_ptr.add(t * n_embd), n_embd);
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
         }
-        for t in 0..n_tokens {
-            let off = t * n_embd;
-            vec_add(
-                &scratch.residual[off..off + n_embd],
-                &scratch.proj_buf[off..off + n_embd],
-                &mut scratch.merged[off..off + n_embd],
-            );
-        }
+        let residual_ptr = scratch.residual.as_ptr();
+        let proj_ptr = scratch.proj_buf.as_ptr();
+        let merged_ptr = scratch.merged.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            for t in start..end {
+                unsafe {
+                    let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
+                    let b = std::slice::from_raw_parts(proj_ptr.add(t * n_embd), n_embd);
+                    let dst = std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                    vec_add(a, b, dst);
+                }
+            }
+        });
         t_attn_out = t_attn_out_start.elapsed().as_secs_f64();
 
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
@@ -1509,27 +1610,38 @@ impl<'a> VisionEncoder<'a> {
         let t_ln2_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln2_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_with_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln2_weights[il],
-                        b,
-                        eps,
-                    );
-                }
+                let weight = &pc.ln2_weights[il];
+                let bias = b.as_slice();
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                            layer_norm_with_bias(row, weight, bias, eps);
+                        }
+                    }
+                });
             } else {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_without_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln2_weights[il],
-                        eps,
-                    );
-                }
+                let weight = &pc.ln2_weights[il];
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                            layer_norm_without_bias(row, weight, eps);
+                        }
+                    }
+                });
             }
 
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 pc.ffn_up_weights[il]
                     .as_ref()
                     .expect("missing vision ffn up weight"),
@@ -1537,25 +1649,44 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
             );
             if let Some(ref bias) = pc.ffn_up_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * cfg.n_ff;
-                    vec_add_into(bias.as_slice(), &mut scratch.ffn_buf[off..off + cfg.n_ff]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let ffn_ptr = scratch.ffn_buf.as_mut_ptr();
+                let nff = cfg.n_ff;
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
+                            let row = std::slice::from_raw_parts_mut(ffn_ptr.add(t * nff), nff);
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
             if let Some(ref gate) = pc.ffn_gate_weights[il] {
-                matmul_weight_batch(
+                matmul_weight_batch_pooled(
+                    pool,
                     gate,
                     &scratch.merged[..n_tokens * n_embd],
                     &mut scratch.ffn_gate_buf[..n_tokens * cfg.n_ff],
                 );
                 if let Some(ref bias) = pc.ffn_gate_biases[il] {
-                    for t in 0..n_tokens {
-                        let off = t * cfg.n_ff;
-                        vec_add_into(
-                            bias.as_slice(),
-                            &mut scratch.ffn_gate_buf[off..off + cfg.n_ff],
-                        );
-                    }
+                    let bias_ptr = bias.as_ptr();
+                    let gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
+                    let nff = cfg.n_ff;
+                    pool.compute(move |ith, nth| {
+                        let (start, end) =
+                            crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                        for t in start..end {
+                            unsafe {
+                                let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
+                                let row =
+                                    std::slice::from_raw_parts_mut(gate_buf_ptr.add(t * nff), nff);
+                                vec_add_into(bias_slice, row);
+                            }
+                        }
+                    });
                 }
             }
         } else {
@@ -1626,7 +1757,8 @@ impl<'a> VisionEncoder<'a> {
 
         let t_ffn_down_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 pc.ffn_down_weights[il]
                     .as_ref()
                     .expect("missing vision ffn down weight"),
@@ -1634,10 +1766,20 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.proj_buf[..n_tokens * n_embd],
             );
             if let Some(ref bias) = pc.ffn_down_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let proj_ptr = scratch.proj_buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
+                            let row =
+                                std::slice::from_raw_parts_mut(proj_ptr.add(t * n_embd), n_embd);
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
         } else {
             let layer = &self.layers[il];
@@ -1662,14 +1804,20 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        for t in 0..n_tokens {
-            let off = t * n_embd;
-            vec_add(
-                &scratch.residual[off..off + n_embd],
-                &scratch.proj_buf[off..off + n_embd],
-                &mut scratch.merged[off..off + n_embd],
-            );
-        }
+        let residual_ptr = scratch.residual.as_ptr();
+        let proj_ptr = scratch.proj_buf.as_ptr();
+        let merged_ptr = scratch.merged.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            for t in start..end {
+                unsafe {
+                    let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
+                    let b = std::slice::from_raw_parts(proj_ptr.add(t * n_embd), n_embd);
+                    let dst = std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                    vec_add(a, b, dst);
+                }
+            }
+        });
         t_ffn_down = t_ffn_down_start.elapsed().as_secs_f64();
 
         if do_profile {
@@ -1688,6 +1836,7 @@ impl<'a> VisionEncoder<'a> {
         n_embd: usize,
         merge: usize,
         scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
     ) {
         let cfg = &self.config;
         let n_merged_x = n_patches_x / merge;
@@ -1711,7 +1860,7 @@ impl<'a> VisionEncoder<'a> {
         concat_buf.copy_from_slice(&hidden[..concat_size]);
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(&pc.mm_0_weight, concat_buf, mm0_out);
+            matmul_weight_batch_pooled(pool, &pc.mm_0_weight, concat_buf, mm0_out);
             if let Some(ref bias) = pc.mm_0_bias {
                 for t in 0..n_projected {
                     for j in 0..bias.len().min(merged_embd) {
@@ -1744,7 +1893,8 @@ impl<'a> VisionEncoder<'a> {
         gelu_ggml_f16_inplace(&mut mm0_out[..n_projected * merged_embd]);
 
         if let Some(ref pc) = self.precomputed {
-            matmul_weight_batch(
+            matmul_weight_batch_pooled(
+                pool,
                 &pc.mm_2_weight,
                 &mm0_out[..n_projected * merged_embd],
                 &mut out[..n_projected * proj_dim],
@@ -2101,6 +2251,103 @@ fn ggml_layer_norm_stats(x: &[f32]) -> (f32, f32) {
         variance += f64::from(centered * centered);
     }
     (mean, (variance / x.len() as f64) as f32)
+}
+
+/// AVX2 + FMA `ggml_layer_norm_stats`.
+///
+/// Computes `(mean, variance)` over `x` in f64 accumulator pairs to
+/// match ggml's precision contract. `_mm256_loadu_ps` does eight lanes
+/// per iteration; the final horizontal sum is done in f64 via
+/// `_mm256_cvtps_pd` + `_mm_add_pd` to avoid precision loss on long
+/// rows.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn ggml_layer_norm_stats_avx2(x: &[f32]) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let n = x.len();
+    let mut sum_v = _mm256_setzero_pd();
+    let mut sumsq_v = _mm256_setzero_pd();
+    let mut i = 0;
+    // Process 8 f32 lanes at a time; widen to two f64 lanes for
+    // accumulation so each SIMD iteration contributes 8 of the 4
+    // f64 lanes inside `sum_v` / `sumsq_v` (which has only 4 lanes
+    // — eight i32 lanes becomes two sets of four i64 lanes after
+    // widening). To keep things simple we just accumulate scalar
+    // into a per-iter partial sum and add into the SIMD vector every
+    // 4 iters (32 floats).
+    let mut partial_sum = 0.0f64;
+    let mut partial_sumsq = 0.0f64;
+    while i + 8 <= n {
+        let v = _mm256_loadu_ps(x.as_ptr().add(i));
+        let lo = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        let hi = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v));
+        let sq = _mm256_mul_pd(lo, lo);
+        let sq_hi = _mm256_mul_pd(hi, hi);
+        sum_v = _mm256_add_pd(sum_v, _mm256_add_pd(lo, hi));
+        sumsq_v = _mm256_add_pd(sumsq_v, _mm256_add_pd(sq, sq_hi));
+        i += 8;
+    }
+    while i < n {
+        let v = f64::from(*x.as_ptr().add(i));
+        partial_sum += v;
+        partial_sumsq += v * v;
+        i += 1;
+    }
+    let mut hsum = |v: std::arch::x86_64::__m256d| -> f64 {
+        let hi = _mm256_extractf128_pd::<1>(v);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum128 = _mm_add_pd(hi, lo);
+        let t = _mm_add_sd(sum128, _mm_unpackhi_pd(sum128, sum128));
+        _mm_cvtsd_f64(t)
+    };
+    let total_sum = hsum(sum_v) + partial_sum;
+    let total_sumsq = hsum(sumsq_v) + partial_sumsq;
+    let mean = (total_sum / n as f64) as f32;
+    let variance = (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
+    (mean, variance)
+}
+
+/// NEON `ggml_layer_norm_stats`.
+///
+/// Same precision contract as AVX2: accumulate in f64, then compute
+/// variance as `E[x²] − (E[x])²` once at the end.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
+    use std::arch::aarch64::*;
+    let n = x.len();
+    let mut sum0 = vdupq_n_f64(0.0);
+    let mut sum1 = vdupq_n_f64(0.0);
+    let mut sumsq0 = vdupq_n_f64(0.0);
+    let mut sumsq1 = vdupq_n_f64(0.0);
+    let mut i = 0;
+    while i + 8 <= n {
+        let v = vld1q_f32(x.as_ptr().add(i));
+        // Widen two f32x4 → f64x2 lanes each (8 floats → 4 f64 lanes
+        // total per iteration).
+        let lo = vcvt_f64_f32(vget_low_f32(v));
+        let hi = vcvt_high_f64_f32(v);
+        sum0 = vaddq_f64(sum0, lo);
+        sum1 = vaddq_f64(sum1, hi);
+        let sq_lo = vmulq_f64(lo, lo);
+        let sq_hi = vmulq_f64(hi, hi);
+        sumsq0 = vaddq_f64(sumsq0, sq_lo);
+        sumsq1 = vaddq_f64(sumsq1, sq_hi);
+        i += 8;
+    }
+    let mut partial_sum = 0.0f64;
+    let mut partial_sumsq = 0.0f64;
+    while i < n {
+        let v = f64::from(*x.as_ptr().add(i));
+        partial_sum += v;
+        partial_sumsq += v * v;
+        i += 1;
+    }
+    let total_sum = vaddvq_f64(vaddq_f64(sum0, sum1)) + partial_sum;
+    let total_sumsq = vaddvq_f64(vaddq_f64(sumsq0, sumsq1)) + partial_sumsq;
+    let mean = (total_sum / n as f64) as f32;
+    let variance = (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
+    (mean, variance)
 }
 
 fn layer_norm_with_bias(x: &mut [f32], w: &[f32], b: &[f32], eps: f32) {
@@ -2535,6 +2782,10 @@ unsafe fn attn_scaled_add_avx2(out: &mut [f32], v: *const f32, scale: f32, d: us
 mod tests {
     use super::*;
 
+    fn test_pool() -> Arc<ComputePool> {
+        Arc::new(ComputePool::new(1))
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn qwen35_vision_attention_value_matches_ggml_reduction() {
@@ -2624,9 +2875,19 @@ mod tests {
         {
             let weight = load_source_weight(&source, "v.test.weight", &[4, 1], 4, 1).unwrap();
             assert_eq!(weight.ggml_type, GGMLType::BF16);
+            // The vision encoder feeds F32 inputs (layer-norm outputs);
+            // the BF16 kernel must NOT coerce those inputs to BF16 before
+            // the dot product. With F32 inputs the dot is computed in F32
+            // precision and includes the input's full mantissa (1.00390625
+            // has a sub-BF16-representable increment), giving:
+            //   1.0*1.00390625 + -2.0*1.0 + 0.5*2.0 + 3.0*-1.0 = -2.99609375
+            let expected = (1.0f32).mul_add(
+                1.00390625,
+                (-2.0f32).mul_add(1.0, (0.5f32).mul_add(2.0, 3.0 * -1.0)),
+            );
             assert_eq!(
                 weight.matmul(&[1.00390625, 1.0, 2.0, -1.0])[0].to_bits(),
-                (-3.0f32).to_bits()
+                expected.to_bits()
             );
         }
 
@@ -2639,9 +2900,13 @@ mod tests {
                 .collect(),
         );
         let patch = load_source_weight(&source, "v.test.weight", &[1, 1, 3, 1], 3, 1).unwrap();
+        // F32 input path: 1.0*1.00390625 + -2.0*1.0 + 0.5*2.0 ≈ 0.00390625
+        // (the OLD bug coerced F32→BF16 first, dropping 1.00390625 to 1.0
+        // and producing a clean 0.0 — that was the bug we just fixed.)
+        let patch_expected = (1.0f32).mul_add(1.00390625, (-2.0f32).mul_add(1.0, 0.5 * 2.0));
         assert_eq!(
             patch.matmul(&[1.00390625, 1.0, 2.0])[0].to_bits(),
-            0.0f32.to_bits()
+            patch_expected.to_bits()
         );
     }
 
@@ -2745,7 +3010,7 @@ mod tests {
         scratch.projected.resize(2, 0.0);
         scratch.merged[..block_order.len()].copy_from_slice(&block_order);
 
-        encoder.project(4, 2, 1, 2, &mut scratch);
+        encoder.project(4, 2, 1, 2, &mut scratch, &test_pool());
 
         assert_eq!(&scratch.project_concat_buf[..8], &block_order);
     }

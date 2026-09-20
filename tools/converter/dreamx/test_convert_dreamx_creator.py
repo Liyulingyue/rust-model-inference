@@ -8,9 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
 
-from tools.dreamx import convert_dreamx_creator as converter
-from tools.dots.convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes
-from tools.dreamx.convert_dreamx_creator import (
+from tools.converter.dreamx import convert_dreamx_creator as converter
+from tools.converter.dots.convert_dots_tts import read_gguf_directory, read_gguf_tensor_bytes
+from tools.converter.dreamx.convert_dreamx_creator import (
     JOINT_LAYERS,
     SourceTensor,
     _publish_pair,
@@ -287,7 +287,7 @@ class DreamXInventoryTest(unittest.TestCase):
                     raise OSError("second publish failed")
                 real_link(source, target)
 
-            with patch("tools.dreamx.convert_dreamx_creator.os.link", fail_second):
+            with patch("tools.converter.dreamx.convert_dreamx_creator.os.link", fail_second):
                 with self.assertRaisesRegex(OSError, "second publish failed"):
                     _publish_pair(main_tmp, aux_tmp, main_out, aux_out, False)
 
@@ -313,7 +313,7 @@ class DreamXInventoryTest(unittest.TestCase):
                     raise OSError("second backup failed")
                 real_replace(source, target)
 
-            with patch("tools.dreamx.convert_dreamx_creator.os.replace", fail_second):
+            with patch("tools.converter.dreamx.convert_dreamx_creator.os.replace", fail_second):
                 with self.assertRaisesRegex(OSError, "second backup failed"):
                     _publish_pair(main_tmp, aux_tmp, main_out, aux_out, True)
 
@@ -506,7 +506,7 @@ class DreamXInventoryTest(unittest.TestCase):
                 )
 
             with patch(
-                "tools.dreamx.convert_dreamx_creator.collect_source_tensors",
+                "tools.converter.dreamx.convert_dreamx_creator.collect_source_tensors",
                 return_value=sources,
             ):
                 main, mmproj = export_model(root, out, "q8_0", False)

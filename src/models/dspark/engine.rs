@@ -85,13 +85,15 @@ pub fn run_greedy<T: DSparkTarget>(
     options: RunOptions,
     mut on_token: impl FnMut(u32),
 ) -> Result<DSparkStats, String> {
-    if options.max_tokens == 0
-        || options.draft_n_max == 0
-        || options.draft_n_max > draft.block_size()
+    let draft_n_max = options.draft_n_max.min(draft.block_size());
+    if draft_n_max == 0
         || !options.confidence_min.is_finite()
         || !(0.0..=1.0).contains(&options.confidence_min)
     {
         return Err("Invalid DSpark run options".into());
+    }
+    if options.max_tokens == 0 {
+        return Ok(DSparkStats::default());
     }
     ensure_aligned(target, draft)?;
 
@@ -115,7 +117,7 @@ pub fn run_greedy<T: DSparkTarget>(
         let keep = if target_only || catch_up {
             0
         } else {
-            options.draft_n_max.min(remaining.saturating_sub(1))
+            draft_n_max.min(remaining.saturating_sub(1))
         };
         let base = if target_only {
             target.position()
@@ -126,11 +128,9 @@ pub fn run_greedy<T: DSparkTarget>(
         let draft_ids = if keep == 0 {
             Vec::new()
         } else {
-            let mut token_ids = draft
-                .draft(pending, options.draft_n_max, options.confidence_min)?
-                .token_ids;
-            token_ids.truncate(keep);
-            token_ids
+            draft
+                .draft(pending, keep, options.confidence_min)?
+                .token_ids
         };
         let draft_elapsed = draft_started.elapsed();
         stats.drafted = stats

@@ -16,6 +16,8 @@ pub fn run_inference(
     profile: bool,
     kv_format: crate::app::cli::KvFormat,
     prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -39,6 +41,8 @@ pub fn run_inference(
         profile,
         kv_format,
         prefill_batch_size,
+        max_context,
+        repetition_penalty,
         None,
     )
 }

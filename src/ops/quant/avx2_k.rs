@@ -290,3 +290,62 @@ pub(crate) unsafe fn vec_dot_q3k_q8k_avx2(q3k_data: &[u8], q8k: &[super::BlockQ8
 
     acc_sum
 }
+
+/// AVX2 SIMD kernel for IQ4_NL × Q8_K dot product.
+///
+/// Each IQ4_NL super-block groups 8 blocks of 32 elements (256 total), sharing
+/// one Q8_K activation block. Per block: 2 bytes f16 d + 16 bytes qs (4-bit
+/// nibbles). Lookup table `KVALUES_IQ4NL` (16-entry non-linear) replaces the
+/// linear `(nibble - 8) * d` mapping of Q4_0.
+///
+/// Precision contract: ≤ 1 ULP drift vs `vec_dot_iq4_nl_q8k_scalar` (FMA single
+/// rounding vs scalar sequential accumulation, see OPTIMIZATION.md §1.2). End
+/// to end on Qwen3-0.6B-IQ4_NL.gguf produces "Paris" — accepted production drift.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn vec_dot_iq4_nl_q8k_avx2(iq4nl_data: &[u8], q8k: &[super::BlockQ8K]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let nb = q8k.len();
+    let m0f128 = _mm_set1_epi8(0x0f);
+    let lut128 = _mm_loadu_si128(super::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let mut acc_sum = 0.0f32;
+
+    for i in 0..nb {
+        let super_off = i * 8 * 18;
+        if super_off + 8 * 18 > iq4nl_data.len() {
+            break;
+        }
+
+        for sb in 0..8usize {
+            let boff = super_off + sb * 18;
+            let d_raw = u16::from_le_bytes([iq4nl_data[boff], iq4nl_data[boff + 1]]);
+            let d = super::f16_to_f32(d_raw) * q8k[i].d;
+
+            let qs = &iq4nl_data[boff + 2..boff + 18];
+            let q8_block = &q8k[i].qs[sb * 32..(sb + 1) * 32];
+
+            let qb = _mm_loadu_si128(qs.as_ptr() as *const __m128i);
+            let q8_lo = _mm_loadu_si128(q8_block.as_ptr() as *const __m128i);
+            let q8_hi = _mm_loadu_si128(q8_block.as_ptr().add(16) as *const __m128i);
+
+            let lo_nib = _mm_and_si128(qb, m0f128);
+            let hi_nib = _mm_and_si128(_mm_srli_epi16(qb, 4), m0f128);
+            let lo_lut = _mm_shuffle_epi8(lut128, lo_nib);
+            let hi_lut = _mm_shuffle_epi8(lut128, hi_nib);
+            let lo_i16 = _mm256_cvtepi8_epi16(lo_lut);
+            let hi_i16 = _mm256_cvtepi8_epi16(hi_lut);
+            let q8_lo_i16 = _mm256_cvtepi8_epi16(q8_lo);
+            let q8_hi_i16 = _mm256_cvtepi8_epi16(q8_hi);
+
+            let p_lo = _mm256_madd_epi16(lo_i16, q8_lo_i16);
+            let p_hi = _mm256_madd_epi16(hi_i16, q8_hi_i16);
+            let p = _mm256_add_epi32(p_lo, p_hi);
+            let dot = hsum_i32(p);
+
+            acc_sum += d * dot as f32;
+        }
+    }
+
+    acc_sum
+}

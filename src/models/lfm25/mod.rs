@@ -5,4 +5,7 @@
 
 pub mod trunk;
 
-pub use trunk::{get_f32_tensor, load_layers, run_inference, Lfm25Config, Lfm25LayerWeights};
+pub use trunk::{
+    get_f32_tensor, load_layers, run_forward_logits_lfm25, run_inference, Lfm25Config,
+    Lfm25LayerWeights,
+};

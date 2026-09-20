@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)]";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -184,6 +184,14 @@ fn main() {
         .mmproj
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    let tts_model = options
+        .tts_model
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+    let tts_mmproj = options
+        .tts_mmproj
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
     let image = options
         .image
         .as_deref()
@@ -237,8 +245,50 @@ fn main() {
             options.temperature.unwrap_or(0.0),
             n_threads,
             prefill_batch_size,
+            options.effective_max_context(),
+            options.effective_repetition_penalty(),
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
+        // Omni → TTS post-processor pipeline: when both the multimodal
+        // media path AND a TTS model + mmproj are present, route the
+        // generated reply through Qwen3-TTS to produce a 24 kHz WAV
+        // alongside the text. The TTS layer is opt-in so the existing
+        // text-only multimodal flow is unchanged for users without a
+        // bundled TTS model.
+        if let (Some(tts_model_path), Some(tts_mmproj_path)) = (tts_model, tts_mmproj) {
+            let wav_out = match options
+                .out
+                .as_deref()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                Some(path) => path,
+                None => {
+                    eprintln!("Inference error: --tts-model and --tts-mmproj require --out <wav>");
+                    std::process::exit(1);
+                }
+            };
+            let language = options.language.as_deref().unwrap_or("en");
+            app::run_or_exit(app::run_multimodal_with_tts_postproc(
+                Arc::clone(&source),
+                model_path,
+                explicit_mmproj,
+                image,
+                video,
+                audio,
+                prompt,
+                max_tokens,
+                temperature,
+                options.threads,
+                prefill_batch_size,
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
+                tts_model_path,
+                tts_mmproj_path,
+                wav_out,
+                language,
+            ));
+            return;
+        }
         app::run_or_exit(app::run_multimodal_with_video(
             Arc::clone(&source),
             model_path,
@@ -251,7 +301,46 @@ fn main() {
             temperature,
             options.threads,
             prefill_batch_size,
+            options.effective_max_context(),
+            options.effective_repetition_penalty(),
         ));
+    } else if options.jev {
+        let jev_context = options
+            .jev_context
+            .as_deref()
+            .ok_or_else(|| "--jev requires --jev-context <text>".to_string());
+        let jev_questions = options.jev_questions.clone();
+        let positive = options.jev_positive.clone();
+        let output_json = options.jev_output_json;
+        match jev_context {
+            Ok(ctx) => {
+                if jev_questions.is_empty() {
+                    app::run_or_exit(Err("--jev requires at least one --jev-question".to_string()));
+                    return;
+                }
+                let inputs: Vec<app::JevQuestionInput> = jev_questions
+                    .into_iter()
+                    .map(|q| app::JevQuestionInput {
+                        text: q.text,
+                        options: q.options,
+                    })
+                    .collect();
+                app::run_or_exit(app::run_jev_decision(
+                    source.clone(),
+                    ctx,
+                    &inputs,
+                    positive.as_deref(),
+                    n_threads,
+                    prefill_batch_size,
+                    output_json,
+                ));
+                return;
+            }
+            Err(e) => {
+                app::run_or_exit(Err(e));
+                return;
+            }
+        }
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
             app::run_or_exit(app::run_multimodal_with_video(
@@ -266,6 +355,8 @@ fn main() {
                 temperature,
                 options.threads,
                 prefill_batch_size,
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         } else if options.embedding {
             app::run_embedding(
@@ -306,6 +397,8 @@ fn main() {
                 options.kv_format,
                 prefill_batch_size,
                 options.dspark_options(),
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -320,6 +413,8 @@ fn main() {
                 options.kv_format,
                 prefill_batch_size,
                 options.dspark_options(),
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
             ));
         }
     } else {
@@ -374,6 +469,8 @@ fn main() {
                     temperature,
                     options.threads,
                     prefill_batch_size,
+                    options.effective_max_context(),
+                    options.effective_repetition_penalty(),
                 ));
                 println!();
             }
@@ -385,6 +482,7 @@ fn main() {
             temperature,
             options.threads,
             prefill_batch_size,
+            options.effective_repetition_penalty(),
         ));
     }
 }

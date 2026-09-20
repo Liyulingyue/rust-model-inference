@@ -1,7 +1,7 @@
-use super::super::f16_to_f32;
 use super::super::has_avx2_fma;
 use super::super::has_f16c;
 use super::super::has_neon;
+use super::super::{bf16_to_f32, f16_to_f32};
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 use std::arch::asm;
 
@@ -182,6 +182,12 @@ pub fn dot_f16_f32(a: &[f32], b_f16: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 8 {
+            return unsafe { dot_f16_avx2(a, b, n) };
+        }
+    }
     #[cfg(all(
         target_arch = "aarch64",
         target_endian = "little",
@@ -208,6 +214,42 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
     }
     sum as f32
+}
+
+/// AVX2 + F16C + FMA implementation of `dot_f16`.
+///
+/// `a` and `b` are both little-endian `u16` F16 arrays. Loads 8 elements at a
+/// time via `_mm_loadu_si128` (treats as raw bytes), converts to FP32 lanes
+/// with `_mm256_cvtph_ps`, then FMA accumulates. Mirrors the existing
+/// `dot_f16_f16_bytes_avx2` for the case where both inputs are already
+/// `u16`-aligned.
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i) as *const __m128i));
+        acc = _mm256_fmadd_ps(va, vb, acc);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    // 4-element tail with `_mm_cvtph_ps` (SSE conversion of 4 F16).
+    if i + 4 <= n {
+        let va = _mm_cvtph_ps(_mm_loadl_epi64(a.as_ptr().add(i) as *const __m128i));
+        let vb = _mm_cvtph_ps(_mm_loadl_epi64(b.as_ptr().add(i) as *const __m128i));
+        let v = _mm_fmadd_ps(va, vb, _mm_setzero_ps());
+        let tail = _mm_hsum_ps_4(v);
+        let t = std::mem::transmute::<__m128, [f32; 4]>(tail);
+        sum += t[0];
+        i += 4;
+    }
+    while i < n {
+        sum += f16_to_f32(a[i]) * f16_to_f32(b[i]);
+        i += 1;
+    }
+    sum
 }
 
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
@@ -281,6 +323,101 @@ unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
     while i < n {
         let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
         sum += f16_to_f32(a[i]) * f16_to_f32(weight);
+        i += 1;
+    }
+    sum
+}
+
+/// BF16 weight bytes × F32 input dot product.
+///
+/// `b` is the raw 2-byte-per-element BF16 weight matrix (per-row, n_in
+/// elements per row); `a` is an F32 input vector of length `n_in`.
+/// Returns the F32 dot product.
+///
+/// The AVX2 path packs 8 BF16 lanes per iteration (PMOVZX + SHL to
+/// promote to F32 in the high half, then FMA). This is the
+/// complement to `dot_f16_f16_bytes_avx2` for the BF16 case where the
+/// activation stays in F32 and the weight is BF16.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n);
+    debug_assert!(b.len() >= n * 2);
+    if has_avx2_fma() && n >= 8 {
+        return unsafe { dot_bf16_f32_avx2(a, b, n) };
+    }
+    dot_bf16_f32_scalar(a, b, n)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn dot_bf16_f32_avx2(a: &[f32], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let chunk = _mm_loadu_si128(b.as_ptr().add(i * 2) as *const __m128i);
+        // Promote u16 → u32 (PMOVZX) then shift-left 16 to put the BF16
+        // bits in the F32 high half. Reinterpret as F32 — the FMA sees
+        // the exact BF16 value, just zero-extended.
+        let bits = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk), 16);
+        let w = _mm256_castsi256_ps(bits);
+        let x = _mm256_loadu_ps(a.as_ptr().add(i));
+        acc = _mm256_fmadd_ps(w, x, acc);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n);
+    debug_assert!(b.len() >= n * 2);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") && n >= 4 {
+            return unsafe { dot_bf16_f32_neon(a, b, n) };
+        }
+    }
+    dot_bf16_f32_scalar(a, b, n)
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0;
+    while i + 4 <= n {
+        let packed = vld1_u16(b.as_ptr().add(i * 2).cast());
+        let bits = vshlq_n_u32(vmovl_u16(packed), 16);
+        let w = vreinterpretq_f32_u32(bits);
+        acc = vfmaq_f32(acc, w, vld1q_f32(a.as_ptr().add(i)));
+        i += 4;
+    }
+    let mut sum = vaddvq_f32(acc);
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
+        i += 1;
+    }
+    sum
+}
+
+#[inline]
+fn dot_bf16_f32_scalar(a: &[f32], b: &[u8], n: usize) -> f32 {
+    let mut sum = 0.0f32;
+    let mut i = 0;
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
         i += 1;
     }
     sum

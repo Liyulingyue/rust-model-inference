@@ -35,4 +35,5 @@ Both pairs were checked against llama.cpp commit
 greedy decoding, and a seven-token draft block. The draft hidden state, logits,
 Markov bias/logits, confidence, generated token IDs, and acceptance blocks were
 compared bit for bit. The real-artifact regression tests are in
-`tests/dspark_reference.rs`.
+`tests/dspark_reference.rs`; run their bitwise Oracle checks with
+`--features parity-trace,scalar-parity`.

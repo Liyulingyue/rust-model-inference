@@ -222,7 +222,51 @@ impl<'model> Qwen3Session<'model> {
         &mut self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
         mut on_token: impl FnMut(&str),
+    ) -> Result<Qwen3Generation, String> {
+        self.generate_streaming_until(input, options, repetition_penalty, |text| {
+            if !text.is_empty() {
+                on_token(text);
+            }
+            true
+        })
+    }
+
+    /// Single forward pass: prefill the prompt and return a copy of the
+    /// last-position logits. Used by JEV / classification modes that do
+    /// not need autoregressive decoding.
+    pub fn forward_logits(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<(Vec<f32>, Duration), String> {
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 prompt must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let duration = self.prefill(&input, prefill_batch_size)?;
+        Ok((self.scratch.logits.clone(), duration))
+    }
+
+    /// Return false from the callback to stop generation. Empty text callbacks
+    /// still allow cancellation when a token has not completed a UTF-8 character.
+    pub fn generate_streaming_until(
+        &mut self,
+        input: Qwen3Input<'_>,
+        options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
+        mut on_token: impl FnMut(&str) -> bool,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self.model, &input, &options)?;
         let required = checked_session_capacity(
@@ -236,8 +280,13 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        let mut callback = |text: &str| on_token(text);
-        self.generate_inner(input, options, false, Some(&mut callback))
+        self.generate_inner(
+            input,
+            options,
+            repetition_penalty,
+            false,
+            Some(&mut on_token),
+        )
     }
 
     pub(crate) fn generate_with_asr_trace(
@@ -258,15 +307,16 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, asr_trace, None)
+        self.generate_inner(input, options, 1.0, asr_trace, None)
     }
 
     fn generate_inner(
         &mut self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
         asr_trace: bool,
-        mut on_token: Option<&mut dyn FnMut(&str)>,
+        mut on_token: Option<&mut dyn FnMut(&str) -> bool>,
     ) -> Result<Qwen3Generation, String> {
         let model = self.model;
         let config = &model.config;
@@ -330,8 +380,17 @@ impl<'model> Qwen3Session<'model> {
             .map_err(|error| format!("Failed to allocate rendered tokens: {error}"))?;
         let mut decoder = model.tokenizer.streaming_decoder(false);
         let mut decode_duration = Duration::ZERO;
+        let mut token_counts: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
 
         while generated_tokens.len() < options.max_new_tokens {
+            if repetition_penalty != 1.0 && !token_counts.is_empty() {
+                crate::ops::sampling::apply_repetition_penalty(
+                    &mut self.scratch.logits,
+                    &token_counts,
+                    repetition_penalty,
+                );
+            }
             let token_id = sample_token(&self.scratch.logits, options.temperature)?;
             if model.tokenizer.eos_id() == Some(token_id)
                 || model.tokenizer.special_token_id("im_end") == Some(token_id)
@@ -339,14 +398,15 @@ impl<'model> Qwen3Session<'model> {
                 break;
             }
             let text = decoder.push(token_id);
+            let keep_going = on_token.as_mut().is_none_or(|callback| callback(&text));
             if !text.is_empty() {
-                if let Some(callback) = on_token.as_mut() {
-                    callback(&text);
-                }
                 rendered_tokens.push(text);
             }
             generated_tokens.push(token_id);
-            if generated_tokens.len() == options.max_new_tokens {
+            if repetition_penalty != 1.0 {
+                *token_counts.entry(token_id).or_insert(0) += 1;
+            }
+            if !keep_going || generated_tokens.len() == options.max_new_tokens {
                 break;
             }
 
@@ -435,6 +495,9 @@ impl<'model> Qwen3Session<'model> {
         ));
         let tail = decoder.finish();
         if !tail.is_empty() {
+            if let Some(callback) = on_token.as_mut() {
+                callback(&tail);
+            }
             rendered_tokens.push(tail);
         }
         Ok(Qwen3Generation {
@@ -835,5 +898,39 @@ mod vulkan_tests {
                 "decode must remain one submission per token"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn controlled_stream_stops_after_first_generated_token() {
+        let model = super::super::tests::deterministic_session_model(16);
+        let mut session = Qwen3Session::new(&model, 16).unwrap();
+        let mut callbacks = 0;
+        let generation = session
+            .generate_streaming_until(
+                Qwen3Input {
+                    token_ids: &[1],
+                    positions: &[[0, 0, 0, 0]],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                Qwen3GenerateOptions {
+                    max_new_tokens: 8,
+                    temperature: 0.0,
+                    prefill_batch_size: 1,
+                },
+                1.0,
+                |_| {
+                    callbacks += 1;
+                    false
+                },
+            )
+            .unwrap();
+        assert_eq!(callbacks, 1);
+        assert_eq!(generation.token_ids.len(), 1);
     }
 }
