@@ -67,6 +67,16 @@ per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
       可以复用生成模式 prefill 出来的 KV cache，避免重复编码同一段 context。
       当前架构下两者用不同的 session path，需要在 dispatch 入口统一
       KV lifecycle（`KvLifecycle::Shared`）。
+- [ ] **JEV Cardinality 扩展（26 → 255）** — 当前 label 固定 A-Z（最多 26 候选）。
+      TypeSafe Jev 官方支持最高 255 cardinality。扩展路径：
+      1. 候选 ≤ 26 时继续用 A-Z label（现有逻辑不变）
+      2. 候选 > 26 时自动切换到数字 label（1, 2, 3, ...），验证每个数字 token
+         在 tokenizer 中是单 token（0-9 在所有 BPE tokenizer 中都是单 token；
+         10-99 大部分也是；100-255 需要逐个验证）
+      3. 更高基数时参考 TypeSafe 的 2-stage 方案：先 score 所有候选（并行），
+         再 top-K choose（第二次 forward pass）
+      注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
+      实际使用的 label set（数字或字母）。
 
 ## Medium Priority
 

@@ -193,6 +193,9 @@ pub struct JevResult {
     pub positive_label: Option<char>,
     pub probability_positive: Option<f32>,
     pub score: Option<f32>,
+    pub confidence: f32,
+    pub entropy: f32,
+    pub margin: f32,
     pub prefill_ms: u128,
 }
 
@@ -369,6 +372,10 @@ pub fn run_jev_decision(
                 }
             }
         }
+        println!(
+            "confidence: {:.4} | entropy: {:.4} | margin: {:.4}",
+            r.confidence, r.entropy, r.margin
+        );
         println!("prefill: {} ms", r.prefill_ms);
     } else {
         println!("\n--- JEV decisions ({} questions) ---", results.len());
@@ -393,6 +400,10 @@ pub fn run_jev_decision(
                     println!("  score: {:.4}", r.score.unwrap_or(0.0));
                 }
             }
+            println!(
+                "  confidence: {:.4} | entropy: {:.4} | margin: {:.4}",
+                r.confidence, r.entropy, r.margin
+            );
         }
     }
 
@@ -1419,6 +1430,22 @@ fn compute_jev_result(
         _ => (None, None),
     };
 
+    let confidence = exps[chosen_idx];
+
+    let entropy: f32 = -exps
+        .iter()
+        .filter(|p| **p > 0.0)
+        .map(|p| p * p.ln())
+        .sum::<f32>();
+
+    let mut sorted = exps.clone();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let margin = if sorted.len() >= 2 {
+        sorted[0] - sorted[1]
+    } else {
+        sorted[0]
+    };
+
     JevResult {
         mode: q.mode,
         question: q.text.clone(),
@@ -1430,6 +1457,9 @@ fn compute_jev_result(
         positive_label: q.positive_label,
         probability_positive: prob_positive,
         score,
+        confidence,
+        entropy,
+        margin,
         prefill_ms,
     }
 }
@@ -1445,7 +1475,7 @@ struct PreparedQuestion {
 impl serde::Serialize for JevResult {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("JevResult", 7)?;
+        let mut st = s.serialize_struct("JevResult", 10)?;
         st.serialize_field(
             "mode",
             match self.mode {
@@ -1477,6 +1507,9 @@ impl serde::Serialize for JevResult {
         if self.mode == JevMode::Score {
             st.serialize_field("score", &self.score)?;
         }
+        st.serialize_field("confidence", &self.confidence)?;
+        st.serialize_field("entropy", &self.entropy)?;
+        st.serialize_field("margin", &self.margin)?;
         st.serialize_field("prefill_ms", &self.prefill_ms)?;
         st.end()
     }
