@@ -141,9 +141,18 @@ TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
 
 | 输入 → 输出 | vision encode | TTS frame_loop | TTS dac_decode | 总耗时 |
 |-----------|--------------|---------------|---------------|-------|
-| apple.png → text + 24k WAV | ~60s | ~20s | ~20s | ~5min |
+| apple.png → text + 24k WAV | ~11s | ~20s | ~20s | ~1.5min |
 | zh.wav → text + 24k WAV | ~5s（encoder） | ~20s | ~20s | ~3min |
 | test.mp4 (320×240) → text + 24k WAV | ~5min（4 帧） | ~20s | ~20s | ~10min |
+
+> 注：`vision encode` 一项 Omni 早期为 ~60s，本仓库 `lfm&qwen25omni`
+> 分支做了两个修复后降至 ~11s（5× 加速）：
+> 1. 视觉编码器加载 BF16 权重时不再用 `with_bf16_input(true)`
+>    强制走 F32 输入的 SIMD 路径（之前因误用 BF16 输入走 scalar
+>    `dot_bf16`，约慢 2.5×）。
+> 2. `BF16Kernel` 的 `n_in % 8 != 0` fallback（如 Omni `ffn_down` 的
+>    `n_in=3420`）用新增的 `dot_bf16_f32`（AVX2+NEON）替代纯 scalar
+>    `forward_f32_rows_scalar`（约再快 4.5×）。
 
 完整输出验证参考 `models/omni_apple_reply.wav` 等。
 
