@@ -1,8 +1,8 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
-#[cfg(not(test))]
-const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0xda70_6e66_3141_68dc_84fd_09da_fee1_4466;
-#[cfg(test)]
-const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0x2055_26be_4c3c_b1e6_cf1a_4a8a_00b7_7831;
+const GEMMA4_TOKEN_TABLE_DIGESTS: &[u128] = &[
+    0x2055_26be_4c3c_b1e6_cf1a_4a8a_00b7_7831,
+    0xda70_6e66_3141_68dc_84fd_09da_fee1_4466,
+];
 pub(super) fn require_clip(source: &dyn TensorSource) -> Result<(), String> {
     require_string(source, "general.architecture", "clip")?;
     require_string(source, "general.type", "mmproj")
@@ -87,9 +87,9 @@ pub(super) fn require_gemma4_token_table(source: &dyn TensorSource) -> Result<()
     match source.metadata("tokenizer.ggml.tokens") {
         Some(MetaValue::Array(MetaValueType::String, tokens)) if tokens.len() == 262_144 => {
             let actual = gemma4_token_table_digest(tokens)?;
-            if actual != GEMMA4_TOKEN_TABLE_DIGEST {
+            if !GEMMA4_TOKEN_TABLE_DIGESTS.contains(&actual) {
                 return Err(format!(
-                    "Invalid metadata tokenizer.ggml.tokens digest: expected {GEMMA4_TOKEN_TABLE_DIGEST:#034x}, got {actual:#034x}"
+                    "Invalid metadata tokenizer.ggml.tokens digest: expected one of {GEMMA4_TOKEN_TABLE_DIGESTS:#034x?}, got {actual:#034x}"
                 ));
             }
             Ok(())

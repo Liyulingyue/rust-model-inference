@@ -34,7 +34,8 @@ git -C "$build_dir" apply "$patch" >&2
 cmake -S "$build_dir" -B "$build_dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-    -DLLAMA_BUILD_SERVER=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF >&2
+    -DLLAMA_BUILD_SERVER=OFF -DGGML_METAL=OFF -DGGML_CUDA=OFF \
+    -DGGML_BLAS=OFF >&2
 cmake --build "$build_dir/build" --target llama-gemma4-trace --parallel "${RMI_BUILD_JOBS:-4}" >&2
 
 binary="$build_dir/build/bin/llama-gemma4-trace"

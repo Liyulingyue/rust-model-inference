@@ -17,6 +17,31 @@ const GEMMA4_MMPROJ_NAME: &str = "mmproj-F16.gguf";
 const GEMMA4_THREADS: usize = 4;
 const GEMMA4_PROMPT: &str = "describe";
 const GEMMA4_CHAT_TEMPLATE: &str = r#"{{ '<|turn>user\n' + messages[0].content + '<turn|>\n' }}{% if add_generation_prompt %}{{ '<|turn>model\n' }}{% endif %}"#;
+const GEMMA4_12B_MODEL_NAME: &str = "gemma-4-12b-it-Q8_0.gguf";
+const GEMMA4_12B_TRACE_NAMES: &[&str] = &[
+    "gemma4.tokens",
+    "gemma4.input",
+    "gemma4.layer.0.attn_norm",
+    "gemma4.layer.0.q",
+    "gemma4.layer.0.q_norm",
+    "gemma4.layer.0.q_rope",
+    "gemma4.layer.0.k",
+    "gemma4.layer.0.k_norm",
+    "gemma4.layer.0.k_rope",
+    "gemma4.layer.0.v",
+    "gemma4.layer.0.v_norm",
+    "gemma4.layer.0.attention",
+    "gemma4.layer.0.attention_projected",
+    "gemma4.layer.0.attn_out",
+    "gemma4.layer.0.ffn_norm",
+    "gemma4.layer.0.ffn_down",
+    "gemma4.layer.0.ffn_out",
+    "gemma4.layer.0.layer_output",
+    "gemma4.final.norm",
+    "gemma4.logits.raw",
+    "gemma4.logits",
+    "gemma4.generated_ids",
+];
 
 static GEMMA4_TRACE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -543,6 +568,72 @@ fn run_oracle_case(
     )
 }
 
+fn run_rust_text_trace(model: &Path, trace: &Path) -> Result<(), String> {
+    let old_trace = std::env::var_os("RMI_PARITY_TRACE");
+    let old_filter = std::env::var_os("RMI_PARITY_FILTER");
+    std::env::set_var("RMI_PARITY_TRACE", trace);
+    std::env::set_var("RMI_PARITY_FILTER", GEMMA4_12B_TRACE_NAMES.join(","));
+    let result = run_gemma4(Gemma4Request {
+        model,
+        mmproj: None,
+        image: None,
+        audio: None,
+        prompt: GEMMA4_PROMPT,
+        max_tokens: 1,
+        threads: 1,
+        kv_format: KvFormat::F32,
+        prefill_batch_size: 1,
+    });
+    restore_env("RMI_PARITY_TRACE", old_trace);
+    restore_env("RMI_PARITY_FILTER", old_filter);
+    result.map_err(|error| format!("12B text Rust inference failed: {error}"))
+}
+
+fn run_oracle_text_trace(oracle: &Path, model: &Path, trace: &Path) -> Result<(), String> {
+    let filter = GEMMA4_12B_TRACE_NAMES.join(",");
+    let mut command = Command::new(oracle);
+    command
+        .env("RMI_PARITY_TRACE", trace)
+        .env("RMI_PARITY_FILTER", filter)
+        .arg("-m")
+        .arg(model)
+        .args([
+            "-p",
+            GEMMA4_PROMPT,
+            "-n",
+            "1",
+            "-t",
+            "1",
+            "-tb",
+            "1",
+            "-b",
+            "1",
+            "-ub",
+            "1",
+            "-ngl",
+            "0",
+            "-ctk",
+            "f32",
+            "-ctv",
+            "f32",
+            "--temp",
+            "0",
+            "--top-k",
+            "1",
+            "--top-p",
+            "1.0",
+            "--repeat-penalty",
+            "1.0",
+            "--jinja",
+            "--chat-template",
+            GEMMA4_CHAT_TEMPLATE,
+            "--flash-attn",
+            "off",
+            "--no-warmup",
+        ]);
+    run_command(&mut command, "12B text Oracle inference")
+}
+
 fn run_parity_case(
     case: ParityCase,
     root: &Path,
@@ -596,6 +687,12 @@ fn gemma4_mmproj_path() -> PathBuf {
     std::env::var_os("RMI_GEMMA4_MMPROJ")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("models/gemma-4-e2b").join(GEMMA4_MMPROJ_NAME))
+}
+
+fn gemma4_12b_model_path() -> PathBuf {
+    std::env::var_os("RMI_GEMMA4_12B_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("models/gemma-4-12b-it-GGUF").join(GEMMA4_12B_MODEL_NAME))
 }
 
 fn require_gemma4_gguf(
@@ -803,6 +900,65 @@ fn gemma4_matches_pinned_cpu_oracle_before_softmax() {
             root.display()
         );
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "parity-trace")]
+#[test]
+#[ignore = "requires the Gemma4 12B GGUF and pinned llama.cpp trace binary"]
+fn gemma4_12b_text_matches_pinned_cpu_oracle_raw_bits() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let model = gemma4_12b_model_path();
+    require_gemma4_gguf(
+        &model,
+        GEMMA4_12B_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    )
+    .unwrap();
+    let oracle = ensure_gemma4_oracle().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "rmi-gemma4-12b-text-parity-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let rust_trace = root.join("rust.jsonl");
+    let oracle_trace = root.join("oracle.jsonl");
+
+    run_oracle_text_trace(&oracle, &model, &oracle_trace).unwrap();
+    run_rust_text_trace(&model, &rust_trace).unwrap();
+    let keep = |record: &TraceRecord| GEMMA4_12B_TRACE_NAMES.contains(&record.checkpoint.as_str());
+    let rust = trace_records(&rust_trace)
+        .unwrap()
+        .into_iter()
+        .filter(keep)
+        .collect::<Vec<_>>();
+    let oracle = trace_records(&oracle_trace)
+        .unwrap()
+        .into_iter()
+        .filter(keep)
+        .collect::<Vec<_>>();
+    for name in GEMMA4_12B_TRACE_NAMES {
+        assert!(
+            rust.iter().any(|record| record.checkpoint == *name),
+            "Rust trace is missing {name}; artifacts retained in {}",
+            root.display()
+        );
+        assert!(
+            oracle.iter().any(|record| record.checkpoint == *name),
+            "Oracle trace is missing {name}; artifacts retained in {}",
+            root.display()
+        );
+    }
+    assert_trace_equal("12b-text", &rust, &oracle)
+        .unwrap_or_else(|error| panic!("{error}\nartifacts retained in {}", root.display()));
     std::fs::remove_dir_all(root).unwrap();
 }
 

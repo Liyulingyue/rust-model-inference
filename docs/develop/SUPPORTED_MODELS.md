@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-08，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-09-20，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -39,6 +39,7 @@
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
+| Gemma 4 12B | `gemma4` | 文本生成 | 无 | Q8_0 LLM + F32 KV | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 在单线程 CPU 上与 llama.cpp `3173a56` 对齐 token、layer-0 checkpoints、raw/final logits 和单步 greedy token 的原始 F32 位；未验证该型号的多模态组件。 |
 | Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
 
 ## 已接入但未达到 Verified 的范围

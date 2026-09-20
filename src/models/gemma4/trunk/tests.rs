@@ -304,7 +304,11 @@ fn deterministic_model_with_config(
                 attn_norm: vec![1.0; cfg.embd],
                 attn_q: deterministic_weight(cfg.embd, q_heads * dim, layer * 11 + 1),
                 attn_k: deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 2),
-                attn_v: Some(deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 3)),
+                attn_v: Some(deterministic_weight(
+                    cfg.embd,
+                    kv_heads * dim,
+                    layer * 11 + 3,
+                )),
                 attn_output: deterministic_weight(q_heads * dim, cfg.embd, layer * 11 + 4),
                 attn_q_norm: vec![1.0; dim],
                 attn_k_norm: Some(vec![1.0; dim]),
@@ -765,6 +769,52 @@ fn gemma4_trace_child() {
 #[cfg(feature = "parity-trace")]
 #[test]
 fn gemma4_trace_rows_match_batch_one_raw_bits() {
+    const FILTER: &str = concat!(
+        "gemma4.input,",
+        "gemma4.layer.0.attn_norm,",
+        "gemma4.layer.0.q,",
+        "gemma4.layer.0.q_norm,",
+        "gemma4.layer.0.q_rope,",
+        "gemma4.layer.0.k,",
+        "gemma4.layer.0.k_norm,",
+        "gemma4.layer.0.k_rope,",
+        "gemma4.layer.0.v,",
+        "gemma4.layer.0.v_norm,",
+        "gemma4.layer.0.attention,",
+        "gemma4.layer.0.attention_projected,",
+        "gemma4.layer.0.attn_out,",
+        "gemma4.layer.0.ffn_norm,",
+        "gemma4.layer.0.ffn_gate,",
+        "gemma4.layer.0.ffn_up,",
+        "gemma4.layer.0.ffn_activated,",
+        "gemma4.layer.0.ffn_down,",
+        "gemma4.layer.0.ffn_out,",
+        "gemma4.layer.0.layer_output,",
+        "gemma4.logits",
+    );
+    const REQUIRED: &[&str] = &[
+        "gemma4.input",
+        "gemma4.layer.0.attn_norm",
+        "gemma4.layer.0.q",
+        "gemma4.layer.0.q_norm",
+        "gemma4.layer.0.q_rope",
+        "gemma4.layer.0.k",
+        "gemma4.layer.0.k_norm",
+        "gemma4.layer.0.k_rope",
+        "gemma4.layer.0.v",
+        "gemma4.layer.0.v_norm",
+        "gemma4.layer.0.attention",
+        "gemma4.layer.0.attention_projected",
+        "gemma4.layer.0.attn_out",
+        "gemma4.layer.0.ffn_norm",
+        "gemma4.layer.0.ffn_gate",
+        "gemma4.layer.0.ffn_up",
+        "gemma4.layer.0.ffn_activated",
+        "gemma4.layer.0.ffn_down",
+        "gemma4.layer.0.ffn_out",
+        "gemma4.layer.0.layer_output",
+        "gemma4.logits",
+    ];
     let mut baseline = None;
     for batch in [1, 64] {
         let trace = std::env::temp_dir().join(format!(
@@ -778,6 +828,7 @@ fn gemma4_trace_rows_match_batch_one_raw_bits() {
                 "models::gemma4::trunk::tests::gemma4_trace_child",
             ])
             .env("RMI_PARITY_TRACE", &trace)
+            .env("RMI_PARITY_FILTER", FILTER)
             .env("RMI_TEST_TRACE_BATCH_SIZE", batch.to_string())
             .output()
             .unwrap();
@@ -809,6 +860,12 @@ fn gemma4_trace_rows_match_batch_one_raw_bits() {
                 .count(),
             2
         );
+        for name in REQUIRED {
+            assert!(
+                records.iter().any(|record| record["name"] == *name),
+                "missing trace checkpoint {name} for batch {batch}"
+            );
+        }
         if let Some(expected) = &baseline {
             assert_eq!(&actual, expected);
         } else {
@@ -874,7 +931,7 @@ fn softcap_matches_pinned_reciprocal_scale_bits() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn layer_12_attention_uses_stable_scalar_softmax() {
+fn layer_12_attention_uses_llama_neon_softmax() {
     let keys = [
         0x40b4_85b2,
         0x3ffc_c0c2,
@@ -909,7 +966,7 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     )
     .unwrap();
 
-    assert_eq!(output.map(f32::to_bits), [0x3f15_89fd; 8]);
+    assert_eq!(output.map(f32::to_bits), [0x3f15_89fe; 8]);
 }
 
 #[test]
@@ -1449,13 +1506,14 @@ fn f32_matrix_loader_preserves_declared_shape() {
 fn actual_model_one_token_produces_finite_logits() {
     let path = std::env::var_os("RMI_GEMMA4_MODEL").expect("RMI_GEMMA4_MODEL");
     let source = std::sync::Arc::new(crate::core::loader::GGUFLoader::from_file(path).unwrap());
-    for (layer, expected_ffn) in [(14, 6144), (15, 12_288), (34, 12_288)] {
+    let config = Gemma4Config::from_source(source.as_ref()).unwrap();
+    for layer in [0, config.layers / 2, config.layers - 1] {
         assert_eq!(
             source
                 .tensor_info(&format!("blk.{layer}.ffn_gate.weight"))
                 .unwrap()
                 .dims,
-            [1536, expected_ffn]
+            [config.embd as u64, config.ffn_per_layer[layer] as u64]
         );
     }
     let model = super::Gemma4Model::from_source(source, 4).unwrap();

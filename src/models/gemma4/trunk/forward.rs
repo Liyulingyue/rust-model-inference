@@ -7,7 +7,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
     bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_inplace,
+    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_approx_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,9 +40,7 @@ impl Gemma4Session<'_> {
             .checked_add(rows.len())
             .ok_or_else(|| "Gemma4 input length overflow".to_string())?;
         if end > n_ctx {
-            return Err(format!(
-                "Gemma4 input length {end} exceeds context {n_ctx}"
-            ));
+            return Err(format!("Gemma4 input length {end} exceeds context {n_ctx}"));
         }
         validate_input_rows(rows, self.model.config.embd)?;
 
@@ -140,6 +138,7 @@ impl Gemma4Session<'_> {
             }
         }
         ensure_finite("gemma4.input", &scratch.x[..x_len])?;
+        trace_rows("gemma4.input", None, &scratch.x[..x_len], row_count, embd);
 
         if use_per_layer {
             let token_scale = (PER_LAYER as f32).sqrt();
@@ -211,6 +210,13 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
+            trace_layer_rows(
+                "attn_norm",
+                layer_index,
+                &scratch.normed[..x_len],
+                row_count,
+                embd,
+            );
             let q_len = row_count * q_width;
             let kv_len = row_count * kv_width;
             if layer_index < base_kv {
@@ -255,7 +261,10 @@ impl Gemma4Session<'_> {
                             ),
                             (
                                 &format!("blk.{layer_index}.attn_v.weight"),
-                                layer.attn_v.as_ref().expect("attn_v present when not shared"),
+                                layer
+                                    .attn_v
+                                    .as_ref()
+                                    .expect("attn_v present when not shared"),
                                 &mut scratch.v[..kv_len],
                             ),
                         ],
@@ -296,13 +305,14 @@ impl Gemma4Session<'_> {
                     &mut scratch.scales,
                 )?;
             }
-
             for row in 0..row_count {
                 let position = base_position + row;
                 let query = &mut scratch.q[row * q_width..(row + 1) * q_width];
+                trace_layer(row, "q", layer_index, query);
                 for head in query.chunks_exact_mut(dim) {
                     rms_norm_inplace(head, &layer.attn_q_norm, EPS);
                 }
+                trace_layer(row, "q_norm", layer_index, query);
                 apply_rope(
                     query,
                     position,
@@ -313,6 +323,7 @@ impl Gemma4Session<'_> {
                     cfg.rope_freq_base,
                     &model.rope_freqs,
                 )?;
+                trace_layer(row, "q_rope", layer_index, query);
             }
 
             if layer_index < base_kv {
@@ -321,13 +332,14 @@ impl Gemma4Session<'_> {
                     let position = base_position + row;
                     let key = &mut scratch.k[row * kv_width..(row + 1) * kv_width];
                     let value = &mut scratch.v[row * kv_width..(row + 1) * kv_width];
+                    trace_layer(row, "k", layer_index, key);
                     for kv_head in 0..layer.kv_heads {
                         let offset = kv_head * dim;
                         if let Some(kn) = k_norm {
                             rms_norm_inplace(&mut key[offset..offset + dim], kn, EPS);
                         }
-                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
                     }
+                    trace_layer(row, "k_norm", layer_index, key);
                     apply_rope(
                         key,
                         position,
@@ -338,6 +350,13 @@ impl Gemma4Session<'_> {
                         cfg.rope_freq_base,
                         &model.rope_freqs,
                     )?;
+                    trace_layer(row, "k_rope", layer_index, key);
+                    trace_layer(row, "v", layer_index, value);
+                    for kv_head in 0..layer.kv_heads {
+                        let offset = kv_head * dim;
+                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
+                    }
+                    trace_layer(row, "v_norm", layer_index, value);
                     self.kv[layer_index].append(layer_index, position, key, value)?;
                 }
             }
@@ -358,6 +377,13 @@ impl Gemma4Session<'_> {
                     model.pool(),
                 )?;
             }
+            trace_layer_rows(
+                "attention",
+                layer_index,
+                &scratch.attn[..q_len],
+                row_count,
+                q_width,
+            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.attn_output.weight"),
                 &layer.attn_output,
@@ -371,6 +397,13 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
+            trace_layer_rows(
+                "attention_projected",
+                layer_index,
+                &scratch.projected[..x_len],
+                row_count,
+                embd,
+            );
             for row in 0..row_count {
                 let projected = &scratch.projected[row * embd..(row + 1) * embd];
                 let down = &mut scratch.down[row * embd..(row + 1) * embd];
@@ -399,6 +432,13 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
+            trace_layer_rows(
+                "ffn_norm",
+                layer_index,
+                &scratch.normed[..x_len],
+                row_count,
+                embd,
+            );
             let ffn_len = row_count * ffn;
             matmul_group_rows(
                 [
@@ -430,12 +470,33 @@ impl Gemma4Session<'_> {
                 &format!("blk.{layer_index}.ffn_up.weight"),
                 &scratch.up[..ffn_len],
             )?;
+            trace_layer_rows(
+                "ffn_gate",
+                layer_index,
+                &scratch.gate[..ffn_len],
+                row_count,
+                ffn,
+            );
+            trace_layer_rows(
+                "ffn_up",
+                layer_index,
+                &scratch.up[..ffn_len],
+                row_count,
+                ffn,
+            );
             for (gate, up) in scratch.gate[..ffn_len]
                 .chunks_exact_mut(ffn)
                 .zip(scratch.up[..ffn_len].chunks_exact(ffn))
             {
                 ggml_geglu_fp16_inplace(gate, up);
             }
+            trace_layer_rows(
+                "ffn_activated",
+                layer_index,
+                &scratch.gate[..ffn_len],
+                row_count,
+                ffn,
+            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.ffn_down.weight"),
                 &layer.ffn_down,
@@ -449,6 +510,13 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
+            trace_layer_rows(
+                "ffn_down",
+                layer_index,
+                &scratch.down[..x_len],
+                row_count,
+                embd,
+            );
             for row in 0..row_count {
                 let down = &scratch.down[row * embd..(row + 1) * embd];
                 let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
@@ -495,8 +563,8 @@ impl Gemma4Session<'_> {
                 for row in 0..row_count {
                     let start = row * per_layer_all + layer_index * per_layer_width;
                     ggml_geglu_fp16_inplace(
-                        &mut scratch.per_layer_gate[row * per_layer_width
-                            ..(row + 1) * per_layer_width],
+                        &mut scratch.per_layer_gate
+                            [row * per_layer_width..(row + 1) * per_layer_width],
                         &scratch.per_layer[start..start + per_layer_width],
                     );
                 }
@@ -526,10 +594,7 @@ impl Gemma4Session<'_> {
                     for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
                         *hidden = (*hidden + *per_layer) * layer.output_scale;
                     }
-                    ensure_finite(
-                        &format!("gemma4.layer.{layer_index}.per_layer_out"),
-                        hidden,
-                    )?;
+                    ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
                     trace_layer(row, "per_layer_out", layer_index, hidden);
                 }
             } else {
@@ -540,12 +605,16 @@ impl Gemma4Session<'_> {
                     for value in hidden.iter_mut() {
                         *value *= layer.output_scale;
                     }
-                    ensure_finite(
-                        &format!("gemma4.layer.{layer_index}.residual_out"),
-                        hidden,
-                    )?;
+                    ensure_finite(&format!("gemma4.layer.{layer_index}.residual_out"), hidden)?;
                 }
             }
+            trace_layer_rows(
+                "layer_output",
+                layer_index,
+                &scratch.x[..x_len],
+                row_count,
+                embd,
+            );
         }
 
         #[cfg(feature = "parity-trace")]
@@ -577,6 +646,7 @@ impl Gemma4Session<'_> {
                     &mut scratch.q8,
                     &mut scratch.scales,
                 )?;
+                trace(row, "gemma4.logits.raw", None, &scratch.logits);
                 for logit in &mut scratch.logits {
                     *logit = softcap(*logit, model.config.logit_softcap);
                 }
@@ -970,27 +1040,34 @@ fn apply_rope(
             dim / 2
         ));
     }
-    apply_rope_full(values, position, dim, full_freq_factors);
+    apply_rope_full(values, position, dim, full_freq_base, full_freq_factors);
     Ok(())
 }
 
-/// Full-attention RoPE: pre-compute the sin/cos table once from
-/// `factors` (which already encodes `θ_i = 1 / freq_base^(2i/dim)`)
-/// and apply the standard neox rotation to every head in one pass.
-fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f32]) {
+/// Full-attention RoPE with the GGUF frequency divisors applied to the
+/// base-derived theta sequence, matching ggml's `ggml_rope_cache_init`.
+fn apply_rope_full(
+    values: &mut [f32],
+    position: usize,
+    dim: usize,
+    freq_base: f32,
+    factors: &[f32],
+) {
     let half = dim / 2;
     let n_heads = values.len() / dim;
     if half == 0 || n_heads == 0 {
         return;
     }
-    let pos_f = position as f32;
+    let theta_scale = freq_base.powf(-2.0 / dim as f32);
+    let mut theta = position as f32;
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
     for (i, factor) in factors[..half].iter().enumerate() {
-        let angle = pos_f / factor;
+        let angle = theta / factor;
         let (c, s) = crate::ops::rope::rope_sin_cos(angle);
         cos_table[i] = c;
         sin_table[i] = s;
+        theta *= theta_scale;
     }
     // Same rotation formula as the scalar path; AVX2-equivalent of the
     // inner FMA pattern will be picked up by the compiler when
@@ -1021,8 +1098,8 @@ pub(super) fn attend(
     sliding: bool,
     sliding_window: usize,
     output: &mut [f32],
-    scores: &mut Vec<f32>,
-    values: &mut Vec<f32>,
+    _scores: &mut Vec<f32>,
+    _values: &mut Vec<f32>,
     pool: &ComputePool,
 ) -> Result<(), String> {
     let dim = cache.head_dim;
@@ -1064,15 +1141,6 @@ pub(super) fn attend(
     };
     let cached = rows - first;
     let padded = cached.div_ceil(256) * 256;
-    scores.resize(padded, f32::NEG_INFINITY);
-    values.resize(padded, 0.0);
-
-    // Parallelize per-head over the compute pool. The V pass iterates
-    // `token` outer / `dimension` inner: V at fixed token is contiguous in
-    // memory (stride 1 in `dim`), so each token-load is cache-friendly, and
-    // the inner dim loop is FMA-fused (AVX2 `_mm256_fmadd_ps`) over
-    // `score[token] * V[token, dim]`. This drops the per-dim `head_values`
-    // gather + `dot_f32` and avoids the strided V reads of the old code.
     let query_ptr = query.as_ptr();
     let keys_ptr = cache.keys.as_ptr();
     let values_ptr = cache.values.as_ptr();
@@ -1092,7 +1160,7 @@ pub(super) fn attend(
                 let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
                 *score = dot_f32(query_head, key, dim);
             }
-            softmax_inplace(&mut head_scores);
+            softmax_approx_inplace(&mut head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
             unsafe {
@@ -1112,10 +1180,8 @@ pub(super) fn attend(
     ensure_finite(&format!("blk.{layer} attention"), output)
 }
 
-/// Fused `output[d] += Σ_t scores[t] * V[t, d]` over `[first, first+cached)`.
-/// Outer loop iterates `t` so each V load is a contiguous `dim`-length chunk
-/// (stride 1 in `dim`). Inner loop uses the SIMD FMA of the host to fuse
-/// `output[d] += score * V[t, d]`.
+/// Match ggml's dimension-major `MUL_MAT` by gathering each V column and using
+/// the same padded SIMD dot reduction as the Q·K pass.
 #[inline]
 unsafe fn attend_v(
     values_ptr: *const f32,
@@ -1127,135 +1193,14 @@ unsafe fn attend_v(
     dim: usize,
     head_output: &mut [f32],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return attend_v_avx2(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
+    let padded = cached.div_ceil(256) * 256;
+    let scores = std::slice::from_raw_parts(scores_ptr, padded);
+    let mut head_values = vec![0.0; padded];
+    for (d, output) in head_output[..dim].iter_mut().enumerate() {
+        for (value, token) in head_values[..cached].iter_mut().zip(first..) {
+            *value = *values_ptr.add(token * row_width + kv_offset + d);
         }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            return attend_v_neon(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
-        }
-    }
-    attend_v_scalar(
-        values_ptr,
-        scores_ptr,
-        row_width,
-        kv_offset,
-        first,
-        cached,
-        dim,
-        head_output,
-    )
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn attend_v_avx2(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::x86_64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = _mm256_set1_ps(score);
-        let mut d = 0;
-        while d + 8 <= dim {
-            let vo = _mm256_loadu_ps(head_output.as_ptr().add(d));
-            let vd = _mm256_loadu_ps(v_base.add(d));
-            _mm256_storeu_ps(
-                head_output.as_mut_ptr().add(d),
-                _mm256_fmadd_ps(vscore, vd, vo),
-            );
-            d += 8;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn attend_v_neon(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::aarch64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = vdupq_n_f32(score);
-        let mut d = 0;
-        while d + 4 <= dim {
-            let vo = vld1q_f32(head_output.as_ptr().add(d));
-            let vd = vld1q_f32(v_base.add(d));
-            vst1q_f32(head_output.as_mut_ptr().add(d), vfmaq_f32(vo, vscore, vd));
-            d += 4;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-unsafe fn attend_v_scalar(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        for d in 0..dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-        }
+        *output = dot_f32(scores, &head_values, padded);
     }
 }
 
@@ -1331,6 +1276,7 @@ fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "parity-trace")]
 fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
     trace(
         row,
@@ -1339,6 +1285,29 @@ fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
         values,
     );
 }
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer(_row: usize, _stage: &str, _layer: usize, _values: &[f32]) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_layer_rows(stage: &str, layer: usize, values: &[f32], rows: usize, width: usize) {
+    let name = format!("gemma4.layer.{layer}.{stage}");
+    let _ = crate::parity_trace::checkpoint_rows(&name, Some(layer), &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer_rows(_stage: &str, _layer: usize, _values: &[f32], _rows: usize, _width: usize) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_rows(name: &str, layer: Option<usize>, values: &[f32], rows: usize, width: usize) {
+    let _ = crate::parity_trace::checkpoint_rows(name, layer, &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_rows(_name: &str, _layer: Option<usize>, _values: &[f32], _rows: usize, _width: usize) {}
 
 #[cfg(feature = "parity-trace")]
 fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
@@ -1353,3 +1322,70 @@ fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
 
 #[cfg(not(feature = "parity-trace"))]
 fn trace(_row: usize, _name: &str, _layer: Option<usize>, _values: &[f32]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_rope, attend, attend_v, KvLayer};
+    use crate::core::thread_pool::ComputePool;
+
+    #[test]
+    fn full_attention_rope_applies_base_before_frequency_factors() {
+        let mut values = [1.25, -2.0, 0.75, 3.5];
+
+        apply_rope(&mut values, 1, 4, 0, false, 10_000.0, 16.0, &[1.0, 2.0]).unwrap();
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3d35_5950, 0xc01a_edae, 0x3fba_811e, 0x404e_4b3f]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_softmax_matches_llama_neon_raw_bits() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 1,
+            keys: [0x410d_e8ceu32, 0x410e_45e2, 0x4110_5392]
+                .map(f32::from_bits)
+                .to_vec(),
+            values: vec![1.0, 0.0, 0.0],
+        };
+        let mut output = [0.0];
+
+        attend(
+            16,
+            2,
+            &[1.0],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0x3ea0_b33e);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_values_match_llama_neon_dot_reduction() {
+        let mut scores = [0.0; 256];
+        scores[0] = f32::from_bits(0x3efa_b5d9);
+        scores[1] = f32::from_bits(0x3f02_a513);
+        let mut values = [0.0; 8];
+        values[0] = f32::from_bits(0x3cb9_1aee);
+        values[4] = f32::from_bits(0x3c9f_4180);
+        let mut output = [0.0; 4];
+
+        unsafe {
+            attend_v(values.as_ptr(), scores.as_ptr(), 4, 0, 0, 2, 4, &mut output);
+        }
+
+        assert_eq!(output[0].to_bits(), 0x3cab_e9d8);
+    }
+}
