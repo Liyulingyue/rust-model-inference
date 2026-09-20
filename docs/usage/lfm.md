@@ -1,12 +1,20 @@
 # LFM 家族用法
 
-本仓库对 LFM2 / LFM2.5 / LFM2-MoE / LFM2.5-VL 的端到端命令行示例。
+本仓库对 LFM2 / LFM2.5 / LFM2-MoE / LFM2.5-VL / LFM2.5-Thinking 的端到端命令行示例。
 
 > 通用前置：构建 `cargo build --release --bin rust-model-inference`。
 > 所有 LFM 文本 / 视觉模型在 GGUF 里的 `general.architecture` 都是字符串 `"lfm2"`。
 > LFM2 与 LFM2.5 文本的变体由 CLI 路由阶段通过 `general.basename` 含 `"2.5"` 区分
 > （`src/app/text.rs:62-66`），分别进入 `src/models/lfm2/` 与 `src/models/lfm25/`。
 > 详见 `docs/ISSUE.md` 的 LFM2 / LFM2.5 命名不一致条目。
+> 
+> 常用生成参数（适用于所有 LFM 路径）：
+> 
+> - `--max-context N`：KV cache 容量上限，默认 8192。LFM2.5 文本模型
+>   `context_length=128000`，过大的 `--max-context` 会一次性占用 GB 级 KV 内存。
+> - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）；α > 1
+>   抑制重复（与 llama.cpp / Hugging Face `repetition_penalty` 等价）。
+>   对低质量量化（如 Q4_K_M）下陷入复读循环的模型尤其有用。
 
 ## 1. LFM2 文本（`src/models/lfm2/`）
 
@@ -28,6 +36,32 @@ cargo run --release --bin rust-model-inference -- \
 
 如果 `general.basename` 不含 `"2.5"`，同样的 GGUF 仍能加载但会走 LFM2 trunk，
 可能与 LFM2.5 实际架构不一致。建议显式选 basename 正确的 GGUF。
+
+### 2.1 LFM2.5-Thinking（reasoning 模型）
+
+`LFM2.5-1.2B-Thinking`（arch = `lfm2`,basename 含 `"2.5"`）走 `src/models/lfm25/`
+trunk。模型默认输出会包含 ``…`` reasoning 段 + 答案文字。仓库代码
+会在构造 chat prompt 时自动注入 LFM2.5 官方 system prompt：
+
+> "You are a helpful assistant trained by Liquid AI. Your goal is to be helpful, accurate, and concise."
+
+不带 system turn 也能加载但可能输出退化。建议显式走默认 chat 路径。
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/LFM2.5-1.2B-Thinking-GGUF/LFM2.5-1.2B-Thinking-Q8_0.gguf \
+  --prompt "What is 2 + 3?" --max-tokens 200 \
+  --max-context 8192 --repetition-penalty 1.05
+```
+
+实测 `LFM2.5-1.2B-Thinking-Q8_0` 在 8 线程 Q8_0 下：
+
+- arch 路由：`lfm2.5`（`src/models/lfm25/trunk/`）
+- 文本生成：~28 t/s（短 prompt）
+- 完整 reasoning + 答案：约 5–10 秒（typical reasoning 长度 50–150 tokens）
+
+注：本仓库**未实现** `--thinking` / `--no-thinking` 切换标志 — 当前所有 LFM2.5
+生成都包含 `` 段。若需去除，使用下游工具（如 `awk`）按 `` 切分。
 
 ## 3. LFM2-MoE
 
@@ -113,10 +147,14 @@ tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（V
 | 输入 GGUF `general.architecture` | `general.basename` | 进入 trunk | Modes |
 |---|---|---|---|
 | `lfm2` | 不含 `2.5` | `src/models/lfm2/`（文本） | 文本 |
-| `lfm2` | 含 `2.5` | `src/models/lfm25/`（文本） | 文本 |
+| `lfm2` | 含 `2.5`（含 Instruct / Thinking） | `src/models/lfm25/`（文本） | 文本 |
 | `lfm2` | 任意 | `src/models/lfm2/vision.rs`（VL，需 `--mmproj --image`） | 多模态 |
 | `lfm2moe` | — | `src/models/lfm2moe/` | 文本（MoE） |
 | `nanbeige` | — | `src/models/llama/` | 文本（Experimental） |
+
+`LFM2.5-Thinking` 区别于 `LFM2.5-Instruct`：Thinking 模型默认在 `<think>...</think>`
+内输出 reasoning；本仓库代码会用同一个 `lfm25` trunk，但**思考文本会直接流
+到 stdout**。后续若需去除可引入 `--no-thinking` 标志（当前未实现）。
 
 ## 6. 与 llama.cpp 的对齐
 

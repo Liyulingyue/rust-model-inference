@@ -104,6 +104,58 @@ cargo run --release --bin rust-model-inference -- \
 Pinned llama.cpp Oracle：`201e50c2076a20adc460c41598593c7cd7b0813`，
 通过 `tests/qwen3_tts_reference.rs` 与 `tools/tts/build_qwen3_tts_oracle.sh` 覆盖。
 
+### 5.1 TTS 作为多模态回复后处理（`--tts-model` / `--tts-mmproj`）
+
+Qwen2.5-Omni 等多模态模型官方输出包含**文本 + 语音**两路,本仓库在
+`Qwen2.5-Omni` GGUF 集合中只包含 Thinker（文本 LLM）+ mmproj（视觉/音频
+编码器）,不含独立 Talker。补齐语音输出：将 `Qwen3-TTS-12Hz-1.7B-Base`
+作为后处理器,在文本生成完成后自动合成 24 kHz mono WAV。
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen2.5-Omni-3B-GGUF/Qwen2.5-Omni-3B-Q8_0.gguf \
+  --mmproj models/Qwen2.5-Omni-3B-GGUF/mmproj-BF16.gguf \
+  --image references/apple.png \
+  --prompt "Describe the image briefly." \
+  --tts-model models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --tts-mmproj models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf \
+  --out speech.wav
+```
+
+触发条件（全部满足）：
+- 入口路径包含 `--mmproj`/`--image`/`--audio`/`--video` 任一（即
+  `run_multimodal_with_video` 路径）
+- 同时传 `--tts-model` 与 `--tts-mmproj`
+- 传 `--out <wav>` 指向可写路径
+
+TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
+`--max-tokens 30` 时 TTS 跑 128 帧（约 1.6 秒音频）,`--max-tokens 200` 时
+800 帧（约 10 秒）。
+
+支持所有 Omni 输入模态：
+- `--image <file>`：视觉
+- `--audio <16kHz WAV>`：语音（听写、转写）
+- `--video <mp4>`：视频（需要 `ffmpeg`+`ffprobe`，见 README）
+
+实测 `models/Qwen2.5-Omni-3B-Q8_0.gguf` 在 18 线程下：
+
+| 输入 → 输出 | vision encode | TTS frame_loop | TTS dac_decode | 总耗时 |
+|-----------|--------------|---------------|---------------|-------|
+| apple.png → text + 24k WAV | ~11s | ~20s | ~20s | ~1.5min |
+| zh.wav → text + 24k WAV | ~5s（encoder） | ~20s | ~20s | ~3min |
+| test.mp4 (320×240) → text + 24k WAV | ~5min（4 帧） | ~20s | ~20s | ~10min |
+
+> 注：`vision encode` 一项 Omni 早期为 ~60s，本仓库 `lfm&qwen25omni`
+> 分支做了两个修复后降至 ~11s（5× 加速）：
+> 1. 视觉编码器加载 BF16 权重时不再用 `with_bf16_input(true)`
+>    强制走 F32 输入的 SIMD 路径（之前因误用 BF16 输入走 scalar
+>    `dot_bf16`，约慢 2.5×）。
+> 2. `BF16Kernel` 的 `n_in % 8 != 0` fallback（如 Omni `ffn_down` 的
+>    `n_in=3420`）用新增的 `dot_bf16_f32`（AVX2+NEON）替代纯 scalar
+>    `forward_f32_rows_scalar`（约再快 4.5×）。
+
+完整输出验证参考 `models/omni_apple_reply.wav` 等。
+
 ## 6. 与 llama.cpp 的数值对齐
 
 ### 通用 scalar 位级对比（Qwen3-0.6B）

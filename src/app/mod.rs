@@ -29,8 +29,9 @@ pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, Proj
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
-    run_inference, run_interactive, run_jev_decision, run_multimodal, run_multimodal_with_video,
-    run_shared_inference, JevQuestionInput,
+    run_inference, run_interactive, run_jev_decision, run_multimodal,
+    run_multimodal_with_tts_postproc, run_multimodal_with_video,
+    run_multimodal_with_video_capture_text, run_shared_inference, JevQuestionInput,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 

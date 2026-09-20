@@ -319,18 +319,25 @@ impl Qwen3TtsTalker {
             &[usize_to_u64(config.n_embd, "embedding width")?],
         )?;
 
+        // Both embeddings are stored as `[n_embd, vocab]` / `[n_embd, codebook]`
+        // row-major Q8_0. `static_weight` follows the matmul convention
+        // (`n_in, n_out`), so we pass `n_embd` first (input dimension) and
+        // the row count second (output dimension). Earlier code passed them
+        // in `rows, cols` order which swapped the dimensions and made
+        // `Weight::embedding_lookup` read each row as `vocab_size` elements
+        // (= ~24 GB byte offset for the first prompt token, panic).
         let token_embedding = static_weight(
             source.as_ref(),
             "token_embd.weight",
-            config.vocab_size,
             config.n_embd,
+            config.vocab_size,
         );
 
         let audio_output_head = static_weight(
             source.as_ref(),
             "output.weight",
-            config.audio_codebook_size,
             config.n_embd,
+            config.audio_codebook_size,
         );
 
         check_allocation(

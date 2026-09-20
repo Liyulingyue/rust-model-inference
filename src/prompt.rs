@@ -25,8 +25,21 @@ const WITH_SPECIAL: EncodeOptions = EncodeOptions {
     parse_special: true,
 };
 
-pub fn format_k2_horizon_chat_prompt(prompt: &str) -> String {
-    format!("<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n")
+/// K2-Horizon chat prompt template (used by `llama` trunk).
+///
+/// Default (`enable_thinking = true`): emits `\n` after
+/// `<|ifm|im_start|>assistant\n`, which triggers the model's thinking
+/// block (`<ifm|think>`). Pass `enable_thinking = false` (via
+/// `--no-thinking`) to emit `\n\n` instead so the model skips straight
+/// to the assistant answer.
+pub fn format_k2_horizon_chat_prompt_with_thinking(prompt: &str, enable_thinking: bool) -> String {
+    if enable_thinking {
+        format!(
+            "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        )
+    } else {
+        format!("<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n\n\n")
+    }
 }
 
 pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
@@ -124,6 +137,19 @@ pub fn build_lfm2_chat_prompt(
     tokenizer: &BPETokenizer,
     messages: &[Lfm2Message<'_>],
 ) -> Result<Vec<u32>, String> {
+    build_lfm2_chat_prompt_with_thinking(tokenizer, messages, true)
+}
+
+/// LFM2 / LFM2.5 chat prompt builder with explicit thinking-mode toggle.
+///
+/// When `enable_thinking = false` the generation tail is prefixed with
+/// `\n\n` (mirroring the Qwen3 ChatML convention) so reasoning models
+/// like `LFM2.5-1.2B-Thinking` skip straight to the assistant answer.
+pub fn build_lfm2_chat_prompt_with_thinking(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+    enable_thinking: bool,
+) -> Result<Vec<u32>, String> {
     // LFM2 / LFM2.5 chat format is a literal "role\n{content}\n" sequence
     // (no ChatML control tokens). The official Jinja template starts with
     // `bos_token` and ends each turn with a newline, followed by an
@@ -132,6 +158,18 @@ pub fn build_lfm2_chat_prompt(
     let mut out = Vec::new();
     if let Some(bos) = tokenizer.bos_id() {
         out.push(bos);
+    }
+    let has_system = messages.iter().any(|m| m.role == "system");
+    if !has_system {
+        // LFM2.5 official template requires a system turn. The README / HF
+        // chat template starts with `system\nYou are a helpful assistant
+        // trained by Liquid AI.\n` before the user turn. Inject the default
+        // so instruct/thinking models don't have to be told to introduce
+        // themselves via the user prompt.
+        out.extend(tokenizer.encode(
+            "system\nYou are a helpful assistant trained by Liquid AI.\n",
+            PLAIN_TEXT,
+        ));
     }
     for message in messages {
         // The role itself can include a trailing newline so that the role
@@ -142,14 +180,30 @@ pub fn build_lfm2_chat_prompt(
         out.extend(tokenizer.encode(message.content, PLAIN_TEXT));
         out.extend(tokenizer.encode("\n", PLAIN_TEXT));
     }
-    // Generation prompt: append "assistant\n".
+    // Generation prompt: append "assistant\n" + (for --no-thinking)
+    // a literal `\n\n` so reasoning models emit the answer directly.
     out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
+    if !enable_thinking {
+        out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+    }
     Ok(out)
 }
 
 pub fn build_lfm25_chat_prompt(
     tokenizer: &BPETokenizer,
     messages: &[Lfm2Message<'_>],
+) -> Result<Vec<u32>, String> {
+    build_lfm25_chat_prompt_with_thinking(tokenizer, messages, true)
+}
+
+/// LFM2.5 ChatML prompt builder with thinking-mode toggle. Same convention
+/// as [`append_qwen_assistant_prefix`]: `enable_thinking = false` appends
+/// `\n\n` so reasoning models (`LFM2.5-1.2B-Thinking`) skip straight to
+/// the assistant answer instead of emitting a `\n…\n` block first.
+pub fn build_lfm25_chat_prompt_with_thinking(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+    enable_thinking: bool,
 ) -> Result<Vec<u32>, String> {
     let mut prompt_text = String::new();
     for message in messages {
@@ -160,6 +214,10 @@ pub fn build_lfm25_chat_prompt(
         prompt_text.push('\n');
     }
     prompt_text.push_str("<|im_start|>assistant\n");
+    if !enable_thinking {
+        prompt_text.push('\n');
+        prompt_text.push('\n');
+    }
     let mut tokens = tokenizer.encode(&prompt_text, WITH_SPECIAL);
     if let Some(bos) = tokenizer.bos_id() {
         tokens.insert(0, bos);
@@ -294,7 +352,7 @@ mod tests {
     #[test]
     fn k2_horizon_prompt_matches_reference_template() {
         assert_eq!(
-            format_k2_horizon_chat_prompt("Hello"),
+            format_k2_horizon_chat_prompt_with_thinking("Hello", true),
             "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
         );
     }

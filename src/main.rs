@@ -184,6 +184,14 @@ fn main() {
         .mmproj
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    let tts_model = options
+        .tts_model
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+    let tts_mmproj = options
+        .tts_mmproj
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
     let image = options
         .image
         .as_deref()
@@ -241,6 +249,46 @@ fn main() {
             options.effective_repetition_penalty(),
         ));
     } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
+        // Omni → TTS post-processor pipeline: when both the multimodal
+        // media path AND a TTS model + mmproj are present, route the
+        // generated reply through Qwen3-TTS to produce a 24 kHz WAV
+        // alongside the text. The TTS layer is opt-in so the existing
+        // text-only multimodal flow is unchanged for users without a
+        // bundled TTS model.
+        if let (Some(tts_model_path), Some(tts_mmproj_path)) = (tts_model, tts_mmproj) {
+            let wav_out = match options
+                .out
+                .as_deref()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                Some(path) => path,
+                None => {
+                    eprintln!("Inference error: --tts-model and --tts-mmproj require --out <wav>");
+                    std::process::exit(1);
+                }
+            };
+            let language = options.language.as_deref().unwrap_or("en");
+            app::run_or_exit(app::run_multimodal_with_tts_postproc(
+                Arc::clone(&source),
+                model_path,
+                explicit_mmproj,
+                image,
+                video,
+                audio,
+                prompt,
+                max_tokens,
+                temperature,
+                options.threads,
+                prefill_batch_size,
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
+                tts_model_path,
+                tts_mmproj_path,
+                wav_out,
+                language,
+            ));
+            return;
+        }
         app::run_or_exit(app::run_multimodal_with_video(
             Arc::clone(&source),
             model_path,

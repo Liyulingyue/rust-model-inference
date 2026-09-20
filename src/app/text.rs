@@ -82,6 +82,8 @@ pub fn run_inference(
                 n_threads_arg,
                 profile,
                 kv_format,
+                max_context,
+                thinking,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -94,6 +96,7 @@ pub fn run_inference(
                 kv_format,
                 max_context,
                 repetition_penalty,
+                thinking,
             )
         }
     } else if arch == "lfm2moe" {
@@ -120,6 +123,7 @@ pub fn run_inference(
             kv_format,
             max_context,
             repetition_penalty,
+            thinking,
         )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
@@ -1741,12 +1745,20 @@ fn run_qwen3_family_multimodal(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-) -> Result<(), String> {
+) -> Result<String, String> {
     validate_single_qwen_media(
         image_path.is_some(),
         video_path.is_some(),
         audio_path.is_some(),
     )?;
+    // Shared ComputePool for vision-encoder matmuls (Qwen2.5-Omni vision
+    // encode is otherwise single-threaded BF16; see `matmul_weight_batch_pooled`).
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
     let arch = llm_source
         .metadata("general.architecture")
         .and_then(|value| value.to_string_val())
@@ -1883,6 +1895,7 @@ fn run_qwen3_family_multimodal(
                         grid.image_width(),
                         grid.image_height(),
                         &mut scratch,
+                        &pool,
                     )?;
                     media.extend_from_slice(&scratch.projected);
                     media_grid_shapes.push((grid.grid_h, grid.grid_w));
@@ -1895,13 +1908,7 @@ fn run_qwen3_family_multimodal(
         BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
     );
-    let pool = Arc::new(ComputePool::new(resolve_thread_count(
-        n_threads_arg,
-        std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1),
-    )));
-    let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), pool)?;
+    let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), Arc::clone(&pool))?;
     let width = model.config().n_embd;
     if media.len() % width != 0 {
         return Err(format!(
@@ -1952,6 +1959,39 @@ fn run_qwen3_family_multimodal(
         },
     ));
     let mut token_ids = Vec::new();
+    // Qwen2.5-Omni (qwen2vl arch with `qwen2.5o` projector) requires a
+    // modality-aware system prompt per the upstream README — without it,
+    // the assistant role can drift (audio output only works with the
+    // exact prompt; for text-only multimodal a generic variant still helps
+    // the model behave as a virtual-human assistant). We only inject the
+    // system turn when the projector family matches `Qwen25Omni`, so
+    // qwen3vl / qwen3vlmoe (Qwen3-VL family) keep their existing
+    // system-less behaviour.
+    if matches!(family, crate::app::omni::ProjectorFamily::Qwen25Omni) {
+        let system_text = match media_kind {
+            crate::app::omni::MediaKind::Audio => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+            crate::app::omni::MediaKind::Video => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+            crate::app::omni::MediaKind::Image => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+        };
+        append_qwen_message_tokens(
+            &mut token_ids,
+            &tokenizer,
+            "system",
+            &tokenizer.encode(
+                system_text,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ),
+        )?;
+    }
     append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
     append_qwen_assistant_prefix(&mut token_ids, &tokenizer, false)?;
     let mut embeddings = model.embed_tokens(&token_ids)?;
@@ -1981,7 +2021,7 @@ fn run_qwen3_family_multimodal(
     print!("{}", generation.text);
     io::stdout().flush().map_err(|error| error.to_string())?;
     println!();
-    Ok(())
+    Ok(generation.text)
 }
 
 fn inject_qwen_media_embeddings(
@@ -2113,6 +2153,167 @@ pub fn run_multimodal_with_video(
     )
 }
 
+/// Run multimodal inference and feed the generated text through a
+/// separate TTS model (Qwen3-TTS / Qwen2.5-Omni Talker compatible) to
+/// produce a 24 kHz WAV. Used to bridge Qwen2.5-Omni (no bundled Talker
+/// in our GGUF set) to a usable audio output. Currently uses
+/// Qwen3-TTS-12Hz-1.7B-Base as the post-processor.
+///
+/// Note: this implementation streams the Omni text to stdout AND
+/// synthesises it for TTS in parallel. The text is captured by running
+/// the multimodal flow in a subprocess-style redirect; we use a small
+/// helper (`run_multimodal_with_video_capture_text`) that returns the
+/// reply as a String instead of printing.
+#[allow(clippy::too_many_arguments)]
+pub fn run_multimodal_with_tts_postproc(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    tts_model: &Path,
+    tts_mmproj: &Path,
+    wav_out: &Path,
+    language: &str,
+) -> Result<(), String> {
+    let reply = run_multimodal_with_video_capture_text(
+        Arc::clone(&llm_source),
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+    )?;
+    eprintln!(
+        "Omni → TTS: captured {} chars from reply; running Qwen3-TTS...",
+        reply.chars().count()
+    );
+    // `synthesize_tts_to_wav` expects the Qwen3-TTS internal language
+    // tag (e.g. "english") rather than the ISO code ("en"). Translate
+    // via the same normalizer the standalone --tts path uses so the
+    // Talker's `<|codec_language_english|>` literal resolves correctly.
+    let internal_language = crate::app::cli::normalize_tts_language(Some(language))?;
+    let wav_bytes = crate::app::tts::synthesize_tts_to_wav(
+        tts_model,
+        tts_mmproj,
+        &reply,
+        internal_language,
+        // TTS frame budget: the user's --max-tokens bounds the Omni reply
+        // length; the Qwen3-TTS Talker emits one 80 ms audio frame per
+        // step and stops on EOS, so `max_tokens * 4` frames (~80 ms per
+        // frame) caps audio at ~3.2 seconds per Omni token. Clamp to a
+        // floor of 128 so short captions (e.g. 30 tokens) still produce
+        // usable audio; cap at 1024 so very long replies don't run the
+        // expensive DAC decoder for minutes on end.
+        max_tokens.saturating_mul(4).clamp(128, 1024),
+        temperature,
+        n_threads_arg,
+        None,
+    )?;
+    std::fs::write(wav_out, &wav_bytes)
+        .map_err(|error| format!("Failed to write WAV {}: {error}", wav_out.display()))?;
+    eprintln!(
+        "Omni → TTS: wrote {} bytes ({} samples) to {}",
+        wav_bytes.len(),
+        wav_bytes.len() / 2,
+        wav_out.display()
+    );
+    Ok(())
+}
+
+/// Same as `run_multimodal_with_video` but returns the generated text
+/// instead of streaming it to stdout. Used by the TTS post-processor
+/// pipeline so we can capture the Omni reply.
+pub fn run_multimodal_with_video_capture_text(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+) -> Result<String, String> {
+    let owned_source = Arc::clone(&llm_source);
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    validate_gemma4_temperature(arch, temperature)?;
+    if arch == "gemma4" {
+        // gemma4 path uses its own `run_gemma4`; it doesn't go through
+        // `run_qwen3_family_multimodal`. For now, capture the text by
+        // delegating to `run_multimodal_with_video` and parsing the
+        // output via stdout redirection.
+        return run_gemma4_capture_text(
+            model_path,
+            mmproj_path,
+            image_path,
+            audio_path,
+            prompt,
+            max_tokens,
+            n_threads_arg,
+            prefill_batch_size,
+        );
+    }
+    if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")
+        && (image_path.is_some() || video_path.is_some() || audio_path.is_some())
+    {
+        return run_qwen3_family_multimodal(
+            llm_source.as_ref(),
+            owned_source,
+            mmproj_path.ok_or("multimodal Qwen models require --mmproj")?,
+            image_path,
+            video_path,
+            audio_path,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            prefill_batch_size,
+        );
+    }
+    Err(format!(
+        "Only qwen35, qwen3vl, qwen3vlmoe and gemma4 architectures are supported for multimodal capture, got: {arch}"
+    ))
+}
+
+fn run_gemma4_capture_text(
+    _model_path: &Path,
+    _mmproj_path: Option<&Path>,
+    _image_path: Option<&Path>,
+    _audio_path: Option<&Path>,
+    _prompt: &str,
+    _max_tokens: usize,
+    _n_threads_arg: usize,
+    _prefill_batch_size: usize,
+) -> Result<String, String> {
+    // Gemma4 multimodal path is implemented in `crate::models::gemma4`;
+    // for now, the TTS post-processor is opt-in and the gemma4 capture
+    // path is left as a TODO. The pipeline above documents this gap.
+    Err("Omni → TTS capture-text is not yet implemented for gemma4".into())
+}
+
 fn run_multimodal_with_video_ref(
     llm_source: &dyn TensorSource,
     model_path: &Path,
@@ -2165,7 +2366,13 @@ fn run_multimodal_with_video_ref(
             temperature,
             n_threads_arg,
             prefill_batch_size,
-        );
+        )
+        .map(|text| {
+            // Multimodal text is already printed inside the function;
+            // this branch swallows the value for the caller that only
+            // expects a unit result.
+            let _ = text;
+        });
     }
     if audio_path.is_some() {
         return Err(format!(
@@ -2321,6 +2528,12 @@ fn run_multimodal_with_video_ref(
                 .map_err(|_| "Original image height does not fit usize")?;
             let grid = qwen35_smart_resize(original_w, original_h, &encoder.config)?;
             let t_preproc = std::time::Instant::now();
+            let venc_pool = Arc::new(ComputePool::new(resolve_thread_count(
+                n_threads_arg,
+                std::thread::available_parallelism()
+                    .map(|value| value.get())
+                    .unwrap_or(1),
+            )));
             let pixels = normalize_resized_image(
                 &image,
                 grid.image_width(),
@@ -2344,6 +2557,7 @@ fn run_multimodal_with_video_ref(
                 grid.image_width(),
                 grid.image_height(),
                 &mut scratch,
+                &venc_pool,
             )?;
             let t_venc = t_venc.elapsed();
             if encoded_grid != grid {

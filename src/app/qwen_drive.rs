@@ -147,6 +147,7 @@ fn normalize_rgb(rgb: &[u8], mean: [f32; 3], std: [f32; 3]) -> Result<Vec<f32>, 
 fn encode_images(
     encoder: &VisionEncoder<'_>,
     scene: &PlanningScene,
+    pool: &Arc<ComputePool>,
 ) -> Result<(Vec<f32>, Vec<VisionGrid>), String> {
     let per_view = scene
         .views
@@ -213,6 +214,7 @@ fn encode_images(
                 grid.image_width(),
                 grid.image_height(),
                 &mut scratch,
+                pool,
             )?;
             if actual != grid {
                 return Err("Qwen-Drive vision encoder returned an unexpected grid".into());
@@ -268,6 +270,7 @@ fn encode_perception_images(
     frame: &PerceptionFrame,
     image_size: [usize; 2],
     vit_dim: usize,
+    pool: &Arc<ComputePool>,
 ) -> Result<(Tensor4, Vec<f32>, Vec<VisionGrid>), String> {
     if encoder.config.n_embd != vit_dim {
         return Err(format!(
@@ -298,7 +301,13 @@ fn encode_perception_images(
             image_size[1],
         )?;
         let normalized = normalize_rgb(&rgb, encoder.config.image_mean, encoder.config.image_std)?;
-        let grid = encoder.encode_image(&normalized, image_size[0], image_size[1], &mut scratch)?;
+        let grid = encoder.encode_image(
+            &normalized,
+            image_size[0],
+            image_size[1],
+            &mut scratch,
+            pool,
+        )?;
         if grids.first().is_some_and(|first| *first != grid) {
             return Err("Qwen-Drive perception cameras produced different vision grids".into());
         }
@@ -618,7 +627,7 @@ pub fn run_qwen_drive_cli(options: QwenDriveCliOptions, threads: usize) -> Resul
                     None,
                 )?;
                 for scene in &scenes {
-                    let (projected, grids) = encode_images(&encoder, scene)?;
+                    let (projected, grids) = encode_images(&encoder, scene, &pool)?;
                     let prefill = prefill_scene(
                         &mut model,
                         &tokenizer,
@@ -673,6 +682,7 @@ pub fn run_qwen_drive_cli(options: QwenDriveCliOptions, threads: usize) -> Resul
                     &frame,
                     perception.config().image_size,
                     perception.config().vit_dim,
+                    &pool,
                 )?;
                 let llm = prefill_perception(
                     &mut model,

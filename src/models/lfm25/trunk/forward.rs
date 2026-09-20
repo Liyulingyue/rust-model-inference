@@ -17,7 +17,7 @@ use crate::ops::{
     rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace,
     vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
 };
-use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
+use crate::prompt::{build_lfm2_chat_prompt_with_thinking, Lfm2Message};
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -34,6 +34,8 @@ pub fn run_inference(
     n_threads_arg: usize,
     profile: bool,
     kv_format: KvFormat,
+    max_context: usize,
+    thinking: bool,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
@@ -47,7 +49,7 @@ pub fn run_inference(
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
 
-    let max_ctx = 512usize.min(cfg.n_ctx);
+    let max_ctx = cfg.n_ctx.min(max_context).max(1);
     let eps = cfg.norm_eps;
     let freq_base = cfg.rope_freq_base;
 
@@ -72,12 +74,13 @@ pub fn run_inference(
         arch, n_embd, n_layer, n_head, n_ff, cfg.d_conv, load_ms
     );
 
-    let input_tokens = build_lfm2_chat_prompt(
+    let input_tokens = build_lfm2_chat_prompt_with_thinking(
         &tokenizer,
         &[Lfm2Message {
             role: "user",
             content: prompt,
         }],
+        thinking,
     )?;
     eprintln!(
         "[RUST_TOKENS] n={} ids={:?}",
@@ -820,7 +823,7 @@ fn forward_attention(
                         }
                         scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[..n_padded]);
-                        let mut values = [0.0f32; 512];
+                        let mut values = vec![0.0f32; max_ctx];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =
