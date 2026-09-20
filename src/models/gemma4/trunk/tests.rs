@@ -276,7 +276,7 @@ fn deterministic_config() -> Gemma4Config {
         logit_softcap: 30.0,
         ffn_per_layer: vec![64; 3],
         swa_pattern: vec![true, false, true],
-        n_ctx: 128,
+        n_ctx: CONTEXT,
         rope_freq_base: 1_000_000.0,
         rope_freq_base_swa: 10_000.0,
     }
@@ -976,11 +976,61 @@ fn ggml_geglu_rounds_gate_and_gelu_through_f16() {
     gate[0] = f32::from_bits(0x3f12_598e);
     up[0] = f32::from_bits(0xbed7_8765);
     gate[1] = f32::from_bits(0xbfff_e000);
+    gate[2] = f32::from_bits(0xbfff_e88e);
+    up[2] = f32::from_bits(0x3ffd_a160);
 
     super::ggml_geglu_fp16_inplace(&mut gate, &up);
 
     assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
-    assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
+    assert_eq!(gate[1].to_bits(), 0xbd3a_4000);
+    assert_eq!(gate[2].to_bits(), 0xbdb8_86a8);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn ggml_attention_dot_matches_pinned_sse3_reduction_order() {
+    let fixture = |mut state: u32| {
+        std::array::from_fn::<_, 256, _>(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f32::from_bits((state & 0x8000_0000) | 0x3f00_0000 | (state & 0x007f_ffff))
+        })
+    };
+    let left = fixture(1);
+    let right = fixture(2);
+
+    assert_eq!(
+        super::forward::ggml_attention_dot(&left, &right, 256).to_bits(),
+        0xc02f_54b6
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn layer_0_attention_uses_pinned_sse3_softmax() {
+    let cache = KvLayer {
+        head_dim: 1,
+        row_width: 1,
+        group_size: 1,
+        keys: [0x40d0_5422, 0x400c_0934].map(f32::from_bits).to_vec(),
+        values: [0xbee2_a638, 0xbf08_d6c7].map(f32::from_bits).to_vec(),
+    };
+    let mut output = [0.0];
+
+    attend(
+        0,
+        1,
+        &[1.0],
+        &cache,
+        false,
+        0,
+        &mut output,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &ComputePool::new(1),
+    )
+    .unwrap();
+
+    assert_eq!(output[0].to_bits(), 0xbee3_43e6);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
     bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_approx_inplace,
+    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1089,6 +1089,156 @@ fn apply_rope_full(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    use std::arch::x86_64::*;
+
+    debug_assert!(left.len() >= len && right.len() >= len);
+    let mut sums = unsafe { [_mm_setzero_ps(); 8] };
+    let aligned = len & !31;
+    let mut index = 0;
+    while index < aligned {
+        for lane in 0..8 {
+            let offset = index + lane * 4;
+            unsafe {
+                sums[lane] = _mm_add_ps(
+                    sums[lane],
+                    _mm_mul_ps(
+                        _mm_loadu_ps(left.as_ptr().add(offset)),
+                        _mm_loadu_ps(right.as_ptr().add(offset)),
+                    ),
+                );
+            }
+        }
+        index += 32;
+    }
+    for lane in 0..4 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 4]) };
+    }
+    for lane in 0..2 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 2]) };
+    }
+    unsafe { sums[0] = _mm_add_ps(sums[0], sums[1]) };
+    let mut lanes = [0.0f32; 4];
+    unsafe { _mm_storeu_ps(lanes.as_mut_ptr(), sums[0]) };
+    let mut sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    while index < len {
+        sum += left[index] * right[index];
+        index += 1;
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    crate::ops::dot_f32(left, right, len)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn ggml_exp_sse2(x: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+
+    let magic = _mm_set1_ps(f32::from_bits(0x4b40_0000));
+    let z = _mm_add_ps(
+        _mm_mul_ps(x, _mm_set1_ps(f32::from_bits(0x3fb8_aa3b))),
+        magic,
+    );
+    let n = _mm_sub_ps(z, magic);
+    let b = _mm_sub_ps(
+        _mm_sub_ps(x, _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x3f31_7200)))),
+        _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x35bf_be8e))),
+    );
+    let exponent = _mm_slli_epi32(_mm_castps_si128(z), 23);
+    let scale = _mm_castsi128_ps(_mm_add_epi32(exponent, _mm_set1_epi32(0x3f80_0000)));
+    let out_of_range = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(126.0),
+    ));
+    let squared = _mm_mul_ps(b, b);
+    let low = _mm_add_ps(
+        _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3c07_2010)), b),
+        _mm_set1_ps(f32::from_bits(0x3d2b_9f17)),
+    );
+    let high = _mm_add_ps(
+        _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3e2a_af33)), b),
+        _mm_set1_ps(f32::from_bits(0x3eff_fedb)),
+    );
+    let polynomial = _mm_add_ps(
+        _mm_mul_ps(_mm_add_ps(_mm_mul_ps(low, squared), high), squared),
+        _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3f7f_fff6)), b),
+    );
+    if _mm_movemask_epi8(out_of_range) == 0 {
+        return _mm_add_ps(_mm_mul_ps(polynomial, scale), scale);
+    }
+
+    let adjustment = _mm_and_si128(
+        _mm_castps_si128(_mm_cmple_ps(n, _mm_setzero_ps())),
+        _mm_set1_epi32(0x8200_0000u32 as i32),
+    );
+    let scale1 = _mm_castsi128_ps(_mm_add_epi32(adjustment, _mm_set1_epi32(0x7f00_0000)));
+    let scale2 = _mm_castsi128_ps(_mm_sub_epi32(exponent, adjustment));
+    let extreme = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(192.0),
+    ));
+    let ranged = _mm_or_ps(
+        _mm_and_ps(
+            _mm_castsi128_ps(out_of_range),
+            _mm_mul_ps(_mm_add_ps(_mm_mul_ps(scale2, polynomial), scale2), scale1),
+        ),
+        _mm_andnot_ps(
+            _mm_castsi128_ps(out_of_range),
+            _mm_add_ps(_mm_mul_ps(scale, polynomial), scale),
+        ),
+    );
+    _mm_or_ps(
+        _mm_and_ps(_mm_castsi128_ps(extreme), _mm_mul_ps(scale1, scale1)),
+        _mm_andnot_ps(_mm_castsi128_ps(extreme), ranged),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    let mut index = 0;
+    while index + 4 <= values.len() {
+        let mut lanes = [0.0f32; 4];
+        unsafe {
+            let exp = ggml_exp_sse2(_mm_sub_ps(
+                _mm_loadu_ps(values.as_ptr().add(index)),
+                _mm_set1_ps(max),
+            ));
+            _mm_storeu_ps(values.as_mut_ptr().add(index), exp);
+            _mm_storeu_ps(lanes.as_mut_ptr(), exp);
+        }
+        sum += f64::from((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
+        index += 4;
+    }
+    while index < values.len() {
+        values[index] = (values[index] - max).exp();
+        sum += f64::from(values[index]);
+        index += 1;
+    }
+
+    let scale = (1.0 / sum) as f32;
+    for value in values {
+        *value *= scale;
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    crate::ops::softmax_approx_inplace(values);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attend(
     layer: usize,
@@ -1169,9 +1319,9 @@ pub(super) fn attend(
             for (score, token) in head_scores[..cached].iter_mut().zip(first..rows) {
                 let offset = token * row_width + kv_offset;
                 let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
-                *score = dot_f32(query_head, key, dim);
+                *score = ggml_attention_dot(query_head, key, dim);
             }
-            softmax_approx_inplace(head_scores);
+            ggml_attention_softmax(head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
             unsafe {
@@ -1212,7 +1362,7 @@ unsafe fn attend_v(
         for (value, token) in head_values[..cached].iter_mut().zip(first..) {
             *value = *values_ptr.add(token * row_width + kv_offset + d);
         }
-        *output = dot_f32(scores, &head_values, padded);
+        *output = ggml_attention_dot(scores, &head_values, padded);
     }
 }
 
@@ -1259,8 +1409,7 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
             x * up
         } else {
             let x = f16_to_f32(f32_to_f16(x));
-            let gelu =
-                0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * x.mul_add(GELU_COEF_A * x, 1.0)).tanh());
+            let gelu = 0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh());
             f16_to_f32(f32_to_f16(gelu)) * up
         };
     }
