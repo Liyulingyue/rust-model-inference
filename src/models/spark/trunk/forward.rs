@@ -156,6 +156,20 @@ impl SparkSession {
         self.output.as_ref().unwrap_or(&self.tok_embd)
     }
 
+    /// Single forward pass: prefill a token list and return the
+    /// last-position logits. Used by JEV / classification modes that do
+    /// not need autoregressive decoding.
+    pub fn forward_logits(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        if tokens.is_empty() {
+            return Err("Spark prompt must contain at least one token".into());
+        }
+        let mut logits = Vec::new();
+        for (pos, &tok) in tokens.iter().enumerate() {
+            logits = self.forward_step_logits(tok, pos)?;
+        }
+        Ok(logits)
+    }
+
     /// Decode one token at position `pos`. Returns the next sampled token id.
     pub fn decode_step(
         &mut self,
@@ -163,6 +177,18 @@ impl SparkSession {
         pos: usize,
         temperature: f32,
     ) -> Result<u32, String> {
+        let logits = self.forward_step_logits(token_id, pos)?;
+        sample_token(&logits, temperature)
+    }
+
+    /// Run the full forward pass for one token at `pos`, returning the
+    /// vocabulary logits. Shared between `decode_step` (which samples
+    /// the logits) and `forward_logits` (which returns them).
+    fn forward_step_logits(
+        &mut self,
+        token_id: u32,
+        pos: usize,
+    ) -> Result<Vec<f32>, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_head = cfg.n_head;
@@ -345,7 +371,7 @@ impl SparkSession {
             &self.pool,
         );
 
-        sample_token(&logits, temperature)
+        Ok(logits)
     }
 }
 

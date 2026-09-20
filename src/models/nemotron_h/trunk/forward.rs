@@ -20,6 +20,7 @@ use super::weights::NemotronLayerWeights;
 use crate::core::scratchpad::{KvArch, KvCache, KvLifecycle, KvState};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
     dot_f32_exact, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rope_neox_inplace,
@@ -1019,4 +1020,82 @@ fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
     } else {
         sample_argmax(logits, 0.0)
     }
+}
+
+/// Single forward pass: prefill `prompt_tokens` and return the
+/// last-position logits. Used by JEV / classification modes that do
+/// not need autoregressive decoding.
+///
+/// Wraps `NemotronModel::prefill`, which already operates per-token
+/// without KV cache (Nemotron currently re-prefills each step).
+pub fn run_forward_logits_nemotron_h(
+    source: Arc<dyn TensorSource>,
+    prompt_tokens: &[u32],
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    use crate::core::tokenizer::BPETokenizer;
+
+    let t0 = std::time::Instant::now();
+    let model = NemotronModel::from_source(source.clone())?;
+    let n_attn_q = model.config.n_head * model.config.n_embd_head_k;
+    let n_attn_v = model.config.n_head_kv.max(1) * model.config.n_embd_head_v;
+    let scratch_capacity = prompt_tokens.len().max(8);
+    let conv_cols = model.config.ssm_inner_size
+        + 2 * model.config.ssm_group_count * model.config.ssm_state_size;
+    let mut scratch = NemotronScratch {
+        hidden: vec![0.0; scratch_capacity * model.config.n_embd],
+        normed: vec![0.0; model.config.n_embd],
+        q: vec![0.0; scratch_capacity * n_attn_q],
+        k: vec![0.0; scratch_capacity * n_attn_v],
+        v: vec![0.0; scratch_capacity * n_attn_v],
+        attn_out: vec![0.0; n_attn_v],
+        ffn_out: vec![0.0; model.config.n_embd],
+        q8_buf: vec![
+            0u8;
+            model
+                .config
+                .n_embd
+                .max(model.config.n_ff)
+                .max(n_attn_v)
+                .max(model.config.n_embd_head_v * model.config.n_head)
+                .max(model.config.ssm_inner_size)
+        ],
+        scale_buf: vec![
+            0.0;
+            model
+                .config
+                .n_embd
+                .max(model.config.n_ff)
+                .max(n_attn_v)
+                .max(model.config.n_embd_head_v * model.config.n_head)
+                .max(model.config.ssm_inner_size)
+                .div_ceil(32)
+        ],
+        scores: vec![0.0; scratch_capacity * scratch_capacity],
+        logits: vec![0.0; model.config.vocab_size],
+        ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
+        ssm_conv_hist: vec![0.0; model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
+        ssm_scan_state: vec![
+            0.0;
+            model.config.n_layer
+                * model.config.ssm_inner_size
+                * model.config.ssm_state_size
+        ],
+    };
+
+    let prefill_started = std::time::Instant::now();
+    let mut logits = Vec::new();
+    for &tid in prompt_tokens {
+        logits = model.prefill(&[tid], &mut scratch)?;
+    }
+    let prefill_dur = prefill_started.elapsed();
+    let _ = t0;
+    Ok((logits, prefill_dur))
+}
+
+/// Load the Nemotron tokenizer (helper so app/text.rs doesn't need to
+/// reach into private types). Mirrors the loading in
+/// `nemotron_h::run_inference`.
+pub fn load_nemotron_tokenizer(source: &dyn TensorSource) -> Result<BPETokenizer, String> {
+    BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|e| format!("Failed to load Nemotron tokenizer: {e}"))
 }

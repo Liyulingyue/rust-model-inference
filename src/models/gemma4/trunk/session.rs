@@ -1,4 +1,5 @@
 use super::config::{CONTEXT, HEADS};
+use super::forward::Gemma4InputRow;
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
 use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
@@ -195,6 +196,17 @@ impl<'model> Gemma4Session<'model> {
 
     pub fn scratch_bytes(&self) -> usize {
         self.scratch.bytes()
+    }
+
+    /// Single forward pass: prefill a token list and return the
+    /// last-position logits. Used by JEV / classification modes that do
+    /// not need autoregressive decoding.
+    pub fn forward_logits(&mut self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
+        if token_ids.is_empty() {
+            return Err("Gemma4 prompt must contain at least one token".into());
+        }
+        let rows: Vec<Gemma4InputRow> = token_ids.iter().map(|&t| Gemma4InputRow::Token(t)).collect();
+        self.forward_rows(&rows)
     }
 }
 

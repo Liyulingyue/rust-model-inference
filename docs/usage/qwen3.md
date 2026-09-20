@@ -188,167 +188,38 @@ cargo run --release --bin server -- \
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
 
-## 10. JEV 决策评分（Choice / Binary / Score / Multi-Q）
+## 10. JEV 决策评分（Qwen3 用法）
 
-`--jev` 是 OpenJEV 风格的 single-forward-pass 决策模式：跳过自回归生成，
-在一次 prefill 后直接读最后一层 logits，对候选 label tokens (A/B/C/…) 做
-softmax 得到概率分布。架构上和"生成第一个 token"完全一样，只是后半段不
-做 embedding lookup 和循环 decode。
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
+跨 trunk 实现现状、chat template 差异、限制等全局性内容见
+[`docs/develop/jev.md`](../develop/jev.md)。
 
-> 参考：[`references/openjev/decisionmaking/prompts.py`](../../references/openjev/decisionmaking/prompts.py)
-> 的 system prompt + 候选排序 + 单 token label 协议。
-
-### 10.1 协议
-
-每条 `--jev-option` 是一个候选描述，会自动映射成 A/B/C/…，并以如下
-system + JSON user 喂给模型：
-
-```
-<|im_start|>system
-Answer the question using the supplied context and candidate answers.
-Select the single best answer. Reply with only its letter label.<|im_end|>
-<|im_start|>user
-{"context": "...", "question": "...", "candidates": {"A": "...", "B": "...", ...}}<|im_end|>
-<|im_start|>assistant
-```
-
-模型在最后一个 token 位置输出 A/B/C/... 中某个，我们读 logits 做
-softmax 得到候选分布。
-
-### 10.2 三种 mode
-
-模式按 `--jev-option` 的形态自动判定，无需显式声明：
-
-**Choice（默认，K≥2）**
+Qwen3 上 `--jev` 的具体用法：
 
 ```bash
-rust-model-inference --model qwen3.gguf --jev \
-  --jev-context "明天下午2点要去机场接人" \
+# Choice mode（默认 K≥2）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "明天下午2点要去机场接人" \
   --jev-question "明天的天气怎么样？" \
   --jev-option "晴天" --jev-option "阴天" --jev-option "雨天"
-```
 
-输出：
-
-```
-choice: A
-probabilities:
-  A: 0.8248
-  B: 0.1546
-  C: 0.0206
-```
-
-**Binary（K=2 + `--jev-positive`）**
-
-K=2 且指定 `--jev-positive` 时进入 binary 模式。`--jev-positive` 缺省为 A，
-与 OpenJEV Web UI 行为一致（"first option as positive"）。
-
-```bash
-rust-model-inference --model qwen3.gguf --jev \
-  --jev-context "天空乌云密布，能听到远处雷声" \
+# Binary mode（K=2 + --jev-positive）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
   --jev-question "现在在下雨吗？" \
-  --jev-option "是的" --jev-option "没有" \
-  --jev-positive A
-```
+  --jev-option "是的" --jev-option "没有" --jev-positive A
 
-输出：
-
-```
-choice: B
-probability (A): 0.3679
-```
-
-**Score（`description:value` 语法）**
-
-任意 `--jev-option` 含 `:` 自动进入 score 模式。每个选项关联一个数值，
-最终输出 `Σ p_i × value_i`（期望分数）。
-
-```bash
-rust-model-inference --model qwen3.gguf --jev \
-  --jev-context "今天股市整体上涨，科技板块表现强劲" \
+# Score mode（description:value）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "今天股市整体上涨，科技板块表现强劲" \
   --jev-question "市场情绪如何？" \
-  --jev-option "极度乐观:5" --jev-option "乐观:4" \
-  --jev-option "中性:3" --jev-option "悲观:2" --jev-option "极度悲观:1"
+  --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
+  --jev-option "悲观:2" --jev-option "极度悲观:1"
 ```
 
-输出：
-
-```
-score: 4.7372
-breakdown:
-  A: 0.8117 × 5 = 4.0586
-  B: 0.1516 × 4 = 0.6065
-  C: 0.0171 × 3 = 0.0513
-  D: 0.0013 × 2 = 0.0025
-  E: 0.0183 × 1 = 0.0183
-```
-
-### 10.3 多 question（顺序 forward pass）
-
-`--jev-question` 可重复，每次开启新问题；选项累积直到下一个
-`--jev-question` 或结束。N 个问题 = N 次顺序 prefill（不共享 KV cache，
-与 OpenJEV 当前实现一致）。
-
-```bash
-rust-model-inference --model qwen3.gguf --jev \
-  --jev-context "天空乌云密布，能听到远处雷声" \
-  --jev-question "现在在下雨吗？" --jev-option "yes" --jev-option "no" \
-  --jev-question "需要带伞吗？" --jev-option "需要" --jev-option "不需要"
-```
-
-### 10.4 JSON 输出
-
-`--jev-output json` 输出 newline-delimited JSON，每行一个 question：
-
-```bash
-rust-model-inference --model qwen3.gguf --jev \
-  --jev-context "..." \
-  --jev-question "..." \
-  --jev-option "晴天:5" --jev-option "阴天:3" --jev-option "雨天:1" \
-  --jev-output json
-```
-
-```json
-{"mode":"score","question":"...","labels":["A","B","C"],"descriptions":["晴天","阴天","雨天"],"values":[5.0,3.0,1.0],"probabilities":{"A":0.81,"B":0.15,"C":0.04},"score":4.74,"prefill_ms":6470}
-```
-
-### 10.5 性能
-
-`models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf`，Intel Core Ultra 5 125H，4 threads：
-
-| Mode | Prefill |
-|---|---|
-| Choice / Binary / Score（单 question） | ~5.7s (cold) |
-| Multi-question × N | ~5.7s × N（顺序，不共享 KV） |
-
-注意：cold-start 包含模型加载 + tokenizer 初始化；连续运行时每次 prefill
-只算真正的前向传播时间（~200ms 量级）。
-
-### 10.6 与 OpenJEV 的差异
-
-| 维度 | 本实现 | OpenJEV |
-|---|---|---|
-| Model | 任何本地 Qwen3 GGUF | 锁定 Qwen3-4B-Instruct-2507 |
-| Multi-question KV 复用 | ❌ 每次新建 session | ❌ 当前也按顺序重编码（planned） |
-| Shared prefix batching | ❌ | 计划中 |
-| Score schema (`positive_id`) | ✅ | ✅ |
-| Bilingual UI / i18n | ❌ | ✅ |
-| HTTP API / JSON export | ❌（CLI 模式） | ✅ |
-| 候选 label 单 token 校验 | ✅（硬约束） | ✅（硬约束） |
-
-### 10.7 已知限制
-
-1. **Qwen3-0.6B 是 base 模型**（不是 Instruct）。OpenJEV README 报告
-   `Qwen3-0.6B instruction, FP16` 在 development challenge 上准确率仅
-   65.7%。要让 JEV 输出真正"对的"答案，需要 Qwen3-0.6B-Instruct GGUF。
-   机制本身（logit → softmax → choice）在 base model 上**能跑**，只是
-   选出的 label 不一定准确。
-2. **label letters 必须单 token**。Qwen3 tokenizer 对 A/B/C/…/Z 是单 token，
-   其他现代 BPE tokenizer 一般也满足，但老 tokenizer 可能不满足——会报
-   "Label 'A' tokenizes to N tokens"。
-3. **不支持 8-bit 以下量化 KV 的精度 drift 修复**。Q4_NL 等量化会引入 ≤
-   1 ULP drift，对单 forward pass 影响比生成更大（生成会自我纠正，
-   single-shot 选择不会）。可以接受"次于 FP16 baseline 的概率分布但
-   argmax 偶尔分叉"的容忍度。
+Qwen3 使用的 chat template 是标准 `<|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n`，
+由 `src/prompt.rs::append_qwen_message_tokens` / `append_qwen_assistant_prefix`
+构造。Qwen3-VL 走同一个 chat template，只是文本 + 图像拼接；多模态路径
+见 [`docs/usage/qwen3.md` §3](#3-视觉语言qwen3-vl--qwen35--qwen38)。
 
 - `docs/SUPPORTED_MODELS.md` — 验证状态与量化格式支持
