@@ -1219,10 +1219,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                merged_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
                             layer_norm_with_bias(row, weight, bias, eps);
                         }
                     }
@@ -1235,10 +1233,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                merged_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
                             layer_norm_without_bias(row, weight, eps);
                         }
                     }
@@ -1261,10 +1257,8 @@ impl<'a> VisionEncoder<'a> {
                             crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                         for t in start..end {
                             unsafe {
-                                let row = std::slice::from_raw_parts_mut(
-                                    qkv_ptr.add(t * chunk),
-                                    chunk,
-                                );
+                                let row =
+                                    std::slice::from_raw_parts_mut(qkv_ptr.add(t * chunk), chunk);
                                 vec_add_into(bias_slice, row);
                             }
                         }
@@ -1587,10 +1581,8 @@ impl<'a> VisionEncoder<'a> {
                     for t in start..end {
                         unsafe {
                             let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
-                            let row = std::slice::from_raw_parts_mut(
-                                proj_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(proj_ptr.add(t * n_embd), n_embd);
                             vec_add_into(bias_slice, row);
                         }
                     }
@@ -1601,8 +1593,7 @@ impl<'a> VisionEncoder<'a> {
         let proj_ptr = scratch.proj_buf.as_ptr();
         let merged_ptr = scratch.merged.as_mut_ptr();
         pool.compute(move |ith, nth| {
-            let (start, end) =
-                crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
             for t in start..end {
                 unsafe {
                     let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
@@ -1627,10 +1618,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                merged_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
                             layer_norm_with_bias(row, weight, bias, eps);
                         }
                     }
@@ -1643,10 +1632,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                merged_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
                             layer_norm_without_bias(row, weight, eps);
                         }
                     }
@@ -1671,8 +1658,7 @@ impl<'a> VisionEncoder<'a> {
                     for t in start..end {
                         unsafe {
                             let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
-                            let row =
-                                std::slice::from_raw_parts_mut(ffn_ptr.add(t * nff), nff);
+                            let row = std::slice::from_raw_parts_mut(ffn_ptr.add(t * nff), nff);
                             vec_add_into(bias_slice, row);
                         }
                     }
@@ -1695,10 +1681,8 @@ impl<'a> VisionEncoder<'a> {
                         for t in start..end {
                             unsafe {
                                 let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
-                                let row = std::slice::from_raw_parts_mut(
-                                    gate_buf_ptr.add(t * nff),
-                                    nff,
-                                );
+                                let row =
+                                    std::slice::from_raw_parts_mut(gate_buf_ptr.add(t * nff), nff);
                                 vec_add_into(bias_slice, row);
                             }
                         }
@@ -1790,10 +1774,8 @@ impl<'a> VisionEncoder<'a> {
                     for t in start..end {
                         unsafe {
                             let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
-                            let row = std::slice::from_raw_parts_mut(
-                                proj_ptr.add(t * n_embd),
-                                n_embd,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(proj_ptr.add(t * n_embd), n_embd);
                             vec_add_into(bias_slice, row);
                         }
                     }
@@ -1826,8 +1808,7 @@ impl<'a> VisionEncoder<'a> {
         let proj_ptr = scratch.proj_buf.as_ptr();
         let merged_ptr = scratch.merged.as_mut_ptr();
         pool.compute(move |ith, nth| {
-            let (start, end) =
-                crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
             for t in start..end {
                 unsafe {
                     let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
@@ -2381,8 +2362,7 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
     let total_sum = vaddvq_f64(vaddq_f64(sum0, sum1)) + partial_sum;
     let total_sumsq = vaddvq_f64(vaddq_f64(sumsq0, sumsq1)) + partial_sumsq;
     let mean = (total_sum / n as f64) as f32;
-    let variance =
-        (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
+    let variance = (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
     (mean, variance)
 }
 

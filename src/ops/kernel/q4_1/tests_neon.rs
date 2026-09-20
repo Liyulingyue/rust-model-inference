@@ -75,7 +75,13 @@ fn assert_neon_eq_scalar(
         assert!(
             diff <= 4,
             "{} row {}: neon={} (bits {:x}) scalar={} (bits {:x}) diff={} ULP",
-            label, i, a, a_bits, b, b_bits, diff
+            label,
+            i,
+            a,
+            a_bits,
+            b,
+            b_bits,
+            diff
         );
     }
 }
@@ -86,7 +92,10 @@ fn parity_block_min_contribution_only() {
     let weight = build_block(0.0, 1.0, 0);
     let q8 = q8_input_zero();
     let scales = vec![1.0f32];
-    let sums: Vec<f32> = q8.chunks_exact(32).map(|c| c.iter().map(|&b| b as i8 as f32).sum()).collect();
+    let sums: Vec<f32> = q8
+        .chunks_exact(32)
+        .map(|c| c.iter().map(|&b| b as i8 as f32).sum())
+        .collect();
     assert_neon_eq_scalar("min-only", &weight, &q8, &scales, Some(&sums));
 }
 
@@ -96,7 +105,10 @@ fn parity_block_dot_product_only() {
     let weight = build_block(1.0, 0.0, 1);
     let q8 = q8_input_max();
     let scales = vec![1.0f32];
-    let sums: Vec<f32> = q8.chunks_exact(32).map(|c| c.iter().map(|&b| b as i8 as f32).sum()).collect();
+    let sums: Vec<f32> = q8
+        .chunks_exact(32)
+        .map(|c| c.iter().map(|&b| b as i8 as f32).sum())
+        .collect();
     assert_neon_eq_scalar("dot-only", &weight, &q8, &scales, Some(&sums));
 }
 
@@ -105,7 +117,10 @@ fn parity_block_zero_nibble_min_input() {
     let weight = build_block(0.0, 1.0, 0);
     let q8 = q8_input_min();
     let scales = vec![1.0f32];
-    let sums: Vec<f32> = q8.chunks_exact(32).map(|c| c.iter().map(|&b| b as i8 as f32).sum()).collect();
+    let sums: Vec<f32> = q8
+        .chunks_exact(32)
+        .map(|c| c.iter().map(|&b| b as i8 as f32).sum())
+        .collect();
     assert_neon_eq_scalar("zero-nibble/min-input", &weight, &q8, &scales, Some(&sums));
 }
 

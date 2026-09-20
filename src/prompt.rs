@@ -32,18 +32,13 @@ const WITH_SPECIAL: EncodeOptions = EncodeOptions {
 /// block (`<ifm|think>`). Pass `enable_thinking = false` (via
 /// `--no-thinking`) to emit `\n\n` instead so the model skips straight
 /// to the assistant answer.
-pub fn format_k2_horizon_chat_prompt_with_thinking(
-    prompt: &str,
-    enable_thinking: bool,
-) -> String {
+pub fn format_k2_horizon_chat_prompt_with_thinking(prompt: &str, enable_thinking: bool) -> String {
     if enable_thinking {
         format!(
             "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
         )
     } else {
-        format!(
-            "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n\n\n"
-        )
+        format!("<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n\n\n")
     }
 }
 

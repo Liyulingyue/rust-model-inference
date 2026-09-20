@@ -58,18 +58,18 @@ pub unsafe fn matmul_q4_1_vs_q8_0_neon(
             let off0 = row_off + b * 20;
             let off1 = row_off + (b + 1) * 20;
 
-            let d_b0 = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off0) as *const u16),
-            ));
-            let m_b0 = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off0 + 2) as *const u16),
-            ));
-            let d_b1 = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off1) as *const u16),
-            ));
-            let m_b1 = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off1 + 2) as *const u16),
-            ));
+            let d_b0 = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off0) as *const u16,
+            )));
+            let m_b0 = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off0 + 2) as *const u16,
+            )));
+            let d_b1 = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off1) as *const u16,
+            )));
+            let m_b1 = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off1 + 2) as *const u16,
+            )));
             let si_b0 = *sc_ptr.add(b);
             let si_b1 = *sc_ptr.add(b + 1);
 
@@ -110,12 +110,12 @@ pub unsafe fn matmul_q4_1_vs_q8_0_neon(
 
         while b < blocks_per_row {
             let off = row_off + b * 20;
-            let d_b = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off) as *const u16),
-            ));
-            let m_b = f16_to_f32(u16::from_le_bytes(
-                std::ptr::read_unaligned(w_ptr.add(off + 2) as *const u16),
-            ));
+            let d_b = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off) as *const u16
+            )));
+            let m_b = f16_to_f32(u16::from_le_bytes(std::ptr::read_unaligned(
+                w_ptr.add(off + 2) as *const u16,
+            )));
             let si_b = *sc_ptr.add(b);
             let q8_b = vld1q_s8(iq_ptr.add(b * 32));
             let dc = block_dot(vld1q_u8(w_ptr.add(off + 4)), q8_b, low_mask);

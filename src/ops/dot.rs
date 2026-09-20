@@ -1,7 +1,7 @@
-use super::super::{bf16_to_f32, f16_to_f32};
 use super::super::has_avx2_fma;
 use super::super::has_f16c;
 use super::super::has_neon;
+use super::super::{bf16_to_f32, f16_to_f32};
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 use std::arch::asm;
 
@@ -1521,7 +1521,10 @@ mod tests {
             let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
             let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
             let denom = scalar.abs().max(1.0);
-            assert!((simd - scalar).abs() / denom < 1e-5, "n={n}: simd={simd} scalar={scalar}");
+            assert!(
+                (simd - scalar).abs() / denom < 1e-5,
+                "n={n}: simd={simd} scalar={scalar}"
+            );
         }
     }
 }
