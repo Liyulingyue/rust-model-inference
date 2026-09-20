@@ -1196,3 +1196,208 @@ fn forward_shortconv(
     let _ = pos;
     (out, bx)
 }
+
+/// Single forward pass: prefill `prompt_tokens` and return the
+/// last-position logits. Used by JEV / classification modes that do
+/// not need autoregressive decoding.
+///
+/// Mirrors the prefill portion of `run_inference_stream` but stops
+/// after the final logits are computed. The per-step body is the same
+/// as in `run_inference_stream`; keeping a separate copy here avoids
+/// touching the existing decode loop and its bench/profile plumbing.
+pub fn run_forward_logits_lfm2(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let t0 = Instant::now();
+    let cfg = Lfm2Config::from_source(source)?;
+    let n_embd = cfg.n_embd;
+    let n_layer = cfg.n_layer;
+    let n_head = cfg.n_head;
+    let n_ff = cfg.n_ff;
+    let max_ctx = cfg.n_ctx.min(max_context);
+    let eps = cfg.norm_eps;
+    let freq_base = cfg.rope_freq_base;
+
+    let output_norm = get_f32_tensor(source, "token_embd_norm.weight", n_embd);
+    let embd_info = source
+        .tensor_info("token_embd.weight")
+        .expect("no token_embd.weight");
+    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
+    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
+    let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
+    let embd_type = embd_info.ggml_type;
+    let output_type = source
+        .tensor_info("output.weight")
+        .unwrap_or(embd_info)
+        .ggml_type;
+    let layers = load_layers(source, &cfg)?;
+    let n_embd_q = n_head * cfg.n_embd_head_k;
+    let n_embd_gqa = cfg
+        .n_head_kv_per_layer
+        .iter()
+        .map(|&h| h * cfg.n_embd_head_k)
+        .max()
+        .unwrap_or(0)
+        .max(n_embd_q);
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to load tokenizer: {error}"))?;
+    let vocab = tokenizer.vocab_size();
+
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let n_threads = if n_threads_arg > 0 {
+        n_threads_arg
+    } else {
+        available_threads
+    };
+
+    let mut scratch = ExecutionScratchpad::new(
+        n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx,
+    );
+    let pool = Arc::new(ComputePool::new(n_threads));
+    eprintln!("compute pool: {} threads", pool.n_threads());
+
+    let output_pw = crate::ops::kernel::Weight::from_quantized(
+        crate::ops::kernel::QuantizedTensor::from_bytes(output_weight, output_type, n_embd, vocab),
+    );
+    let output_needs_q8k = matches!(
+        output_type,
+        crate::core::tensor::GGMLType::Q4K
+            | crate::core::tensor::GGMLType::Q5K
+            | crate::core::tensor::GGMLType::Q6K
+    );
+
+    let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
+    let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
+    for (l, lw) in layers.iter().enumerate() {
+        if lw.is_attn {
+            shortconv_states.push(Vec::new());
+            accumulated_bx.push(Vec::new());
+        } else {
+            shortconv_states.push(vec![0.0f32; n_embd * cfg.d_conv]);
+            accumulated_bx.push(Vec::new());
+            let _ = l;
+        }
+    }
+
+    let kv_cache = match kv_format {
+        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
+        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
+    };
+
+    let mut prefill_time = Duration::ZERO;
+    let n_prompt = prompt_tokens.len();
+
+    for step in 0..n_prompt {
+        let eval_started = Instant::now();
+        let token_id = prompt_tokens[step];
+        let pos = step;
+        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+
+        let is_prefill = true;
+        for layer in 0..n_layer {
+            let lw = &layers[layer];
+            if !lw.is_attn && is_prefill {
+                let d_conv = cfg.d_conv;
+                let n_embd = cfg.n_embd;
+                let state = &mut shortconv_states[layer];
+                state.resize(d_conv * n_embd, 0.0);
+                let hist = &accumulated_bx[layer];
+                for k_p in 0..d_conv {
+                    let idx = k_p as isize - (d_conv - hist.len()) as isize;
+                    if idx >= 0 {
+                        let src = &hist[idx as usize];
+                        for ci in 0..n_embd {
+                            state[k_p * n_embd + ci] = src[ci];
+                        }
+                    }
+                }
+            }
+            forward_layer(
+                &pool,
+                lw,
+                layer,
+                n_layer,
+                &cfg,
+                &mut scratch,
+                &kv_cache,
+                max_ctx,
+                pos,
+                eps,
+                freq_base,
+                &mut shortconv_states[layer],
+                &mut accumulated_bx[layer],
+                is_prefill,
+            );
+        }
+
+        // Output norm + LM head.
+        let x_ptr = scratch.x.as_mut_ptr();
+        let normed_ptr = scratch.normed.as_mut_ptr();
+        let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+        let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+        rms_norm(x, &output_norm, normed, eps);
+
+        let q8_buf = unsafe {
+            std::slice::from_raw_parts_mut(
+                scratch.q8_buf.as_mut_ptr() as *mut u8,
+                scratch.q8_buf.len(),
+            )
+        };
+        let scale_buf =
+            unsafe { std::slice::from_raw_parts_mut(scratch.scale_buf.as_mut_ptr(), n_embd / 32) };
+        let q8k_buf = unsafe {
+            std::slice::from_raw_parts_mut(scratch.q8k_buf.as_mut_ptr(), scratch.q8k_buf.len())
+        };
+        quantize_q8_0_into(
+            normed,
+            n_embd,
+            &mut q8_buf[..n_embd],
+            &mut scale_buf[..n_embd / 32],
+        );
+        let q8 = &q8_buf[..n_embd];
+        let sc = &scale_buf[..n_embd / 32];
+        let q8k_slice: &[crate::ops::quant::BlockQ8K] = if output_needs_q8k {
+            quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            &q8k_buf[..n_embd / 256]
+        } else {
+            &[]
+        };
+
+        let logits_ptr = scratch.logits.as_mut_ptr();
+        let kernel: &dyn crate::ops::kernel::Kernel = &*output_pw.kernel;
+        pool.compute(move |ith, nth| {
+            let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
+            let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
+            let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
+            let q8k = unsafe { std::slice::from_raw_parts(q8k_slice.as_ptr(), q8k_slice.len()) };
+            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> = if q8k_slice.is_empty() {
+                None
+            } else {
+                Some(q8k)
+            };
+            kernel.forward_prepared(input, q8, sc, q8k_opt, logits, n_embd, vocab, ith, nth);
+        });
+
+        prefill_time += eval_started.elapsed();
+    }
+
+    let logits = scratch.logits.clone();
+    eprintln!(
+        "LFM2 forward_logits: {} prompt tokens in {:?} ({:.0} t/s)",
+        n_prompt,
+        prefill_time,
+        if prefill_time.as_millis() > 0 {
+            n_prompt as f64 / prefill_time.as_millis() as f64 * 1000.0
+        } else {
+            0.0
+        },
+    );
+    Ok((logits, prefill_time))
+}

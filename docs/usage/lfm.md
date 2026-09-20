@@ -194,3 +194,45 @@ cargo run --release --bin server -- \
 - `src/app/text.rs:61-83` — LFM2 / LFM2.5 文本路由（basename 分流）
 - `src/app/text.rs:809-824` — LFM2.5-VL 视觉路由
 - `docs/ISSUE.md` — LFM2 / LFM2.5 命名不一致（arch vs 目录名）
+
+## 10. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 10.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `lfm2` | `app/text.rs::run_jev_decision_lfm2` → `lfm2::run_forward_logits_lfm2` |
+| `lfm25` (含 `"2.5"` 的 basename) | `app/text.rs::run_jev_decision_lfm25` → `lfm25::run_forward_logits_lfm25` |
+| `lfm2moe` | ❌ 暂未支持（JEV 路由只覆盖 `lfm2` / `lfm25`） |
+
+LFM2 与 LFM2.5 的 chat template **完全相同**（`{role}\n{content}\n` 序列），
+与 Qwen3 模板几乎一致。
+
+### 10.2 示例
+
+```bash
+# LFM2-1.2B dense — Choice mode
+rust-model-inference --model models/lfm2/LFM2-1.2B-Q8_0.gguf \
+  --jev --jev-context "用户咨询账户安全问题" \
+  --jev-question "这是哪种类型的请求？" \
+  --jev-option "密码重置" --jev-option "2FA 启用" --jev-option "可疑活动" \
+  --threads 4
+
+# LFM2.5-1.2B-Instruct — Binary mode
+rust-model-inference --model models/lfm2.5/LFM2.5-1.2B-Instruct-Q8_0.gguf \
+  --jev --jev-context "用户已通过身份验证" \
+  --jev-question "问题是否已解决？" \
+  --jev-option "是" --jev-option "否" --jev-positive A \
+  --threads 4
+
+# LFM2-8B-A1B (MoE) — 暂不支持 JEV
+# Will return: --jev is not yet supported for architecture "lfm2moe"
+```
+
+> 注意：LFM2 是 hybrid（attention + shortconv）架构，JEV prefill 走
+> 完整 prefill 路径（不是 KV cache 共享）。每个 question 都是一次
+> 独立 prefill，多 question 模式下耗时为 N × prefill_time。

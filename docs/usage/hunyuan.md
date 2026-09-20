@@ -225,3 +225,52 @@ llama.cpp GGUF 量化版本。`docs/REFERENCE_IMPLEMENTATIONS.md` 当前**未固
 - `src/prompt.rs:41` — `build_hunyuan_chat_prompt`（`<hy_user>…<hy_assistant>` 模板）
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — 参考实现清单
 - `docs/SUPPORTED_MODELS.md` — 验证状态
+
+## 9. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 9.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `hunyuan-dense` | `app/text.rs::run_jev_decision_hunyuan` → `qwen3::Qwen3Session::forward_logits`（复用 qwen3 base） |
+
+> Hunyuan 走 qwen3 trunk 的 `run_inference_tokens`，JEV 同样复用
+> `Qwen3Session::forward_logits` —— Hunyuan 没有自己的 forward_logits
+> 实现，模型加载阶段共用 qwen3。
+
+Hunyuan 1.8B 用 `<|hy_User|>` / `<|hy_Assistant|>` 模板（1.8B GGUF），
+Hunyuan 7B 用 raw 文本（无 chat header）。`build_hunyuan_chat_prompt`
+根据 tokenizer metadata 自动分流。
+
+### 9.2 示例
+
+```bash
+# Hy-MT2-1.8B — Choice mode（用 JEV 做语言判定）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "用户输入: 'machine learning is fun'" \
+  --jev-question "这句话是什么语言？" \
+  --jev-option "英语" --jev-option "中文" --jev-option "法语" \
+  --threads 8
+
+# Hy-MT2-1.8B — Binary mode（用 JEV 做领域分类）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "Translate this sentence to Chinese." \
+  --jev-question "用户是要中→英还是英→中？" \
+  --jev-option "中→英" --jev-option "英→中" --jev-positive A \
+  --threads 8
+
+# Score mode（翻译难度评估）
+rust-model-inference --model models/Hy-MT2-1.8B-GGUF/Hy-MT2-1.8B-Q8_0.gguf \
+  --jev --jev-context "The cat sat on the mat." \
+  --jev-question "翻译难度？" \
+  --jev-option "容易:1" --jev-option "中等:2" --jev-option "困难:3" \
+  --threads 8
+```
+
+> 注意：Hy-MT2 是翻译模型，JEV 拿来做分类 / 评分也能跑但不是它的
+> 设计目标。准确率受限于模型本身的训练分布。建议优先用 Hunyuan
+> Dense（非翻译版本）做 JEV 决策评分。

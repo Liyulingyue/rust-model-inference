@@ -1110,6 +1110,569 @@ pub fn run_inference_tokens(
     Ok(())
 }
 
+/// Single forward pass: prefill `prompt_tokens` and return the
+/// last-position logits. Used by JEV / classification modes that do
+/// not need autoregressive decoding.
+///
+/// Mirrors the prefill portion of `run_inference_tokens` but stops
+/// after the final logits are computed. The per-step body is the same
+/// as in `run_inference_tokens`; keeping a separate copy here avoids
+/// touching the existing decode loop and its bench/profile plumbing.
+pub fn run_forward_logits_llama(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let t0 = Instant::now();
+    let config = model_config_from_source(source)
+        .map_err(|error| format!("Failed to parse model config: {error}"))?;
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+    let max_ctx = config.n_ctx.min(max_context);
+    let n_embd = config.n_embd;
+    let n_layer = config.n_layer;
+    let n_head = config.n_head;
+    let n_head_kv = config.n_head_kv;
+    let n_embd_head = config.n_embd_head;
+    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch))
+    {
+        v.to_u64().unwrap_or(n_embd_head as u64) as usize
+    } else {
+        n_embd_head
+    };
+    let n_embd_head_v =
+        if let Some(v) = source.metadata(&format!("{}.attention.value_length", arch)) {
+            v.to_u64().unwrap_or(n_embd_head as u64) as usize
+        } else {
+            n_embd_head
+        };
+    let n_embd_q = n_head * n_embd_head_k;
+    let n_embd_gqa = n_head_kv * n_embd_head_v;
+    let n_ff = config.n_ff;
+    let eps = config.norm_eps;
+    let freq_base = config.rope_freq_base;
+    let norm_groups = normalization_groups(source, &arch, n_embd)?;
+
+    let arch_prefix = &arch;
+    let embedding_scale = source
+        .metadata(&format!("{arch_prefix}.embedding_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+    let residual_scale = source
+        .metadata(&format!("{arch_prefix}.residual_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+    let logit_scale = source
+        .metadata(&format!("{arch_prefix}.logit_scale"))
+        .and_then(|v| v.to_f64())
+        .unwrap_or(0.0) as f32;
+
+    let output_norm = get_f32_tensor(source, "output_norm.weight", n_embd);
+    let embd_info = source
+        .tensor_info("token_embd.weight")
+        .expect("no token_embd.weight");
+    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
+    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
+    let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
+    let embd_type = embd_info.ggml_type;
+    let output_type = source
+        .tensor_info("output.weight")
+        .unwrap_or(embd_info)
+        .ggml_type;
+
+    let layers: Vec<LlamaLayerWeights> =
+        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
+
+    let kv_cache = match kv_format {
+        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
+        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
+    };
+
+    let vocab = tokenizer.vocab_size();
+
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
+
+    let mut scratch = ExecutionScratchpad::new(
+        n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx,
+    );
+    let pool = Arc::new(ComputePool::new(n_threads));
+
+    let group_size = n_head / n_head_kv;
+    let attention_scale_meta = source
+        .metadata(&format!("{arch}.attention.scale"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32);
+    let kq_scale = attention_scale_meta.unwrap_or_else(|| 1.0f32 / (n_embd_head_k as f32).sqrt());
+
+    let mut prefill_time = std::time::Duration::ZERO;
+    let mut prefill_evals = 0usize;
+
+    for step in 0..prompt_tokens.len() {
+        let eval_started = Instant::now();
+        let token_id = prompt_tokens[step];
+        let pos = step;
+
+        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+        if embedding_scale != 0.0 {
+            vec_scale_f32(&mut scratch.x, embedding_scale);
+        }
+
+        for layer in 0..n_layer {
+            let lw = &layers[layer];
+
+            let x_ptr = scratch.x.as_mut_ptr();
+            let normed_ptr = scratch.normed.as_mut_ptr();
+            let q_ptr = scratch.q.as_mut_ptr();
+            let k_ptr = scratch.k_new.as_mut_ptr();
+            let v_ptr = scratch.v_new.as_mut_ptr();
+            let attn_out_ptr = scratch.attn_out.as_mut_ptr();
+            let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
+            let down_buf_ptr = scratch.down_buf.as_mut_ptr();
+            let scores_ptr = scratch.scores.as_mut_ptr();
+            let score_stride = scratch.score_stride;
+            let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
+            let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+            let q8_buf_ptr = scratch.q8_buf.as_mut_ptr();
+            let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
+            let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
+            let kv_cache_size = n_layer * max_ctx * n_embd_gqa;
+            let (k_cache_f16_ptr, v_cache_f16_ptr) = match &kv_cache {
+                KvCache::F16(c) => (c.k.as_ptr() as *mut u16, c.v.as_ptr() as *mut u16),
+                _ => (std::ptr::null_mut(), std::ptr::null_mut()),
+            };
+            let (k_cache_f32_ptr, v_cache_f32_ptr) = match &kv_cache {
+                KvCache::F32(c) => (c.k.as_ptr() as *mut f32, c.v.as_ptr() as *mut f32),
+                _ => (std::ptr::null_mut(), std::ptr::null_mut()),
+            };
+
+            let max_n_in = n_embd_q.max(n_ff);
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+            let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+            let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+
+            rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
+            quantize_q8_0_into(
+                normed,
+                n_embd,
+                &mut q8_buf[..n_embd],
+                &mut scale_buf[..n_embd / 32],
+            );
+            let q8 = q8_buf[..n_embd].as_ptr();
+            let sc = scale_buf[..n_embd / 32].as_ptr();
+            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
+
+            pool.compute(move |ith: usize, nth: usize| {
+                let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+                let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
+
+                lw.wq.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    q,
+                    n_embd,
+                    n_embd_q,
+                    ith,
+                    nth,
+                );
+                lw.wk.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    k_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
+                );
+                lw.wv.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    v_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
+                );
+            });
+
+            {
+                let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+                let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+                let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
+
+                for h in 0..n_head {
+                    apply_rope(
+                        &arch,
+                        &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                        pos,
+                        n_embd_head_k,
+                        freq_base,
+                    );
+                }
+                for h in 0..n_head_kv {
+                    apply_rope(
+                        &arch,
+                        &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                        pos,
+                        n_embd_head_k,
+                        freq_base,
+                    );
+                }
+
+                let kb = layer * max_ctx * n_embd_gqa;
+                if kv_format == KvFormat::F16 {
+                    let k_cache =
+                        unsafe { std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size) };
+                    let v_cache =
+                        unsafe { std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size) };
+                    for h in 0..n_head_kv {
+                        let off = h * n_embd_head_k;
+                        f32_slice_to_f16(
+                            &k_new[off..off + n_embd_head_k],
+                            &mut k_cache[kb + pos * n_embd_gqa + off
+                                ..kb + pos * n_embd_gqa + off + n_embd_head_k],
+                        );
+                        f32_slice_to_f16(
+                            &v_new[off..off + n_embd_head_v],
+                            &mut v_cache[kb + pos * n_embd_gqa + off
+                                ..kb + pos * n_embd_gqa + off + n_embd_head_v],
+                        );
+                    }
+                } else {
+                    let k_cache =
+                        unsafe { std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size) };
+                    let v_cache =
+                        unsafe { std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size) };
+                    for h in 0..n_head_kv {
+                        let off = h * n_embd_head_k;
+                        k_cache[kb + pos * n_embd_gqa + off
+                            ..kb + pos * n_embd_gqa + off + n_embd_head_k]
+                            .copy_from_slice(&k_new[off..off + n_embd_head_k]);
+                        v_cache[kb + pos * n_embd_gqa + off
+                            ..kb + pos * n_embd_gqa + off + n_embd_head_v]
+                            .copy_from_slice(&v_new[off..off + n_embd_head_v]);
+                    }
+                }
+            }
+
+            pool.compute(move |ith: usize, nth: usize| {
+                let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
+                let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+                let h_start = ith * n_head / nth;
+                let h_end = (ith + 1) * n_head / nth;
+
+                let kb = layer * max_ctx * n_embd_gqa;
+
+                if kv_format == KvFormat::F16 {
+                    let k_cache =
+                        unsafe { std::slice::from_raw_parts(k_cache_f16_ptr, kv_cache_size) };
+                    let v_cache =
+                        unsafe { std::slice::from_raw_parts(v_cache_f16_ptr, kv_cache_size) };
+                    for h in h_start..h_end {
+                        let kv_h = h / group_size;
+                        let q_off = h * n_embd_head_k;
+                        let n_cached = pos + 1;
+                        let out_base = h * n_embd_head_v;
+                        let mut ms = 0.0f32;
+                        let mut s_sum = 0.0f32;
+                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
+                        for t in 0..n_cached {
+                            let score = dot_f16_f32(
+                                &q[q_off..q_off + n_embd_head_k],
+                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                n_embd_head_k,
+                            ) * kq_scale;
+                            if score > ms {
+                                let rescale = (ms - score).exp();
+                                vec_scale_f32(
+                                    &mut attn_out[out_base..out_base + n_embd_head_v],
+                                    rescale,
+                                );
+                                s_sum *= rescale;
+                                ms = score;
+                            }
+                            let vs = (score - ms).exp();
+                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
+                            vec_mad_f16_f32(
+                                &mut attn_out[out_base..out_base + n_embd_head_v],
+                                &v_cache[v_base..v_base + n_embd_head_v],
+                                vs,
+                            );
+                            s_sum += vs;
+                        }
+                        let inv_sum = 1.0 / s_sum;
+                        vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
+                    }
+                } else {
+                    let k_cache =
+                        unsafe { std::slice::from_raw_parts(k_cache_f32_ptr, kv_cache_size) };
+                    let v_cache =
+                        unsafe { std::slice::from_raw_parts(v_cache_f32_ptr, kv_cache_size) };
+                    let scores = unsafe {
+                        std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride)
+                    };
+                    for h in h_start..h_end {
+                        let kv_h = h / group_size;
+                        let q_off = h * n_embd_head_k;
+                        let n_cached = pos + 1;
+                        let n_padded = (n_cached + 255) / 256 * 256;
+                        let out_base = h * n_embd_head_v;
+                        let s_off = ith * score_stride;
+                        for t in 0..n_cached {
+                            scores[s_off + t] = dot_f32(
+                                &q[q_off..q_off + n_embd_head_k],
+                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                n_embd_head_k,
+                            ) * kq_scale;
+                        }
+                        scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
+                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
+                        let mut values = vec![0.0f32; n_padded];
+                        for d in 0..n_embd_head_v {
+                            for t in 0..n_cached {
+                                values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                            }
+                            attn_out[out_base + d] = dot_f32(
+                                &values[..n_padded],
+                                &scores[s_off..s_off + n_padded],
+                                n_cached,
+                            );
+                        }
+                    }
+                }
+            });
+
+            let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            quantize_q8_0_into(
+                attn_out,
+                n_embd_q,
+                &mut q8_buf[..n_embd_q],
+                &mut scale_buf[..n_embd_q / 32],
+            );
+            crate::ops::quantize_row_q8_k_into(attn_out, &mut q8k_buf[..n_embd_q / 256]);
+            let q8 = q8_buf[..n_embd_q].as_ptr();
+            let sc = scale_buf[..n_embd_q / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd_q / 256].as_ptr();
+            pool.compute(move |ith: usize, nth: usize| {
+                let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd_q) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd_q / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd_q / 256) };
+                let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+                lw.wo.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    attn_proj,
+                    n_embd_q,
+                    n_embd,
+                    ith,
+                    nth,
+                );
+            });
+
+            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, attn_proj, residual_scale);
+            } else {
+                vec_add_into(attn_proj, x);
+            }
+
+            rms_norm_grouped(x, &lw.ffn_norm, normed, norm_groups, eps);
+            quantize_q8_0_into(
+                normed,
+                n_embd,
+                &mut q8_buf[..n_embd],
+                &mut scale_buf[..n_embd / 32],
+            );
+            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            let q8 = q8_buf[..n_embd].as_ptr();
+            let sc = scale_buf[..n_embd / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
+
+            pool.compute(move |ith: usize, nth: usize| {
+                let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
+                lw.w_gate.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    up_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
+                );
+                lw.w_up.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    gate_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
+                );
+                if crate::ops::gpu_matmul_active() {
+                    if ith == 0 {
+                        silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                    }
+                } else {
+                    let per_thread = (n_ff + nth - 1) / nth;
+                    let r_start = ith * per_thread;
+                    let r_end = (r_start + per_thread).min(n_ff);
+                    silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                }
+            });
+
+            {
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
+                let scale_buf =
+                    unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
+                let q8k_buf =
+                    unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+                quantize_q8_0_into(
+                    gate_buf,
+                    n_ff,
+                    &mut q8_buf[..n_ff],
+                    &mut scale_buf[..n_ff / 32],
+                );
+                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
+            }
+
+            let q8 = q8_buf[..n_ff].as_ptr();
+            let sc = scale_buf[..n_ff / 32].as_ptr();
+            let q8k = q8k_buf[..n_ff / 256].as_ptr();
+            pool.compute(move |ith: usize, nth: usize| {
+                let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_ff) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_ff / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_ff / 256) };
+                let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+                lw.w_down.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    down_buf,
+                    n_ff,
+                    n_embd,
+                    ith,
+                    nth,
+                );
+            });
+
+            let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+            let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            if residual_scale != 0.0 {
+                vec_mad_f32(x, down_buf, residual_scale);
+            } else {
+                vec_add_into(down_buf, x);
+            }
+        }
+
+        // Output norm + logits.
+        {
+            let x = &mut scratch.x;
+            let normed = &mut scratch.normed;
+            let logits_ptr = scratch.logits.as_mut_ptr();
+            let q8_buf = &mut scratch.q8_buf;
+            let scale_buf = &mut scratch.scale_buf;
+            let q8k_buf = &mut scratch.q8k_buf;
+
+            rms_norm_grouped(x, &output_norm, normed, norm_groups, eps);
+            quantize_q8_0_into(
+                normed,
+                n_embd,
+                &mut q8_buf[..n_embd],
+                &mut scale_buf[..n_embd / 32],
+            );
+            crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+            let q8 = q8_buf[..n_embd].as_ptr();
+            let sc = scale_buf[..n_embd / 32].as_ptr();
+            let q8k = q8k_buf[..n_embd / 256].as_ptr();
+            let input = normed.as_ptr();
+            let output_pw = Weight::from_quantized(QuantizedTensor::from_bytes(
+                output_weight,
+                output_type,
+                n_embd,
+                vocab,
+            ));
+            pool.compute(move |ith: usize, nth: usize| {
+                let input = unsafe { std::slice::from_raw_parts(input, n_embd) };
+                let q8 = unsafe { std::slice::from_raw_parts(q8, n_embd) };
+                let sc = unsafe { std::slice::from_raw_parts(sc, n_embd / 32) };
+                let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                output_pw.kernel.forward_prepared(
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    logits,
+                    n_embd,
+                    vocab,
+                    ith,
+                    nth,
+                );
+            });
+            if logit_scale != 0.0 {
+                let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+                vec_scale_f32(logits, logit_scale);
+            }
+        }
+
+        prefill_evals += 1;
+        prefill_time += eval_started.elapsed();
+    }
+
+    let logits = scratch.logits.clone();
+    let total_elapsed = t0.elapsed();
+    eprintln!(
+        "Llama forward_logits: {} prompt tokens in {:?} ({:.0} t/s)",
+        prompt_tokens.len(),
+        prefill_time,
+        crate::app::cli::per_second(prefill_evals, prefill_time),
+    );
+    let _ = total_elapsed;
+    Ok((logits, prefill_time))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{apply_rope, normalization_groups};

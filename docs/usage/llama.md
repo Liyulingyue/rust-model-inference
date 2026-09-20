@@ -119,3 +119,56 @@ cargo run --release --bin server -- \
 - `src/prompt.rs` — Hunyuan 与其他 chat template 构造（Granite 由 forward.rs 内联）
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — 通用 scalar pinned commit
 - `docs/SUPPORTED_MODELS.md` — 验证状态
+
+## 9. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式：跳过自回归
+生成，直接读最后一层 logits 对候选 label tokens (A/B/C/…) 做 softmax。
+通用协议、3 种 mode、JSON 输出、已知限制见
+[`docs/develop/jev.md`](../develop/jev.md) 和
+[`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 9.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `llama` / `qwen2_2` / `minicpm` | `app/text.rs::run_jev_decision_llama` → `llama::run_forward_logits_llama` |
+| `granite` / `k2-horizon` | 同上（chat template 不同） |
+| `nanbeige` | 同上（base model，无 chat template） |
+
+### 9.2 Chat template 差异（per-arch）
+
+| Arch | Prompt 模板 |
+|---|---|
+| `llama` / `qwen2_2` | `system\n{sys}\nuser\n{payload}\nassistant\n` |
+| `granite` | `<\|start_of_role\|>system<\|end_of_role\|>{sys}<\|end_of_text\|>\n<\|start_of_role\|>user<\|end_of_role\|>{payload}<\|end_of_text\|>\n<\|start_of_role\|>assistant<\|end_of_role\|>` |
+| `k2-horizon` | 同 granite |
+| `nanbeige` | 无 chat template，直接 `{sys}\n\n{payload}\n\nAnswer:` |
+
+### 9.3 示例
+
+```bash
+# MiniCPM5-1B Q8_0 — Choice mode
+rust-model-inference --model models/MiniCPM5-1B-Q8_0.gguf \
+  --jev --jev-context "用户问的是航空公司的行李规定" \
+  --jev-question "这是哪个业务领域？" \
+  --jev-option "退款" --jev-option "行李" --jev-option "里程" \
+  --threads 4
+
+# Granite — Binary mode
+rust-model-inference --model models/granite-Q8_0.gguf \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
+  --jev-question "现在在下雨吗？" \
+  --jev-option "是的" --jev-option "没有" --jev-positive A \
+  --threads 4
+
+# Nanbeige — Score mode（base model，准确率可能受限）
+rust-model-inference --model models/nanbeige-4.2-3B-Q8_0.gguf \
+  --jev --jev-context "今天股市整体上涨，科技板块表现强劲" \
+  --jev-question "市场情绪如何？" \
+  --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
+  --threads 4
+```
+
+> ⚠️ 注意：Nanbeige 是 base model，JEV 输出概率分布但准确率
+> 有限。Granite 是 instruct-tuned，score mode 表现更可靠。

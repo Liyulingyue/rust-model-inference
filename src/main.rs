@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -304,6 +304,43 @@ fn main() {
             options.effective_max_context(),
             options.effective_repetition_penalty(),
         ));
+    } else if options.jev {
+        let jev_context = options
+            .jev_context
+            .as_deref()
+            .ok_or_else(|| "--jev requires --jev-context <text>".to_string());
+        let jev_questions = options.jev_questions.clone();
+        let positive = options.jev_positive.clone();
+        let output_json = options.jev_output_json;
+        match jev_context {
+            Ok(ctx) => {
+                if jev_questions.is_empty() {
+                    app::run_or_exit(Err("--jev requires at least one --jev-question".to_string()));
+                    return;
+                }
+                let inputs: Vec<app::JevQuestionInput> = jev_questions
+                    .into_iter()
+                    .map(|q| app::JevQuestionInput {
+                        text: q.text,
+                        options: q.options,
+                    })
+                    .collect();
+                app::run_or_exit(app::run_jev_decision(
+                    source.clone(),
+                    ctx,
+                    &inputs,
+                    positive.as_deref(),
+                    n_threads,
+                    prefill_batch_size,
+                    output_json,
+                ));
+                return;
+            }
+            Err(e) => {
+                app::run_or_exit(Err(e));
+                return;
+            }
+        }
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
             app::run_or_exit(app::run_multimodal_with_video(

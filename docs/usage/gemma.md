@@ -116,3 +116,56 @@ cargo run --release --bin server -- \
 - `src/app/text.rs:29, 765-803` — Gemma 4 CLI 路由
 - `tests/gemma4_reference.rs` — pinned llama.cpp 对齐
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Oracle pin 与构建脚本
+
+## 11. JEV 决策评分
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式。通用协议、
+3 种 mode、JSON 输出、已知限制见 [`docs/develop/jev.md`](../develop/jev.md)
+和 [`docs/usage/qwen3.md` §10](qwen3.md)。
+
+### 11.1 Arch 路由
+
+| Arch | JEV 路径 |
+|---|---|
+| `gemma4` | `app/text.rs::run_jev_decision_gemma4` → `gemma4::Gemma4Session::forward_logits` |
+
+Gemma 4 的 chat template 用 `<turn|>` / `<|turn>` turn marker：
+
+```
+{system}
+
+{payload}
+
+<turn|>
+<|turn>model
+```
+
+### 11.2 示例
+
+```bash
+# Gemma 4 E2B — Choice mode（gemma-4-it 是 instruct-tuned，JEV 准确率更高）
+rust-model-inference --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --jev --jev-context "用户咨询公司差旅政策" \
+  --jev-question "应该归到哪个 FAQ 类别？" \
+  --jev-option "退款政策" --jev-option "报销流程" --jev-option "机票预订" \
+  --threads 4
+
+# Binary mode
+rust-model-inference --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --jev --jev-context "这是关于退款政策的询问" \
+  --jev-question "属于高频问题吗？" \
+  --jev-option "是" --jev-option "否" --jev-positive A \
+  --threads 4
+
+# Score mode
+rust-model-inference --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
+  --jev --jev-context "客服对话内容" \
+  --jev-question "客户满意度？" \
+  --jev-option "非常满意:5" --jev-option "满意:4" --jev-option "一般:3" \
+  --jev-option "不满意:2" --jev-option "非常不满意:1" \
+  --threads 4
+```
+
+> Gemma 4 与 Qwen3 的显著差异：Gemma 4 **不支持** `<|im_start|>` /
+> `<|im_end|>`，chat template 是 `<turn|>` / `<|turn>` 系列。JEV 实现
+> 在 `run_jev_decision_gemma4` 中用对应格式拼 prompt，无需用户感知。

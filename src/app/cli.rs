@@ -80,6 +80,17 @@ pub struct CliOptions {
     pub out: Option<PathBuf>,
     pub tts_model: Option<PathBuf>,
     pub tts_mmproj: Option<PathBuf>,
+    pub jev: bool,
+    pub jev_context: Option<String>,
+    pub jev_questions: Vec<JevQuestion>,
+    pub jev_positive: Option<String>,
+    pub jev_output_json: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JevQuestion {
+    pub text: String,
+    pub options: Vec<String>,
 }
 
 impl CliOptions {
@@ -644,6 +655,69 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .filter(|value| !value.starts_with("--"))
                     .ok_or("Missing value for --out")?;
                 options.out = Some(value.as_str().into());
+                i += 1;
+            }
+            "--jev" => options.jev = true,
+            "--jev-context" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-context")?;
+                options.jev_context = Some(value.clone());
+                i += 1;
+            }
+            "--jev-question" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-question")?;
+                options.jev_questions.push(JevQuestion {
+                    text: value.clone(),
+                    options: Vec::new(),
+                });
+                i += 1;
+            }
+            "--jev-option" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-option")?;
+                if options.jev_questions.is_empty() {
+                    return Err(
+                        "--jev-option must follow a --jev-question (or be the first argument after --jev)"
+                            .into(),
+                    );
+                }
+                options
+                    .jev_questions
+                    .last_mut()
+                    .unwrap()
+                    .options
+                    .push(value.clone());
+                i += 1;
+            }
+            "--jev-positive" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-positive")?;
+                options.jev_positive = Some(value.clone());
+                i += 1;
+            }
+            "--jev-output" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-output")?;
+                match value.as_str() {
+                    "text" => options.jev_output_json = false,
+                    "json" => options.jev_output_json = true,
+                    other => {
+                        return Err(format!(
+                            "--jev-output must be 'text' or 'json', got {other:?}"
+                        ));
+                    }
+                }
                 i += 1;
             }
             _ => {

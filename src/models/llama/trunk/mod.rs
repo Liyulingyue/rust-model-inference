@@ -8,5 +8,5 @@
 pub mod forward;
 pub mod weights;
 
-pub use forward::{run_inference, run_inference_tokens};
+pub use forward::{run_forward_logits_llama, run_inference, run_inference_tokens};
 pub use weights::{get_f32_tensor, load_layers, load_layers_static, LlamaLayerWeights};
