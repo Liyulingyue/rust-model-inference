@@ -1,4 +1,4 @@
-use super::super::f16_to_f32;
+use super::super::{bf16_to_f32, f16_to_f32};
 use super::super::has_avx2_fma;
 use super::super::has_f16c;
 use super::super::has_neon;
@@ -342,6 +342,101 @@ unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
     while i < n {
         let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
         sum += f16_to_f32(a[i]) * f16_to_f32(weight);
+        i += 1;
+    }
+    sum
+}
+
+/// BF16 weight bytes × F32 input dot product.
+///
+/// `b` is the raw 2-byte-per-element BF16 weight matrix (per-row, n_in
+/// elements per row); `a` is an F32 input vector of length `n_in`.
+/// Returns the F32 dot product.
+///
+/// The AVX2 path packs 8 BF16 lanes per iteration (PMOVZX + SHL to
+/// promote to F32 in the high half, then FMA). This is the
+/// complement to `dot_f16_f16_bytes_avx2` for the BF16 case where the
+/// activation stays in F32 and the weight is BF16.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n);
+    debug_assert!(b.len() >= n * 2);
+    if has_avx2_fma() && n >= 8 {
+        return unsafe { dot_bf16_f32_avx2(a, b, n) };
+    }
+    dot_bf16_f32_scalar(a, b, n)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn dot_bf16_f32_avx2(a: &[f32], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let chunk = _mm_loadu_si128(b.as_ptr().add(i * 2) as *const __m128i);
+        // Promote u16 → u32 (PMOVZX) then shift-left 16 to put the BF16
+        // bits in the F32 high half. Reinterpret as F32 — the FMA sees
+        // the exact BF16 value, just zero-extended.
+        let bits = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk), 16);
+        let w = _mm256_castsi256_ps(bits);
+        let x = _mm256_loadu_ps(a.as_ptr().add(i));
+        acc = _mm256_fmadd_ps(w, x, acc);
+        i += 8;
+    }
+    let mut sum = hsum_ps(acc);
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
+        i += 1;
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n);
+    debug_assert!(b.len() >= n * 2);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") && n >= 4 {
+            return unsafe { dot_bf16_f32_neon(a, b, n) };
+        }
+    }
+    dot_bf16_f32_scalar(a, b, n)
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0;
+    while i + 4 <= n {
+        let packed = vld1_u16(b.as_ptr().add(i * 2).cast());
+        let bits = vshlq_n_u32(vmovl_u16(packed), 16);
+        let w = vreinterpretq_f32_u32(bits);
+        acc = vfmaq_f32(acc, w, vld1q_f32(a.as_ptr().add(i)));
+        i += 4;
+    }
+    let mut sum = vaddvq_f32(acc);
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
+        i += 1;
+    }
+    sum
+}
+
+#[inline]
+fn dot_bf16_f32_scalar(a: &[f32], b: &[u8], n: usize) -> f32 {
+    let mut sum = 0.0f32;
+    let mut i = 0;
+    while i < n {
+        let bits = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += bf16_to_f32(bits) * a[i];
         i += 1;
     }
     sum
@@ -1362,6 +1457,71 @@ mod tests {
         for (i, (a, s)) in simd.iter().zip(scalar.iter()).enumerate() {
             let denom = s.abs().max(1.0);
             assert!((a - s).abs() / denom < 1e-5, "row {i}: simd={a} scalar={s}");
+        }
+    }
+
+    fn bf16_bytes_from_f32(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
+            .collect()
+    }
+
+    fn dot_bf16_f32_reference(weight_bytes: &[u8], input: &[f32], n: usize) -> f32 {
+        let mut sum = 0.0f32;
+        for i in 0..n {
+            let bits = u16::from_le_bytes(
+                weight_bytes[i * 2..i * 2 + 2]
+                    .try_into()
+                    .expect("weight slice has uneven bytes"),
+            );
+            sum += crate::ops::bf16_to_f32(bits) * input[i];
+        }
+        sum
+    }
+
+    #[test]
+    fn dot_bf16_f32_matches_scalar_for_aligned_length() {
+        let n = 256usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        let denom = scalar.abs().max(1.0);
+        assert!((simd - scalar).abs() / denom < 1e-5);
+    }
+
+    #[test]
+    fn dot_bf16_f32_matches_scalar_for_non_aligned_length() {
+        // n = 3420 mirrors Qwen2.5-Omni's FFN_down width (n_in = n_ff = 3420)
+        // which the packed BF16×F32 AVX2 kernel refuses because 3420 % 8 != 0.
+        // Exercises the per-row dot path used by the BF16 kernel fallback.
+        let n = 3420usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.011).sin() * 1.5).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.019).cos() + 0.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        let denom = scalar.abs().max(1.0);
+        assert!(
+            (simd - scalar).abs() / denom < 1e-5,
+            "non-aligned dot diverged: simd={simd} scalar={scalar}"
+        );
+    }
+
+    #[test]
+    fn dot_bf16_f32_handles_short_tail() {
+        // Smaller than the AVX2/NEON minimum (8/4 lanes) so we always go
+        // through the scalar tail inside the kernel.
+        for n in [1usize, 3, 7, 9, 13] {
+            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.3).sin()).collect();
+            let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos()).collect();
+            let weight_bytes = bf16_bytes_from_f32(&weights);
+            let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+            let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+            let denom = scalar.abs().max(1.0);
+            assert!((simd - scalar).abs() / denom < 1e-5, "n={n}: simd={simd} scalar={scalar}");
         }
     }
 }
