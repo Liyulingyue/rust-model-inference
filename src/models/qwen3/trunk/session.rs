@@ -218,7 +218,7 @@ impl<'model> Qwen3Session<'model> {
         })
     }
 
-/// Single forward pass: prefill the prompt and return a copy of the
+    /// Single forward pass: prefill the prompt and return a copy of the
     /// last-position logits. Used by JEV / classification modes that do
     /// not need autoregressive decoding.
     pub fn forward_logits(
@@ -265,7 +265,13 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, repetition_penalty, false, Some(&mut on_token))
+        self.generate_inner(
+            input,
+            options,
+            repetition_penalty,
+            false,
+            Some(&mut on_token),
+        )
     }
 
     pub(crate) fn generate_with_asr_trace(

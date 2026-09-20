@@ -39,7 +39,13 @@ pub(crate) unsafe fn vec_dot_iq4_nl_q8k_neon(iq4nl_data: &[u8], q8k: &[BlockQ8K]
             let q8_hi = vld1q_u8(q8_ptr.add(16));
 
             let lo_nib = vandq_u8(qb, mask);
-            let hi_nib = vshrq_n_u8(vandq_u8(vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(qb), 4))), 1);
+            let hi_nib = vshrq_n_u8(
+                vandq_u8(vreinterpretq_u8_u16(vshrq_n_u16(
+                    vreinterpretq_u16_u8(qb),
+                    4,
+                ))),
+                1,
+            );
 
             let lo_lut_u8 = vqtbl1q_u8(lut, lo_nib);
             let hi_lut_u8 = vqtbl1q_u8(lut, hi_nib);

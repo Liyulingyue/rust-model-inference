@@ -260,16 +260,14 @@ pub fn run_jev_decision(
             prefill_batch_size,
             output_json,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
-            run_jev_decision_llama(
-                source.clone(),
-                context,
-                &prepared,
-                n_threads_arg,
-                prefill_batch_size,
-                output_json,
-            )?
-        }
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => run_jev_decision_llama(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
+        )?,
         "gemma4" => run_jev_decision_gemma4(
             source.clone(),
             context,
@@ -488,11 +486,8 @@ fn run_jev_decision_qwen3(
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
     let pool = Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
-    let model = crate::models::qwen3::Qwen3Model::from_source(
-        source.clone(),
-        Arc::new(tokenizer),
-        pool,
-    )?;
+    let model =
+        crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
     let model_config = model_config_from_source(source.as_ref())?;
     let _ = model_config;
     let max_ctx = model.config().n_ctx;
@@ -502,8 +497,7 @@ fn run_jev_decision_qwen3(
         let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
             .map(|b| b as char)
             .collect();
-        let (token_ids, payload_str) =
-            build_jev_prompt(&model.tokenizer, context, q, output_json)?;
+        let (token_ids, payload_str) = build_jev_prompt(&model.tokenizer, context, q, output_json)?;
         if !output_json {
             print_jev_question(q, &labels);
         }
@@ -524,7 +518,13 @@ fn run_jev_decision_qwen3(
             deepstack_embeddings: None,
         };
         let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)?;
-        let result = compute_jev_result(q, &model.tokenizer, &labels, &logits, prefill_dur.as_millis());
+        let result = compute_jev_result(
+            q,
+            &model.tokenizer,
+            &labels,
+            &logits,
+            prefill_dur.as_millis(),
+        );
         results.push(result);
     }
     Ok(results)
@@ -558,8 +558,7 @@ fn run_jev_decision_qwen35(
         let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
             .map(|b| b as char)
             .collect();
-        let (token_ids, payload_str) =
-            build_jev_prompt(&tokenizer, context, q, output_json)?;
+        let (token_ids, payload_str) = build_jev_prompt(&tokenizer, context, q, output_json)?;
         if !output_json {
             print_jev_question(q, &labels);
         }
@@ -618,15 +617,21 @@ fn run_jev_decision_llama(
         // The system prompt + JSON payload use the same wrappers as the
         // model expects during inference, so the protocol lines up.
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -657,15 +662,16 @@ fn run_jev_decision_llama(
             format!("{system}\n\n{payload}\n\nAnswer:")
         } else {
             // Default llama / qwen2_2 / minicpm: simple user/assistant format.
-            format!(
-                "system\n{system}\nuser\n{payload}\nassistant\n"
-            )
+            format!("system\n{system}\nuser\n{payload}\nassistant\n")
         };
 
         let add_special = arch == "nanbeige";
         let mut token_ids = tokenizer.encode(
             &prompt_text,
-            EncodeOptions { add_special, parse_special: true },
+            EncodeOptions {
+                add_special,
+                parse_special: true,
+            },
         );
         if !add_special {
             if let Some(bos) = tokenizer.bos_id() {
@@ -677,15 +683,14 @@ fn run_jev_decision_llama(
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) =
-            crate::models::llama::run_forward_logits_llama(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-            )
-            .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) = crate::models::llama::run_forward_logits_llama(
+            source.as_ref(),
+            &token_ids,
+            n_threads,
+            KvFormat::F16,
+            8192,
+        )
+        .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }
@@ -721,15 +726,21 @@ fn run_jev_decision_gemma4(
 
         // Gemma4 chat format: <|turn>user\n{text}<turn|>\n<|turn>model\n
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -741,14 +752,15 @@ fn run_jev_decision_gemma4(
             payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
         }
         payload.push_str("}}");
-        let prompt_text = format!(
-            "{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n"
-        );
+        let prompt_text = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
 
         let bos = tokenizer.bos_id().ok_or("Gemma4 tokenizer missing BOS")?;
         let mut ids = tokenizer.encode(
             &prompt_text,
-            EncodeOptions { add_special: false, parse_special: true },
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
         );
         if ids.first() != Some(&bos) {
             ids.insert(0, bos);
@@ -801,15 +813,21 @@ fn run_jev_decision_lfm2(
 
         // LFM2 chat format: "{role}\n{content}\n" + assistant prefix.
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -828,30 +846,38 @@ fn run_jev_decision_lfm2(
         }
         token_ids.extend(tokenizer.encode(
             &format!("system\n{system}\n"),
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
         token_ids.extend(tokenizer.encode(
             &format!("user\n{payload}\n"),
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
         token_ids.extend(tokenizer.encode(
             "assistant\n",
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
 
         if !output_json {
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) =
-            crate::models::lfm2::run_forward_logits_lfm2(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-            )
-            .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) = crate::models::lfm2::run_forward_logits_lfm2(
+            source.as_ref(),
+            &token_ids,
+            n_threads,
+            KvFormat::F16,
+            8192,
+        )
+        .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }
@@ -892,15 +918,21 @@ fn run_jev_decision_spark(
         let sos = "<｜start▁of▁sentence｜>";
         let eos = "<｜end▁of▁sentence｜>";
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -922,7 +954,10 @@ fn run_jev_decision_spark(
         );
         let mut token_ids = tokenizer.encode(
             &prompt_text,
-            EncodeOptions { add_special: false, parse_special: true },
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
         );
         if tokenizer.add_bos() {
             if let Some(bos) = tokenizer.bos_id() {
@@ -971,15 +1006,21 @@ fn run_jev_decision_lfm25(
             .collect();
 
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -998,30 +1039,38 @@ fn run_jev_decision_lfm25(
         }
         token_ids.extend(tokenizer.encode(
             &format!("system\n{system}\n"),
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
         token_ids.extend(tokenizer.encode(
             &format!("user\n{payload}\n"),
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
         token_ids.extend(tokenizer.encode(
             "assistant\n",
-            EncodeOptions { add_special: false, parse_special: false },
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
         ));
 
         if !output_json {
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) =
-            crate::models::lfm25::run_forward_logits_lfm25(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-            )
-            .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) = crate::models::lfm25::run_forward_logits_lfm25(
+            source.as_ref(),
+            &token_ids,
+            n_threads,
+            KvFormat::F16,
+            8192,
+        )
+        .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }
@@ -1049,15 +1098,21 @@ fn run_jev_decision_nemotron_h(
         // Nemotron-H is a base model (no chat template). Build a plain
         // text prompt with system + JSON payload.
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -1072,18 +1127,22 @@ fn run_jev_decision_nemotron_h(
         let prompt_text = format!("{system}\n\n{payload}\n\nAnswer:");
         let token_ids = tokenizer.encode(
             &prompt_text,
-            EncodeOptions { add_special: true, parse_special: true },
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
         );
 
         if !output_json {
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) = crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
-            source.clone(),
-            &token_ids,
-        )
-        .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) =
+            crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
+                source.clone(),
+                &token_ids,
+            )
+            .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }
@@ -1113,11 +1172,8 @@ fn run_jev_decision_hunyuan(
     // delegates to `qwen3::text::run_inference_tokens`). Build a
     // `Qwen3Model` so we can call `forward_logits` directly with the
     // Hunyuan-formatted chat prompt.
-    let model = crate::models::qwen3::Qwen3Model::from_source(
-        source.clone(),
-        Arc::new(tokenizer),
-        pool,
-    )?;
+    let model =
+        crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
     let max_ctx = model.config().n_ctx;
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
@@ -1127,15 +1183,21 @@ fn run_jev_decision_hunyuan(
             .collect();
 
         let system = match q.mode {
-            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label.",
-            _ => "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label.",
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
         };
         let mut payload = String::from("{\"context\": ");
-        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
         payload.push_str(", \"question\": ");
-        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
         payload.push_str(", \"candidates\": {");
         for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
             if i > 0 {
@@ -1151,8 +1213,14 @@ fn run_jev_decision_hunyuan(
         let token_ids = build_hunyuan_chat_prompt(
             &model.tokenizer,
             &[
-                HunyuanMessage { role: "system", content: system },
-                HunyuanMessage { role: "user", content: &payload },
+                HunyuanMessage {
+                    role: "system",
+                    content: system,
+                },
+                HunyuanMessage {
+                    role: "user",
+                    content: &payload,
+                },
             ],
             true,
         )?;
@@ -1177,7 +1245,13 @@ fn run_jev_decision_hunyuan(
         let (logits, prefill_dur) = session
             .forward_logits(input, prefill_batch_size)
             .map_err(|e| format!("Hunyuan forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &model.tokenizer, &labels, &logits, prefill_dur.as_millis());
+        let result = compute_jev_result(
+            q,
+            &model.tokenizer,
+            &labels,
+            &logits,
+            prefill_dur.as_millis(),
+        );
         results.push(result);
     }
     Ok(results)
@@ -1186,10 +1260,13 @@ fn run_jev_decision_hunyuan(
 fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(), String> {
     for label_char in b'A'..=b'Z' {
         let label_text = (label_char as char).to_string();
-        let label_enc = tokenizer.encode(&label_text, EncodeOptions {
-            add_special: false,
-            parse_special: false,
-        });
+        let label_enc = tokenizer.encode(
+            &label_text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        );
         if label_enc.len() != 1 {
             return Err(format!(
                 "Label \"{}\" tokenizes to {} tokens; the tokenizer must encode A..Z as single tokens",
@@ -1207,10 +1284,14 @@ fn build_jev_prompt(
     _output_json: bool,
 ) -> Result<(Vec<u32>, String), String> {
     let system = match q.mode {
-        JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
-                           Reply with only its letter label.",
-        _ => "Answer the question using the supplied context and candidate answers. \
-              Select the single best answer. Reply with only its letter label.",
+        JevMode::Score => {
+            "Score the situation using the supplied context and numeric candidates. \
+                           Reply with only its letter label."
+        }
+        _ => {
+            "Answer the question using the supplied context and candidate answers. \
+              Select the single best answer. Reply with only its letter label."
+        }
     };
     let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
         .map(|b| b as char)
@@ -1236,20 +1317,35 @@ fn build_jev_prompt(
         &mut token_ids,
         tokenizer,
         "system",
-        &tokenizer.encode(system, EncodeOptions { add_special: false, parse_special: false }),
+        &tokenizer.encode(
+            system,
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ),
     )?;
     append_qwen_message_tokens(
         &mut token_ids,
         tokenizer,
         "user",
-        &tokenizer.encode(&payload, EncodeOptions { add_special: false, parse_special: false }),
+        &tokenizer.encode(
+            &payload,
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ),
     )?;
     append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
     Ok((token_ids, payload))
 }
 
 fn print_jev_question(q: &PreparedQuestion, labels: &[char]) {
-    println!("\n--- JEV question ({} candidates) ---", q.descriptions.len());
+    println!(
+        "\n--- JEV question ({} candidates) ---",
+        q.descriptions.len()
+    );
     println!("Q: {}", q.text);
     for (i, desc) in q.descriptions.iter().enumerate() {
         if q.mode == JevMode::Score {
@@ -1272,7 +1368,13 @@ fn compute_jev_result(
         .map(|c| {
             let s = c.to_string();
             tokenizer
-                .encode(&s, EncodeOptions { add_special: false, parse_special: false })
+                .encode(
+                    &s,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: false,
+                    },
+                )
                 .into_iter()
                 .next()
                 .unwrap_or(0)
@@ -1340,11 +1442,14 @@ impl serde::Serialize for JevResult {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("JevResult", 7)?;
-        st.serialize_field("mode", match self.mode {
-            JevMode::Choice => "choice",
-            JevMode::Binary => "binary",
-            JevMode::Score => "score",
-        })?;
+        st.serialize_field(
+            "mode",
+            match self.mode {
+                JevMode::Choice => "choice",
+                JevMode::Binary => "binary",
+                JevMode::Score => "score",
+            },
+        )?;
         st.serialize_field("question", &self.question)?;
         let labels_str: Vec<String> = self.labels.iter().map(|c| c.to_string()).collect();
         st.serialize_field("labels", &labels_str)?;
@@ -1362,10 +1467,7 @@ impl serde::Serialize for JevResult {
         }
         if self.mode == JevMode::Binary {
             st.serialize_field("choice", &self.choice_label.map(|c| c.to_string()))?;
-            st.serialize_field(
-                "positive",
-                &self.positive_label.map(|c| c.to_string()),
-            )?;
+            st.serialize_field("positive", &self.positive_label.map(|c| c.to_string()))?;
             st.serialize_field("probability", &self.probability_positive)?;
         }
         if self.mode == JevMode::Score {

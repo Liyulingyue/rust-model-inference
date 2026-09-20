@@ -269,13 +269,20 @@ fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
     assert_eq!(weight[2], 0, "weight[2] should be 0 but is {}", weight[2]);
     kernel.embedding_lookup(0, 32, &mut output);
 
-    let expected_lut = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
+    let expected_lut = [
+        -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+    ];
     for (i, &val) in output.iter().enumerate() {
         let j = i / 2;
         let is_low = i % 2 == 0;
         let nibble = if is_low { j } else { j + 8 };
         let expected_val = expected_lut[nibble] as f32;
-        assert!((val - expected_val).abs() < 1e-6, "output[{i}] = {} != LUT[{nibble}]={}", val, expected_val);
+        assert!(
+            (val - expected_val).abs() < 1e-6,
+            "output[{i}] = {} != LUT[{nibble}]={}",
+            val,
+            expected_val
+        );
     }
 }
 
@@ -307,30 +314,43 @@ fn iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp() {
     for super_idx in 0..8 {
         for sb in 0..8 {
             let boff = super_idx * 8 * 18 + sb * 18;
-            iq4nl_data[boff..boff + 2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+            iq4nl_data[boff..boff + 2]
+                .copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
             for j in 0..16 {
                 iq4nl_data[boff + 2 + j] = (j | ((j + 8) << 4)) as u8;
             }
         }
     }
     // 8 Q8K blocks with random but bounded values
-    let q8k: Vec<BlockQ8K> = (0..8).map(|_| {
-        let d_val = ((rng.next().unwrap() % 32) as f32 + 1.0) / 16.0;
-        let mut qs = [0i8; 256];
-        let mut bsums = [0i16; 16];
-        for qs in qs.iter_mut() {
-            *qs = (rng.next().unwrap() % 128) as i8;
-        }
-        for bs in bsums.iter_mut() {
-            *bs = (rng.next().unwrap() % 256) as i8 as i16;
-        }
-        BlockQ8K { d: d_val, qs, bsums }
-    }).collect();
+    let q8k: Vec<BlockQ8K> = (0..8)
+        .map(|_| {
+            let d_val = ((rng.next().unwrap() % 32) as f32 + 1.0) / 16.0;
+            let mut qs = [0i8; 256];
+            let mut bsums = [0i16; 16];
+            for qs in qs.iter_mut() {
+                *qs = (rng.next().unwrap() % 128) as i8;
+            }
+            for bs in bsums.iter_mut() {
+                *bs = (rng.next().unwrap() % 256) as i8 as i16;
+            }
+            BlockQ8K {
+                d: d_val,
+                qs,
+                bsums,
+            }
+        })
+        .collect();
 
     let scalar = rust_model_inference::ops::quant::vec_dot_iq4_nl_q8k_scalar(&iq4nl_data, &q8k);
     let simd = rust_model_inference::ops::quant::vec_dot_iq4_nl_q8k(&iq4nl_data, &q8k);
     let diff = (simd - scalar).abs();
-    assert!(diff <= 1.0, "IQ4_NL AVX2/NEON vs scalar diff {} > 1 ULP: scalar={} simd={}", diff, scalar, simd);
+    assert!(
+        diff <= 1.0,
+        "IQ4_NL AVX2/NEON vs scalar diff {} > 1 ULP: scalar={} simd={}",
+        diff,
+        scalar,
+        simd
+    );
 }
 
 fn rand_simple(seed: u32) -> impl Iterator<Item = u32> {

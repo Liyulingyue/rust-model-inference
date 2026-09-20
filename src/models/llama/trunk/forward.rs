@@ -1140,7 +1140,8 @@ pub fn run_forward_logits_llama(
     let n_head = config.n_head;
     let n_head_kv = config.n_head_kv;
     let n_embd_head = config.n_embd_head;
-    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch)) {
+    let n_embd_head_k = if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch))
+    {
         v.to_u64().unwrap_or(n_embd_head as u64) as usize
     } else {
         n_embd_head
@@ -1282,13 +1283,37 @@ pub fn run_forward_logits_llama(
                 let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
 
                 lw.wq.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    q,
+                    n_embd,
+                    n_embd_q,
+                    ith,
+                    nth,
                 );
                 lw.wk.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    k_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
                 );
                 lw.wv.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    v_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
                 );
             });
 
@@ -1459,7 +1484,15 @@ pub fn run_forward_logits_llama(
                 let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd_q / 256) };
                 let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
                 lw.wo.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    attn_proj,
+                    n_embd_q,
+                    n_embd,
+                    ith,
+                    nth,
                 );
             });
 
@@ -1492,10 +1525,26 @@ pub fn run_forward_logits_llama(
                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
                 lw.w_gate.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    up_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
                 );
                 lw.w_up.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    gate_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
                 );
                 if crate::ops::gpu_matmul_active() {
                     if ith == 0 {
@@ -1535,7 +1584,15 @@ pub fn run_forward_logits_llama(
                 let q8k = unsafe { std::slice::from_raw_parts(q8k, n_ff / 256) };
                 let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
                 lw.w_down.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    down_buf,
+                    n_ff,
+                    n_embd,
+                    ith,
+                    nth,
                 );
             });
 
@@ -1582,7 +1639,15 @@ pub fn run_forward_logits_llama(
                 let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
                 let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
                 output_pw.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    logits,
+                    n_embd,
+                    vocab,
+                    ith,
+                    nth,
                 );
             });
             if logit_scale != 0.0 {

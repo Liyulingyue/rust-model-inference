@@ -184,11 +184,7 @@ impl SparkSession {
     /// Run the full forward pass for one token at `pos`, returning the
     /// vocabulary logits. Shared between `decode_step` (which samples
     /// the logits) and `forward_logits` (which returns them).
-    fn forward_step_logits(
-        &mut self,
-        token_id: u32,
-        pos: usize,
-    ) -> Result<Vec<f32>, String> {
+    fn forward_step_logits(&mut self, token_id: u32, pos: usize) -> Result<Vec<f32>, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
         let n_head = cfg.n_head;

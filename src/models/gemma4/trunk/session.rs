@@ -205,7 +205,10 @@ impl<'model> Gemma4Session<'model> {
         if token_ids.is_empty() {
             return Err("Gemma4 prompt must contain at least one token".into());
         }
-        let rows: Vec<Gemma4InputRow> = token_ids.iter().map(|&t| Gemma4InputRow::Token(t)).collect();
+        let rows: Vec<Gemma4InputRow> = token_ids
+            .iter()
+            .map(|&t| Gemma4InputRow::Token(t))
+            .collect();
         self.forward_rows(&rows)
     }
 }

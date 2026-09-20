@@ -272,7 +272,10 @@ fn main() {
                 }
                 let inputs: Vec<app::JevQuestionInput> = jev_questions
                     .into_iter()
-                    .map(|q| app::JevQuestionInput { text: q.text, options: q.options })
+                    .map(|q| app::JevQuestionInput {
+                        text: q.text,
+                        options: q.options,
+                    })
                     .collect();
                 app::run_or_exit(app::run_jev_decision(
                     source.clone(),
