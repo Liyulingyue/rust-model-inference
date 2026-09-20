@@ -1098,8 +1098,8 @@ pub(super) fn attend(
     sliding: bool,
     sliding_window: usize,
     output: &mut [f32],
-    _scores: &mut Vec<f32>,
-    _values: &mut Vec<f32>,
+    scores: &mut Vec<f32>,
+    values: &mut Vec<f32>,
     pool: &ComputePool,
 ) -> Result<(), String> {
     let dim = cache.head_dim;
@@ -1141,15 +1141,26 @@ pub(super) fn attend(
     };
     let cached = rows - first;
     let padded = cached.div_ceil(256) * 256;
+    let workspace = padded
+        .checked_mul(pool.n_threads())
+        .ok_or_else(|| format!("blk.{layer} attention scratch length overflow"))?;
+    scores.resize(workspace, f32::NEG_INFINITY);
+    values.resize(workspace, 0.0);
+    values.fill(0.0);
     let query_ptr = query.as_ptr();
     let keys_ptr = cache.keys.as_ptr();
     let values_ptr = cache.values.as_ptr();
     let output_ptr = output.as_mut_ptr();
+    let scores_ptr = scores.as_mut_ptr();
+    let scratch_values_ptr = values.as_mut_ptr();
     pool.compute(move |ith, nth| {
         let h_step = (q_heads + nth - 1) / nth;
         let h_start = (ith * h_step).min(q_heads);
         let h_end = (h_start + h_step).min(q_heads);
-        let mut head_scores = vec![f32::NEG_INFINITY; padded];
+        let head_scores =
+            unsafe { std::slice::from_raw_parts_mut(scores_ptr.add(ith * padded), padded) };
+        let head_values =
+            unsafe { std::slice::from_raw_parts_mut(scratch_values_ptr.add(ith * padded), padded) };
         for head in h_start..h_end {
             let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
             let kv_head = head / group_size;
@@ -1160,7 +1171,7 @@ pub(super) fn attend(
                 let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
                 *score = dot_f32(query_head, key, dim);
             }
-            softmax_approx_inplace(&mut head_scores);
+            softmax_approx_inplace(head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
             unsafe {
@@ -1172,6 +1183,7 @@ pub(super) fn attend(
                     first,
                     cached,
                     dim,
+                    head_values,
                     head_output,
                 );
             }
@@ -1191,11 +1203,11 @@ unsafe fn attend_v(
     first: usize,
     cached: usize,
     dim: usize,
+    head_values: &mut [f32],
     head_output: &mut [f32],
 ) {
     let padded = cached.div_ceil(256) * 256;
     let scores = std::slice::from_raw_parts(scores_ptr, padded);
-    let mut head_values = vec![0.0; padded];
     for (d, output) in head_output[..dim].iter_mut().enumerate() {
         for (value, token) in head_values[..cached].iter_mut().zip(first..) {
             *value = *values_ptr.add(token * row_width + kv_offset + d);
@@ -1381,11 +1393,54 @@ mod tests {
         values[0] = f32::from_bits(0x3cb9_1aee);
         values[4] = f32::from_bits(0x3c9f_4180);
         let mut output = [0.0; 4];
+        let mut scratch = [0.0; 256];
 
         unsafe {
-            attend_v(values.as_ptr(), scores.as_ptr(), 4, 0, 0, 2, 4, &mut output);
+            attend_v(
+                values.as_ptr(),
+                scores.as_ptr(),
+                4,
+                0,
+                0,
+                2,
+                4,
+                &mut scratch,
+                &mut output,
+            );
         }
 
         assert_eq!(output[0].to_bits(), 0x3cab_e9d8);
+    }
+
+    #[test]
+    fn attention_reuses_worker_partitioned_scratch() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 2,
+            keys: vec![0.0, 1.0],
+            values: vec![1.0, 2.0],
+        };
+        let mut output = [0.0; 2];
+        let mut scores = Vec::new();
+        let mut values = Vec::new();
+
+        attend(
+            0,
+            1,
+            &[1.0; 2],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut scores,
+            &mut values,
+            &ComputePool::new(2),
+        )
+        .unwrap();
+
+        assert_eq!(scores.len(), 2 * 256);
+        assert_eq!(values.len(), 2 * 256);
+        assert_eq!(output[0].to_bits(), output[1].to_bits());
     }
 }
