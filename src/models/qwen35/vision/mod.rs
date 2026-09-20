@@ -1214,24 +1214,38 @@ impl<'a> VisionEncoder<'a> {
         let t_ln1_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln1_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_with_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln1_weights[il],
-                        b,
-                        eps,
-                    );
-                }
+                let weight = &pc.ln1_weights[il];
+                let bias = b.as_slice();
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row = std::slice::from_raw_parts_mut(
+                                merged_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            layer_norm_with_bias(row, weight, bias, eps);
+                        }
+                    }
+                });
             } else {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_without_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln1_weights[il],
-                        eps,
-                    );
-                }
+                let weight = &pc.ln1_weights[il];
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row = std::slice::from_raw_parts_mut(
+                                merged_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            layer_norm_without_bias(row, weight, eps);
+                        }
+                    }
+                });
             }
 
             if let Some(ref qkv) = pc.qkv_weights[il] {
@@ -1242,10 +1256,22 @@ impl<'a> VisionEncoder<'a> {
                     &mut scratch.qkv_buf[..n_tokens * n_embd * 3],
                 );
                 if let Some(ref bias) = pc.qkv_biases[il] {
-                    for t in 0..n_tokens {
-                        let off = t * n_embd * 3;
-                        vec_add_into(bias.as_slice(), &mut scratch.qkv_buf[off..off + n_embd * 3]);
-                    }
+                    let bias_slice = bias.as_slice();
+                    let qkv_ptr = scratch.qkv_buf.as_mut_ptr();
+                    let chunk = n_embd * 3;
+                    pool.compute(move |ith, nth| {
+                        let (start, end) =
+                            crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                        for t in start..end {
+                            unsafe {
+                                let row = std::slice::from_raw_parts_mut(
+                                    qkv_ptr.add(t * chunk),
+                                    chunk,
+                                );
+                                vec_add_into(bias_slice, row);
+                            }
+                        }
+                    });
                 }
             } else {
                 let input = &scratch.merged[..n_tokens * n_embd];
@@ -1556,20 +1582,39 @@ impl<'a> VisionEncoder<'a> {
             }
             if let Some(bias_data) = layer.out_bias {
                 let bias = decode_f32_slice(bias_data);
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let proj_ptr = scratch.proj_buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
+                            let row = std::slice::from_raw_parts_mut(
+                                proj_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
         }
-        for t in 0..n_tokens {
-            let off = t * n_embd;
-            vec_add(
-                &scratch.residual[off..off + n_embd],
-                &scratch.proj_buf[off..off + n_embd],
-                &mut scratch.merged[off..off + n_embd],
-            );
-        }
+        let residual_ptr = scratch.residual.as_ptr();
+        let proj_ptr = scratch.proj_buf.as_ptr();
+        let merged_ptr = scratch.merged.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) =
+                crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            for t in start..end {
+                unsafe {
+                    let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
+                    let b = std::slice::from_raw_parts(proj_ptr.add(t * n_embd), n_embd);
+                    let dst = std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                    vec_add(a, b, dst);
+                }
+            }
+        });
         t_attn_out = t_attn_out_start.elapsed().as_secs_f64();
 
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
@@ -1577,24 +1622,38 @@ impl<'a> VisionEncoder<'a> {
         let t_ln2_start = std::time::Instant::now();
         if let Some(ref pc) = self.precomputed {
             if let Some(ref b) = pc.ln2_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_with_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln2_weights[il],
-                        b,
-                        eps,
-                    );
-                }
+                let weight = &pc.ln2_weights[il];
+                let bias = b.as_slice();
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row = std::slice::from_raw_parts_mut(
+                                merged_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            layer_norm_with_bias(row, weight, bias, eps);
+                        }
+                    }
+                });
             } else {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    layer_norm_without_bias(
-                        &mut scratch.merged[off..off + n_embd],
-                        &pc.ln2_weights[il],
-                        eps,
-                    );
-                }
+                let weight = &pc.ln2_weights[il];
+                let merged_ptr = scratch.merged.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let row = std::slice::from_raw_parts_mut(
+                                merged_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            layer_norm_without_bias(row, weight, eps);
+                        }
+                    }
+                });
             }
 
             matmul_weight_batch_pooled(
@@ -1606,10 +1665,21 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
             );
             if let Some(ref bias) = pc.ffn_up_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * cfg.n_ff;
-                    vec_add_into(bias.as_slice(), &mut scratch.ffn_buf[off..off + cfg.n_ff]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let ffn_ptr = scratch.ffn_buf.as_mut_ptr();
+                let nff = cfg.n_ff;
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
+                            let row =
+                                std::slice::from_raw_parts_mut(ffn_ptr.add(t * nff), nff);
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
             if let Some(ref gate) = pc.ffn_gate_weights[il] {
                 matmul_weight_batch_pooled(
@@ -1619,13 +1689,23 @@ impl<'a> VisionEncoder<'a> {
                     &mut scratch.ffn_gate_buf[..n_tokens * cfg.n_ff],
                 );
                 if let Some(ref bias) = pc.ffn_gate_biases[il] {
-                    for t in 0..n_tokens {
-                        let off = t * cfg.n_ff;
-                        vec_add_into(
-                            bias.as_slice(),
-                            &mut scratch.ffn_gate_buf[off..off + cfg.n_ff],
-                        );
-                    }
+                    let bias_ptr = bias.as_ptr();
+                    let gate_buf_ptr = scratch.ffn_gate_buf.as_mut_ptr();
+                    let nff = cfg.n_ff;
+                    pool.compute(move |ith, nth| {
+                        let (start, end) =
+                            crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                        for t in start..end {
+                            unsafe {
+                                let bias_slice = std::slice::from_raw_parts(bias_ptr, nff);
+                                let row = std::slice::from_raw_parts_mut(
+                                    gate_buf_ptr.add(t * nff),
+                                    nff,
+                                );
+                                vec_add_into(bias_slice, row);
+                            }
+                        }
+                    });
                 }
             }
         } else {
@@ -1705,10 +1785,22 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.proj_buf[..n_tokens * n_embd],
             );
             if let Some(ref bias) = pc.ffn_down_biases[il] {
-                for t in 0..n_tokens {
-                    let off = t * n_embd;
-                    vec_add_into(bias.as_slice(), &mut scratch.proj_buf[off..off + n_embd]);
-                }
+                let bias_ptr = bias.as_ptr();
+                let proj_ptr = scratch.proj_buf.as_mut_ptr();
+                pool.compute(move |ith, nth| {
+                    let (start, end) =
+                        crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                    for t in start..end {
+                        unsafe {
+                            let bias_slice = std::slice::from_raw_parts(bias_ptr, n_embd);
+                            let row = std::slice::from_raw_parts_mut(
+                                proj_ptr.add(t * n_embd),
+                                n_embd,
+                            );
+                            vec_add_into(bias_slice, row);
+                        }
+                    }
+                });
             }
         } else {
             let layer = &self.layers[il];
@@ -1733,14 +1825,21 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        for t in 0..n_tokens {
-            let off = t * n_embd;
-            vec_add(
-                &scratch.residual[off..off + n_embd],
-                &scratch.proj_buf[off..off + n_embd],
-                &mut scratch.merged[off..off + n_embd],
-            );
-        }
+        let residual_ptr = scratch.residual.as_ptr();
+        let proj_ptr = scratch.proj_buf.as_ptr();
+        let merged_ptr = scratch.merged.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let (start, end) =
+                crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+            for t in start..end {
+                unsafe {
+                    let a = std::slice::from_raw_parts(residual_ptr.add(t * n_embd), n_embd);
+                    let b = std::slice::from_raw_parts(proj_ptr.add(t * n_embd), n_embd);
+                    let dst = std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
+                    vec_add(a, b, dst);
+                }
+            }
+        });
         t_ffn_down = t_ffn_down_start.elapsed().as_secs_f64();
 
         if do_profile {
