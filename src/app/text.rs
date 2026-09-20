@@ -1,4 +1,5 @@
 use crate::app::cli::{resolve_thread_count, CliOptions, KvFormat};
+use crate::core::loader::model_config_from_source;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -159,6 +160,446 @@ pub fn run_inference(
     }
 }
 
+/// One question inside a JEV request. Options are stored in their original
+/// user-supplied form (e.g. "晴天:5" for score mode, "晴天" otherwise); the
+/// decision logic parses the `:value` suffix and decides the per-question
+/// mode from the option shapes.
+#[derive(Clone, Debug)]
+pub struct JevQuestionInput {
+    pub text: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JevMode {
+    Choice,
+    Binary,
+    Score,
+}
+
+#[derive(Clone, Debug)]
+pub struct JevResult {
+    pub mode: JevMode,
+    pub question: String,
+    pub labels: Vec<char>,
+    pub descriptions: Vec<String>,
+    pub values: Vec<f32>,
+    pub probabilities: Vec<f32>,
+    pub choice_label: Option<char>,
+    pub positive_label: Option<char>,
+    pub probability_positive: Option<f32>,
+    pub score: Option<f32>,
+    pub prefill_ms: u128,
+}
+
+/// JEV-style single-forward-pass decision.
+///
+/// Protocol (paraphrased from `references/openjev/decisionmaking/prompts.py`):
+///   1. For each question, build chat prompt with system instruction + JSON
+///      user payload.
+///   2. Run a single prefill per question, read last-position logits.
+///   3. Look up logits for label tokens (A, B, C, …) which must each be a
+///      single token in the tokenizer (otherwise error out).
+///   4. Return softmax over those labels.
+///
+/// Per-question mode is auto-detected:
+///   - any option contains `:` → score (text:value)
+///   - K==2 and --jev-positive set → binary
+///   - else → choice
+///
+/// Output format (stdout):
+///   text mode (single question):
+///     choice: B
+///     probabilities:
+///       A: 0.124
+///       B: 0.683
+///       C: 0.193
+///   text mode (binary):
+///     choice: A
+///     probability: 0.683
+///   text mode (score):
+///     score: 3.42
+///   json mode: one JSON object per question (newline-delimited).
+///
+/// Notes:
+/// - This routine intentionally does **not** run autoregressive decode.
+/// - Qwen3-0.6B-Instruct is recommended; base Qwen3-0.6B still runs but
+///   the protocol's instruction-following is not guaranteed.
+pub fn run_jev_decision(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevQuestionInput],
+    positive: Option<&str>,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    output_json: bool,
+) -> Result<(), String> {
+    if questions.is_empty() {
+        return Err("--jev requires at least one --jev-question".into());
+    }
+    for q in questions {
+        if q.options.len() < 2 {
+            return Err(format!(
+                "Question {:?} requires at least 2 --jev-option values",
+                q.text
+            ));
+        }
+        if q.options.len() > 26 {
+            return Err(format!(
+                "Question {:?} has {} options; JEV supports at most 26 (A..Z)",
+                q.text,
+                q.options.len()
+            ));
+        }
+    }
+
+    let t0 = Instant::now();
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+    // Verify A..Z are single tokens in this tokenizer.
+    for label_char in b'A'..=b'Z' {
+        let label_text = (label_char as char).to_string();
+        let label_enc = tokenizer.encode(&label_text, EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        });
+        if label_enc.len() != 1 {
+            return Err(format!(
+                "Label \"{}\" tokenizes to {} tokens; the Qwen tokenizer must encode A..Z as single tokens",
+                label_text, label_enc.len()
+            ));
+        }
+    }
+
+    // Resolve the per-question mode and parse option values.
+    let mut per_question = Vec::with_capacity(questions.len());
+    for q in questions {
+        let has_colon = q.options.iter().any(|opt| opt.contains(':'));
+        let mode = if has_colon {
+            JevMode::Score
+        } else if q.options.len() == 2 && positive.is_some() {
+            JevMode::Binary
+        } else {
+            JevMode::Choice
+        };
+        let mut descriptions = Vec::with_capacity(q.options.len());
+        let mut values = Vec::with_capacity(q.options.len());
+        for opt in &q.options {
+            if mode == JevMode::Score {
+                let (desc, val) = opt
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("Score option \"{}\" must be \"description:value\"", opt))?;
+                let v: f32 = val
+                    .parse()
+                    .map_err(|e| format!("Score value {:?} is not a float: {}", val, e))?;
+                descriptions.push(desc.to_string());
+                values.push(v);
+            } else {
+                descriptions.push(opt.clone());
+                values.push(0.0);
+            }
+        }
+        let positive_label = if mode == JevMode::Binary {
+            let p = positive.unwrap().to_string();
+            let pch = p.chars().next().unwrap_or('A').to_ascii_uppercase();
+            if !('A'..='Z').contains(&pch) {
+                return Err(format!(
+                    "--jev-positive must be a single letter A..Z, got {:?}",
+                    p
+                ));
+            }
+            Some(pch)
+        } else {
+            None
+        };
+        per_question.push(PreparedQuestion {
+            mode,
+            text: q.text.clone(),
+            descriptions,
+            values,
+            positive_label,
+        });
+    }
+
+    // Load model once for all questions.
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
+    let pool = Arc::new(ComputePool::new(n_threads));
+    eprintln!("compute pool: {} threads", pool.n_threads());
+    let model = crate::models::qwen3::Qwen3Model::from_source(
+        source.clone(),
+        Arc::new(tokenizer),
+        pool,
+    )?;
+    let model_config = model_config_from_source(source.as_ref())?;
+    let _ = model_config;
+
+    // Per-question forward pass. We keep one session and reset its KV state
+    // between questions because each question has a different prompt.
+    let max_ctx = model.config().n_ctx;
+    let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
+        &model,
+        max_ctx,
+        KvFormat::F16,
+        crate::core::scratchpad::KvLifecycle::Ephemeral,
+    )?;
+
+    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
+    for q in &per_question {
+        // Build prompt.
+        let system = match q.mode {
+            JevMode::Score => "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label.",
+            _ => "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label.",
+        };
+        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
+            .map(|b| b as char)
+            .collect();
+        let mut payload = String::from("{\"context\": ");
+        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload.push_str(", \"question\": ");
+        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload.push_str(", \"candidates\": {");
+        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
+            if i > 0 {
+                payload.push(',');
+            }
+            payload.push('"');
+            payload.push(*label_char);
+            payload.push_str("\": ");
+            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
+        }
+        payload.push_str("}}");
+
+        let mut token_ids = Vec::new();
+        append_qwen_message_tokens(
+            &mut token_ids,
+            &model.tokenizer,
+            "system",
+            &model.tokenizer.encode(system, EncodeOptions { add_special: false, parse_special: false }),
+        )?;
+        append_qwen_message_tokens(
+            &mut token_ids,
+            &model.tokenizer,
+            "user",
+            &model.tokenizer.encode(&payload, EncodeOptions { add_special: false, parse_special: false }),
+        )?;
+        append_qwen_assistant_prefix(&mut token_ids, &model.tokenizer, false)?;
+
+        if !output_json {
+            println!("\n--- JEV question ({} candidates) ---", q.descriptions.len());
+            println!("Q: {}", q.text);
+            for (i, desc) in q.descriptions.iter().enumerate() {
+                if q.mode == JevMode::Score {
+                    println!("  {}: {} = {}", labels[i], desc, q.values[i]);
+                } else {
+                    println!("  {}: {}", labels[i], desc);
+                }
+            }
+        }
+
+        // Reset KV state by recreating the session (Ephemeral lifecycle
+        // cannot easily be cleared mid-flight).
+        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
+            &model,
+            max_ctx,
+            KvFormat::F16,
+            crate::core::scratchpad::KvLifecycle::Ephemeral,
+        )?;
+
+        let positions: Vec<[usize; 4]> = (0..token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
+        let input = crate::models::qwen3::Qwen3Input {
+            token_ids: &token_ids,
+            positions: &positions,
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)?;
+
+        // Extract label logits + softmax.
+        let label_ids: Vec<u32> = labels
+            .iter()
+            .map(|c| {
+                let s = c.to_string();
+                model
+                    .tokenizer
+                    .encode(&s, EncodeOptions { add_special: false, parse_special: false })
+                    .into_iter()
+                    .next()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let max_logit = label_ids
+            .iter()
+            .map(|&id| logits[id as usize])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut exps: Vec<f32> = label_ids
+            .iter()
+            .map(|&id| (logits[id as usize] - max_logit).exp())
+            .collect();
+        let sum: f32 = exps.iter().sum();
+        for v in exps.iter_mut() {
+            *v /= sum;
+        }
+
+        let chosen_idx = exps
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        let choice_label = Some(labels[chosen_idx]);
+        let (prob_positive, score) = match q.mode {
+            JevMode::Binary => {
+                let pos_idx = q.positive_label.unwrap().to_string().as_str().bytes().next().unwrap() as usize - b'A' as usize;
+                let prob = exps[pos_idx];
+                (Some(prob), None)
+            }
+            JevMode::Score => {
+                let s: f32 = exps.iter().zip(q.values.iter()).map(|(p, v)| p * v).sum();
+                (None, Some(s))
+            }
+            _ => (None, None),
+        };
+
+        results.push(JevResult {
+            mode: q.mode,
+            question: q.text.clone(),
+            labels,
+            descriptions: q.descriptions.clone(),
+            values: q.values.clone(),
+            probabilities: exps,
+            choice_label,
+            positive_label: q.positive_label,
+            probability_positive: prob_positive,
+            score,
+            prefill_ms: prefill_dur.as_millis(),
+        });
+    }
+
+    if output_json {
+        for r in &results {
+            let line = serde_json::to_string(r).map_err(|e| format!("json encode: {e}"))?;
+            println!("{}", line);
+        }
+    } else if results.len() == 1 {
+        let r = &results[0];
+        println!("\n--- JEV decision ---");
+        match r.mode {
+            JevMode::Choice => {
+                println!("choice: {}", r.choice_label.unwrap_or('?'));
+                println!("probabilities:");
+                for (i, p) in r.probabilities.iter().enumerate() {
+                    println!("  {}: {:.4}", r.labels[i], p);
+                }
+            }
+            JevMode::Binary => {
+                println!("choice: {}", r.choice_label.unwrap_or('?'));
+                println!(
+                    "probability ({}): {:.4}",
+                    r.positive_label.unwrap_or('?'),
+                    r.probability_positive.unwrap_or(0.0)
+                );
+            }
+            JevMode::Score => {
+                println!("score: {:.4}", r.score.unwrap_or(0.0));
+                println!("breakdown:");
+                for (i, p) in r.probabilities.iter().enumerate() {
+                    println!(
+                        "  {}: {:.4} × {} = {:.4}",
+                        r.labels[i],
+                        p,
+                        r.values[i],
+                        p * r.values[i]
+                    );
+                }
+            }
+        }
+        println!("prefill: {} ms", r.prefill_ms);
+    } else {
+        println!("\n--- JEV decisions ({} questions) ---", results.len());
+        for (qi, r) in results.iter().enumerate() {
+            println!("\nQ{}: {}", qi + 1, r.question);
+            match r.mode {
+                JevMode::Choice => {
+                    println!("  choice: {}", r.choice_label.unwrap_or('?'));
+                    for (i, p) in r.probabilities.iter().enumerate() {
+                        println!("    {}: {:.4}", r.labels[i], p);
+                    }
+                }
+                JevMode::Binary => {
+                    println!("  choice: {}", r.choice_label.unwrap_or('?'));
+                    println!(
+                        "  P({}): {:.4}",
+                        r.positive_label.unwrap_or('?'),
+                        r.probability_positive.unwrap_or(0.0)
+                    );
+                }
+                JevMode::Score => {
+                    println!("  score: {:.4}", r.score.unwrap_or(0.0));
+                }
+            }
+        }
+    }
+
+    let total_ms = t0.elapsed().as_millis();
+    eprintln!("\nJEV total: {} ms ({} questions)", total_ms, results.len());
+    Ok(())
+}
+
+struct PreparedQuestion {
+    mode: JevMode,
+    text: String,
+    descriptions: Vec<String>,
+    values: Vec<f32>,
+    positive_label: Option<char>,
+}
+
+impl serde::Serialize for JevResult {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("JevResult", 7)?;
+        st.serialize_field("mode", match self.mode {
+            JevMode::Choice => "choice",
+            JevMode::Binary => "binary",
+            JevMode::Score => "score",
+        })?;
+        st.serialize_field("question", &self.question)?;
+        let labels_str: Vec<String> = self.labels.iter().map(|c| c.to_string()).collect();
+        st.serialize_field("labels", &labels_str)?;
+        st.serialize_field("descriptions", &self.descriptions)?;
+        if self.mode == JevMode::Score {
+            st.serialize_field("values", &self.values)?;
+        }
+        let mut probs = serde_json::Map::new();
+        for (i, p) in self.probabilities.iter().enumerate() {
+            probs.insert(self.labels[i].to_string(), serde_json::json!(p));
+        }
+        st.serialize_field("probabilities", &probs)?;
+        if self.mode == JevMode::Choice {
+            st.serialize_field("choice", &self.choice_label.map(|c| c.to_string()))?;
+        }
+        if self.mode == JevMode::Binary {
+            st.serialize_field("choice", &self.choice_label.map(|c| c.to_string()))?;
+            st.serialize_field(
+                "positive",
+                &self.positive_label.map(|c| c.to_string()),
+            )?;
+            st.serialize_field("probability", &self.probability_positive)?;
+        }
+        if self.mode == JevMode::Score {
+            st.serialize_field("score", &self.score)?;
+        }
+        st.serialize_field("prefill_ms", &self.prefill_ms)?;
+        st.end()
+    }
+}
+
 pub fn run_interactive(
     source: Arc<dyn TensorSource>,
     max_tokens: usize,
@@ -201,7 +642,7 @@ pub fn run_interactive(
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
         )?;
-        let _ = repetition_penalty; // suppress unused warning if not consumed
+        let _ = repetition_penalty;
         println!();
     }
     Ok(())

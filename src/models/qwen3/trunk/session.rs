@@ -218,6 +218,32 @@ impl<'model> Qwen3Session<'model> {
         })
     }
 
+/// Single forward pass: prefill the prompt and return a copy of the
+    /// last-position logits. Used by JEV / classification modes that do
+    /// not need autoregressive decoding.
+    pub fn forward_logits(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<(Vec<f32>, Duration), String> {
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 prompt must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let duration = self.prefill(&input, prefill_batch_size)?;
+        Ok((self.scratch.logits.clone(), duration))
+    }
+
     /// Return false from the callback to stop generation. Empty text callbacks
     /// still allow cancellation when a token has not completed a UTF-8 character.
     pub fn generate_streaming_until(
