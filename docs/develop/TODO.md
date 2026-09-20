@@ -30,6 +30,44 @@ NEON on aarch64; no AVX-512).
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
       预期 1.5-2× 加速。
 
+### JEV 决策评分 follow-ups
+
+`--jev` 已在 `src/app/text.rs::run_jev_decision` 中按 `general.architecture` 自动路由
+到 9 个 trunk 的 `forward_logits` / `run_forward_logits_*`（Qwen3 / Qwen3.5 /
+Llama / Gemma4 / LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan）。通用协议与
+per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
+[`docs/develop/jev.md`](jev.md)。
+
+- [ ] **JEV Multi-question KV 共享** — 当前多 question 模式（`--jev-question × N`）
+      每个 question 都会新建 session 重新 prefill 一遍 context + question 文本，
+      耗时 N × prefill_time。KV 共享方案：让 session 支持 `reset_kv(seq_len)`
+      把 KV cache 截到 context 之后的长度，对每个 question 只 prefill
+      `{"question": ..., "candidates": ...}` 部分复用同一份 context KV。
+      预期 N 个 question 总耗时从 `N × t` 降到 `t + (N-1) × t'`，其中 `t'`
+      是 question-only 部分。
+      适用 trunk：qwen3 / qwen35 / gemma4 / spark（有 Session API）；
+      llama / lfm2 / lfm25 / nemotron_h / hunyuan 需要先把 monolith
+      拆出 session API。
+- [ ] **JEV Shared prefix batching** — 多个 `--jev-question` 不仅共享 prefix，
+      还可以把 K 个不同 question 的最后 token batch 成一次前向（拼接
+      成 `[prefix; q1_suffix; q2_suffix; ...; qK_suffix]`，attention 阶段
+      mask 让 K 个问题互不干扰）。当 K 个 question 文本相似度高时（典型
+      客服路由、FAQ 分类场景），可以把 prefill 提速近 K×。
+      需要先解决：不同 question 的 last-token 位置索引；padding 到统一
+      长度；attention mask 的构造。当前架构（每 question 一个独立 session）
+      完全不支持此模式，需要结构化改造。
+- [ ] **JEV instruct-tuned GGUF 文档** — 现状：本地 `models/qwen3-0.6b-gguf/`
+      只有 base model Qwen3-0.6B（IQ4_NL / Q4_0 / Q8_0 等量化），不是
+      Instruct 变体。OpenJEV 锁定 Qwen3-4B-Instruct-2507。要让 JEV 输出
+      真正准确的 label，需要：
+      1. 找/下载 `Qwen3-0.6B-Instruct` 的 GGUF（huggingface 上有）
+      2. 同 §1（用 base model + IQ4_NL 跑通作为 baseline）
+      3. 加 `tests/qwen3_instruct_jev_reference.rs` 比对 base vs instruct
+- [ ] **JEV 与生成模式共享 KV（暂留）** — 当 `--prompt` 后面接 `--jev` 时，
+      可以复用生成模式 prefill 出来的 KV cache，避免重复编码同一段 context。
+      当前架构下两者用不同的 session path，需要在 dispatch 入口统一
+      KV lifecycle（`KvLifecycle::Shared`）。
+
 ## Medium Priority
 
 - [ ] **讨论：MemoryArena 与 BlockAllocator 组合**

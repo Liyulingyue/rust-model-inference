@@ -187,4 +187,39 @@ cargo run --release --bin server -- \
 - `src/app/tts.rs` — TTS CLI 入口
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
+
+## 10. JEV 决策评分（Qwen3 用法）
+
+`--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
+跨 trunk 实现现状、chat template 差异、限制等全局性内容见
+[`docs/develop/jev.md`](../develop/jev.md)。
+
+Qwen3 上 `--jev` 的具体用法：
+
+```bash
+# Choice mode（默认 K≥2）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "明天下午2点要去机场接人" \
+  --jev-question "明天的天气怎么样？" \
+  --jev-option "晴天" --jev-option "阴天" --jev-option "雨天"
+
+# Binary mode（K=2 + --jev-positive）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
+  --jev-question "现在在下雨吗？" \
+  --jev-option "是的" --jev-option "没有" --jev-positive A
+
+# Score mode（description:value）
+rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
+  --jev --jev-context "今天股市整体上涨，科技板块表现强劲" \
+  --jev-question "市场情绪如何？" \
+  --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
+  --jev-option "悲观:2" --jev-option "极度悲观:1"
+```
+
+Qwen3 使用的 chat template 是标准 `<|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n`，
+由 `src/prompt.rs::append_qwen_message_tokens` / `append_qwen_assistant_prefix`
+构造。Qwen3-VL 走同一个 chat template，只是文本 + 图像拼接；多模态路径
+见 [`docs/usage/qwen3.md` §3](#3-视觉语言qwen3-vl--qwen35--qwen38)。
+
 - `docs/SUPPORTED_MODELS.md` — 验证状态与量化格式支持

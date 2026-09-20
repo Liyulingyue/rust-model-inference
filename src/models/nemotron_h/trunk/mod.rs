@@ -13,5 +13,8 @@ pub mod forward;
 pub mod weights;
 
 pub use config::NemotronConfig;
-pub use forward::run_inference;
+pub use forward::{
+    load_nemotron_tokenizer, run_forward_logits_nemotron_h, run_inference, NemotronModel,
+    NemotronScratch,
+};
 pub use weights::NemotronLayerWeights;
