@@ -22,7 +22,7 @@
 //! ## Scratch buffer sizing invariant
 //!
 //! All three local `max_n_in` expressions in `forward_layer`,
-//! `forward_attention`, and `forward_shortconv` **must** equal
+//! `forward_attention_chunked`, and `forward_shortconv` **must** equal
 //! `(n_embd * 3).max(n_embd_q).max(n_ff)` and stay synchronized with
 //! `ExecutionScratchpad::new`. The `n_embd * 3` term covers the shortconv
 //! `in_proj` output (the b∥c∥x concatenation); using only `n_ff` here is a
@@ -522,7 +522,7 @@ fn forward_layer(
     let q8k = &q8k_buf[..n_embd / 256];
 
     if lw.is_attn {
-        forward_attention(
+        forward_attention_chunked(
             &pool,
             lw,
             cfg,
@@ -530,6 +530,8 @@ fn forward_layer(
             &kv_cache,
             max_ctx,
             pos,
+            pos + 1,
+            1,
             freq_base,
             eps,
             layer,
@@ -671,36 +673,6 @@ fn forward_layer(
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
-}
-
-fn forward_attention(
-    pool: &Arc<ComputePool>,
-    lw: &Lfm2LayerWeights<'_>,
-    cfg: &Lfm2Config,
-    scratch: &mut ExecutionScratchpad,
-    kv_cache: &KvCache,
-    max_ctx: usize,
-    pos: usize,
-    freq_base: f32,
-    eps: f32,
-    layer: usize,
-    n_layer: usize,
-) {
-    forward_attention_chunked(
-        pool,
-        lw,
-        cfg,
-        scratch,
-        kv_cache,
-        max_ctx,
-        pos,
-        pos + 1,
-        1,
-        freq_base,
-        eps,
-        layer,
-        n_layer,
-    )
 }
 
 /// Batched LFM2 attention sub-layer for `rows` consecutive tokens
