@@ -79,47 +79,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
          再 top-K choose（第二次 forward pass）
       注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
       实际使用的 label set（数字或字母）。
-- [ ] **JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up** — 9 个 trunk 中 8 个走
-      `JevScorer` / `JevGroupedScorer` trait，唯一例外是 Qwen3.5。原因是
-      **Qwen35 trunk 缺一个对称的 free function wrapper** —— 不是 zero-copy
-      设计权衡。
-
-      **对照其他 trunk 的两条 trait 兼容路径**（revised 2026-09-22）：
-      - **owned + transmute `'a → 'static`**：Qwen3 / Gemma4 / Hunyuan。
-        `Qwen3Model::from_source` 用 `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }`
-        把 mmap 字节假装成 `'static`，因为它们持有 `Arc<dyn TensorSource>`
-        保证 mmap 区域 ≥ self 寿命。`JevScorer` 持有 owned model，干净。
-      - **free function 借 source**：Llama / LFM2 / LFM2.5 / LFM2-MoE /
-        Spark / Nemotron-H。`JevScorer` 不持有 model，每次 `forward_logits`
-        把 `self.source.as_ref()` 借给 `run_forward_logits_*_with_batch`
-        （trunk 层 free function），后者自己管生命周期。`LlamaSession<'a>`
-        等 session 类型本身也是 `'a` 的，但 JEV 用 free function 路径绕开。
-
-      **Qwen35 现状**：trunk 公开 API 只有 `Qwen35Model<'a>` + `Qwen35Session`。
-      没有 `run_forward_logits_qwen35_with_batch` free function，所以
-      `JevScorer` 没法用第二条路径。当前 inline ~60 行手动管理
-      `from_source` + `Qwen35Session::new_with_prefill_batch_size` +
-      `build_qwen35_positions` + `session.forward_logits` 调用链。
-
-      **修法（cost 低）**：在 `src/models/qwen35/trunk/forward.rs` 加
-      `pub fn run_forward_logits_qwen35_with_batch(source: &dyn TensorSource,
-      token_ids: &[u32], n_threads, kv_format, max_context, prefill_batch_size)
-      -> Result<(Vec<f32>, Duration), String>`，内部
-      `Qwen35Model::from_source(source)` + `Qwen35Session::new_*` +
-      `build_qwen35_positions` + `session.forward_logits`。
-      `Qwen35Model<'a>` 不动，zero-copy 保留。
-
-      然后 `single/qwen35.rs` / `grouped/qwen35.rs` 改成 Llama 风格
-      `JevScorer` / `JevGroupedScorer` impl（~30 行 vs 当前 inline 60 行）。
-      之后 9 个 trunk 完全对称，dispatch 表清爽。
-
-      **这是 High Priority**：解法干净、cost 低、消除新人困惑、一致性收益大。
-      不阻塞其他工作；可以独立一个 PR。
-
-      **触发条件**：立刻可做，不依赖外部变化。
-
-      **验收**：qwen35 single + grouped smoke test 与 inline 版本 bit-identical
-      （Paris = 1.0000、pair_1 choice 与 current 一致）。
+- [x] ✅ **JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up** (2026-09-22,
+      commit `53581f3`) — 9/9 trunks 现在统一走 trait，Qwen3.5 通过新增的
+      `run_forward_logits_qwen35_with_batch` free function + Llama-style
+      `JevScorer` / `JevGroupedScorer` impl 加入。`Qwen35Model<'a>` 不动，
+      zero-copy 完全保留。JEV 单 + group smoke test 在 Qwen3.5-0.8B Q8_0
+      真实模型上跑通（Paris = 0.9141、pair_1 = A 0.7158）。图像推理路径
+      （`--image` + mmproj）确认不受影响（apple.png 描述正确）。
 
 ## Medium Priority
 

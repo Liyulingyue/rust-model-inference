@@ -432,7 +432,7 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 | `src/app/jev/types.rs` | `JevMode` / `JevQuestionInput` / `JevResult` / `JevGroupInput` / `JevGroupedQuestionInput` / `JevGroupResult` / `JevGroupedResult` / `PreparedQuestion` / `PreparedGroup` / `PreparedGroupedQuestion` + `impl Serialize for JevResult` / `JevGroupedResult` |
 | `src/app/jev/single.rs` | `run_jev_decision` 入口 + 10 个 arch 的 dispatch 表 + `JevScorer` trait + `run_jev_decision_core` + 6 个共享 helper（`prepare_jev_questions` / `verify_label_tokens_single` / `jev_system_prompt` / `jev_labels` / `jev_payload_json` / `build_jev_prompt` / `print_jev_question` / `compute_jev_result`） |
 | `src/app/jev/single/qwen3.rs` (114 行) | Qwen3 single-mode scorer + `run_jev_decision_qwen3` |
-| `src/app/jev/single/qwen35.rs` (79 行) | Qwen3.5 inline loop（`run_jev_decision_qwen35`），未走 trait |
+| `src/app/jev/single/qwen35.rs` (130 行) | Qwen3.5 single-mode scorer + `run_jev_decision_qwen35`（走 `JevScorer` trait，通过 `run_forward_logits_qwen35_with_batch` free function） |
 | `src/app/jev/single/llama.rs` (141 行) | Llama 家族 single-mode scorer（覆盖 llama / k2-horizon / granite / nanbeige / qwen2_2 / minicpm）+ `run_jev_decision_llama` |
 | `src/app/jev/single/gemma4.rs` (117 行) | Gemma4 single-mode scorer + `run_jev_decision_gemma4` |
 | `src/app/jev/single/lfm2.rs` (134 行) | LFM2 single-mode scorer；同时作为 `lfm25` / `lfm2moe` 的 inner |
@@ -443,7 +443,7 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 | `src/app/jev/single/hunyuan.rs` (129 行) | Hunyuan-Dense 包装 `Qwen3JevScorer` 的 single-mode scorer |
 | `src/app/jev/grouped.rs` | `run_jev_grouped_decision` 入口 + 9 个 arch 的 dispatch 表 + `JevGroupedScorer` trait + `run_jev_grouped_core` + 7 个共享 helper（`prepare_jev_grouped_questions` / `build_grouped_system` / `build_grouped_payload` / `allocate_group_labels` / `build_jev_token_ids_for_arch` / `compute_grouped_jev_result` / `print_grouped_result_text`） |
 | `src/app/jev/grouped/qwen3.rs` (92 行) | Qwen3 grouped scorer（包 `Qwen3JevScorer`） |
-| `src/app/jev/grouped/qwen35.rs` (57 行) | Qwen3.5 inline loop，未走 trait |
+| `src/app/jev/grouped/qwen35.rs` (117 行) | Qwen3.5 grouped scorer + `run_jev_grouped_qwen35`（走 `JevGroupedScorer` trait，同上通过 free function） |
 | `src/app/jev/grouped/llama.rs` (91 行) | Llama 家族 grouped scorer |
 | `src/app/jev/grouped/gemma4.rs` (92 行) | Gemma4 grouped scorer |
 | `src/app/jev/grouped/lfm2.rs` (93 行) | LFM2 grouped scorer |
@@ -531,42 +531,46 @@ pub(crate) fn run_jev_decision_qwen3(
 ```rust
 let results = match &*arch {
     "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(...)?,
-    "qwen35" => qwen35::run_jev_decision_qwen35(...)?,  // inline, no trait
+    "qwen35" => qwen35::run_jev_decision_qwen35(...)?,  // trait, via free fn
     "llama" | "k2-horizon" | ... => llama::run_jev_decision_llama(...)?,
     ...
     other => return Err(format!("unsupported arch {:?}", other)),
 };
 ```
 
-### 为什么 Qwen3.5 不走 trait（2026-09-22 修订）
+### 两条 trait 兼容路径（修订 2026-09-22）
 
-**事实校正**：本节原文把"Qwen3 / Gemma4 都 owned，Qwen35 不 owned"作为理由，
-这不准确。**所有 9 个 trunk 都是 zero-copy mmap**（数据都没有 copy 到 Vec），
-区别在于把零拷贝表达成什么类型：
+**事实**：所有 9 个 trunk 都是 zero-copy mmap（数据没有 copy 到 Vec）。
+区别在于把零拷贝表达成什么类型 — 也是为什么 `JevScorer` trait 兼容
+9 个 trunk 的关键：
 
-- **Qwen3 / Gemma4 / Hunyuan**: `Qwen3Model::from_source` 在
-  `src/models/qwen3/trunk/weights.rs:522-523` 用
-  `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }` 把 mmap 字节
+- **owned + transmute `'a → 'static`**（Qwen3 / Gemma4 / Hunyuan）：
+  `Qwen3Model::from_source` 在 `src/models/qwen3/trunk/weights.rs:522-523`
+  用 `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }` 把 mmap 字节
   假装成 `'static`。前提是 model **自身持有** `Arc<dyn TensorSource>`
   （`weights.rs:26`），所以 mmap 区域生命周期 ≥ self。`JevScorer` 持有
   owned `'static` 化 model，干净。
-- **Llama / LFM2 / LFM2.5 / LFM2-MoE / Spark / Nemotron-H**: trunk 暴露
+- **free function 借 source**（Llama / LFM2 / LFM2.5 / LFM2-MoE / Spark /
+  Nemotron-H / **Qwen3.5**）：trunk 暴露
   `run_forward_logits_*_with_batch(source: &dyn TensorSource, ...)`
   free function。`JevScorer` 不持有 model，每次 `forward_logits` 把
   `self.source.as_ref()` 借给 free function（后者自己内部 `from_source`
-  + session 生命 + `forward_logits`，管完就丢）。`LlamaSession<'a>` 等
-  内部类型也带 `'a`，但 JEV 走 free function 路径绕开。
-- **Qwen35**: 只有 `Qwen35Model<'a>` + `Qwen35Session` API，
-  **没有 free function wrapper**。`JevScorer` 没法照搬上面两条路径，
-  必须 inline 手动管理 `from_source` + `Qwen35Session::new_with_prefill_batch_size` +
-  `build_qwen35_positions` + `session.forward_logits` 调用链。
+  + session 生命 + `forward_logits`，管完就丢）。`LlamaSession<'a>` /
+  `Qwen35Model<'a>` 等内部类型也带 `'a`，但 JEV 走 free function 路径绕开。
 
-**结论**：Qwen35 当前不走 trait 不是架构债务，是 trunk 缺一个对称
-wrapper 的小遗漏。follow-up 跟踪在 `docs/develop/TODO.md` JEV section
-的"JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up"项 —— 修法是在
-`src/models/qwen35/trunk/forward.rs` 加
-`run_forward_logits_qwen35_with_batch` free function，然后
-`single/qwen35.rs` / `grouped/qwen35.rs` 改成 Llama 风格的
+**Qwen3.5 走 trait**（2026-09-22，commit `53581f3`）：trunk 加了
+`run_forward_logits_qwen35_with_batch` free function（内部
+`Qwen35Model::from_source` + `Qwen35Session::new_with_prefill_batch_size` +
+`build_qwen35_positions` + `session.forward_logits`），`single/qwen35.rs` /
+`grouped/qwen35.rs` 改成 Llama 风格 `JevScorer` / `JevGroupedScorer` impl。
+`Qwen35Model<'a>` 不动，zero-copy 完全保留。
+Qwen3.5-0.8B Q8_0 真实模型上 JEV 单 + group smoke test 跑通（Paris = 0.9141、
+pair_1 = A 0.7158）；图片推理路径（`--image` + mmproj，apple.png）确认不受
+影响。
+
+**结论**：9 个 trunk 完全对称 — 2 条路径（owned + transmute / free function）
+覆盖全部情况。JEV dispatch 表 9 行 match，每行结构相同，不再有"特殊" inline
+循环。Follow-up 已完成（`docs/develop/TODO.md` JEV section 标 ✅ 2026-09-22）。
 `JevScorer` / `JevGroupedScorer` impl。`Qwen35Model<'a>` 不动，zero-copy
 保留。
 
