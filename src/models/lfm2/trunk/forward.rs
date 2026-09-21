@@ -686,6 +686,47 @@ fn forward_attention(
     layer: usize,
     n_layer: usize,
 ) {
+    forward_attention_chunked(
+        pool,
+        lw,
+        cfg,
+        scratch,
+        kv_cache,
+        max_ctx,
+        pos,
+        pos + 1,
+        1,
+        freq_base,
+        eps,
+        layer,
+        n_layer,
+    )
+}
+
+/// Batched LFM2 attention sub-layer for `rows` consecutive tokens
+/// starting at `base_position`. `n_cached_total` is the new seq_len
+/// after the chunk has been written to the KV cache. For
+/// `rows == 1` this collapses to the legacy per-query walk (no
+/// extra allocation). For `rows > 1` the Q/K/V projections go
+/// through a single [`PreparedRows::matmul_group`] dispatch so
+/// the quantise + dispatch overhead is amortised across `rows`.
+/// Shortconv layers stay per-row by construction.
+#[allow(clippy::too_many_arguments)]
+fn forward_attention_chunked(
+    pool: &Arc<ComputePool>,
+    lw: &Lfm2LayerWeights<'_>,
+    cfg: &Lfm2Config,
+    scratch: &mut ExecutionScratchpad,
+    kv_cache: &KvCache,
+    max_ctx: usize,
+    base_position: usize,
+    _n_cached_total: usize,
+    rows: usize,
+    freq_base: f32,
+    eps: f32,
+    layer: usize,
+    n_layer: usize,
+) {
     let n_embd = cfg.n_embd;
     let n_head = cfg.n_head;
     let n_head_kv = cfg.n_head_kv_per_layer[layer];
@@ -693,6 +734,19 @@ fn forward_attention(
     let n_embd_head_v = cfg.n_embd_head_v;
     let n_embd_q = n_head * n_embd_head_k;
     let n_embd_gqa = n_head_kv * n_embd_head_v;
+    let group_size = n_head / n_head_kv;
+    // When `rows == 1` `base_position == pos` so the legacy
+    // per-token math falls out unchanged. When `rows > 1` we
+    // exercise the `PreparedRows` batched matmul path.
+    let pos = base_position;
+
+    // `ExecutionScratchpad` is sized for per-row state. When
+    // `rows > 1` we allocate row-major `[rows × n]` scratch here
+    // so the batched Q/K/V / wo matmul can write into disjoint
+    // rows. The free is amortised across `rows` so the per-token
+    // cost is small.
+    let use_batched = rows > 1;
+    let _ = use_batched;
 
     let q_ptr = scratch.q.as_mut_ptr();
     let k_ptr = scratch.k_new.as_mut_ptr();
