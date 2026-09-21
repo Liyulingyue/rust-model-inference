@@ -1740,6 +1740,73 @@ fn run_jev_decision_core<S: JevScorer>(
     Ok(results)
 }
 
+/// Per-architecture JEV scorer for the **grouped** JEV modes
+/// (`MultiSelect` + `BlockChoice`). Same idea as [`JevScorer`]
+/// but the input is a `PreparedGroupedQuestion` (one question
+/// with multiple independent groups) and the result is a
+/// `JevGroupedResult` (per-group probabilities under per-group
+/// softmax — see [`run_jev_grouped_decision`] for the protocol).
+///
+/// `run_jev_grouped_core` drives the per-question loop using only
+/// this trait surface, so adding a new trunk is a single impl
+/// + dispatch entry instead of ~40 lines of copy-pasted boilerplate.
+trait JevGroupedScorer {
+    /// Display name used in the dispatch table's error message
+    /// (the `eprintln!("compute pool: {} threads (...)")` is owned
+    /// by the per-arch wrapper, not the scorer).
+    fn scorer_label(&self) -> &'static str;
+
+    /// Build the per-question grouped chat-template token ids
+    /// for `q`. Returns the per-group A..Z labels (one vec per
+    /// group, in the same order as `q.groups`) and the token id
+    /// sequence to feed into `forward_logits`.
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String>;
+
+    /// Run the prefill + LM-head forward for a single grouped
+    /// question, returning the final logits and elapsed duration.
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String>;
+
+    /// Borrow the tokenizer for `compute_grouped_jev_result`.
+    fn tokenizer(&self) -> &BPETokenizer;
+}
+
+/// Per-question dispatch shared by every `run_jev_grouped_<arch>`
+/// function. Calls `scorer.build_grouped_prompt` for token ids +
+/// per-group labels, `scorer.forward_logits` for the prefill,
+/// and finally `compute_grouped_jev_result` to score each group.
+fn run_jev_grouped_core<S: JevGroupedScorer>(
+    _source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedGroupedQuestion],
+    output_json: bool,
+    scorer: &mut S,
+) -> Result<Vec<JevGroupedResult>, String> {
+    let mut results = Vec::with_capacity(per_question.len());
+    for q in per_question {
+        let (group_labels, token_ids) = scorer.build_grouped_prompt(context, q)?;
+        if !output_json {
+            eprintln!("\n--- JEV grouped question ({} groups) ---", q.groups.len());
+            eprintln!("Q: {}", q.text);
+        }
+        let (logits, prefill_dur) = scorer.forward_logits(token_ids)?;
+        results.push(compute_grouped_jev_result(
+            q,
+            scorer.tokenizer(),
+            &group_labels,
+            &logits,
+            prefill_dur.as_millis(),
+        ));
+    }
+    Ok(results)
+}
+
 impl serde::Serialize for JevResult {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -2184,31 +2251,31 @@ pub fn run_jev_grouped_decision(
     let t0 = Instant::now();
     let results = match &*arch {
         "qwen3" | "qwen3vl" => run_jev_grouped_qwen3(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "qwen35" => run_jev_grouped_qwen35(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => run_jev_grouped_llama(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "gemma4" => run_jev_grouped_gemma4(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "lfm2" => run_jev_grouped_lfm2(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "lfm25" => run_jev_grouped_lfm25(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "spark2_5" => run_jev_grouped_spark(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "nemotron_h" => run_jev_grouped_nemotron_h(
-            source.clone(), context, &prepared, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         "hunyuan-dense" => run_jev_grouped_hunyuan(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
         )?,
         other => {
             return Err(format!(
@@ -2315,42 +2382,76 @@ fn run_jev_grouped_qwen3(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-    let model = crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
-    let max_ctx = model.config().n_ctx;
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = Qwen3JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads", scorer.pool().n_threads());
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// Qwen3 JEV grouped scorer — wraps [`Qwen3JevScorer`] for the
+/// Qwen3Model + Session API.
+struct Qwen3JevGroupedScorer {
+    inner: Qwen3JevScorer,
+}
+
+impl Qwen3JevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Qwen3JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+
+    fn pool(&self) -> Arc<ComputePool> {
+        self.inner.pool()
+    }
+}
+
+impl JevGroupedScorer for Qwen3JevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Qwen3"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("qwen3", &model.tokenizer, system, &payload)?;
-        if !output_json_check(per_question) {
-            eprintln!("\n--- JEV grouped question ({} groups) ---", q.groups.len());
-            eprintln!("Q: {}", q.text);
-        }
-        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
-            &model, max_ctx, KvFormat::F16,
-            crate::core::scratchpad::KvLifecycle::Ephemeral,
+        let token_ids = build_jev_token_ids_for_arch(
+            "qwen3",
+            self.inner.model.tokenizer(),
+            system,
+            &payload,
         )?;
-        let positions: Vec<[usize; 4]> = (0..token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
-        let input = crate::models::qwen3::Qwen3Input {
-            token_ids: &token_ids, positions: &positions, embeddings: None, deepstack_embeddings: None,
-        };
-        let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)?;
-        results.push(compute_grouped_jev_result(q, &model.tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
-}
 
-fn output_json_check(_per_question: &[PreparedGroupedQuestion]) -> bool {
-    false
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        // Qwen3JevScorer::forward_logits already runs the session,
+        // computes positions, and returns (logits, dur). Delegate
+        // rather than re-deriving positions / input.
+        self.inner
+            .forward_logits(token_ids)
+            .map_err(|e| format!("Qwen3 grouped forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_qwen35(
@@ -2359,7 +2460,13 @@ fn run_jev_grouped_qwen35(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
+    // Qwen3.5's `Qwen35Model<'a>` borrows from the source. Keeping
+    // it inside a lifetime-parameterized scorer would complicate
+    // the trait-object story (same constraint as
+    // `run_jev_decision_qwen35`); for now the per-question loop
+    // stays inline here.
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     verify_label_tokens_single(&tokenizer)?;
@@ -2396,33 +2503,75 @@ fn run_jev_grouped_llama(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-    let arch = source.metadata("general.architecture").and_then(|v| v.to_string_val()).unwrap_or_default();
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Llama-family)", n_threads);
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = LlamaJevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Llama-family)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// Llama-family JEV grouped scorer — wraps [`LlamaJevScorer`]
+/// for the per-arch chat template + free-function forward path.
+struct LlamaJevGroupedScorer {
+    inner: LlamaJevScorer,
+}
+
+impl LlamaJevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: LlamaJevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for LlamaJevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Llama-family"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch(&arch, &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) =
-            crate::models::llama::run_forward_logits_llama_with_batch(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-                prefill_batch_size,
-            )
-            .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        let token_ids = build_jev_token_ids_for_arch(
+            &self.inner.arch,
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::llama::trunk::run_forward_logits_llama_with_batch(
+            self.inner.source.as_ref(),
+            &token_ids,
+            self.inner.n_threads,
+            KvFormat::F16,
+            8192,
+            self.inner.prefill_batch_size,
+        )
+        .map_err(|e| format!("Llama forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_gemma4(
@@ -2431,31 +2580,76 @@ fn run_jev_grouped_gemma4(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-    let model = crate::models::gemma4::Gemma4Model::from_source(source.clone(), n_threads_arg)
-        .map_err(|e| format!("Failed to load Gemma4 model: {e}"))?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Gemma4)", n_threads);
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = Gemma4JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Gemma4)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// Gemma4 JEV grouped scorer — wraps [`Gemma4JevScorer`] for
+/// the session API + tokenizer access.
+struct Gemma4JevGroupedScorer {
+    inner: Gemma4JevScorer,
+}
+
+impl Gemma4JevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Gemma4JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for Gemma4JevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Gemma4"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("gemma4", &tokenizer, system, &payload)?;
+        let token_ids = build_jev_token_ids_for_arch(
+            "gemma4",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
+    }
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::gemma4::Gemma4Session::new_with_prefill_batch_size(
-            &model, KvFormat::F16, prefill_batch_size,
+            &self.inner.model,
+            KvFormat::F16,
+            self.inner.prefill_batch_size,
         )?;
         let t0 = Instant::now();
-        let logits = session.forward_logits(&token_ids)
+        let logits = session
+            .forward_logits(&token_ids)
             .map_err(|e| format!("Gemma4 forward_logits failed: {e}"))?;
-        let prefill_dur = t0.elapsed();
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        Ok((logits, t0.elapsed()))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_lfm2(
@@ -2464,32 +2658,77 @@ fn run_jev_grouped_lfm2(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (LFM2)", n_threads);
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = Lfm2JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (LFM2)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// LFM2 JEV grouped scorer — uses the free-function prefill
+/// path (`run_forward_logits_lfm2_with_batch`). Chat template
+/// dispatched through [`build_jev_token_ids_for_arch`] (the
+/// `"lfm2"` arm).
+struct Lfm2JevGroupedScorer {
+    inner: Lfm2JevScorer,
+}
+
+impl Lfm2JevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for Lfm2JevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "LFM2"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("lfm2", &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) =
-            crate::models::lfm2::run_forward_logits_lfm2_with_batch(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-                prefill_batch_size,
-            )
-            .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        let token_ids = build_jev_token_ids_for_arch(
+            "lfm2",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::lfm2::run_forward_logits_lfm2_with_batch(
+            self.inner.source.as_ref(),
+            &token_ids,
+            self.inner.n_threads,
+            KvFormat::F16,
+            8192,
+            self.inner.prefill_batch_size,
+        )
+        .map_err(|e| format!("LFM2 forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_lfm25(
@@ -2498,32 +2737,75 @@ fn run_jev_grouped_lfm25(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = Lfm25JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// LFM2.5 JEV grouped scorer — wraps [`Lfm25JevScorer`] for
+/// the chat template / tokenizer + free-function forward path.
+struct Lfm25JevGroupedScorer {
+    inner: Lfm25JevScorer,
+}
+
+impl Lfm25JevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Lfm25JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for Lfm25JevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "LFM2.5"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("lfm25", &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) =
-            crate::models::lfm25::run_forward_logits_lfm25_with_batch(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-                prefill_batch_size,
-            )
-            .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        let token_ids = build_jev_token_ids_for_arch(
+            "lfm25",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::lfm25::run_forward_logits_lfm25_with_batch(
+            self.inner.inner.source.as_ref(),
+            &token_ids,
+            self.inner.inner.n_threads,
+            KvFormat::F16,
+            8192,
+            self.inner.inner.prefill_batch_size,
+        )
+        .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_spark(
@@ -2531,52 +2813,135 @@ fn run_jev_grouped_spark(
     context: &str,
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
-    prefill_batch_size: usize,
+    _prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Spark)", n_threads);
-    let mut session = crate::models::spark::SparkSession::new(
-        source.as_ref(), Arc::new(ComputePool::new(n_threads)), 8192,
-    )?;
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = SparkJevGroupedScorer::new(source.clone(), n_threads)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Spark)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// Spark JEV grouped scorer — wraps [`SparkJevScorer`] for the
+/// session API + tokenizer access.
+struct SparkJevGroupedScorer {
+    inner: SparkJevScorer,
+}
+
+impl SparkJevGroupedScorer {
+    fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+        Ok(Self {
+            inner: SparkJevScorer::new(source, n_threads)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for SparkJevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Spark"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("spark2_5", &tokenizer, system, &payload)?;
-        let t0 = Instant::now();
-        let logits = session.forward_logits(&token_ids)
-            .map_err(|e| format!("Spark forward_logits failed: {e}"))?;
-        let prefill_dur = t0.elapsed();
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        let token_ids = build_jev_token_ids_for_arch(
+            "spark2_5",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        let t0 = Instant::now();
+        let logits = self
+            .inner
+            .session
+            .forward_logits(&token_ids)
+            .map_err(|e| format!("Spark forward_logits failed: {e}"))?;
+        Ok((logits, t0.elapsed()))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_nemotron_h(
     source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedGroupedQuestion],
+    _n_threads_arg: usize,
     _prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
-    verify_label_tokens_single(&tokenizer)?;
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = NemotronHJevGroupedScorer::new(source.clone())?;
+    let _ = output_json;
+    run_jev_grouped_core(source, context, per_question, false, &mut scorer)
+}
+
+/// Nemotron-H JEV grouped scorer — wraps [`NemotronHJevScorer`]
+/// (base model, free-function forward path).
+struct NemotronHJevGroupedScorer {
+    inner: NemotronHJevScorer,
+}
+
+impl NemotronHJevGroupedScorer {
+    fn new(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+        Ok(Self {
+            inner: NemotronHJevScorer::new(source)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for NemotronHJevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Nemotron-H"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch("nemotron_h", &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) = crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
-            source.clone(), &token_ids,
-        ).map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))?;
-        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        let token_ids = build_jev_token_ids_for_arch(
+            "nemotron_h",
+            self.inner.tokenizer(),
+            system,
+            &payload,
+        )?;
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
+            self.inner.source.clone(),
+            &token_ids,
+        )
+        .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_grouped_hunyuan(
@@ -2585,42 +2950,78 @@ fn run_jev_grouped_hunyuan(
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
     let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
-    let model = crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
-    let max_ctx = model.config().n_ctx;
-    let mut results = Vec::with_capacity(per_question.len());
-    for q in per_question {
+    let mut scorer = HunyuanJevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
+    }
+    run_jev_grouped_core(source, context, per_question, output_json, &mut scorer)
+}
+
+/// Hunyuan JEV grouped scorer — wraps [`HunyuanJevScorer`] (uses
+/// Qwen3Model under the hood + Session API).
+struct HunyuanJevGroupedScorer {
+    inner: HunyuanJevScorer,
+}
+
+impl HunyuanJevGroupedScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: HunyuanJevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
+
+impl JevGroupedScorer for HunyuanJevGroupedScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Hunyuan"
+    }
+
+    fn build_grouped_prompt(
+        &self,
+        context: &str,
+        q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
         let token_ids = build_hunyuan_chat_prompt(
-            &model.tokenizer,
+            self.inner.model.tokenizer(),
             &[
-                HunyuanMessage { role: "system", content: system },
-                HunyuanMessage { role: "user", content: &payload },
+                HunyuanMessage {
+                    role: "system",
+                    content: system,
+                },
+                HunyuanMessage {
+                    role: "user",
+                    content: &payload,
+                },
             ],
             true,
         )?;
-        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
-            &model, max_ctx.min(token_ids.len() + 1), KvFormat::F16,
-            crate::core::scratchpad::KvLifecycle::Ephemeral,
-        )?;
-        let positions: Vec<[usize; 4]> = (0..token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
-        let input = crate::models::qwen3::Qwen3Input {
-            token_ids: &token_ids, positions: &positions, embeddings: None, deepstack_embeddings: None,
-        };
-        let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)
-            .map_err(|e| format!("Hunyuan forward_logits failed: {e}"))?;
-        results.push(compute_grouped_jev_result(q, &model.tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+        Ok((group_labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        // HunyuanJevScorer::forward_logits runs the session for us.
+        self.inner
+            .forward_logits(token_ids)
+            .map_err(|e| format!("Hunyuan grouped forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 pub fn run_interactive(
