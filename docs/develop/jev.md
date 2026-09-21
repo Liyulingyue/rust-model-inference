@@ -1,8 +1,8 @@
 # JEV 决策评分
 
 > **Status (2026-09-21)**：`--jev` CLI 是 OpenJEV 风格的 single-forward-pass
-> 决策评分模式。9 个 model trunk 全支持（qwen3 / qwen3.5 / llama 家族 /
-> gemma4 / lfm2 / lfm25 / spark2_5 / nemotron_h / hunyuan-dense）。
+> 决策评分模式。10 个 model trunk 全支持（qwen3 / qwen3.5 / llama 家族 /
+> gemma4 / lfm2 / lfm25 / lfm2moe / spark2_5 / nemotron_h / hunyuan-dense）。
 > 新增 Grouped 模式（MultiSelect + BlockChoice），支持多选与块级单选，
 > 使用 per-group softmax 避免跨组概率污染。
 
@@ -158,10 +158,11 @@ prefill ──► logits [batch, seq_len, vocab]
 | Gemma4 | ✅ | `Gemma4Session::forward_logits`（thin wrapper over `forward_rows`） |
 | LFM2（Liquid Foundation Model 2，attention + shortconv hybrid） | ✅ | `lfm2::run_forward_logits_lfm2`（copy-paste prefill） |
 | LFM2.5（1.2B 等） | ✅ | `lfm25::run_forward_logits_lfm25`（copy-paste prefill） |
+| LFM2-MoE（8B-A1B，attention + shortconv + MoE FFN） | ✅ | `lfm2moe::run_forward_logits_lfm2moe`（copy-paste prefill from `run_inference`） |
 | Spark 2.5（1.7B / 4B） | ✅ | `SparkSession::forward_logits`（拆 `decode_step` 抽出 `forward_step_logits`） |
 | Nemotron-H | ✅ | `nemotron_h::run_forward_logits_nemotron_h`（wrap `NemotronModel::prefill`） |
 | Hunyuan-dense（Hy-MT2 1.8B / 7B） | ✅ | 复用 `Qwen3Session::forward_logits` + Hunyuan chat prompt |
-| LFM2-MoE | ❌ | 待办（MoE 独立 trunk） |
+| LFM2-MoE | ✅ | 待办→已完成（MoE 独立 trunk） |
 
 > 模式分两类：
 > 1. **Session API（薄包装）**：当 trunk 已经有 Session/forward_rows/prefill
@@ -187,7 +188,7 @@ JEV 按 `general.architecture` 自动选 chat template：
 | granite | 同 k2-horizon 格式 |
 | nanbeige | base model，无 chat template，直接 `{system}\n\n{payload}\n\nAnswer:` |
 | gemma4 | `{system}\n\n{payload}\n\n<turn\|>\n<\|turn>model\n` |
-| lfm2 / lfm25 | `{role}\n{content}\n` + `assistant\n`（用 `tokenizer.bos_id()` 前缀） |
+| lfm2 / lfm25 / lfm2moe | `{role}\n{content}\n` + `assistant\n`（用 `tokenizer.bos_id()` 前缀） |
 | spark2_5 | `<｜start▁of▁sentence｜><\|System\|>\n...\n<｜end▁of▁sentence｜><｜start▁of▁sentence｜><\|User\|>...\n<｜end▁of▁sentence｜><｜start▁of▁sentence｜><\|Bot\|></think>` |
 | nemotron_h | base model，没有 chat template，直接 `{system}\n\n{payload}\n\nAnswer:` |
 | hunyuan-dense (1.8B) | `<\|hy_User\|>{msg}<\|hy_Assistant\|>`（v1 模板） |
@@ -422,10 +423,10 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 |---|---|
 | `src/app/cli.rs` | `--jev*` CLI 解析（含 `--jev-multi` / `--jev-block`） |
 | `src/app/text.rs::run_jev_decision` | Choice/Binary/Score arch dispatcher |
-| `src/app/text.rs::run_jev_decision_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Choice 实现 |
+| `src/app/text.rs::run_jev_decision_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,lfm2moe,spark,nemotron_h,hunyuan}` | per-arch Choice 实现 |
 | `src/app/text.rs::{prepare_jev_questions,verify_label_tokens_single,build_jev_prompt,print_jev_question,compute_jev_result}` | Choice 共享 helper |
 | `src/app/text.rs::run_jev_grouped_decision` | MultiSelect/BlockChoice arch dispatcher |
-| `src/app/text.rs::run_jev_grouped_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Grouped 实现 |
+| `src/app/text.rs::run_jev_grouped_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,lfm2moe,spark,nemotron_h,hunyuan}` | per-arch Grouped 实现 |
 | `src/app/text.rs::{prepare_jev_grouped_questions,build_grouped_payload,build_grouped_system,allocate_group_labels,build_jev_token_ids_for_arch,compute_grouped_jev_result,print_grouped_result_text}` | Grouped 共享 helper |
 | `src/models/*/trunk/forward.rs` 或 `session.rs` | 各 trunk 的 `forward_logits` 实现 |
 | `tests/quantized_inference.rs` | 已有 IQ4_NL parity 测试 |

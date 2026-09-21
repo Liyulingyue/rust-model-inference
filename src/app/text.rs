@@ -335,12 +335,20 @@ pub fn run_jev_decision(
             prefill_batch_size,
             output_json,
         )?,
+        "lfm2moe" => run_jev_decision_lfm2moe(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
+        )?,
         other => {
             return Err(format!(
                 "--jev is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / \
                  llama / k2-horizon / granite / nanbeige / qwen2_2 / \
-                 gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
+                 gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h / lfm2moe",
                 other
             ));
         }
@@ -1116,6 +1124,78 @@ fn run_jev_decision_lfm25(
     Ok(results)
 }
 
+fn run_jev_decision_lfm2moe(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedQuestion],
+    n_threads_arg: usize,
+    _prefill_batch_size: usize,
+    output_json: bool,
+) -> Result<Vec<JevResult>, String> {
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    verify_label_tokens_single(&tokenizer)?;
+    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
+    eprintln!("compute pool: {} threads (LFM2-MoE)", n_threads);
+    let mut results = Vec::with_capacity(per_question.len());
+    for q in per_question {
+        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
+            .map(|b| b as char)
+            .collect();
+        let system = match q.mode {
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
+        };
+        let mut payload = String::from("{\"context\": ");
+        payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload.push_str(", \"question\": ");
+        payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload.push_str(", \"candidates\": {");
+        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
+            if i > 0 {
+                payload.push(',');
+            }
+            payload.push('"');
+            payload.push(*label_char);
+            payload.push_str("\": ");
+            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
+        }
+        payload.push_str("}}");
+        let mut token_ids = Vec::new();
+        if let Some(bos) = tokenizer.bos_id() {
+            token_ids.push(bos);
+        }
+        token_ids.extend(tokenizer.encode(
+            &format!("system\n{system}\n"),
+            EncodeOptions { add_special: false, parse_special: false },
+        ));
+        token_ids.extend(tokenizer.encode(
+            &format!("user\n{payload}\n"),
+            EncodeOptions { add_special: false, parse_special: false },
+        ));
+        token_ids.extend(tokenizer.encode(
+            "assistant\n",
+            EncodeOptions { add_special: false, parse_special: false },
+        ));
+        if !output_json {
+            print_jev_question(q, &labels);
+        }
+        let (logits, prefill_dur) = crate::models::lfm2moe::run_forward_logits_lfm2moe(
+            source.as_ref(), &token_ids, n_threads, KvFormat::F16, 8192,
+        ).map_err(|e| format!("LFM2-MoE forward_logits failed: {e}"))?;
+        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
+        results.push(result);
+    }
+    Ok(results)
+}
+
 fn run_jev_decision_nemotron_h(
     source: Arc<dyn TensorSource>,
     context: &str,
@@ -1802,7 +1882,7 @@ fn build_jev_token_ids_for_arch(
             }
             Ok(ids)
         }
-        "lfm2" | "lfm25" => {
+        "lfm2" | "lfm25" | "lfm2moe" => {
             let mut token_ids = Vec::new();
             if let Some(bos) = tokenizer.bos_id() {
                 token_ids.push(bos);
@@ -1966,12 +2046,15 @@ pub fn run_jev_grouped_decision(
         "hunyuan-dense" => run_jev_grouped_hunyuan(
             source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
+        "lfm2moe" => run_jev_grouped_lfm2moe(
+            source.clone(), context, &prepared, n_threads_arg,
+        )?,
         other => {
             return Err(format!(
                 "--jev grouped is not yet supported for architecture {:?}; \
                  currently supported: qwen3 / qwen3vl / qwen35 / llama / k2-horizon / \
                  granite / nanbeige / qwen2_2 / gemma4 / lfm2 / lfm25 / spark2_5 / \
-                 hunyuan-dense / nemotron_h",
+                 hunyuan-dense / nemotron_h / lfm2moe",
                 other
             ));
         }
@@ -2349,6 +2432,32 @@ fn run_jev_grouped_hunyuan(
         let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)
             .map_err(|e| format!("Hunyuan forward_logits failed: {e}"))?;
         results.push(compute_grouped_jev_result(q, &model.tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
+    }
+    Ok(results)
+}
+
+fn run_jev_grouped_lfm2moe(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedGroupedQuestion],
+    n_threads_arg: usize,
+) -> Result<Vec<JevGroupedResult>, String> {
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    verify_label_tokens_single(&tokenizer)?;
+    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
+    eprintln!("compute pool: {} threads (LFM2-MoE)", n_threads);
+    let mut results = Vec::with_capacity(per_question.len());
+    for q in per_question {
+        let group_labels = allocate_group_labels(q);
+        let system = build_grouped_system();
+        let payload = build_grouped_payload(context, q)?;
+        let token_ids = build_jev_token_ids_for_arch("lfm2", &tokenizer, system, &payload)?;
+        let (logits, prefill_dur) = crate::models::lfm2moe::run_forward_logits_lfm2moe(
+            source.as_ref(), &token_ids, n_threads, KvFormat::F16, 8192,
+        ).map_err(|e| format!("LFM2-MoE forward_logits failed: {e}"))?;
+        results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
     }
     Ok(results)
 }

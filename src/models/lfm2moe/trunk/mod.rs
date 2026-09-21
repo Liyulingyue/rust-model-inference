@@ -9,5 +9,5 @@ pub mod forward;
 pub mod weights;
 
 pub use config::Lfm2MoeConfig;
-pub use forward::run_inference;
+pub use forward::{run_forward_logits_lfm2moe, run_inference};
 pub use weights::{get_f32_tensor, load_layers, Lfm2MoeLayerWeights};
