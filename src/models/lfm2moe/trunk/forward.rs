@@ -70,7 +70,44 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
+
 ) -> Result<(), String> {
+    run_inference_with_batch(
+        source,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        profile,
+        kv_format,
+        max_context,
+        repetition_penalty,
+        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+    )
+}
+
+/// Same as [`run_inference`] but takes an explicit `batch_size`
+/// for the chunked prefill dispatch. The LFM2-MoE prefill walks
+/// the per-token path today (the MoE router hidden state and the
+/// SSM shortconv state both step one token at a time) so the
+/// `batch_size` argument is accepted for trait-compatibility but
+/// ignored at runtime — every step is processed serially
+/// regardless of the requested chunk size. Future work lifts the
+/// per-step body into a real batched forward and the flag becomes
+/// meaningful.
+pub fn run_inference_with_batch(
+    source: &dyn TensorSource,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    profile: bool,
+    kv_format: KvFormat,
+    max_context: usize,
+    repetition_penalty: f32,
+    batch_size: usize,
+) -> Result<(), String> {
+    let _ = batch_size;
     let t0 = Instant::now();
     let cfg = Lfm2MoeConfig::from_source(source)?;
     let n_embd = cfg.n_embd;

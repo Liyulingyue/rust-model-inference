@@ -100,7 +100,7 @@ pub fn run_inference(
             )
         }
     } else if arch == "lfm2moe" {
-        crate::models::lfm2moe::run_inference(
+        crate::models::lfm2moe::run_inference_with_batch(
             source.as_ref(),
             prompt,
             max_tokens,
@@ -110,6 +110,7 @@ pub fn run_inference(
             kv_format,
             max_context,
             repetition_penalty,
+            prefill_batch_size,
         )
     } else if uses_llama_trunk(&arch) {
         crate::models::llama::run_inference(
