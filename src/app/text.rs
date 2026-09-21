@@ -2059,22 +2059,22 @@ pub fn run_jev_grouped_decision(
             source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => run_jev_grouped_llama(
-            source.clone(), context, &prepared, n_threads_arg,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "gemma4" => run_jev_grouped_gemma4(
             source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "lfm2" => run_jev_grouped_lfm2(
-            source.clone(), context, &prepared, n_threads_arg,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "lfm25" => run_jev_grouped_lfm25(
-            source.clone(), context, &prepared, n_threads_arg,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "spark2_5" => run_jev_grouped_spark(
-            source.clone(), context, &prepared, n_threads_arg,
+            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
         )?,
         "nemotron_h" => run_jev_grouped_nemotron_h(
-            source.clone(), context, &prepared,
+            source.clone(), context, &prepared, prefill_batch_size,
         )?,
         "hunyuan-dense" => run_jev_grouped_hunyuan(
             source.clone(), context, &prepared, n_threads_arg, prefill_batch_size,
@@ -2264,6 +2264,7 @@ fn run_jev_grouped_llama(
     context: &str,
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -2278,9 +2279,16 @@ fn run_jev_grouped_llama(
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
         let token_ids = build_jev_token_ids_for_arch(&arch, &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) = crate::models::llama::run_forward_logits_llama(
-            source.as_ref(), &token_ids, n_threads, KvFormat::F16, 8192,
-        ).map_err(|e| format!("Llama forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) =
+            crate::models::llama::run_forward_logits_llama_with_batch(
+                source.as_ref(),
+                &token_ids,
+                n_threads,
+                KvFormat::F16,
+                8192,
+                prefill_batch_size,
+            )
+            .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
         results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
     }
     Ok(results)
@@ -2324,6 +2332,7 @@ fn run_jev_grouped_lfm2(
     context: &str,
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -2337,9 +2346,16 @@ fn run_jev_grouped_lfm2(
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
         let token_ids = build_jev_token_ids_for_arch("lfm2", &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) = crate::models::lfm2::run_forward_logits_lfm2(
-            source.as_ref(), &token_ids, n_threads, KvFormat::F16, 8192,
-        ).map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) =
+            crate::models::lfm2::run_forward_logits_lfm2_with_batch(
+                source.as_ref(),
+                &token_ids,
+                n_threads,
+                KvFormat::F16,
+                8192,
+                prefill_batch_size,
+            )
+            .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
         results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
     }
     Ok(results)
@@ -2350,6 +2366,7 @@ fn run_jev_grouped_lfm25(
     context: &str,
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -2363,9 +2380,16 @@ fn run_jev_grouped_lfm25(
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
         let token_ids = build_jev_token_ids_for_arch("lfm25", &tokenizer, system, &payload)?;
-        let (logits, prefill_dur) = crate::models::lfm25::run_forward_logits_lfm25(
-            source.as_ref(), &token_ids, n_threads, KvFormat::F16, 8192,
-        ).map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) =
+            crate::models::lfm25::run_forward_logits_lfm25_with_batch(
+                source.as_ref(),
+                &token_ids,
+                n_threads,
+                KvFormat::F16,
+                8192,
+                prefill_batch_size,
+            )
+            .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
         results.push(compute_grouped_jev_result(q, &tokenizer, &group_labels, &logits, prefill_dur.as_millis()));
     }
     Ok(results)
@@ -2376,6 +2400,7 @@ fn run_jev_grouped_spark(
     context: &str,
     per_question: &[PreparedGroupedQuestion],
     n_threads_arg: usize,
+    prefill_batch_size: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -2405,6 +2430,7 @@ fn run_jev_grouped_nemotron_h(
     source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedGroupedQuestion],
+    _prefill_batch_size: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
     verify_label_tokens_single(&tokenizer)?;
