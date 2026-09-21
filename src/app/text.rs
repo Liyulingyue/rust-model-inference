@@ -698,14 +698,16 @@ fn run_jev_decision_llama(
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) = crate::models::llama::run_forward_logits_llama(
-            source.as_ref(),
-            &token_ids,
-            n_threads,
-            KvFormat::F16,
-            8192,
-        )
-        .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
+        let (logits, prefill_dur) =
+            crate::models::llama::trunk::run_forward_logits_llama_with_batch(
+                source.as_ref(),
+                &token_ids,
+                n_threads,
+                KvFormat::F16,
+                8192,
+                prefill_batch_size,
+            )
+            .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }

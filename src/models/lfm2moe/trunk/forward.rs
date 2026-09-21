@@ -192,6 +192,12 @@ pub fn run_inference(
     print!("Output: ");
     io::stdout().flush().unwrap();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body is
+    // the legacy per-token forward; the outer loop is
+    // marked so a future `Lfm2MoESession` + `ChunkedPrefill`
+    // impl is a drop-in replacement.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(input_tokens.len(), 1);
     for step in 0..total_steps {
         let eval_started = Instant::now();
         let token_id = if step < input_tokens.len() {

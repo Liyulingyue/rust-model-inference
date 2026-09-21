@@ -477,6 +477,13 @@ pub fn run_inference(
 
     let inference_started = Instant::now();
     let mut last_token = prompt_tokens[0];
+
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body is
+    // the legacy per-token forward; the outer loop is
+    // marked so a future `SparkSession` + `ChunkedPrefill`
+    // impl is a drop-in replacement.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(prompt_tokens.len(), 1);
     for (pos, &tok) in prompt_tokens.iter().enumerate() {
         let next = session.decode_step(tok, pos, temperature)?;
         last_token = next;

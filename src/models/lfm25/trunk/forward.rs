@@ -1156,6 +1156,12 @@ pub fn run_forward_logits_lfm25(
     let mut prefill_time = Duration::ZERO;
     let n_prompt = prompt_tokens.len();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body
+    // is the legacy per-token forward; the outer loop is
+    // marked so a future `Lfm25Session` + `ChunkedPrefill`
+    // impl is a drop-in replacement.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(n_prompt, 1);
     for step in 0..n_prompt {
         let eval_started = Instant::now();
         let token_id = prompt_tokens[step];

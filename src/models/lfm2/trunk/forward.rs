@@ -1293,6 +1293,20 @@ pub fn run_forward_logits_lfm2(
     let mut prefill_time = Duration::ZERO;
     let n_prompt = prompt_tokens.len();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. The dispatch loop
+    // matches the `ChunkedPrefill` trait default; the per-step
+    // body is the legacy per-token forward. When `B = 1`
+    // (default `DEFAULT_PREFILL_BATCH_SIZE = 64`, but LFM2 runs
+    // at `B = 1` because the shortconv + SSM state has to
+    // step one token at a time) `prefill_chunks` yields one
+    // single-element chunk per iteration and the walk is
+    // identical to the legacy loop. The next refactor adds
+    // a real `Lfm2Session` + `ChunkedPrefill` impl so the
+    // attention sub-layers can run a true `B > 1` batched
+    // forward while SSM/MoE sub-layers keep their per-row
+    // stateful semantics.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(n_prompt, 1);
     for step in 0..n_prompt {
         let eval_started = Instant::now();
         let token_id = prompt_tokens[step];
