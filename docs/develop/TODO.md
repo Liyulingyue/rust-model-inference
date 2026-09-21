@@ -79,6 +79,35 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
          再 top-K choose（第二次 forward pass）
       注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
       实际使用的 label set（数字或字母）。
+- [ ] **JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up** — 9 个 trunk 中 8 个走
+      `JevScorer` / `JevGroupedScorer` trait，唯一例外是 Qwen3.5：它的
+      `Qwen35Model<'a>` zero-copy borrow 自 `&dyn TensorSource`（`weights.rs:59`），
+      装进 owned scorer struct 会跟 trait 抽象的 `'a` 生命周期冲突
+      （`scorer: &mut S` 与 `source: Arc<dyn TensorSource>` 同次调用被借用检查器视为
+      同一借用；trait 必加 `'a` 参数 → monomorphize → 失去 dyn Trait 灵活性）。
+      当前 `run_jev_decision_qwen35` / `run_jev_grouped_qwen35` 保留 inline loop
+      （共 ~60 行），共享 helper 全部复用，只是不走 `run_jev_decision_core` /
+      `run_jev_grouped_core` 的 per-question 调度骨架。
+
+      **影响**：cross-cutting 改动（metrics / logging / retry / 单元测试）需要在
+      2 个 inline 函数里各加一遍，而非在 `run_jev_decision_core` 一处加完。新
+      contributor 看到 dispatch 表里 qwen35 单独走另一条路会困惑。
+
+      **为什么是 TODO 而非立即修**：修法是把 `Qwen35Model<'a>` 改成 owned（或内部
+      `Arc<Weight>`），代价是失去 zero-copy（启动时多一次 weights clone + 多一份
+      peak memory）。**当前是有意识的取舍，不是 bug**。
+
+      **建议 follow-up 路径**（按代价从小到大）：
+      1. **不动模型所有权**，把 Qwen3.5 的 inline loop 抽到一个独立的
+         `run_jev_decision_qwen35_loop(...)` 函数并写 doctest，说清楚"为什么
+         不走 trait"。消除"特殊感"但仍保留 inline 路径。
+      2. 把 `Qwen35Model` 内部从 `Weight<'a>` 改成 `Arc<Weight<'static>>`，让
+         model owned 而不丢失 zero-copy。Qwen35Model 自身的 API（`from_source` /
+         `forward_logits`）不变，只是 Weight 内部多一层 Arc。trait 可以包它。
+      3. 如果有第二个 zero-copy trunk 加入（比如新 GGUF 格式同样零拷贝），再做
+         一次统一 trait 抽象的讨论。
+
+      **触发条件**：未来出现第二个"非 owned" trunk 时升级为 High Priority。
 
 ## Medium Priority
 

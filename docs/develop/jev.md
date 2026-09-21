@@ -540,9 +540,24 @@ let results = match &*arch {
 
 ### 为什么 Qwen3.5 不走 trait
 
-`Qwen35Model<'a>` borrow 自 `&dyn TensorSource`，`&mut self` scorer 与
-生命周期参数化冲突。保留 inline `run_jev_decision_qwen35` 是最简方案。
-grouped 同理：`run_jev_grouped_qwen35` 也是 inline。
+`Qwen35Model<'a>` borrow 自 `&dyn TensorSource`（`weights.rs:59`），`Weight<'a>`
+零拷贝持有 mmap 权重。把它装进 owned scorer struct 后，`scorer: &mut S` 与
+`source: Arc<dyn TensorSource>` 在 `run_jev_decision_core` 同一调用内被借用
+检查器视为同一借用（trait object 的生命周期信息已被擦除），编译失败。
+
+**权衡**：把 `Qwen35Model<'a>` 改成 owned 或 `Arc<Weight<'static>>` 可消除
+不一致，但失去 zero-copy（启动时多一次 weights clone + 多一份 peak memory）。
+
+**当前折中**：保留 inline `run_jev_decision_qwen35`（`single/qwen35.rs`）+
+`run_jev_grouped_qwen35`（`grouped/qwen35.rs`），共享 helper（`build_jev_prompt` /
+`print_jev_question` / `verify_label_tokens_single` / `compute_jev_result` /
+`build_grouped_payload` / `compute_grouped_jev_result` 等）全部复用，只是不
+走 `run_jev_decision_core` / `run_jev_grouped_core` 的 per-question 调度骨架。
+
+> Follow-up 跟踪在 `docs/develop/TODO.md` JEV section 的"JEV Qwen3.5 不走
+> `JevScorer` trait 的 follow-up"项。三档修法（不改模型抽函数 / 改 Weight 为
+> Arc / 出现第二个非 owned trunk 再统一 trait 抽象）按代价从小到大列在那里。
+> **当前是有意识的取舍，不是 bug**。
 
 ### Grouped trait：`JevGroupedScorer`
 
