@@ -205,8 +205,8 @@ cargo run --release --bin server -- \
 
 | Arch | JEV 路径 |
 |---|---|
-| `lfm2` | `app/text.rs::run_jev_decision_lfm2` → `lfm2::run_forward_logits_lfm2` |
-| `lfm25` (含 `"2.5"` 的 basename) | `app/text.rs::run_jev_decision_lfm25` → `lfm25::run_forward_logits_lfm25` |
+| `lfm2` | `app/jev/single/lfm2.rs::run_jev_decision_lfm2` → `lfm2::run_forward_logits_lfm2` |
+| `lfm25` (含 `"2.5"` 的 basename) | `app/jev/single/lfm2.rs::run_jev_decision_lfm25` → `lfm25::run_forward_logits_lfm25` |
 | `lfm2moe` | ❌ 暂未支持（JEV 路由只覆盖 `lfm2` / `lfm25`） |
 
 LFM2 与 LFM2.5 的 chat template **完全相同**（`{role}\n{content}\n` 序列），

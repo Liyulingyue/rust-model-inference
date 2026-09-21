@@ -12,8 +12,10 @@
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
 use super::util::{l2_norm, softplus_f32};
-use super::weights::Qwen35LayerWeights;
+use super::weights::{Qwen35LayerWeights, Qwen35Model};
+use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace,
@@ -1042,4 +1044,48 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 FFN output shape");
     }
+}
+
+/// Free-function wrapper around `Qwen35Model<'a>` + `Qwen35Session`.
+///
+/// Mirrors the pattern of `run_forward_logits_llama_with_batch` /
+/// `run_forward_logits_lfm2_with_batch` / etc: takes
+/// `&dyn TensorSource` and builds a fresh `Qwen35Model` + `Qwen35Session`
+/// per call. The model is zero-copy-mmap'd from the source, the
+/// session borrows from it for the duration of `forward_logits`,
+/// and both are dropped before returning. No model lifetime escapes
+/// this function — `JevScorer` / `JevGroupedScorer` for Qwen3.5 just
+/// need to keep `source: Arc<dyn TensorSource>` and call this.
+///
+/// `prompt_tokens` may be empty, in which case the function returns
+/// an empty `Vec<f32>` without touching the model.
+pub fn run_forward_logits_qwen35_with_batch(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    _kv_format: KvFormat,
+    max_context: usize,
+    prefill_batch_size: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    if prompt_tokens.is_empty() {
+        return Err("Qwen3.5 prompt must contain at least one token".into());
+    }
+    let t0 = std::time::Instant::now();
+    let mut model = Qwen35Model::from_source(source)
+        .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
+    let n_ctx = model.config.n_ctx.min(max_context);
+    let pool = ComputePool::new(n_threads_arg);
+    let (positions, _next) =
+        crate::models::qwen35::build_qwen35_positions(prompt_tokens, None, &[])
+            .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
+    let mut session = super::session::Qwen35Session::new_with_prefill_batch_size(
+        &mut model,
+        n_ctx.min(prompt_tokens.len() + 1),
+        prefill_batch_size,
+        std::sync::Arc::new(pool),
+    )?;
+    let logits = session
+        .forward_logits(prompt_tokens, &positions)
+        .map_err(|e| format!("Qwen3.5 forward_logits failed: {e}"))?;
+    Ok((logits, t0.elapsed()))
 }

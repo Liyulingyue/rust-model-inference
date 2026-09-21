@@ -149,7 +149,7 @@ cargo run --release --bin server -- \
 
 | Arch | JEV 路径 |
 |---|---|
-| `gemma4` | `app/text.rs::run_jev_decision_gemma4` → `gemma4::Gemma4Session::forward_logits` |
+| `gemma4` | `app/jev/single/gemma4.rs::run_jev_decision_gemma4` → `gemma4::Gemma4Session::forward_logits` |
 
 Gemma 4 的 chat template 用 `<turn|>` / `<|turn>` turn marker：
 

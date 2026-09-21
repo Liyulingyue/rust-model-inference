@@ -32,11 +32,13 @@ NEON on aarch64; no AVX-512).
 
 ### JEV 决策评分 follow-ups
 
-`--jev` 已在 `src/app/text.rs::run_jev_decision` 中按 `general.architecture` 自动路由
-到 9 个 trunk 的 `forward_logits` / `run_forward_logits_*`（Qwen3 / Qwen3.5 /
-Llama / Gemma4 / LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan）。通用协议与
-per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
-[`docs/develop/jev.md`](jev.md)。
+`--jev` 已在 `src/app/jev/single.rs::run_jev_decision` 中按 `general.architecture`
+自动路由到 10 个 per-arch scorer（Qwen3 / Qwen3.5 / Llama 家族 / Gemma4 /
+LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实现
+`JevScorer` trait。Grouped 模式（MultiSelect + BlockChoice）在
+`src/app/jev/grouped.rs::run_jev_grouped_decision` 通过 `JevGroupedScorer` trait。
+通用协议与 per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
+[`docs/develop/jev.md`](jev.md) §14（源码索引）+ §15（trait 重构）。
 
 - [ ] **JEV Multi-question KV 共享** — 当前多 question 模式（`--jev-question × N`）
       每个 question 都会新建 session 重新 prefill 一遍 context + question 文本，
@@ -77,6 +79,13 @@ per-arch chat template 见 [`docs/usage/qwen3.md` §10](../usage/qwen3.md) 与
          再 top-K choose（第二次 forward pass）
       注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
       实际使用的 label set（数字或字母）。
+- [x] ✅ **JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up** (2026-09-22,
+      commit `53581f3`) — 9/9 trunks 现在统一走 trait，Qwen3.5 通过新增的
+      `run_forward_logits_qwen35_with_batch` free function + Llama-style
+      `JevScorer` / `JevGroupedScorer` impl 加入。`Qwen35Model<'a>` 不动，
+      zero-copy 完全保留。JEV 单 + group smoke test 在 Qwen3.5-0.8B Q8_0
+      真实模型上跑通（Paris = 0.9141、pair_1 = A 0.7158）。图像推理路径
+      （`--image` + mmproj）确认不受影响（apple.png 描述正确）。
 
 ## Medium Priority
 

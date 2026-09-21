@@ -315,13 +315,13 @@ fn main() {
                 if options.jev_multi || !options.jev_blocks.is_empty() {
                     if options.jev_multi && !options.jev_blocks.is_empty() {
                         app::run_or_exit(Err(
-                            "--jev-multi and --jev-block are mutually exclusive".to_string(),
+                            "--jev-multi and --jev-block are mutually exclusive".to_string()
                         ));
                         return;
                     }
                     if options.jev_questions.is_empty() {
                         app::run_or_exit(Err(
-                            "--jev requires at least one --jev-question".to_string(),
+                            "--jev requires at least one --jev-question".to_string()
                         ));
                         return;
                     }
@@ -370,9 +370,11 @@ fn main() {
                                         groups: pairs,
                                     })
                                 }
-                                .unwrap_or_else(|| app::JevGroupedQuestionInput {
-                                    text: q.text.clone(),
-                                    groups: Vec::new(),
+                                .unwrap_or_else(|| {
+                                    app::JevGroupedQuestionInput {
+                                        text: q.text.clone(),
+                                        groups: Vec::new(),
+                                    }
                                 })
                             }
                         })

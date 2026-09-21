@@ -5,6 +5,7 @@ pub(crate) mod dots;
 pub(crate) mod dreamx;
 pub(crate) mod embedding;
 pub(crate) mod image;
+pub(crate) mod jev;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
@@ -25,14 +26,16 @@ pub use cli::{
 pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
 pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
+pub use jev::{
+    run_jev_decision, run_jev_grouped_decision, JevGroupInput, JevGroupedQuestionInput, JevMode,
+    JevQuestionInput,
+};
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
-    run_inference, run_interactive, run_jev_decision, run_jev_grouped_decision, run_multimodal,
-    run_multimodal_with_tts_postproc, run_multimodal_with_video,
-    run_multimodal_with_video_capture_text, run_shared_inference, JevGroupedQuestionInput,
-    JevGroupInput, JevMode, JevQuestionInput,
+    run_inference, run_interactive, run_multimodal, run_multimodal_with_tts_postproc,
+    run_multimodal_with_video, run_multimodal_with_video_capture_text, run_shared_inference,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 

@@ -132,7 +132,7 @@ cargo run --release --bin server -- \
 
 | Arch | JEV 路径 |
 |---|---|
-| `llama` / `qwen2_2` / `minicpm` | `app/text.rs::run_jev_decision_llama` → `llama::run_forward_logits_llama` |
+| `llama` / `qwen2_2` / `minicpm` | `app/jev/single/llama.rs::run_jev_decision_llama` → `llama::run_forward_logits_llama` |
 | `granite` / `k2-horizon` | 同上（chat template 不同） |
 | `nanbeige` | 同上（base model，无 chat template） |
 

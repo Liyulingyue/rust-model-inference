@@ -236,7 +236,7 @@ llama.cpp GGUF 量化版本。`docs/REFERENCE_IMPLEMENTATIONS.md` 当前**未固
 
 | Arch | JEV 路径 |
 |---|---|
-| `hunyuan-dense` | `app/text.rs::run_jev_decision_hunyuan` → `qwen3::Qwen3Session::forward_logits`（复用 qwen3 base） |
+| `hunyuan-dense` | `app/jev/single/hunyuan.rs::run_jev_decision_hunyuan` → `qwen3::Qwen3Session::forward_logits`（复用 qwen3 base） |
 
 > Hunyuan 走 qwen3 trunk 的 `run_inference_tokens`，JEV 同样复用
 > `Qwen3Session::forward_logits` —— Hunyuan 没有自己的 forward_logits

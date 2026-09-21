@@ -121,7 +121,7 @@ cargo run --release --bin rust-model-inference -- \
 
 | Arch | JEV 路径 |
 |---|---|
-| `spark2_5` | `app/text.rs::run_jev_decision_spark` → `spark::SparkSession::forward_logits` |
+| `spark2_5` | `app/jev/single/spark.rs::run_jev_decision_spark` → `spark::SparkSession::forward_logits` |
 
 Spark 2.5 的 chat template 用 `<｜start▁of▁sentence｜>` / `<｜end▁of▁sentence｜>`
 包裹每个 role block。JEV 在 `run_jev_decision_spark` 中用对应格式拼

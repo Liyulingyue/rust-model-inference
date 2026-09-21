@@ -171,7 +171,7 @@ prefill ──► logits [batch, seq_len, vocab]
 >    函数包揽全部），按当前 `run_inference` 的 setup + prefill 部分
 >    拷贝一份独立函数（llama / lfm2 / lfm25）。
 
-Dispatcher 在 `src/app/text.rs::run_jev_decision` 中按 `general.architecture`
+Dispatcher 在 `src/app/jev/single.rs::run_jev_decision` 中按 `general.architecture`
 自动路由到对应 trunk 实现。
 
 ## 8. Per-arch chat template 差异
@@ -418,17 +418,244 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 
 ## 14. 源码索引
 
+> **Status (2026-09-22)**：JEV 评分已重构。`src/app/text.rs` 从 4597 行
+> 降至 1748 行，所有 JEV 代码迁出至 `src/app/jev/` 子模块，下设三个目录：
+> `types.rs`（数据）、`single.rs` + `single/<arch>.rs`（单 question 评分）、
+> `grouped.rs` + `grouped/<arch>.rs`（分组评分）。两个评分 trait
+> `JevScorer` / `JevGroupedScorer` 把原来 ~80% 的 per-arch 复制粘贴
+> 收敛到 9-10 个 arch 各一个小 struct + 一个 dispatch 表项。
+
 | 路径 | 角色 |
 |---|---|
 | `src/app/cli.rs` | `--jev*` CLI 解析（含 `--jev-multi` / `--jev-block`） |
-| `src/app/text.rs::run_jev_decision` | Choice/Binary/Score arch dispatcher |
-| `src/app/text.rs::run_jev_decision_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Choice 实现 |
-| `src/app/text.rs::{prepare_jev_questions,verify_label_tokens_single,build_jev_prompt,print_jev_question,compute_jev_result}` | Choice 共享 helper |
-| `src/app/text.rs::run_jev_grouped_decision` | MultiSelect/BlockChoice arch dispatcher |
-| `src/app/text.rs::run_jev_grouped_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Grouped 实现 |
-| `src/app/text.rs::{prepare_jev_grouped_questions,build_grouped_payload,build_grouped_system,allocate_group_labels,build_jev_token_ids_for_arch,compute_grouped_jev_result,print_grouped_result_text}` | Grouped 共享 helper |
+| `src/app/jev/mod.rs` | 模块声明 + `pub use` 重导出 |
+| `src/app/jev/types.rs` | `JevMode` / `JevQuestionInput` / `JevResult` / `JevGroupInput` / `JevGroupedQuestionInput` / `JevGroupResult` / `JevGroupedResult` / `PreparedQuestion` / `PreparedGroup` / `PreparedGroupedQuestion` + `impl Serialize for JevResult` / `JevGroupedResult` |
+| `src/app/jev/single.rs` | `run_jev_decision` 入口 + 10 个 arch 的 dispatch 表 + `JevScorer` trait + `run_jev_decision_core` + 6 个共享 helper（`prepare_jev_questions` / `verify_label_tokens_single` / `jev_system_prompt` / `jev_labels` / `jev_payload_json` / `build_jev_prompt` / `print_jev_question` / `compute_jev_result`） |
+| `src/app/jev/single/qwen3.rs` (114 行) | Qwen3 single-mode scorer + `run_jev_decision_qwen3` |
+| `src/app/jev/single/qwen35.rs` (130 行) | Qwen3.5 single-mode scorer + `run_jev_decision_qwen35`（走 `JevScorer` trait，通过 `run_forward_logits_qwen35_with_batch` free function） |
+| `src/app/jev/single/llama.rs` (141 行) | Llama 家族 single-mode scorer（覆盖 llama / k2-horizon / granite / nanbeige / qwen2_2 / minicpm）+ `run_jev_decision_llama` |
+| `src/app/jev/single/gemma4.rs` (117 行) | Gemma4 single-mode scorer + `run_jev_decision_gemma4` |
+| `src/app/jev/single/lfm2.rs` (134 行) | LFM2 single-mode scorer；同时作为 `lfm25` / `lfm2moe` 的 inner |
+| `src/app/jev/single/spark.rs` (118 行) | Spark2.5 single-mode scorer + `run_jev_decision_spark` |
+| `src/app/jev/single/lfm25.rs` (89 行) | LFM2.5 包装 `Lfm2JevScorer` 的 single-mode scorer |
+| `src/app/jev/single/lfm2moe.rs` (90 行) | LFM2 MoE 包装 `Lfm2JevScorer` 的 single-mode scorer |
+| `src/app/jev/single/nemotron_h.rs` (90 行) | Nemotron-H single-mode scorer |
+| `src/app/jev/single/hunyuan.rs` (129 行) | Hunyuan-Dense 包装 `Qwen3JevScorer` 的 single-mode scorer |
+| `src/app/jev/grouped.rs` | `run_jev_grouped_decision` 入口 + 9 个 arch 的 dispatch 表 + `JevGroupedScorer` trait + `run_jev_grouped_core` + 7 个共享 helper（`prepare_jev_grouped_questions` / `build_grouped_system` / `build_grouped_payload` / `allocate_group_labels` / `build_jev_token_ids_for_arch` / `compute_grouped_jev_result` / `print_grouped_result_text`） |
+| `src/app/jev/grouped/qwen3.rs` (92 行) | Qwen3 grouped scorer（包 `Qwen3JevScorer`） |
+| `src/app/jev/grouped/qwen35.rs` (117 行) | Qwen3.5 grouped scorer + `run_jev_grouped_qwen35`（走 `JevGroupedScorer` trait，同上通过 free function） |
+| `src/app/jev/grouped/llama.rs` (91 行) | Llama 家族 grouped scorer |
+| `src/app/jev/grouped/gemma4.rs` (92 行) | Gemma4 grouped scorer |
+| `src/app/jev/grouped/lfm2.rs` (93 行) | LFM2 grouped scorer |
+| `src/app/jev/grouped/spark.rs` (85 行) | Spark2.5 grouped scorer |
+| `src/app/jev/grouped/lfm25.rs` (91 行) | LFM2.5 grouped scorer |
+| `src/app/jev/grouped/nemotron_h.rs` (79 行) | Nemotron-H grouped scorer |
+| `src/app/jev/grouped/hunyuan.rs` (95 行) | Hunyuan-Dense grouped scorer |
 | `src/models/*/trunk/forward.rs` 或 `session.rs` | 各 trunk 的 `forward_logits` 实现 |
 | `tests/quantized_inference.rs` | 已有 IQ4_NL parity 测试 |
+
+## 15. JevScorer trait 重构
+
+> **2026-09-22**：随着 trunk 数量增长，每个 `run_jev_decision_<arch>`
+> 内部 ~95 行的复制粘贴（chat template、tokenizer 交互、prefill
+> 调用、logits 读取、softmax、结果包装）成为维护负担。本次重构把
+> per-arch 差异收敛到一个 trait + 一个小 struct。
+
+```rust
+pub(crate) trait JevScorer {
+    fn scorer_label(&self) -> &'static str;
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<Vec<u32>, String>;
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String>;
+    fn tokenizer(&self) -> &BPETokenizer;
+}
+
+fn run_jev_decision_core<S: JevScorer>(
+    _source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedQuestion],
+    output_json: bool,
+    scorer: &mut S,
+) -> Result<Vec<JevResult>, String> {
+    for q in per_question {
+        let labels = jev_labels(q);
+        let token_ids = scorer.build_prompt(context, q)?;
+        if !output_json {
+            print_jev_question(q, &labels);
+        }
+        let (logits, prefill_dur) = scorer.forward_logits(token_ids)?;
+        results.push(compute_jev_result(
+            q, scorer.tokenizer(), &labels, &logits, prefill_dur.as_millis(),
+        ));
+    }
+    Ok(results)
+}
+```
+
+每个 arch 只需要 ~30-100 行：
+
+```rust
+pub(crate) struct Qwen3JevScorer {
+    pub(crate) model: Qwen3Model<'a>,
+    pub(crate) tokenizer: Arc<BPETokenizer>,
+    pub(crate) pool: Arc<ComputePool>,
+}
+
+impl JevScorer for Qwen3JevScorer {
+    fn scorer_label(&self) -> &'static str { "Qwen3" }
+    fn build_prompt(&self, context: &str, q: &PreparedQuestion)
+        -> Result<Vec<u32>, String> { /* qwen3 chat template */ }
+    fn forward_logits(&mut self, token_ids: Vec<u32>)
+        -> Result<(Vec<f32>, Duration), String> {
+        /* run_forward_logits_qwen3_with_batch */
+    }
+    fn tokenizer(&self) -> &BPETokenizer { &self.tokenizer }
+}
+
+pub(crate) fn run_jev_decision_qwen3(
+    source, context, per_question, n_threads_arg, prefill_batch_size, output_json,
+) -> Result<Vec<JevResult>, String> {
+    let scorer = Qwen3JevScorer::new(source, n_threads, prefill_batch_size)?;
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
+```
+
+**Dispatch 表**从一个 ~95 行的 match 缩成一个紧凑 map：
+
+```rust
+let results = match &*arch {
+    "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(...)?,
+    "qwen35" => qwen35::run_jev_decision_qwen35(...)?,  // trait, via free fn
+    "llama" | "k2-horizon" | ... => llama::run_jev_decision_llama(...)?,
+    ...
+    other => return Err(format!("unsupported arch {:?}", other)),
+};
+```
+
+### 两条 trait 兼容路径（修订 2026-09-22）
+
+**事实**：所有 9 个 trunk 都是 zero-copy mmap（数据没有 copy 到 Vec）。
+区别在于把零拷贝表达成什么类型 — 也是为什么 `JevScorer` trait 兼容
+9 个 trunk 的关键：
+
+- **owned + transmute `'a → 'static`**（Qwen3 / Gemma4 / Hunyuan）：
+  `Qwen3Model::from_source` 在 `src/models/qwen3/trunk/weights.rs:522-523`
+  用 `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }` 把 mmap 字节
+  假装成 `'static`。前提是 model **自身持有** `Arc<dyn TensorSource>`
+  （`weights.rs:26`），所以 mmap 区域生命周期 ≥ self。`JevScorer` 持有
+  owned `'static` 化 model，干净。
+- **free function 借 source**（Llama / LFM2 / LFM2.5 / LFM2-MoE / Spark /
+  Nemotron-H / **Qwen3.5**）：trunk 暴露
+  `run_forward_logits_*_with_batch(source: &dyn TensorSource, ...)`
+  free function。`JevScorer` 不持有 model，每次 `forward_logits` 把
+  `self.source.as_ref()` 借给 free function（后者自己内部 `from_source`
+  + session 生命 + `forward_logits`，管完就丢）。`LlamaSession<'a>` /
+  `Qwen35Model<'a>` 等内部类型也带 `'a`，但 JEV 走 free function 路径绕开。
+
+**Qwen3.5 走 trait**（2026-09-22，commit `53581f3`）：trunk 加了
+`run_forward_logits_qwen35_with_batch` free function（内部
+`Qwen35Model::from_source` + `Qwen35Session::new_with_prefill_batch_size` +
+`build_qwen35_positions` + `session.forward_logits`），`single/qwen35.rs` /
+`grouped/qwen35.rs` 改成 Llama 风格 `JevScorer` / `JevGroupedScorer` impl。
+`Qwen35Model<'a>` 不动，zero-copy 完全保留。
+Qwen3.5-0.8B Q8_0 真实模型上 JEV 单 + group smoke test 跑通（Paris = 0.9141、
+pair_1 = A 0.7158）；图片推理路径（`--image` + mmproj，apple.png）确认不受
+影响。
+
+**结论**：9 个 trunk 完全对称 — 2 条路径（owned + transmute / free function）
+覆盖全部情况。JEV dispatch 表 9 行 match，每行结构相同，不再有"特殊" inline
+循环。Follow-up 已完成（`docs/develop/TODO.md` JEV section 标 ✅ 2026-09-22）。
+`JevScorer` / `JevGroupedScorer` impl。`Qwen35Model<'a>` 不动，zero-copy
+保留。
+
+### Grouped trait：`JevGroupedScorer`
+
+`JevGroupedScorer` 是 `JevScorer` 的"per-group softmax"对应版本：
+
+```rust
+pub(crate) trait JevGroupedScorer {
+    fn scorer_label(&self) -> &'static str;
+    fn build_grouped_prompt(
+        &self, context: &str, q: &PreparedGroupedQuestion,
+    ) -> Result<(Vec<Vec<char>>, Vec<u32>), String>;
+    fn forward_logits(
+        &mut self, token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String>;
+    fn tokenizer(&self) -> &BPETokenizer;
+}
+```
+
+每个 grouped scorer 是一个**薄包装**持有对应的 single-mode scorer：
+
+```rust
+struct Qwen3JevGroupedScorer {
+    inner: Qwen3JevScorer,
+}
+
+impl JevGroupedScorer for Qwen3JevGroupedScorer {
+    fn build_grouped_prompt(&self, context, q)
+        -> Result<(Vec<Vec<char>>, Vec<u32>), String> {
+        // 用 self.inner.model.tokenizer() 复用同一份 chat template
+        let group_labels = allocate_group_labels(q);
+        let token_ids = build_jev_token_ids_for_arch(
+            "qwen3", self.inner.model.tokenizer(),
+            build_grouped_system(), &build_grouped_payload(context, q)?,
+        )?;
+        Ok((group_labels, token_ids))
+    }
+    fn forward_logits(&mut self, token_ids)
+        -> Result<(Vec<f32>, Duration), String> {
+        self.inner.forward_logits(token_ids)
+    }
+    fn tokenizer(&self) -> &BPETokenizer { self.inner.tokenizer() }
+}
+```
+
+这样 `run_jev_grouped_<arch>` 的 wrapper 与 single 一对一映射，新增
+trunk 的代价：single 一个 struct + grouped 一个 struct + 两个 dispatch
+表项。
+
+### 重构收益（实测）
+
+| 阶段 | text.rs 行数 | `jev/` 行数 | 总行数 |
+|---|---|---|---|
+| 重构前 | 4597 | — | 4597 |
+| 重构后 + 抽出 `jev/mod.rs` | 1748 | 2876 | 4624 |
+| 重构后 + 三层目录拆分（types/single/grouped） | 1748 | 3197 (types 190 + single 608 + single/* 1101 + grouped 496 + grouped/* 775) | 4945 |
+
+每行平均职责更清晰，但行数总量略增（多出的 ~200 行是每个文件顶部
+`//! doc comment` 和 `use ...`）。**关键收益是消除复制粘贴**：新加一个
+trunk 现在是 ~70 行（JevScorer impl）+ ~30 行（JevGroupedScorer 包装）
++ 2 行 dispatch，原来的 ~190 行重复。
+
+### 测试
+
+- `cargo test --release --lib`: 775 passed / 14 failed / 58 ignored
+- 14 个失败全部是**预存在**（bf16 / f16 / matmul neon parity / rope vision /
+  qwen35 projector），与本次重构无关
+- JEV 单 question 模式（Choice）：Qwen3-0.6B Paris = 1.0000 ✓
+- JEV grouped 模式（MultiSelect）：`pair_1` choice = B ✓
+- JEV grouped 模式（BlockChoice）：City→Paris, Country→France ✓
+
+### Prefill 收益
+
+Grouped JEV 在 Qwen3-0.6B 上 prefill 受益：
+
+- B=1 → 2182 ms（per-token 循环）
+- B=64 → 1631 ms（chunked prefill）
+- **1.34× speedup**
+
+Single JEV（300 token context）：
+
+- B=1 → 3008 ms
+- B=64 → 793 ms
+- **3.8× speedup**
 
 > Reference：上游协议来源 `references/openjev/decisionmaking/prompts.py`
 > 的 system prompt + 候选排序 + 单 token label 协议。

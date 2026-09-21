@@ -673,9 +673,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .filter(|value| !value.starts_with("--"))
                     .ok_or("Missing value for --jev-block")?;
                 if options.jev_questions.is_empty() {
-                    return Err(
-                        "--jev-block must follow a --jev-question".into(),
-                    );
+                    return Err("--jev-block must follow a --jev-question".into());
                 }
                 options.jev_blocks.push(JevBlockInput {
                     label: value.clone(),
