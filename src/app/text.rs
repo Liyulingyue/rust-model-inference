@@ -1578,6 +1578,7 @@ pub struct JevGroupedQuestionInput {
 struct PreparedGroup {
     label: String,
     descriptions: Vec<String>,
+    values: Vec<f32>,
 }
 
 struct PreparedGroupedQuestion {
@@ -1591,8 +1592,10 @@ pub struct JevGroupResult {
     pub label: String,
     pub labels: Vec<char>,
     pub descriptions: Vec<String>,
+    pub values: Vec<f32>,
     pub probabilities: Vec<f32>,
     pub choice_label: char,
+    pub score: Option<f32>,
     pub confidence: f32,
     pub entropy: f32,
     pub margin: f32,
@@ -1637,13 +1640,35 @@ pub fn prepare_jev_grouped_questions(
                     q.text, total_options
                 ));
             }
+            let has_colon = g.options.iter().any(|opt| opt.contains(':'));
+            let mut descriptions = Vec::with_capacity(g.options.len());
+            let mut values = Vec::with_capacity(g.options.len());
+            for opt in &g.options {
+                if has_colon {
+                    let (desc, val_str) = opt.rsplit_once(':').ok_or_else(|| {
+                        format!(
+                            "Group {:?} option {:?} must be \"description:value\" (mixed with/without colon is not allowed)",
+                            g.label, opt
+                        )
+                    })?;
+                    let v: f32 = val_str
+                        .parse()
+                        .map_err(|e| format!("Score value {:?} is not a float: {}", val_str, e))?;
+                    descriptions.push(desc.to_string());
+                    values.push(v);
+                } else {
+                    descriptions.push(opt.clone());
+                    values.push(0.0);
+                }
+            }
             prepared_groups.push(PreparedGroup {
                 label: if g.label.is_empty() {
                     format!("group_{}", gi + 1)
                 } else {
                     g.label.clone()
                 },
-                descriptions: g.options.clone(),
+                descriptions,
+                values,
             });
         }
         per_question.push(PreparedGroupedQuestion {
@@ -1869,12 +1894,20 @@ fn compute_grouped_jev_result(
         } else {
             sorted[0]
         };
+        let has_values = group.values.iter().any(|v| *v != 0.0);
+        let score = if has_values {
+            Some(exps.iter().zip(group.values.iter()).map(|(p, v)| p * v).sum())
+        } else {
+            None
+        };
         groups.push(JevGroupResult {
             label: group.label.clone(),
             labels: labels.to_vec(),
             descriptions: group.descriptions.clone(),
+            values: group.values.clone(),
             probabilities: exps,
             choice_label: labels[chosen_idx],
+            score,
             confidence,
             entropy,
             margin,
@@ -1967,9 +2000,19 @@ pub fn run_jev_grouped_decision(
 fn print_grouped_result_text(r: &JevGroupedResult) {
     println!("\n--- JEV decision ({:?}) ---", r.mode);
     for g in &r.groups {
-        println!("  [{}] choice: {}", g.label, g.choice_label);
-        for (i, p) in g.probabilities.iter().enumerate() {
-            println!("    {}: {:.4} — {}", g.labels[i], p, g.descriptions[i]);
+        if let Some(score) = g.score {
+            println!("  [{}] score: {:.4}", g.label, score);
+            for (i, p) in g.probabilities.iter().enumerate() {
+                println!(
+                    "    {}: {:.4} × {} = {:.4} — {}",
+                    g.labels[i], p, g.values[i], p * g.values[i], g.descriptions[i]
+                );
+            }
+        } else {
+            println!("  [{}] choice: {}", g.label, g.choice_label);
+            for (i, p) in g.probabilities.iter().enumerate() {
+                println!("    {}: {:.4} — {}", g.labels[i], p, g.descriptions[i]);
+            }
         }
         println!(
             "    confidence: {:.4} | entropy: {:.4} | margin: {:.4}",
@@ -2002,14 +2045,18 @@ impl serde::Serialize for JevGroupedResult {
                     .zip(g.probabilities.iter())
                     .map(|(l, p)| (l.to_string(), serde_json::json!(p)))
                     .collect();
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "label": g.label,
                     "choice": g.choice_label.to_string(),
                     "probabilities": probs,
                     "confidence": g.confidence,
                     "entropy": g.entropy,
                     "margin": g.margin,
-                })
+                });
+                if let Some(score) = g.score {
+                    obj.as_object_mut().unwrap().insert("score".to_string(), serde_json::json!(score));
+                }
+                obj
             })
             .collect();
         st.serialize_field("groups", &groups)?;
