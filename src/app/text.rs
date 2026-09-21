@@ -308,6 +308,14 @@ pub fn run_jev_decision(
             prefill_batch_size,
             output_json,
         )?,
+        "lfm2moe" => run_jev_decision_lfm2moe(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
+        )?,
         "nemotron_h" => run_jev_decision_nemotron_h(
             source.clone(),
             context,
@@ -1091,6 +1099,106 @@ fn run_jev_decision_lfm25(
             prefill_batch_size,
         )
         .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
+        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn run_jev_decision_lfm2moe(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedQuestion],
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    output_json: bool,
+) -> Result<Vec<JevResult>, String> {
+    // LFM2-MoE chat format is identical to LFM2 / LFM2.5 (the MoE
+    // variation only swaps dense FFN blocks for MoE; the chat
+    // template is shared).
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    verify_label_tokens_single(&tokenizer)?;
+
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let n_threads = resolve_thread_count(n_threads_arg, available_threads);
+    eprintln!("compute pool: {} threads (LFM2-MoE)", n_threads);
+
+    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
+    for q in per_question {
+        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
+            .map(|b| b as char)
+            .collect();
+
+        let system = match q.mode {
+            JevMode::Score => {
+                "Score the situation using the supplied context and numeric candidates. \
+                               Reply with only its letter label."
+            }
+            _ => {
+                "Answer the question using the supplied context and candidate answers. \
+                  Select the single best answer. Reply with only its letter label."
+            }
+        };
+        let mut payload = String::from("{\"context\": ");
+        payload
+            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+        payload.push_str(", \"question\": ");
+        payload
+            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+        payload.push_str(", \"candidates\": {");
+        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
+            if i > 0 {
+                payload.push(',');
+            }
+            payload.push('"');
+            payload.push(*label_char);
+            payload.push_str("\": ");
+            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
+        }
+        payload.push_str("}}");
+
+        let mut token_ids = Vec::new();
+        if let Some(bos) = tokenizer.bos_id() {
+            token_ids.push(bos);
+        }
+        token_ids.extend(tokenizer.encode(
+            &format!("system\n{system}\n"),
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ));
+        token_ids.extend(tokenizer.encode(
+            &format!("user\n{payload}\n"),
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ));
+        token_ids.extend(tokenizer.encode(
+            "assistant\n",
+            EncodeOptions {
+                add_special: false,
+                parse_special: false,
+            },
+        ));
+
+        if !output_json {
+            print_jev_question(q, &labels);
+        }
+
+        let (logits, prefill_dur) = crate::models::lfm2moe::run_forward_logits_lfm2moe_with_batch(
+            source.as_ref(),
+            &token_ids,
+            n_threads,
+            KvFormat::F16,
+            8192,
+            prefill_batch_size,
+        )
+        .map_err(|e| format!("LFM2-MoE forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
         results.push(result);
     }
