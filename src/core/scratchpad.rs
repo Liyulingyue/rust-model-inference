@@ -29,6 +29,41 @@ pub struct ExecutionScratchpad {
     pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
     pub score_stride: usize,
     pub scores: Vec<f32>,
+    /// Maximum number of rows a single chunked prefill may hold.
+    /// Buffers sized for `n_embd * 1` work for any `B = 1` call
+    /// but need to be sized `n_embd * max_rows` to support `B > 1`.
+    /// The legacy `new` constructor sets `max_rows = 1` so existing
+    /// per-token paths keep their original memory footprint.
+    pub max_rows: usize,
+}
+
+impl Default for ExecutionScratchpad {
+    fn default() -> Self {
+        // `Default` is only here so direct struct-literal init in
+        // existing callers (e.g. `qwen3/trunk/session.rs:146`)
+        // keeps compiling without naming every field. The actual
+        // size-correct construction goes through `new` /
+        // `new_batched`.
+        Self {
+            x: Vec::new(),
+            normed: Vec::new(),
+            q: Vec::new(),
+            k_new: Vec::new(),
+            v_new: Vec::new(),
+            attn_out: Vec::new(),
+            attn_proj: Vec::new(),
+            down_buf: Vec::new(),
+            gate_buf: Vec::new(),
+            up_buf: Vec::new(),
+            logits: Vec::new(),
+            q8_buf: Vec::new(),
+            scale_buf: Vec::new(),
+            q8k_buf: Vec::new(),
+            score_stride: 0,
+            scores: Vec::new(),
+            max_rows: 1,
+        }
+    }
 }
 
 pub struct KvCacheF16 {
@@ -81,32 +116,62 @@ impl ExecutionScratchpad {
         n_threads: usize,
         max_ctx: usize,
     ) -> Self {
+        // Legacy per-token constructor: `max_rows = 1` so every
+        // buffer stays at its original single-row size. Callers
+        // that want a chunked prefill scratch use
+        // [`ExecutionScratchpad::new_batched`] instead.
+        Self::new_batched(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx, 1)
+    }
+}
+
+impl ExecutionScratchpad {
+    /// Build a scratchpad sized to hold up to `max_rows` rows of
+    /// prefill state in one chunk. `max_rows == 1` reproduces the
+    /// legacy per-token footprint exactly; `max_rows > 1` widens
+    /// the per-row buffers (`x`, `normed`, `q`, `k_new`, `v_new`,
+    /// `attn_out`, `attn_proj`, `down_buf`, `gate_buf`, `up_buf`)
+    /// to `rows × width` so a `forward_chunk(rows, …)` call can
+    /// hold the full chunk's activations and Q/K/V without
+    /// copying row-by-row.
+    pub fn new_batched(
+        n_embd: usize,
+        n_embd_q: usize,
+        n_embd_gqa: usize,
+        n_ff: usize,
+        vocab: usize,
+        n_threads: usize,
+        max_ctx: usize,
+        max_rows: usize,
+    ) -> Self {
+        let max_rows = max_rows.max(1);
         let max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
         let score_stride = max_ctx.div_ceil(256) * 256;
+        let row_scale = max_rows;
         Self {
-            x: vec![0.0f32; n_embd],
-            normed: vec![0.0f32; n_embd],
-            q: vec![0.0f32; n_embd_q],
-            k_new: vec![0.0f32; n_embd_gqa],
-            v_new: vec![0.0f32; n_embd_gqa],
-            attn_out: vec![0.0f32; n_embd_q],
-            attn_proj: vec![0.0f32; n_embd],
-            down_buf: vec![0.0f32; n_embd],
-            gate_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
-            up_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
+            x: vec![0.0f32; n_embd * row_scale],
+            normed: vec![0.0f32; n_embd * row_scale],
+            q: vec![0.0f32; n_embd_q * row_scale],
+            k_new: vec![0.0f32; n_embd_gqa * row_scale],
+            v_new: vec![0.0f32; n_embd_gqa * row_scale],
+            attn_out: vec![0.0f32; n_embd_q * row_scale],
+            attn_proj: vec![0.0f32; n_embd * row_scale],
+            down_buf: vec![0.0f32; n_embd * row_scale],
+            gate_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
+            up_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
             logits: vec![0.0f32; vocab],
-            q8_buf: vec![0u8; max_n_in],
-            scale_buf: vec![0.0f32; max_n_in / 32],
+            q8_buf: vec![0u8; max_n_in * row_scale],
+            scale_buf: vec![0.0f32; max_n_in / 32 * row_scale],
             q8k_buf: vec![
                 crate::ops::quant::BlockQ8K {
                     d: 0.0,
                     qs: [0; 256],
                     bsums: [0; 16],
                 };
-                max_n_in / 256
+                max_n_in / 256 * row_scale
             ],
             score_stride,
             scores: vec![0.0f32; n_threads * score_stride],
+            max_rows,
         }
     }
 }

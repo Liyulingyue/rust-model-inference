@@ -167,6 +167,7 @@ impl<'model> Qwen3Session<'model> {
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],
+                max_rows: 1,
             },
             prefill_scratch: Qwen3PrefillScratch::new(1, model),
             capacity,
