@@ -1,4 +1,7 @@
-use super::{gemma4_token_table_digest, Gemma4AudioConfig, Gemma4Config, Gemma4UvConfig, Gemma4VisionConfig};
+use super::{
+    gemma4_token_table_digest, Gemma4AudioConfig, Gemma4AudioProjector, Gemma4Config,
+    Gemma4UvConfig, Gemma4VisionConfig,
+};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use std::collections::HashMap;
 
@@ -475,22 +478,10 @@ fn valid_mmproj_source_gemma4uv() -> MapTensorSource {
     // tensors the 12B mmproj actually carries.
     source.tensors.clear();
     for (name, dims, ty) in [
-        (
-            "v.patch_embd.weight",
-            &[6912u64, 3840][..],
-            GGMLType::F32,
-        ),
+        ("v.patch_embd.weight", &[6912u64, 3840][..], GGMLType::F32),
         ("v.patch_embd.bias", &[3840][..], GGMLType::F32),
-        (
-            "v.patch_norm.1.weight",
-            &[6912u64][..],
-            GGMLType::F32,
-        ),
-        (
-            "v.patch_norm.1.bias",
-            &[6912u64][..],
-            GGMLType::F32,
-        ),
+        ("v.patch_norm.1.weight", &[6912u64][..], GGMLType::F32),
+        ("v.patch_norm.1.bias", &[6912u64][..], GGMLType::F32),
         ("v.patch_norm.2.weight", &[3840][..], GGMLType::F32),
         ("v.patch_norm.2.bias", &[3840][..], GGMLType::F32),
         ("v.patch_norm.3.weight", &[3840][..], GGMLType::F32),
@@ -520,12 +511,14 @@ fn valid_mmproj_source_gemma4uv() -> MapTensorSource {
     source
         .metadata
         .insert("clip.vision.projection_dim".into(), MetaValue::Uint32(3840));
-    source
-        .metadata
-        .insert("clip.vision.embedding_length".into(), MetaValue::Uint32(3840));
-    source
-        .metadata
-        .insert("clip.vision.feed_forward_length".into(), MetaValue::Uint32(0));
+    source.metadata.insert(
+        "clip.vision.embedding_length".into(),
+        MetaValue::Uint32(3840),
+    );
+    source.metadata.insert(
+        "clip.vision.feed_forward_length".into(),
+        MetaValue::Uint32(0),
+    );
     source
         .metadata
         .insert("clip.vision.block_count".into(), MetaValue::Uint32(0));
@@ -536,25 +529,55 @@ fn valid_mmproj_source_gemma4uv() -> MapTensorSource {
     source
 }
 
+fn valid_mmproj_source_gemma4ua() -> MapTensorSource {
+    let mut source = valid_mmproj_source_gemma4uv();
+    source.metadata.insert(
+        "clip.audio.projector_type".into(),
+        MetaValue::String("gemma4ua".into()),
+    );
+    source
+        .metadata
+        .insert("clip.audio.projection_dim".into(), MetaValue::Uint32(3840));
+    source
+        .metadata
+        .insert("clip.audio.embedding_length".into(), MetaValue::Uint32(640));
+    source.metadata.insert(
+        "clip.audio.feed_forward_length".into(),
+        MetaValue::Uint32(0),
+    );
+    source
+        .metadata
+        .insert("clip.audio.block_count".into(), MetaValue::Uint32(0));
+    source.metadata.insert(
+        "clip.audio.attention.head_count".into(),
+        MetaValue::Uint32(1),
+    );
+    source
+        .metadata
+        .insert("clip.audio.num_mel_bins".into(), MetaValue::Uint32(128));
+    source.metadata.insert(
+        "clip.audio.attention.layer_norm_epsilon".into(),
+        MetaValue::Float32(1e-6),
+    );
+    source
+}
+
 #[test]
 fn gemma4_vision_rejects_gemma4uv_projector() {
     // The 12B mmproj's projector_type is "gemma4uv", which must NOT be
     // accepted by the E2B (`gemma4v`) config — they have different
     // tensor shapes and forward graphs.
     let error = Gemma4VisionConfig::from_source(&valid_mmproj_source_gemma4uv()).unwrap_err();
-    assert!(
-        error.contains("projector_type"),
-        "got {error:?}"
-    );
+    assert!(error.contains("projector_type"), "got {error:?}");
 }
 
 #[test]
 fn gemma4_uv_vision_contract_is_exact() {
     let config = Gemma4UvConfig::from_source(&valid_mmproj_source_gemma4uv()).unwrap();
     assert_eq!(config.embd, 3840);
-    assert_eq!(config.patch_size, 16);
+    assert_eq!(config.patch_size, 48);
     assert_eq!(config.image_size, 224);
-    assert_eq!(config.in_channels, 27);
+    assert_eq!(config.in_channels, 3);
     assert_eq!(config.projection, 3840);
     assert_eq!(config.position_size, 1120);
 }
@@ -564,6 +587,7 @@ fn gemma4_audio_contract_is_exact() {
     assert_eq!(
         Gemma4AudioConfig::from_source(&valid_mmproj_source()).unwrap(),
         Gemma4AudioConfig {
+            projector: Gemma4AudioProjector::Gemma4a,
             layers: 12,
             embd: 1024,
             heads: 8,
@@ -571,6 +595,49 @@ fn gemma4_audio_contract_is_exact() {
             projection: 1536,
         }
     );
+}
+
+#[test]
+fn gemma4ua_audio_contract_is_exact() {
+    let config = Gemma4AudioConfig::from_source(&valid_mmproj_source_gemma4ua()).unwrap();
+    assert_eq!(config.projector, Gemma4AudioProjector::Gemma4ua);
+    assert_eq!(config.layers, 0);
+    assert_eq!(config.embd, 640);
+    assert_eq!(config.heads, 1);
+    assert_eq!(config.mel_bins, 128);
+    assert_eq!(config.projection, 3840);
+}
+
+#[test]
+fn gemma4ua_audio_contract_rejects_projector_and_tensor_drift() {
+    let mut wrong_projector = valid_mmproj_source_gemma4ua();
+    wrong_projector.metadata.insert(
+        "clip.audio.projector_type".into(),
+        MetaValue::String("wrong".into()),
+    );
+    assert!(Gemma4AudioConfig::from_source(&wrong_projector)
+        .unwrap_err()
+        .contains("projector_type"));
+
+    let mut wrong_shape = valid_mmproj_source_gemma4ua();
+    wrong_shape
+        .tensors
+        .get_mut("mm.a.input_projection.weight")
+        .unwrap()
+        .dims = vec![639, 3840];
+    assert!(Gemma4AudioConfig::from_source(&wrong_shape)
+        .unwrap_err()
+        .contains("mm.a.input_projection.weight"));
+
+    let mut wrong_type = valid_mmproj_source_gemma4ua();
+    wrong_type
+        .tensors
+        .get_mut("mm.a.input_projection.weight")
+        .unwrap()
+        .ggml_type = GGMLType::F32;
+    assert!(Gemma4AudioConfig::from_source(&wrong_type)
+        .unwrap_err()
+        .contains("mm.a.input_projection.weight"));
 }
 
 #[test]

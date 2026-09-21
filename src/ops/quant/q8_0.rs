@@ -2,7 +2,7 @@
 
 pub fn quantize_q8_0_into(input: &[f32], n: usize, q8: &mut [u8], scales: &mut [f32]) {
     let blocks = n / 32;
-    #[cfg(all(target_arch = "x86_64", not(feature = "parity-trace")))]
+    #[cfg(target_arch = "x86_64")]
     {
         if super::super::has_avx2_fma() {
             unsafe {
@@ -34,7 +34,7 @@ pub fn quantize_q8_0_into_parallel(
     let blocks = n / 32;
     let block_start = ith * blocks / nth;
     let block_end = (ith + 1) * blocks / nth;
-    #[cfg(all(target_arch = "x86_64", not(feature = "parity-trace")))]
+    #[cfg(target_arch = "x86_64")]
     {
         if super::super::has_avx2_fma() {
             unsafe {
@@ -182,18 +182,6 @@ unsafe fn quantize_q8_0_into_avx2_range(
 ) {
     use std::arch::x86_64::*;
     let sign_mask = _mm256_set1_ps(-0.0f32);
-    let max_i8 = _mm256_set1_ps(127.0);
-    let min_i8 = _mm256_set1_ps(-128.0);
-    let round_away = |value| {
-        let whole = _mm256_round_ps(value, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC);
-        let fraction = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(value, whole));
-        let step = _mm256_or_ps(_mm256_and_ps(value, sign_mask), _mm256_set1_ps(1.0));
-        let increment = _mm256_and_ps(
-            _mm256_cmp_ps(fraction, _mm256_set1_ps(0.5), _CMP_GE_OQ),
-            step,
-        );
-        _mm256_add_ps(whole, increment)
-    };
     for b in b_start..b_end {
         let ptr = input.as_ptr().add(b * 32);
         let v0 = _mm256_loadu_ps(ptr);
@@ -215,21 +203,17 @@ unsafe fn quantize_q8_0_into_avx2_range(
         let m3 = _mm_movehl_ps(shuf, m2);
         let amax = _mm_cvtss_f32(_mm_max_ss(m2, m3));
         let d = if amax == 0.0 { 0.0 } else { amax / 127.0 };
-        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
+        let id = if amax == 0.0 { 0.0 } else { 127.0 / amax };
         scales[b] = super::super::f16_to_f32(super::super::f32_to_f16(d));
         let id_v = _mm256_set1_ps(id);
-        let r0 = round_away(_mm256_mul_ps(v0, id_v));
-        let r1 = round_away(_mm256_mul_ps(v1, id_v));
-        let r2 = round_away(_mm256_mul_ps(v2, id_v));
-        let r3 = round_away(_mm256_mul_ps(v3, id_v));
-        let c0 = _mm256_min_ps(_mm256_max_ps(r0, min_i8), max_i8);
-        let c1 = _mm256_min_ps(_mm256_max_ps(r1, min_i8), max_i8);
-        let c2 = _mm256_min_ps(_mm256_max_ps(r2, min_i8), max_i8);
-        let c3 = _mm256_min_ps(_mm256_max_ps(r3, min_i8), max_i8);
-        let i0 = _mm256_cvtps_epi32(c0);
-        let i1 = _mm256_cvtps_epi32(c1);
-        let i2 = _mm256_cvtps_epi32(c2);
-        let i3 = _mm256_cvtps_epi32(c3);
+        let r0 = _mm256_round_ps(_mm256_mul_ps(v0, id_v), _MM_FROUND_TO_NEAREST_INT);
+        let r1 = _mm256_round_ps(_mm256_mul_ps(v1, id_v), _MM_FROUND_TO_NEAREST_INT);
+        let r2 = _mm256_round_ps(_mm256_mul_ps(v2, id_v), _MM_FROUND_TO_NEAREST_INT);
+        let r3 = _mm256_round_ps(_mm256_mul_ps(v3, id_v), _MM_FROUND_TO_NEAREST_INT);
+        let i0 = _mm256_cvtps_epi32(r0);
+        let i1 = _mm256_cvtps_epi32(r1);
+        let i2 = _mm256_cvtps_epi32(r2);
+        let i3 = _mm256_cvtps_epi32(r3);
         let p01 = _mm256_packs_epi32(i0, i1);
         let p23 = _mm256_packs_epi32(i2, i3);
         let packed = _mm256_packs_epi16(p01, p23);
@@ -325,7 +309,7 @@ mod tests {
         ]);
         let expected = expected.map(|value| value as u8);
         let mut expected_native = expected;
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
             expected_native[2] = 0;
             expected_native[3] = 0;
@@ -351,6 +335,9 @@ mod tests {
         for ith in 0..7 {
             quantize_q8_0_into_parallel(&input, input.len(), &mut q8, &mut scales, ith, 7);
         }
+        #[cfg(target_arch = "x86_64")]
+        check(&q8, &scales, &expected_native);
+        #[cfg(not(target_arch = "x86_64"))]
         check(&q8, &scales, &expected);
 
         #[cfg(target_arch = "x86_64")]
@@ -358,7 +345,7 @@ mod tests {
             let mut q8 = [0; 64];
             let mut scales = [0.0; 2];
             unsafe { quantize_q8_0_into_avx2(&input, input.len(), &mut q8, &mut scales) };
-            check(&q8, &scales, &expected);
+            check(&q8, &scales, &expected_native);
         }
     }
 }

@@ -71,6 +71,19 @@ const GEMMA4_12B_TRACE_NAMES: &[&str] = &[
     "gemma4.layer.32.layer_output",
     "gemma4.layer.33.layer_output",
     "gemma4.layer.34.layer_output",
+    "gemma4.layer.35.attn_norm",
+    "gemma4.layer.35.q",
+    "gemma4.layer.35.q_norm",
+    "gemma4.layer.35.q_rope",
+    "gemma4.layer.35.attention",
+    "gemma4.layer.35.attention_projected",
+    "gemma4.layer.35.attn_out",
+    "gemma4.layer.35.ffn_norm",
+    "gemma4.layer.35.ffn_gate",
+    "gemma4.layer.35.ffn_up",
+    "gemma4.layer.35.ffn_activated",
+    "gemma4.layer.35.ffn_down",
+    "gemma4.layer.35.ffn_out",
     "gemma4.layer.35.layer_output",
     "gemma4.layer.36.layer_output",
     "gemma4.layer.37.layer_output",
@@ -476,6 +489,10 @@ fn write_audio_fixture(path: &Path) -> Result<(), String> {
     let samples = (0..320)
         .map(|index| ((index as f32 * 0.03125).sin() * 16_384.0) as i16)
         .collect::<Vec<_>>();
+    write_pcm16_audio_fixture(path, &samples)
+}
+
+fn write_pcm16_audio_fixture(path: &Path, samples: &[i16]) -> Result<(), String> {
     let data_len = u32::try_from(samples.len() * 2).unwrap();
     let mut wav = Vec::with_capacity(44 + data_len as usize);
     wav.extend_from_slice(b"RIFF");
@@ -742,6 +759,12 @@ fn gemma4_12b_model_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("models/gemma-4-12b-it-GGUF").join(GEMMA4_12B_MODEL_NAME))
 }
 
+fn gemma4_12b_mmproj_path() -> PathBuf {
+    std::env::var_os("RMI_GEMMA4_12B_MMPROJ")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("models/gemma-4-12b-it-GGUF").join(GEMMA4_MMPROJ_NAME))
+}
+
 fn require_gemma4_gguf(
     path: &Path,
     expected_name: &str,
@@ -866,7 +889,15 @@ fn readme_lists_gemma4_model_projector_and_media_flags() {
 }
 
 fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("LLAMA_GEMMA4_TRACE_BIN").map(PathBuf::from) {
+    ensure_gemma4_oracle_binary("LLAMA_GEMMA4_TRACE_BIN", "build_oracle.sh")
+}
+
+fn ensure_gemma4_audio_oracle() -> Result<PathBuf, String> {
+    ensure_gemma4_oracle_binary("LLAMA_GEMMA4_AUDIO_TRACE_BIN", "build_audio_oracle.sh")
+}
+
+fn ensure_gemma4_oracle_binary(env_name: &str, script_name: &str) -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os(env_name).map(PathBuf::from) {
         if path.is_file() {
             return Ok(path);
         }
@@ -875,7 +906,9 @@ fn ensure_gemma4_oracle() -> Result<PathBuf, String> {
     let llama_dir = std::env::var_os("LLAMA_CPP_DIR").ok_or_else(|| {
         "LLAMA_CPP_DIR is required when LLAMA_GEMMA4_TRACE_BIN is not a file".to_owned()
     })?;
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/gemma4/build_oracle.sh");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools/gemma4")
+        .join(script_name);
     let output = Command::new("bash")
         .arg(&script)
         .arg(llama_dir)
@@ -1005,6 +1038,92 @@ fn gemma4_12b_text_matches_pinned_cpu_oracle_raw_bits() {
         );
     }
     assert_trace_equal("12b-text", &rust, &oracle)
+        .unwrap_or_else(|error| panic!("{error}\nartifacts retained in {}", root.display()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(all(feature = "parity-trace", target_arch = "x86_64"))]
+#[test]
+#[ignore = "requires the Gemma4 12B GGUF, F16 mmproj, and pinned llama.cpp"]
+fn gemma4_12b_audio_projection_matches_pinned_oracle_raw_bits() {
+    if !(std::is_x86_feature_detected!("avx2")
+        && std::is_x86_feature_detected!("fma")
+        && std::is_x86_feature_detected!("f16c"))
+    {
+        eprintln!("skipped: Gemma4 12B audio raw-bit parity requires AVX2+FMA+F16C");
+        return;
+    }
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let model = gemma4_12b_model_path();
+    let mmproj = gemma4_12b_mmproj_path();
+    require_gemma4_gguf(
+        &model,
+        GEMMA4_12B_MODEL_NAME,
+        "gemma4",
+        "token_embd.weight",
+        GGMLType::Q8_0,
+    )
+    .unwrap();
+    require_gemma4_gguf(
+        &mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "mm.a.input_projection.weight",
+        GGMLType::F16,
+    )
+    .unwrap();
+    let oracle = ensure_gemma4_audio_oracle().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "rmi-gemma4-12b-audio-parity-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let audio = root.join("fixture.wav");
+    let rust_trace = root.join("rust.jsonl");
+    let oracle_trace = root.join("oracle.jsonl");
+    let samples = (0..997)
+        .map(|index| (((index * 7_919) % 60_001) as i32 - 30_000) as i16)
+        .collect::<Vec<_>>();
+    write_pcm16_audio_fixture(&audio, &samples).unwrap();
+
+    let old_trace = std::env::var_os("RMI_PARITY_TRACE");
+    let old_filter = std::env::var_os("RMI_PARITY_FILTER");
+    std::env::set_var("RMI_PARITY_TRACE", &rust_trace);
+    std::env::set_var(
+        "RMI_PARITY_FILTER",
+        "gemma4.audio.normalized,gemma4.audio.projected",
+    );
+    let source = GGUFLoader::from_file(&mmproj).unwrap();
+    let audio_model = Gemma4AudioModel::from_source(&source, 1).unwrap();
+    let result = audio_model.encode_wav_path(&audio);
+    restore_env("RMI_PARITY_TRACE", old_trace);
+    restore_env("RMI_PARITY_FILTER", old_filter);
+    result.unwrap();
+
+    run_command(
+        Command::new(&oracle)
+            .arg("-m")
+            .arg(&model)
+            .arg("--mmproj")
+            .arg(&mmproj)
+            .args(["-p", "Describe the audio.", "-n", "0", "--audio"])
+            .arg(&audio)
+            .args(["--jinja", "--no-mmproj-offload", "-t", "1", "-fa", "off"])
+            .env("MTMD_DEBUG_GRAPH", "1")
+            .env("RMI_PARITY_TRACE", &oracle_trace),
+        "Gemma4 12B audio Oracle",
+    )
+    .unwrap();
+
+    let rust = trace_records(&rust_trace).unwrap();
+    let oracle = trace_records(&oracle_trace).unwrap();
+    assert_trace_equal("12b-audio", &rust, &oracle)
         .unwrap_or_else(|error| panic!("{error}\nartifacts retained in {}", root.display()));
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1,4 +1,4 @@
-# Gemma 4 E2B 用法
+# Gemma 4 用法
 
 Gemma 4 是本仓库唯一同时原生支持**文本 + 视觉 + 音频**的模型架构，通过同一
 mmproj 提供视觉和音频两个 projector。代码侧入口是
@@ -15,6 +15,10 @@ mmproj 提供视觉和音频两个 projector。代码侧入口是
 - mmproj：`models/gemma-4-e2b/mmproj-F16.gguf`（F16 精度；提供视觉 + 音频双 projector）
   - `clip.vision.projector_type = gemma4v`（`src/models/gemma4/vision/config.rs:22`）
   - `clip.audio.projector_type = gemma4a`（`src/models/gemma4/asr/config.rs:20`）
+- 12B：`models/gemma-4-12b-it-GGUF/` 中的 Q8_0 主模型与 `mmproj-F16.gguf`
+  - `clip.vision.projector_type = gemma4uv`
+  - `clip.audio.projector_type = gemma4ua`，将 16 kHz 单声道 PCM16 WAV 每 640
+    个采样切成一行，尾行补零，再投影到 3840 维
 
 任一媒体输入都必须**同时传入 mmproj**；文本模式不需要 mmproj。
 
@@ -38,12 +42,25 @@ cargo run --release --bin rust-model-inference -- \
 
 ## 4. 音频 + 文本
 
+E2B：
+
 ```bash
 cargo run --release --bin rust-model-inference -- \
   --model models/gemma-4-e2b/gemma-4-E2B-it-Q8_0.gguf \
   --mmproj models/gemma-4-e2b/mmproj-F16.gguf \
   --audio path/to/audio.wav \
   --prompt "Transcribe the audio." --max-tokens 32 --temp 0
+```
+
+12B（`gemma4ua` 仅接受 16 kHz、单声道、PCM16 WAV）：
+
+```bash
+cargo run --release --bin rust-model-inference -- \
+  --model models/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q8_0.gguf \
+  --mmproj models/gemma-4-12b-it-GGUF/mmproj-F16.gguf \
+  --audio path/to/audio.wav \
+  --prompt "Describe the audio." --max-tokens 32 --temp 0 \
+  --kv-cache f32 --threads 1
 ```
 
 ## 5. 图像 + 音频 + 文本
@@ -74,17 +91,21 @@ cargo run --release --bin rust-model-inference -- \
 
 ## 7. 与 llama.cpp 的对齐
 
-Pinned Oracle：`llama.cpp @ 3173a56471c1753650cd806694145ffd6dcace67`
+Pinned Oracle：
+
+- E2B 与 12B 文本：`llama.cpp @ 3173a56471c1753650cd806694145ffd6dcace67`
+- 12B `gemma4ua` 音频：`llama.cpp @ b96806d96`（x86_64 CPU）
 
 构建 / 测试入口：
 
 - `tools/gemma4/build_oracle.sh`
 - `tests/gemma4_reference.rs`
 
-CPU 对齐覆盖 attention softmax 前的 token IDs，以及
+E2B 媒体门禁覆盖 attention softmax 前的 token IDs，以及
 `gemma4.vision.preprocessed` / `gemma4.audio.mel` 的原始 F32 `u32` 位。
-attention 之后**不**承诺与 llama.cpp 逐位一致——仓库统一使用准确、稳定的
-标量 softmax。`--gpu` 可以运行，但当前不提供 GPU 位级对比保证。
+12B 文本门禁覆盖逐层 checkpoint、最终 logits 和 3 步 greedy token 的原始位；
+`gemma4ua` 另外覆盖 640 采样 RMSNorm 与 3840 维 F16 投影的原始 F32 位。
+`--gpu` 可以运行，但当前不提供 GPU 位级对比保证。
 
 ## 8. 服务端模式
 
@@ -113,6 +134,7 @@ cargo run --release --bin server -- \
 - `src/models/gemma4/trunk/` — Gemma 4 LLM trunk
 - `src/models/gemma4/vision/` — 视觉 encoder + projector（`gemma4v`）
 - `src/models/gemma4/asr/` — 音频 encoder + projector（`gemma4a`）
+- `src/models/gemma4/asr/` — 12B encoder-free 音频 projector（`gemma4ua`）
 - `src/app/text.rs:29, 765-803` — Gemma 4 CLI 路由
 - `tests/gemma4_reference.rs` — pinned llama.cpp 对齐
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Oracle pin 与构建脚本

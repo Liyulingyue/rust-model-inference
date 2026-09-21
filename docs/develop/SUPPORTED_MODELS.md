@@ -39,7 +39,7 @@
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
-| Gemma 4 12B | `gemma4` | 文本生成 | 无 | Q8_0 LLM + F32 KV | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 在单线程 CPU 上与 llama.cpp `3173a56` 对齐 token、layer-0 checkpoints、raw/final logits 和单步 greedy token 的原始 F32 位；未验证该型号的多模态组件。 |
+| Gemma 4 12B | `gemma4` | 文本、音频 | 音频需要 F16 `gemma4ua` mmproj | Q8_0 LLM + F32 KV；F16 `gemma4ua` | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖三步文本 raw-bit parity，并在 AVX2+FMA+F16C x86_64 CPU 上与 llama.cpp `b96806d` 逐位比较音频 RMSNorm 和 3840 维投影；音频严格要求 16 kHz mono PCM16 WAV。 |
 | Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
 
 ## 已接入但未达到 Verified 的范围
@@ -47,6 +47,7 @@
 | 模型 / 范围 | GGUF architecture | 能力 | 所需组件 | 当前覆盖 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
 | 其他 Qwen3 文本 GGUF | `qwen3` | 文本生成 | 无 | 通用 metadata/tensor 分发 | `Supported` | 未逐个验证尺寸和量化组合；应为目标 GGUF 补一次真实推理。 |
+| Gemma 4 12B 图像 | `gemma4` | 图像 | F16 `gemma4uv` mmproj | 图像预处理、投影和生成入口 | `Supported` | 入口已接入，但尚未执行 12B 图像 Oracle 或独立真实冒烟，不继承文本/音频的 `Verified` 状态。 |
 | Qwen3-VL 0.6B / 2B 配置 | `qwen3vl` | 文本、图像、视频 | `qwen3vl_merger` mmproj | 两组主模型维度白名单、视觉编码器和 CLI 路由 | `Supported` | 当前代码接受 1024-dim 与 2048-dim 两组配置；没有独立的生成式 VL Oracle 记录。 |
 | Qwen2.5-Omni 兼容 GGUF 对 | `qwen2vl` + `qwen2.5o` projector | 文本、图像、视频、音频 | 匹配 mmproj | 多媒体编码、投影和生成路径 | `Supported` | 架构级覆盖，不代表所有 Qwen2.5-Omni 尺寸均可用。 |
 | Qwen3-Omni MoE 兼容 GGUF 对 | `qwen3vlmoe` + `qwen3vl_merger` projector | 文本、图像、视频、音频 | 匹配 mmproj | MoE、媒体投影和生成路径 | `Supported` | shared-expert 张量仍会被明确拒绝。 |

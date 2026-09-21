@@ -95,7 +95,7 @@ index 97678c6b2..388922cb4 100644
  #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
  #include <signal.h>
  #include <unistd.h>
-@@ -30,7 +38,221 @@
+@@ -30,7 +38,224 @@
  // volatile, because of signal being an interrupt
  static volatile bool g_is_generating = false;
  static volatile bool g_is_interrupted = false;
@@ -228,6 +228,9 @@ index 97678c6b2..388922cb4 100644
 +            || layer_checkpoint(name, "attn_projected-", "attention_projected", output)
 +            || layer_checkpoint(name, "attn_out-", "attn_out", output)
 +            || layer_checkpoint(name, "ffn_norm-", "ffn_norm", output)
++            || layer_checkpoint(name, "ffn_gate-", "ffn_gate", output)
++            || layer_checkpoint(name, "ffn_up-", "ffn_up", output)
++            || layer_checkpoint(name, "ffn_geglu-", "ffn_activated", output)
 +            || layer_checkpoint(name, "ffn_out-", "ffn_down", output)
 +            || layer_checkpoint(name, "ffn_residual-", "ffn_out", output)
 +            || layer_checkpoint(name, "l_out-", "layer_output", output);
@@ -317,7 +320,7 @@ index 97678c6b2..388922cb4 100644
  /**
   * Please note that this is NOT a production-ready binary.
   * It is a playground for trying multimodal support in llama.cpp.
-@@ -97,7 +319,9 @@ struct mtmd_cli_context {
+@@ -97,7 +322,9 @@ struct mtmd_cli_context {
      std::vector<common_chat_msg> chat_history;
      bool use_jinja = false;
      // TODO: support for --system-prompt with /clear command
@@ -328,7 +331,7 @@ index 97678c6b2..388922cb4 100644
      // support for legacy templates (models not having EOT token)
      llama_tokens antiprompt_tokens;
 
-@@ -105,8 +329,12 @@ struct mtmd_cli_context {
+@@ -105,8 +332,12 @@ struct mtmd_cli_context {
      llama_pos n_past = 0;
 
      common_debug_cb_user_data cb_data;
@@ -342,7 +345,7 @@ index 97678c6b2..388922cb4 100644
          model = llama_init->model();
          lctx = llama_init->context();
          vocab = llama_model_get_vocab(model);
-@@ -119,9 +347,9 @@ struct mtmd_cli_context {
+@@ -119,9 +350,9 @@ struct mtmd_cli_context {
              exit(1);
          }
 
@@ -354,7 +357,7 @@ index 97678c6b2..388922cb4 100644
              LOG_ERR("Model does not support chat mode\n");
              LOG_ERR("Hint: for TTS models, please use llama-tts\n");
              exit(1);
-@@ -164,6 +392,12 @@ struct mtmd_cli_context {
+@@ -164,6 +395,12 @@ struct mtmd_cli_context {
          mparams.warmup           = params.warmup;
          mparams.image_min_tokens = params.image_min_tokens;
          mparams.image_max_tokens = params.image_max_tokens;
@@ -367,7 +370,7 @@ index 97678c6b2..388922cb4 100644
          if (std::getenv("MTMD_DEBUG_GRAPH") != nullptr) {
              mparams.cb_eval_user_data = &cb_data;
              mparams.cb_eval = common_debug_cb_eval;
-@@ -230,6 +464,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
+@@ -230,6 +467,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
              break;
          }
 
@@ -377,7 +380,7 @@ index 97678c6b2..388922cb4 100644
          // eval the token
          common_batch_clear(ctx.batch);
          common_batch_add(ctx.batch, token_id, ctx.n_past++, {0}, true);
-@@ -238,6 +475,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
+@@ -238,6 +478,9 @@ static int generate_response(mtmd_cli_context & ctx, int n_predict) {
              return 1;
          }
      }
@@ -387,7 +390,7 @@ index 97678c6b2..388922cb4 100644
 
      std::string generated_text = common_detokenize(ctx.lctx, generated_tokens);
      common_chat_msg msg;
-@@ -273,6 +513,27 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
+@@ -273,6 +516,27 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
 
      if (g_is_interrupted) return 0;
 
@@ -415,7 +418,7 @@ index 97678c6b2..388922cb4 100644
      mtmd::input_chunks chunks(mtmd_input_chunks_init());
      auto bitmaps_c_ptr = ctx.bitmaps.c_ptr();
      int32_t res = mtmd_tokenize(ctx.ctx_vision.get(),
-@@ -285,11 +546,24 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
+@@ -285,11 +549,24 @@ static int eval_message(mtmd_cli_context & ctx, common_chat_msg & msg) {
          return 1;
      }
 
@@ -441,7 +444,7 @@ index 97678c6b2..388922cb4 100644
      for (size_t i = 0; i < n_chunks; i++) {
          auto chunk = mtmd_input_chunks_get(chunks.ptr.get(), i);
          auto chunk_type = mtmd_input_chunk_get_type(chunk);
-@@ -398,18 +672,32 @@ int main(int argc, char ** argv) {
+@@ -398,18 +675,32 @@ int main(int argc, char ** argv) {
 
      mtmd_helper_log_set(common_log_default_callback, nullptr);
 

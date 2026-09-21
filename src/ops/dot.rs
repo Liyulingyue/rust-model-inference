@@ -310,6 +310,18 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     sum as f32
 }
 
+/// F16 dot product matching ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f16_f16_bytes_ggml(a: &[u16], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n && b.len() >= n * 2);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 32 {
+            return unsafe { dot_f16_f16_bytes_ggml_avx2(a, b, n) };
+        }
+    }
+    dot_f16_f16_bytes(a, b, n)
+}
+
 /// AVX2 + F16C + FMA implementation of `dot_f16_f16_bytes`.
 ///
 /// Both inputs are stored as `u16` (a) and packed 2-byte little-endian (b),
@@ -345,6 +357,39 @@ unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
         i += 1;
     }
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_f16_bytes_ggml_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= n {
+        for (offset, acc) in [
+            (0, &mut acc0),
+            (8, &mut acc1),
+            (16, &mut acc2),
+            (24, &mut acc3),
+        ] {
+            let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i + offset) as *const __m128i));
+            let vb = _mm256_cvtph_ps(_mm_loadu_si128(
+                b.as_ptr().add((i + offset) * 2) as *const __m128i
+            ));
+            *acc = _mm256_fmadd_ps(va, vb, *acc);
+        }
+        i += 32;
+    }
+    let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc2), _mm256_add_ps(acc1, acc3));
+    let mut sum = f64::from(hsum_ps(acc));
+    while i < n {
+        let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(weight));
+        i += 1;
+    }
+    sum as f32
 }
 
 /// BF16 weight bytes × F32 input dot product.

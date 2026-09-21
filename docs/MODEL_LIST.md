@@ -8,7 +8,7 @@
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
 | Gemma-4 E2B                   | E2B          | 文本、图像、音频      | llama.cpp @ `3173a56`（gemma4v）/ `gemma4uv` 来自 `tools/mtmd/models/gemma4uv.cpp` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
 | Gemma-4 E4B                   | E4B          | 待核验                | llama.cpp @ `3173a56` | | 尚无独立验证证据 |
-| Gemma-4 12B                   | 12B          | 文本                  | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-12b-it-GGUF | Q8_0、CPU 单线程、F32 KV 已核验；未验证多模态 |
+| Gemma-4 12B                   | 12B          | 文本、音频；图像（实验） | 文本：llama.cpp @ `3173a56`；`gemma4ua`：`b96806d` | https://www.modelscope.cn/models/unsloth/gemma-4-12b-it-GGUF | Q8_0 文本与 F16 `gemma4ua` 音频投影已逐位核验；`gemma4uv` 图像仅接入入口，尚未独立核验；音频要求 16 kHz mono PCM16 WAV |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B / 7B | 文本（翻译）                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |

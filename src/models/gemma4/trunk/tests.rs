@@ -978,17 +978,27 @@ fn ggml_geglu_rounds_gate_and_gelu_through_f16() {
     gate[1] = f32::from_bits(0xbfff_e000);
     gate[2] = f32::from_bits(0xbfff_e88e);
     up[2] = f32::from_bits(0x3ffd_a160);
+    gate[3] = f32::from_bits(0xbfff_e110);
+    up[3] = f32::from_bits(0x3f9d_669c);
+    gate[4] = f32::from_bits(0xc1b1_365d);
+    up[4] = f32::from_bits(0xc1cc_314e);
 
     super::ggml_geglu_fp16_inplace(&mut gate, &up);
 
     assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
-    assert_eq!(gate[1].to_bits(), 0xbd3a_4000);
-    assert_eq!(gate[2].to_bits(), 0xbdb8_86a8);
+    assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
+    assert_eq!(gate[2].to_bits(), 0xbdb8_a65c);
+    assert_eq!(gate[3].to_bits(), 0xbd65_2f28);
+    assert_eq!(gate[4].to_bits(), 0x0000_0000);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn ggml_attention_dot_matches_pinned_sse3_reduction_order() {
+fn ggml_attention_dot_matches_pinned_avx_fma_reduction_order() {
+    if !std::is_x86_feature_detected!("fma") {
+        eprintln!("skipped: pinned attention dot bits require FMA");
+        return;
+    }
     let fixture = |mut state: u32| {
         std::array::from_fn::<_, 256, _>(|_| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -1000,7 +1010,7 @@ fn ggml_attention_dot_matches_pinned_sse3_reduction_order() {
 
     assert_eq!(
         super::forward::ggml_attention_dot(&left, &right, 256).to_bits(),
-        0xc02f_54b6
+        0xc02f_54b9
     );
 }
 

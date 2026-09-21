@@ -3,10 +3,10 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::{decode_pcm16_wav_any, RealFft};
 use crate::ops::{
-    dot_f16, dot_f16_f16_bytes, dot_f32, f32_to_f16, rms_norm_inplace, silu_approx_inplace,
-    softmax_inplace, sum_sq_f32,
+    dot_f16, dot_f16_f16_bytes, dot_f16_f16_bytes_ggml, dot_f32, f32_to_f16, rms_norm_inplace,
+    rms_unit_inplace, silu_approx_inplace, softmax_inplace, sum_sq_f32,
 };
-pub use config::Gemma4AudioConfig;
+pub use config::{Gemma4AudioConfig, Gemma4AudioProjector};
 use std::path::Path;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -27,6 +27,8 @@ const RPE_LEN: usize = LOCAL_CONTEXT + 1;
 const CONV_KERNEL: usize = 5;
 const EPS: f32 = 1e-6;
 const SOFTCAP: f32 = 50.0;
+const UA_FRAME_SAMPLES: usize = 640;
+const UA_RMS_EPS: f32 = 1e-6;
 
 #[derive(Clone, Copy)]
 struct Clamp {
@@ -41,6 +43,7 @@ struct F16Linear<'a> {
     input: usize,
     output: usize,
     clamp: Option<Clamp>,
+    ggml_reduction: bool,
 }
 
 struct F32Linear<'a> {
@@ -91,6 +94,7 @@ pub struct Gemma4AudioModel<'a> {
     output_projection: F16Linear<'a>,
     output_bias: &'a [f32],
     multimodal_projection: F16Linear<'a>,
+    ua_projection: Option<F16Linear<'a>>,
 }
 
 impl<'a> Gemma4AudioModel<'a> {
@@ -98,7 +102,10 @@ impl<'a> Gemma4AudioModel<'a> {
     /// output). The audio encoder writes its outputs in this width so the
     /// chat composer can chunk the flat slice into per-token rows.
     pub fn audio_projection(&self) -> usize {
-        self.multimodal_projection.output
+        self.ua_projection
+            .as_ref()
+            .map(|projection| projection.output)
+            .unwrap_or(self.multimodal_projection.output)
     }
 }
 
@@ -137,6 +144,51 @@ pub struct Gemma4AudioFeatures {
 impl<'a> Gemma4AudioModel<'a> {
     pub fn from_source(source: &'a dyn TensorSource, threads: usize) -> Result<Self, String> {
         let config = Gemma4AudioConfig::from_source(source)?;
+        if config.projector == Gemma4AudioProjector::Gemma4ua {
+            return Ok(Self {
+                config,
+                pool: ComputePool::new(threads.max(1)),
+                conv0: FrontendConv {
+                    weight: &[],
+                    norm: &[],
+                    input_channels: 0,
+                    output_channels: 0,
+                },
+                conv1: FrontendConv {
+                    weight: &[],
+                    norm: &[],
+                    input_channels: 0,
+                    output_channels: 0,
+                },
+                input_projection: F32Linear {
+                    weight: &[],
+                    input: 0,
+                    output: 0,
+                },
+                layers: Vec::new(),
+                output_projection: F16Linear {
+                    weight: &[],
+                    input: 0,
+                    output: 0,
+                    clamp: None,
+                    ggml_reduction: false,
+                },
+                output_bias: &[],
+                multimodal_projection: F16Linear {
+                    weight: &[],
+                    input: 0,
+                    output: config.projection,
+                    clamp: None,
+                    ggml_reduction: false,
+                },
+                ua_projection: Some(F16Linear::ggml(
+                    source,
+                    "mm.a.input_projection.weight",
+                    UA_FRAME_SAMPLES,
+                    config.projection,
+                )?),
+            });
+        }
         let conv0 = FrontendConv {
             weight: f32_tensor(source, "a.conv1d.0.weight", &[3, 3, 1, 128])?,
             norm: f32_tensor(source, "a.conv1d.0.norm.weight", &[128])?,
@@ -262,12 +314,16 @@ impl<'a> Gemma4AudioModel<'a> {
                 PROJECTION,
                 PROJECTION,
             )?,
+            ua_projection: None,
         })
     }
 
     pub fn encode_wav_path(&self, path: &Path) -> Result<Vec<f32>, String> {
         let bytes = std::fs::read(path)
             .map_err(|error| format!("Failed to read Gemma4 audio {}: {error}", path.display()))?;
+        if let Some(projection) = &self.ua_projection {
+            return self.encode_gemma4ua(&bytes, projection);
+        }
         let chunks = gemma4_audio_feature_chunks(&bytes)?;
         let mut output = Vec::new();
         for chunk in &chunks {
@@ -277,6 +333,62 @@ impl<'a> Gemma4AudioModel<'a> {
                 .map_err(|_| "Gemma4 projected audio allocation failed")?;
             output.extend_from_slice(&encoded);
         }
+        Ok(output)
+    }
+
+    fn encode_gemma4ua(
+        &self,
+        bytes: &[u8],
+        projection: &F16Linear<'a>,
+    ) -> Result<Vec<f32>, String> {
+        let decoded = decode_pcm16_wav_any(bytes).map_err(|error| format!("{error:?}"))?;
+        if decoded.channels != 1 {
+            return Err("Gemma4 gemma4ua audio requires mono WAV".into());
+        }
+        if decoded.sample_rate != SAMPLE_RATE {
+            return Err("Gemma4 gemma4ua audio requires 16000 Hz WAV".into());
+        }
+        let rows = decoded
+            .samples
+            .len()
+            .checked_add(UA_FRAME_SAMPLES - 1)
+            .and_then(|length| length.checked_div(UA_FRAME_SAMPLES))
+            .ok_or("Gemma4 gemma4ua audio row count overflow")?;
+        let output_len = checked_len("Gemma4 gemma4ua audio output", &[rows, projection.output])?;
+        let mut output = zeroed_f32("Gemma4 gemma4ua audio output", output_len)?;
+        let mut row = vec![0.0f32; UA_FRAME_SAMPLES];
+        let mut activation = Vec::new();
+        #[cfg(feature = "parity-trace")]
+        let mut normalized = vec![0.0f32; rows * UA_FRAME_SAMPLES];
+        for (index, chunk) in decoded.samples.chunks(UA_FRAME_SAMPLES).enumerate() {
+            row.fill(0.0);
+            row[..chunk.len()].copy_from_slice(chunk);
+            rms_unit_inplace(&mut row, UA_RMS_EPS);
+            #[cfg(feature = "parity-trace")]
+            normalized[index * UA_FRAME_SAMPLES..(index + 1) * UA_FRAME_SAMPLES]
+                .copy_from_slice(&row);
+            projection.forward(
+                &self.pool,
+                &row,
+                1,
+                &mut output[index * projection.output..(index + 1) * projection.output],
+                &mut activation,
+            )?;
+        }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "gemma4.audio.normalized",
+            None,
+            &[UA_FRAME_SAMPLES, rows, 1, 1],
+            &normalized,
+        ));
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "gemma4.audio.projected",
+            None,
+            &[projection.output, rows, 1, 1],
+            &output,
+        ));
         Ok(output)
     }
 
@@ -502,6 +614,19 @@ impl<'a> F16Linear<'a> {
             input,
             output,
             clamp: None,
+            ggml_reduction: false,
+        })
+    }
+
+    fn ggml(
+        source: &'a dyn TensorSource,
+        name: &str,
+        input: usize,
+        output: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            ggml_reduction: true,
+            ..Self::plain(source, name, input, output)?
         })
     }
 
@@ -529,6 +654,7 @@ impl<'a> F16Linear<'a> {
             input,
             output,
             clamp: Some(clamp),
+            ggml_reduction: false,
         })
     }
 
@@ -557,12 +683,17 @@ impl<'a> F16Linear<'a> {
                     .unwrap_or(*source),
             );
         }
+        let dot = if self.ggml_reduction {
+            dot_f16_f16_bytes_ggml
+        } else {
+            dot_f16_f16_bytes
+        };
         let output_ptr = SharedMut(output.as_mut_ptr());
         pool.compute(|thread, threads| {
             for index in (thread..output_len).step_by(threads) {
                 let row = index / self.output;
                 let column = index % self.output;
-                let value = dot_f16_f16_bytes(
+                let value = dot(
                     &activation[row * self.input..(row + 1) * self.input],
                     &self.weight[column * self.input * 2..(column + 1) * self.input * 2],
                     self.input,
@@ -1290,6 +1421,8 @@ fn zeroed(len: usize) -> Result<Vec<f32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo};
+    use std::collections::HashMap;
 
     fn zero_sized_test_audio_model() -> Gemma4AudioModel<'static> {
         let empty_f16 = |input, output| F16Linear {
@@ -1297,9 +1430,11 @@ mod tests {
             input,
             output,
             clamp: None,
+            ggml_reduction: false,
         };
         Gemma4AudioModel {
             config: Gemma4AudioConfig {
+                projector: Gemma4AudioProjector::Gemma4a,
                 layers: LAYERS,
                 embd: EMBED,
                 heads: HEADS,
@@ -1328,6 +1463,7 @@ mod tests {
             output_projection: empty_f16(EMBED, PROJECTION),
             output_bias: &[],
             multimodal_projection: empty_f16(PROJECTION, PROJECTION),
+            ua_projection: None,
         }
     }
 
@@ -1351,6 +1487,109 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    struct UaTensorSource {
+        metadata: HashMap<String, MetaValue>,
+        info: TensorInfo,
+        data: Vec<u8>,
+    }
+
+    impl TensorSource for UaTensorSource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(self.data.as_slice())
+        }
+    }
+
+    fn ua_tensor_source() -> UaTensorSource {
+        let name = "mm.a.input_projection.weight".to_string();
+        let mut data = vec![0u8; 640 * 3840 * 2];
+        data[..2].copy_from_slice(&f32_to_f16(1.0).to_le_bytes());
+        UaTensorSource {
+            metadata: HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("clip".into()),
+                ),
+                ("general.type".into(), MetaValue::String("mmproj".into())),
+                ("clip.has_audio_encoder".into(), MetaValue::Bool(true)),
+                (
+                    "clip.audio.projector_type".into(),
+                    MetaValue::String("gemma4ua".into()),
+                ),
+                ("clip.audio.projection_dim".into(), MetaValue::Uint32(3840)),
+                ("clip.audio.embedding_length".into(), MetaValue::Uint32(640)),
+                (
+                    "clip.audio.feed_forward_length".into(),
+                    MetaValue::Uint32(0),
+                ),
+                ("clip.audio.block_count".into(), MetaValue::Uint32(0)),
+                (
+                    "clip.audio.attention.head_count".into(),
+                    MetaValue::Uint32(1),
+                ),
+                ("clip.audio.num_mel_bins".into(), MetaValue::Uint32(128)),
+                (
+                    "clip.audio.attention.layer_norm_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+            ]),
+            info: TensorInfo {
+                name,
+                dims: vec![640, 3840],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+            data,
+        }
+    }
+
+    #[test]
+    fn gemma4ua_projects_640_sample_rows_and_zero_pads_tail() {
+        let source = ua_tensor_source();
+        let model = Gemma4AudioModel::from_source(&source, 1).unwrap();
+        let samples: Vec<i16> = (0..641).map(|index| 1000 + index as i16).collect();
+        let path = temp_wav_path("gemma4ua-test");
+        std::fs::write(&path, pcm16_wav(SAMPLE_RATE, 1, &samples)).unwrap();
+        let projected = model.encode_wav_path(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(projected.len(), 2 * 3840);
+        assert!(projected[0].is_finite());
+        assert!(projected[3840].is_finite());
+        assert!(projected[3840] > projected[0]);
+    }
+
+    #[test]
+    fn gemma4ua_rejects_non_16khz_and_stereo_wav() {
+        let source = ua_tensor_source();
+        let model = Gemma4AudioModel::from_source(&source, 1).unwrap();
+        let path = temp_wav_path("gemma4ua-reject");
+
+        std::fs::write(&path, pcm16_wav(8_000, 1, &[1; 640])).unwrap();
+        let error = model.encode_wav_path(&path).unwrap_err();
+        assert!(error.contains("16000 Hz"), "got {error:?}");
+
+        std::fs::write(&path, pcm16_wav(SAMPLE_RATE, 2, &[1; 1_280])).unwrap();
+        let error = model.encode_wav_path(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert!(error.contains("mono"), "got {error:?}");
+    }
+
+    fn temp_wav_path(prefix: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nonce}.wav", std::process::id()))
     }
 
     #[test]

@@ -2,10 +2,17 @@ use super::super::contract::{
     require_bool, require_clip, require_clippable, require_f32, require_string, require_tensor,
     require_u32,
 };
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gemma4AudioProjector {
+    Gemma4a,
+    Gemma4ua,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Gemma4AudioConfig {
+    pub projector: Gemma4AudioProjector,
     pub layers: usize,
     pub embd: usize,
     pub heads: usize,
@@ -17,6 +24,32 @@ impl Gemma4AudioConfig {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         require_clip(source)?;
         require_bool(source, "clip.has_audio_encoder", true)?;
+        if matches!(
+            source.metadata("clip.audio.projector_type"),
+            Some(MetaValue::String(value)) if value == "gemma4ua"
+        ) {
+            require_u32(source, "clip.audio.projection_dim", 3840)?;
+            require_u32(source, "clip.audio.embedding_length", 640)?;
+            require_u32(source, "clip.audio.feed_forward_length", 0)?;
+            require_u32(source, "clip.audio.block_count", 0)?;
+            require_u32(source, "clip.audio.attention.head_count", 1)?;
+            require_u32(source, "clip.audio.num_mel_bins", 128)?;
+            require_f32(source, "clip.audio.attention.layer_norm_epsilon", 1e-6)?;
+            require_tensor(
+                source,
+                "mm.a.input_projection.weight",
+                &[640, 3840],
+                GGMLType::F16,
+            )?;
+            return Ok(Self {
+                projector: Gemma4AudioProjector::Gemma4ua,
+                layers: 0,
+                embd: 640,
+                heads: 1,
+                mel_bins: 128,
+                projection: 3840,
+            });
+        }
         require_string(source, "clip.audio.projector_type", "gemma4a")?;
         require_u32(source, "clip.audio.projection_dim", 1536)?;
         require_u32(source, "clip.audio.embedding_length", 1024)?;
@@ -96,6 +129,7 @@ impl Gemma4AudioConfig {
         }
 
         Ok(Self {
+            projector: Gemma4AudioProjector::Gemma4a,
             layers: 12,
             embd: 1024,
             heads: 8,

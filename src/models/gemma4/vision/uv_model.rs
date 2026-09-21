@@ -88,16 +88,24 @@ impl<'a> Gemma4UvVisionModel<'a> {
 
     pub fn encode_path(&self, path: &Path) -> Result<Vec<f32>, String> {
         let rgb = image::open(path)
-            .map_err(|error| format!("Failed to decode Gemma4-uv image {}: {error}", path.display()))?
+            .map_err(|error| {
+                format!(
+                    "Failed to decode Gemma4-uv image {}: {error}",
+                    path.display()
+                )
+            })?
             .to_rgb8();
-        let image = preprocess_rgb(rgb.as_raw(), rgb.width() as usize, rgb.height() as usize, self.config)?;
+        let image = preprocess_rgb(
+            rgb.as_raw(),
+            rgb.width() as usize,
+            rgb.height() as usize,
+            self.config,
+        )?;
         self.encode_preprocessed(&image)
     }
 
     fn encode_preprocessed(&self, image: &PreprocessedImage) -> Result<Vec<f32>, String> {
-        if image.width % self.config.patch_size != 0
-            || image.height % self.config.patch_size != 0
-        {
+        if image.width % self.config.patch_size != 0 || image.height % self.config.patch_size != 0 {
             return Err("Gemma4-uv image is not patch-aligned".into());
         }
         if std::env::var("DUMP_PREPROCESSED").is_ok() {
@@ -105,7 +113,10 @@ impl<'a> Gemma4UvVisionModel<'a> {
             for v in &image.values {
                 f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
             }
-            eprintln!("[dump] wrote preprocessed.bin ({} floats)", image.values.len());
+            eprintln!(
+                "[dump] wrote preprocessed.bin ({} floats)",
+                image.values.len()
+            );
         }
         let patches_x = image.width / self.config.patch_size;
         let patches_y = image.height / self.config.patch_size;
@@ -145,7 +156,10 @@ impl<'a> Gemma4UvVisionModel<'a> {
         eprintln!("[debug-matmul] patches.len()={}, patch_weight.len()={}, patch_dim={}, embd={}, n_patches={}",
             patches.len(), self.patch_weight.len(), patch_dim, self.config.embd, n_patches);
         eprintln!("[debug-matmul] patches[0..8]={:?}", &patches[..8]);
-        eprintln!("[debug-matmul] patch_weight[0..8]={:?}", &self.patch_weight[..8]);
+        eprintln!(
+            "[debug-matmul] patch_weight[0..8]={:?}",
+            &self.patch_weight[..8]
+        );
         let test_val = crate::ops::dot_f32(
             &patches[..patch_dim],
             &self.patch_weight[..patch_dim],
@@ -181,17 +195,25 @@ impl<'a> Gemma4UvVisionModel<'a> {
             for v in &embedded {
                 f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
             }
-            eprintln!("[dump] wrote after_patch_embd.bin ({} floats)", embedded.len());
+            eprintln!(
+                "[dump] wrote after_patch_embd.bin ({} floats)",
+                embedded.len()
+            );
         }
         if std::env::var("DUMP_BEFORE_PATCH_EMBD").is_ok() {
-            let mut f = std::fs::File::create("before_patch_embd.bin").map_err(|e| e.to_string())?;
+            let mut f =
+                std::fs::File::create("before_patch_embd.bin").map_err(|e| e.to_string())?;
             for v in &patches {
                 f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
             }
-            eprintln!("[dump] wrote before_patch_embd.bin ({} floats)", patches.len());
+            eprintln!(
+                "[dump] wrote before_patch_embd.bin ({} floats)",
+                patches.len()
+            );
         }
         if std::env::var("DUMP_PREPROCESSED_IMAGE").is_ok() {
-            let mut f = std::fs::File::create("preprocessed_image.bin").map_err(|e| e.to_string())?;
+            let mut f =
+                std::fs::File::create("preprocessed_image.bin").map_err(|e| e.to_string())?;
             for v in &image.values {
                 f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
             }
@@ -212,7 +234,13 @@ impl<'a> Gemma4UvVisionModel<'a> {
                 pos_y.push(py as u32);
             }
         }
-        add_positions(&self.positions, &mut embedded, &pos_x, &pos_y, self.config.embd)?;
+        add_positions(
+            &self.positions,
+            &mut embedded,
+            &pos_x,
+            &pos_y,
+            self.config.embd,
+        )?;
 
         if std::env::var("DUMP_AFTER_POS").is_ok() {
             let mut f = std::fs::File::create("after_pos.bin").map_err(|e| e.to_string())?;
@@ -281,9 +309,7 @@ fn im2col(
     let n_patches_x = width / patch;
     let n_patches_y = height / patch;
     let plane = checked_len("Gemma4-uv plane", &[width, height])?;
-    let expected = plane
-        .checked_mul(channels)
-        .ok_or("Image length overflow")?;
+    let expected = plane.checked_mul(channels).ok_or("Image length overflow")?;
     if image.len() != expected
         || output.len() != n_patches_x * n_patches_y * patch * patch * channels
     {
@@ -503,9 +529,10 @@ fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec
             bytes.len()
         ));
     }
-    if bytes.chunks_exact(4).any(|chunk| {
-        !f32::from_le_bytes(chunk.try_into().unwrap()).is_finite()
-    }) {
+    if bytes
+        .chunks_exact(4)
+        .any(|chunk| !f32::from_le_bytes(chunk.try_into().unwrap()).is_finite())
+    {
         return Err(format!("Non-finite F32 tensor: {name}"));
     }
     Ok(bytes
@@ -572,9 +599,12 @@ fn calc_resize_dyn_size(
     min_pixels: usize,
     max_pixels: usize,
 ) -> (usize, usize) {
-    let round_by_factor = |x: f32| -> usize { ((x / align_size as f32).round() as usize) * align_size };
-    let floor_by_factor = |x: f32| -> usize { ((x / align_size as f32).floor() as usize) * align_size };
-    let ceil_by_factor = |x: f32| -> usize { ((x / align_size as f32).ceil() as usize) * align_size };
+    let round_by_factor =
+        |x: f32| -> usize { ((x / align_size as f32).round() as usize) * align_size };
+    let floor_by_factor =
+        |x: f32| -> usize { ((x / align_size as f32).floor() as usize) * align_size };
+    let ceil_by_factor =
+        |x: f32| -> usize { ((x / align_size as f32).ceil() as usize) * align_size };
     let mut w_bar = align_size.max(round_by_factor(width as f32));
     let mut h_bar = align_size.max(round_by_factor(height as f32));
     if max_pixels > 0 && h_bar * w_bar > max_pixels {
@@ -595,7 +625,7 @@ fn preprocess_rgb(
     height: usize,
     config: Gemma4UvConfig,
 ) -> Result<PreprocessedImage, String> {
-if width == 0 || height == 0 || rgb.len() != width * height * 3 {
+    if width == 0 || height == 0 || rgb.len() != width * height * 3 {
         return Err("Invalid Gemma4-uv RGB image".into());
     }
     // After llama.cpp's `n_merge = 1` collapse, the dyn_size preprocessor
@@ -639,27 +669,23 @@ mod tests {
     #[test]
     fn layernorm_matches_ggml_scalar_accumulation() {
         // ggml_compute_forward_norm_f32 computes mean and variance using
-        // scalar f64 accumulation (matches ggml's reference behavior).
+        // scalar f32 accumulation (matches ggml's reference behavior).
         // This test pins that behavior so we can detect any drift.
         let mut row = vec![1.5f32, -2.25, 0.0, 4.5, -1.0, 0.75, -3.0, 2.0];
         let weight = vec![1.0f32; 8];
         let bias = vec![0.0f32; 8];
         let eps = 1e-5f32;
         let mut expected = row.clone();
-        let n = expected.len() as f64;
-        let mean: f64 = expected.iter().map(|v| f64::from(*v)).sum::<f64>() / n;
-        let variance: f64 = expected
-            .iter()
-            .map(|v| {
-                let d = f64::from(*v) - mean;
-                d * d
-            })
-            .sum::<f64>()
-            / n;
-        let scale = 1.0f64 / (variance + f64::from(eps)).sqrt();
+        let n = expected.len() as f32;
+        let mean = expected.iter().sum::<f32>() / n;
+        let mut variance = 0.0f32;
         for value in expected.iter_mut() {
-            let centered = f64::from(*value) - mean;
-            *value = (centered * scale * f64::from(weight[0]) + f64::from(bias[0])) as f32;
+            *value -= mean;
+            variance += *value * *value;
+        }
+        let scale = 1.0f32 / (variance / n + eps).sqrt();
+        for value in expected.iter_mut() {
+            *value = *value * scale * weight[0] + bias[0];
         }
         layer_norm_rows_inplace(&mut row, &weight, &bias, eps).unwrap();
         let row_bits: Vec<u32> = row.iter().map(|v| v.to_bits()).collect();
@@ -672,7 +698,11 @@ mod tests {
         let mut row = vec![1.5f32, -2.25, 0.0, 4.5, -1.0];
         let saved = row.clone();
         let n = row.len() as f64;
-        let mean_sq: f64 = saved.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / n;
+        let mean_sq: f64 = saved
+            .iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+            / n;
         let eps = 1e-6f32;
         let scale = 1.0f64 / (mean_sq + f64::from(eps)).sqrt();
         let expected: Vec<f32> = saved
