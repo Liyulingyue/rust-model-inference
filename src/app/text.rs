@@ -524,35 +524,74 @@ fn run_jev_decision_qwen3(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-    let model =
-        crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
-    let model_config = model_config_from_source(source.as_ref())?;
-    let _ = model_config;
-    let max_ctx = model.config().n_ctx;
+    let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads", scorer.pool().n_threads());
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
-        let labels = jev_labels(q);
-        let (token_ids, payload_str) = build_jev_prompt(&model.tokenizer, context, q, output_json)?;
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-        let _ = payload_str;
+/// Qwen3 JEV scorer — owns the `Qwen3Model` (which embeds the
+/// tokenizer + compute pool). Each `forward_logits` rebuilds a
+/// fresh `Qwen3Session` so the KV cache stays ephemeral.
+struct Qwen3JevScorer {
+    model: crate::models::qwen3::Qwen3Model,
+    max_ctx: usize,
+    prefill_batch_size: usize,
+}
 
-        // Reset KV state by recreating the session.
-        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
-            &model,
+impl Qwen3JevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        let pool = Arc::new(ComputePool::new(n_threads));
+        let model =
+            crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
+        let max_ctx = model.config().n_ctx;
+        Ok(Self {
+            model,
             max_ctx,
+            prefill_batch_size,
+        })
+    }
+
+    fn pool(&self) -> Arc<ComputePool> {
+        self.model.pool()
+    }
+}
+
+impl JevScorer for Qwen3JevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Qwen3"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
+        let labels = jev_labels(q);
+        let (token_ids, _payload) =
+            build_jev_prompt(self.model.tokenizer(), context, q, false)?;
+        Ok((labels, token_ids))
+    }
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
+            &self.model,
+            self.max_ctx,
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,
         )?;
@@ -563,17 +602,14 @@ fn run_jev_decision_qwen3(
             embeddings: None,
             deepstack_embeddings: None,
         };
-        let (logits, prefill_dur) = session.forward_logits(input, prefill_batch_size)?;
-        let result = compute_jev_result(
-            q,
-            &model.tokenizer,
-            &labels,
-            &logits,
-            prefill_dur.as_millis(),
-        );
-        results.push(result);
+        session
+            .forward_logits(input, self.prefill_batch_size)
+            .map_err(|e| format!("Qwen3 forward_logits failed: {e}"))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.model.tokenizer()
+    }
 }
 
 fn run_jev_decision_qwen35(
@@ -584,6 +620,13 @@ fn run_jev_decision_qwen35(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
+    // Qwen3.5's `Qwen35Model<'a>` borrows from the source. Holding it
+    // inside the scorer struct would force the scorer itself to be
+    // lifetime-parameterized, which complicates the `JevScorer`
+    // trait object story. For Qwen3.5 we keep the per-question loop
+    // inline here — the scorer pattern works well for the trunks
+    // that own their model data (gemma4, llama-family) or wrap a
+    // free function (lfm*/spark/nemotron-h/hunyuan).
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     verify_label_tokens_single(&tokenizer)?;
@@ -637,53 +680,86 @@ fn run_jev_decision_llama(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        .unwrap_or_default();
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Llama-family)", n_threads);
+    let mut scorer = LlamaJevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Llama-family)", n_threads);
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+/// Llama-family JEV scorer — covers llama / k2-horizon / granite /
+/// nanbeige / qwen2_2 / minicpm. The chat template varies per arch
+/// but the forward path is uniform
+/// (`run_forward_logits_llama_with_batch`).
+struct LlamaJevScorer {
+    tokenizer: BPETokenizer,
+    source: Arc<dyn TensorSource>,
+    arch: String,
+    n_threads: usize,
+    prefill_batch_size: usize,
+}
+
+impl LlamaJevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(|v| v.to_string_val())
+            .unwrap_or_default()
+            .to_string();
+        Ok(Self {
+            tokenizer,
+            source,
+            arch,
+            n_threads,
+            prefill_batch_size,
+        })
+    }
+}
+
+impl JevScorer for LlamaJevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Llama-family"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
-        // Build the prompt text. Mirror `llama::run_inference` chat templates.
-        // The system prompt + JSON payload use the same wrappers as the
-        // model expects during inference, so the protocol lines up.
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
-
-        // Per-arch chat template; mirrors llama::trunk::forward::run_inference.
-        let prompt_text = if arch == "k2-horizon" {
+        // Per-arch chat template; mirrors `llama::trunk::forward::run_inference`.
+        let prompt_text = if self.arch == "k2-horizon" {
             format!(
                 "<|start_of_role|>system<|end_of_role|>{system}<|end_of_text|>\n\
                  <|start_of_role|>user<|end_of_role|>{payload}<|end_of_text|>\n\
                  <|start_of_role|>assistant<|end_of_role|>"
             )
-        } else if arch == "granite" {
+        } else if self.arch == "granite" {
             format!(
                 "<|start_of_role|>system<|end_of_role|>{system}<|end_of_text|>\n\
                  <|start_of_role|>user<|end_of_role|>{payload}<|end_of_text|>\n\
                  <|start_of_role|>assistant<|end_of_role|>"
             )
-        } else if arch == "nanbeige" {
-            // Base model: no chat template. Just concat system + question.
+        } else if self.arch == "nanbeige" {
             format!("{system}\n\n{payload}\n\nAnswer:")
         } else {
-            // Default llama / qwen2_2 / minicpm: simple user/assistant format.
             format!("system\n{system}\nuser\n{payload}\nassistant\n")
         };
-
-        let add_special = arch == "nanbeige";
-        let mut token_ids = tokenizer.encode(
+        let add_special = self.arch == "nanbeige";
+        let mut token_ids = self.tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special,
@@ -691,29 +767,31 @@ fn run_jev_decision_llama(
             },
         );
         if !add_special {
-            if let Some(bos) = tokenizer.bos_id() {
+            if let Some(bos) = self.tokenizer.bos_id() {
                 token_ids.insert(0, bos);
             }
         }
-
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
-        let (logits, prefill_dur) =
-            crate::models::llama::trunk::run_forward_logits_llama_with_batch(
-                source.as_ref(),
-                &token_ids,
-                n_threads,
-                KvFormat::F16,
-                8192,
-                prefill_batch_size,
-            )
-            .map_err(|e| format!("Llama forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        Ok((labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::llama::trunk::run_forward_logits_llama_with_batch(
+            self.source.as_ref(),
+            &token_ids,
+            self.n_threads,
+            KvFormat::F16,
+            8192,
+            self.prefill_batch_size,
+        )
+        .map_err(|e| format!("Llama forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
 }
 
 fn run_jev_decision_gemma4(
@@ -724,30 +802,64 @@ fn run_jev_decision_gemma4(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
-    let model = crate::models::gemma4::Gemma4Model::from_source(source.clone(), n_threads_arg)
-        .map_err(|e| format!("Failed to load Gemma4 model: {e}"))?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Gemma4)", n_threads);
+    let mut scorer = Gemma4JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Gemma4)", n_threads);
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+/// Gemma4 JEV scorer — uses the session API. The session is
+/// recreated per question to mimic the legacy ephemeral-KV
+/// behaviour (each question is a fresh prefill).
+struct Gemma4JevScorer {
+    tokenizer: BPETokenizer,
+    model: crate::models::gemma4::Gemma4Model,
+    prefill_batch_size: usize,
+}
+
+impl Gemma4JevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        _n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        let model = crate::models::gemma4::Gemma4Model::from_source(source.clone(), _n_threads)
+            .map_err(|e| format!("Failed to load Gemma4 model: {e}"))?;
+        Ok(Self {
+            tokenizer,
+            model,
+            prefill_batch_size,
+        })
+    }
+}
+
+impl JevScorer for Gemma4JevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Gemma4"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
-        // Gemma4 chat format: <|turn>user\n{text}<turn|>\n<|turn>model\n
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
         let prompt_text = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
-
-        let bos = tokenizer.bos_id().ok_or("Gemma4 tokenizer missing BOS")?;
-        let mut ids = tokenizer.encode(
+        let bos = self
+            .tokenizer
+            .bos_id()
+            .ok_or("Gemma4 tokenizer missing BOS")?;
+        let mut ids = self.tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special: false,
@@ -757,26 +869,28 @@ fn run_jev_decision_gemma4(
         if ids.first() != Some(&bos) {
             ids.insert(0, bos);
         }
+        Ok((labels, ids))
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
-        // Recreate session per question (Ephemeral KV via reset()).
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::gemma4::Gemma4Session::new_with_prefill_batch_size(
-            &model,
+            &self.model,
             KvFormat::F16,
-            prefill_batch_size,
+            self.prefill_batch_size,
         )?;
         let t0 = Instant::now();
         let logits = session
-            .forward_logits(&ids)
+            .forward_logits(&token_ids)
             .map_err(|e| format!("Gemma4 forward_logits failed: {e}"))?;
-        let prefill_dur = t0.elapsed();
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        Ok((logits, t0.elapsed()))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
 }
 
 fn run_jev_decision_lfm2(
@@ -787,67 +901,111 @@ fn run_jev_decision_lfm2(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (LFM2)", n_threads);
+    let mut scorer = Lfm2JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (LFM2)", n_threads);
+    }
+    run_jev_decision_core(
+        source,
+        context,
+        per_question,
+        output_json,
+        &mut scorer,
+    )
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+/// LFM2 JEV scorer: uses the free-function prefill path
+/// (`run_forward_logits_lfm2_with_batch`). The chat template is
+/// `"system\n...\nuser\n{json}\nassistant\n"` which is the LFM2
+/// convention shared with LFM2.5 / LFM2-MoE.
+struct Lfm2JevScorer {
+    tokenizer: BPETokenizer,
+    source: Arc<dyn TensorSource>,
+    n_threads: usize,
+    prefill_batch_size: usize,
+}
+
+impl Lfm2JevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        Ok(Self {
+            tokenizer,
+            source,
+            n_threads,
+            prefill_batch_size,
+        })
+    }
+}
+
+impl JevScorer for Lfm2JevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "LFM2"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
-        // LFM2 chat format: "{role}\n{content}\n" + assistant prefix.
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
-
         let mut token_ids = Vec::new();
-        if let Some(bos) = tokenizer.bos_id() {
+        if let Some(bos) = self.tokenizer.bos_id() {
             token_ids.push(bos);
         }
-        token_ids.extend(tokenizer.encode(
+        token_ids.extend(self.tokenizer.encode(
             &format!("system\n{system}\n"),
             EncodeOptions {
                 add_special: false,
                 parse_special: false,
             },
         ));
-        token_ids.extend(tokenizer.encode(
+        token_ids.extend(self.tokenizer.encode(
             &format!("user\n{payload}\n"),
             EncodeOptions {
                 add_special: false,
                 parse_special: false,
             },
         ));
-        token_ids.extend(tokenizer.encode(
+        token_ids.extend(self.tokenizer.encode(
             "assistant\n",
             EncodeOptions {
                 add_special: false,
                 parse_special: false,
             },
         ));
+        Ok((labels, token_ids))
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
-        let (logits, prefill_dur) = crate::models::lfm2::run_forward_logits_lfm2_with_batch(
-            source.as_ref(),
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::lfm2::run_forward_logits_lfm2_with_batch(
+            self.source.as_ref(),
             &token_ids,
-            n_threads,
+            self.n_threads,
             KvFormat::F16,
             8192,
-            prefill_batch_size,
+            self.prefill_batch_size,
         )
-        .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        .map_err(|e| format!("LFM2 forward_logits failed: {e}"))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
 }
 
 fn run_jev_decision_spark(
@@ -858,32 +1016,59 @@ fn run_jev_decision_spark(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (Spark)", n_threads);
+    let mut scorer = SparkJevScorer::new(source.clone(), n_threads)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Spark)", n_threads);
+    }
+    let _ = prefill_batch_size;
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut session = crate::models::spark::SparkSession::new(
-        source.as_ref(),
-        Arc::new(ComputePool::new(n_threads)),
-        8192,
-    )?;
+/// Spark 2.5 JEV scorer — uses the session API
+/// (`SparkSession::forward_logits`) which owns its compute pool
+/// internally, so the scorer holds the session rather than the
+/// pool + free function.
+struct SparkJevScorer {
+    tokenizer: BPETokenizer,
+    session: crate::models::spark::SparkSession,
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+impl SparkJevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        let session = crate::models::spark::SparkSession::new(
+            source.as_ref(),
+            Arc::new(ComputePool::new(n_threads)),
+            8192,
+        )?;
+        Ok(Self { tokenizer, session })
+    }
+}
+
+impl JevScorer for SparkJevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Spark"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
-        // Spark 2.5 chat template (mirrors run_inference).
         let sos = "<｜start▁of▁sentence｜>";
         let eos = "<｜end▁of▁sentence｜>";
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
-
         let prompt_text = format!(
             "{sos}<|System|>\n{system}{eos}\
              {sos}<|User|>{payload}{eos}\
@@ -891,32 +1076,36 @@ fn run_jev_decision_spark(
             sos = sos,
             eos = eos,
         );
-        let mut token_ids = tokenizer.encode(
+        let mut token_ids = self.tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special: false,
                 parse_special: true,
             },
         );
-        if tokenizer.add_bos() {
-            if let Some(bos) = tokenizer.bos_id() {
+        if self.tokenizer.add_bos() {
+            if let Some(bos) = self.tokenizer.bos_id() {
                 token_ids.insert(0, bos);
             }
         }
+        Ok((labels, token_ids))
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let t0 = Instant::now();
-        let logits = session
+        let logits = self
+            .session
             .forward_logits(&token_ids)
             .map_err(|e| format!("Spark forward_logits failed: {e}"))?;
-        let prefill_dur = t0.elapsed();
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        Ok((logits, t0.elapsed()))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
 }
 
 fn run_jev_decision_lfm25(
@@ -927,67 +1116,68 @@ fn run_jev_decision_lfm25(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    // LFM2.5 chat format is identical to LFM2.
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
+    // LFM2.5 chat format is identical to LFM2 — see [`Lfm2JevScorer`].
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
+    let mut scorer = Lfm25JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
-        let labels = jev_labels(q);
+/// LFM2.5 JEV scorer — chat template + free-function forward path,
+/// identical to LFM2 but routed at the `crate::models::lfm25`
+/// module instead of `lfm2`.
+struct Lfm25JevScorer {
+    inner: Lfm2JevScorer,
+}
 
-        let system = jev_system_prompt(q.mode);
-        let payload = jev_payload_json(context, q)?;
+impl Lfm25JevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
 
-        let mut token_ids = Vec::new();
-        if let Some(bos) = tokenizer.bos_id() {
-            token_ids.push(bos);
-        }
-        token_ids.extend(tokenizer.encode(
-            &format!("system\n{system}\n"),
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
-        token_ids.extend(tokenizer.encode(
-            &format!("user\n{payload}\n"),
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
-        token_ids.extend(tokenizer.encode(
-            "assistant\n",
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
+impl JevScorer for Lfm25JevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "LFM2.5"
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
+        self.inner.build_prompt(context, q)
+    }
 
-        let (logits, prefill_dur) = crate::models::lfm25::run_forward_logits_lfm25_with_batch(
-            source.as_ref(),
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::lfm25::run_forward_logits_lfm25_with_batch(
+            self.inner.source.as_ref(),
             &token_ids,
-            n_threads,
+            self.inner.n_threads,
             KvFormat::F16,
             8192,
-            prefill_batch_size,
+            self.inner.prefill_batch_size,
         )
-        .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_decision_lfm2moe(
@@ -998,69 +1188,69 @@ fn run_jev_decision_lfm2moe(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    // LFM2-MoE chat format is identical to LFM2 / LFM2.5 (the MoE
-    // variation only swaps dense FFN blocks for MoE; the chat
-    // template is shared).
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
+    // LFM2-MoE chat format is identical to LFM2 / LFM2.5 — only the
+    // forward module differs (`crate::models::lfm2moe`).
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    eprintln!("compute pool: {} threads (LFM2-MoE)", n_threads);
+    let mut scorer = Lfm2MoeJevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (LFM2-MoE)", n_threads);
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
-        let labels = jev_labels(q);
+/// LFM2-MoE JEV scorer — wraps the LFM2 chat template via the
+/// `Lfm2JevScorer` payload builder, routes the forward through
+/// `crate::models::lfm2moe::run_forward_logits_lfm2moe_with_batch`.
+struct Lfm2MoeJevScorer {
+    inner: Lfm2JevScorer,
+}
 
-        let system = jev_system_prompt(q.mode);
-        let payload = jev_payload_json(context, q)?;
+impl Lfm2MoeJevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            inner: Lfm2JevScorer::new(source, n_threads, prefill_batch_size)?,
+        })
+    }
+}
 
-        let mut token_ids = Vec::new();
-        if let Some(bos) = tokenizer.bos_id() {
-            token_ids.push(bos);
-        }
-        token_ids.extend(tokenizer.encode(
-            &format!("system\n{system}\n"),
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
-        token_ids.extend(tokenizer.encode(
-            &format!("user\n{payload}\n"),
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
-        token_ids.extend(tokenizer.encode(
-            "assistant\n",
-            EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
+impl JevScorer for Lfm2MoeJevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "LFM2-MoE"
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
+        self.inner.build_prompt(context, q)
+    }
 
-        let (logits, prefill_dur) = crate::models::lfm2moe::run_forward_logits_lfm2moe_with_batch(
-            source.as_ref(),
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::lfm2moe::run_forward_logits_lfm2moe_with_batch(
+            self.inner.source.as_ref(),
             &token_ids,
-            n_threads,
+            self.inner.n_threads,
             KvFormat::F16,
             8192,
-            prefill_batch_size,
+            self.inner.prefill_batch_size,
         )
-        .map_err(|e| format!("LFM2-MoE forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        .map_err(|e| format!("LFM2-MoE forward_logits failed: {e}"))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.inner.tokenizer()
+    }
 }
 
 fn run_jev_decision_nemotron_h(
@@ -1072,40 +1262,68 @@ fn run_jev_decision_nemotron_h(
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
     let _ = (n_threads_arg, prefill_batch_size);
-    let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
-    verify_label_tokens_single(&tokenizer)?;
+    let mut scorer = NemotronHJevScorer::new(source.clone())?;
+    let _ = output_json;
+    run_jev_decision_core(source, context, per_question, false, &mut scorer)
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+/// Nemotron-H JEV scorer — base model (no chat template). Uses
+/// the standalone `load_nemotron_tokenizer` + `run_forward_logits_nemotron_h`
+/// free function (Nemotron-H has no Session API). The
+/// `n_threads_arg` and `prefill_batch_size` parameters are
+/// accepted for trait-compatibility but ignored at runtime —
+/// Nemotron-H's per-step body still walks the per-token path.
+struct NemotronHJevScorer {
+    tokenizer: BPETokenizer,
+    source: Arc<dyn TensorSource>,
+}
+
+impl NemotronHJevScorer {
+    fn new(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+        let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
+        verify_label_tokens_single(&tokenizer)?;
+        Ok(Self { tokenizer, source })
+    }
+}
+
+impl JevScorer for NemotronHJevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Nemotron-H"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
-        // Nemotron-H is a base model (no chat template). Build a plain
-        // text prompt with system + JSON payload.
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
         let prompt_text = format!("{system}\n\n{payload}\n\nAnswer:");
-        let token_ids = tokenizer.encode(
+        let token_ids = self.tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special: true,
                 parse_special: true,
             },
         );
-
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
-        let (logits, prefill_dur) =
-            crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
-                source.clone(),
-                &token_ids,
-            )
-            .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))?;
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+        Ok((labels, token_ids))
     }
-    Ok(results)
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
+            self.source.clone(),
+            &token_ids,
+        )
+        .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
 }
 
 fn run_jev_decision_hunyuan(
@@ -1116,34 +1334,63 @@ fn run_jev_decision_hunyuan(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
+    let mut scorer = HunyuanJevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
+    }
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+}
 
-    // Hunyuan uses Qwen3's trunk under the hood (its `run_inference`
-    // delegates to `qwen3::text::run_inference_tokens`). Build a
-    // `Qwen3Model` so we can call `forward_logits` directly with the
-    // Hunyuan-formatted chat prompt.
-    let model =
-        crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
-    let max_ctx = model.config().n_ctx;
+/// Hunyuan JEV scorer — wraps a `Qwen3Model` (Hunyuan reuses
+/// Qwen3's trunk under the hood). The chat template is
+/// `build_hunyuan_chat_prompt`; the forward rebuilds a fresh
+/// `Qwen3Session` per question for ephemeral KV.
+struct HunyuanJevScorer {
+    model: crate::models::qwen3::Qwen3Model,
+    max_ctx: usize,
+    prefill_batch_size: usize,
+}
 
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
+impl HunyuanJevScorer {
+    fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        let pool = Arc::new(ComputePool::new(n_threads));
+        let model =
+            crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
+        let max_ctx = model.config().n_ctx;
+        Ok(Self {
+            model,
+            max_ctx,
+            prefill_batch_size,
+        })
+    }
+}
+
+impl JevScorer for HunyuanJevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Hunyuan"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
         let labels = jev_labels(q);
-
         let system = jev_system_prompt(q.mode);
         let payload = jev_payload_json(context, q)?;
-
         let token_ids = build_hunyuan_chat_prompt(
-            &model.tokenizer,
+            self.model.tokenizer(),
             &[
                 HunyuanMessage {
                     role: "system",
@@ -1156,14 +1403,16 @@ fn run_jev_decision_hunyuan(
             ],
             true,
         )?;
+        Ok((labels, token_ids))
+    }
 
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
-            &model,
-            max_ctx.min(token_ids.len() + 1),
+            &self.model,
+            self.max_ctx.min(token_ids.len() + 1),
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,
         )?;
@@ -1174,19 +1423,14 @@ fn run_jev_decision_hunyuan(
             embeddings: None,
             deepstack_embeddings: None,
         };
-        let (logits, prefill_dur) = session
-            .forward_logits(input, prefill_batch_size)
-            .map_err(|e| format!("Hunyuan forward_logits failed: {e}"))?;
-        let result = compute_jev_result(
-            q,
-            &model.tokenizer,
-            &labels,
-            &logits,
-            prefill_dur.as_millis(),
-        );
-        results.push(result);
+        session
+            .forward_logits(input, self.prefill_batch_size)
+            .map_err(|e| format!("Hunyuan forward_logits failed: {e}"))
     }
-    Ok(results)
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        self.model.tokenizer()
+    }
 }
 
 fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(), String> {
@@ -1421,6 +1665,79 @@ struct PreparedQuestion {
     descriptions: Vec<String>,
     values: Vec<f32>,
     positive_label: Option<char>,
+}
+
+/// Per-architecture JEV scorer.
+///
+/// Each implementation encapsulates:
+/// - the per-arch chat template + tokenizer interaction,
+/// - the prefill + LM-head forward (session-based for qwen3/qwen35/
+///   gemma4/spark, free-function for llama/lfm2/lfm25/lfm2moe/
+///   nemotron_h),
+/// - tokenizer access for `compute_jev_result` to resolve label
+///   tokens.
+///
+/// `run_jev_decision_core` (defined further down) drives the
+/// per-question loop using only this trait surface, so adding a
+/// new trunk is a single `JevScorer` impl + one dispatch table
+/// entry instead of ~95 lines of copy-pasted boilerplate.
+trait JevScorer {
+    /// Display name used in `eprintln!("compute pool: {} threads ({})", n, label)`.
+    fn scorer_label(&self) -> &'static str;
+
+    /// Build the per-question chat-template token ids for `q`.
+    /// Returns the A..Z labels that the prompt encoded + the
+    /// token id sequence to feed into `forward_logits`. The
+    /// `payload_str` field is the rendered JSON (used by
+    /// `print_jev_question` for debug output).
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String>;
+
+    /// Run the prefill + LM-head forward for a single question,
+    /// returning the final logits and the elapsed duration.
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String>;
+
+    /// Borrow the tokenizer for `compute_jev_result`.
+    fn tokenizer(&self) -> &BPETokenizer;
+}
+
+/// Per-question dispatch shared by every `run_jev_decision_*`
+/// function. Calls `scorer.build_prompt` for token ids + labels,
+/// `scorer.forward_logits` for the prefill, and finally
+/// `compute_jev_result` to score the candidate labels. The
+/// per-arch code now only owns the scorer construction (see the
+/// `run_jev_decision_<arch>` functions below), not the
+/// per-question loop.
+fn run_jev_decision_core<S: JevScorer>(
+    _source: Arc<dyn TensorSource>,
+    context: &str,
+    per_question: &[PreparedQuestion],
+    output_json: bool,
+    scorer: &mut S,
+) -> Result<Vec<JevResult>, String> {
+    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
+    for q in per_question {
+        let (labels, token_ids) = scorer.build_prompt(context, q)?;
+        if !output_json {
+            print_jev_question(q, &labels);
+        }
+        let (logits, prefill_dur) = scorer.forward_logits(token_ids)?;
+        let result = compute_jev_result(
+            q,
+            scorer.tokenizer(),
+            &labels,
+            &logits,
+            prefill_dur.as_millis(),
+        );
+        results.push(result);
+    }
+    Ok(results)
 }
 
 impl serde::Serialize for JevResult {
