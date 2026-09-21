@@ -18,9 +18,9 @@ pub use cli::{
     parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
     resolve_thread_count, transcription_options, validate_cli_options,
     validate_qwen3vl_decoder_mode, z_image_cli_options, CliOptions, DreamXCliOptions,
-    DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, KvFormat, LatentUpsampleKind,
-    PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind, ZImageCliOptions,
-    DEFAULT_THREAD_CAP,
+    DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, JevBlockInput, KvFormat,
+    LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind,
+    ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
 pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
@@ -29,9 +29,10 @@ pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, Proj
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
-    run_inference, run_interactive, run_jev_decision, run_multimodal,
+    run_inference, run_interactive, run_jev_decision, run_jev_grouped_decision, run_multimodal,
     run_multimodal_with_tts_postproc, run_multimodal_with_video,
-    run_multimodal_with_video_capture_text, run_shared_inference, JevQuestionInput,
+    run_multimodal_with_video_capture_text, run_shared_inference, JevGroupedQuestionInput,
+    JevGroupInput, JevMode, JevQuestionInput,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 

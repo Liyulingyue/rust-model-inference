@@ -85,11 +85,19 @@ pub struct CliOptions {
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,
     pub jev_output_json: bool,
+    pub jev_multi: bool,
+    pub jev_blocks: Vec<JevBlockInput>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct JevQuestion {
     pub text: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JevBlockInput {
+    pub label: String,
     pub options: Vec<String>,
 }
 
@@ -658,6 +666,23 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--jev" => options.jev = true,
+            "--jev-multi" => options.jev_multi = true,
+            "--jev-block" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-block")?;
+                if options.jev_questions.is_empty() {
+                    return Err(
+                        "--jev-block must follow a --jev-question".into(),
+                    );
+                }
+                options.jev_blocks.push(JevBlockInput {
+                    label: value.clone(),
+                    options: Vec::new(),
+                });
+                i += 1;
+            }
             "--jev-context" => {
                 let value = args
                     .get(i + 1)
@@ -682,18 +707,26 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .get(i + 1)
                     .filter(|value| !value.starts_with("--"))
                     .ok_or("Missing value for --jev-option")?;
-                if options.jev_questions.is_empty() {
+                if !options.jev_blocks.is_empty() {
+                    options
+                        .jev_blocks
+                        .last_mut()
+                        .unwrap()
+                        .options
+                        .push(value.clone());
+                } else if options.jev_questions.is_empty() {
                     return Err(
                         "--jev-option must follow a --jev-question (or be the first argument after --jev)"
                             .into(),
                     );
+                } else {
+                    options
+                        .jev_questions
+                        .last_mut()
+                        .unwrap()
+                        .options
+                        .push(value.clone());
                 }
-                options
-                    .jev_questions
-                    .last_mut()
-                    .unwrap()
-                    .options
-                    .push(value.clone());
                 i += 1;
             }
             "--jev-positive" => {

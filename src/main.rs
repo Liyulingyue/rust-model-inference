@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -309,11 +309,87 @@ fn main() {
             .jev_context
             .as_deref()
             .ok_or_else(|| "--jev requires --jev-context <text>".to_string());
-        let jev_questions = options.jev_questions.clone();
-        let positive = options.jev_positive.clone();
         let output_json = options.jev_output_json;
         match jev_context {
             Ok(ctx) => {
+                if options.jev_multi || !options.jev_blocks.is_empty() {
+                    if options.jev_multi && !options.jev_blocks.is_empty() {
+                        app::run_or_exit(Err(
+                            "--jev-multi and --jev-block are mutually exclusive".to_string(),
+                        ));
+                        return;
+                    }
+                    if options.jev_questions.is_empty() {
+                        app::run_or_exit(Err(
+                            "--jev requires at least one --jev-question".to_string(),
+                        ));
+                        return;
+                    }
+                    let mode = if options.jev_multi {
+                        app::JevMode::MultiSelect
+                    } else {
+                        app::JevMode::BlockChoice
+                    };
+                    let inputs: Vec<app::JevGroupedQuestionInput> = options
+                        .jev_questions
+                        .iter()
+                        .map(|q| {
+                            if !options.jev_blocks.is_empty() {
+                                app::JevGroupedQuestionInput {
+                                    text: q.text.clone(),
+                                    groups: options
+                                        .jev_blocks
+                                        .iter()
+                                        .map(|b| app::JevGroupInput {
+                                            label: b.label.clone(),
+                                            options: b.options.clone(),
+                                        })
+                                        .collect(),
+                                }
+                            } else {
+                                let pairs: Vec<app::JevGroupInput> = q
+                                    .options
+                                    .chunks(2)
+                                    .enumerate()
+                                    .filter_map(|(i, chunk)| {
+                                        if chunk.len() == 2 {
+                                            Some(app::JevGroupInput {
+                                                label: format!("pair_{}", i + 1),
+                                                options: chunk.to_vec(),
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                if pairs.is_empty() {
+                                    None
+                                } else {
+                                    Some(app::JevGroupedQuestionInput {
+                                        text: q.text.clone(),
+                                        groups: pairs,
+                                    })
+                                }
+                                .unwrap_or_else(|| app::JevGroupedQuestionInput {
+                                    text: q.text.clone(),
+                                    groups: Vec::new(),
+                                })
+                            }
+                        })
+                        .collect();
+                    app::run_or_exit(app::run_jev_grouped_decision(
+                        source.clone(),
+                        ctx,
+                        &inputs,
+                        mode,
+                        n_threads,
+                        prefill_batch_size,
+                        output_json,
+                    ));
+                    return;
+                }
+                let jev_questions = options.jev_questions.clone();
+                let positive = options.jev_positive.clone();
                 if jev_questions.is_empty() {
                     app::run_or_exit(Err("--jev requires at least one --jev-question".to_string()));
                     return;
