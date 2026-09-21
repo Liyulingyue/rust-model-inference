@@ -176,7 +176,10 @@ fn load_layer(
             &k_quant,
         )?;
         (Some(v), false)
-    } else if source.tensor_info(&format!("{prefix}.attn_v.weight")).is_some() {
+    } else if source
+        .tensor_info(&format!("{prefix}.attn_v.weight"))
+        .is_some()
+    {
         let v = load_weight_any(
             source,
             &format!("{prefix}.attn_v.weight"),

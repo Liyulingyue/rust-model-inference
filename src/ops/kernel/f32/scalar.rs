@@ -61,13 +61,12 @@ pub fn forward_q8_rows_scalar(
     );
     for out_idx in start..end {
         let row_off = out_idx * n_in;
-        let mut sum = 0.0f64;
+        let mut sum = 0.0f32;
         for block in 0..n_in.div_ceil(32) {
             let input_scale = input_scales[block];
             let block_end = ((block + 1) * 32).min(n_in);
             for in_idx in (block * 32)..block_end {
-                sum += (weight[row_off + in_idx] * (input_q8[in_idx] as i8 as f32) * input_scale)
-                    as f64;
+                sum += weight[row_off + in_idx] * (input_q8[in_idx] as i8 as f32) * input_scale;
             }
         }
         let output_index = if output.len() >= n_out {
@@ -75,7 +74,7 @@ pub fn forward_q8_rows_scalar(
         } else {
             out_idx - start
         };
-        output[output_index] = sum as f32;
+        output[output_index] = sum;
     }
 }
 

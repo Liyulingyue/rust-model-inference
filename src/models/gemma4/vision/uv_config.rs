@@ -39,8 +39,8 @@ impl Gemma4UvConfig {
             Some(MetaValue::String(value)) if value == "gemma4uv" => {}
             Some(value) => {
                 return Err(format!(
-                    "Invalid metadata clip.vision.projector_type: expected \"gemma4uv\", got {value:?}"
-                ))
+                "Invalid metadata clip.vision.projector_type: expected \"gemma4uv\", got {value:?}"
+            ))
             }
             None => return Err("Missing metadata: clip.vision.projector_type".into()),
         }

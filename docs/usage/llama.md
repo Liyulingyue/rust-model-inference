@@ -12,9 +12,9 @@ arch 区分 chat template、`add_special`、RoPE 公式等行为差异；**forwa
 
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
 > KV cache 默认 F16；与 llama.cpp 位级对比时显式传 `--kv-cache f16`。
->
+> 
 > 常用生成参数（适用于所有 llama 家族）：
->
+> 
 > - `--max-context N`：KV cache 容量上限，默认 8192。
 > - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）；α > 1 抑制
 >   重复。

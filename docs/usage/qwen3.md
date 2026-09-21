@@ -5,9 +5,9 @@
 > 通用前置：构建 `cargo build --release --bin rust-model-inference`。所有命令均以
 > 工作目录为仓库根目录为前提；GGUF / 音频 / 图像路径请按本地调整。
 > KV cache 默认 F16；与 llama.cpp 做位级对比时显式传 `--kv-cache f16`。
->
+> 
 > 常用生成参数（适用于所有 Qwen3 路径）：
->
+> 
 > - `--max-context N`：KV cache 容量上限，默认 8192。超过此值的输入会触发预
 >   警告或分配错误；显式调小可避免大上下文模型（如 Qwen3.5-27B 128k、
 >   K2-Horizon-4B/7B 524k）一次性占用 GB~TB 级 KV 内存。

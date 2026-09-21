@@ -58,7 +58,3 @@ path = "src/bin/codec_test.rs"
 [[bin]]
 name = "rust-model-server"
 path = "src/bin/server.rs"
-
-[[bin]]
-name = "dump_all"
-path = "src/bin/dump_all.rs"

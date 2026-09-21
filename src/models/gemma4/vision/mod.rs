@@ -7,9 +7,9 @@ use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
 };
 pub use config::Gemma4VisionConfig;
+use std::path::Path;
 pub use uv_config::Gemma4UvConfig;
 pub use uv_model::Gemma4UvVisionModel;
-use std::path::Path;
 
 /// Either the E2B (`gemma4v`) block-based vision encoder or the 12B
 /// (`gemma4uv`) unified patch-embedder. Both produce flat `Vec<f32>`

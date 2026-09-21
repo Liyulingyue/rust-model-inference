@@ -7,9 +7,9 @@
 > LFM2 与 LFM2.5 文本的变体由 CLI 路由阶段通过 `general.basename` 含 `"2.5"` 区分
 > （`src/app/text.rs:62-66`），分别进入 `src/models/lfm2/` 与 `src/models/lfm25/`。
 > 详见 `docs/ISSUE.md` 的 LFM2 / LFM2.5 命名不一致条目。
->
+> 
 > 常用生成参数（适用于所有 LFM 路径）：
->
+> 
 > - `--max-context N`：KV cache 容量上限，默认 8192。LFM2.5 文本模型
 >   `context_length=128000`，过大的 `--max-context` 会一次性占用 GB 级 KV 内存。
 > - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）；α > 1

@@ -78,12 +78,7 @@ impl Gemma4Config {
 
     /// Max Q projection width across all layers (`n_heads × head_dim`).
     pub fn max_q_width(&self) -> usize {
-        let max_kv = self
-            .kv_heads_per_layer
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let max_kv = self.kv_heads_per_layer.iter().copied().max().unwrap_or(0);
         let max_dim = self.full_head_dim.max(self.swa_head_dim);
         // Q width is the same for every layer (only head_dim varies);
         // use n_heads × max_dim as an upper bound.
@@ -251,8 +246,9 @@ impl Gemma4Config {
                             "Invalid metadata gemma4.attention.head_count_kv: expected Int32 array, got {v:?}"
                         ));
                     };
-                    let n = usize::try_from(*n)
-                        .map_err(|_| format!("Invalid gemma4.attention.head_count_kv entry: {n}"))?;
+                    let n = usize::try_from(*n).map_err(|_| {
+                        format!("Invalid gemma4.attention.head_count_kv entry: {n}")
+                    })?;
                     per_layer.push(n);
                 }
                 if per_layer.len() != layers {
@@ -264,15 +260,13 @@ impl Gemma4Config {
                 per_layer
             }
             Some(MetaValue::Uint32(n)) => {
-                let n = usize::try_from(*n).map_err(|_| {
-                    format!("Invalid gemma4.attention.head_count_kv scalar: {n}")
-                })?;
+                let n = usize::try_from(*n)
+                    .map_err(|_| format!("Invalid gemma4.attention.head_count_kv scalar: {n}"))?;
                 vec![n; layers]
             }
             Some(MetaValue::Int32(n)) => {
-                let n = usize::try_from(*n).map_err(|_| {
-                    format!("Invalid gemma4.attention.head_count_kv scalar: {n}")
-                })?;
+                let n = usize::try_from(*n)
+                    .map_err(|_| format!("Invalid gemma4.attention.head_count_kv scalar: {n}"))?;
                 vec![n; layers]
             }
             Some(other) => {
@@ -287,14 +281,12 @@ impl Gemma4Config {
         let rope_freq_base_swa = read_f32(source, "gemma4.rope.freq_base_swa")?;
         let logit_softcap = read_f32(source, "gemma4.final_logit_softcapping")?;
         let sliding_window = read_u32(source, "gemma4.attention.sliding_window")? as usize;
-        let shared_kv_layers =
-            read_u32(source, "gemma4.attention.shared_kv_layers")? as usize;
+        let shared_kv_layers = read_u32(source, "gemma4.attention.shared_kv_layers")? as usize;
 
         // Per-layer projection width. 0 means the projection is disabled
         // and the per_layer_* tensors are absent (12B). Anything else is
         // the per-layer embedding dim (E2B/E4B: 256).
-        let per_layer_width =
-            read_u32(source, "gemma4.embedding_length_per_layer_input")? as usize;
+        let per_layer_width = read_u32(source, "gemma4.embedding_length_per_layer_input")? as usize;
 
         // head dims. E2B/E4B full=512, swa=256. 12B same.
         let full_head_dim = read_u32(source, "gemma4.attention.key_length")? as usize;

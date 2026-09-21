@@ -35,12 +35,22 @@ pub fn build_turn_rows(
     let mut rows = encoded_rows(tokenizer, "<|turn>user\n", true, true)?;
     if let Some(values) = image {
         rows.extend(encoded_rows(tokenizer, "<|image>", false, true)?);
-        append_raw_rows(&mut rows, "image", values, image_embed.unwrap_or(DEFAULT_EMBED))?;
+        append_raw_rows(
+            &mut rows,
+            "image",
+            values,
+            image_embed.unwrap_or(DEFAULT_EMBED),
+        )?;
         rows.extend(encoded_rows(tokenizer, "<image|>", false, true)?);
     }
     if let Some(values) = audio {
         rows.extend(encoded_rows(tokenizer, "<|audio>", false, true)?);
-        append_raw_rows(&mut rows, "audio", values, audio_embed.unwrap_or(DEFAULT_EMBED))?;
+        append_raw_rows(
+            &mut rows,
+            "audio",
+            values,
+            audio_embed.unwrap_or(DEFAULT_EMBED),
+        )?;
         rows.extend(encoded_rows(tokenizer, "<audio|>", false, true)?);
     }
     rows.extend(encoded_rows(tokenizer, prompt, false, false)?);
@@ -66,37 +76,38 @@ pub fn run_gemma4(request: Gemma4Request<'_>) -> Result<(), String> {
         .map_err(|error| format!("Failed to initialize Gemma4 tokenizer: {error}"))?;
     let model = Gemma4Model::from_source(source, request.threads)?;
 
-    let (image, audio, image_embed, audio_embed) = if request.image.is_some() || request.audio.is_some() {
-        let mmproj = GGUFLoader::from_file(request.mmproj.expect("checked media mmproj"))
-            .map_err(|error| format!("Failed to load Gemma4 mmproj: {error}"))?;
-        let vision_encoder = if request.image.is_some() {
-            let encoder = build_vision_encoder(&mmproj, request.threads)?;
-            let embed = encoder.projection();
-            Some((encoder, embed))
+    let (image, audio, image_embed, audio_embed) =
+        if request.image.is_some() || request.audio.is_some() {
+            let mmproj = GGUFLoader::from_file(request.mmproj.expect("checked media mmproj"))
+                .map_err(|error| format!("Failed to load Gemma4 mmproj: {error}"))?;
+            let vision_encoder = if request.image.is_some() {
+                let encoder = build_vision_encoder(&mmproj, request.threads)?;
+                let embed = encoder.projection();
+                Some((encoder, embed))
+            } else {
+                None
+            };
+            let audio_model = if request.audio.is_some() {
+                Some(Gemma4AudioModel::from_source(&mmproj, request.threads)?)
+            } else {
+                None
+            };
+            let image = if let Some((encoder, _)) = &vision_encoder {
+                Some(encoder.encode_path(request.image.expect("requested image"))?)
+            } else {
+                None
+            };
+            let audio = if let Some(model) = &audio_model {
+                Some(model.encode_wav_path(request.audio.expect("requested audio"))?)
+            } else {
+                None
+            };
+            let image_embed = vision_encoder.as_ref().map(|(_, e)| *e);
+            let audio_embed = audio_model.as_ref().map(|m| m.audio_projection());
+            (image, audio, image_embed, audio_embed)
         } else {
-            None
+            (None, None, None, None)
         };
-        let audio_model = if request.audio.is_some() {
-            Some(Gemma4AudioModel::from_source(&mmproj, request.threads)?)
-        } else {
-            None
-        };
-        let image = if let Some((encoder, _)) = &vision_encoder {
-            Some(encoder.encode_path(request.image.expect("requested image"))?)
-        } else {
-            None
-        };
-        let audio = if let Some(model) = &audio_model {
-            Some(model.encode_wav_path(request.audio.expect("requested audio"))?)
-        } else {
-            None
-        };
-        let image_embed = vision_encoder.as_ref().map(|(_, e)| *e);
-        let audio_embed = audio_model.as_ref().map(|m| m.audio_projection());
-        (image, audio, image_embed, audio_embed)
-    } else {
-        (None, None, None, None)
-    };
 
     let rows = build_turn_rows(
         &tokenizer,
@@ -539,10 +550,20 @@ mod tests {
     #[test]
     fn composer_requires_full_finite_rows_and_context_budget() {
         let tokenizer = gemma4_test_tokenizer();
-        assert!(build_turn_rows(&tokenizer, "x", Some(&vec![0.0; 1535]), None, Some(1536), None).is_err());
+        assert!(build_turn_rows(
+            &tokenizer,
+            "x",
+            Some(&vec![0.0; 1535]),
+            None,
+            Some(1536),
+            None
+        )
+        .is_err());
         let mut nonfinite = vec![0.0; 1536];
         nonfinite[0] = f32::NAN;
-        assert!(build_turn_rows(&tokenizer, "x", None, Some(&nonfinite), None, Some(1536)).is_err());
+        assert!(
+            build_turn_rows(&tokenizer, "x", None, Some(&nonfinite), None, Some(1536)).is_err()
+        );
         assert!(check_context(8192, 8192, 1).is_err());
         assert!(check_context(8191, 8192, 1).is_ok());
     }
