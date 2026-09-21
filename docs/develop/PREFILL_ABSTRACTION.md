@@ -66,7 +66,7 @@ Plus the existing helpers:
 | `llama` | ✅ (`session.rs::forward_chunk_batched_real`) | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`LlamaSession` impl; **real batched Q/K/V + wo + gate/up/down matmul + batched flash attention** at `B > 1`; wired into `app/text.rs:701` JEV path; legacy free-function retained as fallback) | **~2× prefill speedup at `B = 64`** |
 | `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm2Session` impl; B=1 fallback delegates to `run_forward_logits_lfm2_with_batch`; `forward_attention_chunked(rows, base_position, …)` skeleton with rows threaded but `rows > 1` branch still per-row placeholder) | shortconv SSM keeps per-row by construction; per-row attention math makes lifting a 200+ line change with no easy isolation boundary |
 | `lfm25` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm25Session` impl; B=1 fallback delegates to `run_forward_logits_lfm25_with_batch`) | same as lfm2 |
-| `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | MoE router hidden state keeps per-row |
+| `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm2MoeSession` impl; B=1 fallback delegates to `run_forward_logits_lfm2moe_with_batch`; new `_inner` body extracted from `run_inference`) | MoE router + SSM shortconv keep per-row by construction |
 | `spark` | ❌ | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`SparkSession` impl; B=1 fallback to `forward_step_logits`) | fused QKV layout + per-head attention loop make the per-step forward hard to lift without a full `rows × n_head` batched attention rewrite |
 | `breeze` | ❌ | ❌ | ❌ | TTS codec, mostly stateful |
 
@@ -225,7 +225,7 @@ Eight unit tests in `core::prefill::tests`:
   — `B=1` reproduces the legacy per-token loop, **which is the
   whole point of the abstraction**
 
-`cargo test --release --lib`: 757 passed / 14 failed / 58 ignored.
+`cargo test --release --lib`: 759 passed / 14 failed / 58 ignored.
 The 14 failures are pre-existing (`bf16_is_neither_f16_decoded_nor_…`,
 `f16_projection_quantizes_input_and_uses_ggml_f16_dot`, various
 `matmul::neon_tests::…` parity checks, `rope::tests::vision_rope_…`).
@@ -233,6 +233,7 @@ The new passes come from
 `models::llama::trunk::session::tests::chunked_prefill_*` (2),
 `models::lfm2::trunk::session::tests::chunked_prefill_*` (2),
 `models::lfm25::trunk::session::tests::chunked_prefill_*` (2),
+`models::lfm2moe::trunk::session::tests::chunked_prefill_*` (2),
 `models::spark::trunk::forward::tests::chunked_prefill_input_len_*` (1).
 None of the 14 failures come from this branch.
 

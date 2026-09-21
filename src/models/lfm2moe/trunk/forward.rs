@@ -427,6 +427,213 @@ pub fn run_inference(
     Ok(())
 }
 
+/// Run the prefill loop against `prompt_tokens` and return the
+/// final prefill-step logits alongside the elapsed wall-clock
+/// duration. Used by [`run_forward_logits_lfm2moe`] /
+/// [`run_forward_logits_lfm2moe_with_batch`] so the
+/// [`crate::core::prefill::ChunkedPrefill`] trait has a logits
+/// entry point. Mirrors the per-step body of [`run_inference`]
+/// minus the autoregressive sampling loop.
+pub fn run_forward_logits_lfm2moe_with_batch(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+    batch_size: usize,
+) -> Result<(Vec<f32>, Duration), String> {
+    let _ = batch_size;
+    run_forward_logits_lfm2moe_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
+}
+
+fn run_forward_logits_lfm2moe_inner(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+) -> Result<(Vec<f32>, Duration), String> {
+    let t0 = Instant::now();
+    let cfg = Lfm2MoeConfig::from_source(source)?;
+    let n_embd = cfg.n_embd;
+    let n_layer = cfg.n_layer;
+    let n_head = cfg.n_head;
+    let n_ff = cfg.n_ff;
+    let n_embd_q = n_head * cfg.n_embd_head_k;
+    let n_embd_gqa = cfg
+        .n_head_kv_per_layer
+        .iter()
+        .map(|&h| h * cfg.n_embd_head_k)
+        .max()
+        .unwrap_or(0)
+        .max(n_embd_q);
+    let eps = cfg.norm_eps;
+    let freq_base = cfg.rope_freq_base;
+    let max_ctx = max_context.min(cfg.n_ctx).max(1);
+
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let vocab = tokenizer.vocab_size();
+
+    let output_norm = get_f32_tensor(source, "token_embd_norm.weight", n_embd);
+    let embd_info = source
+        .tensor_info("token_embd.weight")
+        .ok_or_else(|| "Missing token_embd.weight metadata".to_string())?;
+    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
+    let embd_weight = source
+        .tensor_slice("token_embd.weight")
+        .ok_or_else(|| "Missing token_embd.weight data".to_string())?;
+    let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
+    let embd_type = embd_info.ggml_type;
+    let output_type = source
+        .tensor_info("output.weight")
+        .unwrap_or(embd_info)
+        .ggml_type;
+
+    let layers = load_layers(source, &cfg)?;
+
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let n_threads = if n_threads_arg > 0 {
+        n_threads_arg
+    } else {
+        available_threads
+    };
+
+    let mut scratch = ExecutionScratchpad::new(
+        n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx,
+    );
+    let pool = Arc::new(ComputePool::new(n_threads));
+
+    let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
+    let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
+    for lw in layers.iter() {
+        if lw.is_attn {
+            shortconv_states.push(Vec::new());
+            accumulated_bx.push(Vec::new());
+        } else {
+            shortconv_states.push(vec![0.0f32; n_embd * cfg.d_conv]);
+            accumulated_bx.push(Vec::new());
+        }
+    }
+
+    let kv_cache = match kv_format {
+        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
+        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
+    };
+
+    if prompt_tokens.is_empty() {
+        return Ok((Vec::new(), t0.elapsed()));
+    }
+
+    // ---- Per-step prefill loop (mirrors `run_inference` lines 200..330) ----
+    for step in 0..prompt_tokens.len() {
+        let token_id = prompt_tokens[step];
+        let pos = step;
+
+        embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
+
+        let is_prefill = true;
+        for layer in 0..n_layer {
+            let lw = &layers[layer];
+            if !lw.is_attn && is_prefill {
+                let d_conv = cfg.d_conv;
+                let state = &mut shortconv_states[layer];
+                state.resize(d_conv * n_embd, 0.0);
+                let hist = &accumulated_bx[layer];
+                for k_p in 0..d_conv {
+                    let idx = k_p as isize - (d_conv - hist.len()) as isize;
+                    if idx >= 0 {
+                        let src = &hist[idx as usize];
+                        for ci in 0..n_embd {
+                            state[k_p * n_embd + ci] = src[ci];
+                        }
+                    }
+                }
+            }
+            forward_layer(
+                &pool,
+                lw,
+                layer,
+                n_layer,
+                &cfg,
+                &mut scratch,
+                &kv_cache,
+                max_ctx,
+                pos,
+                eps,
+                freq_base,
+                &mut shortconv_states[layer],
+                &mut accumulated_bx[layer],
+                is_prefill,
+                step,
+            );
+        }
+
+        // Output norm + LM head (mirrors `run_inference` lines 260..317).
+        let x_ptr = scratch.x.as_mut_ptr();
+        let normed_ptr = scratch.normed.as_mut_ptr();
+        let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+        let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+        rms_norm(x, &output_norm, normed, eps);
+
+        let q8_buf = unsafe {
+            std::slice::from_raw_parts_mut(
+                scratch.q8_buf.as_mut_ptr() as *mut u8,
+                scratch.q8_buf.len(),
+            )
+        };
+        let scale_buf =
+            unsafe { std::slice::from_raw_parts_mut(scratch.scale_buf.as_mut_ptr(), n_embd / 32) };
+        let q8k_buf = unsafe {
+            std::slice::from_raw_parts_mut(scratch.q8k_buf.as_mut_ptr(), scratch.q8k_buf.len())
+        };
+        quantize_q8_0_into(
+            normed,
+            n_embd,
+            &mut q8_buf[..n_embd],
+            &mut scale_buf[..n_embd / 32],
+        );
+        quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
+        let q8 = &q8_buf[..n_embd];
+        let sc = &scale_buf[..n_embd / 32];
+        let q8k = &q8k_buf[..n_embd / 256];
+
+        let output_pw = crate::ops::kernel::Weight::from_quantized(
+            crate::ops::kernel::QuantizedTensor::from_bytes(
+                output_weight,
+                output_type,
+                n_embd,
+                vocab,
+            ),
+        );
+
+        let logits_ptr = scratch.logits.as_mut_ptr();
+        pool.compute(move |ith, nth| {
+            let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
+            let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
+            let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
+            let q8k = unsafe { std::slice::from_raw_parts(q8k.as_ptr(), n_embd / 256) };
+            let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
+            output_pw.kernel.forward_prepared(
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                logits,
+                n_embd,
+                vocab,
+                ith,
+                nth,
+            );
+        });
+    }
+
+    let logits = scratch.logits.clone();
+    Ok((logits, t0.elapsed()))
+}
+
 /// Parity debugging: append "[step=S il=L label] v ..." lines to
 /// RUST_LFM2MOE_DEBUG_OUTFILE when the env var is set (mirrors the llama
 /// trunk's RUST_LLAMA_DEBUG_OUTFILE). Values print with 6 decimals.
