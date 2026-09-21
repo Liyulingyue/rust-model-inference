@@ -1,21 +1,18 @@
 //! JEV single-mode scorer for qwen35.
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
-use super::compute_jev_result;
-use super::build_jev_prompt;
 use super::jev_labels;
-use super::print_jev_question;
-use super::JevScorer;
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use super::jev_payload_json;
+use super::jev_system_prompt;
+use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
-use super::{PreparedQuestion};
+use super::JevScorer;
+use super::PreparedQuestion;
+use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::BPETokenizer;
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use crate::prompt::{append_qwen_message_tokens};
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::models::qwen35::run_forward_logits_qwen35_with_batch;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub(crate) fn run_jev_decision_qwen35(
     source: Arc<dyn TensorSource>,
@@ -25,55 +22,97 @@ pub(crate) fn run_jev_decision_qwen35(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevResult>, String> {
-    // Qwen3.5's `Qwen35Model<'a>` borrows from the source. Holding it
-    // inside the scorer struct would force the scorer itself to be
-    // lifetime-parameterized, which complicates the `JevScorer`
-    // trait object story. For Qwen3.5 we keep the per-question loop
-    // inline here — the scorer pattern works well for the trunks
-    // that own their model data (gemma4, llama-family) or wrap a
-    // free function (lfm*/spark/nemotron-h/hunyuan).
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    verify_label_tokens_single(&tokenizer)?;
-
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-
-    let mut model = crate::models::qwen35::Qwen35Model::from_source(source.as_ref())
-        .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
-    let n_ctx = model.config.n_ctx;
-
-    let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
-    for q in per_question {
-        let labels = jev_labels(q);
-        let (token_ids, payload_str) = build_jev_prompt(&tokenizer, context, q, output_json)?;
-        if !output_json {
-            print_jev_question(q, &labels);
-        }
-        let _ = payload_str;
-
-        let (positions, _next) = build_qwen35_positions(&token_ids, None, &[])
-            .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
-
-        // Recreate session per question (Ephemeral KV).
-        let mut session = crate::models::qwen35::Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
-            n_ctx.min(token_ids.len() + 1),
-            prefill_batch_size,
-            pool.clone(),
-        )?;
-        let t0 = Instant::now();
-        let logits = session
-            .forward_logits(&token_ids, &positions)
-            .map_err(|e| format!("Qwen3.5 forward_logits failed: {e}"))?;
-        let prefill_dur = t0.elapsed();
-        let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
-        results.push(result);
+    let mut scorer = Qwen35JevScorer::new(source.clone(), n_threads, prefill_batch_size)?;
+    if !output_json {
+        eprintln!("compute pool: {} threads (Qwen3.5)", n_threads);
     }
-    Ok(results)
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
 }
 
+/// Qwen3.5 JEV scorer. Holds `Arc<dyn TensorSource>` + tokenizer;
+/// forwards logits through `run_forward_logits_qwen35_with_batch`,
+/// which constructs the `Qwen35Model<'a>` + `Qwen35Session` per call
+/// (zero-copy borrow against the source). Mirrors the Llama-family
+/// scorer shape so all 9 trunks now follow the same trait path.
+pub(crate) struct Qwen35JevScorer {
+    pub(crate) tokenizer: BPETokenizer,
+    pub(crate) source: Arc<dyn TensorSource>,
+    pub(crate) n_threads: usize,
+    pub(crate) prefill_batch_size: usize,
+}
+
+impl Qwen35JevScorer {
+    pub(crate) fn new(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        prefill_batch_size: usize,
+    ) -> Result<Self, String> {
+        let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        verify_label_tokens_single(&tokenizer)?;
+        Ok(Self {
+            tokenizer,
+            source,
+            n_threads,
+            prefill_batch_size,
+        })
+    }
+}
+
+impl JevScorer for Qwen35JevScorer {
+    fn scorer_label(&self) -> &'static str {
+        "Qwen3.5"
+    }
+
+    fn build_prompt(
+        &self,
+        context: &str,
+        q: &PreparedQuestion,
+    ) -> Result<(Vec<char>, Vec<u32>), String> {
+        let labels = jev_labels(q);
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
+        // Mirrors `qwen3::trunk::forward::run_inference` chat
+        // template (system + user + assistant prefix), encoded with
+        // BOS prepended.
+        let prompt_text = format!(
+            "<|im_start|>system\n{system}<|im_end|>\n\
+             <|im_start|>user\n{payload}<|im_end|>\n\
+             <|im_start|>assistant\n"
+        );
+        let mut token_ids = self.tokenizer.encode(
+            &prompt_text,
+            EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        if let Some(bos) = self.tokenizer.bos_id() {
+            token_ids.insert(0, bos);
+        }
+        Ok((labels, token_ids))
+    }
+
+    fn forward_logits(
+        &mut self,
+        token_ids: Vec<u32>,
+    ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        run_forward_logits_qwen35_with_batch(
+            self.source.as_ref(),
+            &token_ids,
+            self.n_threads,
+            KvFormat::F16,
+            8192,
+            self.prefill_batch_size,
+        )
+        .map_err(|e| format!("Qwen3.5 forward_logits failed: {e}"))
+    }
+
+    fn tokenizer(&self) -> &BPETokenizer {
+        &self.tokenizer
+    }
+}

@@ -20,6 +20,7 @@ pub mod util;
 pub mod weights;
 
 pub use config::Qwen35Config;
+pub use forward::run_forward_logits_qwen35_with_batch;
 pub use positions::build_qwen35_positions;
 pub use scratch::Qwen35Scratchpad;
 pub use session::{Qwen35DenseKvSnapshot, Qwen35Session};
