@@ -63,10 +63,10 @@ Plus the existing helpers:
 | `nemotron_h` | partial (`prefill()` calls `forward_layer(length)` which still loops `for t in 0..length`) | ❌ | ❌ |  |
 | `qwen3/asr` | ✅ | ✅ | ❌ |  |
 | `qwen3/tts` | ✅ | ✅ | ❌ |  |
-| `llama` | ✅ (`session.rs::forward_chunk_batched_real`) | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`LlamaSession` impl; **real batched Q/K/V + wo + gate/up/down matmul + batched flash attention** at `B > 1`) | **~2× prefill speedup at `B = 64`** |
-| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | session refactor pending; shortconv SSM keeps per-row |
-| `lfm25` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | same as lfm2 |
-| `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | same as lfm2 |
+| `llama` | ✅ (`session.rs::forward_chunk_batched_real`) | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`LlamaSession` impl; **real batched Q/K/V + wo + gate/up/down matmul + batched flash attention** at `B > 1`; wired into `app/text.rs:701` JEV path; legacy free-function retained as fallback) | **~2× prefill speedup at `B = 64`** |
+| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm2Session` impl; B=1 fallback delegates to `run_forward_logits_lfm2_with_batch`; `forward_attention_chunked(rows, base_position, …)` skeleton with rows threaded but `rows > 1` branch still per-row placeholder) | shortconv SSM keeps per-row by construction |
+| `lfm25` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm25Session` impl; B=1 fallback delegates to `run_forward_logits_lfm25_with_batch`) | same as lfm2 |
+| `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | MoE router hidden state keeps per-row |
 | `spark` | ❌ | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`SparkSession` impl; B=1 fallback to `forward_step_logits`) | next refactor lifts `forward_step_logits` for ~2× speedup |
 | `breeze` | ❌ | ❌ | ❌ | TTS codec, mostly stateful |
 
@@ -100,56 +100,48 @@ each trunk's `forward_chunk` *amortise* the inner work across rows:
 Llama session path now delivers a real `~2×` prefill speedup at
 `B = 64` (default `DEFAULT_PREFILL_BATCH_SIZE`). Numbers below are
 `Prompt: t/s` from `target/release/rust-model-inference` on the
-18-thread Intel Core Ultra 5 125H:
+18-thread Intel Core Ultra 5 125H, measured with the bench prompt
+`"The quick brown fox jumps over the lazy dog. " × N`:
 
-| Prompt tokens | B=1 | B=32 | B=64 | Speedup |
-|---|---|---|---|---|
-| 50 | 14.5 | 33.6 | 42.1 | 2.9× |
-| 200 | 20.5 | 43.1 | 44.2 | 2.2× |
-| 800 | 17.1 | 31.2 | 32.0 | 1.9× |
-| 1500 | 11.7 | — | 19.6 | 1.7× |
+| Prompt tokens | B=1 | B=64 | Speedup |
+|---|---|---|---|
+| 53 | 15.5 | 37.9 | 2.45× |
+| 304 | 18.6 | 43.7 | 2.35× |
+| ~1200 | (timed out at 90s) | 23.1 | — |
 
 `B=1` falls back to the legacy per-token path; `B=64` walks the
 chunked trait loop once (single 64-row chunk) so the
 `PreparedRows::matmul_group` quantise+dispatch amortises across
-all 64 rows. Output text matches the per-token path on ~75% of
-test prompts at `temperature > 0` (sampling stochasticity accounts
-for the remaining diffs); the underlying logits agree
-to ~1 ULP on F32 weights.
+all 64 rows. Output text matches the per-token path on
+`temperature = 0` (echo prompts stay identical across B settings).
 
 ### `llama` (highest ROI, pure transformer)
 
 `run_forward_logits_llama` was a free function that constructed
 all scratch + KV cache + pool from scratch and then looped
-`for step in 0..n_prompt`. That function now sits alongside a
-new `LlamaSession<'model>` (in `src/models/llama/trunk/session.rs`)
-that owns the same state and implements `ChunkedPrefill`. The
-`forward_chunk` body calls `forward_one_token` `rows` times — bit-
-identical to the legacy per-token walk at `B = 1`. The session
-also reserves `max_rows × n_embd` scratchpad and a `PreparedRows`
-slot for future batched matmul dispatch. What still needs to
-happen:
+`for step in 0..n_prompt`. The free function is now a thin
+wrapper around `run_forward_logits_llama_with_batch(...)` that
+threads `--prefill-batch-size` through, and the new
+`LlamaSession<'model>` (in `src/models/llama/trunk/session.rs`)
+owns the same state and implements `ChunkedPrefill`.
 
-1. **Real `rows > 1` batched math**. Right now `forward_chunk`
-   just calls the legacy `forward_one_token` `rows` times.
-   Lifting it to a real tiled forward — RMSNorm × rows, Q/K/V
-   `PreparedRows::matmul_group` × rows, RoPE × rows, KV append ×
-   rows, **tiled flash attention** × rows, `wo` /
-   `gate` / `up` / `down` `PreparedRows` × rows — is the
-   remaining work. Attention is the hard part: rewrite the
-   per-query loop to a `Q × Kᵀ → softmax → @V` that handles
-   `rows × n_head` queries against the full cached K/V in one or
-   two passes. The math is well-known (FlashAttention-2 §3.1); the
-   SIMD plumbing is non-trivial but every other piece is
-   mechanical.
-2. **Wire `LlamaSession` into `app/text.rs`**. Today
-   `app/text.rs:701` still calls
-   `crate::models::llama::run_forward_logits_llama` for the JEV
-   question classifier. Swap that call to
-   `LlamaSession::from_source_with_max_rows(...).forward_logits_chunked(...)`
-   so the trait-driven path is exercised end-to-end. Until this
-   lands, the new `LlamaSession` is unexercised in production
-   even though it is exercised by the unit tests.
+The session's `forward_chunk` dispatches on `rows`:
+
+- `rows == 1` → legacy per-token path (`forward_one_token`), bit-
+  identical to the pre-trait baseline.
+- `rows > 1` → `forward_chunk_batched_real`: `PreparedRows::prepare`
+  quantises `[rows × n_embd]` activations once, then a single
+  `PreparedRows::matmul_group` call dispatches Q / K / V / wo /
+  gate / up / down in one pass; attention goes through
+  `run_attention_chunked` (tiled flash attention — KV cache row
+  loaded once per head instead of `rows × n_head` times; online
+  softmax with rescale); LM head projects the last row only.
+
+The batched path is wired into `app/text.rs:701` (JEV question
+classifier) as a forwarder around `LlamaSession::from_source_with_max_rows
+(...).forward_logits_chunked(...)`; on construction failure we fall
+back to the legacy `run_forward_logits_llama_inner` so JEV still
+works on models that don't fit the new session.
 
 ### `lfm2` / `lfm25` / `lfm2moe`
 
@@ -158,11 +150,22 @@ previous tokens** (shortconv buffer, MoE router hidden state). The
 attention sub-layers can still be batched; the SSM/MoE sub-layers
 must remain per-row. So `forward_chunk` would dispatch on
 `lw.is_attn` and call either a batched attention forward or a
-per-row SSM forward. This is doable in a few hundred lines per
-trunk. As a stop-gap, the per-step loop in `run_forward_logits_lfm2`
-is now wrapped by an outer `prefill_chunks` so the dispatch
-matches the trait default; migrating to a real
-`Lfm2Session` + `ChunkedPrefill` impl is the next step.
+per-row SSM forward.
+
+`Lfm2Session<'a>` + `Lfm25Session<'a>` are extracted (mirror
+`LlamaSession`'s shape) and implement `ChunkedPrefill` with a
+`B = 1` fallback that delegates to the legacy free-function path
+(`run_forward_logits_lfm2_with_batch` /
+`run_forward_logits_lfm25_with_batch`). `forward_attention_chunked
+(rows, base_position, …)` is the work-in-progress batched skeleton;
+`rows` is threaded through but the `rows > 1` branch still defers
+to the legacy per-row attention compute via `let _ = use_batched;`.
+Lifting that to a real `PreparedRows::matmul_group` dispatch +
+tiled flash attention is the next step, and is the same shape as
+the llama lift. As a stop-gap, the per-step loop in
+`run_forward_logits_lfm2` is wrapped by an outer `prefill_chunks`
+so the dispatch matches the trait default; `--prefill-batch-size`
+routes through the new wrappers in `app/text.rs:890, 1083`.
 
 ### `spark`
 
@@ -222,26 +225,31 @@ Eight unit tests in `core::prefill::tests`:
   — `B=1` reproduces the legacy per-token loop, **which is the
   whole point of the abstraction**
 
-`cargo test --release --lib`: 752 passed / 14 failed / 58 ignored.
+`cargo test --release --lib`: 757 passed / 14 failed / 58 ignored.
 The 14 failures are pre-existing (`bf16_is_neither_f16_decoded_nor_…`,
 `f16_projection_quantizes_input_and_uses_ggml_f16_dot`, various
 `matmul::neon_tests::…` parity checks, `rope::tests::vision_rope_…`).
-The two new passes come from
-`models::llama::trunk::session::tests::chunked_prefill_*`.
-None of them come from this commit.
+The new passes come from
+`models::llama::trunk::session::tests::chunked_prefill_*` (2),
+`models::lfm2::trunk::session::tests::chunked_prefill_*` (2),
+`models::lfm25::trunk::session::tests::chunked_prefill_*` (2),
+`models::spark::trunk::forward::tests::chunked_prefill_input_len_*` (1).
+None of the 14 failures come from this branch.
 
 ## Out of scope
 
 This commit does **not**:
 
-- Change any trunk's per-token forward to a real batched forward.
-  That's the follow-up work for each trunk; this commit only
-  abstracts the dispatch loop.
+- Lift `lfm2` / `lfm25` / `spark` per-token forward into a real
+  batched forward. The traits and B=1 fallbacks are in place; the
+  per-row math is preserved. Lifting them is the follow-up work
+  per trunk.
 - Touch the `--prefill-batch-size` CLI flag — it already feeds into
   `checked_prefill_batch_size` for every trunk that reads it.
 - Add new SIMD kernels. The current `matmul_*` family already
   handles `[rows, n_in] × [n_in, n_out]` shaped inputs; trunks just
   need to call them with `rows > 1`.
-- Refactor `llama::run_forward_logits_llama` into a session. That's
-  step 1 of the `llama` migration above; large enough to deserve
-  its own commit.
+- Refactor `qwen3` / `qwen35` / `gemma4` to drop their own
+  `prefill()` wrappers in favour of `ChunkedPrefill`. The
+  `forward_cpu_chunk` / `forward_chunk` API is preserved for
+  backwards compatibility.
