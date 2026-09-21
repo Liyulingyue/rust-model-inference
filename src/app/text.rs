@@ -542,9 +542,7 @@ fn run_jev_decision_qwen3(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
         let (token_ids, payload_str) = build_jev_prompt(&model.tokenizer, context, q, output_json)?;
         if !output_json {
             print_jev_question(q, &labels);
@@ -603,9 +601,7 @@ fn run_jev_decision_qwen35(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
         let (token_ids, payload_str) = build_jev_prompt(&tokenizer, context, q, output_json)?;
         if !output_json {
             print_jev_question(q, &labels);
@@ -657,40 +653,13 @@ fn run_jev_decision_llama(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
         // Build the prompt text. Mirror `llama::run_inference` chat templates.
         // The system prompt + JSON payload use the same wrappers as the
         // model expects during inference, so the protocol lines up.
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         // Per-arch chat template; mirrors llama::trunk::forward::run_inference.
         let prompt_text = if arch == "k2-horizon" {
@@ -770,38 +739,11 @@ fn run_jev_decision_gemma4(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
         // Gemma4 chat format: <|turn>user\n{text}<turn|>\n<|turn>model\n
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
         let prompt_text = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
 
         let bos = tokenizer.bos_id().ok_or("Gemma4 tokenizer missing BOS")?;
@@ -857,38 +799,11 @@ fn run_jev_decision_lfm2(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
         // LFM2 chat format: "{role}\n{content}\n" + assistant prefix.
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         let mut token_ids = Vec::new();
         if let Some(bos) = tokenizer.bos_id() {
@@ -961,40 +876,13 @@ fn run_jev_decision_spark(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
         // Spark 2.5 chat template (mirrors run_inference).
         let sos = "<｜start▁of▁sentence｜>";
         let eos = "<｜end▁of▁sentence｜>";
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         let prompt_text = format!(
             "{sos}<|System|>\n{system}{eos}\
@@ -1052,37 +940,10 @@ fn run_jev_decision_lfm25(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         let mut token_ids = Vec::new();
         if let Some(bos) = tokenizer.bos_id() {
@@ -1152,37 +1013,10 @@ fn run_jev_decision_lfm2moe(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         let mut token_ids = Vec::new();
         if let Some(bos) = tokenizer.bos_id() {
@@ -1243,39 +1077,12 @@ fn run_jev_decision_nemotron_h(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
         // Nemotron-H is a base model (no chat template). Build a plain
         // text prompt with system + JSON payload.
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
         let prompt_text = format!("{system}\n\n{payload}\n\nAnswer:");
         let token_ids = tokenizer.encode(
             &prompt_text,
@@ -1330,37 +1137,10 @@ fn run_jev_decision_hunyuan(
 
     let mut results: Vec<JevResult> = Vec::with_capacity(per_question.len());
     for q in per_question {
-        let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
-            .map(|b| b as char)
-            .collect();
+        let labels = jev_labels(q);
 
-        let system = match q.mode {
-            JevMode::Score => {
-                "Score the situation using the supplied context and numeric candidates. \
-                               Reply with only its letter label."
-            }
-            _ => {
-                "Answer the question using the supplied context and candidate answers. \
-                  Select the single best answer. Reply with only its letter label."
-            }
-        };
-        let mut payload = String::from("{\"context\": ");
-        payload
-            .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
-        payload.push_str(", \"question\": ");
-        payload
-            .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
-        payload.push_str(", \"candidates\": {");
-        for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
-            if i > 0 {
-                payload.push(',');
-            }
-            payload.push('"');
-            payload.push(*label_char);
-            payload.push_str("\": ");
-            payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
-        }
-        payload.push_str("}}");
+        let system = jev_system_prompt(q.mode);
+        let payload = jev_payload_json(context, q)?;
 
         let token_ids = build_hunyuan_chat_prompt(
             &model.tokenizer,
@@ -1429,29 +1209,50 @@ fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(), String> {
     Ok(())
 }
 
-fn build_jev_prompt(
-    tokenizer: &BPETokenizer,
-    context: &str,
-    q: &PreparedQuestion,
-    _output_json: bool,
-) -> Result<(Vec<u32>, String), String> {
-    let system = match q.mode {
+/// Returns the system prompt for a JEV question based on its `mode`.
+/// Shared across every per-arch `run_jev_decision_*` so a single edit
+/// flows through all backends.
+fn jev_system_prompt(mode: JevMode) -> &'static str {
+    match mode {
         JevMode::Score => {
             "Score the situation using the supplied context and numeric candidates. \
                            Reply with only its letter label."
         }
-        _ => {
+        JevMode::Choice | JevMode::Binary => {
             "Answer the question using the supplied context and candidate answers. \
               Select the single best answer. Reply with only its letter label."
         }
-    };
-    let labels: Vec<char> = (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
+        JevMode::MultiSelect | JevMode::BlockChoice => {
+            // Grouped modes use the per-group scoring style — the
+            // runner enumerates the candidate set per question so the
+            // exact wording is per-arch (handled inside the grouped
+            // payload builders below).
+            "Answer the question using the supplied context and candidate answers. \
+              Reply with the relevant labels."
+        }
+    }
+}
+
+/// Allocates the A..Z letter labels for `q`'s candidates. Returns
+/// `vec![]` for an empty question so callers can `is_empty()` to
+/// distinguish "no candidates" from a build error.
+fn jev_labels(q: &PreparedQuestion) -> Vec<char> {
+    (b'A'..=(b'A' + q.descriptions.len() as u8 - 1))
         .map(|b| b as char)
-        .collect();
+        .collect()
+}
+
+/// Renders the JEV JSON payload (context + question + candidates)
+/// for embedding in the per-arch chat template. Used by every
+/// per-arch `run_jev_decision_*` so the JSON shape stays in sync.
+fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
+    let labels = jev_labels(q);
     let mut payload = String::from("{\"context\": ");
-    payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+    payload
+        .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
     payload.push_str(", \"question\": ");
-    payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+    payload
+        .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
     payload.push_str(", \"candidates\": {");
     for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
         if i > 0 {
@@ -1460,9 +1261,22 @@ fn build_jev_prompt(
         payload.push('"');
         payload.push(*label_char);
         payload.push_str("\": ");
-        payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
+        payload
+            .push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
     }
     payload.push_str("}}");
+    Ok(payload)
+}
+
+fn build_jev_prompt(
+    tokenizer: &BPETokenizer,
+    context: &str,
+    q: &PreparedQuestion,
+    _output_json: bool,
+) -> Result<(Vec<u32>, String), String> {
+    let system = jev_system_prompt(q.mode);
+    let labels = jev_labels(q);
+    let payload = jev_payload_json(context, q)?;
 
     let mut token_ids = Vec::new();
     append_qwen_message_tokens(
