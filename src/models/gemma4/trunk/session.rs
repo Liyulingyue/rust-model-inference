@@ -3,6 +3,8 @@ use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
 use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
 use crate::core::scratchpad::KvFormat;
+#[cfg(feature = "vulkan")]
+use crate::ops::kernel::Weight;
 
 pub struct Gemma4Session<'model> {
     pub(super) model: &'model Gemma4Model,
