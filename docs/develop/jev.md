@@ -1,8 +1,10 @@
 # JEV 决策评分
 
-> **Status (2026-09-20)**：`--jev` CLI 是 OpenJEV 风格的 single-forward-pass
+> **Status (2026-09-21)**：`--jev` CLI 是 OpenJEV 风格的 single-forward-pass
 > 决策评分模式。9 个 model trunk 全支持（qwen3 / qwen3.5 / llama 家族 /
 > gemma4 / lfm2 / lfm25 / spark2_5 / nemotron_h / hunyuan-dense）。
+> 新增 Grouped 模式（MultiSelect + BlockChoice），支持多选与块级单选，
+> 使用 per-group softmax 避免跨组概率污染。
 
 ## 1. 设计动机
 
@@ -238,6 +240,128 @@ cargo build --release --bin rust-model-inference
   --jev-question "..." --jev-option "晴天:5" --jev-option "阴天:3"
 ```
 
+## 10a. Grouped 模式：MultiSelect + BlockChoice
+
+> **实验性功能，与 Choice/Binary/Score 完全隔离。** Grouped 路径使用独立的
+> `run_jev_grouped_decision` / `compute_grouped_jev_result` /
+> `build_grouped_payload` 函数族，不调用、不影响原有 Choice/Binary/Score
+> 的任何代码。详见 §13「隔离边界」。
+
+### 动机
+
+Choice / Binary / Score 使用**全局 softmax**：所有候选共享一个分母，互斥归一化。
+当候选之间**不互斥**时（多选、块级独立选择），全局 softmax 会造成**跨组概率污染**——
+一个组里的高分候选会压制其它组的概率，即使两组在语义上无关。
+
+Grouped 模式改用 **per-group softmax**：每个组内独立归一化，组间概率互不影响。
+
+### MultiSelect（成对二选一）
+
+`--jev-multi` 标志激活。每 2 个 `--jev-option` 自动组成一组（正/反 binary pair），
+每组独立 softmax，输出每个项目的独立判别结果。
+
+```bash
+./target/release/rust-model-inference \
+  --model "models/..." --jev --jev-multi \
+  --jev-context "元音字母判断" \
+  --jev-question "以下哪些是元音？" \
+  --jev-option "A是元音" --jev-option "A不是元音" \
+  --jev-option "E是元音" --jev-option "E不是元音" \
+  --jev-option "R是元音" --jev-option "R不是元音"
+```
+
+输出：
+```
+--- JEV decision (MultiSelect) ---
+  [pair_1] choice: A
+    A: 0.9933 — A是元音
+    B: 0.0067 — A不是元音
+    confidence: 0.9933 | entropy: 0.0393 | margin: 0.9866
+  [pair_2] choice: C
+    C: 0.9989 — E是元音
+    D: 0.0011 — E不是元音
+    ...
+  [pair_3] choice: F
+    E: 0.6225 — R是元音
+    F: 0.3775 — R不是元音
+    ...
+```
+
+### BlockChoice（显式分块，每块内单选）
+
+`--jev-block "label"` 标记块边界，后续 `--jev-option` 归入当前块。每块独立 softmax，
+块间互不影响。
+
+```bash
+./target/release/rust-model-inference \
+  --model "models/..." --jev \
+  --jev-context "用户偏好素食，买了一荤一素" \
+  --jev-question "选一荤一素" \
+  --jev-block "素菜" --jev-option "豆腐" --jev-option "青菜" --jev-option "西兰花" \
+  --jev-block "荤菜" --jev-option "牛肉" --jev-option "猪肉" --jev-option "鸡肉"
+```
+
+### Batch Score（分组打分）
+
+BlockChoice + `:value` 后缀 = 每块独立打分。每组内 softmax 后计算
+`score = Σ p_i × value_i`，输出多个独立分数。
+
+```bash
+./target/release/rust-model-inference \
+  --model "models/..." --jev \
+  --jev-context "用户评价三道菜" \
+  --jev-question "对每道菜打分（1-5）" \
+  --jev-block "鱼香肉丝" --jev-option "1分:1" --jev-option "2分:2" --jev-option "3分:3" --jev-option "4分:4" --jev-option "5分:5" \
+  --jev-block "宫保鸡丁" --jev-option "1分:1" --jev-option "2分:2" --jev-option "3分:3" --jev-option "4分:4" --jev-option "5分:5" \
+  --jev-block "麻婆豆腐" --jev-option "1分:1" --jev-option "2分:2" --jev-option "3分:3" --jev-option "4分:4" --jev-option "5分:5"
+```
+
+输出：
+```
+--- JEV decision (BlockChoice) ---
+  [鱼香肉丝] score: 4.2100
+    A: 0.7100 × 1 = 0.7100 — 1分
+    B: 0.1800 × 2 = 0.3600 — 2分
+    C: 0.0800 × 3 = 0.2400 — 3分
+    D: 0.0200 × 4 = 0.0800 — 4分
+    E: 0.0100 × 5 = 0.0500 — 5分
+    confidence: 0.7100 | entropy: 0.8900 | margin: 0.5300
+  [宫保鸡丁] score: 3.4500
+    ...
+  [麻婆豆腐] score: 4.8200
+    ...
+```
+
+### CLI 标志
+
+| 标志 | 作用 | 与原有标志的关系 |
+|---|---|---|
+| `--jev-multi` | 激活 MultiSelect 模式（2 个 option 一组） | 与 `--jev-block` 互斥 |
+| `--jev-block "label"` | 开始一个新块，后续 `--jev-option` 归入此块 | 可重复，每个 block = 一组 |
+| `--jev-option` | 在 `--jev-block` 之后归入当前块；否则走原 Choice 路径 | 完全向后兼容 |
+
+### 分组 softmax vs 全局 softmax
+
+```
+全局 softmax（Choice / Binary / Score）：
+  p_i = exp(z_i) / Σ_all exp(z_j)
+  → 所有候选互斥，一个高分候选压低所有其它概率
+
+per-group softmax（MultiSelect / BlockChoice）：
+  p_i = exp(z_i) / Σ_group exp(z_j)
+  → 组内互斥归一化，组间概率独立
+  → 一个组的高分候选不影响其它组的概率
+```
+
+### 字母标签分配
+
+跨组连续分配 A-Z。例如 3 个组，每组 2 项：
+- 组 1: A, B
+- 组 2: C, D
+- 组 3: E, F
+
+上限 26 个（A-Z），跨所有组的选项总数 ≤ 26。
+
 ## 11. 与 OpenJEV 的差异
 
 | 维度 | 本实现 | OpenJEV |
@@ -249,6 +373,9 @@ cargo build --release --bin rust-model-inference
 | Bilingual UI / i18n | ❌ | ✅ |
 | HTTP API / JSON export | ❌（CLI 模式） | ✅ |
 | 候选 label 单 token 校验 | ✅（硬约束） | ✅（硬约束） |
+| MultiSelect（成对二选一） | ✅（实验性，per-group softmax） | ❌ |
+| BlockChoice（块级单选） | ✅（实验性，per-group softmax） | ❌ |
+| Batch Score（分组独立打分） | ✅（实验性，per-group `Σ p×value`） | ❌ |
 
 ## 12. 已知限制
 
@@ -265,15 +392,41 @@ cargo build --release --bin rust-model-inference
 4. **per-arch chat template 硬编码**：每个 trunk 的 prompt format 是
    写死在 `run_jev_decision_*` 函数里的。如果上游 tokenizer chat
    template 变化，需要同步更新。
+5. **Grouped 模式实验性**：MultiSelect / BlockChoice 使用单次前向 + 分组
+   softmax，模型在前向时仍看到全部候选的 prompt。组内相对排序通常足够
+   准确，但概率值本身的校准尚未验证。如需精确独立的 per-group 概率，
+   可考虑 per-group 独立前向（当前未实现，开销 ×N）。
 
-## 13. 源码索引
+## 13. 隔离边界
+
+Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔离**：
+
+| 原有路径（Choice/Binary/Score） | 分组路径（MultiSelect/BlockChoice） |
+|---|---|
+| `run_jev_decision` | `run_jev_grouped_decision` |
+| `prepare_jev_questions` | `prepare_jev_grouped_questions` |
+| `build_jev_prompt` | `build_grouped_payload` + `build_grouped_system` |
+| `compute_jev_result`（全局 softmax） | `compute_grouped_jev_result`（per-group softmax） |
+| `run_jev_decision_{trunk}` × 9 | `run_jev_grouped_{trunk}` × 9 |
+| `JevResult` | `JevGroupedResult` + `JevGroupResult` |
+| `Serialize for JevResult` | `Serialize for JevGroupedResult` |
+
+两条路径**共享的唯一代码**是 `verify_label_tokens_single`（校验 A-Z 单 token，
+未改动）。原有 Choice/Binary/Score 的 prompt 构造、前向调用、softmax 后处理、
+输出格式均未修改——`JevMode` 枚举新增 `MultiSelect` / `BlockChoice` 两个变体
+仅导致原有 match arm 加了 `=> return Err(...)` 兜底，正常 Choice 调用不会触发。
+
+## 14. 源码索引
 
 | 路径 | 角色 |
 |---|---|
-| `src/app/cli.rs` | `--jev*` CLI 解析 |
-| `src/app/text.rs::run_jev_decision` | arch dispatcher |
-| `src/app/text.rs::run_jev_decision_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch 实现 |
-| `src/app/text.rs::{prepare_jev_questions,verify_label_tokens_single,build_jev_prompt,print_jev_question,compute_jev_result}` | 共享 helper |
+| `src/app/cli.rs` | `--jev*` CLI 解析（含 `--jev-multi` / `--jev-block`） |
+| `src/app/text.rs::run_jev_decision` | Choice/Binary/Score arch dispatcher |
+| `src/app/text.rs::run_jev_decision_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Choice 实现 |
+| `src/app/text.rs::{prepare_jev_questions,verify_label_tokens_single,build_jev_prompt,print_jev_question,compute_jev_result}` | Choice 共享 helper |
+| `src/app/text.rs::run_jev_grouped_decision` | MultiSelect/BlockChoice arch dispatcher |
+| `src/app/text.rs::run_jev_grouped_{qwen3,qwen35,llama,gemma4,lfm2,lfm25,spark,nemotron_h,hunyuan}` | per-arch Grouped 实现 |
+| `src/app/text.rs::{prepare_jev_grouped_questions,build_grouped_payload,build_grouped_system,allocate_group_labels,build_jev_token_ids_for_arch,compute_grouped_jev_result,print_grouped_result_text}` | Grouped 共享 helper |
 | `src/models/*/trunk/forward.rs` 或 `session.rs` | 各 trunk 的 `forward_logits` 实现 |
 | `tests/quantized_inference.rs` | 已有 IQ4_NL parity 测试 |
 
