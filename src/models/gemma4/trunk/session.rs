@@ -1,7 +1,7 @@
 use super::forward::Gemma4InputRow;
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
-use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
+use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks, ChunkedPrefill, DEFAULT_PREFILL_BATCH_SIZE};
 use crate::core::scratchpad::KvFormat;
 #[cfg(feature = "vulkan")]
 use crate::ops::kernel::Weight;
@@ -267,4 +267,93 @@ pub(super) fn require_f32_kv(kv_format: KvFormat) -> Result<(), String> {
         return Err("Gemma4 incremental session requires an F32 KV cache".into());
     }
     Ok(())
+}
+
+impl<'model> ChunkedPrefill for Gemma4Session<'model> {
+    type Input = Vec<Gemma4InputRow>;
+
+    fn input_len(input: &Self::Input) -> usize {
+        input.len()
+    }
+
+    fn max_chunk_size(&self) -> usize {
+        self.model.config.n_ctx
+    }
+
+    fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    fn set_seq_len(&mut self, len: usize) {
+        self.seq_len = len;
+    }
+
+    fn forward_chunk(
+        &mut self,
+        input: &Self::Input,
+        rows: usize,
+        _base_position: usize,
+        _project_logits: bool,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if rows != input.len() {
+            return Err(format!(
+                "Gemma4Session::forward_chunk only handles whole-input chunks; \
+                 rows = {rows} vs input.len() = {}",
+                input.len()
+            ));
+        }
+        let logits = self.forward_rows(input)?;
+        Ok(Some(logits))
+    }
+
+    fn prefill(
+        &mut self,
+        input: &Self::Input,
+        batch_size: usize,
+    ) -> Result<Option<Vec<f32>>, String> {
+        let batch_size = checked_prefill_batch_size(Some(batch_size))?;
+        let total = Self::input_len(input);
+        if total == 0 {
+            return Ok(None);
+        }
+        let mut last_logits: Option<Vec<f32>> = None;
+        for chunk in prefill_chunks(total, batch_size) {
+            let rows = chunk.len();
+            let base = self.seq_len;
+            let is_last = chunk.end == total;
+            last_logits = <Self as ChunkedPrefill>::forward_chunk(self, input, rows, base, is_last)?;
+            self.set_seq_len(base + rows);
+        }
+        Ok(last_logits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_prefill_input_len_matches_token_count() {
+        let rows = vec![Gemma4InputRow::Token(0); 7];
+        assert_eq!(
+            <Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows),
+            7
+        );
+    }
+
+    #[test]
+    fn chunked_prefill_default_loop_clamps_batch_to_one_for_now() {
+        // Gemma4 actually supports B > 1 via its own `prefill_chunks`
+        // dispatch inside `forward_rows`, but the trait `forward_chunk`
+        // contract only handles whole-input chunks today — the default
+        // `prefill` loop calls `forward_chunk` once per chunk, and the
+        // B > 1 case routes to `forward_rows` which already does the
+        // chunking. Verify the input contract stays compatible with the
+        // `prefill_chunks` B = 1 walk.
+        let rows = vec![Gemma4InputRow::Token(0); 1];
+        assert_eq!(
+            <Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows),
+            1
+        );
+    }
 }

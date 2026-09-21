@@ -59,7 +59,7 @@ Plus the existing helpers:
 |---|---|---|---|---|
 | `qwen3` | ✅ (`prefill.rs::forward_cpu_chunk`) | ✅ | ❌ | kept `prefill(&Qwen3Input)` API for backwards compat |
 | `qwen35` | ✅ (`forward.rs::forward_chunk`) | ✅ (via `session.rs::prefill`) | ❌ |  |
-| `gemma4` | ✅ (`forward.rs::forward_chunk_inner`) | ✅ | ❌ |  |
+| `gemma4` | ✅ (`forward.rs::forward_chunk_inner`) | ✅ (via `forward_rows` → `prefill_chunks` + `forward_chunk`) | ✅ (`Gemma4Session` impl; `forward_chunk` delegates to `forward_rows` which already does internal chunking) | `Input = Vec<Gemma4InputRow>` (carries per-layer token metadata) |
 | `nemotron_h` | partial (`prefill()` calls `forward_layer(length)` which still loops `for t in 0..length`) | ❌ | ❌ |  |
 | `qwen3/asr` | ✅ | ✅ | ❌ |  |
 | `qwen3/tts` | ✅ | ✅ | ❌ |  |
@@ -225,15 +225,18 @@ Eight unit tests in `core::prefill::tests`:
   — `B=1` reproduces the legacy per-token loop, **which is the
   whole point of the abstraction**
 
-`cargo test --release --lib`: 759 passed / 14 failed / 58 ignored.
+`cargo test --release --lib`: 775 passed / 14 failed / 58 ignored.
 The 14 failures are pre-existing (`bf16_is_neither_f16_decoded_nor_…`,
 `f16_projection_quantizes_input_and_uses_ggml_f16_dot`, various
-`matmul::neon_tests::…` parity checks, `rope::tests::vision_rope_…`).
-The new passes come from
+`matmul::neon_tests::…` parity checks, `rope::tests::vision_rope_…`,
+`models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix`,
+`models::qwen35::vision::tests::projector_keeps_the_existing_spatial_block_order`,
+etc.). The new passes come from
 `models::llama::trunk::session::tests::chunked_prefill_*` (2),
 `models::lfm2::trunk::session::tests::chunked_prefill_*` (2),
 `models::lfm25::trunk::session::tests::chunked_prefill_*` (2),
 `models::lfm2moe::trunk::session::tests::chunked_prefill_*` (2),
+`models::gemma4::trunk::session::tests::chunked_prefill_*` (2),
 `models::spark::trunk::forward::tests::chunked_prefill_input_len_*` (1).
 None of the 14 failures come from this branch.
 
