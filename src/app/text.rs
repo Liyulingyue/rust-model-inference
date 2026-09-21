@@ -887,12 +887,13 @@ fn run_jev_decision_lfm2(
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) = crate::models::lfm2::run_forward_logits_lfm2(
+        let (logits, prefill_dur) = crate::models::lfm2::run_forward_logits_lfm2_with_batch(
             source.as_ref(),
             &token_ids,
             n_threads,
             KvFormat::F16,
             8192,
+            prefill_batch_size,
         )
         .map_err(|e| format!("LFM2 forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
@@ -1080,12 +1081,13 @@ fn run_jev_decision_lfm25(
             print_jev_question(q, &labels);
         }
 
-        let (logits, prefill_dur) = crate::models::lfm25::run_forward_logits_lfm25(
+        let (logits, prefill_dur) = crate::models::lfm25::run_forward_logits_lfm25_with_batch(
             source.as_ref(),
             &token_ids,
             n_threads,
             KvFormat::F16,
             8192,
+            prefill_batch_size,
         )
         .map_err(|e| format!("LFM2.5 forward_logits failed: {e}"))?;
         let result = compute_jev_result(q, &tokenizer, &labels, &logits, prefill_dur.as_millis());
