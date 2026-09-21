@@ -183,13 +183,25 @@ pub fn run_inference(
             .and_then(|v| v.to_string_val())
             .unwrap_or_default();
 
-        // Build the prompt based on the architecture. Granite uses a
+// MiniCPM5 detection: `general.architecture = llama` (LLaMA backbone),
+        // but `general.name` contains "MiniCPM". MiniCPM5's GGUF embeds a
+        // ChatML-based `tokenizer.chat_template` (with `<|im_start|>`/`<|im_end|>`),
+        // NOT the old MiniCPM 3B `<用户>/<AI>` template. The template supports
+        // `enable_thinking` to control reasoning mode.
+        // (Ref: OpenBMB/MiniCPM GGUF chat_template; llama.cpp `llama-chat.cpp:180`)
+        let is_minicpm5 = source
+            .metadata("general.name")
+            .and_then(|v| v.to_string_val())
+            .map(|s| s.to_ascii_lowercase().contains("minicpm"))
+            .unwrap_or(false);
+
+// Build the prompt based on the architecture. Granite uses a
         // distinct chat template: `<|start_of_role|>{role}<|end_of_role|>
         // {content}<|end_of_text|>` between turns and ends the user turn
-        // with `<|end_of_text|>\n`. MiniCPM5/Llama use the Qwen2-style
-        // `<|im_start|>{role}\n{content}<|im_end|>\n` template. Nanbeige is
-        // a base model with no chat template — feed the prompt as-is and let
-        // the BOS token mark the start of generation.
+        // with `<|end_of_text|>\n`. MiniCPM5 uses ChatML with non-thinking
+        // mode (`🤔\n\n\web_search\n\n`). Other Llama models use Qwen2-style
+        // ChatML with thinking (`🤔\n`). Nanbeige is a base model with no
+        // chat template — feed the prompt as-is.
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
         } else if arch == "granite" {
@@ -198,8 +210,16 @@ pub fn run_inference(
             )
         } else if arch == "nanbeige" {
             prompt.to_string()
+} else if is_minicpm5 {
+            // MiniCPM5 uses ChatML (`<|im_start|>/{role}\n{content}<|im_end|>`)
+            // per its GGUF `tokenizer.chat_template`. The template supports
+            // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
+            // (empty thinking block → direct answer). When true, emits `🤔\n`
+            // (thinking mode). Default: non-thinking for fast direct answers.
+            // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
+            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n")
         } else {
-            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n")
+            format!("user\n{prompt}\nassistant\n<think>\n")
         };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
         // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
