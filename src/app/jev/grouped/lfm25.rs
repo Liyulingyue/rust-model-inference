@@ -1,16 +1,18 @@
 //! JEV grouped-mode scorer for lfm25.
 
 use super::super::single::lfm25::Lfm25JevScorer;
+use super::super::single::{verify_label_tokens_single, JevScorer};
 use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
-use super::{JevGroupedScorer, allocate_group_labels, build_grouped_payload, build_grouped_system, build_jev_token_ids_for_arch, run_jev_grouped_core};
-use super::super::single::{JevScorer, verify_label_tokens_single};
+use super::{
+    allocate_group_labels, build_grouped_payload, build_grouped_system,
+    build_jev_token_ids_for_arch, run_jev_grouped_core, JevGroupedScorer,
+};
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
 
 pub(crate) fn run_jev_grouped_lfm25(
     source: Arc<dyn TensorSource>,
@@ -20,7 +22,9 @@ pub(crate) fn run_jev_grouped_lfm25(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
     let mut scorer = Lfm25JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
     if !output_json {
@@ -42,7 +46,11 @@ impl Lfm25JevGroupedScorer {
         prefill_batch_size: usize,
     ) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::lfm25::Lfm25JevScorer::new(source, n_threads, prefill_batch_size)?,
+            inner: super::super::single::lfm25::Lfm25JevScorer::new(
+                source,
+                n_threads,
+                prefill_batch_size,
+            )?,
         })
     }
 }
@@ -60,12 +68,8 @@ impl JevGroupedScorer for Lfm25JevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch(
-            "lfm25",
-            self.inner.tokenizer(),
-            system,
-            &payload,
-        )?;
+        let token_ids =
+            build_jev_token_ids_for_arch("lfm25", self.inner.tokenizer(), system, &payload)?;
         Ok((group_labels, token_ids))
     }
 
@@ -88,4 +92,3 @@ impl JevGroupedScorer for Lfm25JevGroupedScorer {
         self.inner.tokenizer()
     }
 }
-

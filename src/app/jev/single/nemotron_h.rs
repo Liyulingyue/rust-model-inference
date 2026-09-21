@@ -1,13 +1,13 @@
 //! JEV single-mode scorer for nemotron_h.
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
-use super::jev_system_prompt;
-use super::jev_payload_json;
-use super::PreparedQuestion;
-use super::run_jev_decision_core;
 use super::jev_labels;
-use super::JevScorer;
+use super::jev_payload_json;
+use super::jev_system_prompt;
+use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
+use super::JevScorer;
+use super::PreparedQuestion;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -87,4 +87,3 @@ impl JevScorer for NemotronHJevScorer {
         &self.tokenizer
     }
 }
-

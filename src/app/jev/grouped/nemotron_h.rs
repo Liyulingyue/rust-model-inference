@@ -1,16 +1,18 @@
 //! JEV grouped-mode scorer for nemotron_h.
 
 use super::super::single::nemotron_h::NemotronHJevScorer;
+use super::super::single::{verify_label_tokens_single, JevScorer};
 use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
-use super::{JevGroupedScorer, allocate_group_labels, build_grouped_payload, build_grouped_system, build_jev_token_ids_for_arch, run_jev_grouped_core};
-use super::super::single::{JevScorer, verify_label_tokens_single};
+use super::{
+    allocate_group_labels, build_grouped_payload, build_grouped_system,
+    build_jev_token_ids_for_arch, run_jev_grouped_core, JevGroupedScorer,
+};
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
 
 pub(crate) fn run_jev_grouped_nemotron_h(
     source: Arc<dyn TensorSource>,
@@ -52,12 +54,8 @@ impl JevGroupedScorer for NemotronHJevGroupedScorer {
         let group_labels = allocate_group_labels(q);
         let system = build_grouped_system();
         let payload = build_grouped_payload(context, q)?;
-        let token_ids = build_jev_token_ids_for_arch(
-            "nemotron_h",
-            self.inner.tokenizer(),
-            system,
-            &payload,
-        )?;
+        let token_ids =
+            build_jev_token_ids_for_arch("nemotron_h", self.inner.tokenizer(), system, &payload)?;
         Ok((group_labels, token_ids))
     }
 
@@ -76,4 +74,3 @@ impl JevGroupedScorer for NemotronHJevGroupedScorer {
         self.inner.tokenizer()
     }
 }
-

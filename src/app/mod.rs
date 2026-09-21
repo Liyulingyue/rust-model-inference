@@ -26,13 +26,13 @@ pub use cli::{
 pub use dreamx::run_dreamx_cli;
 pub use embedding::{compute_embedding, run_embedding};
 pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
+pub use jev::{
+    run_jev_decision, run_jev_grouped_decision, JevGroupInput, JevGroupedQuestionInput, JevMode,
+    JevQuestionInput,
+};
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
-pub use jev::{
-    JevGroupInput, JevGroupedQuestionInput, JevMode, JevQuestionInput, run_jev_decision,
-    run_jev_grouped_decision,
-};
 pub use text::{
     run_inference, run_interactive, run_multimodal, run_multimodal_with_tts_postproc,
     run_multimodal_with_video, run_multimodal_with_video_capture_text, run_shared_inference,

@@ -1075,12 +1075,9 @@ pub fn run_forward_logits_qwen35_with_batch(
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     let n_ctx = model.config.n_ctx.min(max_context);
     let pool = ComputePool::new(n_threads_arg);
-    let (positions, _next) = crate::models::qwen35::build_qwen35_positions(
-        prompt_tokens,
-        None,
-        &[],
-    )
-    .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
+    let (positions, _next) =
+        crate::models::qwen35::build_qwen35_positions(prompt_tokens, None, &[])
+            .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
     let mut session = super::session::Qwen35Session::new_with_prefill_batch_size(
         &mut model,
         n_ctx.min(prompt_tokens.len() + 1),

@@ -1,14 +1,14 @@
 //! JEV single-mode scorer for lfm2.
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
-use super::jev_system_prompt;
-use super::jev_payload_json;
-use super::PreparedQuestion;
-use super::run_jev_decision_core;
 use super::jev_labels;
-use super::JevScorer;
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use super::jev_payload_json;
+use super::jev_system_prompt;
+use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
+use super::JevScorer;
+use super::PreparedQuestion;
+use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -33,13 +33,7 @@ pub(crate) fn run_jev_decision_lfm2(
     if !output_json {
         eprintln!("compute pool: {} threads (LFM2)", n_threads);
     }
-    run_jev_decision_core(
-        source,
-        context,
-        per_question,
-        output_json,
-        &mut scorer,
-    )
+    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
 }
 
 /// LFM2 JEV scorer: uses the free-function prefill path
@@ -131,4 +125,3 @@ impl JevScorer for Lfm2JevScorer {
         &self.tokenizer
     }
 }
-

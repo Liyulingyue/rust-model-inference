@@ -32,7 +32,6 @@ pub struct JevResult {
     pub prefill_ms: u128,
 }
 
-
 // ---------------------------------------------------------------------------
 // Grouped JEV: MultiSelect + BlockChoice
 //
@@ -133,7 +132,9 @@ impl serde::Serialize for JevGroupedResult {
                     "margin": g.margin,
                 });
                 if let Some(score) = g.score {
-                    obj.as_object_mut().unwrap().insert("score".to_string(), serde_json::json!(score));
+                    obj.as_object_mut()
+                        .unwrap()
+                        .insert("score".to_string(), serde_json::json!(score));
                 }
                 obj
             })

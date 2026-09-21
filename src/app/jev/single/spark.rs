@@ -1,14 +1,14 @@
 //! JEV single-mode scorer for spark.
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
-use super::jev_system_prompt;
-use super::jev_payload_json;
-use super::PreparedQuestion;
-use super::run_jev_decision_core;
 use super::jev_labels;
-use super::JevScorer;
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use super::jev_payload_json;
+use super::jev_system_prompt;
+use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
+use super::JevScorer;
+use super::PreparedQuestion;
+use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -46,10 +46,7 @@ pub(crate) struct SparkJevScorer {
 }
 
 impl SparkJevScorer {
-    pub(crate) fn new(
-        source: Arc<dyn TensorSource>,
-        n_threads: usize,
-    ) -> Result<Self, String> {
+    pub(crate) fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
@@ -115,4 +112,3 @@ impl JevScorer for SparkJevScorer {
         &self.tokenizer
     }
 }
-

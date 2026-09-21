@@ -172,7 +172,6 @@ pub fn run_inference(
 
 // JEV types + decision scoring live in `src/app/jev/mod.rs`.
 
-
 // JEV decision scoring has moved to `src/app/jev/mod.rs`.
 
 pub fn run_interactive(

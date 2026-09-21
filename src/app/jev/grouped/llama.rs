@@ -1,16 +1,18 @@
 //! JEV grouped-mode scorer for llama.
 
 use super::super::single::llama::LlamaJevScorer;
+use super::super::single::{verify_label_tokens_single, JevScorer};
 use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
-use super::{JevGroupedScorer, allocate_group_labels, build_grouped_payload, build_grouped_system, build_jev_token_ids_for_arch, run_jev_grouped_core};
-use super::super::single::{JevScorer, verify_label_tokens_single};
+use super::{
+    allocate_group_labels, build_grouped_payload, build_grouped_system,
+    build_jev_token_ids_for_arch, run_jev_grouped_core, JevGroupedScorer,
+};
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
 
 pub(crate) fn run_jev_grouped_llama(
     source: Arc<dyn TensorSource>,
@@ -20,7 +22,9 @@ pub(crate) fn run_jev_grouped_llama(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let available_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let available_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
     let mut scorer = LlamaJevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size)?;
     if !output_json {
@@ -42,7 +46,11 @@ impl LlamaJevGroupedScorer {
         prefill_batch_size: usize,
     ) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::llama::LlamaJevScorer::new(source, n_threads, prefill_batch_size)?,
+            inner: super::super::single::llama::LlamaJevScorer::new(
+                source,
+                n_threads,
+                prefill_batch_size,
+            )?,
         })
     }
 }
@@ -88,4 +96,3 @@ impl JevGroupedScorer for LlamaJevGroupedScorer {
         self.inner.tokenizer()
     }
 }
-

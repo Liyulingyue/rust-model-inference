@@ -1,5 +1,6 @@
 use super::single::{
-    build_jev_prompt, jev_labels, print_jev_question, run_jev_decision_core, verify_label_tokens_single,
+    build_jev_prompt, jev_labels, print_jev_question, run_jev_decision_core,
+    verify_label_tokens_single,
 };
 use super::types::{
     JevGroupInput, JevGroupResult, JevGroupedOption, JevGroupedQuestionInput, JevGroupedResult,
@@ -71,15 +72,15 @@ fn run_jev_grouped_core<S: JevGroupedScorer>(
     Ok(results)
 }
 
-pub(crate) mod qwen3;
-pub(crate) mod qwen35;
-pub(crate) mod llama;
 pub(crate) mod gemma4;
+pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
 pub(crate) mod lfm25;
-pub(crate) mod spark;
+pub(crate) mod llama;
 pub(crate) mod nemotron_h;
-pub(crate) mod hunyuan;
+pub(crate) mod qwen3;
+pub(crate) mod qwen35;
+pub(crate) mod spark;
 
 pub fn prepare_jev_grouped_questions(
     questions: &[JevGroupedQuestionInput],
@@ -102,7 +103,10 @@ pub fn prepare_jev_grouped_questions(
             if g.options.len() < 2 {
                 return Err(format!(
                     "Question {:?} group {} ({:?}) needs at least 2 options, got {}",
-                    q.text, gi + 1, g.label, g.options.len()
+                    q.text,
+                    gi + 1,
+                    g.label,
+                    g.options.len()
                 ));
             }
             total_options += g.options.len();
@@ -189,9 +193,7 @@ fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     let mut next = b'A';
     for group in &q.groups {
         let count = group.descriptions.len();
-        let labels: Vec<char> = (next..next + count as u8)
-            .map(|b| b as char)
-            .collect();
+        let labels: Vec<char> = (next..next + count as u8).map(|b| b as char).collect();
         next += count as u8;
         all.push(labels);
     }
@@ -211,13 +213,25 @@ fn build_jev_token_ids_for_arch(
                 &mut token_ids,
                 tokenizer,
                 "system",
-                &tokenizer.encode(system, EncodeOptions { add_special: false, parse_special: false }),
+                &tokenizer.encode(
+                    system,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: false,
+                    },
+                ),
             )?;
             append_qwen_message_tokens(
                 &mut token_ids,
                 tokenizer,
                 "user",
-                &tokenizer.encode(payload, EncodeOptions { add_special: false, parse_special: false }),
+                &tokenizer.encode(
+                    payload,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: false,
+                    },
+                ),
             )?;
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
@@ -228,13 +242,25 @@ fn build_jev_token_ids_for_arch(
                 &mut token_ids,
                 tokenizer,
                 "system",
-                &tokenizer.encode(system, EncodeOptions { add_special: false, parse_special: false }),
+                &tokenizer.encode(
+                    system,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: false,
+                    },
+                ),
             )?;
             append_qwen_message_tokens(
                 &mut token_ids,
                 tokenizer,
                 "user",
-                &tokenizer.encode(payload, EncodeOptions { add_special: false, parse_special: false }),
+                &tokenizer.encode(
+                    payload,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: false,
+                    },
+                ),
             )?;
             append_qwen_assistant_prefix(&mut token_ids, tokenizer, false)?;
             Ok(token_ids)
@@ -246,7 +272,13 @@ fn build_jev_token_ids_for_arch(
                      <|start_of_role|>user<|end_of_role|>{payload}<|end_of_text|>\n\
                      <|start_of_role|>assistant<|end_of_role|>"
                 );
-                let mut ids = tokenizer.encode(&prompt, EncodeOptions { add_special: false, parse_special: true });
+                let mut ids = tokenizer.encode(
+                    &prompt,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: true,
+                    },
+                );
                 if let Some(bos) = tokenizer.bos_id() {
                     if ids.first() != Some(&bos) {
                         ids.insert(0, bos);
@@ -255,10 +287,22 @@ fn build_jev_token_ids_for_arch(
                 Ok(ids)
             } else if arch == "nanbeige" {
                 let prompt = format!("{system}\n\n{payload}\n\nAnswer:");
-                Ok(tokenizer.encode(&prompt, EncodeOptions { add_special: true, parse_special: true }))
+                Ok(tokenizer.encode(
+                    &prompt,
+                    EncodeOptions {
+                        add_special: true,
+                        parse_special: true,
+                    },
+                ))
             } else {
                 let prompt = format!("system\n{system}\nuser\n{payload}\nassistant\n");
-                let mut ids = tokenizer.encode(&prompt, EncodeOptions { add_special: false, parse_special: true });
+                let mut ids = tokenizer.encode(
+                    &prompt,
+                    EncodeOptions {
+                        add_special: false,
+                        parse_special: true,
+                    },
+                );
                 if let Some(bos) = tokenizer.bos_id() {
                     ids.insert(0, bos);
                 }
@@ -268,7 +312,13 @@ fn build_jev_token_ids_for_arch(
         "gemma4" => {
             let prompt = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
             let bos = tokenizer.bos_id().ok_or("Gemma4 tokenizer missing BOS")?;
-            let mut ids = tokenizer.encode(&prompt, EncodeOptions { add_special: false, parse_special: true });
+            let mut ids = tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            );
             if ids.first() != Some(&bos) {
                 ids.insert(0, bos);
             }
@@ -281,15 +331,24 @@ fn build_jev_token_ids_for_arch(
             }
             token_ids.extend(tokenizer.encode(
                 &format!("system\n{system}\n"),
-                EncodeOptions { add_special: false, parse_special: false },
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
             ));
             token_ids.extend(tokenizer.encode(
                 &format!("user\n{payload}\n"),
-                EncodeOptions { add_special: false, parse_special: false },
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
             ));
             token_ids.extend(tokenizer.encode(
                 "assistant\n",
-                EncodeOptions { add_special: false, parse_special: false },
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
             ));
             Ok(token_ids)
         }
@@ -301,7 +360,13 @@ fn build_jev_token_ids_for_arch(
                  {sos}<|User|>{payload}{eos}\
                  {sos}<|Bot|>\n"
             );
-            let mut token_ids = tokenizer.encode(&prompt, EncodeOptions { add_special: false, parse_special: true });
+            let mut token_ids = tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            );
             if tokenizer.add_bos() {
                 if let Some(bos) = tokenizer.bos_id() {
                     token_ids.insert(0, bos);
@@ -311,7 +376,13 @@ fn build_jev_token_ids_for_arch(
         }
         "nemotron_h" => {
             let prompt = format!("{system}\n\n{payload}\n\nAnswer:");
-            Ok(tokenizer.encode(&prompt, EncodeOptions { add_special: true, parse_special: true }))
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: true,
+                    parse_special: true,
+                },
+            ))
         }
         other => Err(format!(
             "--jev grouped is not yet supported for architecture {:?}; \
@@ -338,15 +409,26 @@ fn compute_grouped_jev_result(
             .map(|c| {
                 let s = c.to_string();
                 tokenizer
-                    .encode(&s, EncodeOptions { add_special: false, parse_special: false })
+                    .encode(
+                        &s,
+                        EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    )
                     .into_iter()
                     .next()
                     .unwrap_or(0)
             })
             .collect();
         let group_logits: Vec<f32> = label_ids.iter().map(|&id| logits[id as usize]).collect();
-        let max_logit = group_logits.iter().fold(f32::NEG_INFINITY, |a, &b| f32::max(a, b));
-        let mut exps: Vec<f32> = group_logits.iter().map(|&z| (z - max_logit).exp()).collect();
+        let max_logit = group_logits
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| f32::max(a, b));
+        let mut exps: Vec<f32> = group_logits
+            .iter()
+            .map(|&z| (z - max_logit).exp())
+            .collect();
         let sum: f32 = exps.iter().sum();
         for v in exps.iter_mut() {
             *v /= sum;
@@ -358,7 +440,11 @@ fn compute_grouped_jev_result(
             .map(|(i, _)| i)
             .unwrap_or(0);
         let confidence = exps[chosen_idx];
-        let entropy: f32 = -exps.iter().filter(|p| **p > 0.0).map(|p| p * p.ln()).sum::<f32>();
+        let entropy: f32 = -exps
+            .iter()
+            .filter(|p| **p > 0.0)
+            .map(|p| p * p.ln())
+            .sum::<f32>();
         let mut sorted = exps.clone();
         sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         let margin = if sorted.len() >= 2 {
@@ -368,7 +454,12 @@ fn compute_grouped_jev_result(
         };
         let has_values = group.values.iter().any(|v| *v != 0.0);
         let score = if has_values {
-            Some(exps.iter().zip(group.values.iter()).map(|(p, v)| p * v).sum())
+            Some(
+                exps.iter()
+                    .zip(group.values.iter())
+                    .map(|(p, v)| p * v)
+                    .sum(),
+            )
         } else {
             None
         };
@@ -412,31 +503,78 @@ pub fn run_jev_grouped_decision(
     let t0 = Instant::now();
     let results = match &*arch {
         "qwen3" | "qwen3vl" => qwen3::run_jev_grouped_qwen3(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "qwen35" => qwen35::run_jev_grouped_qwen35(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => llama::run_jev_grouped_llama(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
-        )?,
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+            llama::run_jev_grouped_llama(
+                source.clone(),
+                context,
+                &prepared,
+                n_threads_arg,
+                prefill_batch_size,
+                output_json,
+            )?
+        }
         "gemma4" => gemma4::run_jev_grouped_gemma4(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "lfm25" => lfm25::run_jev_grouped_lfm25(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "spark2_5" => spark::run_jev_grouped_spark(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         "hunyuan-dense" => hunyuan::run_jev_grouped_hunyuan(
-            source.clone(), context, &prepared, n_threads_arg, prefill_batch_size, output_json,
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            output_json,
         )?,
         other => {
             return Err(format!(
@@ -457,7 +595,10 @@ pub fn run_jev_grouped_decision(
     } else if results.len() == 1 {
         print_grouped_result_text(&results[0]);
     } else {
-        println!("\n--- JEV grouped decisions ({} questions) ---", results.len());
+        println!(
+            "\n--- JEV grouped decisions ({} questions) ---",
+            results.len()
+        );
         for r in &results {
             println!("\nQ: {}", r.question);
             print_grouped_result_text(r);
@@ -465,7 +606,11 @@ pub fn run_jev_grouped_decision(
     }
 
     let total_ms = t0.elapsed().as_millis();
-    eprintln!("\nJEV grouped total: {} ms ({} questions)", total_ms, results.len());
+    eprintln!(
+        "\nJEV grouped total: {} ms ({} questions)",
+        total_ms,
+        results.len()
+    );
     Ok(())
 }
 
@@ -477,7 +622,11 @@ fn print_grouped_result_text(r: &JevGroupedResult) {
             for (i, p) in g.probabilities.iter().enumerate() {
                 println!(
                     "    {}: {:.4} × {} = {:.4} — {}",
-                    g.labels[i], p, g.values[i], p * g.values[i], g.descriptions[i]
+                    g.labels[i],
+                    p,
+                    g.values[i],
+                    p * g.values[i],
+                    g.descriptions[i]
                 );
             }
         } else {
@@ -493,4 +642,3 @@ fn print_grouped_result_text(r: &JevGroupedResult) {
     }
     println!("prefill: {} ms", r.prefill_ms);
 }
-

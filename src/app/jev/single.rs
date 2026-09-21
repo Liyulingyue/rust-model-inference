@@ -7,8 +7,8 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::gemma4::{Gemma4Model, Gemma4Session};
-use crate::models::lfm25::trunk::forward::run_forward_logits_lfm25_with_batch;
 use crate::models::lfm2::trunk::forward::run_forward_logits_lfm2_with_batch;
+use crate::models::lfm25::trunk::forward::run_forward_logits_lfm25_with_batch;
 use crate::models::lfm2moe::trunk::forward::run_forward_logits_lfm2moe_with_batch;
 use crate::models::llama::trunk::forward::run_forward_logits_llama_with_batch;
 use crate::models::qwen3::{Qwen3Input, Qwen3Model, Qwen3Session};
@@ -56,14 +56,16 @@ pub fn run_jev_decision(
             prefill_batch_size,
             output_json,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => llama::run_jev_decision_llama(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+            llama::run_jev_decision_llama(
+                source.clone(),
+                context,
+                &prepared,
+                n_threads_arg,
+                prefill_batch_size,
+                output_json,
+            )?
+        }
         "gemma4" => gemma4::run_jev_decision_gemma4(
             source.clone(),
             context,
@@ -292,16 +294,16 @@ fn prepare_jev_questions(
     Ok(per_question)
 }
 
-pub(crate) mod qwen3;
-pub(crate) mod qwen35;
-pub(crate) mod llama;
 pub(crate) mod gemma4;
+pub(crate) mod hunyuan;
 pub(crate) mod lfm2;
-pub(crate) mod spark;
 pub(crate) mod lfm25;
 pub(crate) mod lfm2moe;
+pub(crate) mod llama;
 pub(crate) mod nemotron_h;
-pub(crate) mod hunyuan;
+pub(crate) mod qwen3;
+pub(crate) mod qwen35;
+pub(crate) mod spark;
 
 pub(crate) fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(), String> {
     for label_char in b'A'..=b'Z' {
@@ -359,11 +361,9 @@ pub(crate) fn jev_labels(q: &PreparedQuestion) -> Vec<char> {
 pub(crate) fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
     let labels = jev_labels(q);
     let mut payload = String::from("{\"context\": ");
-    payload
-        .push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
+    payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
     payload.push_str(", \"question\": ");
-    payload
-        .push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
+    payload.push_str(&serde_json::to_string(&q.text).map_err(|e| format!("question json: {e}"))?);
     payload.push_str(", \"candidates\": {");
     for (i, (label_char, desc)) in labels.iter().zip(q.descriptions.iter()).enumerate() {
         if i > 0 {
@@ -372,8 +372,7 @@ pub(crate) fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<St
         payload.push('"');
         payload.push(*label_char);
         payload.push_str("\": ");
-        payload
-            .push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
+        payload.push_str(&serde_json::to_string(desc).map_err(|e| format!("desc json: {e}"))?);
     }
     payload.push_str("}}");
     Ok(payload)

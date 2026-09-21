@@ -1,15 +1,15 @@
 //! JEV single-mode scorer for hunyuan.
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
-use super::qwen3::Qwen3JevScorer;
-use super::jev_system_prompt;
-use super::jev_payload_json;
-use super::PreparedQuestion;
-use super::run_jev_decision_core;
 use super::jev_labels;
-use super::JevScorer;
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use super::jev_payload_json;
+use super::jev_system_prompt;
+use super::qwen3::Qwen3JevScorer;
+use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
+use super::JevScorer;
+use super::PreparedQuestion;
+use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -57,8 +57,11 @@ impl HunyuanJevScorer {
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         verify_label_tokens_single(&tokenizer)?;
         let pool = Arc::new(ComputePool::new(n_threads));
-        let model =
-            crate::models::qwen3::Qwen3Model::from_source(source.clone(), Arc::new(tokenizer), pool)?;
+        let model = crate::models::qwen3::Qwen3Model::from_source(
+            source.clone(),
+            Arc::new(tokenizer),
+            pool,
+        )?;
         let max_ctx = model.config().n_ctx;
         Ok(Self {
             model,
@@ -124,6 +127,3 @@ impl JevScorer for HunyuanJevScorer {
         self.model.tokenizer()
     }
 }
-
-
-

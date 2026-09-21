@@ -2,15 +2,15 @@
 
 use super::super::types::{JevMode, JevQuestionInput, JevResult};
 use super::lfm2::Lfm2JevScorer;
-use super::PreparedQuestion;
 use super::run_jev_decision_core;
 use super::JevScorer;
+use super::PreparedQuestion;
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::lfm25::trunk::forward::run_forward_logits_lfm25_with_batch;
 use crate::models::lfm2::trunk::forward::run_forward_logits_lfm2_with_batch;
+use crate::models::lfm25::trunk::forward::run_forward_logits_lfm25_with_batch;
 use crate::prompt::append_qwen_message_tokens;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,4 +86,3 @@ impl JevScorer for Lfm25JevScorer {
         self.inner.tokenizer()
     }
 }
-
