@@ -64,10 +64,10 @@ Plus the existing helpers:
 | `qwen3/asr` | ✅ | ✅ | ❌ |  |
 | `qwen3/tts` | ✅ | ✅ | ❌ |  |
 | `llama` | ✅ (`session.rs::forward_chunk_batched_real`) | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`LlamaSession` impl; **real batched Q/K/V + wo + gate/up/down matmul + batched flash attention** at `B > 1`; wired into `app/text.rs:701` JEV path; legacy free-function retained as fallback) | **~2× prefill speedup at `B = 64`** |
-| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm2Session` impl; B=1 fallback delegates to `run_forward_logits_lfm2_with_batch`; `forward_attention_chunked(rows, base_position, …)` skeleton with rows threaded but `rows > 1` branch still per-row placeholder) | shortconv SSM keeps per-row by construction |
+| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm2Session` impl; B=1 fallback delegates to `run_forward_logits_lfm2_with_batch`; `forward_attention_chunked(rows, base_position, …)` skeleton with rows threaded but `rows > 1` branch still per-row placeholder) | shortconv SSM keeps per-row by construction; per-row attention math makes lifting a 200+ line change with no easy isolation boundary |
 | `lfm25` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ✅ (`Lfm25Session` impl; B=1 fallback delegates to `run_forward_logits_lfm25_with_batch`) | same as lfm2 |
 | `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | MoE router hidden state keeps per-row |
-| `spark` | ❌ | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`SparkSession` impl; B=1 fallback to `forward_step_logits`) | next refactor lifts `forward_step_logits` for ~2× speedup |
+| `spark` | ❌ | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`SparkSession` impl; B=1 fallback to `forward_step_logits`) | fused QKV layout + per-head attention loop make the per-step forward hard to lift without a full `rows × n_head` batched attention rewrite |
 | `breeze` | ❌ | ❌ | ❌ | TTS codec, mostly stateful |
 
 ## What still needs to happen to capture the speedup
