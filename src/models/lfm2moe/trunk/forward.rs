@@ -70,7 +70,6 @@ pub fn run_inference(
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
-
 ) -> Result<(), String> {
     run_inference_with_batch(
         source,

@@ -142,9 +142,7 @@ pub trait ChunkedPrefill {
             let rows = chunk.len();
             let max = self.max_chunk_size();
             if rows > max {
-                return Err(format!(
-                    "prefill chunk rows {rows} exceed trunk max {max}"
-                ));
+                return Err(format!("prefill chunk rows {rows} exceed trunk max {max}"));
             }
             let base = self.seq_len();
             let is_last = chunk.end == total_tokens;
@@ -233,8 +231,7 @@ mod tests {
                 self.seen_rows.push(base_position + offset);
             }
             if project_logits {
-                let logits: Vec<f32> =
-                    (0..rows).map(|r| (base_position + r) as f32).collect();
+                let logits: Vec<f32> = (0..rows).map(|r| (base_position + r) as f32).collect();
                 self.last_logits = Some(logits.clone());
                 Ok(Some(logits))
             } else {
@@ -262,10 +259,7 @@ mod tests {
     #[test]
     fn chunked_prefill_default_loop_pays_logits_only_for_final_chunk() {
         let mut toy = ToyChunked::new(3);
-        let logits = toy
-            .prefill(&toy_input(), 3)
-            .unwrap()
-            .expect("final logits");
+        let logits = toy.prefill(&toy_input(), 3).unwrap().expect("final logits");
         assert_eq!(toy.seen_rows, (0..10).collect::<Vec<_>>());
         assert_eq!(toy.seq_len, 10);
         // The toy encodes base_position+r into logits[r]; the final
@@ -278,10 +272,7 @@ mod tests {
     fn chunked_prefill_default_loop_rejects_oversized_chunk() {
         let mut toy = ToyChunked::new(2);
         let err = toy.prefill(&toy_input(), 3).unwrap_err();
-        assert!(
-            err.contains("exceed"),
-            "unexpected error message: {err}"
-        );
+        assert!(err.contains("exceed"), "unexpected error message: {err}");
     }
 
     #[test]

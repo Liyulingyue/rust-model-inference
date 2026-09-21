@@ -153,7 +153,13 @@ pub(crate) fn normalization_groups(
     Ok(groups)
 }
 
-pub(crate) fn apply_rope(arch: &str, values: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+pub(crate) fn apply_rope(
+    arch: &str,
+    values: &mut [f32],
+    pos: usize,
+    head_dim: usize,
+    freq_base: f32,
+) {
     if arch == "k2-horizon" {
         rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
@@ -1796,15 +1802,12 @@ pub(crate) fn run_attention_per_query(
         let h_start = ith * n_head / nth;
         let h_end = (ith + 1) * n_head / nth;
         if is_f16 {
-            let k_cache = unsafe {
-                std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size)
-            };
-            let v_cache = unsafe {
-                std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size)
-            };
+            let k_cache =
+                unsafe { std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size) };
+            let v_cache =
+                unsafe { std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size) };
             let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local =
-                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
             for h in h_start..h_end {
                 let kv_h = h / group_size;
                 let q_off = h * n_embd_head_k;
@@ -1844,18 +1847,14 @@ pub(crate) fn run_attention_per_query(
                 );
             }
         } else {
-            let k_cache = unsafe {
-                std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size)
-            };
-            let v_cache = unsafe {
-                std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size)
-            };
+            let k_cache =
+                unsafe { std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size) };
+            let v_cache =
+                unsafe { std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size) };
             let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-            let attn_out_local =
-                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
-            let scores = unsafe {
-                std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride)
-            };
+            let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            let scores =
+                unsafe { std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride) };
             let n_padded = (n_cached + 255) / 256 * 256;
             for h in h_start..h_end {
                 let kv_h = h / group_size;
@@ -1913,7 +1912,8 @@ pub(crate) fn silu_mul_rows(
                     gate_ptr.add(row * n_ff + r_start),
                     r_end - r_start,
                 );
-                let u = std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
+                let u =
+                    std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
                 for (g, u) in g.iter_mut().zip(u.iter()) {
                     let silu = *u / (1.0 + (-*u).exp());
                     *g *= silu;
@@ -2007,12 +2007,10 @@ pub(crate) fn run_attention_chunked(
         let h_start = ith * n_head / nth;
         let h_end = (ith + 1) * n_head / nth;
         if is_f16 {
-            let k_cache = unsafe {
-                std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size)
-            };
-            let v_cache = unsafe {
-                std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size)
-            };
+            let k_cache =
+                unsafe { std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size) };
+            let v_cache =
+                unsafe { std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size) };
             let q_local = unsafe { std::slice::from_raw_parts(q_ptr, rows * n_embd_q) };
             let attn_out_local =
                 unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, rows * n_embd_q) };
@@ -2026,19 +2024,21 @@ pub(crate) fn run_attention_chunked(
                     let cache_row = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
                     let score_base = &k_cache[cache_row..cache_row + n_embd_head_k];
                     let v_base = v_cache.as_ptr().wrapping_add(cache_row) as *const u16;
-                    let v_row = unsafe {
-                        std::slice::from_raw_parts(v_base, n_embd_head_v)
-                    };
+                    let v_row = unsafe { std::slice::from_raw_parts(v_base, n_embd_head_v) };
                     for r in 0..rows {
                         let abs_pos = base_position + r;
-                        let q_row = &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                        let q_row =
+                            &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
                         let raw_score = if t > abs_pos {
                             f32::NEG_INFINITY
                         } else {
-                            crate::ops::dot_f16_f32(q_row, score_base, n_embd_head_k)
-                                * kq_scale
+                            crate::ops::dot_f16_f32(q_row, score_base, n_embd_head_k) * kq_scale
                         };
-                        let m_new = if raw_score > row_ms[r] { raw_score } else { row_ms[r] };
+                        let m_new = if raw_score > row_ms[r] {
+                            raw_score
+                        } else {
+                            row_ms[r]
+                        };
                         let rescale = (row_ms[r] - m_new).exp();
                         for d in 0..n_embd_head_v {
                             row_out[r * n_embd_head_v + d] *= rescale;
@@ -2054,8 +2054,8 @@ pub(crate) fn run_attention_chunked(
                         // multiply-add with `vs` in one pass so
                         // we don't materialise a float copy of
                         // every cache row.
-                        let dst = &mut row_out[r * n_embd_head_v
-                            ..r * n_embd_head_v + n_embd_head_v];
+                        let dst =
+                            &mut row_out[r * n_embd_head_v..r * n_embd_head_v + n_embd_head_v];
                         crate::ops::vec_mad_f16_f32(dst, v_row, vs);
                         row_sum[r] += vs;
                     }
@@ -2070,20 +2070,15 @@ pub(crate) fn run_attention_chunked(
             }
         } else {
             // F32 KV cache path.
-            let k_cache = unsafe {
-                std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size)
-            };
-            let v_cache = unsafe {
-                std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size)
-            };
+            let k_cache =
+                unsafe { std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size) };
+            let v_cache =
+                unsafe { std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size) };
             let q_local = unsafe { std::slice::from_raw_parts(q_ptr, rows * n_embd_q) };
             let attn_out_local =
                 unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, rows * n_embd_q) };
             let scores = unsafe {
-                std::slice::from_raw_parts_mut(
-                    scores_ptr.add(ith * score_stride),
-                    score_stride,
-                )
+                std::slice::from_raw_parts_mut(scores_ptr.add(ith * score_stride), score_stride)
             };
             let n_padded = (n_cached_total + 255) / 256 * 256;
             for h in h_start..h_end {
@@ -2092,7 +2087,8 @@ pub(crate) fn run_attention_chunked(
                 let out_base = h * n_embd_head_v;
                 // Compute Q · K for every (row, cached_row).
                 for r in 0..rows {
-                    let q_row = &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                    let q_row =
+                        &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
                     for t in 0..n_cached_total {
                         let abs_pos = base_position + r;
                         let score = if t > abs_pos {
@@ -2133,8 +2129,7 @@ pub(crate) fn run_attention_chunked(
                     for d in 0..n_embd_head_v {
                         let mut acc = 0.0f32;
                         for t in 0..n_cached_total {
-                            acc += v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d]
-                                * s[t];
+                            acc += v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d] * s[t];
                         }
                         attn_out_local[r * n_embd_q + out_base + d] = acc;
                     }

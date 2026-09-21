@@ -21,12 +21,12 @@
 
 use super::forward::{apply_rope, normalization_groups};
 use super::weights::{get_f32_tensor, load_layers, LlamaLayerWeights};
-use crate::core::tokenizer::load_tokenizer;
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks, ChunkedPrefill};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::load_tokenizer;
 use crate::core::tokenizer::Tokenizer;
 use crate::ops::kernel::{Kernel, PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
@@ -34,7 +34,7 @@ use crate::core::tensor::GGMLType;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into,
     quantize_row_q8_k_into, rms_norm_grouped, silu_mul_approx_inplace, vec_add_into,
-    vec_mad_f32, vec_mad_f16_f32, vec_scale_f32,
+    vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -132,20 +132,18 @@ impl<'a> LlamaSession<'a> {
         let n_head = config.n_head;
         let n_head_kv = config.n_head_kv;
         let n_embd_head = config.n_embd_head;
-        let n_embd_head_k = if let Some(v) =
-            source.metadata(&format!("{}.attention.key_length", arch))
-        {
-            v.to_u64().unwrap_or(n_embd_head as u64) as usize
-        } else {
-            n_embd_head
-        };
-        let n_embd_head_v = if let Some(v) =
-            source.metadata(&format!("{}.attention.value_length", arch))
-        {
-            v.to_u64().unwrap_or(n_embd_head as u64) as usize
-        } else {
-            n_embd_head
-        };
+        let n_embd_head_k =
+            if let Some(v) = source.metadata(&format!("{}.attention.key_length", arch)) {
+                v.to_u64().unwrap_or(n_embd_head as u64) as usize
+            } else {
+                n_embd_head
+            };
+        let n_embd_head_v =
+            if let Some(v) = source.metadata(&format!("{}.attention.value_length", arch)) {
+                v.to_u64().unwrap_or(n_embd_head as u64) as usize
+            } else {
+                n_embd_head
+            };
         let n_embd_q = n_head * n_embd_head_k;
         let n_embd_gqa = n_head_kv * n_embd_head_v;
         let n_ff = config.n_ff;
@@ -410,7 +408,13 @@ impl<'a> LlamaSession<'a> {
                 let abs_pos = base_position + r;
                 let token_id = input[abs_pos];
                 let row = &mut x[r * n_embd..(r + 1) * n_embd];
-                embedding_lookup(weights.embd_weight, token_id, n_embd, weights.embd_type, row);
+                embedding_lookup(
+                    weights.embd_weight,
+                    token_id,
+                    n_embd,
+                    weights.embd_type,
+                    row,
+                );
                 if embedding_scale != 0.0 {
                     vec_scale_f32(row, embedding_scale);
                 }
@@ -494,12 +498,10 @@ impl<'a> LlamaSession<'a> {
             let kb = layer * max_ctx * n_embd_gqa;
             let is_f16 = !k_cache_f16_ptr.is_null();
             if is_f16 {
-                let k_cache_f16 = unsafe {
-                    std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size)
-                };
-                let v_cache_f16 = unsafe {
-                    std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size)
-                };
+                let k_cache_f16 =
+                    unsafe { std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size) };
+                let v_cache_f16 =
+                    unsafe { std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size) };
                 for r in 0..rows {
                     let abs_pos = base_position + r;
                     let k_row = &k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa];
@@ -520,12 +522,10 @@ impl<'a> LlamaSession<'a> {
                     }
                 }
             } else {
-                let k_cache_f32 = unsafe {
-                    std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size)
-                };
-                let v_cache_f32 = unsafe {
-                    std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size)
-                };
+                let k_cache_f32 =
+                    unsafe { std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size) };
+                let v_cache_f32 =
+                    unsafe { std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size) };
                 for r in 0..rows {
                     let abs_pos = base_position + r;
                     let k_row = &k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa];
@@ -577,19 +577,9 @@ impl<'a> LlamaSession<'a> {
             // single dispatch that writes `[rows × n_embd]`.
             let needs_q8_wo = lw.wo.needs_q8_0_activation();
             let needs_q8k_wo = lw.wo.uses_q8_k();
-            prepared_rows.prepare(
-                attn_out,
-                rows,
-                n_embd_q,
-                needs_q8_wo,
-                needs_q8k_wo,
-            )?;
+            prepared_rows.prepare(attn_out, rows, n_embd_q, needs_q8_wo, needs_q8k_wo)?;
             let wo_proj = &mut scratch.attn_proj[..rows * n_embd];
-            prepared_rows.matmul_group(
-                attn_out,
-                [(&lw.wo, wo_proj)],
-                pool,
-            )?;
+            prepared_rows.matmul_group(attn_out, [(&lw.wo, wo_proj)], pool)?;
             // ---- Residual add (x ← x + wo_proj) ----
             for r in 0..rows {
                 let x_row = &mut scratch.x[r * n_embd..(r + 1) * n_embd];
@@ -636,22 +626,14 @@ impl<'a> LlamaSession<'a> {
             )?;
             // silu_mul per-row (independent; cheap on n_ff).
             crate::models::llama::trunk::forward::silu_mul_rows(
-                pool,
-                n_threads,
-                gate_proj,
-                up_proj,
-                n_ff,
+                pool, n_threads, gate_proj, up_proj, n_ff,
             );
             // down via PreparedRows.
             let needs_q8_down = lw.w_down.needs_q8_0_activation();
             let needs_q8k_down = lw.w_down.uses_q8_k();
             let down_buf = &mut scratch.down_buf[..rows * n_embd];
             prepared_rows.prepare(gate_proj, rows, n_ff, needs_q8_down, needs_q8k_down)?;
-            prepared_rows.matmul_group(
-                gate_proj,
-                [(&lw.w_down, &mut down_buf[..])],
-                pool,
-            )?;
+            prepared_rows.matmul_group(gate_proj, [(&lw.w_down, &mut down_buf[..])], pool)?;
             for r in 0..rows {
                 let x_row = &mut scratch.x[r * n_embd..(r + 1) * n_embd];
                 let down_row = &down_buf[r * n_embd..(r + 1) * n_embd];
@@ -719,11 +701,13 @@ impl<'a> LlamaSession<'a> {
                         output_weight,
                         output_type,
                         output_proj_n_embd,
-                    output_proj_vocab,
+                        output_proj_vocab,
+                    ),
                 ),
-            ),
-            &mut logits[..]),
-        ], pool)?;
+                &mut logits[..],
+            )],
+            pool,
+        )?;
         if logit_scale != 0.0 {
             vec_scale_f32(logits, logit_scale);
         }
@@ -760,7 +744,13 @@ impl<'a> LlamaSession<'a> {
         let logit_scale = self.logit_scale;
         let norm_groups = self.norm_groups;
 
-        embedding_lookup(weights.embd_weight, token_id, n_embd, weights.embd_type, &mut scratch.x);
+        embedding_lookup(
+            weights.embd_weight,
+            token_id,
+            n_embd,
+            weights.embd_type,
+            &mut scratch.x,
+        );
         if embedding_scale != 0.0 {
             vec_scale_f32(&mut scratch.x, embedding_scale);
         }
@@ -831,13 +821,37 @@ impl<'a> LlamaSession<'a> {
                 let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
                 let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
                 lw.wq.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), q, n_embd, n_embd_q, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    q,
+                    n_embd,
+                    n_embd_q,
+                    ith,
+                    nth,
                 );
                 lw.wk.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), k_new, n_embd, n_embd_gqa, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    k_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
                 );
                 lw.wv.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), v_new, n_embd, n_embd_gqa, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    v_new,
+                    n_embd,
+                    n_embd_gqa,
+                    ith,
+                    nth,
                 );
             });
 
@@ -849,19 +863,17 @@ impl<'a> LlamaSession<'a> {
             apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base);
             apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base);
 
-// KV cache append — same as legacy.
+            // KV cache append — same as legacy.
             let kb = layer * max_ctx * n_embd_gqa;
             // Decide the cache storage based on the raw pointers we
             // extracted up front. The `kv_format == F16` flag is
             // already baked into which pointer pair is non-null.
             let is_f16 = !k_cache_f16_ptr.is_null();
             if is_f16 {
-                let k_cache_f16 = unsafe {
-                    std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size)
-                };
-                let v_cache_f16 = unsafe {
-                    std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size)
-                };
+                let k_cache_f16 =
+                    unsafe { std::slice::from_raw_parts_mut(k_cache_f16_ptr, kv_cache_size) };
+                let v_cache_f16 =
+                    unsafe { std::slice::from_raw_parts_mut(v_cache_f16_ptr, kv_cache_size) };
                 for h in 0..cfg.n_head_kv {
                     let off = h * n_embd_head_k;
                     let slot = kb + pos * n_embd_gqa + off;
@@ -877,12 +889,10 @@ impl<'a> LlamaSession<'a> {
                     );
                 }
             } else {
-                let k_cache_f32 = unsafe {
-                    std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size)
-                };
-                let v_cache_f32 = unsafe {
-                    std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size)
-                };
+                let k_cache_f32 =
+                    unsafe { std::slice::from_raw_parts_mut(k_cache_f32_ptr, kv_cache_size) };
+                let v_cache_f32 =
+                    unsafe { std::slice::from_raw_parts_mut(v_cache_f32_ptr, kv_cache_size) };
                 for h in 0..cfg.n_head_kv {
                     let off = h * n_embd_head_k;
                     let slot = kb + pos * n_embd_gqa + off;
@@ -903,127 +913,112 @@ impl<'a> LlamaSession<'a> {
             let n_cached = pos + 1;
             pool.compute(move |ith: usize, nth: usize| {
                 let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
-                let attn_out_local = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+                let attn_out_local =
+                    unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
                 let h_start = ith * cfg.n_head / nth;
                 let h_end = (ith + 1) * cfg.n_head / nth;
                 let is_f16_attn = !k_cache_f16_ptr.is_null();
                 if is_f16_attn {
-                        let k_cache = unsafe {
-                            std::slice::from_raw_parts(
-                                k_cache_f16_ptr as *const u16,
-                                kv_cache_size,
-                            )
-                        };
-                        let v_cache = unsafe {
-                            std::slice::from_raw_parts(
-                                v_cache_f16_ptr as *const u16,
-                                kv_cache_size,
-                            )
-                        };
-                        for h in h_start..h_end {
-                            let kv_h = h / group_size;
-                            let q_off = h * n_embd_head_k;
-                            let out_base = h * n_embd_head_v;
-                            let mut ms = 0.0f32;
-                            let mut s_sum = 0.0f32;
-                            attn_out_local[out_base..out_base + n_embd_head_v].fill(0.0);
-                            for t in 0..n_cached {
-                                let score = dot_f16_f32(
-                                    &q[q_off..q_off + n_embd_head_k],
-                                    &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                        ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                    n_embd_head_k,
-                                ) * kq_scale;
-                                if score > ms {
-                                    let rescale = (ms - score).exp();
-                                    vec_scale_f32(
-                                        &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                                        rescale,
-                                    );
-                                    s_sum *= rescale;
-                                    ms = score;
-                                }
-                                let vs = (score - ms).exp();
-                                let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                                vec_mad_f16_f32(
+                    let k_cache = unsafe {
+                        std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size)
+                    };
+                    let v_cache = unsafe {
+                        std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size)
+                    };
+                    for h in h_start..h_end {
+                        let kv_h = h / group_size;
+                        let q_off = h * n_embd_head_k;
+                        let out_base = h * n_embd_head_v;
+                        let mut ms = 0.0f32;
+                        let mut s_sum = 0.0f32;
+                        attn_out_local[out_base..out_base + n_embd_head_v].fill(0.0);
+                        for t in 0..n_cached {
+                            let score = dot_f16_f32(
+                                &q[q_off..q_off + n_embd_head_k],
+                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                n_embd_head_k,
+                            ) * kq_scale;
+                            if score > ms {
+                                let rescale = (ms - score).exp();
+                                vec_scale_f32(
                                     &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                                    &v_cache[v_base..v_base + n_embd_head_v],
-                                    vs,
+                                    rescale,
                                 );
-                                s_sum += vs;
+                                s_sum *= rescale;
+                                ms = score;
                             }
-                            let inv_sum = 1.0 / s_sum;
-                            vec_scale_f32(
+                            let vs = (score - ms).exp();
+                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
+                            vec_mad_f16_f32(
                                 &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                                inv_sum,
+                                &v_cache[v_base..v_base + n_embd_head_v],
+                                vs,
                             );
+                            s_sum += vs;
                         }
-                    } else {
-                        let k_cache = unsafe {
-                            std::slice::from_raw_parts(
-                                k_cache_f32_ptr as *const f32,
-                                kv_cache_size,
-                            )
-                        };
-                        let v_cache = unsafe {
-                            std::slice::from_raw_parts(
-                                v_cache_f32_ptr as *const f32,
-                                kv_cache_size,
-                            )
-                        };
-                        let scores = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                scores_ptr,
-                                n_threads * score_stride,
-                            )
-                        };
-                        let n_padded = (n_cached + 255) / 256 * 256;
-                        for h in h_start..h_end {
-                            let kv_h = h / group_size;
-                            let q_off = h * n_embd_head_k;
-                            let out_base = h * n_embd_head_v;
-                            let s_off = ith * score_stride;
-                            for t in 0..n_cached {
-                                scores[s_off + t] = dot_f32(
-                                    &q[q_off..q_off + n_embd_head_k],
-                                    &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                        ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                    n_embd_head_k,
-                                ) * kq_scale;
-                            }
-                            scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                            for t in n_cached..n_padded {
-                                scores[s_off + t] = f32::NEG_INFINITY;
-                            }
-                            // In-place softmax over the active range.
-                            let mut max_v = f32::NEG_INFINITY;
-                            for t in 0..n_cached {
-                                if scores[s_off + t] > max_v {
-                                    max_v = scores[s_off + t];
-                                }
-                            }
-                            let mut sum = 0.0f32;
-                            for t in 0..n_cached {
-                                let e = (scores[s_off + t] - max_v).exp();
-                                scores[s_off + t] = e;
-                                sum += e;
-                            }
-                            for t in 0..n_cached {
-                                scores[s_off + t] /= sum;
-                            }
-                            let mut values = vec![0.0f32; n_cached];
-                            for d in 0..n_embd_head_v {
-                                for t in 0..n_cached {
-                                    values[t] =
-                                        v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
-                                }
-                                let mut acc = 0.0f32;
-                                for t in 0..n_cached {
-                                    acc += values[t] * scores[s_off + t];
-                                }
-                                attn_out_local[out_base + d] = acc;
+                        let inv_sum = 1.0 / s_sum;
+                        vec_scale_f32(
+                            &mut attn_out_local[out_base..out_base + n_embd_head_v],
+                            inv_sum,
+                        );
+                    }
+                } else {
+                    let k_cache = unsafe {
+                        std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size)
+                    };
+                    let v_cache = unsafe {
+                        std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size)
+                    };
+                    let scores = unsafe {
+                        std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride)
+                    };
+                    let n_padded = (n_cached + 255) / 256 * 256;
+                    for h in h_start..h_end {
+                        let kv_h = h / group_size;
+                        let q_off = h * n_embd_head_k;
+                        let out_base = h * n_embd_head_v;
+                        let s_off = ith * score_stride;
+                        for t in 0..n_cached {
+                            scores[s_off + t] = dot_f32(
+                                &q[q_off..q_off + n_embd_head_k],
+                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                n_embd_head_k,
+                            ) * kq_scale;
+                        }
+                        scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
+                        for t in n_cached..n_padded {
+                            scores[s_off + t] = f32::NEG_INFINITY;
+                        }
+                        // In-place softmax over the active range.
+                        let mut max_v = f32::NEG_INFINITY;
+                        for t in 0..n_cached {
+                            if scores[s_off + t] > max_v {
+                                max_v = scores[s_off + t];
                             }
                         }
+                        let mut sum = 0.0f32;
+                        for t in 0..n_cached {
+                            let e = (scores[s_off + t] - max_v).exp();
+                            scores[s_off + t] = e;
+                            sum += e;
+                        }
+                        for t in 0..n_cached {
+                            scores[s_off + t] /= sum;
+                        }
+                        let mut values = vec![0.0f32; n_cached];
+                        for d in 0..n_embd_head_v {
+                            for t in 0..n_cached {
+                                values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                            }
+                            let mut acc = 0.0f32;
+                            for t in 0..n_cached {
+                                acc += values[t] * scores[s_off + t];
+                            }
+                            attn_out_local[out_base + d] = acc;
+                        }
+                    }
                 }
             });
 
@@ -1036,10 +1031,7 @@ impl<'a> LlamaSession<'a> {
                 &mut scratch.q8_buf[..n_embd_q],
                 &mut scratch.scale_buf[..n_embd_q / 32],
             );
-            crate::ops::quantize_row_q8_k_into(
-                attn_out,
-                &mut scratch.q8k_buf[..n_embd_q / 256],
-            );
+            crate::ops::quantize_row_q8_k_into(attn_out, &mut scratch.q8k_buf[..n_embd_q / 256]);
             let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
             let q8_ptr_wo = scratch.q8_buf.as_ptr();
             let sc_ptr_wo = scratch.scale_buf.as_ptr();
@@ -1051,7 +1043,15 @@ impl<'a> LlamaSession<'a> {
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_wo, n_embd_q / 256) };
                 let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
                 lw.wo.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), attn_proj, n_embd_q, n_embd, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    attn_proj,
+                    n_embd_q,
+                    n_embd,
+                    ith,
+                    nth,
                 );
             });
 
@@ -1081,14 +1081,29 @@ impl<'a> LlamaSession<'a> {
                 let q8 = unsafe { std::slice::from_raw_parts(q8_ptr_ffn, n_embd) };
                 let sc = unsafe { std::slice::from_raw_parts(sc_ptr_ffn, n_embd / 32) };
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
-                let gate_buf =
-                    unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+                let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
                 lw.w_gate.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), up_buf, n_embd, n_ff, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    up_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
                 );
                 lw.w_up.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), gate_buf, n_embd, n_ff, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    gate_buf,
+                    n_embd,
+                    n_ff,
+                    ith,
+                    nth,
                 );
                 if gpu_matmul_active() {
                     if ith == 0 {
@@ -1120,10 +1135,17 @@ impl<'a> LlamaSession<'a> {
                 let q8 = unsafe { std::slice::from_raw_parts(q8_ptr_down, n_ff) };
                 let sc = unsafe { std::slice::from_raw_parts(sc_ptr_down, n_ff / 32) };
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_down, n_ff / 256) };
-                let down_buf =
-                    unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+                let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
                 lw.w_down.kernel.forward_prepared(
-                    input, q8, sc, Some(q8k), down_buf, n_ff, n_embd, ith, nth,
+                    input,
+                    q8,
+                    sc,
+                    Some(q8k),
+                    down_buf,
+                    n_ff,
+                    n_embd,
+                    ith,
+                    nth,
                 );
             });
 
@@ -1159,7 +1181,7 @@ impl<'a> LlamaSession<'a> {
             n_embd,
             vocab,
         ));
-let q8_ptr_out = q8_buf.as_ptr();
+        let q8_ptr_out = q8_buf.as_ptr();
         let sc_ptr_out = scale_buf.as_ptr();
         let q8k_ptr_out = q8k_buf.as_ptr();
         pool.compute(move |ith, nth| {
@@ -1169,7 +1191,15 @@ let q8_ptr_out = q8_buf.as_ptr();
             let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_out, n_embd / 256) };
             let logits = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab) };
             output_pw.kernel.forward_prepared(
-                input, q8, sc, Some(q8k), logits, n_embd, vocab, ith, nth,
+                input,
+                q8,
+                sc,
+                Some(q8k),
+                logits,
+                n_embd,
+                vocab,
+                ith,
+                nth,
             );
         });
         if logit_scale != 0.0 {
@@ -1289,7 +1319,14 @@ mod tests {
     use crate::core::tokenizer::load_tokenizer;
     use std::collections::HashMap;
 
-    fn build_minimal_source(arch: &str, n_embd: usize, n_head: usize, n_layer: usize, n_ff: usize, vocab: usize) -> HashMap<String, Vec<u8>> {
+    fn build_minimal_source(
+        arch: &str,
+        n_embd: usize,
+        n_head: usize,
+        n_layer: usize,
+        n_ff: usize,
+        vocab: usize,
+    ) -> HashMap<String, Vec<u8>> {
         // Minimal weight fixture: a 4-layer, 4-head, n_embd=8, n_ff=16 llama.
         // We deliberately keep numbers tiny so the test runs in ms.
         let _ = (arch, n_embd, n_head, n_layer, n_ff, vocab);

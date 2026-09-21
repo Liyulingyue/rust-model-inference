@@ -1300,14 +1300,8 @@ pub fn run_forward_logits_lfm2_with_batch(
     // for B = 1 the two paths produce bit-identical results, so
     // the existing app/text.rs and binary callers keep their
     // behaviour unchanged.
-    run_forward_logits_lfm2_inner(
-        source,
-        prompt_tokens,
-        n_threads_arg,
-        kv_format,
-        max_context,
-    )
-    .map(|(logits, _)| (logits, std::time::Instant::now().elapsed()))
+    run_forward_logits_lfm2_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
+        .map(|(logits, _)| (logits, std::time::Instant::now().elapsed()))
 }
 
 fn run_forward_logits_lfm2_inner(

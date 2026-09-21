@@ -633,6 +633,9 @@ mod tests {
     #[test]
     fn chunked_prefill_input_len_matches_token_count() {
         let tokens: Vec<u32> = (0..7).collect();
-        assert_eq!(<SparkSession as crate::core::prefill::ChunkedPrefill>::input_len(&tokens), 7);
+        assert_eq!(
+            <SparkSession as crate::core::prefill::ChunkedPrefill>::input_len(&tokens),
+            7
+        );
     }
 }

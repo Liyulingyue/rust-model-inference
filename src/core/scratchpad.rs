@@ -120,7 +120,9 @@ impl ExecutionScratchpad {
         // buffer stays at its original single-row size. Callers
         // that want a chunked prefill scratch use
         // [`ExecutionScratchpad::new_batched`] instead.
-        Self::new_batched(n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx, 1)
+        Self::new_batched(
+            n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx, 1,
+        )
     }
 }
 

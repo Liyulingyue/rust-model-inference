@@ -93,10 +93,7 @@ impl<'a> Lfm2MoeSession<'a> {
         let embd_info = source
             .tensor_info("token_embd.weight")
             .ok_or_else(|| "Missing token_embd.weight metadata".to_string())?;
-        crate::ops::embedding::expect_supported_embedding(
-            "token_embd.weight",
-            embd_info.ggml_type,
-        );
+        crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
         let embd_weight = source
             .tensor_slice("token_embd.weight")
             .ok_or_else(|| "Missing token_embd.weight data".to_string())?;
@@ -118,9 +115,8 @@ impl<'a> Lfm2MoeSession<'a> {
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         let vocab = tokenizer.vocab_size();
 
-        let layers: Vec<super::weights::Lfm2MoeLayerWeights<'a>> =
-            load_layers(source, &config)
-                .map_err(|e| format!("Failed to load LFM2-MoE layers: {e}"))?;
+        let layers: Vec<super::weights::Lfm2MoeLayerWeights<'a>> = load_layers(source, &config)
+            .map_err(|e| format!("Failed to load LFM2-MoE layers: {e}"))?;
 
         let kv_cache = match kv_format {
             KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
@@ -268,7 +264,10 @@ mod tests {
     #[test]
     fn chunked_prefill_input_len_matches_token_count() {
         let tokens: Vec<u32> = (0..7).collect();
-        assert_eq!(<Lfm2MoeSession<'_> as ChunkedPrefill>::input_len(&tokens), 7);
+        assert_eq!(
+            <Lfm2MoeSession<'_> as ChunkedPrefill>::input_len(&tokens),
+            7
+        );
     }
 
     #[test]

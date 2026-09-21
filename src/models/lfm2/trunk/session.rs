@@ -90,16 +90,11 @@ impl<'a> Lfm2Session<'a> {
         let embd_info = source
             .tensor_info("token_embd.weight")
             .ok_or_else(|| "Missing token_embd.weight metadata".to_string())?;
-        crate::ops::embedding::expect_supported_embedding(
-            "token_embd.weight",
-            embd_info.ggml_type,
-        );
+        crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
         let embd_weight = source
             .tensor_slice("token_embd.weight")
             .ok_or_else(|| "Missing token_embd.weight data".to_string())?;
-        let output_weight = source
-            .tensor_slice("output.weight")
-            .unwrap_or(embd_weight);
+        let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
         let output_type = source
             .tensor_info("output.weight")
             .unwrap_or(embd_info)
@@ -115,8 +110,7 @@ impl<'a> Lfm2Session<'a> {
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         let vocab = tokenizer.vocab_size();
         let layers: Vec<Lfm2LayerWeights<'a>> =
-            load_layers(source, &config)
-                .map_err(|e| format!("Failed to load LFM2 layers: {e}"))?;
+            load_layers(source, &config).map_err(|e| format!("Failed to load LFM2 layers: {e}"))?;
         let kv_cache = match kv_format {
             KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
             KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
