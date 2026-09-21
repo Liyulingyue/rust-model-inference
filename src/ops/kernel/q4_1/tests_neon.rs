@@ -6,8 +6,8 @@
 
 #![cfg(target_arch = "aarch64")]
 
-use super::super::matmul_q4_1_scalar_range;
-use super::matmul_q4_1_vs_q8_0_neon;
+use super::neon::matmul_q4_1_vs_q8_0_neon;
+use super::scalar::matmul_q4_1_scalar_range;
 
 fn build_block(scale: f32, min: f32, nibble: u8) -> Vec<u8> {
     assert!(nibble < 16);

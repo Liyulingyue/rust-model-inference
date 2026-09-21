@@ -8,8 +8,8 @@
 
 #![cfg(target_arch = "aarch64")]
 
-use super::super::matmul_q4_0_scalar_range;
-use super::matmul_q4_0_vs_q8_0_neon;
+use super::neon::matmul_q4_0_vs_q8_0_neon;
+use super::scalar::matmul_q4_0_scalar_range;
 
 fn build_block(scale: f32, low: u8, hi: u8) -> Vec<u8> {
     assert!(low < 16 && hi < 16);
