@@ -167,6 +167,7 @@ impl<'model> Qwen3Session<'model> {
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],
+                attention_values: vec![0.0; score_values],
             },
             prefill_scratch: Qwen3PrefillScratch::new(1, model),
             capacity,
@@ -185,6 +186,20 @@ impl<'model> Qwen3Session<'model> {
 
     pub fn last_logits(&self) -> &[f32] {
         &self.scratch.logits
+    }
+
+    pub(crate) fn dspark_position(&self) -> usize {
+        self.kv_state.seq_len
+    }
+
+    pub(crate) fn dspark_hidden_size(&self) -> usize {
+        self.model.config.n_embd
+    }
+
+    pub(crate) fn dspark_restore(&mut self, position: usize) {
+        debug_assert!(position <= self.kv_state.seq_len);
+        self.kv_state.seq_len = position;
+        self.kv_state.update_access();
     }
 
     pub fn reset_kv(&mut self) {
@@ -452,7 +467,7 @@ impl<'model> Qwen3Session<'model> {
 
             if !used_vulkan {
                 let base = self.kv_state.seq_len;
-                self.forward_cpu_chunk(&decode_input, 0..1, true)?;
+                self.forward_cpu_chunk(&decode_input, 0..1, true, true, None)?;
                 self.kv_state.seq_len = base + 1;
                 self.kv_state.update_access();
             }

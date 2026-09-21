@@ -17,7 +17,7 @@ use crate::ops::{
     rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace,
     vec_add_into, vec_mad_f16_f32, vec_mul_inplace, vec_scale_f32,
 };
-use crate::prompt::{build_lfm2_chat_prompt_with_thinking, Lfm2Message};
+use crate::prompt::{build_lfm25_chat_prompt_with_thinking, Lfm2Message};
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -26,150 +26,188 @@ use std::time::{Duration, Instant};
 use super::config::Lfm25Config;
 use super::weights::{get_f32_tensor, load_layers, Lfm25LayerWeights};
 
-pub fn run_inference(
-    source: &dyn TensorSource,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    profile: bool,
-    kv_format: KvFormat,
-    max_context: usize,
-    thinking: bool,
-) -> Result<(), String> {
-    let t0 = Instant::now();
-    let cfg = Lfm25Config::from_source(source)?;
-    let n_embd = cfg.n_embd;
-    let n_layer = cfg.n_layer;
-    let n_head = cfg.n_head;
-    let n_ff = cfg.n_ff;
+#[derive(Clone)]
+pub struct Lfm25Checkpoint {
+    position: usize,
+    prefill: bool,
+    shortconv_states: Vec<Vec<f32>>,
+    accumulated_bx: Vec<Vec<Vec<f32>>>,
+    logits: Vec<f32>,
+}
 
-    let arch = "lfm2.5";
+pub struct Lfm25Session<'a> {
+    source: &'a dyn TensorSource,
+    cfg: Lfm25Config,
+    layers: Vec<Lfm25LayerWeights<'a>>,
+    output_norm: Vec<f32>,
+    pool: Arc<ComputePool>,
+    scratch: ExecutionScratchpad,
+    kv_cache: KvCache,
+    shortconv_states: Vec<Vec<f32>>,
+    accumulated_bx: Vec<Vec<Vec<f32>>>,
+    position: usize,
+    prefill: bool,
+    capacity: usize,
+}
 
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+impl<'a> Lfm25Session<'a> {
+    pub fn new(
+        source: &'a dyn TensorSource,
+        pool: Arc<ComputePool>,
+        capacity: usize,
+        kv_format: KvFormat,
+    ) -> Result<Self, String> {
+        let cfg = Lfm25Config::from_source(source)?;
+        if capacity == 0 || capacity > cfg.n_ctx {
+            return Err(format!("Invalid LFM2.5 session capacity {capacity}"));
+        }
+        let n_embd_q = cfg.n_head * cfg.n_embd_head_k;
+        let n_embd_gqa = cfg
+            .n_head_kv_per_layer
+            .iter()
+            .map(|&h| h * cfg.n_embd_head_k)
+            .max()
+            .unwrap_or(0)
+            .max(n_embd_q);
+        let scratch = ExecutionScratchpad::new(
+            cfg.n_embd,
+            n_embd_q,
+            n_embd_gqa,
+            cfg.n_ff,
+            cfg.vocab_size,
+            pool.n_threads(),
+            capacity,
+        );
+        let kv_cache = match kv_format {
+            KvFormat::F16 => KvCache::new_f16(cfg.n_layer, capacity, n_embd_gqa),
+            KvFormat::F32 => KvCache::new_f32(cfg.n_layer, capacity, n_embd_gqa),
+        };
+        let layers = load_layers(source, &cfg)?;
+        let shortconv_states = layers
+            .iter()
+            .map(|lw| {
+                if lw.is_attn {
+                    Vec::new()
+                } else {
+                    vec![0.0; cfg.n_embd * cfg.d_conv]
+                }
+            })
+            .collect();
+        let accumulated_bx = vec![Vec::new(); cfg.n_layer];
+        let output_norm = get_f32_tensor(source, "token_embd_norm.weight", cfg.n_embd);
+        Ok(Self {
+            source,
+            cfg,
+            layers,
+            output_norm,
+            pool,
+            scratch,
+            kv_cache,
+            shortconv_states,
+            accumulated_bx,
+            position: 0,
+            prefill: true,
+            capacity,
+        })
+    }
 
-    let max_ctx = cfg.n_ctx.min(max_context).max(1);
-    let eps = cfg.norm_eps;
-    let freq_base = cfg.rope_freq_base;
-
-    let output_norm = get_f32_tensor(source, "token_embd_norm.weight", n_embd);
-    let embd_info = source
-        .tensor_info("token_embd.weight")
-        .expect("no token_embd.weight");
-    crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
-    let embd_weight = source.tensor_slice("token_embd.weight").expect("no embd");
-    let output_weight = source.tensor_slice("output.weight").unwrap_or(embd_weight);
-    let embd_type = embd_info.ggml_type;
-    let output_type = source
-        .tensor_info("output.weight")
-        .unwrap_or(embd_info)
-        .ggml_type;
-
-    let layers = load_layers(source, &cfg)?;
-
-    let load_ms = t0.elapsed().as_millis();
-    println!(
-        "Model: {} | n_embd={} n_layer={} n_head={} n_ff={} d_conv={} | loaded in {}ms",
-        arch, n_embd, n_layer, n_head, n_ff, cfg.d_conv, load_ms
-    );
-
-    let input_tokens = build_lfm2_chat_prompt_with_thinking(
-        &tokenizer,
-        &[Lfm2Message {
-            role: "user",
-            content: prompt,
-        }],
-        thinking,
-    )?;
-    eprintln!(
-        "[RUST_TOKENS] n={} ids={:?}",
-        input_tokens.len(),
-        input_tokens
-    );
-
-    let n_embd_q = n_head * cfg.n_embd_head_k;
-    let n_embd_gqa = cfg
-        .n_head_kv_per_layer
-        .iter()
-        .map(|&h| h * cfg.n_embd_head_k)
-        .max()
-        .unwrap_or(0)
-        .max(n_embd_q);
-
-    let vocab = tokenizer.vocab_size();
-    let available_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let n_threads = if n_threads_arg > 0 {
-        n_threads_arg
-    } else {
-        available_threads
-    };
-
-    let mut scratch = ExecutionScratchpad::new(
-        n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx,
-    );
-    let pool = Arc::new(ComputePool::new(n_threads));
-    eprintln!("compute pool: {} threads", pool.n_threads());
-    println!("Prompt: {} tokens", input_tokens.len());
-
-    let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
-    let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
-    for (l, lw) in layers.iter().enumerate() {
-        if lw.is_attn {
-            shortconv_states.push(Vec::new());
-            accumulated_bx.push(Vec::new());
-        } else {
-            shortconv_states.push(vec![0.0f32; n_embd * cfg.d_conv]);
-            accumulated_bx.push(Vec::new());
-            let _ = l;
+    pub fn finish_prefill(&mut self) {
+        if !self.prefill {
+            return;
+        }
+        self.prefill = false;
+        for (state, history) in self
+            .shortconv_states
+            .iter_mut()
+            .zip(&mut self.accumulated_bx)
+        {
+            let n_embd = self.cfg.n_embd;
+            let offset = self.cfg.d_conv.saturating_sub(history.len());
+            state.fill(0.0);
+            for (row, values) in history.iter().enumerate() {
+                state[(offset + row) * n_embd..(offset + row + 1) * n_embd].copy_from_slice(values);
+            }
+            history.clear();
         }
     }
 
-    let kv_cache = match kv_format {
-        KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
-        KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
-    };
+    #[cfg(test)]
+    pub fn logit_bits(&self) -> Vec<u32> {
+        self.scratch.logits.iter().map(|v| v.to_bits()).collect()
+    }
 
-    let eos_id = tokenizer.eos_id();
-    let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
-    let mut decoder = tokenizer.streaming_decoder(false);
+    #[cfg(test)]
+    pub fn shortconv_state_bits(&self) -> Vec<Vec<u32>> {
+        self.shortconv_states
+            .iter()
+            .map(|state| state.iter().map(|v| v.to_bits()).collect())
+            .collect()
+    }
 
-    let total_steps = input_tokens.len() + max_tokens;
-    let t_infer = Instant::now();
-    let mut prefill_evals = 0usize;
-    let mut prefill_time = Duration::ZERO;
-    let mut decode_evals = 0usize;
-    let mut decode_time = Duration::ZERO;
-
-    print!("Output: ");
-    io::stdout().flush().unwrap();
-
-    for step in 0..total_steps {
-        let eval_started = Instant::now();
-        let token_id = if step < input_tokens.len() {
-            input_tokens[step]
-        } else {
-            *generated_tokens.last().unwrap_or(&0)
-        };
-        let pos = step;
-
+    fn evaluate_one(&mut self, token_id: u32, target_layers: &[usize]) -> Result<Vec<f32>, String> {
+        if self.position >= self.capacity {
+            return Err("LFM2.5 session capacity exceeded".into());
+        }
+        let cfg = &self.cfg;
+        let n_embd = cfg.n_embd;
+        let n_layer = cfg.n_layer;
+        let vocab = cfg.vocab_size;
+        let max_ctx = self.capacity;
+        let pos = self.position;
+        let is_prefill = self.prefill;
+        let eps = cfg.norm_eps;
+        let freq_base = cfg.rope_freq_base;
+        let layers = &self.layers;
+        let scratch = &mut self.scratch;
+        let kv_cache = &self.kv_cache;
+        let pool = &self.pool;
+        let shortconv_states = &mut self.shortconv_states;
+        let accumulated_bx = &mut self.accumulated_bx;
+        let output_norm = &self.output_norm;
+        let embd_info = self
+            .source
+            .tensor_info("token_embd.weight")
+            .ok_or("Missing token_embd.weight")?;
+        crate::ops::embedding::expect_supported_embedding("token_embd.weight", embd_info.ggml_type);
+        let embd_weight = self
+            .source
+            .tensor_slice("token_embd.weight")
+            .ok_or("Missing token_embd.weight data")?;
+        let output_weight = self
+            .source
+            .tensor_slice("output.weight")
+            .unwrap_or(embd_weight);
+        let embd_type = embd_info.ggml_type;
+        let output_type = self
+            .source
+            .tensor_info("output.weight")
+            .unwrap_or(embd_info)
+            .ggml_type;
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
-
-        let is_prefill = step < input_tokens.len();
+        let mut features = vec![0.0; target_layers.len() * n_embd];
         for layer in 0..n_layer {
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "lfm25.layer_input",
+                Some(layer),
+                &[n_embd],
+                &scratch.x[..n_embd],
+            ));
             let lw = &layers[layer];
+            if let Some(index) = target_layers
+                .iter()
+                .position(|&requested| requested == layer)
+            {
+                features[index * n_embd..(index + 1) * n_embd]
+                    .copy_from_slice(&scratch.x[..n_embd]);
+            }
             if !lw.is_attn && is_prefill {
                 let d_conv = cfg.d_conv;
-                let n_embd = cfg.n_embd;
                 let state = &mut shortconv_states[layer];
                 state.resize(d_conv * n_embd, 0.0);
                 let hist = &accumulated_bx[layer];
                 for k_p in 0..d_conv {
-                    // Right-align the history: zero pads the FRONT of the
-                    // conv window (ggml_ssm_conv taps K[0] on the oldest entry).
+                    // The prefill convolution window is right-aligned with zero padding.
                     let idx = k_p as isize - (d_conv - hist.len()) as isize;
                     if idx >= 0 {
                         let src = &hist[idx as usize];
@@ -180,13 +218,13 @@ pub fn run_inference(
                 }
             }
             forward_layer(
-                &pool,
+                pool,
                 lw,
                 layer,
                 n_layer,
-                &cfg,
-                &mut scratch,
-                &kv_cache,
+                cfg,
+                scratch,
+                kv_cache,
                 max_ctx,
                 pos,
                 eps,
@@ -196,12 +234,11 @@ pub fn run_inference(
                 is_prefill,
             );
         }
-
         let x_ptr = scratch.x.as_mut_ptr();
         let normed_ptr = scratch.normed.as_mut_ptr();
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
-        rms_norm(x, &output_norm, normed, eps);
+        rms_norm(x, output_norm, normed, eps);
 
         let q8_buf = unsafe {
             std::slice::from_raw_parts_mut(
@@ -254,85 +291,272 @@ pub fn run_inference(
             );
         });
 
-        let eval_elapsed = eval_started.elapsed();
-        if step < input_tokens.len() {
-            prefill_evals += 1;
-            prefill_time += eval_elapsed;
-        } else {
-            decode_evals += 1;
-            decode_time += eval_elapsed;
-        }
+        self.position += 1;
+        Ok(features)
+    }
+}
 
-        if step < input_tokens.len() - 1 {
-            continue;
-        }
+impl crate::models::dspark::DSparkTarget for Lfm25Session<'_> {
+    type Checkpoint = Lfm25Checkpoint;
 
-        let logits = &mut scratch.logits;
-        // Parity debugging: dump top-10 logits per step when
-        // RUST_LFM25_DEBUG_LOGITS is set (mirrors the other trunks).
-        if std::env::var("RUST_LFM25_DEBUG_LOGITS").is_ok() {
-            let mut idxs: Vec<(usize, f32)> =
-                logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            let mut line = format!("RUST_LOGITS step={} top10:", step);
-            for k in 0..10 {
-                line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
-            }
-            line.push('\n');
-            let _ = io::stderr().write_all(line.as_bytes());
-            let _ = io::stderr().flush();
+    fn checkpoint(&self) -> Self::Checkpoint {
+        Lfm25Checkpoint {
+            position: self.position,
+            prefill: self.prefill,
+            shortconv_states: self.shortconv_states.clone(),
+            accumulated_bx: self.accumulated_bx.clone(),
+            logits: self.scratch.logits.clone(),
         }
-        let chosen = if temperature <= 0.0 {
-            logits
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        } else {
-            for l in logits.iter_mut() {
-                *l /= temperature;
-            }
-            let top = sample_top_k(logits, 40);
-            let mut rng = 0u64;
-            for &t in &all_tokens {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
-            }
-            let r = ((rng >> 33) as f32) / (1u32 << 31) as f32;
-            let mut cum = 0.0f32;
-            let mut chosen = top[0].0;
-            for &(idx, prob) in &top {
-                cum += prob;
-                if cum >= r {
-                    chosen = idx;
-                    break;
-                }
-            }
-            chosen
-        };
-
-        let chosen_id = chosen as u32;
-        if eos_id == Some(chosen_id) {
-            break;
-        }
-        if generated_tokens.len() >= max_tokens {
-            break;
-        }
-
-        generated_tokens.push(chosen_id);
-        all_tokens.push(chosen_id);
-
-        let text = decoder.push(chosen_id);
-        print!("{}", text);
-        io::stdout().flush().unwrap();
     }
 
+    fn restore(&mut self, checkpoint: &Self::Checkpoint) {
+        self.position = checkpoint.position;
+        self.prefill = checkpoint.prefill;
+        self.shortconv_states
+            .clone_from(&checkpoint.shortconv_states);
+        self.accumulated_bx.clone_from(&checkpoint.accumulated_bx);
+        self.scratch.logits.clone_from(&checkpoint.logits);
+    }
+
+    fn position(&self) -> usize {
+        self.position
+    }
+
+    fn evaluate(
+        &mut self,
+        token_ids: &[u32],
+        target_layers: &[usize],
+    ) -> Result<crate::models::dspark::TargetBatch, String> {
+        if target_layers.iter().any(|&id| id >= self.cfg.n_layer)
+            || target_layers
+                .iter()
+                .enumerate()
+                .any(|(index, layer)| target_layers[..index].contains(layer))
+        {
+            return Err("Invalid LFM2.5 DSpark target layers".into());
+        }
+        let mut batch = crate::models::dspark::TargetBatch {
+            logits: Vec::with_capacity(token_ids.len()),
+            features: Vec::with_capacity(token_ids.len()),
+        };
+        for &token in token_ids {
+            batch
+                .features
+                .push(self.evaluate_one(token, target_layers)?);
+            batch.logits.push(self.scratch.logits.clone());
+        }
+        Ok(batch)
+    }
+
+    fn evaluate_token(&mut self, token_id: u32) -> Result<(), String> {
+        self.evaluate_one(token_id, &[]).map(drop)
+    }
+
+    fn current_logits(&self) -> &[f32] {
+        &self.scratch.logits
+    }
+}
+
+pub fn run_inference(
+    source: Arc<dyn TensorSource>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    _profile: bool,
+    kv_format: KvFormat,
+    max_context: usize,
+    thinking: bool,
+    dspark: Option<crate::app::cli::DSparkOptions>,
+) -> Result<(), String> {
+    use crate::format::ggufrs::{open_model_source, ComponentRole};
+    use crate::models::dspark::{
+        prefill as dspark_prefill, run_greedy, DSparkModel, DSparkSession, RunOptions, SharedHead,
+        TargetShape,
+    };
+
+    let t0 = Instant::now();
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    let input_tokens = build_lfm25_chat_prompt_with_thinking(
+        &tokenizer,
+        &[Lfm2Message {
+            role: "user",
+            content: prompt,
+        }],
+        thinking,
+    )?;
+    if input_tokens.is_empty() {
+        return Err("LFM2.5 prompt has no tokens".into());
+    }
+    eprintln!(
+        "[RUST_TOKENS] n={} ids={:?}",
+        input_tokens.len(),
+        input_tokens
+    );
+    let cfg = Lfm25Config::from_source(source.as_ref())?;
+    let max_ctx = crate::models::qwen3::trunk::util::checked_session_capacity(
+        input_tokens.len(),
+        max_tokens,
+        cfg.n_ctx.min(max_context).max(1),
+    )?;
+    let n_threads = if n_threads_arg > 0 {
+        n_threads_arg
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    };
+    let pool = Arc::new(ComputePool::new(n_threads));
+    let mut session = Lfm25Session::new(source.as_ref(), Arc::clone(&pool), max_ctx, kv_format)?;
+    println!(
+        "Model: lfm2.5 | n_embd={} n_layer={} n_head={} n_ff={} d_conv={} | loaded in {}ms",
+        cfg.n_embd,
+        cfg.n_layer,
+        cfg.n_head,
+        cfg.n_ff,
+        cfg.d_conv,
+        t0.elapsed().as_millis()
+    );
+    eprintln!("compute pool: {} threads", pool.n_threads());
+    println!("Prompt: {} tokens", input_tokens.len());
+    print!("Output: ");
+    io::stdout().flush().unwrap();
+    let t_infer = Instant::now();
+    let mut generated_tokens = Vec::new();
+    let mut decoder = tokenizer.streaming_decoder(false);
+    let mut prefill_time = Duration::ZERO;
+    let mut decode_time = Duration::ZERO;
+    let mut decode_evals = 0usize;
+
+    if let Some(options) = dspark {
+        let draft_source: Arc<dyn TensorSource> = Arc::from(
+            open_model_source(&options.draft_model, ComponentRole::Llm)
+                .map_err(|e| format!("Failed to open DSpark sidecar: {e}"))?,
+        );
+        let target = TargetShape {
+            hidden: cfg.n_embd,
+            vocab: cfg.vocab_size,
+            layers: cfg.n_layer,
+        };
+        let shared_head = SharedHead::new(
+            Arc::clone(&source),
+            Arc::clone(&tokenizer),
+            target,
+            cfg.n_ctx,
+        )?;
+        let draft_model = DSparkModel::from_source(draft_source, shared_head, Arc::clone(&pool))?;
+        let draft_n_max = options.draft_n_max.unwrap_or(draft_model.config.block_size);
+        let mut draft_session = DSparkSession::new(&draft_model, max_ctx, kv_format)?;
+        dspark_prefill(&mut session, &mut draft_session, &input_tokens, 1)?;
+        session.finish_prefill();
+        prefill_time = t_infer.elapsed();
+        if max_tokens > 0 {
+            let stats = run_greedy(
+                &mut session,
+                &mut draft_session,
+                RunOptions {
+                    max_tokens,
+                    draft_n_max,
+                    confidence_min: options.confidence_min,
+                    stop_tokens: tokenizer.eos_id().into_iter().collect(),
+                },
+                |token| {
+                    generated_tokens.push(token);
+                    print!("{}", decoder.push(token));
+                    io::stdout().flush().unwrap();
+                },
+            )?;
+            eprintln!(
+                "DSpark: drafted={} accepted={} target_evaluations={}",
+                stats.drafted, stats.accepted, stats.target_evaluations
+            );
+        }
+        decode_time = t_infer.elapsed().saturating_sub(prefill_time);
+        decode_evals = generated_tokens.len();
+    } else {
+        let mut all_tokens = input_tokens.clone();
+        for step in 0..input_tokens.len() + max_tokens {
+            let started = Instant::now();
+            let token_id = if step < input_tokens.len() {
+                input_tokens[step]
+            } else {
+                *generated_tokens.last().unwrap_or(&0)
+            };
+            session.evaluate_one(token_id, &[])?;
+            if step + 1 == input_tokens.len() {
+                session.finish_prefill();
+            }
+            if step < input_tokens.len() {
+                prefill_time += started.elapsed();
+            } else {
+                decode_time += started.elapsed();
+                decode_evals += 1;
+            }
+            if step + 1 < input_tokens.len() {
+                continue;
+            }
+            let logits = &mut session.scratch.logits;
+            if std::env::var("RUST_LFM25_DEBUG_LOGITS").is_ok() {
+                let mut idxs: Vec<(usize, f32)> =
+                    logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+                idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let mut line = format!("RUST_LOGITS step={} top10:", step);
+                for k in 0..10 {
+                    line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
+                }
+                line.push('\n');
+                let _ = io::stderr().write_all(line.as_bytes());
+                let _ = io::stderr().flush();
+            }
+            let chosen = if temperature <= 0.0 {
+                logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            } else {
+                for l in logits.iter_mut() {
+                    *l /= temperature;
+                }
+                let top = sample_top_k(logits, 40);
+                let mut rng = 0u64;
+                for &t in &all_tokens {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
+                }
+                let r = ((rng >> 33) as f32) / (1u32 << 31) as f32;
+                let mut cum = 0.0f32;
+                let mut chosen = top[0].0;
+                for &(idx, prob) in &top {
+                    cum += prob;
+                    if cum >= r {
+                        chosen = idx;
+                        break;
+                    }
+                }
+                chosen
+            };
+            let chosen_id = chosen as u32;
+            if tokenizer.eos_id() == Some(chosen_id) || generated_tokens.len() >= max_tokens {
+                break;
+            }
+            generated_tokens.push(chosen_id);
+            all_tokens.push(chosen_id);
+            print!("{}", decoder.push(chosen_id));
+            io::stdout().flush().unwrap();
+        }
+    }
     let tail = decoder.finish();
     if !tail.is_empty() {
         print!("{}", tail);
         io::stdout().flush().unwrap();
     }
-
+    if std::env::var_os("RUST_DSPARK_TRACE_IDS").is_some() {
+        eprintln!("[RUST_GENERATED_IDS] {:?}", generated_tokens);
+    }
     let infer_ms = t_infer.elapsed().as_millis();
     let tok_s = if infer_ms > 0 {
         generated_tokens.len() as f64 / infer_ms as f64 * 1000.0
@@ -340,16 +564,15 @@ pub fn run_inference(
         0.0
     };
     let per_second = |count: usize, secs: Duration| -> f64 {
-        let s = secs.as_secs_f64();
-        if s > 0.0 {
-            count as f64 / s
+        if secs.as_secs_f64() > 0.0 {
+            count as f64 / secs.as_secs_f64()
         } else {
             0.0
         }
     };
     eprintln!(
         "\nPrompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
-        per_second(prefill_evals, prefill_time),
+        per_second(input_tokens.len(), prefill_time),
         per_second(decode_evals, decode_time),
         tok_s
     );
@@ -411,6 +634,13 @@ fn forward_layer(
         );
         quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
     }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "lfm25.operator_norm",
+        Some(layer),
+        &[n_embd],
+        unsafe { std::slice::from_raw_parts(normed_ptr, n_embd) },
+    ));
 
     let q8 = &q8_buf[..n_embd];
     let sc = &scale_buf[..n_embd / 32];
@@ -433,6 +663,13 @@ fn forward_layer(
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(attn_proj, x);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "lfm25.attn_residual",
+            Some(layer),
+            &[n_embd],
+            x,
+        ));
     } else {
         let (cur, _bx) = forward_shortconv(
             &pool,
@@ -560,6 +797,13 @@ fn forward_layer(
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "lfm25.layer_output",
+        Some(layer),
+        &[n_embd],
+        x,
+    ));
 }
 
 fn forward_attention(
@@ -653,6 +897,27 @@ fn forward_attention(
             );
         }
     });
+    #[cfg(feature = "parity-trace")]
+    {
+        for (name, data) in [
+            ("lfm25.q_raw", unsafe {
+                std::slice::from_raw_parts(q_ptr, n_embd_q)
+            }),
+            ("lfm25.k_raw", unsafe {
+                std::slice::from_raw_parts(k_ptr, n_embd_gqa)
+            }),
+            ("lfm25.v_raw", unsafe {
+                std::slice::from_raw_parts(v_ptr, n_embd_gqa)
+            }),
+        ] {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                name,
+                Some(layer),
+                &[data.len()],
+                data,
+            ));
+        }
+    }
 
     unsafe {
         let q = std::slice::from_raw_parts_mut(q_ptr, n_embd_q);
@@ -669,6 +934,21 @@ fn forward_attention(
                 eps,
             );
         }
+        #[cfg(feature = "parity-trace")]
+        {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "lfm25.q_norm",
+                Some(layer),
+                &[n_embd_q],
+                q,
+            ));
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "lfm25.k_norm",
+                Some(layer),
+                &[n_embd_gqa],
+                k_new,
+            ));
+        }
         for h in 0..n_head {
             rope_neox_inplace(
                 &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
@@ -684,6 +964,21 @@ fn forward_attention(
                 n_embd_head_k,
                 freq_base,
             );
+        }
+        #[cfg(feature = "parity-trace")]
+        {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "lfm25.q_rope",
+                Some(layer),
+                &[n_embd_q],
+                q,
+            ));
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "lfm25.k_rope",
+                Some(layer),
+                &[n_embd_gqa],
+                k_new,
+            ));
         }
     }
 
@@ -792,6 +1087,7 @@ fn forward_attention(
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
+            let attention_values_ptr = scratch.attention_values.as_mut_ptr();
             pool.compute({
                 let q_ptr = q_ptr;
                 let attn_out_ptr = attn_out_ptr;
@@ -810,6 +1106,12 @@ fn forward_attention(
                         let scores = unsafe {
                             std::slice::from_raw_parts_mut(scores_ptr.add(s_off), score_stride)
                         };
+                        let values = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                attention_values_ptr.add(s_off),
+                                score_stride,
+                            )
+                        };
                         for t in 0..n_cached {
                             scores[t] = dot_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -823,7 +1125,7 @@ fn forward_attention(
                         }
                         scores[n_cached..n_padded].fill(f32::NEG_INFINITY);
                         softmax_inplace(&mut scores[..n_padded]);
-                        let mut values = vec![0.0f32; max_ctx];
+                        values[n_cached..n_padded].fill(0.0);
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =
@@ -839,6 +1141,13 @@ fn forward_attention(
     }
 
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "lfm25.attn_out",
+        Some(layer),
+        &[n_embd_q],
+        attn_out,
+    ));
     quantize_q8_0_into(
         attn_out,
         n_embd_q,
@@ -875,6 +1184,13 @@ fn forward_attention(
             );
         }
     });
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "lfm25.attn_proj",
+        Some(layer),
+        &[n_embd],
+        unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) },
+    ));
 }
 
 fn forward_shortconv(
@@ -1062,13 +1378,6 @@ fn forward_shortconv(
     let _ = pos;
     (out, bx)
 }
-
-/// Single forward pass: prefill `prompt_tokens` and return the
-/// last-position logits. Used by JEV / classification modes that do
-/// not need autoregressive decoding.
-///
-/// Mirrors the prefill portion of `run_inference` but stops after the
-/// final logits are computed.
 pub fn run_forward_logits_lfm25(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],

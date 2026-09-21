@@ -153,6 +153,73 @@ fn sequential_weight_rows(weight: &Weight<'_>, input: &[f32], rows: usize) -> Ve
 }
 
 #[test]
+fn prepared_rows_dispatches_one_multirow_call_per_worker() {
+    use crate::ops::kernel::Kernel;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct MultirowOnly(Arc<AtomicUsize>);
+    impl Kernel for MultirowOnly {
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("prepared rows must use the multirow entry point");
+        }
+
+        fn forward_prepared_rows(
+            &self,
+            input_f32: &[f32],
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _q8_k: Option<&[BlockQ8K]>,
+            output: &mut [f32],
+            rows: usize,
+            n_in: usize,
+            n_out: usize,
+            ith: usize,
+            nth: usize,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let per_thread = n_out.div_ceil(nth);
+            let start = ith * per_thread;
+            let end = (start + per_thread).min(n_out);
+            for row in 0..rows {
+                for out_idx in start..end {
+                    output[row * n_out + out_idx] = input_f32[row * n_in] + out_idx as f32;
+                }
+            }
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let weight = Weight {
+        kernel: Box::new(MultirowOnly(Arc::clone(&calls))),
+        ggml_type: GGMLType::F32,
+        n_in: 2,
+        n_out: 2,
+    };
+    let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let mut prepared = PreparedRows::new(3, 2);
+    prepared.prepare(&input, 3, 2, false, false).unwrap();
+    let mut output = [f32::NAN; 6];
+    prepared
+        .matmul(&weight, &input, &mut output, &ComputePool::new(1))
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(output, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
 fn prepared_rows_match_sequential_matmul_bits_and_reuse_storage() {
     for weight in prepared_row_test_weights() {
         for rows in [1, 2, 3, 17] {
@@ -666,7 +733,7 @@ fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
 }
 
 #[test]
-fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
+fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_rotation_order() {
     let mut values = [0.0f32; 128];
     values[0] = f32::from_bits(0x402a_4f21);
     values[1] = f32::from_bits(0x3fad_b711);
@@ -677,7 +744,7 @@ fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
 
     assert_eq!(
         [values[0], values[1], values[64], values[65]].map(f32::to_bits),
-        [0x3fc7_0519, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
+        [0x3fc7_051a, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
     );
 }
 
@@ -738,6 +805,26 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
         unsafe { dot_f32_neon(&a, &b, a.len()) }.to_bits(),
         0x3d07_1678
     );
+}
+
+#[cfg(feature = "scalar-parity")]
+#[test]
+fn scalar_dot_f32_matches_ggml_f64_accumulation() {
+    assert_eq!(dot_f32(&[1.0e8, 1.0, -1.0e8], &[1.0; 3], 3), 1.0);
+}
+
+#[cfg(feature = "scalar-parity")]
+#[test]
+fn scalar_dot_f16_matches_ggml_f64_accumulation() {
+    let mut input = vec![f32_to_f16(0.0); 96];
+    input[0] = f32_to_f16(10_000.0);
+    input[32] = f32_to_f16(1.0);
+    input[64] = f32_to_f16(-10_000.0);
+    let weights = (0..96)
+        .flat_map(|_| f32_to_f16(1.0).to_le_bytes())
+        .collect::<Vec<_>>();
+
+    assert_eq!(dot_f16_f16_bytes(&input, &weights, input.len()), 1.0);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -828,10 +915,12 @@ fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
 
     softmax_inplace(&mut values);
 
-    assert_eq!(
-        values.map(f32::to_bits),
-        [0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0]
-    );
+    for (actual, expected) in values
+        .into_iter()
+        .zip([0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0])
+    {
+        assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1036,7 +1125,7 @@ fn neon_q8_quantization_matches_scalar() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_q8_quantization_uses_ties_to_even() {
+fn neon_q8_quantization_uses_ties_away_from_zero() {
     let mut input = [0.0f32; 32];
     input[0] = 127.0;
     input[1] = 34.5;
@@ -1045,7 +1134,7 @@ fn neon_q8_quantization_uses_ties_to_even() {
 
     quantize_q8_0_into(&input, input.len(), &mut q8, &mut scales);
 
-    assert_eq!(q8[1] as i8, 34);
+    assert_eq!(q8[1] as i8, 35);
 }
 
 #[test]

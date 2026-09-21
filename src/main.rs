@@ -396,6 +396,7 @@ fn main() {
                 options.profile,
                 options.kv_format,
                 prefill_batch_size,
+                options.dspark_options(),
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
             ));
@@ -411,6 +412,7 @@ fn main() {
                 options.profile,
                 options.kv_format,
                 prefill_batch_size,
+                options.dspark_options(),
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
             ));

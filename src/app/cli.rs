@@ -28,6 +28,9 @@ pub struct CliOptions {
     pub num_steps: Option<usize>,
     pub output: Option<PathBuf>,
     pub model: PathBuf,
+    pub draft_model: Option<PathBuf>,
+    pub spec_draft_n_max: Option<usize>,
+    pub spec_draft_conf_min: f32,
     pub mmproj: Option<PathBuf>,
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
@@ -93,9 +96,24 @@ pub struct JevQuestion {
     pub options: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DSparkOptions {
+    pub draft_model: PathBuf,
+    pub draft_n_max: Option<usize>,
+    pub confidence_min: f32,
+}
+
 impl CliOptions {
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
+
+    pub fn dspark_options(&self) -> Option<DSparkOptions> {
+        self.draft_model.clone().map(|draft_model| DSparkOptions {
+            draft_model,
+            draft_n_max: self.spec_draft_n_max,
+            confidence_min: self.spec_draft_conf_min,
+        })
     }
 
     /// Default max-context cap. Most chat workloads fit in 8K; this
@@ -305,6 +323,25 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     options.model = args[i + 1].as_str().into();
                     i += 1;
                 }
+            }
+            "--draft-model" => {
+                options.draft_model = Some(required_path_value(args, &mut i, "--draft-model")?);
+            }
+            "--spec-draft-n-max" => {
+                let value = required_usize_value(args, &mut i, "--spec-draft-n-max")?;
+                if value == 0 {
+                    return Err("--spec-draft-n-max must be greater than zero".into());
+                }
+                options.spec_draft_n_max = Some(value);
+            }
+            "--spec-draft-conf-min" => {
+                let value = required_string_value(args, &mut i, "--spec-draft-conf-min")?
+                    .parse::<f32>()
+                    .map_err(|error| format!("Invalid --spec-draft-conf-min value: {error}"))?;
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err("--spec-draft-conf-min must be finite and in [0, 1]".into());
+                }
+                options.spec_draft_conf_min = value;
             }
             "--prompt" => {
                 if i + 1 < args.len() {
@@ -1142,6 +1179,24 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
 }
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.draft_model.is_some() && options.temperature.is_some_and(|value| value != 0.0) {
+        return Err("DSpark currently requires greedy decoding; use --temperature 0".into());
+    }
+    if options.draft_model.is_some()
+        && (options.prompt.is_none()
+            || options.audio.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.mmproj.is_some()
+            || options.tts
+            || options.embedding
+            || options.gpu
+            || options.dreamx
+            || options.planner.is_some()
+            || options.vae.is_some())
+    {
+        return Err("DSpark requires a CPU text prompt; multimodal, embedding, GPU and interactive modes are unsupported".into());
+    }
     if (options.top_k.is_some() || options.top_p.is_some()) && (!options.tts || options.edit) {
         return Err("--top-k/--top-p require Breeze --tts without --edit".into());
     }
@@ -1337,9 +1392,13 @@ pub fn resolve_cli_generation_options(options: &CliOptions) -> (usize, f32) {
         options
             .max_tokens
             .unwrap_or(if options.audio.is_some() { 256 } else { 128 }),
-        options
-            .temperature
-            .unwrap_or(if options.audio.is_some() { 0.0 } else { 0.6 }),
+        options.temperature.unwrap_or(
+            if options.audio.is_some() || options.draft_model.is_some() {
+                0.0
+            } else {
+                0.6
+            },
+        ),
     )
 }
 
@@ -1366,6 +1425,75 @@ mod tests {
     use crate::models::qwen3::asr::model::{normalize_language, TranscriptionOptions};
     use std::collections::HashMap;
     use std::path::Path;
+
+    #[test]
+    fn dspark_cli_parses_draft_options() {
+        let parsed = parse_cli_options(&args(&[
+            "rmi",
+            "--draft-model",
+            "draft.gguf",
+            "--spec-draft-n-max",
+            "7",
+            "--spec-draft-conf-min",
+            "0.4",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.draft_model.as_deref(), Some(Path::new("draft.gguf")));
+        assert_eq!(parsed.spec_draft_n_max, Some(7));
+        assert_eq!(parsed.spec_draft_conf_min, 0.4);
+    }
+
+    #[test]
+    fn dspark_cli_rejects_invalid_options() {
+        for argv in [
+            &["rmi", "--draft-model"][..],
+            &["rmi", "--spec-draft-n-max", "0"][..],
+            &["rmi", "--spec-draft-conf-min", "-0.1"][..],
+            &["rmi", "--spec-draft-conf-min", "1.1"][..],
+        ] {
+            assert!(parse_cli_options(&args(argv)).is_err(), "{argv:?}");
+        }
+
+        let sampled = parse_cli_options(&args(&[
+            "rmi",
+            "--draft-model",
+            "draft.gguf",
+            "--temperature",
+            "0.1",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&sampled)
+            .unwrap_err()
+            .contains("greedy"));
+        for flag in ["--gpu", "--tts", "--embedding"] {
+            let parsed = parse_cli_options(&args(&[
+                "rmi",
+                "--prompt",
+                "hello",
+                "--draft-model",
+                "draft.gguf",
+                flag,
+            ]))
+            .unwrap();
+            assert!(validate_cli_options(&parsed)
+                .unwrap_err()
+                .contains("CPU text prompt"));
+        }
+        let mmproj = parse_cli_options(&args(&[
+            "rmi",
+            "--prompt",
+            "hello",
+            "--draft-model",
+            "draft.gguf",
+            "--mmproj",
+            "projector.gguf",
+        ]))
+        .unwrap();
+        assert!(validate_cli_options(&mmproj)
+            .unwrap_err()
+            .contains("CPU text prompt"));
+    }
 
     struct TestTensorSource {
         info: TensorInfo,

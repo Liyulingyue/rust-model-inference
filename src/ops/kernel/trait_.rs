@@ -76,6 +76,50 @@ pub trait Kernel: Send + Sync {
         self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 
+    /// Multi-row prepared matmul. Kernels may override this to reuse one
+    /// weight row across several activations while preserving each dot
+    /// product's arithmetic order.
+    fn forward_prepared_rows(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let q8_blocks = n_in.div_ceil(32);
+        let q8k_blocks = n_in / crate::ops::quant::QK_K;
+        for row in 0..rows {
+            let input_q8 = if input_q8.is_empty() {
+                &[][..]
+            } else {
+                &input_q8[row * n_in..(row + 1) * n_in]
+            };
+            let input_scales = if input_scales.is_empty() {
+                &[][..]
+            } else {
+                &input_scales[row * q8_blocks..(row + 1) * q8_blocks]
+            };
+            let q8_k = q8_k.map(|values| &values[row * q8k_blocks..(row + 1) * q8k_blocks]);
+            self.forward_prepared(
+                &input_f32[row * n_in..(row + 1) * n_in],
+                input_q8,
+                input_scales,
+                q8_k,
+                &mut output[row * n_out..(row + 1) * n_out],
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
+        }
+    }
+
     /// Convenience: f32 input, single-thread. Default impl quantizes the
     /// input to Q8_0 and delegates to `forward_prequantized`. Kernels that
     /// have a native f32-input path (e.g. F16) override this.

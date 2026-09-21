@@ -910,6 +910,7 @@ fn forward_attention(
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
+            let attention_values_ptr = scratch.attention_values.as_mut_ptr();
             pool.compute({
                 let q_ptr = q_ptr;
                 let attn_out_ptr = attn_out_ptr;
@@ -928,6 +929,12 @@ fn forward_attention(
                         let scores = unsafe {
                             std::slice::from_raw_parts_mut(scores_ptr.add(s_off), score_stride)
                         };
+                        let values = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                attention_values_ptr.add(s_off),
+                                score_stride,
+                            )
+                        };
                         for t in 0..n_cached {
                             scores[t] = dot_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -943,11 +950,7 @@ fn forward_attention(
                             *v = f32::NEG_INFINITY;
                         }
                         softmax_inplace(&mut scores[..n_padded]);
-                        // `values` was hard-coded to `[0.0f32; 512]` historically,
-                        // which silently truncated attention once the cache
-                        // exceeded 512 tokens. Allocating based on `max_ctx`
-                        // matches the score buffer and KV cache layout.
-                        let mut values = vec![0.0f32; max_ctx];
+                        values[n_cached..n_padded].fill(0.0);
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =

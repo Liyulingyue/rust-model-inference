@@ -9,15 +9,15 @@ silu_mul_approx_inplace + AVX2/NEON matmul）。
 > 共用前置：构建 `cargo build --release --bin rust-model-inference`。
 > KV cache 默认 F16；与 llama.cpp 位级对比时显式传 `--kv-cache f16`。
 > 当前仅 CPU 路径；Vulkan dispatch 不在 `hunyuan-dense` 的覆盖范围内。
-> 
+>
 > 常用生成参数：
-> 
+>
 > - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2 GGUF
 >   `context_length=524288`，大值会一次性占用 GB 级 KV 内存。
 > - `--repetition-penalty α`：logit 级重复抑制，默认 1.0（禁用）。对
 >   Hy-MT2-7B Q4_K_M 翻译时陷入复读循环的问题尤其有用（α ≥ 1.3 起效）。
 > - `--temperature`：Hy-MT2 路径已直通到 sampling，仓库默认 0（greedy）。
-> 
+>
 > - `--max-context N`：KV cache 容量上限，默认 8192。Hy-MT2-7B 的 GGUF
 >   `context_length=524288` 不受 `--max-context` 影响 KV 分配本身（实际容量取
 >   `min(model.n_ctx, --max-context)`），但可避免 524k × 36 层 × 4096 维 ≈ 77 GB

@@ -43,5 +43,6 @@ pub fn run_inference(
         prefill_batch_size,
         max_context,
         repetition_penalty,
+        None,
     )
 }

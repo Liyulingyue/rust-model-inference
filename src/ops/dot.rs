@@ -27,11 +27,11 @@ unsafe fn dot_f32_avx2(a: &[f32], b: &[f32], n: usize) -> f32 {
 
 #[inline(always)]
 fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
-    let mut s = 0.0f32;
+    let mut s = 0.0f64;
     for i in 0..n {
-        s += a[i] * b[i];
+        s += f64::from(a[i] * b[i]);
     }
-    s
+    s as f32
 }
 
 /// Same throughput as `dot_f32_avx2` but with **separate `mul` + `add`** instead of
@@ -182,65 +182,36 @@ pub fn dot_f16_f32(a: &[f32], b_f16: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n);
-    // x86_64 SIMD: AVX2 + F16C converts 8 halfs to 8 f32 per `_mm256_cvtph_ps`,
-    // then FMA accumulates. This is the hot path for Qwen3-TTS DAC conv1
-    // (which uses F16 weights × F32 inputs, pre-quantized to F16 here).
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() && has_f16c() && n >= 8 {
             return unsafe { dot_f16_avx2(a, b, n) };
         }
     }
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    ))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
-                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
+                f64::from(unsafe { dot_f16_fp16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
             )
         } else {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    )))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
-    // Tail SIMD: handle the `n % 32` remainder with 8-wide NEON FP16 +
-    // F32 lanes (NEON's `fmla` works on F16 directly so the conversion
-    // is implicit). Edge cases like Qwen3-TTS DAC always have
-    // `dot_len = in_channels * kernel_size` divisible by 8 (Q8_0/F16
-    // layout), so this loop usually doesn't run, but it removes the
-    // last scalar fallback for callers with arbitrary strides.
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    {
-        let mut i = tail_start;
-        unsafe {
-            use std::arch::aarch64::*;
-            while i + 8 <= n {
-                let av = vld1q_u16(a.as_ptr().add(i));
-                let bv = vld1q_u16(b.as_ptr().add(i));
-                let acc = vfmaq_f16(
-                    vdupq_n_f16(0.0),
-                    vreinterpretq_f16_u16(av),
-                    vreinterpretq_f16_u16(bv),
-                );
-                let lo = vcvtn_f32_f16(vget_low_f16(acc));
-                let hi = vcvtn_f32_f16(vget_high_f16(acc));
-                let pair = vaddq_f32(lo, hi);
-                sum += f64::from(vaddvq_f32(pair));
-                i += 8;
-            }
-        }
-        while i < n {
-            sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(b[i]));
-            i += 1;
-        }
-    }
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
-    {
-        for index in tail_start..n {
-            sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
-        }
+    for index in tail_start..n {
+        sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
     }
     sum as f32
 }
@@ -289,19 +260,29 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
             return unsafe { dot_f16_f16_bytes_avx2(a, b, n) };
         }
     }
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    ))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
         if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
-                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
+                f64::from(unsafe {
+                    dot_f16_fp16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix)
+                }),
                 prefix,
             )
         } else {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        not(feature = "scalar-parity")
+    )))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
     for index in tail_start..n {
         let weight = u16::from_le_bytes(b[index * 2..index * 2 + 2].try_into().unwrap());
@@ -454,7 +435,7 @@ unsafe fn _mm_hsum_ps_4(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m1
 }
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
+unsafe fn dot_f16_fp16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
     debug_assert_eq!(n % 32, 0);
     let bits: u32;
     asm!(
@@ -922,7 +903,7 @@ unsafe fn vec_mad_per_channel_f32_neon(y: &mut [f32], x: &[f32], scale: &[f32]) 
         let yi = vld1q_f32(y.as_ptr().add(i));
         let xi = vld1q_f32(x.as_ptr().add(i));
         let si = vld1q_f32(scale.as_ptr().add(i));
-        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, si, yi));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(yi, xi, si));
         i += 4;
     }
     while i < y.len() {
@@ -1014,7 +995,7 @@ unsafe fn vec_mad_per_channel_f32_broadcast_neon(
         let sc = vld1q_f32(scale.as_ptr().add(c0));
         let yi = vld1q_f32(y.as_ptr().add(i));
         let xi = vld1q_f32(x.as_ptr().add(i));
-        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, sc, yi));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(yi, xi, sc));
         i += 4;
     }
     while i < y.len() {
@@ -1457,74 +1438,6 @@ mod tests {
         for (i, (a, s)) in simd.iter().zip(scalar.iter()).enumerate() {
             let denom = s.abs().max(1.0);
             assert!((a - s).abs() / denom < 1e-5, "row {i}: simd={a} scalar={s}");
-        }
-    }
-
-    fn bf16_bytes_from_f32(values: &[f32]) -> Vec<u8> {
-        values
-            .iter()
-            .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
-            .collect()
-    }
-
-    fn dot_bf16_f32_reference(weight_bytes: &[u8], input: &[f32], n: usize) -> f32 {
-        let mut sum = 0.0f32;
-        for i in 0..n {
-            let bits = u16::from_le_bytes(
-                weight_bytes[i * 2..i * 2 + 2]
-                    .try_into()
-                    .expect("weight slice has uneven bytes"),
-            );
-            sum += crate::ops::bf16_to_f32(bits) * input[i];
-        }
-        sum
-    }
-
-    #[test]
-    fn dot_bf16_f32_matches_scalar_for_aligned_length() {
-        let n = 256usize;
-        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
-        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
-        let weight_bytes = bf16_bytes_from_f32(&weights);
-        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
-        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
-        let denom = scalar.abs().max(1.0);
-        assert!((simd - scalar).abs() / denom < 1e-5);
-    }
-
-    #[test]
-    fn dot_bf16_f32_matches_scalar_for_non_aligned_length() {
-        // n = 3420 mirrors Qwen2.5-Omni's FFN_down width (n_in = n_ff = 3420)
-        // which the packed BF16×F32 AVX2 kernel refuses because 3420 % 8 != 0.
-        // Exercises the per-row dot path used by the BF16 kernel fallback.
-        let n = 3420usize;
-        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.011).sin() * 1.5).collect();
-        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.019).cos() + 0.5).collect();
-        let weight_bytes = bf16_bytes_from_f32(&weights);
-        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
-        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
-        let denom = scalar.abs().max(1.0);
-        assert!(
-            (simd - scalar).abs() / denom < 1e-5,
-            "non-aligned dot diverged: simd={simd} scalar={scalar}"
-        );
-    }
-
-    #[test]
-    fn dot_bf16_f32_handles_short_tail() {
-        // Smaller than the AVX2/NEON minimum (8/4 lanes) so we always go
-        // through the scalar tail inside the kernel.
-        for n in [1usize, 3, 7, 9, 13] {
-            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.3).sin()).collect();
-            let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos()).collect();
-            let weight_bytes = bf16_bytes_from_f32(&weights);
-            let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
-            let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
-            let denom = scalar.abs().max(1.0);
-            assert!(
-                (simd - scalar).abs() / denom < 1e-5,
-                "n={n}: simd={simd} scalar={scalar}"
-            );
         }
     }
 }

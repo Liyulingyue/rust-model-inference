@@ -546,7 +546,13 @@ impl<'a> QuantizedTensor<'a> {
 
     pub fn n_rows(&self) -> usize {
         match self {
-            Self::F32 { data, .. } => usize::from(!data.is_empty()),
+            Self::F32 { data, n_out, .. } => {
+                if *n_out != 0 {
+                    *n_out
+                } else {
+                    usize::from(!data.is_empty())
+                }
+            }
             Self::F16(weight) => weight.n_out,
             Self::BF16(weight) => weight.n_out,
             Self::Q8_0 { n_rows, .. } => *n_rows,
@@ -725,6 +731,13 @@ mod tests {
             n_out: 0,
         };
         assert_eq!(q.ggml_type(), GGMLType::F32);
+
+        let q = QuantizedTensor::F32 {
+            data: vec![0.0; 8],
+            n_in: 4,
+            n_out: 2,
+        };
+        assert_eq!(q.n_rows(), 2);
 
         let q8_bytes = vec![0u8; 34];
         let q = QuantizedTensor::Q8_0 {

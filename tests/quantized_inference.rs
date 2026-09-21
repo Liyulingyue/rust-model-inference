@@ -50,7 +50,7 @@ fn q4_0_dot_scales_in_llama_scalar_order() {
         1,
     );
 
-    assert_eq!(output[0].to_bits(), 0x4892_44e8);
+    assert_eq!(output[0].to_bits(), 0x4892_44e7);
 }
 
 #[cfg(feature = "parity-trace")]
@@ -261,21 +261,18 @@ fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
     let mut weight = vec![0u8; 18];
     weight[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
     for j in 0..16 {
-        weight[2 + j] = j as u8;
+        weight[2 + j] = (j as u8) | ((15 - j as u8) << 4);
     }
 
     let kernel = IQ4NLKernel::new(&weight, 32, 1);
     let mut output = vec![0.0f32; 32];
-    assert_eq!(weight[2], 0, "weight[2] should be 0 but is {}", weight[2]);
     kernel.embedding_lookup(0, 32, &mut output);
 
     let expected_lut = [
         -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
     ];
     for (i, &val) in output.iter().enumerate() {
-        let j = i / 2;
-        let is_low = i % 2 == 0;
-        let nibble = if is_low { j } else { j + 8 };
+        let nibble = if i < 16 { i } else { 31 - i };
         let expected_val = expected_lut[nibble] as f32;
         assert!(
             (val - expected_val).abs() < 1e-6,

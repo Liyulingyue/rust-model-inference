@@ -508,14 +508,16 @@ impl BPETokenizer {
             PreTokenizer::K2Horizon => K2_HORIZON_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
         };
-        for (literal, _) in semantic_literals {
-            if let Some(&id) = token_to_id.get(*literal) {
-                if !special_tokens.iter().any(|t| t.text == *literal) {
-                    special_tokens.push(SpecialToken {
-                        text: (*literal).into(),
-                        id,
-                        kind: TokenType::Control,
-                    });
+        if matches!(pre, PreTokenizer::Minicpm5) {
+            for (literal, _) in semantic_literals {
+                if let Some(&id) = token_to_id.get(*literal) {
+                    if !special_tokens.iter().any(|t| t.text == *literal) {
+                        special_tokens.push(SpecialToken {
+                            text: (*literal).into(),
+                            id,
+                            kind: TokenType::Control,
+                        });
+                    }
                 }
             }
         }

@@ -2233,22 +2233,6 @@ fn f32_from_le_bytes(b: &[u8]) -> f32 {
 }
 
 fn ggml_layer_norm_stats(x: &[f32]) -> (f32, f32) {
-    // ggml matches: accumulate sum and sum-of-squares in f64 for
-    // numerical stability over long row reductions. Two AVX2/NEON fast
-    // paths exist; the scalar fallback handles small buffers and
-    // pre-feature hosts.
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::ops::has_avx2_fma() {
-            return unsafe { ggml_layer_norm_stats_avx2(x) };
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::ops::has_neon() {
-            return unsafe { ggml_layer_norm_stats_neon(x) };
-        }
-    }
     let sum = x.iter().fold(0.0f64, |sum, &value| sum + f64::from(value)) as f32;
     let mean = sum / x.len() as f32;
     let mut variance = 0.0f64;

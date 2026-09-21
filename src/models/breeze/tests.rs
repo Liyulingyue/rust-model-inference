@@ -36,6 +36,61 @@ impl Source {
         );
         source
     }
+
+    fn with_breeze_preflight(mut self) -> Self {
+        let mut add = |name: String| {
+            self.tensors.entry(name.clone()).or_insert_with(|| {
+                (
+                    TensorInfo {
+                        name,
+                        dims: vec![1],
+                        ggml_type: GGMLType::BF16,
+                        offset: 0,
+                    },
+                    Vec::new(),
+                )
+            });
+        };
+        add("depth_decoder.codebooks_head.weight".into());
+        add("text_encoder.embed_tokens.eoi_embedding".into());
+        for (prefix, count, norms) in [
+            (
+                "text_encoder",
+                26,
+                &[
+                    "pre_self_attn_layernorm",
+                    "post_self_attn_layernorm",
+                    "pre_feedforward_layernorm",
+                    "post_feedforward_layernorm",
+                    "self_attn.q_norm",
+                    "self_attn.k_norm",
+                ][..],
+            ),
+            (
+                "backbone_model",
+                28,
+                &[
+                    "input_layernorm",
+                    "post_attention_layernorm",
+                    "self_attn.q_norm",
+                    "self_attn.k_norm",
+                ][..],
+            ),
+            (
+                "depth_decoder.model",
+                12,
+                &["input_layernorm", "post_attention_layernorm"][..],
+            ),
+        ] {
+            add(format!("{prefix}.norm.weight"));
+            for index in 0..count {
+                for norm in norms {
+                    add(format!("{prefix}.layers.{index}.{norm}.weight"));
+                }
+            }
+        }
+        self
+    }
 }
 
 // Representative original safetensors shapes, reversed into GGUF dimension order.
@@ -81,13 +136,13 @@ const NON_MATRIX_TENSORS: &[(&str, &[u64])] = &[
 ];
 
 #[test]
-fn main_source_rejects_non_bf16_heads_eoi_and_norms() {
+fn main_source_rejects_unsupported_vector_types() {
     for &(name, dims) in NON_MATRIX_TENSORS {
-        for dtype in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0] {
-            let source = Source::with_tensor(name, dims, dtype, Vec::new());
+        for dtype in [GGMLType::F16, GGMLType::Q8_0] {
+            let source = Source::with_tensor(name, dims, dtype, Vec::new()).with_breeze_preflight();
             let error = BreezeModel::from_source(&source, 1).err().unwrap();
             assert!(
-                error.contains(name) && error.contains("original BF16"),
+                error.contains(name) && error.contains("F32 or BF16"),
                 "{name} {dtype:?}: {error}"
             );
         }
@@ -105,7 +160,7 @@ fn main_source_preserves_original_bf16_and_legacy_codec_f32() {
         } else {
             GGMLType::BF16
         };
-        let source = Source::with_tensor(name, dims, dtype, Vec::new());
+        let source = Source::with_tensor(name, dims, dtype, Vec::new()).with_breeze_preflight();
         let error = BreezeModel::from_source(&source, 1).err().unwrap();
         // This tiny source passes the dtype preflight, then reaches metadata validation.
         assert!(error.contains("general.architecture"), "{name}: {error}");
@@ -131,7 +186,7 @@ fn main_non_matrix_shapes_and_byte_lengths_fail_closed() {
 }
 
 #[test]
-fn main_matrices_require_original_dtype_exact_shape_and_length() {
+fn main_matrices_accept_supported_dtypes_and_reject_bad_shape_or_length() {
     for (name, input, output) in [
         ("lm_head.weight", 2048, 2052),
         ("text_encoder.embed_tokens.weight", 1152, 262158),
@@ -142,11 +197,19 @@ fn main_matrices_require_original_dtype_exact_shape_and_length() {
         ),
     ] {
         for dtype in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0] {
-            let source = Source::with_tensor(name, &[input, output], dtype, Vec::new());
-            let error = matrix(&source, name, input as usize, output as usize)
-                .err()
-                .unwrap();
-            assert!(error.contains("original BF16"), "{name}: {error}");
+            let elements = input * output;
+            let bytes = match dtype {
+                GGMLType::F32 => elements * 4,
+                GGMLType::F16 => elements * 2,
+                GGMLType::Q8_0 => (elements / 32) * 34,
+                _ => unreachable!(),
+            };
+            let source =
+                Source::with_tensor(name, &[input, output], dtype, vec![0; bytes as usize]);
+            assert!(
+                matrix(&source, name, input as usize, output as usize).is_ok(),
+                "{name} should accept {dtype:?}"
+            );
         }
         let source = Source::with_tensor(name, &[output, input], GGMLType::BF16, Vec::new());
         let error = matrix(&source, name, input as usize, output as usize)

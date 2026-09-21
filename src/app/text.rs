@@ -1,4 +1,4 @@
-use crate::app::cli::{resolve_thread_count, CliOptions, KvFormat};
+use crate::app::cli::{resolve_thread_count, CliOptions, DSparkOptions, KvFormat};
 use crate::core::loader::model_config_from_source;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -34,6 +34,17 @@ fn uses_llama_trunk(arch: &str) -> bool {
     matches!(arch, "llama" | "k2-horizon" | "granite" | "nanbeige")
 }
 
+fn is_lfm25_source(source: &dyn TensorSource) -> bool {
+    ["general.basename", "general.name"].into_iter().any(|key| {
+        source
+            .metadata(key)
+            .and_then(|v| v.to_string_val())
+            .is_some_and(|name| {
+                name.contains("2.5") || name == "4cd563d5a96af9e7c738b76cd89a0a200db7608f"
+            })
+    })
+}
+
 pub fn run_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -45,6 +56,7 @@ pub fn run_inference(
     profile: bool,
     kv_format: KvFormat,
     prefill_batch_size: usize,
+    dspark: Option<DSparkOptions>,
     max_context: usize,
     repetition_penalty: f32,
 ) -> Result<(), String> {
@@ -52,6 +64,14 @@ pub fn run_inference(
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
+
+    if dspark.is_some()
+        && !(arch == "qwen3" || (arch == "lfm2" && is_lfm25_source(source.as_ref())))
+    {
+        return Err(format!(
+            "DSpark supports Qwen3 and LFM2.5 text targets; got {arch:?}"
+        ));
+    }
 
     if arch == "hunyuan-dense" {
         crate::models::qwen3::hunyuan::run_inference(
@@ -67,15 +87,11 @@ pub fn run_inference(
             repetition_penalty,
         )
     } else if arch == "lfm2" {
-        let is_lfm25 = source
-            .metadata("general.basename")
-            .and_then(|v| v.to_string_val())
-            .map(|v| v.contains("2.5"))
-            .unwrap_or(false);
+        let is_lfm25 = is_lfm25_source(source.as_ref());
 
         if is_lfm25 {
             crate::models::lfm25::run_inference(
-                source.as_ref(),
+                source.clone(),
                 prompt,
                 max_tokens,
                 temperature,
@@ -84,6 +100,7 @@ pub fn run_inference(
                 kv_format,
                 max_context,
                 thinking,
+                dspark,
             )
         } else {
             crate::models::lfm2::run_inference(
@@ -160,6 +177,7 @@ pub fn run_inference(
             prefill_batch_size,
             max_context,
             repetition_penalty,
+            dspark,
         )
     }
 }
@@ -1554,6 +1572,7 @@ pub fn run_interactive(
             false,
             KvFormat::F16,
             prefill_batch_size,
+            None,
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
         )?;

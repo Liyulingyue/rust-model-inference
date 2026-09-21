@@ -224,6 +224,48 @@ impl<'a> Kernel for BF16Kernel<'a> {
         }
     }
 
+    fn forward_prepared_rows(
+        &self,
+        input_f32: &[f32],
+        _input_q8: &[u8],
+        _input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if self.bf16_input {
+            let rounded = input_f32
+                .iter()
+                .map(|&value| crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(value)))
+                .collect::<Vec<_>>();
+            scalar::forward_bf16_input_rows(
+                self.weight,
+                &rounded,
+                output,
+                rows,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
+            return;
+        }
+        for row in 0..rows {
+            self.forward_f32_rows(
+                &input_f32[row * n_in..(row + 1) * n_in],
+                &mut output[row * n_out..(row + 1) * n_out],
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
+        }
+    }
+
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         self.forward_f32_rows(&input[..n_in], output, n_in, n_out, 0, 1);
     }

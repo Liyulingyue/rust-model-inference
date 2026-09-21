@@ -29,6 +29,7 @@ pub struct ExecutionScratchpad {
     pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
     pub score_stride: usize,
     pub scores: Vec<f32>,
+    pub attention_values: Vec<f32>,
 }
 
 pub struct KvCacheF16 {
@@ -107,6 +108,7 @@ impl ExecutionScratchpad {
             ],
             score_stride,
             scores: vec![0.0f32; n_threads * score_stride],
+            attention_values: vec![0.0f32; n_threads * score_stride],
         }
     }
 }
@@ -308,6 +310,7 @@ mod tests {
         let scratch = ExecutionScratchpad::new(1, 1, 1, 1, 1, 2, 257);
 
         assert_eq!(scratch.scores.len(), 1024);
+        assert_eq!(scratch.attention_values.len(), 1024);
         let (first_thread, second_thread) = scratch.scores.split_at(512);
         assert_eq!(first_thread.len(), 512);
         assert_eq!(second_thread.len(), 512);

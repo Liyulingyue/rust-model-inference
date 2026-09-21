@@ -309,6 +309,7 @@ fn build_oracles(llama: &Path, artifacts: &Path) -> (PathBuf, PathBuf) {
     (text, vision)
 }
 
+#[cfg(feature = "parity-trace")]
 fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
     use rust_model_inference::core::tensor::TensorSource;
     use rust_model_inference::models::qwen35::vision::{
@@ -377,6 +378,7 @@ fn run_oracle_vision(oracle: &Path, model: &Path, mmproj: &Path, artifacts: &Pat
 }
 
 #[test]
+#[cfg(feature = "parity-trace")]
 #[ignore = "diagnostic Rust vision trace"]
 fn qwen_drive_vlm_rust_vision_trace() {
     let artifacts = unique_temp_dir("rmi-qwen-drive-rust-vision");
@@ -489,6 +491,7 @@ fn run_oracle_text(oracle: &Path, model: &Path, artifacts: &Path) -> PathBuf {
 }
 
 #[test]
+#[cfg(feature = "parity-trace")]
 #[ignore = "requires Qwen-Drive BF16 GGUF pair and pinned llama.cpp"]
 fn qwen_drive_vlm_matches_llama_cpp_bitwise() {
     let model = required_path("RMI_QWEN_DRIVE_VLM");

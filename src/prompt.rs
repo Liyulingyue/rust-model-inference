@@ -211,7 +211,7 @@ pub fn build_lfm25_chat_prompt_with_thinking(
         prompt_text.push_str(message.role);
         prompt_text.push('\n');
         prompt_text.push_str(message.content);
-        prompt_text.push('\n');
+        prompt_text.push_str("<|im_end|>\n");
     }
     prompt_text.push_str("<|im_start|>assistant\n");
     if !enable_thinking {
