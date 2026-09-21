@@ -64,10 +64,10 @@ Plus the existing helpers:
 | `qwen3/asr` | ✅ | ✅ | ❌ |  |
 | `qwen3/tts` | ✅ | ✅ | ❌ |  |
 | `llama` | ✅ (`session.rs::forward_chunk_batched_real`) | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`LlamaSession` impl; **real batched Q/K/V + wo + gate/up/down matmul + batched flash attention** at `B > 1`) | **~2× prefill speedup at `B = 64`** |
-| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | session refactor pending; attention math still per-row |
+| `lfm2` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | session refactor pending; shortconv SSM keeps per-row |
 | `lfm25` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | same as lfm2 |
 | `lfm2moe` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | same as lfm2 |
-| `spark` | ❌ | ✅ (dispatch loop marked `_prefill_chunks`) | ❌ | same as llama |
+| `spark` | ❌ | ✅ (via `prefill_chunks` + `ChunkedPrefill`) | ✅ (`SparkSession` impl; B=1 fallback to `forward_step_logits`) | next refactor lifts `forward_step_logits` for ~2× speedup |
 | `breeze` | ❌ | ❌ | ❌ | TTS codec, mostly stateful |
 
 ## What still needs to happen to capture the speedup
