@@ -768,6 +768,24 @@ fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
+fn f16_dot_scalar_tail_covers_gemma4_audio_patch_length() {
+    let a: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * 0.25 - 1.0))
+        .collect();
+    let b: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * -0.125 + 0.75))
+        .collect();
+    let expected = a
+        .iter()
+        .zip(&b)
+        .map(|(&left, &right)| f64::from(f16_to_f32(left) * f16_to_f32(right)))
+        .sum::<f64>() as f32;
+
+    assert_eq!(dot_f16(&a, &b, 9).to_bits(), expected.to_bits());
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
 fn neon_q8_matmul_matches_repacked_fused_block_accumulation() {
     let mut weights = Vec::with_capacity(68);
     for _ in 0..2 {

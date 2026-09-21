@@ -2,7 +2,6 @@ use crate::core::tensor::TensorInfo;
 
 pub mod fuse;
 pub mod iq_tables;
-pub mod neon_k;
 pub mod q8_0;
 
 mod avx2_k;
@@ -950,10 +949,8 @@ pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     if crate::ops::has_avx2_fma() {
         return unsafe { self::avx2_k::vec_dot_iq4_nl_q8k_avx2(iq4nl_data, q8k) };
     }
-    #[cfg(target_arch = "aarch64")]
-    if crate::ops::has_neon() {
-        return unsafe { self::neon_k::vec_dot_iq4_nl_q8k_neon(iq4nl_data, q8k) };
-    }
+    // ponytail: keep aarch64 on the scalar oracle until the unfinished NEON
+    // widening/multiply kernel compiles and passes raw-bit parity.
     vec_dot_iq4_nl_q8k_scalar(iq4nl_data, q8k)
 }
 

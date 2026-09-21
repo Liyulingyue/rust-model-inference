@@ -1,6 +1,6 @@
 use rust_model_inference::core::scratchpad::KvFormat;
 use rust_model_inference::models::gemma4::asr::Gemma4AudioModel;
-use rust_model_inference::models::gemma4::vision::Gemma4VisionModel;
+use rust_model_inference::models::gemma4::vision::{build_vision_encoder, Gemma4VisionModel};
 use rust_model_inference::models::gemma4::{run_gemma4, Gemma4Request};
 use rust_model_inference::{GGMLType, GGUFLoader, MetaValue};
 use serde_json::Value;
@@ -1042,10 +1042,11 @@ fn gemma4_12b_text_matches_pinned_cpu_oracle_raw_bits() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(all(feature = "parity-trace", target_arch = "x86_64"))]
+#[cfg(feature = "parity-trace")]
 #[test]
 #[ignore = "requires the Gemma4 12B GGUF, F16 mmproj, and pinned llama.cpp"]
 fn gemma4_12b_audio_projection_matches_pinned_oracle_raw_bits() {
+    #[cfg(target_arch = "x86_64")]
     if !(std::is_x86_feature_detected!("avx2")
         && std::is_x86_feature_detected!("fma")
         && std::is_x86_feature_detected!("f16c"))
@@ -1304,6 +1305,35 @@ fn gemma4_image_smoke() {
             serde_json::json!([1536, projected.len() / 1536, 1, 1])
         );
     }
+}
+
+#[test]
+#[ignore = "requires the Gemma4 12B mmproj"]
+fn gemma4_12b_image_smoke() {
+    let _guard = GEMMA4_TRACE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mmproj = gemma4_12b_mmproj_path();
+    require_gemma4_gguf(
+        &mmproj,
+        GEMMA4_MMPROJ_NAME,
+        "clip",
+        "v.patch_embd.weight",
+        GGMLType::F32,
+    )
+    .unwrap();
+    let loader = GGUFLoader::from_file(&mmproj).unwrap();
+    let model = build_vision_encoder(&loader, 4).unwrap();
+    let fixture = std::env::temp_dir().join(format!(
+        "rmi-gemma4-12b-image-smoke-{}.png",
+        std::process::id()
+    ));
+    write_image_fixture(&fixture).unwrap();
+    let projected = model.encode_path(&fixture).unwrap();
+    let _ = std::fs::remove_file(&fixture);
+    assert!(!projected.is_empty());
+    assert_eq!(projected.len() % model.projection(), 0);
+    assert!(projected.iter().all(|value| value.is_finite()));
 }
 
 #[test]

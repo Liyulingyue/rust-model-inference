@@ -6,13 +6,13 @@
 //! Module structure:
 //! - `scalar.rs` — scalar fallback (`matmul_q4_1_scalar_range`)
 //! - `avx2.rs`    — AVX2 SIMD kernel (mirrors `q4_0::avx2` strategy)
-//! - `neon.rs`    — NEON `vdotq_u32` SIMD kernel (aarch64)
+//!
+//! aarch64 currently uses the scalar fallback. The existing NEON source is
+//! kept out of the build until its signed Q8 dot-product path is repaired.
 
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
-#[cfg(target_arch = "aarch64")]
-pub mod neon;
 pub mod scalar;
 
 pub use scalar::matmul_q4_1_scalar_range;
@@ -71,30 +71,8 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
                 }
             }
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
-                unsafe {
-                    neon::matmul_q4_1_vs_q8_0_neon(
-                        self.weight,
-                        input_q8,
-                        input_scales,
-                        None,
-                        output,
-                        n_in,
-                        my_start,
-                        my_end,
-                    );
-                    return;
-                }
-            }
-        }
+        // ponytail: restore the aarch64 fast path only after its parity tests
+        // compile and pass; Q4_1 is not used by the Gemma4 Q8_0 model.
         matmul_q4_1_scalar_range(
             self.weight,
             input_q8,
@@ -161,30 +139,6 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
                 }
             }
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
-                unsafe {
-                    neon::matmul_q4_1_vs_q8_0_neon(
-                        self.weight,
-                        input_q8,
-                        input_scales,
-                        Some(&input_sums),
-                        output,
-                        n_in,
-                        my_start,
-                        my_end,
-                    );
-                    return;
-                }
-            }
-        }
         matmul_q4_1_scalar_range(
             self.weight,
             input_q8,
@@ -241,7 +195,3 @@ mod tests {
         assert_eq!(output, [32.0]);
     }
 }
-
-#[cfg(target_arch = "aarch64")]
-#[path = "tests_neon.rs"]
-mod tests_neon;

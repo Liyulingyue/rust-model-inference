@@ -27,7 +27,6 @@ git -C "$clone_dir" checkout --detach "$pin" >&2
 git -C "$clone_dir" apply "$script_dir/gemma4ua-trace.patch" >&2
 cmake -S "$clone_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
     -DBUILD_SHARED_LIBS=OFF \
     -DGGML_ACCELERATE=OFF \
     -DGGML_BLAS=OFF \

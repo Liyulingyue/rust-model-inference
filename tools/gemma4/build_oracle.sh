@@ -33,7 +33,6 @@ git -C "$build_dir" apply --check "$patch" >&2
 git -C "$build_dir" apply "$patch" >&2
 cmake -S "$build_dir" -B "$build_dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
     -DBUILD_SHARED_LIBS=OFF \
     -DGGML_ACCELERATE=OFF \
     -DGGML_BLAS=OFF \
