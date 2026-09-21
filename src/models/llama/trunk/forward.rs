@@ -183,7 +183,7 @@ pub fn run_inference(
             .and_then(|v| v.to_string_val())
             .unwrap_or_default();
 
-// MiniCPM5 detection: `general.architecture = llama` (LLaMA backbone),
+        // MiniCPM5 detection: `general.architecture = llama` (LLaMA backbone),
         // but `general.name` contains "MiniCPM". MiniCPM5's GGUF embeds a
         // ChatML-based `tokenizer.chat_template` (with `<|im_start|>`/`<|im_end|>`),
         // NOT the old MiniCPM 3B `<用户>/<AI>` template. The template supports
@@ -195,7 +195,7 @@ pub fn run_inference(
             .map(|s| s.to_ascii_lowercase().contains("minicpm"))
             .unwrap_or(false);
 
-// Build the prompt based on the architecture. Granite uses a
+        // Build the prompt based on the architecture. Granite uses a
         // distinct chat template: `<|start_of_role|>{role}<|end_of_role|>
         // {content}<|end_of_text|>` between turns and ends the user turn
         // with `<|end_of_text|>\n`. MiniCPM5 uses ChatML with non-thinking
@@ -210,14 +210,16 @@ pub fn run_inference(
             )
         } else if arch == "nanbeige" {
             prompt.to_string()
-} else if is_minicpm5 {
+        } else if is_minicpm5 {
             // MiniCPM5 uses ChatML (`<|im_start|>/{role}\n{content}<|im_end|>`)
             // per its GGUF `tokenizer.chat_template`. The template supports
             // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
             // (empty thinking block → direct answer). When true, emits `🤔\n`
             // (thinking mode). Default: non-thinking for fast direct answers.
             // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
-            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n")
+            format!(
+                "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
+            )
         } else {
             format!("user\n{prompt}\nassistant\n<think>\n")
         };
