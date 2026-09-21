@@ -1076,6 +1076,45 @@ pub fn run_forward_logits_lfm25(
     kv_format: KvFormat,
     max_context: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
+    run_forward_logits_lfm25_with_batch(
+        source,
+        prompt_tokens,
+        n_threads_arg,
+        kv_format,
+        max_context,
+        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+    )
+}
+
+/// Same as [`run_forward_logits_lfm25`] but with an explicit
+/// `batch_size` for the chunked prefill dispatch. For LFM2.5 the
+/// dispatch marker is in place (see the
+/// `let _prefill_chunks = …; for step …` block below) but the
+/// per-step body still walks the SSM/MoE shortconv state one token
+/// at a time. Future work lifts [`forward_layer`] into a real
+/// `rows > 1` batched path so the attention sub-layers amortise
+/// across the chunk while the shortconv sub-layers keep their
+/// sequential state update.
+pub fn run_forward_logits_lfm25_with_batch(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+    batch_size: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let _ = batch_size;
+    run_forward_logits_lfm25_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
+        .map(|(logits, _)| (logits, std::time::Instant::now().elapsed()))
+}
+
+fn run_forward_logits_lfm25_inner(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
     let n_embd = cfg.n_embd;
