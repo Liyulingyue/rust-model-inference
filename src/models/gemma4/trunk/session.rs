@@ -1,7 +1,9 @@
 use super::forward::Gemma4InputRow;
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
-use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks, ChunkedPrefill, DEFAULT_PREFILL_BATCH_SIZE};
+use crate::core::prefill::{
+    checked_prefill_batch_size, prefill_chunks, ChunkedPrefill, DEFAULT_PREFILL_BATCH_SIZE,
+};
 use crate::core::scratchpad::KvFormat;
 #[cfg(feature = "vulkan")]
 use crate::ops::kernel::Weight;
@@ -321,7 +323,8 @@ impl<'model> ChunkedPrefill for Gemma4Session<'model> {
             let rows = chunk.len();
             let base = self.seq_len;
             let is_last = chunk.end == total;
-            last_logits = <Self as ChunkedPrefill>::forward_chunk(self, input, rows, base, is_last)?;
+            last_logits =
+                <Self as ChunkedPrefill>::forward_chunk(self, input, rows, base, is_last)?;
             self.set_seq_len(base + rows);
         }
         Ok(last_logits)
@@ -335,10 +338,7 @@ mod tests {
     #[test]
     fn chunked_prefill_input_len_matches_token_count() {
         let rows = vec![Gemma4InputRow::Token(0); 7];
-        assert_eq!(
-            <Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows),
-            7
-        );
+        assert_eq!(<Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows), 7);
     }
 
     #[test]
@@ -351,9 +351,6 @@ mod tests {
         // chunking. Verify the input contract stays compatible with the
         // `prefill_chunks` B = 1 walk.
         let rows = vec![Gemma4InputRow::Token(0); 1];
-        assert_eq!(
-            <Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows),
-            1
-        );
+        assert_eq!(<Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows), 1);
     }
 }
