@@ -1,4 +1,4 @@
-use super::config::{CONTEXT, EPS, HEADS, PER_LAYER, VOCAB};
+use super::config::{EPS, PER_LAYER, VOCAB};
 use super::session::{Gemma4PrefillLinear, Gemma4Session, KvLayer};
 use super::weights::{kv_source_layer, Gemma4Model};
 use crate::core::prefill::prefill_chunks;
@@ -6,8 +6,8 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_inplace,
+    bf16_to_f32, dot_f32, f32_to_bf16, quantize_q8_0_into, rms_norm, rms_norm_inplace,
+    rms_unit_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,14 +34,13 @@ pub(super) struct AssembledInputRow {
 
 impl Gemma4Session<'_> {
     pub fn forward_rows(&mut self, rows: &[Gemma4InputRow]) -> Result<Vec<f32>, String> {
+        let n_ctx = self.model.config.n_ctx;
         let end = self
             .seq_len
             .checked_add(rows.len())
             .ok_or_else(|| "Gemma4 input length overflow".to_string())?;
-        if end > CONTEXT {
-            return Err(format!(
-                "Gemma4 input length {end} exceeds context {CONTEXT}"
-            ));
+        if end > n_ctx {
+            return Err(format!("Gemma4 input length {end} exceeds context {n_ctx}"));
         }
         validate_input_rows(rows, self.model.config.embd)?;
 
@@ -113,6 +112,8 @@ impl Gemma4Session<'_> {
         let per_layer_all = cfg.per_layer_all();
         let per_layer_len = row_count * per_layer_all;
 
+        let use_per_layer = cfg.use_per_layer_projection();
+        let per_layer_width = if use_per_layer { PER_LAYER } else { 0 };
         for (index, row) in rows.iter().enumerate() {
             let x = &mut scratch.x[index * embd..(index + 1) * embd];
             match &row.values {
@@ -125,58 +126,77 @@ impl Gemma4Session<'_> {
                     *value *= scale;
                 }
             }
-            model.per_layer_token_embedding.embedding_lookup(
-                row.per_layer_token,
-                &mut scratch.per_layer[index * per_layer_all..(index + 1) * per_layer_all],
-            );
-        }
-        ensure_finite("gemma4.input", &scratch.x[..x_len])?;
-
-        let token_scale = (PER_LAYER as f32).sqrt();
-        for value in &mut scratch.per_layer[..per_layer_len] {
-            *value *= token_scale;
-        }
-        prefill_matmul_rows(
-            "per_layer_model_proj.weight",
-            &model.per_layer_model_proj,
-            &scratch.x[..x_len],
-            &mut scratch.per_layer_projected[..per_layer_len],
-            row_count,
-            model,
-            linear,
-            model.pool(),
-            &mut scratch.prepared,
-            &mut scratch.q8,
-            &mut scratch.scales,
-        )?;
-        let projection_scale = 1.0 / (embd as f32).sqrt();
-        let merge_scale = 1.0 / 2.0_f32.sqrt();
-        for row in 0..row_count {
-            for layer in 0..cfg.layers {
-                let start = row * per_layer_all + layer * PER_LAYER;
-                let end = start + PER_LAYER;
-                let projected = &mut scratch.per_layer_projected[start..end];
-                for value in projected.iter_mut() {
-                    *value *= projection_scale;
-                }
-                rms_norm_inplace(projected, &model.per_layer_proj_norm, EPS);
-                for (target, projected) in scratch.per_layer[start..end].iter_mut().zip(projected) {
-                    *target = (*target + *projected) * merge_scale;
-                }
+            if use_per_layer {
+                let pe = model
+                    .per_layer_token_embedding
+                    .as_ref()
+                    .expect("per-layer projection enabled but tensor missing");
+                pe.embedding_lookup(
+                    row.per_layer_token,
+                    &mut scratch.per_layer[index * per_layer_all..(index + 1) * per_layer_all],
+                );
             }
         }
-        ensure_finite(
-            "gemma4.per_layer_input",
-            &scratch.per_layer[..per_layer_len],
-        )?;
+        ensure_finite("gemma4.input", &scratch.x[..x_len])?;
+        trace_rows("gemma4.input", None, &scratch.x[..x_len], row_count, embd);
+
+        if use_per_layer {
+            let token_scale = (PER_LAYER as f32).sqrt();
+            for value in &mut scratch.per_layer[..per_layer_len] {
+                *value *= token_scale;
+            }
+            let pm = model
+                .per_layer_model_proj
+                .as_ref()
+                .expect("per-layer projection enabled but tensor missing");
+            prefill_matmul_rows(
+                "per_layer_model_proj.weight",
+                pm,
+                &scratch.x[..x_len],
+                &mut scratch.per_layer_projected[..per_layer_len],
+                row_count,
+                model,
+                linear,
+                model.pool(),
+                &mut scratch.prepared,
+                &mut scratch.q8,
+                &mut scratch.scales,
+            )?;
+            let projection_scale = 1.0 / (embd as f32).sqrt();
+            let merge_scale = 1.0 / 2.0_f32.sqrt();
+            let pn = model
+                .per_layer_proj_norm
+                .as_ref()
+                .expect("per-layer projection enabled but norm missing");
+            for row in 0..row_count {
+                for layer in 0..cfg.layers {
+                    let start = row * per_layer_all + layer * PER_LAYER;
+                    let end = start + PER_LAYER;
+                    let projected = &mut scratch.per_layer_projected[start..end];
+                    for value in projected.iter_mut() {
+                        *value *= projection_scale;
+                    }
+                    rms_norm_inplace(projected, pn, EPS);
+                    for (target, projected) in
+                        scratch.per_layer[start..end].iter_mut().zip(projected)
+                    {
+                        *target = (*target + *projected) * merge_scale;
+                    }
+                }
+            }
+            ensure_finite(
+                "gemma4.per_layer_input",
+                &scratch.per_layer[..per_layer_len],
+            )?;
+        }
 
         let base_position = self.seq_len;
         let base_kv = cfg.base_kv_layers();
         for layer_index in 0..cfg.layers {
             let layer = &model.layers[layer_index];
             let dim = layer.head_dim;
-            let kv_width = cfg.kv_heads * dim;
-            let q_width = HEADS * dim;
+            let kv_width = layer.kv_heads * dim;
+            let q_width = layer.q_heads * dim;
             let ffn = layer.ffn_gate.n_out;
 
             for (input, output) in scratch.x[..x_len]
@@ -190,36 +210,74 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
+            trace_layer_rows(
+                "attn_norm",
+                layer_index,
+                &scratch.normed[..x_len],
+                row_count,
+                embd,
+            );
             let q_len = row_count * q_width;
             let kv_len = row_count * kv_width;
             if layer_index < base_kv {
-                matmul_group_rows(
-                    [
-                        (
-                            &format!("blk.{layer_index}.attn_q.weight"),
-                            &layer.attn_q,
-                            &mut scratch.q[..q_len],
-                        ),
-                        (
-                            &format!("blk.{layer_index}.attn_k.weight"),
-                            &layer.attn_k,
-                            &mut scratch.k[..kv_len],
-                        ),
-                        (
-                            &format!("blk.{layer_index}.attn_v.weight"),
-                            &layer.attn_v,
-                            &mut scratch.v[..kv_len],
-                        ),
-                    ],
-                    &scratch.normed[..x_len],
-                    row_count,
-                    model,
-                    linear,
-                    model.pool(),
-                    &mut scratch.prepared,
-                    &mut scratch.q8,
-                    &mut scratch.scales,
-                )?;
+                if layer.kv_shared_with_k {
+                    // 12B MQA fallback: V is shared with K. Compute Q
+                    // and K in parallel, then copy K into V.
+                    matmul_group_rows(
+                        [
+                            (
+                                &format!("blk.{layer_index}.attn_q.weight"),
+                                &layer.attn_q,
+                                &mut scratch.q[..q_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_k.weight"),
+                                &layer.attn_k,
+                                &mut scratch.k[..kv_len],
+                            ),
+                        ],
+                        &scratch.normed[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    scratch.v[..kv_len].copy_from_slice(&scratch.k[..kv_len]);
+                } else {
+                    matmul_group_rows(
+                        [
+                            (
+                                &format!("blk.{layer_index}.attn_q.weight"),
+                                &layer.attn_q,
+                                &mut scratch.q[..q_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_k.weight"),
+                                &layer.attn_k,
+                                &mut scratch.k[..kv_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_v.weight"),
+                                layer
+                                    .attn_v
+                                    .as_ref()
+                                    .expect("attn_v present when not shared"),
+                                &mut scratch.v[..kv_len],
+                            ),
+                        ],
+                        &scratch.normed[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                }
                 ensure_finite(
                     &format!("blk.{layer_index}.attn_q.weight"),
                     &scratch.q[..q_len],
@@ -247,41 +305,58 @@ impl Gemma4Session<'_> {
                     &mut scratch.scales,
                 )?;
             }
-
             for row in 0..row_count {
                 let position = base_position + row;
                 let query = &mut scratch.q[row * q_width..(row + 1) * q_width];
+                trace_layer(row, "q", layer_index, query);
                 for head in query.chunks_exact_mut(dim) {
                     rms_norm_inplace(head, &layer.attn_q_norm, EPS);
                 }
+                trace_layer(row, "q_norm", layer_index, query);
                 apply_rope(
                     query,
                     position,
                     dim,
                     layer_index,
                     cfg.is_swa(layer_index),
+                    cfg.rope_freq_base_swa,
+                    cfg.rope_freq_base,
                     &model.rope_freqs,
                 )?;
+                trace_layer(row, "q_rope", layer_index, query);
             }
 
             if layer_index < base_kv {
+                let k_norm = layer.attn_k_norm.as_deref();
                 for row in 0..row_count {
                     let position = base_position + row;
                     let key = &mut scratch.k[row * kv_width..(row + 1) * kv_width];
                     let value = &mut scratch.v[row * kv_width..(row + 1) * kv_width];
-                    for kv_head in 0..cfg.kv_heads {
+                    trace_layer(row, "k", layer_index, key);
+                    for kv_head in 0..layer.kv_heads {
                         let offset = kv_head * dim;
-                        rms_norm_inplace(&mut key[offset..offset + dim], &layer.attn_k_norm, EPS);
-                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
+                        if let Some(kn) = k_norm {
+                            rms_norm_inplace(&mut key[offset..offset + dim], kn, EPS);
+                        }
                     }
+                    trace_layer(row, "k_norm", layer_index, key);
                     apply_rope(
                         key,
                         position,
                         dim,
                         layer_index,
                         cfg.is_swa(layer_index),
+                        cfg.rope_freq_base_swa,
+                        cfg.rope_freq_base,
                         &model.rope_freqs,
                     )?;
+                    trace_layer(row, "k_rope", layer_index, key);
+                    trace_layer(row, "v", layer_index, value);
+                    for kv_head in 0..layer.kv_heads {
+                        let offset = kv_head * dim;
+                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
+                    }
+                    trace_layer(row, "v_norm", layer_index, value);
                     self.kv[layer_index].append(layer_index, position, key, value)?;
                 }
             }
@@ -295,12 +370,20 @@ impl Gemma4Session<'_> {
                     &scratch.q[row * q_width..(row + 1) * q_width],
                     &self.kv[cache_layer],
                     cfg.is_swa(layer_index),
+                    cfg.sliding_window,
                     &mut scratch.attn[row * q_width..(row + 1) * q_width],
                     &mut scratch.scores,
                     &mut scratch.attention_values,
                     model.pool(),
                 )?;
             }
+            trace_layer_rows(
+                "attention",
+                layer_index,
+                &scratch.attn[..q_len],
+                row_count,
+                q_width,
+            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.attn_output.weight"),
                 &layer.attn_output,
@@ -314,6 +397,13 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
+            trace_layer_rows(
+                "attention_projected",
+                layer_index,
+                &scratch.projected[..x_len],
+                row_count,
+                embd,
+            );
             for row in 0..row_count {
                 let projected = &scratch.projected[row * embd..(row + 1) * embd];
                 let down = &mut scratch.down[row * embd..(row + 1) * embd];
@@ -342,6 +432,13 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
+            trace_layer_rows(
+                "ffn_norm",
+                layer_index,
+                &scratch.normed[..x_len],
+                row_count,
+                embd,
+            );
             let ffn_len = row_count * ffn;
             matmul_group_rows(
                 [
@@ -373,12 +470,33 @@ impl Gemma4Session<'_> {
                 &format!("blk.{layer_index}.ffn_up.weight"),
                 &scratch.up[..ffn_len],
             )?;
+            trace_layer_rows(
+                "ffn_gate",
+                layer_index,
+                &scratch.gate[..ffn_len],
+                row_count,
+                ffn,
+            );
+            trace_layer_rows(
+                "ffn_up",
+                layer_index,
+                &scratch.up[..ffn_len],
+                row_count,
+                ffn,
+            );
             for (gate, up) in scratch.gate[..ffn_len]
                 .chunks_exact_mut(ffn)
                 .zip(scratch.up[..ffn_len].chunks_exact(ffn))
             {
                 ggml_geglu_fp16_inplace(gate, up);
             }
+            trace_layer_rows(
+                "ffn_activated",
+                layer_index,
+                &scratch.gate[..ffn_len],
+                row_count,
+                ffn,
+            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.ffn_down.weight"),
                 &layer.ffn_down,
@@ -392,6 +510,13 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
+            trace_layer_rows(
+                "ffn_down",
+                layer_index,
+                &scratch.down[..x_len],
+                row_count,
+                embd,
+            );
             for row in 0..row_count {
                 let down = &scratch.down[row * embd..(row + 1) * embd];
                 let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
@@ -409,55 +534,87 @@ impl Gemma4Session<'_> {
                 trace_layer(row, "ffn_out", layer_index, hidden);
             }
 
-            prefill_matmul_rows(
-                &format!("blk.{layer_index}.inp_gate.weight"),
-                &layer.inp_gate,
-                &scratch.x[..x_len],
-                &mut scratch.per_layer_gate[..row_count * PER_LAYER],
-                row_count,
-                model,
-                linear,
-                model.pool(),
-                &mut scratch.prepared,
-                &mut scratch.q8,
-                &mut scratch.scales,
-            )?;
-            for row in 0..row_count {
-                let start = row * per_layer_all + layer_index * PER_LAYER;
-                ggml_geglu_fp16_inplace(
-                    &mut scratch.per_layer_gate[row * PER_LAYER..(row + 1) * PER_LAYER],
-                    &scratch.per_layer[start..start + PER_LAYER],
-                );
-            }
-            prefill_matmul_rows(
-                &format!("blk.{layer_index}.proj.weight"),
-                &layer.proj,
-                &scratch.per_layer_gate[..row_count * PER_LAYER],
-                &mut scratch.down[..x_len],
-                row_count,
-                model,
-                linear,
-                model.pool(),
-                &mut scratch.prepared,
-                &mut scratch.q8,
-                &mut scratch.scales,
-            )?;
-            for row in 0..row_count {
-                let down = &scratch.down[row * embd..(row + 1) * embd];
-                let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
-                checked_rms_norm(
-                    &format!("blk.{layer_index}.post_norm.weight"),
-                    down,
-                    &layer.post_norm,
-                    projected,
+            if use_per_layer {
+                let ig = layer
+                    .inp_gate
+                    .as_ref()
+                    .expect("per-layer projection enabled but inp_gate missing");
+                let pj = layer
+                    .proj
+                    .as_ref()
+                    .expect("per-layer projection enabled but proj missing");
+                let pn = layer
+                    .post_norm
+                    .as_ref()
+                    .expect("per-layer projection enabled but post_norm missing");
+                prefill_matmul_rows(
+                    &format!("blk.{layer_index}.inp_gate.weight"),
+                    ig,
+                    &scratch.x[..x_len],
+                    &mut scratch.per_layer_gate[..row_count * per_layer_width],
+                    row_count,
+                    model,
+                    linear,
+                    model.pool(),
+                    &mut scratch.prepared,
+                    &mut scratch.q8,
+                    &mut scratch.scales,
                 )?;
-                let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
-                    *hidden = (*hidden + *per_layer) * layer.output_scale;
+                for row in 0..row_count {
+                    let start = row * per_layer_all + layer_index * per_layer_width;
+                    ggml_geglu_fp16_inplace(
+                        &mut scratch.per_layer_gate
+                            [row * per_layer_width..(row + 1) * per_layer_width],
+                        &scratch.per_layer[start..start + per_layer_width],
+                    );
                 }
-                ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
-                trace_layer(row, "per_layer_out", layer_index, hidden);
+                prefill_matmul_rows(
+                    &format!("blk.{layer_index}.proj.weight"),
+                    pj,
+                    &scratch.per_layer_gate[..row_count * per_layer_width],
+                    &mut scratch.down[..x_len],
+                    row_count,
+                    model,
+                    linear,
+                    model.pool(),
+                    &mut scratch.prepared,
+                    &mut scratch.q8,
+                    &mut scratch.scales,
+                )?;
+                for row in 0..row_count {
+                    let down = &scratch.down[row * embd..(row + 1) * embd];
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_norm.weight"),
+                        down,
+                        pn,
+                        projected,
+                    )?;
+                    let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                    for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
+                        *hidden = (*hidden + *per_layer) * layer.output_scale;
+                    }
+                    ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
+                    trace_layer(row, "per_layer_out", layer_index, hidden);
+                }
+            } else {
+                // Per-layer projection disabled (12B). Apply the
+                // residual scale directly to x and continue.
+                for row in 0..row_count {
+                    let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                    for value in hidden.iter_mut() {
+                        *value *= layer.output_scale;
+                    }
+                    ensure_finite(&format!("gemma4.layer.{layer_index}.residual_out"), hidden)?;
+                }
             }
+            trace_layer_rows(
+                "layer_output",
+                layer_index,
+                &scratch.x[..x_len],
+                row_count,
+                embd,
+            );
         }
 
         #[cfg(feature = "parity-trace")]
@@ -489,6 +646,7 @@ impl Gemma4Session<'_> {
                     &mut scratch.q8,
                     &mut scratch.scales,
                 )?;
+                trace(row, "gemma4.logits.raw", None, &scratch.logits);
                 for logit in &mut scratch.logits {
                     *logit = softcap(*logit, model.config.logit_softcap);
                 }
@@ -857,6 +1015,8 @@ fn apply_rope(
     dim: usize,
     layer: usize,
     sliding: bool,
+    swa_freq_base: f32,
+    full_freq_base: f32,
     full_freq_factors: &[f32],
 ) -> Result<(), String> {
     if values.len() % dim != 0 {
@@ -866,41 +1026,49 @@ fn apply_rope(
         ));
     }
     if sliding {
-        // `rope_neox_inplace` internally loops over `n_heads = x.len() / dim`
-        // with one cached sin/cos table, so passing the full buffer is
-        // strictly cheaper than calling it once per head (which would
-        // rebuild the same table 8 times for E2B/E4B).
-        rope_neox_inplace(values, position, dim, 10_000.0);
+        apply_rope_ggml(values, position, dim, swa_freq_base, None);
         return Ok(());
     }
     if full_freq_factors.len() != dim / 2 {
         return Err(format!(
-            "rope_freqs.weight length {}; expected {} for blk.{layer}",
+            "rope_freqs.weight length {}; expected {} for blk.{layer} (freq_base={full_freq_base})",
             full_freq_factors.len(),
             dim / 2
         ));
     }
-    apply_rope_full(values, position, dim, full_freq_factors);
+    apply_rope_ggml(
+        values,
+        position,
+        dim,
+        full_freq_base,
+        Some(full_freq_factors),
+    );
     Ok(())
 }
 
-/// Full-attention RoPE: pre-compute the sin/cos table once from
-/// `factors` (which already encodes `θ_i = 1 / freq_base^(2i/dim)`)
-/// and apply the standard neox rotation to every head in one pass.
-fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f32]) {
+/// Gemma 4 RoPE matching ggml's `ggml_rope_cache_init` and fused rotation.
+fn apply_rope_ggml(
+    values: &mut [f32],
+    position: usize,
+    dim: usize,
+    freq_base: f32,
+    factors: Option<&[f32]>,
+) {
     let half = dim / 2;
     let n_heads = values.len() / dim;
     if half == 0 || n_heads == 0 {
         return;
     }
-    let pos_f = position as f32;
+    let theta_scale = freq_base.powf(-2.0 / dim as f32);
+    let mut theta = position as f32;
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
-    for (i, factor) in factors[..half].iter().enumerate() {
-        let angle = pos_f / factor;
+    for i in 0..half {
+        let angle = theta / factors.map_or(1.0, |values| values[i]);
         let (c, s) = crate::ops::rope::rope_sin_cos(angle);
         cos_table[i] = c;
         sin_table[i] = s;
+        theta *= theta_scale;
     }
     // Same rotation formula as the scalar path; AVX2-equivalent of the
     // inner FMA pattern will be picked up by the compiler when
@@ -922,6 +1090,217 @@ fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    use std::arch::x86_64::*;
+
+    debug_assert!(left.len() >= len && right.len() >= len);
+    let mut sums = unsafe { [_mm_setzero_ps(); 8] };
+    let use_fma = std::is_x86_feature_detected!("fma");
+    let aligned = len & !31;
+    let mut index = 0;
+    while index < aligned {
+        for lane in 0..8 {
+            let offset = index + lane * 4;
+            unsafe {
+                sums[lane] = if use_fma {
+                    _mm_fmadd_ps(
+                        _mm_loadu_ps(left.as_ptr().add(offset)),
+                        _mm_loadu_ps(right.as_ptr().add(offset)),
+                        sums[lane],
+                    )
+                } else {
+                    _mm_add_ps(
+                        sums[lane],
+                        _mm_mul_ps(
+                            _mm_loadu_ps(left.as_ptr().add(offset)),
+                            _mm_loadu_ps(right.as_ptr().add(offset)),
+                        ),
+                    )
+                };
+            }
+        }
+        index += 32;
+    }
+    for lane in 0..4 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 4]) };
+    }
+    for lane in 0..2 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 2]) };
+    }
+    unsafe { sums[0] = _mm_add_ps(sums[0], sums[1]) };
+    let mut lanes = [0.0f32; 4];
+    unsafe { _mm_storeu_ps(lanes.as_mut_ptr(), sums[0]) };
+    let mut sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    while index < len {
+        sum += left[index] * right[index];
+        index += 1;
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    crate::ops::dot_f32(left, right, len)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn ggml_exp_sse2(x: std::arch::x86_64::__m128, use_fma: bool) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+
+    let magic = _mm_set1_ps(f32::from_bits(0x4b40_0000));
+    let z = if use_fma {
+        _mm_fmadd_ps(x, _mm_set1_ps(f32::from_bits(0x3fb8_aa3b)), magic)
+    } else {
+        _mm_add_ps(
+            _mm_mul_ps(x, _mm_set1_ps(f32::from_bits(0x3fb8_aa3b))),
+            magic,
+        )
+    };
+    let n = _mm_sub_ps(z, magic);
+    let b = if use_fma {
+        _mm_fnmadd_ps(
+            n,
+            _mm_set1_ps(f32::from_bits(0x35bf_be8e)),
+            _mm_fnmadd_ps(n, _mm_set1_ps(f32::from_bits(0x3f31_7200)), x),
+        )
+    } else {
+        _mm_sub_ps(
+            _mm_sub_ps(x, _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x3f31_7200)))),
+            _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x35bf_be8e))),
+        )
+    };
+    let exponent = _mm_slli_epi32(_mm_castps_si128(z), 23);
+    let scale = _mm_castsi128_ps(_mm_add_epi32(exponent, _mm_set1_epi32(0x3f80_0000)));
+    let out_of_range = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(126.0),
+    ));
+    let squared = _mm_mul_ps(b, b);
+    let (low, high) = if use_fma {
+        (
+            _mm_fmadd_ps(
+                _mm_set1_ps(f32::from_bits(0x3c07_2010)),
+                b,
+                _mm_set1_ps(f32::from_bits(0x3d2b_9f17)),
+            ),
+            _mm_fmadd_ps(
+                _mm_set1_ps(f32::from_bits(0x3e2a_af33)),
+                b,
+                _mm_set1_ps(f32::from_bits(0x3eff_fedb)),
+            ),
+        )
+    } else {
+        (
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3c07_2010)), b),
+                _mm_set1_ps(f32::from_bits(0x3d2b_9f17)),
+            ),
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3e2a_af33)), b),
+                _mm_set1_ps(f32::from_bits(0x3eff_fedb)),
+            ),
+        )
+    };
+    let linear = _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3f7f_fff6)), b);
+    let polynomial = if use_fma {
+        _mm_fmadd_ps(_mm_fmadd_ps(low, squared, high), squared, linear)
+    } else {
+        _mm_add_ps(
+            _mm_mul_ps(_mm_add_ps(_mm_mul_ps(low, squared), high), squared),
+            linear,
+        )
+    };
+    if _mm_movemask_epi8(out_of_range) == 0 {
+        return if use_fma {
+            _mm_fmadd_ps(polynomial, scale, scale)
+        } else {
+            _mm_add_ps(_mm_mul_ps(polynomial, scale), scale)
+        };
+    }
+
+    let adjustment = _mm_and_si128(
+        _mm_castps_si128(_mm_cmple_ps(n, _mm_setzero_ps())),
+        _mm_set1_epi32(0x8200_0000u32 as i32),
+    );
+    let scale1 = _mm_castsi128_ps(_mm_add_epi32(adjustment, _mm_set1_epi32(0x7f00_0000)));
+    let scale2 = _mm_castsi128_ps(_mm_sub_epi32(exponent, adjustment));
+    let extreme = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(192.0),
+    ));
+    let scaled = if use_fma {
+        _mm_fmadd_ps(scale, polynomial, scale)
+    } else {
+        _mm_add_ps(_mm_mul_ps(scale, polynomial), scale)
+    };
+    let ranged_scaled = if use_fma {
+        _mm_mul_ps(_mm_fmadd_ps(scale2, polynomial, scale2), scale1)
+    } else {
+        _mm_mul_ps(_mm_add_ps(_mm_mul_ps(scale2, polynomial), scale2), scale1)
+    };
+    let ranged = _mm_or_ps(
+        _mm_and_ps(_mm_castsi128_ps(out_of_range), ranged_scaled),
+        _mm_andnot_ps(_mm_castsi128_ps(out_of_range), scaled),
+    );
+    _mm_or_ps(
+        _mm_and_ps(_mm_castsi128_ps(extreme), _mm_mul_ps(scale1, scale1)),
+        _mm_andnot_ps(_mm_castsi128_ps(extreme), ranged),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let use_fma = std::is_x86_feature_detected!("fma");
+    let mut sum = 0.0f64;
+    let mut index = 0;
+    while index + 8 <= values.len() {
+        unsafe {
+            let low = ggml_exp_sse2(
+                _mm_sub_ps(_mm_loadu_ps(values.as_ptr().add(index)), _mm_set1_ps(max)),
+                use_fma,
+            );
+            let high = ggml_exp_sse2(
+                _mm_sub_ps(
+                    _mm_loadu_ps(values.as_ptr().add(index + 4)),
+                    _mm_set1_ps(max),
+                ),
+                use_fma,
+            );
+            _mm_storeu_ps(values.as_mut_ptr().add(index), low);
+            _mm_storeu_ps(values.as_mut_ptr().add(index + 4), high);
+            let mut reduced = _mm_add_ps(high, low);
+            reduced = _mm_add_ps(reduced, _mm_movehl_ps(reduced, reduced));
+            reduced = _mm_add_ss(reduced, _mm_shuffle_ps(reduced, reduced, 0xf5));
+            sum += f64::from(_mm_cvtss_f32(reduced));
+        }
+        index += 8;
+    }
+    while index < values.len() {
+        values[index] = (values[index] - max).exp();
+        sum += f64::from(values[index]);
+        index += 1;
+    }
+
+    let scale = (1.0 / sum) as f32;
+    for value in values {
+        *value *= scale;
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    crate::ops::softmax_approx_inplace(values);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attend(
     layer: usize,
@@ -929,6 +1308,7 @@ pub(super) fn attend(
     query: &[f32],
     cache: &KvLayer,
     sliding: bool,
+    sliding_window: usize,
     output: &mut [f32],
     scores: &mut Vec<f32>,
     values: &mut Vec<f32>,
@@ -937,7 +1317,13 @@ pub(super) fn attend(
     let dim = cache.head_dim;
     let row_width = cache.row_width;
     let group_size = cache.group_size;
-    let q_width = HEADS * dim;
+    // `cache.q_heads` is `group_size * cache.kv_heads`. We derive
+    // q_heads from `row_width` and `group_size` indirectly: the
+    // largest head index we visit is `q_heads - 1` where
+    // `q_heads = group_size * kv_heads`. Easiest: compute q_heads as
+    // `query.len() / dim`, since the caller sized the buffer exactly.
+    let q_heads = query.len() / dim;
+    let q_width = q_heads * dim;
     if query.len() != q_width || output.len() != q_width {
         return Err(format!(
             "blk.{layer} attention length mismatch: query {}, output {}, expected {}",
@@ -960,27 +1346,33 @@ pub(super) fn attend(
             cache.values.len()
         ));
     }
-    let first = if sliding { rows.saturating_sub(512) } else { 0 };
+    let first = if sliding {
+        rows.saturating_sub(sliding_window)
+    } else {
+        0
+    };
     let cached = rows - first;
     let padded = cached.div_ceil(256) * 256;
-    scores.resize(padded, f32::NEG_INFINITY);
-    values.resize(padded, 0.0);
-
-    // Parallelize per-head over the compute pool. The V pass iterates
-    // `token` outer / `dimension` inner: V at fixed token is contiguous in
-    // memory (stride 1 in `dim`), so each token-load is cache-friendly, and
-    // the inner dim loop is FMA-fused (AVX2 `_mm256_fmadd_ps`) over
-    // `score[token] * V[token, dim]`. This drops the per-dim `head_values`
-    // gather + `dot_f32` and avoids the strided V reads of the old code.
+    let workspace = padded
+        .checked_mul(pool.n_threads())
+        .ok_or_else(|| format!("blk.{layer} attention scratch length overflow"))?;
+    scores.resize(workspace, f32::NEG_INFINITY);
+    values.resize(workspace, 0.0);
+    values.fill(0.0);
     let query_ptr = query.as_ptr();
     let keys_ptr = cache.keys.as_ptr();
     let values_ptr = cache.values.as_ptr();
     let output_ptr = output.as_mut_ptr();
+    let scores_ptr = scores.as_mut_ptr();
+    let scratch_values_ptr = values.as_mut_ptr();
     pool.compute(move |ith, nth| {
-        let h_step = (HEADS + nth - 1) / nth;
-        let h_start = (ith * h_step).min(HEADS);
-        let h_end = (h_start + h_step).min(HEADS);
-        let mut head_scores = vec![f32::NEG_INFINITY; padded];
+        let h_step = (q_heads + nth - 1) / nth;
+        let h_start = (ith * h_step).min(q_heads);
+        let h_end = (h_start + h_step).min(q_heads);
+        let head_scores =
+            unsafe { std::slice::from_raw_parts_mut(scores_ptr.add(ith * padded), padded) };
+        let head_values =
+            unsafe { std::slice::from_raw_parts_mut(scratch_values_ptr.add(ith * padded), padded) };
         for head in h_start..h_end {
             let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
             let kv_head = head / group_size;
@@ -989,9 +1381,9 @@ pub(super) fn attend(
             for (score, token) in head_scores[..cached].iter_mut().zip(first..rows) {
                 let offset = token * row_width + kv_offset;
                 let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
-                *score = dot_f32(query_head, key, dim);
+                *score = ggml_attention_dot(query_head, key, dim);
             }
-            softmax_inplace(&mut head_scores);
+            ggml_attention_softmax(head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
             unsafe {
@@ -1003,6 +1395,7 @@ pub(super) fn attend(
                     first,
                     cached,
                     dim,
+                    head_values,
                     head_output,
                 );
             }
@@ -1011,10 +1404,8 @@ pub(super) fn attend(
     ensure_finite(&format!("blk.{layer} attention"), output)
 }
 
-/// Fused `output[d] += Σ_t scores[t] * V[t, d]` over `[first, first+cached)`.
-/// Outer loop iterates `t` so each V load is a contiguous `dim`-length chunk
-/// (stride 1 in `dim`). Inner loop uses the SIMD FMA of the host to fuse
-/// `output[d] += score * V[t, d]`.
+/// Match ggml's dimension-major `MUL_MAT` by gathering each V column and using
+/// the same padded SIMD dot reduction as the Q·K pass.
 #[inline]
 unsafe fn attend_v(
     values_ptr: *const f32,
@@ -1024,137 +1415,16 @@ unsafe fn attend_v(
     first: usize,
     cached: usize,
     dim: usize,
+    head_values: &mut [f32],
     head_output: &mut [f32],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return attend_v_avx2(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
+    let padded = cached.div_ceil(256) * 256;
+    let scores = std::slice::from_raw_parts(scores_ptr, padded);
+    for (d, output) in head_output[..dim].iter_mut().enumerate() {
+        for (value, token) in head_values[..cached].iter_mut().zip(first..) {
+            *value = *values_ptr.add(token * row_width + kv_offset + d);
         }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            return attend_v_neon(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
-        }
-    }
-    attend_v_scalar(
-        values_ptr,
-        scores_ptr,
-        row_width,
-        kv_offset,
-        first,
-        cached,
-        dim,
-        head_output,
-    )
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn attend_v_avx2(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::x86_64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = _mm256_set1_ps(score);
-        let mut d = 0;
-        while d + 8 <= dim {
-            let vo = _mm256_loadu_ps(head_output.as_ptr().add(d));
-            let vd = _mm256_loadu_ps(v_base.add(d));
-            _mm256_storeu_ps(
-                head_output.as_mut_ptr().add(d),
-                _mm256_fmadd_ps(vscore, vd, vo),
-            );
-            d += 8;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn attend_v_neon(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::aarch64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = vdupq_n_f32(score);
-        let mut d = 0;
-        while d + 4 <= dim {
-            let vo = vld1q_f32(head_output.as_ptr().add(d));
-            let vd = vld1q_f32(v_base.add(d));
-            vst1q_f32(head_output.as_mut_ptr().add(d), vfmaq_f32(vo, vscore, vd));
-            d += 4;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-unsafe fn attend_v_scalar(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        for d in 0..dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-        }
+        *output = ggml_attention_dot(scores, &head_values, padded);
     }
 }
 
@@ -1163,7 +1433,7 @@ pub(super) fn softcap(value: f32, cap: f32) -> f32 {
 }
 
 pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
-    // Scalar reference; matches llama.cpp GEGLU with f16 intermediate.
+    // Scalar reference; matches llama.cpp GEGLU with f16 GELU table entries.
     //
     // === TODO-002: SIMD GeGLU (`tanh_approx`) ===
     //
@@ -1189,21 +1459,13 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     // recovery plan (likely a `[7/6]` padé + per-call opt-in feature
     // flag once precision is characterised against the llama.cpp
     // pinned Oracle).
-    const GELU_COEF_A: f32 = 0.044715;
-    const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
-
     assert_eq!(gate.len(), up.len());
     for (gate, up) in gate.iter_mut().zip(up) {
         let x = *gate;
         *gate = if x <= -10.0 {
             0.0
-        } else if x >= 10.0 {
-            x * up
         } else {
-            let x = f16_to_f32(f32_to_f16(x));
-            let gelu =
-                0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * x.mul_add(GELU_COEF_A * x, 1.0)).tanh());
-            f16_to_f32(f32_to_f16(gelu)) * up
+            crate::ops::gelu_ggml_f16(x) * up
         };
     }
 }
@@ -1230,6 +1492,7 @@ fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "parity-trace")]
 fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
     trace(
         row,
@@ -1238,6 +1501,29 @@ fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
         values,
     );
 }
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer(_row: usize, _stage: &str, _layer: usize, _values: &[f32]) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_layer_rows(stage: &str, layer: usize, values: &[f32], rows: usize, width: usize) {
+    let name = format!("gemma4.layer.{layer}.{stage}");
+    let _ = crate::parity_trace::checkpoint_rows(&name, Some(layer), &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer_rows(_stage: &str, _layer: usize, _values: &[f32], _rows: usize, _width: usize) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_rows(name: &str, layer: Option<usize>, values: &[f32], rows: usize, width: usize) {
+    let _ = crate::parity_trace::checkpoint_rows(name, layer, &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_rows(_name: &str, _layer: Option<usize>, _values: &[f32], _rows: usize, _width: usize) {}
 
 #[cfg(feature = "parity-trace")]
 fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
@@ -1252,3 +1538,156 @@ fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
 
 #[cfg(not(feature = "parity-trace"))]
 fn trace(_row: usize, _name: &str, _layer: Option<usize>, _values: &[f32]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_rope, attend, attend_v, ggml_attention_softmax, KvLayer};
+    use crate::core::thread_pool::ComputePool;
+
+    #[test]
+    fn full_attention_rope_applies_base_before_frequency_factors() {
+        let mut values = [1.25, -2.0, 0.75, 3.5];
+
+        apply_rope(&mut values, 1, 4, 0, false, 10_000.0, 16.0, &[1.0, 2.0]).unwrap();
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3d35_5950, 0xc01a_edae, 0x3fba_811e, 0x404e_4b3f]
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn attention_softmax_matches_llama_avx2_raw_bits() {
+        let mut scores = vec![f32::NEG_INFINITY; 256];
+        scores[..3].copy_from_slice(&[0x3fcd_edd6, 0x40e4_80e5, 0x4150_be72].map(f32::from_bits));
+
+        ggml_attention_softmax(&mut scores);
+
+        assert_eq!(
+            scores[..3]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![0x3734_641c, 0x3b32_039e, 0x3f7f_4d49],
+        );
+
+        let mut scores = vec![f32::NEG_INFINITY; 256];
+        scores[..5].copy_from_slice(
+            &[
+                0x3fd0_6948,
+                0xc003_7c6a,
+                0xbf45_a7b2,
+                0x4118_5013,
+                0x4015_ff08,
+            ]
+            .map(f32::from_bits),
+        );
+        ggml_attention_softmax(&mut scores);
+        assert_eq!(
+            scores[..5]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![
+                0x39c3_d611,
+                0x371d_a495,
+                0x380e_1575,
+                0x3f7f_b29f,
+                0x3a48_4231
+            ],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_softmax_matches_llama_neon_raw_bits() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 1,
+            keys: [0x410d_e8ceu32, 0x410e_45e2, 0x4110_5392]
+                .map(f32::from_bits)
+                .to_vec(),
+            values: vec![1.0, 0.0, 0.0],
+        };
+        let mut output = [0.0];
+
+        attend(
+            16,
+            2,
+            &[1.0],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0x3ea0_b33e);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_values_match_llama_neon_dot_reduction() {
+        let mut scores = [0.0; 256];
+        scores[0] = f32::from_bits(0x3efa_b5d9);
+        scores[1] = f32::from_bits(0x3f02_a513);
+        let mut values = [0.0; 8];
+        values[0] = f32::from_bits(0x3cb9_1aee);
+        values[4] = f32::from_bits(0x3c9f_4180);
+        let mut output = [0.0; 4];
+        let mut scratch = [0.0; 256];
+
+        unsafe {
+            attend_v(
+                values.as_ptr(),
+                scores.as_ptr(),
+                4,
+                0,
+                0,
+                2,
+                4,
+                &mut scratch,
+                &mut output,
+            );
+        }
+
+        assert_eq!(output[0].to_bits(), 0x3cab_e9d8);
+    }
+
+    #[test]
+    fn attention_reuses_worker_partitioned_scratch() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 2,
+            keys: vec![0.0, 1.0],
+            values: vec![1.0, 2.0],
+        };
+        let mut output = [0.0; 2];
+        let mut scores = Vec::new();
+        let mut values = Vec::new();
+
+        attend(
+            0,
+            1,
+            &[1.0; 2],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut scores,
+            &mut values,
+            &ComputePool::new(2),
+        )
+        .unwrap();
+
+        assert_eq!(scores.len(), 2 * 256);
+        assert_eq!(values.len(), 2 * 256);
+        assert_eq!(output[0].to_bits(), output[1].to_bits());
+    }
+}

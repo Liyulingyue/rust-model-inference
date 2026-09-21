@@ -12,7 +12,8 @@
 
 #[inline]
 pub fn rope_sin_cos(theta: f32) -> (f32, f32) {
-    (theta.cos(), theta.sin())
+    let (sin, cos) = super::mrope::sin_cos(theta);
+    (cos, sin)
 }
 
 pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
@@ -26,12 +27,13 @@ pub fn rope_neox_inplace(x: &mut [f32], pos: usize, head_dim: usize, freq_base: 
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
     let pos_f = pos as f32;
+    let theta_scale = freq_base.powf(-2.0 / head_dim as f32);
+    let mut theta = pos_f;
     for i in 0..half {
-        let inv_freq = 1.0f32 / freq_base.powf((2 * i) as f32 / head_dim as f32);
-        let theta = pos_f * inv_freq;
         let (c, s) = rope_sin_cos(theta);
         cos_table[i] = c;
         sin_table[i] = s;
+        theta *= theta_scale;
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -119,10 +121,10 @@ unsafe fn rope_neox_inplace_neon(
             let sin_v = vld1q_f32(sin.as_ptr().add(i));
             let x_lo = vld1q_f32(lo_ptr.add(i));
             let x_hi = vld1q_f32(hi_ptr.add(i));
-            // new_lo = x_lo * cos - x_hi * sin
-            let new_lo = vmlsq_f32(vmulq_f32(x_lo, cos_v), x_hi, sin_v);
-            // new_hi = x_hi * cos + x_lo * sin
-            let new_hi = vmlaq_f32(vmulq_f32(x_hi, cos_v), x_lo, sin_v);
+            let neg_hi_sin = vmulq_f32(vnegq_f32(x_hi), sin_v);
+            let new_lo = vfmaq_f32(neg_hi_sin, x_lo, cos_v);
+            let hi_cos = vmulq_f32(x_hi, cos_v);
+            let new_hi = vfmaq_f32(hi_cos, x_lo, sin_v);
             vst1q_f32(lo_ptr.add(i), new_lo);
             vst1q_f32(hi_ptr.add(i), new_hi);
             i += 4;
@@ -130,8 +132,8 @@ unsafe fn rope_neox_inplace_neon(
         while i < half {
             let x0 = *lo_ptr.add(i);
             let x1 = *hi_ptr.add(i);
-            *lo_ptr.add(i) = x0 * cos[i] - x1 * sin[i];
-            *hi_ptr.add(i) = x0 * sin[i] + x1 * cos[i];
+            *lo_ptr.add(i) = x0.mul_add(cos[i], -(x1 * sin[i]));
+            *hi_ptr.add(i) = x0.mul_add(sin[i], x1 * cos[i]);
             i += 1;
         }
     }
@@ -290,4 +292,31 @@ unsafe fn bf16_round_ps(a: std::arch::x86_64::__m256) -> std::arch::x86_64::__m2
         *lane = f32::from_bits(rounded << 16);
     }
     _mm256_loadu_ps(buf.as_ptr())
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rope_neox_matches_llama_arm_raw_bits() {
+        let theta_scale = 10_000.0f32.powf(-2.0 / 256.0);
+        let theta = (0..10).fold(1.0f32, |theta, _| theta * theta_scale);
+        let (cos, sin) = rope_sin_cos(theta);
+        assert_eq!(cos.to_bits(), 0x3f62_3dd5);
+        assert_eq!(sin.to_bits(), 0x3eef_96e2);
+
+        let mut values = vec![0.0f32; 256];
+        values[2] = f32::from_bits(0x3ec4_d666);
+        values[10] = f32::from_bits(0x3e82_5ca5);
+        values[130] = f32::from_bits(0xbccb_b52e);
+        values[138] = f32::from_bits(0xbd7e_afee);
+
+        rope_neox_inplace(&mut values, 1, 256, 10_000.0);
+
+        assert_eq!(values[2].to_bits(), 0x3e89_3aee);
+        assert_eq!(values[10].to_bits(), 0x3e82_1b0c);
+        assert_eq!(values[130].to_bits(), 0x3e8d_afa8);
+        assert_eq!(values[138].to_bits(), 0x3d83_783d);
+    }
 }

@@ -1,9 +1,10 @@
-use super::config::{CONTEXT, HEADS};
 use super::forward::Gemma4InputRow;
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
 use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
 use crate::core::scratchpad::KvFormat;
+#[cfg(feature = "vulkan")]
+use crate::ops::kernel::Weight;
 
 pub struct Gemma4Session<'model> {
     pub(super) model: &'model Gemma4Model,
@@ -37,8 +38,9 @@ impl Gemma4PrefillLinear {
                 crate::vulkan::mark_gpu_broken("Gemma4 prefill Vulkan initialization failed");
                 return Self::default();
             };
+            let n_ctx = _model.config.n_ctx;
             let result = Self::limits(_model).and_then(|(n_in, n_out, descriptors)| {
-                BatchedLinearRuntime::new(context, _rows.min(CONTEXT), n_in, n_out, descriptors)
+                BatchedLinearRuntime::new(context, _rows.min(n_ctx), n_in, n_out, descriptors)
             });
             return match result {
                 Ok(runtime) => Self {
@@ -62,21 +64,35 @@ impl Gemma4PrefillLinear {
     ) -> Result<(usize, usize, usize), crate::vulkan::VulkanError> {
         // Each visited projection has a distinct tensor label. Shared-KV layers
         // never project K/V; embeddings and the tied vocabulary output stay CPU.
-        std::iter::once(&model.per_layer_model_proj)
+        let per_layer_iter: Box<dyn Iterator<Item = &Weight<'static>>> =
+            if let Some(p) = model.per_layer_model_proj.as_ref() {
+                Box::new(std::iter::once(p))
+            } else {
+                Box::new(std::iter::empty())
+            };
+        per_layer_iter
             .chain(model.layers.iter().enumerate().flat_map(|(index, layer)| {
-                [
-                    Some(&layer.attn_q),
-                    Some(&layer.attn_output),
-                    Some(&layer.ffn_gate),
-                    Some(&layer.ffn_up),
-                    Some(&layer.ffn_down),
-                    Some(&layer.inp_gate),
-                    Some(&layer.proj),
-                    (index < model.config.base_kv_layers()).then_some(&layer.attn_k),
-                    (index < model.config.base_kv_layers()).then_some(&layer.attn_v),
-                ]
-                .into_iter()
-                .flatten()
+                let base_kv = model.config.base_kv_layers();
+                let mut items: Vec<&Weight<'static>> = vec![
+                    &layer.attn_q,
+                    &layer.attn_output,
+                    &layer.ffn_gate,
+                    &layer.ffn_up,
+                    &layer.ffn_down,
+                ];
+                if let Some(ig) = layer.inp_gate.as_ref() {
+                    items.push(ig);
+                }
+                if let Some(pj) = layer.proj.as_ref() {
+                    items.push(pj);
+                }
+                if index < base_kv {
+                    items.push(&layer.attn_k);
+                    if let Some(v) = layer.attn_v.as_ref() {
+                        items.push(v);
+                    }
+                }
+                items.into_iter()
             }))
             .try_fold((0, 0, 1usize), |(n_in, n_out, descriptors), weight| {
                 Ok((
@@ -162,10 +178,11 @@ impl<'model> Gemma4Session<'model> {
         let kv = (0..base)
             .map(|layer| {
                 let head_dim = cfg.head_dim(layer);
+                let kv_heads = cfg.kv_heads(layer);
                 KvLayer {
                     head_dim,
-                    row_width: cfg.kv_heads * head_dim,
-                    group_size: HEADS / cfg.kv_heads,
+                    row_width: kv_heads * head_dim,
+                    group_size: cfg.n_heads / kv_heads,
                     keys: Vec::new(),
                     values: Vec::new(),
                 }
@@ -174,7 +191,7 @@ impl<'model> Gemma4Session<'model> {
         Ok(Self {
             model,
             kv,
-            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(CONTEXT)),
+            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(cfg.n_ctx)),
             seq_len: 0,
             prefill_batch_size,
             prefill_linear: Gemma4PrefillLinear::new(model, prefill_batch_size),

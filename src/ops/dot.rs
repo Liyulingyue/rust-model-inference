@@ -205,42 +205,10 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     };
     #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
-    // Tail SIMD: handle the `n % 32` remainder with 8-wide NEON FP16 +
-    // F32 lanes (NEON's `fmla` works on F16 directly so the conversion
-    // is implicit). Edge cases like Qwen3-TTS DAC always have
-    // `dot_len = in_channels * kernel_size` divisible by 8 (Q8_0/F16
-    // layout), so this loop usually doesn't run, but it removes the
-    // last scalar fallback for callers with arbitrary strides.
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    {
-        let mut i = tail_start;
-        unsafe {
-            use std::arch::aarch64::*;
-            while i + 8 <= n {
-                let av = vld1q_u16(a.as_ptr().add(i));
-                let bv = vld1q_u16(b.as_ptr().add(i));
-                let acc = vfmaq_f16(
-                    vdupq_n_f16(0.0),
-                    vreinterpretq_f16_u16(av),
-                    vreinterpretq_f16_u16(bv),
-                );
-                let lo = vcvtn_f32_f16(vget_low_f16(acc));
-                let hi = vcvtn_f32_f16(vget_high_f16(acc));
-                let pair = vaddq_f32(lo, hi);
-                sum += f64::from(vaddvq_f32(pair));
-                i += 8;
-            }
-        }
-        while i < n {
-            sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(b[i]));
-            i += 1;
-        }
-    }
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
-    {
-        for index in tail_start..n {
-            sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
-        }
+    // ponytail: stable Rust has no usable aarch64 FP16 tail intrinsic here;
+    // keep the remainder scalar and retain the 32-wide assembly fast path.
+    for index in tail_start..n {
+        sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
     }
     sum as f32
 }
@@ -310,6 +278,18 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     sum as f32
 }
 
+/// F16 dot product matching ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f16_f16_bytes_ggml(a: &[u16], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n && b.len() >= n * 2);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 32 {
+            return unsafe { dot_f16_f16_bytes_ggml_avx2(a, b, n) };
+        }
+    }
+    dot_f16_f16_bytes(a, b, n)
+}
+
 /// AVX2 + F16C + FMA implementation of `dot_f16_f16_bytes`.
 ///
 /// Both inputs are stored as `u16` (a) and packed 2-byte little-endian (b),
@@ -345,6 +325,39 @@ unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
         i += 1;
     }
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_f16_bytes_ggml_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= n {
+        for (offset, acc) in [
+            (0, &mut acc0),
+            (8, &mut acc1),
+            (16, &mut acc2),
+            (24, &mut acc3),
+        ] {
+            let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i + offset) as *const __m128i));
+            let vb = _mm256_cvtph_ps(_mm_loadu_si128(
+                b.as_ptr().add((i + offset) * 2) as *const __m128i
+            ));
+            *acc = _mm256_fmadd_ps(va, vb, *acc);
+        }
+        i += 32;
+    }
+    let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc2), _mm256_add_ps(acc1, acc3));
+    let mut sum = f64::from(hsum_ps(acc));
+    while i < n {
+        let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(weight));
+        i += 1;
+    }
+    sum as f32
 }
 
 /// BF16 weight bytes × F32 input dot product.

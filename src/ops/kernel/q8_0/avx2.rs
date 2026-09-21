@@ -5,7 +5,13 @@
 
 #![cfg(target_arch = "x86_64")]
 
-use crate::ops::hsum_ps;
+#[inline(always)]
+unsafe fn hsum_ggml(v: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let mut sum = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
+    sum = _mm_add_ps(sum, _mm_movehl_ps(sum, sum));
+    _mm_cvtss_f32(_mm_add_ss(sum, _mm_movehdup_ps(sum)))
+}
 
 /// AVX2 Q8_0 × Q8_0 matmul over a row range (prequantized input).
 ///
@@ -110,10 +116,10 @@ pub unsafe fn matmul_q8_0_vs_q8_0_avx2(
             );
         }
         let base_out = tile * 4;
-        *out_ptr.add(base_out) = hsum_ps(cv0);
-        *out_ptr.add(base_out + 1) = hsum_ps(cv1);
-        *out_ptr.add(base_out + 2) = hsum_ps(cv2);
-        *out_ptr.add(base_out + 3) = hsum_ps(cv3);
+        *out_ptr.add(base_out) = hsum_ggml(cv0);
+        *out_ptr.add(base_out + 1) = hsum_ggml(cv1);
+        *out_ptr.add(base_out + 2) = hsum_ggml(cv2);
+        *out_ptr.add(base_out + 3) = hsum_ggml(cv3);
     }
 
     for (out_idx, j) in (row_start + full4 * 4..row_end).enumerate() {
@@ -132,7 +138,7 @@ pub unsafe fn matmul_q8_0_vs_q8_0_avx2(
             let summed = _mm256_madd_epi16(ones, dot);
             acc = _mm256_fmadd_ps(d_v, _mm256_cvtepi32_ps(summed), acc);
         }
-        *out_ptr.add(full4 * 4 + out_idx) = hsum_ps(acc);
+        *out_ptr.add(full4 * 4 + out_idx) = hsum_ggml(acc);
     }
 }
 

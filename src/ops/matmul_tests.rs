@@ -3,11 +3,11 @@ use crate::ops::dot::dot_f32_neon;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 use crate::ops::{
-    dot_f16, dot_f16_f16_bytes, dot_f16_f32, dot_f32, f16_to_f32, f32_slice_to_f16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox_inplace, rope_norm,
-    silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
-    vec_mad_self_f32, vec_scale_f32,
+    dot_f16, dot_f16_f16_bytes, dot_f16_f16_bytes_ggml, dot_f16_f32, dot_f32, f16_to_f32,
+    f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope,
+    rope_neox_inplace, rope_norm, silu_inplace, silu_mul_approx_inplace, softmax_inplace,
+    ssm_matvec, ssm_matvec_scaled, ssm_outer_product_update, sum_f32, sum_sq_centered_f32,
+    sum_sq_f32, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
 };
 use crate::{
     core::tensor::GGMLType,
@@ -768,6 +768,24 @@ fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
+fn f16_dot_scalar_tail_covers_gemma4_audio_patch_length() {
+    let a: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * 0.25 - 1.0))
+        .collect();
+    let b: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * -0.125 + 0.75))
+        .collect();
+    let expected = a
+        .iter()
+        .zip(&b)
+        .map(|(&left, &right)| f64::from(f16_to_f32(left) * f16_to_f32(right)))
+        .sum::<f64>() as f32;
+
+    assert_eq!(dot_f16(&a, &b, 9).to_bits(), expected.to_bits());
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
 fn neon_q8_matmul_matches_repacked_fused_block_accumulation() {
     let mut weights = Vec::with_capacity(68);
     for _ in 0..2 {
@@ -955,7 +973,7 @@ fn neon_f16_ops_match_scalar_with_tail() {
 }
 
 #[test]
-fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
+fn f16_dot_dispatch_matches_platform_reduction_contract() {
     fn pinned_inputs(n: usize) -> (Vec<u16>, Vec<u8>) {
         let x = (0..n)
             .map(|index| {
@@ -981,14 +999,33 @@ fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
     let native_fp16 = std::arch::is_aarch64_feature_detected!("fp16");
     #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     let native_fp16 = false;
-    let expected = if native_fp16 {
+    #[cfg(target_arch = "x86_64")]
+    let avx_f16 = std::arch::is_x86_feature_detected!("avx2")
+        && std::arch::is_x86_feature_detected!("fma")
+        && std::arch::is_x86_feature_detected!("f16c");
+    #[cfg(not(target_arch = "x86_64"))]
+    let avx_f16 = false;
+    let expected: [(usize, u32); 3] = if native_fp16 {
         [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)]
+    } else if avx_f16 {
+        [(32, 0xc086_612e), (37, 0x4035_d998), (64, 0x4122_a160)]
     } else {
         [(32, 0xc086_612e), (37, 0x4035_d999), (64, 0x4122_a161)]
     };
     for (n, expected) in expected {
         let (x, y) = pinned_inputs(n);
         assert_eq!(dot_f16_f16_bytes(&x, &y, n).to_bits(), expected, "n={n}");
+    }
+
+    if avx_f16 {
+        for (n, expected) in [(32, 0xc086_612f), (37, 0x4035_d996), (64, 0x4122_a161)] {
+            let (x, y) = pinned_inputs(n);
+            assert_eq!(
+                dot_f16_f16_bytes_ggml(&x, &y, n).to_bits(),
+                expected,
+                "GGML n={n}",
+            );
+        }
     }
 
     if !native_fp16 {

@@ -6,7 +6,7 @@
 //! Module structure:
 //! - `scalar.rs` — scalar fallback (`matmul_q4_1_scalar_range`)
 //! - `avx2.rs`    — AVX2 SIMD kernel (mirrors `q4_0::avx2` strategy)
-//! - `neon.rs`    — NEON `vdotq_u32` SIMD kernel (aarch64)
+//! - `neon.rs`    — ARMv8.4-A dot-product fast path (aarch64)
 
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
@@ -72,27 +72,24 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let per_thread = (n_out + nth - 1) / nth;
+            let my_start = ith * per_thread;
+            let my_end = (my_start + per_thread).min(n_out);
+            if my_start < my_end {
                 unsafe {
                     neon::matmul_q4_1_vs_q8_0_neon(
                         self.weight,
                         input_q8,
                         input_scales,
                         None,
-                        output,
+                        &mut output[my_start..my_end],
                         n_in,
                         my_start,
                         my_end,
                     );
-                    return;
                 }
+                return;
             }
         }
         matmul_q4_1_scalar_range(
@@ -162,27 +159,24 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let per_thread = (n_out + nth - 1) / nth;
+            let my_start = ith * per_thread;
+            let my_end = (my_start + per_thread).min(n_out);
+            if my_start < my_end {
                 unsafe {
                     neon::matmul_q4_1_vs_q8_0_neon(
                         self.weight,
                         input_q8,
                         input_scales,
                         Some(&input_sums),
-                        output,
+                        &mut output[my_start..my_end],
                         n_in,
                         my_start,
                         my_end,
                     );
-                    return;
                 }
+                return;
             }
         }
         matmul_q4_1_scalar_range(
@@ -198,6 +192,10 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
         );
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+#[path = "tests_neon.rs"]
+mod tests_neon;
 
 #[cfg(test)]
 mod tests {
@@ -241,7 +239,3 @@ mod tests {
         assert_eq!(output, [32.0]);
     }
 }
-
-#[cfg(target_arch = "aarch64")]
-#[path = "tests_neon.rs"]
-mod tests_neon;

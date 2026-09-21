@@ -2,6 +2,7 @@ use crate::core::tensor::TensorInfo;
 
 pub mod fuse;
 pub mod iq_tables;
+#[cfg(target_arch = "aarch64")]
 pub mod neon_k;
 pub mod q8_0;
 
@@ -951,7 +952,7 @@ pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         return unsafe { self::avx2_k::vec_dot_iq4_nl_q8k_avx2(iq4nl_data, q8k) };
     }
     #[cfg(target_arch = "aarch64")]
-    if crate::ops::has_neon() {
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
         return unsafe { self::neon_k::vec_dot_iq4_nl_q8k_neon(iq4nl_data, q8k) };
     }
     vec_dot_iq4_nl_q8k_scalar(iq4nl_data, q8k)
@@ -3090,6 +3091,43 @@ mod i_quant_tests {
         assert_eq!(
             KVALUES_IQ4NL,
             [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn iq4_nl_neon_matches_scalar() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+
+        let mut data = vec![0u8; 8 * 18];
+        for subblock in 0..8 {
+            let offset = subblock * 18;
+            let scale = crate::ops::f32_to_f16(if subblock % 2 == 0 { 0.5 } else { -0.25 });
+            data[offset..offset + 2].copy_from_slice(&scale.to_le_bytes());
+            for j in 0..16 {
+                let lo = ((j * 3 + subblock) & 0x0f) as u8;
+                let hi = ((j * 5 + subblock * 2) & 0x0f) as u8;
+                data[offset + 2 + j] = lo | (hi << 4);
+            }
+        }
+
+        let mut qs = [0i8; 256];
+        for (index, value) in qs.iter_mut().enumerate() {
+            *value = ((index * 37 % 255) as i16 - 127) as i8;
+        }
+        let q8k = [BlockQ8K {
+            d: 0.75,
+            qs,
+            bsums: [0; 16],
+        }];
+        let scalar = vec_dot_iq4_nl_q8k_scalar(&data, &q8k);
+        let neon = unsafe { super::neon_k::vec_dot_iq4_nl_q8k_neon(&data, &q8k) };
+        assert_eq!(
+            scalar.to_bits(),
+            neon.to_bits(),
+            "scalar={scalar}, neon={neon}"
         );
     }
 

@@ -62,21 +62,28 @@ pub fn gelu_inplace(values: &mut [f32]) {
     }
 }
 
-pub fn gelu_ggml_f16_inplace(values: &mut [f32]) {
+#[inline]
+pub fn gelu_ggml_f16(value: f32) -> f32 {
     use super::super::float::{f16_to_f32, f32_to_f16};
 
+    if value <= -10.0 {
+        return 0.0;
+    }
+    if value >= 10.0 {
+        return value;
+    }
+    let x = f16_to_f32(f32_to_f16(value));
+    let inner = 0.797_884_6 * x * (0.044_715 * x).mul_add(x, 1.0);
+    #[cfg(unix)]
+    let activation = unsafe { tanhf(inner) };
+    #[cfg(not(unix))]
+    let activation = inner.tanh();
+    f16_to_f32(f32_to_f16(0.5 * x * (1.0 + activation)))
+}
+
+pub fn gelu_ggml_f16_inplace(values: &mut [f32]) {
     for value in values {
-        if *value <= -10.0 {
-            *value = 0.0;
-        } else if *value < 10.0 {
-            let x = f16_to_f32(f32_to_f16(*value));
-            let inner = 0.797_884_6 * x * (1.0 + 0.044_715 * x * x);
-            #[cfg(unix)]
-            let activation = unsafe { tanhf(inner) };
-            #[cfg(not(unix))]
-            let activation = inner.tanh();
-            *value = f16_to_f32(f32_to_f16(0.5 * x * (1.0 + activation)));
-        }
+        *value = gelu_ggml_f16(*value);
     }
 }
 
@@ -371,9 +378,10 @@ mod tests {
 
     #[test]
     fn gelu_ggml_f16_matches_pinned_oracle_bits() {
-        let mut values = [f32::from_bits(0xc009_836e)];
+        let mut values = [f32::from_bits(0xc009_836e), f32::from_bits(0xbfff_e110)];
         gelu_ggml_f16_inplace(&mut values);
         assert_eq!(values[0].to_bits(), 0xbd0a_8000);
+        assert_eq!(values[1].to_bits(), 0xbd3a_6000);
     }
 
     fn gelu_erf_scalar(values: &[f32]) -> Vec<f32> {

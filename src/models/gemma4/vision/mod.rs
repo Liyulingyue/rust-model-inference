@@ -1,11 +1,72 @@
 pub mod config;
-use crate::core::tensor::{GGMLType, TensorSource};
+mod uv_config;
+mod uv_model;
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
 };
 pub use config::Gemma4VisionConfig;
 use std::path::Path;
+pub use uv_config::Gemma4UvConfig;
+pub use uv_model::Gemma4UvVisionModel;
+
+/// Either the E2B (`gemma4v`) block-based vision encoder or the 12B
+/// (`gemma4uv`) unified patch-embedder. Both produce flat `Vec<f32>`
+/// patch embeddings in the trunk's embedding space; callers can stay
+/// agnostic of which architecture is loaded.
+pub enum Gemma4VisionEncoder<'a> {
+    E2b(Gemma4VisionModel<'a>),
+    Uv(Gemma4UvVisionModel<'a>),
+}
+
+impl<'a> Gemma4VisionEncoder<'a> {
+    pub fn encode_path(&self, path: &Path) -> Result<Vec<f32>, String> {
+        match self {
+            Gemma4VisionEncoder::E2b(model) => model.encode_path(path),
+            Gemma4VisionEncoder::Uv(model) => model.encode_path(path),
+        }
+    }
+    pub fn embd(&self) -> usize {
+        match self {
+            Gemma4VisionEncoder::E2b(_) => EMBED,
+            Gemma4VisionEncoder::Uv(model) => model.config.embd,
+        }
+    }
+    pub fn projection(&self) -> usize {
+        match self {
+            Gemma4VisionEncoder::E2b(_) => PROJECTION,
+            Gemma4VisionEncoder::Uv(model) => model.config.projection,
+        }
+    }
+}
+
+/// Build the appropriate vision encoder based on the mmproj's
+/// `clip.vision.projector_type`. Returns the E2B block-based vision model
+/// for `"gemma4v"` or the 12B unified patch-embedder for `"gemma4uv"`.
+pub fn build_vision_encoder<'a>(
+    source: &'a dyn TensorSource,
+    threads: usize,
+) -> Result<Gemma4VisionEncoder<'a>, String> {
+    let projector = source
+        .metadata("clip.vision.projector_type")
+        .and_then(|value| match value {
+            MetaValue::String(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .ok_or("Missing metadata: clip.vision.projector_type")?;
+    match projector {
+        "gemma4uv" => Ok(Gemma4VisionEncoder::Uv(Gemma4UvVisionModel::from_source(
+            source, threads,
+        )?)),
+        other if other.starts_with("gemma4v") => Ok(Gemma4VisionEncoder::E2b(
+            Gemma4VisionModel::from_source(source, threads)?,
+        )),
+        other => Err(format!(
+            "Unsupported Gemma4 vision projector_type: {other:?}"
+        )),
+    }
+}
 
 const EMBED: usize = 768;
 const FFN: usize = 3072;

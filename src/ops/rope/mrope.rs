@@ -35,7 +35,7 @@ unsafe extern "C" {
 }
 
 #[inline]
-fn sin_cos(value: f32) -> (f32, f32) {
+pub(super) fn sin_cos(value: f32) -> (f32, f32) {
     #[cfg(target_vendor = "apple")]
     {
         let result = unsafe { sincosf(value) };
