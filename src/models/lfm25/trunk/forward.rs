@@ -1069,13 +1069,27 @@ fn forward_shortconv(
 ///
 /// Mirrors the prefill portion of `run_inference` but stops after the
 /// final logits are computed.
-pub fn run_forward_logits_lfm25(
+/// Single forward pass: prefill `prompt_tokens` and return the
+/// final prefill-step logits. Used by
+/// [`crate::models::lfm25::Lfm25Session::forward_logits_chunked`]
+/// for the B = 1 fallback and by JEV / classification modes that
+/// do not need autoregressive decoding. The `batch_size` argument
+/// is accepted for trait compatibility but ignored at runtime — the
+/// LFM2.5 prefill walks the per-token path today (the SSM shortconv
+/// state has to step per-token by construction). Future work lifts
+/// [`forward_layer`] into a true `rows > 1` batched path so the
+/// attention sub-layers amortise across the chunk while the
+/// shortconv sub-layers keep their sequential state update.
+pub fn run_forward_logits_lfm25_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
     n_threads_arg: usize,
     kv_format: KvFormat,
     max_context: usize,
+    batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let _ = batch_size;
+
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
     let n_embd = cfg.n_embd;
@@ -1156,6 +1170,12 @@ pub fn run_forward_logits_lfm25(
     let mut prefill_time = Duration::ZERO;
     let n_prompt = prompt_tokens.len();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body
+    // is the legacy per-token forward; the outer loop is
+    // marked so a future `Lfm25Session` + `ChunkedPrefill`
+    // impl is a drop-in replacement.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(n_prompt, 1);
     for step in 0..n_prompt {
         let eval_started = Instant::now();
         let token_id = prompt_tokens[step];

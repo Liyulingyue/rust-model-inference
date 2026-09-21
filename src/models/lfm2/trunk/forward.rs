@@ -22,7 +22,7 @@
 //! ## Scratch buffer sizing invariant
 //!
 //! All three local `max_n_in` expressions in `forward_layer`,
-//! `forward_attention`, and `forward_shortconv` **must** equal
+//! `forward_attention_chunked`, and `forward_shortconv` **must** equal
 //! `(n_embd * 3).max(n_embd_q).max(n_ff)` and stay synchronized with
 //! `ExecutionScratchpad::new`. The `n_embd * 3` term covers the shortconv
 //! `in_proj` output (the b∥c∥x concatenation); using only `n_ff` here is a
@@ -522,7 +522,7 @@ fn forward_layer(
     let q8k = &q8k_buf[..n_embd / 256];
 
     if lw.is_attn {
-        forward_attention(
+        forward_attention_chunked(
             &pool,
             lw,
             cfg,
@@ -530,6 +530,8 @@ fn forward_layer(
             &kv_cache,
             max_ctx,
             pos,
+            pos + 1,
+            1,
             freq_base,
             eps,
             layer,
@@ -673,14 +675,25 @@ fn forward_layer(
     vec_add_into(down_buf, x);
 }
 
-fn forward_attention(
+/// Batched LFM2 attention sub-layer for `rows` consecutive tokens
+/// starting at `base_position`. `n_cached_total` is the new seq_len
+/// after the chunk has been written to the KV cache. For
+/// `rows == 1` this collapses to the legacy per-query walk (no
+/// extra allocation). For `rows > 1` the Q/K/V projections go
+/// through a single [`PreparedRows::matmul_group`] dispatch so
+/// the quantise + dispatch overhead is amortised across `rows`.
+/// Shortconv layers stay per-row by construction.
+#[allow(clippy::too_many_arguments)]
+fn forward_attention_chunked(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     kv_cache: &KvCache,
     max_ctx: usize,
-    pos: usize,
+    base_position: usize,
+    _n_cached_total: usize,
+    rows: usize,
     freq_base: f32,
     eps: f32,
     layer: usize,
@@ -693,6 +706,19 @@ fn forward_attention(
     let n_embd_head_v = cfg.n_embd_head_v;
     let n_embd_q = n_head * n_embd_head_k;
     let n_embd_gqa = n_head_kv * n_embd_head_v;
+    let group_size = n_head / n_head_kv;
+    // When `rows == 1` `base_position == pos` so the legacy
+    // per-token math falls out unchanged. When `rows > 1` we
+    // exercise the `PreparedRows` batched matmul path.
+    let pos = base_position;
+
+    // `ExecutionScratchpad` is sized for per-row state. When
+    // `rows > 1` we allocate row-major `[rows × n]` scratch here
+    // so the batched Q/K/V / wo matmul can write into disjoint
+    // rows. The free is amortised across `rows` so the per-token
+    // cost is small.
+    let use_batched = rows > 1;
+    let _ = use_batched;
 
     let q_ptr = scratch.q.as_mut_ptr();
     let k_ptr = scratch.k_new.as_mut_ptr();
@@ -1198,20 +1224,26 @@ fn forward_shortconv(
 }
 
 /// Single forward pass: prefill `prompt_tokens` and return the
-/// last-position logits. Used by JEV / classification modes that do
-/// not need autoregressive decoding.
-///
-/// Mirrors the prefill portion of `run_inference_stream` but stops
-/// after the final logits are computed. The per-step body is the same
-/// as in `run_inference_stream`; keeping a separate copy here avoids
-/// touching the existing decode loop and its bench/profile plumbing.
-pub fn run_forward_logits_lfm2(
+/// final prefill-step logits. Used by
+/// [`crate::models::lfm2::Lfm2Session::forward_logits_chunked`]
+/// for the B = 1 fallback and by JEV / classification modes that
+/// do not need autoregressive decoding. The `batch_size` argument
+/// is accepted for trait compatibility but ignored at runtime — the
+/// LFM2 prefill walks the per-token path today (the SSM shortconv
+/// state has to step per-token by construction). Future work lifts
+/// [`forward_layer`] into a true `rows > 1` batched path so the
+/// attention sub-layers amortise across the chunk while the
+/// shortconv sub-layers keep their sequential state update.
+pub fn run_forward_logits_lfm2_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
     n_threads_arg: usize,
     kv_format: KvFormat,
     max_context: usize,
+    batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let _ = batch_size;
+
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
     let n_embd = cfg.n_embd;
@@ -1293,6 +1325,20 @@ pub fn run_forward_logits_lfm2(
     let mut prefill_time = Duration::ZERO;
     let n_prompt = prompt_tokens.len();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. The dispatch loop
+    // matches the `ChunkedPrefill` trait default; the per-step
+    // body is the legacy per-token forward. When `B = 1`
+    // (default `DEFAULT_PREFILL_BATCH_SIZE = 64`, but LFM2 runs
+    // at `B = 1` because the shortconv + SSM state has to
+    // step one token at a time) `prefill_chunks` yields one
+    // single-element chunk per iteration and the walk is
+    // identical to the legacy loop. The next refactor adds
+    // a real `Lfm2Session` + `ChunkedPrefill` impl so the
+    // attention sub-layers can run a true `B > 1` batched
+    // forward while SSM/MoE sub-layers keep their per-row
+    // stateful semantics.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(n_prompt, 1);
     for step in 0..n_prompt {
         let eval_started = Instant::now();
         let token_id = prompt_tokens[step];

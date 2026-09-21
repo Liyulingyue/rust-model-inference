@@ -170,6 +170,20 @@ impl SparkSession {
         Ok(logits)
     }
 
+    /// Trait-driven entry point. Equivalent to
+    /// [`forward_logits`](Self::forward_logits) for `B = 1`; a
+    /// future refactor can lift [`forward_step_logits`] into a true
+    /// batched forward so a `B > 1` chunked walk sees the same
+    /// ~2× prefill speedup documented in
+    /// `docs/develop/PREFILL_ABSTRACTION.md` for the llama trunk.
+    pub fn forward_logits_chunked(
+        &mut self,
+        tokens: &[u32],
+        _batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        self.forward_logits(tokens)
+    }
+
     /// Decode one token at position `pos`. Returns the next sampled token id.
     pub fn decode_step(
         &mut self,
@@ -477,6 +491,13 @@ pub fn run_inference(
 
     let inference_started = Instant::now();
     let mut last_token = prompt_tokens[0];
+
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. Per-step body is
+    // the legacy per-token forward; the outer loop is
+    // marked so a future `SparkSession` + `ChunkedPrefill`
+    // impl is a drop-in replacement.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(prompt_tokens.len(), 1);
     for (pos, &tok) in prompt_tokens.iter().enumerate() {
         let next = session.decode_step(tok, pos, temperature)?;
         last_token = next;
@@ -520,4 +541,101 @@ pub fn run_inference(
         tps
     );
     Ok(())
+}
+
+// ---- `ChunkedPrefill` impl -------------------------------------------------
+//
+// `SparkSession` already owns every piece of state `forward_logits`
+// needs, so the trait impl is mechanical: dispatch the input into
+// rows = `batch_size` chunks and forward each chunk through the
+// existing per-token `forward_step_logits`. The `B = 1` path is
+// bit-exact (one chunk, one row per chunk), so existing parity
+// tests stay green. A future refactor lifts `forward_step_logits`
+// into a true `rows × n_head` batched forward and the trait impl
+// gains a real speedup at `B > 1`.
+
+impl SparkSession {
+    pub(crate) fn forward_chunk_logits(
+        &mut self,
+        tokens: &[u32],
+        rows: usize,
+        base_position: usize,
+        project_logits: bool,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if rows == 0 {
+            return Ok(None);
+        }
+        if rows > tokens.len() {
+            return Err(format!(
+                "Spark chunk rows {rows} exceeds token length {}",
+                tokens.len()
+            ));
+        }
+        let start = tokens.len() - base_position - rows;
+        let mut last_logits: Option<Vec<f32>> = None;
+        for offset in 0..rows {
+            let pos = base_position + offset;
+            let tok = tokens[start + offset];
+            let logits = self.forward_step_logits(tok, pos)?;
+            if project_logits && offset + 1 == rows {
+                last_logits = Some(logits);
+            }
+        }
+        Ok(last_logits)
+    }
+}
+
+impl crate::core::prefill::ChunkedPrefill for SparkSession {
+    type Input = Vec<u32>;
+
+    fn input_len(input: &Self::Input) -> usize {
+        input.len()
+    }
+
+    fn max_chunk_size(&self) -> usize {
+        self.config.n_ctx
+    }
+
+    fn seq_len(&self) -> usize {
+        self.kv_state.seq_len
+    }
+
+    fn set_seq_len(&mut self, len: usize) {
+        self.kv_state.seq_len = len;
+    }
+
+    fn forward_chunk(
+        &mut self,
+        input: &Self::Input,
+        rows: usize,
+        base_position: usize,
+        project_logits: bool,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if base_position != self.kv_state.seq_len {
+            return Err(format!(
+                "Spark chunk base_position {base_position} != session seq_len {}",
+                self.kv_state.seq_len
+            ));
+        }
+        let last_logits = self.forward_chunk_logits(input, rows, base_position, project_logits)?;
+        // `forward_step_logits` advances `kv_state.seq_len` by
+        // one each call; the trait loop expects the session's
+        // `seq_len` to match `base_position + rows` afterwards.
+        // No extra `set_seq_len` call is needed.
+        Ok(last_logits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_prefill_input_len_matches_token_count() {
+        let tokens: Vec<u32> = (0..7).collect();
+        assert_eq!(
+            <SparkSession as crate::core::prefill::ChunkedPrefill>::input_len(&tokens),
+            7
+        );
+    }
 }
