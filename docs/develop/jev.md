@@ -538,26 +538,37 @@ let results = match &*arch {
 };
 ```
 
-### 为什么 Qwen3.5 不走 trait
+### 为什么 Qwen3.5 不走 trait（2026-09-22 修订）
 
-`Qwen35Model<'a>` borrow 自 `&dyn TensorSource`（`weights.rs:59`），`Weight<'a>`
-零拷贝持有 mmap 权重。把它装进 owned scorer struct 后，`scorer: &mut S` 与
-`source: Arc<dyn TensorSource>` 在 `run_jev_decision_core` 同一调用内被借用
-检查器视为同一借用（trait object 的生命周期信息已被擦除），编译失败。
+**事实校正**：本节原文把"Qwen3 / Gemma4 都 owned，Qwen35 不 owned"作为理由，
+这不准确。**所有 9 个 trunk 都是 zero-copy mmap**（数据都没有 copy 到 Vec），
+区别在于把零拷贝表达成什么类型：
 
-**权衡**：把 `Qwen35Model<'a>` 改成 owned 或 `Arc<Weight<'static>>` 可消除
-不一致，但失去 zero-copy（启动时多一次 weights clone + 多一份 peak memory）。
+- **Qwen3 / Gemma4 / Hunyuan**: `Qwen3Model::from_source` 在
+  `src/models/qwen3/trunk/weights.rs:522-523` 用
+  `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }` 把 mmap 字节
+  假装成 `'static`。前提是 model **自身持有** `Arc<dyn TensorSource>`
+  （`weights.rs:26`），所以 mmap 区域生命周期 ≥ self。`JevScorer` 持有
+  owned `'static` 化 model，干净。
+- **Llama / LFM2 / LFM2.5 / LFM2-MoE / Spark / Nemotron-H**: trunk 暴露
+  `run_forward_logits_*_with_batch(source: &dyn TensorSource, ...)`
+  free function。`JevScorer` 不持有 model，每次 `forward_logits` 把
+  `self.source.as_ref()` 借给 free function（后者自己内部 `from_source`
+  + session 生命 + `forward_logits`，管完就丢）。`LlamaSession<'a>` 等
+  内部类型也带 `'a`，但 JEV 走 free function 路径绕开。
+- **Qwen35**: 只有 `Qwen35Model<'a>` + `Qwen35Session` API，
+  **没有 free function wrapper**。`JevScorer` 没法照搬上面两条路径，
+  必须 inline 手动管理 `from_source` + `Qwen35Session::new_with_prefill_batch_size` +
+  `build_qwen35_positions` + `session.forward_logits` 调用链。
 
-**当前折中**：保留 inline `run_jev_decision_qwen35`（`single/qwen35.rs`）+
-`run_jev_grouped_qwen35`（`grouped/qwen35.rs`），共享 helper（`build_jev_prompt` /
-`print_jev_question` / `verify_label_tokens_single` / `compute_jev_result` /
-`build_grouped_payload` / `compute_grouped_jev_result` 等）全部复用，只是不
-走 `run_jev_decision_core` / `run_jev_grouped_core` 的 per-question 调度骨架。
-
-> Follow-up 跟踪在 `docs/develop/TODO.md` JEV section 的"JEV Qwen3.5 不走
-> `JevScorer` trait 的 follow-up"项。三档修法（不改模型抽函数 / 改 Weight 为
-> Arc / 出现第二个非 owned trunk 再统一 trait 抽象）按代价从小到大列在那里。
-> **当前是有意识的取舍，不是 bug**。
+**结论**：Qwen35 当前不走 trait 不是架构债务，是 trunk 缺一个对称
+wrapper 的小遗漏。follow-up 跟踪在 `docs/develop/TODO.md` JEV section
+的"JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up"项 —— 修法是在
+`src/models/qwen35/trunk/forward.rs` 加
+`run_forward_logits_qwen35_with_batch` free function，然后
+`single/qwen35.rs` / `grouped/qwen35.rs` 改成 Llama 风格的
+`JevScorer` / `JevGroupedScorer` impl。`Qwen35Model<'a>` 不动，zero-copy
+保留。
 
 ### Grouped trait：`JevGroupedScorer`
 

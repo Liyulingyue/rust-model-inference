@@ -80,34 +80,46 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
       实际使用的 label set（数字或字母）。
 - [ ] **JEV Qwen3.5 不走 `JevScorer` trait 的 follow-up** — 9 个 trunk 中 8 个走
-      `JevScorer` / `JevGroupedScorer` trait，唯一例外是 Qwen3.5：它的
-      `Qwen35Model<'a>` zero-copy borrow 自 `&dyn TensorSource`（`weights.rs:59`），
-      装进 owned scorer struct 会跟 trait 抽象的 `'a` 生命周期冲突
-      （`scorer: &mut S` 与 `source: Arc<dyn TensorSource>` 同次调用被借用检查器视为
-      同一借用；trait 必加 `'a` 参数 → monomorphize → 失去 dyn Trait 灵活性）。
-      当前 `run_jev_decision_qwen35` / `run_jev_grouped_qwen35` 保留 inline loop
-      （共 ~60 行），共享 helper 全部复用，只是不走 `run_jev_decision_core` /
-      `run_jev_grouped_core` 的 per-question 调度骨架。
+      `JevScorer` / `JevGroupedScorer` trait，唯一例外是 Qwen3.5。原因是
+      **Qwen35 trunk 缺一个对称的 free function wrapper** —— 不是 zero-copy
+      设计权衡。
 
-      **影响**：cross-cutting 改动（metrics / logging / retry / 单元测试）需要在
-      2 个 inline 函数里各加一遍，而非在 `run_jev_decision_core` 一处加完。新
-      contributor 看到 dispatch 表里 qwen35 单独走另一条路会困惑。
+      **对照其他 trunk 的两条 trait 兼容路径**（revised 2026-09-22）：
+      - **owned + transmute `'a → 'static`**：Qwen3 / Gemma4 / Hunyuan。
+        `Qwen3Model::from_source` 用 `unsafe { std::mem::transmute(&[u8] → &'static [u8]) }`
+        把 mmap 字节假装成 `'static`，因为它们持有 `Arc<dyn TensorSource>`
+        保证 mmap 区域 ≥ self 寿命。`JevScorer` 持有 owned model，干净。
+      - **free function 借 source**：Llama / LFM2 / LFM2.5 / LFM2-MoE /
+        Spark / Nemotron-H。`JevScorer` 不持有 model，每次 `forward_logits`
+        把 `self.source.as_ref()` 借给 `run_forward_logits_*_with_batch`
+        （trunk 层 free function），后者自己管生命周期。`LlamaSession<'a>`
+        等 session 类型本身也是 `'a` 的，但 JEV 用 free function 路径绕开。
 
-      **为什么是 TODO 而非立即修**：修法是把 `Qwen35Model<'a>` 改成 owned（或内部
-      `Arc<Weight>`），代价是失去 zero-copy（启动时多一次 weights clone + 多一份
-      peak memory）。**当前是有意识的取舍，不是 bug**。
+      **Qwen35 现状**：trunk 公开 API 只有 `Qwen35Model<'a>` + `Qwen35Session`。
+      没有 `run_forward_logits_qwen35_with_batch` free function，所以
+      `JevScorer` 没法用第二条路径。当前 inline ~60 行手动管理
+      `from_source` + `Qwen35Session::new_with_prefill_batch_size` +
+      `build_qwen35_positions` + `session.forward_logits` 调用链。
 
-      **建议 follow-up 路径**（按代价从小到大）：
-      1. **不动模型所有权**，把 Qwen3.5 的 inline loop 抽到一个独立的
-         `run_jev_decision_qwen35_loop(...)` 函数并写 doctest，说清楚"为什么
-         不走 trait"。消除"特殊感"但仍保留 inline 路径。
-      2. 把 `Qwen35Model` 内部从 `Weight<'a>` 改成 `Arc<Weight<'static>>`，让
-         model owned 而不丢失 zero-copy。Qwen35Model 自身的 API（`from_source` /
-         `forward_logits`）不变，只是 Weight 内部多一层 Arc。trait 可以包它。
-      3. 如果有第二个 zero-copy trunk 加入（比如新 GGUF 格式同样零拷贝），再做
-         一次统一 trait 抽象的讨论。
+      **修法（cost 低）**：在 `src/models/qwen35/trunk/forward.rs` 加
+      `pub fn run_forward_logits_qwen35_with_batch(source: &dyn TensorSource,
+      token_ids: &[u32], n_threads, kv_format, max_context, prefill_batch_size)
+      -> Result<(Vec<f32>, Duration), String>`，内部
+      `Qwen35Model::from_source(source)` + `Qwen35Session::new_*` +
+      `build_qwen35_positions` + `session.forward_logits`。
+      `Qwen35Model<'a>` 不动，zero-copy 保留。
 
-      **触发条件**：未来出现第二个"非 owned" trunk 时升级为 High Priority。
+      然后 `single/qwen35.rs` / `grouped/qwen35.rs` 改成 Llama 风格
+      `JevScorer` / `JevGroupedScorer` impl（~30 行 vs 当前 inline 60 行）。
+      之后 9 个 trunk 完全对称，dispatch 表清爽。
+
+      **这是 High Priority**：解法干净、cost 低、消除新人困惑、一致性收益大。
+      不阻塞其他工作；可以独立一个 PR。
+
+      **触发条件**：立刻可做，不依赖外部变化。
+
+      **验收**：qwen35 single + grouped smoke test 与 inline 版本 bit-identical
+      （Paris = 1.0000、pair_1 choice 与 current 一致）。
 
 ## Medium Priority
 
