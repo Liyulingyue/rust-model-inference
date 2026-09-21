@@ -7,6 +7,6 @@ pub mod trunk;
 pub mod vision;
 
 pub use trunk::{
-    get_f32_tensor, load_layers, run_forward_logits_lfm2, run_forward_logits_lfm2_with_batch,
-    run_inference, run_inference_stream, Lfm2Config, Lfm2LayerWeights, Lfm2Session,
+    get_f32_tensor, load_layers, run_forward_logits_lfm2_with_batch, run_inference,
+    run_inference_stream, Lfm2Config, Lfm2LayerWeights, Lfm2Session,
 };

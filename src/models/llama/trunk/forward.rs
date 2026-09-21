@@ -1124,24 +1124,15 @@ pub fn run_inference_tokens(
 /// after the final logits are computed. The per-step body is the same
 /// as in `run_inference_tokens`; keeping a separate copy here avoids
 /// touching the existing decode loop and its bench/profile plumbing.
-pub fn run_forward_logits_llama(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, std::time::Duration), String> {
-    run_forward_logits_llama_with_batch(
-        source,
-        prompt_tokens,
-        n_threads_arg,
-        kv_format,
-        max_context,
-        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-    )
-}
+/// When the model exposes a `qwen2vl`-style arch metadata that
+/// `LlamaSession::from_source_with_max_rows` can't parse, this
+/// falls back to the legacy free-function per-token path. `batch_size`
+/// is accepted for trait compatibility but the dispatch currently
+/// goes through the per-token path either way.
 
-/// Same as [`run_forward_logits_llama`] but with an explicit
+/// `batch_size` for the chunked prefill dispatch. When the model
+/// is built with `LlamaSession` this routes through the
+/// [`LlamaSession::forward_logits_chunked`] entry point so a
 /// `batch_size` for the chunked prefill dispatch. When the model
 /// is built with `LlamaSession` this routes through the
 /// [`LlamaSession::forward_logits_chunked`] entry point so a

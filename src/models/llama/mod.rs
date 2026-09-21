@@ -1,3 +1,3 @@
 pub mod trunk;
 
-pub use trunk::{run_forward_logits_llama, run_inference, run_inference_tokens};
+pub use trunk::{run_forward_logits_llama_with_batch, run_inference, run_inference_tokens};

@@ -1224,40 +1224,16 @@ fn forward_shortconv(
 }
 
 /// Single forward pass: prefill `prompt_tokens` and return the
-/// last-position logits. Used by JEV / classification modes that do
-/// not need autoregressive decoding.
-///
-/// Mirrors the prefill portion of `run_inference_stream` but stops
-/// after the final logits are computed. The per-step body is the same
-/// as in `run_inference_stream`; keeping a separate copy here avoids
-/// touching the existing decode loop and its bench/profile plumbing.
-pub fn run_forward_logits_lfm2(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, std::time::Duration), String> {
-    run_forward_logits_lfm2_with_batch(
-        source,
-        prompt_tokens,
-        n_threads_arg,
-        kv_format,
-        max_context,
-        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-    )
-}
-
-/// Same as [`run_forward_logits_lfm2`] but with an explicit
-/// `batch_size` for the chunked prefill dispatch. For LFM2 the
-/// dispatch marker is in place (see the
-/// `let _prefill_chunks = …; for step …` block below) but the
-/// per-step body still walks the SSM/MoE shortconv state one token
-/// at a time — shortconv has to step per-token by construction.
-/// Future work lifts [`forward_layer`] into a true `rows > 1`
-/// batched path so the attention sub-layers amortise across the
-/// chunk while the shortconv sub-layers keep their sequential
-/// state update.
+/// final prefill-step logits. Used by
+/// [`crate::models::lfm2::Lfm2Session::forward_logits_chunked`]
+/// for the B = 1 fallback and by JEV / classification modes that
+/// do not need autoregressive decoding. The `batch_size` argument
+/// is accepted for trait compatibility but ignored at runtime — the
+/// LFM2 prefill walks the per-token path today (the SSM shortconv
+/// state has to step per-token by construction). Future work lifts
+/// [`forward_layer`] into a true `rows > 1` batched path so the
+/// attention sub-layers amortise across the chunk while the
+/// shortconv sub-layers keep their sequential state update.
 pub fn run_forward_logits_lfm2_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
@@ -1267,22 +1243,7 @@ pub fn run_forward_logits_lfm2_with_batch(
     batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     let _ = batch_size;
-    // Delegate to the legacy per-token path. The session-aware
-    // variant lives in `super::session::Lfm2Session::forward_logits_chunked`;
-    // for B = 1 the two paths produce bit-identical results, so
-    // the existing app/text.rs and binary callers keep their
-    // behaviour unchanged.
-    run_forward_logits_lfm2_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
-        .map(|(logits, _)| (logits, std::time::Instant::now().elapsed()))
-}
 
-fn run_forward_logits_lfm2_inner(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, std::time::Duration), String> {
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
     let n_embd = cfg.n_embd;
@@ -1486,3 +1447,5 @@ fn run_forward_logits_lfm2_inner(
     );
     Ok((logits, prefill_time))
 }
+
+

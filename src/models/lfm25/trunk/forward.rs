@@ -1069,32 +1069,17 @@ fn forward_shortconv(
 ///
 /// Mirrors the prefill portion of `run_inference` but stops after the
 /// final logits are computed.
-pub fn run_forward_logits_lfm25(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, std::time::Duration), String> {
-    run_forward_logits_lfm25_with_batch(
-        source,
-        prompt_tokens,
-        n_threads_arg,
-        kv_format,
-        max_context,
-        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-    )
-}
-
-/// Same as [`run_forward_logits_lfm25`] but with an explicit
-/// `batch_size` for the chunked prefill dispatch. For LFM2.5 the
-/// dispatch marker is in place (see the
-/// `let _prefill_chunks = …; for step …` block below) but the
-/// per-step body still walks the SSM/MoE shortconv state one token
-/// at a time. Future work lifts [`forward_layer`] into a real
-/// `rows > 1` batched path so the attention sub-layers amortise
-/// across the chunk while the shortconv sub-layers keep their
-/// sequential state update.
+/// Single forward pass: prefill `prompt_tokens` and return the
+/// final prefill-step logits. Used by
+/// [`crate::models::lfm25::Lfm25Session::forward_logits_chunked`]
+/// for the B = 1 fallback and by JEV / classification modes that
+/// do not need autoregressive decoding. The `batch_size` argument
+/// is accepted for trait compatibility but ignored at runtime — the
+/// LFM2.5 prefill walks the per-token path today (the SSM shortconv
+/// state has to step per-token by construction). Future work lifts
+/// [`forward_layer`] into a true `rows > 1` batched path so the
+/// attention sub-layers amortise across the chunk while the
+/// shortconv sub-layers keep their sequential state update.
 pub fn run_forward_logits_lfm25_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
@@ -1104,17 +1089,7 @@ pub fn run_forward_logits_lfm25_with_batch(
     batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     let _ = batch_size;
-    run_forward_logits_lfm25_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
-        .map(|(logits, _)| (logits, std::time::Instant::now().elapsed()))
-}
 
-fn run_forward_logits_lfm25_inner(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, std::time::Duration), String> {
     let t0 = Instant::now();
     let cfg = Lfm25Config::from_source(source)?;
     let n_embd = cfg.n_embd;
@@ -1308,3 +1283,5 @@ fn run_forward_logits_lfm25_inner(
     );
     Ok((logits, prefill_time))
 }
+
+

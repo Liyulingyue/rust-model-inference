@@ -457,16 +457,7 @@ pub fn run_forward_logits_lfm2moe_with_batch(
     batch_size: usize,
 ) -> Result<(Vec<f32>, Duration), String> {
     let _ = batch_size;
-    run_forward_logits_lfm2moe_inner(source, prompt_tokens, n_threads_arg, kv_format, max_context)
-}
 
-fn run_forward_logits_lfm2moe_inner(
-    source: &dyn TensorSource,
-    prompt_tokens: &[u32],
-    n_threads_arg: usize,
-    kv_format: KvFormat,
-    max_context: usize,
-) -> Result<(Vec<f32>, Duration), String> {
     let t0 = Instant::now();
     let cfg = Lfm2MoeConfig::from_source(source)?;
     let n_embd = cfg.n_embd;
@@ -647,6 +638,8 @@ fn run_forward_logits_lfm2moe_inner(
     let logits = scratch.logits.clone();
     Ok((logits, t0.elapsed()))
 }
+
+
 
 /// Parity debugging: append "[step=S il=L label] v ..." lines to
 /// RUST_LFM2MOE_DEBUG_OUTFILE when the env var is set (mirrors the llama
