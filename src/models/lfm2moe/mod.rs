@@ -11,6 +11,6 @@
 pub mod trunk;
 
 pub use trunk::{
-    get_f32_tensor, load_layers, run_forward_logits_lfm2moe_with_batch, run_inference,
-    run_inference_with_batch, Lfm2MoeConfig, Lfm2MoeLayerWeights, Lfm2MoeSession,
+    get_f32_tensor, load_layers, run_forward_logits_lfm2moe_with_batch, run_inference_with_batch,
+    Lfm2MoeConfig, Lfm2MoeLayerWeights, Lfm2MoeSession,
 };

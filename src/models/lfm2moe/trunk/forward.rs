@@ -60,40 +60,14 @@ use std::time::{Duration, Instant};
 use super::config::Lfm2MoeConfig;
 use super::weights::{get_f32_tensor, load_layers, Lfm2MoeLayerWeights};
 
-pub fn run_inference(
-    source: &dyn TensorSource,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    profile: bool,
-    kv_format: KvFormat,
-    max_context: usize,
-    repetition_penalty: f32,
-) -> Result<(), String> {
-    run_inference_with_batch(
-        source,
-        prompt,
-        max_tokens,
-        temperature,
-        n_threads_arg,
-        profile,
-        kv_format,
-        max_context,
-        repetition_penalty,
-        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-    )
-}
-
-/// Same as [`run_inference`] but takes an explicit `batch_size`
-/// for the chunked prefill dispatch. The LFM2-MoE prefill walks
-/// the per-token path today (the MoE router hidden state and the
-/// SSM shortconv state both step one token at a time) so the
-/// `batch_size` argument is accepted for trait-compatibility but
-/// ignored at runtime — every step is processed serially
-/// regardless of the requested chunk size. Future work lifts the
-/// per-step body into a real batched forward and the flag becomes
-/// meaningful.
+/// Run the LFM2-MoE prefill + autoregressive decode loop.
+/// `batch_size` is accepted for chunked-prefill trait
+/// compatibility but ignored at runtime today: the MoE router
+/// hidden state and the SSM shortconv state both step one token
+/// at a time, so the per-step body walks the prefill one row at
+/// a time regardless of the requested chunk size. Future work
+/// lifts the per-step body into a real `rows > 1` batched
+/// forward and the flag becomes meaningful.
 pub fn run_inference_with_batch(
     source: &dyn TensorSource,
     prompt: &str,
@@ -465,11 +439,15 @@ pub fn run_inference_with_batch(
 
 /// Run the prefill loop against `prompt_tokens` and return the
 /// final prefill-step logits alongside the elapsed wall-clock
-/// duration. Used by [`run_forward_logits_lfm2moe`] /
-/// [`run_forward_logits_lfm2moe_with_batch`] so the
-/// [`crate::core::prefill::ChunkedPrefill`] trait has a logits
-/// entry point. Mirrors the per-step body of [`run_inference`]
-/// minus the autoregressive sampling loop.
+/// duration. Used by
+/// [`crate::models::lfm2moe::Lfm2MoeSession::forward_logits_chunked`]
+/// so the [`crate::core::prefill::ChunkedPrefill`] trait has a
+/// logits entry point. Mirrors the per-step body of
+/// [`run_inference_with_batch`] minus the autoregressive sampling
+/// loop. The `batch_size` argument is accepted for trait
+/// compatibility but ignored at runtime — the LFM2-MoE prefill
+/// walks the per-token path today (the MoE router hidden state
+/// and the SSM shortconv state both step one token at a time).
 pub fn run_forward_logits_lfm2moe_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
