@@ -131,7 +131,7 @@ fn dbg_full(step: usize, label: &'static str, il: usize, buf: &[f32], n: usize) 
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-fn normalization_groups(
+pub(crate) fn normalization_groups(
     source: &dyn TensorSource,
     arch: &str,
     n_embd: usize,
@@ -153,7 +153,7 @@ fn normalization_groups(
     Ok(groups)
 }
 
-fn apply_rope(arch: &str, values: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
+pub(crate) fn apply_rope(arch: &str, values: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     if arch == "k2-horizon" {
         rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
@@ -1125,6 +1125,75 @@ pub fn run_forward_logits_llama(
     kv_format: KvFormat,
     max_context: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
+    run_forward_logits_llama_with_batch(
+        source,
+        prompt_tokens,
+        n_threads_arg,
+        kv_format,
+        max_context,
+        crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+    )
+}
+
+/// Same as [`run_forward_logits_llama`] but with an explicit
+/// `batch_size` for the chunked prefill dispatch. When the model
+/// is built with `LlamaSession` this routes through the
+/// [`LlamaSession::forward_logits_chunked`] entry point so a
+/// `batch_size > 1` triggers the real batched math
+/// (`PreparedRows::matmul_group` for Q/K/V / wo / gate / up /
+/// down projections). Falls back to the legacy free-function path
+/// when the model exposes a `qwen2vl`-style arch metadata that
+/// `LlamaSession::from_source_with_max_rows` can't parse.
+pub fn run_forward_logits_llama_with_batch(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+    batch_size: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    let t0 = Instant::now();
+    // Try the session path first. If `from_source_with_max_rows`
+    // fails (wrong arch metadata, missing tensors, …) fall back
+    // to the legacy free-function path so existing models
+    // keep working. The dispatch decision is per-call so a
+    // runtime bug in the session path doesn't permanently lock
+    // out a model.
+    if let Ok(mut session) = super::session::LlamaSession::from_source_with_max_rows(
+        source,
+        n_threads_arg,
+        kv_format,
+        max_context,
+        batch_size,
+    ) {
+        let owned: Vec<u32> = prompt_tokens.to_vec();
+        let logits = session
+            .forward_logits_chunked(&owned, batch_size)
+            .map_err(|e| format!("Llama chunked forward_logits failed: {e}"))?;
+        return Ok((logits, t0.elapsed()));
+    }
+    run_forward_logits_llama_inner(
+        source,
+        prompt_tokens,
+        n_threads_arg,
+        kv_format,
+        max_context,
+        batch_size,
+    )
+}
+
+/// Original per-token prefill body, factored out so the
+/// session-driven path can fall back to it without re-entering
+/// `run_forward_logits_llama`. Same math as before — at
+/// `batch_size == 1` this collapses to the legacy per-token walk.
+pub fn run_forward_logits_llama_inner(
+    source: &dyn TensorSource,
+    prompt_tokens: &[u32],
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    max_context: usize,
+    _batch_size: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
     let t0 = Instant::now();
     let config = model_config_from_source(source)
         .map_err(|error| format!("Failed to parse model config: {error}"))?;
@@ -1671,6 +1740,408 @@ pub fn run_forward_logits_llama(
     );
     let _ = total_elapsed;
     Ok((logits, prefill_time))
+}
+
+// ---- Helper functions used by `LlamaSession::forward_chunk_batched_real`
+//      to reuse the legacy per-token attention math and the per-thread
+//      silu_mul dispatch without duplicating the closure body.
+
+/// Compute the per-query flash-attention for one Llama token, writing
+/// `n_embd_q` floats into `attn_out`. Same math as the inline closure
+/// inside `run_forward_logits_llama`'s per-layer loop, but parameterised
+/// so the batched session can call it once per row in a chunked
+/// prefill step. See `forward_cpu_chunk` for the qwen3 equivalent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_attention_per_query(
+    pool: &Arc<ComputePool>,
+    q: &[f32],
+    attn_out: &mut [f32],
+    kv_cache: &KvCache,
+    kv_cache_size: usize,
+    n_cached: usize,
+    n_embd_head_k: usize,
+    n_embd_head_v: usize,
+    n_embd_gqa: usize,
+    n_head: usize,
+    group_size: usize,
+    kq_scale: f32,
+    kb: usize,
+    n_threads: usize,
+    max_ctx: usize,
+) {
+    let attn_out_ptr = attn_out.as_mut_ptr();
+    let q_ptr = q.as_ptr();
+    let n_embd_q = attn_out.len();
+    let score_stride = max_ctx.div_ceil(256) * 256;
+    let scores_storage = std::cell::UnsafeCell::new(vec![0.0f32; n_threads * score_stride]);
+    let scores_ptr = scores_storage.get() as *mut f32;
+    let is_f16 = matches!(kv_cache, KvCache::F16(_));
+    let k_cache_f16_ptr = match kv_cache {
+        KvCache::F16(c) => c.k.as_ptr() as *const u16,
+        _ => std::ptr::null(),
+    };
+    let v_cache_f16_ptr = match kv_cache {
+        KvCache::F16(c) => c.v.as_ptr() as *const u16,
+        _ => std::ptr::null(),
+    };
+    let k_cache_f32_ptr = match kv_cache {
+        KvCache::F32(c) => c.k.as_ptr() as *const f32,
+        _ => std::ptr::null(),
+    };
+    let v_cache_f32_ptr = match kv_cache {
+        KvCache::F32(c) => c.v.as_ptr() as *const f32,
+        _ => std::ptr::null(),
+    };
+    pool.compute(move |ith: usize, nth: usize| {
+        let h_start = ith * n_head / nth;
+        let h_end = (ith + 1) * n_head / nth;
+        if is_f16 {
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size)
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size)
+            };
+            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
+            let attn_out_local =
+                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            for h in h_start..h_end {
+                let kv_h = h / group_size;
+                let q_off = h * n_embd_head_k;
+                let out_base = h * n_embd_head_v;
+                let mut ms = 0.0f32;
+                let mut s_sum = 0.0f32;
+                attn_out_local[out_base..out_base + n_embd_head_v].fill(0.0);
+                for t in 0..n_cached {
+                    let score = dot_f16_f32(
+                        &q_local[q_off..q_off + n_embd_head_k],
+                        &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                            ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                        n_embd_head_k,
+                    ) * kq_scale;
+                    if score > ms {
+                        let rescale = (ms - score).exp();
+                        vec_scale_f32(
+                            &mut attn_out_local[out_base..out_base + n_embd_head_v],
+                            rescale,
+                        );
+                        s_sum *= rescale;
+                        ms = score;
+                    }
+                    let vs = (score - ms).exp();
+                    let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
+                    vec_mad_f16_f32(
+                        &mut attn_out_local[out_base..out_base + n_embd_head_v],
+                        &v_cache[v_base..v_base + n_embd_head_v],
+                        vs,
+                    );
+                    s_sum += vs;
+                }
+                let inv_sum = 1.0 / s_sum;
+                vec_scale_f32(
+                    &mut attn_out_local[out_base..out_base + n_embd_head_v],
+                    inv_sum,
+                );
+            }
+        } else {
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size)
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size)
+            };
+            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
+            let attn_out_local =
+                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            let scores = unsafe {
+                std::slice::from_raw_parts_mut(scores_ptr, n_threads * score_stride)
+            };
+            let n_padded = (n_cached + 255) / 256 * 256;
+            for h in h_start..h_end {
+                let kv_h = h / group_size;
+                let q_off = h * n_embd_head_k;
+                let out_base = h * n_embd_head_v;
+                let s_off = ith * score_stride;
+                for t in 0..n_cached {
+                    scores[s_off + t] = dot_f32(
+                        &q_local[q_off..q_off + n_embd_head_k],
+                        &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                            ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                        n_embd_head_k,
+                    ) * kq_scale;
+                }
+                scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
+                softmax_inplace(&mut scores[s_off..s_off + n_padded]);
+                let mut values = vec![0.0f32; n_padded];
+                for d in 0..n_embd_head_v {
+                    for t in 0..n_cached {
+                        values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
+                    }
+                    attn_out_local[out_base + d] = dot_f32(
+                        &values[..n_padded],
+                        &scores[s_off..s_off + n_padded],
+                        n_cached,
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// silu_mul dispatched across threads. `gate` and `up` each have
+/// `rows * n_ff` elements laid out row-major. Used by
+/// `LlamaSession::forward_chunk_batched_real` after the FFN gate +
+/// up projections land in `gate_buf` / `up_buf`.
+pub(crate) fn silu_mul_rows(
+    pool: &Arc<ComputePool>,
+    n_threads: usize,
+    gate: &mut [f32],
+    up: &[f32],
+    n_ff: usize,
+) {
+    assert_eq!(gate.len(), up.len());
+    let rows = gate.len() / n_ff;
+    let per_thread = (n_ff + n_threads - 1) / n_threads;
+    let gate_ptr = gate.as_mut_ptr();
+    let up_ptr = up.as_ptr();
+    pool.compute(move |ith, nth| {
+        let r_start = ith * per_thread;
+        let r_end = (r_start + per_thread).min(n_ff);
+        for row in 0..rows {
+            unsafe {
+                let g = std::slice::from_raw_parts_mut(
+                    gate_ptr.add(row * n_ff + r_start),
+                    r_end - r_start,
+                );
+                let u = std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
+                for (g, u) in g.iter_mut().zip(u.iter()) {
+                    let silu = *u / (1.0 + (-*u).exp());
+                    *g *= silu;
+                }
+            }
+        }
+    });
+}
+
+/// Batched flash attention for a chunk of `rows` queries. Same
+/// online-softmax-with-rescale math as the legacy per-query loop,
+/// but with `Q × Kᵀ` and `@V` done as full row-major matmuls
+/// instead of `rows × n_cached` individual dot products.
+///
+/// Layout assumptions:
+/// - `q` is `[rows × n_embd_q]` where
+///   `n_embd_q = n_head × n_embd_head_k`. Row `r` of head `h`
+///   lives at `q[r * n_embd_q + h * n_embd_head_k .. ]`.
+/// - `attn_out` is `[rows × n_embd_q]` and `kv_cache` is the
+///   standard `[layer × max_ctx × n_embd_gqa]` layout with
+///   `n_embd_gqa = n_head_kv × n_embd_head_v`.
+/// - `base_position` is the absolute position of the first query
+///   in the chunk; each row `r` attends to positions
+///   `[0, base_position + r + 1)` (causal).
+///
+/// Per head we do:
+///   `S[r, t] = Q[r, h, :] · K[t, kv_h(h), :]`
+///   `S[r, t] *= kq_scale`
+///   `S[r, t > base_position + r] = -inf`     (causal mask)
+///   `S = softmax(S, row)`
+///   `O[r, d] = Σ_t S[r, t] · V[t, kv_h(h), d]`
+///
+/// `softmax_inplace` is reused from the existing scalar helper.
+/// Inside the `pool.compute` body we have:
+/// - `rows` per-query rows processed against the SAME cached K/V
+///   load (cache is loaded once per worker per head — `rows ×`
+///   amortisation)
+/// - per-row rescale / `ms` / `s_sum` (online softmax)
+/// - scalar fused `exp` (matches `forward_one_token`'s precision)
+///
+/// The vectorised case (F32 KV cache) uses `dot_f32` for the
+/// `Q·K` row products; `Vec<f32>` accumulators keep the SIMD
+/// register pressure bounded so the kernel scales linearly in
+/// `seq_len` instead of quadratically.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_attention_chunked(
+    pool: &Arc<ComputePool>,
+    q: &[f32],
+    attn_out: &mut [f32],
+    kv_cache: &KvCache,
+    kv_cache_size: usize,
+    n_cached_total: usize,
+    base_position: usize,
+    rows: usize,
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+    n_head: usize,
+    n_embd_head_k: usize,
+    n_embd_head_v: usize,
+    group_size: usize,
+    kq_scale: f32,
+    kb: usize,
+    n_threads: usize,
+    max_ctx: usize,
+) {
+    let attn_out_ptr = attn_out.as_mut_ptr();
+    let q_ptr = q.as_ptr();
+    let n_padded_max = max_ctx.div_ceil(256) * 256;
+    let is_f16 = matches!(kv_cache, KvCache::F16(_));
+    let k_cache_f16_ptr = match kv_cache {
+        KvCache::F16(c) => c.k.as_ptr() as *const u16,
+        _ => std::ptr::null(),
+    };
+    let v_cache_f16_ptr = match kv_cache {
+        KvCache::F16(c) => c.v.as_ptr() as *const u16,
+        _ => std::ptr::null(),
+    };
+    let k_cache_f32_ptr = match kv_cache {
+        KvCache::F32(c) => c.k.as_ptr() as *const f32,
+        _ => std::ptr::null(),
+    };
+    let v_cache_f32_ptr = match kv_cache {
+        KvCache::F32(c) => c.v.as_ptr() as *const f32,
+        _ => std::ptr::null(),
+    };
+    let score_stride = n_padded_max;
+    let scores_storage = std::cell::UnsafeCell::new(vec![0.0f32; n_threads * score_stride]);
+    let scores_ptr = scores_storage.get() as *mut f32;
+
+    pool.compute(move |ith, nth| {
+        let h_start = ith * n_head / nth;
+        let h_end = (ith + 1) * n_head / nth;
+        if is_f16 {
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(k_cache_f16_ptr as *const u16, kv_cache_size)
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(v_cache_f16_ptr as *const u16, kv_cache_size)
+            };
+            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, rows * n_embd_q) };
+            let attn_out_local =
+                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, rows * n_embd_q) };
+            for h in h_start..h_end {
+                let kv_h = h / group_size;
+                let q_off = h * n_embd_head_k;
+                let mut row_ms = vec![f32::NEG_INFINITY; rows];
+                let mut row_sum = vec![0.0f32; rows];
+                let mut row_out: Vec<f32> = vec![0.0; rows * n_embd_head_v];
+                for t in 0..n_cached_total {
+                    let cache_row = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
+                    let score_base = &k_cache[cache_row..cache_row + n_embd_head_k];
+                    let v_base = v_cache.as_ptr().wrapping_add(cache_row) as *const u16;
+                    let v_row = unsafe {
+                        std::slice::from_raw_parts(v_base, n_embd_head_v)
+                    };
+                    for r in 0..rows {
+                        let abs_pos = base_position + r;
+                        let q_row = &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                        let raw_score = if t > abs_pos {
+                            f32::NEG_INFINITY
+                        } else {
+                            crate::ops::dot_f16_f32(q_row, score_base, n_embd_head_k)
+                                * kq_scale
+                        };
+                        let m_new = if raw_score > row_ms[r] { raw_score } else { row_ms[r] };
+                        let rescale = (row_ms[r] - m_new).exp();
+                        for d in 0..n_embd_head_v {
+                            row_out[r * n_embd_head_v + d] *= rescale;
+                        }
+                        row_sum[r] *= rescale;
+                        row_ms[r] = m_new;
+                        if t > abs_pos {
+                            continue;
+                        }
+                        let vs = (raw_score - m_new).exp();
+                        // `v_row` is a `&[u16]` of F16 bits;
+                        // `vec_mad_f16_f32` does the F16→F32 cast +
+                        // multiply-add with `vs` in one pass so
+                        // we don't materialise a float copy of
+                        // every cache row.
+                        let dst = &mut row_out[r * n_embd_head_v
+                            ..r * n_embd_head_v + n_embd_head_v];
+                        crate::ops::vec_mad_f16_f32(dst, v_row, vs);
+                        row_sum[r] += vs;
+                    }
+                }
+                for r in 0..rows {
+                    let inv = 1.0 / row_sum[r];
+                    for d in 0..n_embd_head_v {
+                        attn_out_local[r * n_embd_q + h * n_embd_head_v + d] =
+                            row_out[r * n_embd_head_v + d] * inv;
+                    }
+                }
+            }
+        } else {
+            // F32 KV cache path.
+            let k_cache = unsafe {
+                std::slice::from_raw_parts(k_cache_f32_ptr as *const f32, kv_cache_size)
+            };
+            let v_cache = unsafe {
+                std::slice::from_raw_parts(v_cache_f32_ptr as *const f32, kv_cache_size)
+            };
+            let q_local = unsafe { std::slice::from_raw_parts(q_ptr, rows * n_embd_q) };
+            let attn_out_local =
+                unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, rows * n_embd_q) };
+            let scores = unsafe {
+                std::slice::from_raw_parts_mut(
+                    scores_ptr.add(ith * score_stride),
+                    score_stride,
+                )
+            };
+            let n_padded = (n_cached_total + 255) / 256 * 256;
+            for h in h_start..h_end {
+                let kv_h = h / group_size;
+                let q_off = h * n_embd_head_k;
+                let out_base = h * n_embd_head_v;
+                // Compute Q · K for every (row, cached_row).
+                for r in 0..rows {
+                    let q_row = &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
+                    for t in 0..n_cached_total {
+                        let abs_pos = base_position + r;
+                        let score = if t > abs_pos {
+                            f32::NEG_INFINITY
+                        } else {
+                            crate::ops::dot_f32(
+                                q_row,
+                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
+                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
+                                n_embd_head_k,
+                            ) * kq_scale
+                        };
+                        scores[r * n_padded + t] = score;
+                    }
+                    // Causal mask padding.
+                    for t in n_cached_total..n_padded {
+                        scores[r * n_padded + t] = f32::NEG_INFINITY;
+                    }
+                    // In-place softmax over the active range.
+                    let s = &mut scores[r * n_padded..(r + 1) * n_padded];
+                    let mut max_v = f32::NEG_INFINITY;
+                    for v in s.iter() {
+                        if *v > max_v {
+                            max_v = *v;
+                        }
+                    }
+                    let mut sum = 0.0f32;
+                    for v in s.iter_mut() {
+                        let e = (*v - max_v).exp();
+                        *v = e;
+                        sum += e;
+                    }
+                    for v in s.iter_mut() {
+                        *v /= sum;
+                    }
+                    // `O = S · V` row-major: per `d` of `n_embd_head_v`,
+                    // gather V[t, kv_h, d] and dot with `S`.
+                    for d in 0..n_embd_head_v {
+                        let mut acc = 0.0f32;
+                        for t in 0..n_cached_total {
+                            acc += v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d]
+                                * s[t];
+                        }
+                        attn_out_local[r * n_embd_q + out_base + d] = acc;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
