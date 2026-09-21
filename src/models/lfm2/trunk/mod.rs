@@ -11,8 +11,6 @@ pub mod session;
 pub mod weights;
 
 pub use config::Lfm2Config;
-pub use forward::{
-    run_forward_logits_lfm2_with_batch, run_inference, run_inference_stream,
-};
+pub use forward::{run_forward_logits_lfm2_with_batch, run_inference, run_inference_stream};
 pub use session::Lfm2Session;
 pub use weights::{get_f32_tensor, load_layers, Lfm2LayerWeights};

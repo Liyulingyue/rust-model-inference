@@ -1283,5 +1283,3 @@ pub fn run_forward_logits_lfm25_with_batch(
     );
     Ok((logits, prefill_time))
 }
-
-

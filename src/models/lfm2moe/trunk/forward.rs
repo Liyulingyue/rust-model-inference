@@ -639,8 +639,6 @@ pub fn run_forward_logits_lfm2moe_with_batch(
     Ok((logits, t0.elapsed()))
 }
 
-
-
 /// Parity debugging: append "[step=S il=L label] v ..." lines to
 /// RUST_LFM2MOE_DEBUG_OUTFILE when the env var is set (mirrors the llama
 /// trunk's RUST_LLAMA_DEBUG_OUTFILE). Values print with 6 decimals.

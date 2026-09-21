@@ -12,8 +12,6 @@ pub mod forward;
 pub mod session;
 pub mod weights;
 
-pub use forward::{
-    run_forward_logits_llama_with_batch, run_inference, run_inference_tokens,
-};
+pub use forward::{run_forward_logits_llama_with_batch, run_inference, run_inference_tokens};
 pub use session::{LlamaSession, LlamaSessionConfig, LlamaWeights};
 pub use weights::{get_f32_tensor, load_layers, load_layers_static, LlamaLayerWeights};
