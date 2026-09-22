@@ -10,7 +10,7 @@
 | Gemma-4                   | E2B / E4B / 12B          | 文本、图像、音频      | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B / 7B | 文本（翻译）                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
-| Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
+| Jina-Embeddings-v5-Omni       | Small Retrieval | 文本、图像 Embedding | llama.cpp @ `b96806d` |              | Q8_0 文本模型 + F16 vision mmproj 已逐位核验 |
 | K2-Horizon                    | 0.9B / 3.7B / 7B         | 文本                 | MBZUAI-IFM/llama.cpp | https://modelscope.cn/models/IFM/K2-Horizon-7B-GGUF | √ |
 | LFM2                          | 350M / 700M / 1.2B / 8B-A1B     | 文本          | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/LFM2.5-8B-A1B-GGUF             | √ |
 | LFM2.5                        | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |

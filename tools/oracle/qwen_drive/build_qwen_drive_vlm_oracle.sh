@@ -20,13 +20,14 @@ if [ -n "$(git -C "$source_dir" status --porcelain)" ]; then
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+qwen35_dir=$(CDPATH= cd -- "$script_dir/../qwen35" && pwd)
 clone_dir=$work_dir/llama.cpp
 build_dir=$work_dir/build
 git clone --shared --no-checkout "$source_dir" "$clone_dir"
 git -C "$clone_dir" checkout --detach "$pin"
 git -C "$clone_dir" apply "$script_dir/qwen_drive_vlm_trace.patch"
-git -C "$clone_dir" apply "$script_dir/qwen35-llama-trace.patch"
-git -C "$clone_dir" apply "$script_dir/qwen35-scalar-softmax.patch"
+git -C "$clone_dir" apply "$qwen35_dir/qwen35-llama-trace.patch"
+git -C "$clone_dir" apply "$qwen35_dir/qwen35-scalar-softmax.patch"
 cmake -S "$clone_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \

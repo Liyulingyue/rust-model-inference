@@ -480,7 +480,7 @@ pub fn run_embedding_tokens(
                     }
                     values[n_cached..n_padded].fill(0.0);
                     attn_row[out_base + d] =
-                        dot_f32(&values[..n_padded], &scores[..n_padded], n_cached);
+                        dot_f32(&values[..n_padded], &scores[..n_padded], n_padded);
                 }
             }
         }
@@ -546,6 +546,13 @@ pub fn run_embedding_tokens(
     }
 
     let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "embedding.pooled",
+        None,
+        &[n_embd],
+        &pooled,
+    ));
     l2_normalize_embedding(&mut pooled)?;
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::checkpoint(
