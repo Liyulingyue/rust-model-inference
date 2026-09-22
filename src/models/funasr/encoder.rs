@@ -17,7 +17,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_mad_f32, vec_mad_per_channel_f32};
+use crate::ops::{dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add_into, vec_mad_f32, vec_mad_per_channel_f32, vec_scale_f32};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -398,8 +398,19 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
             let mean = (sum_f32(input_row) / dim as f64) as f32;
             let var = (sum_sq_centered_f32(input_row, mean) / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
+            // output[i] = (input[i] - mean) * rstd * weight[i] + bias[i]
+            // Fused as: output = bias + normalized * weight, where normalized = (input - mean) * rstd
+            // Step 1: output = (input - mean) * rstd  (scalar, dim ≤ 560)
             for i in 0..dim {
-                output_row[i] = (input_row[i] - mean) * rstd * weight[i] + bias[i];
+                output_row[i] = (input_row[i] - mean) * rstd;
+            }
+            // Step 2: output = bias + output * weight  (SIMD via vec_mad_per_channel)
+            // vec_mad_per_channel: y[i] += x[i] * scale[i]
+            // Need y=bias first, then y += output * weight → but y IS output.
+            // Workaround: copy bias into output, then mad with old output values.
+            // Simpler: just do fused scalar — dim is small (512/560), overhead negligible.
+            for i in 0..dim {
+                output_row[i] = output_row[i] * weight[i] + bias[i];
             }
         }
     });
