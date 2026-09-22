@@ -14,7 +14,7 @@ pub mod model;
 
 pub use config::FunAsrConfig;
 pub use encoder::FunAsrEncoder;
-pub use model::{is_funasr_encoder, run_funasr_cli, FunAsrTranscription};
+pub use model::{is_funasr_encoder, run_funasr_cli};
 
 /// GGUF architecture string for the Fun-ASR-Nano encoder.
 pub const ENCODER_ARCH: &str = "funasr-sensevoice-encoder";

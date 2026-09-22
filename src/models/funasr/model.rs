@@ -11,19 +11,15 @@ use crate::core::thread_pool::ComputePool;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
 use crate::models::funasr::fbank;
-use crate::models::qwen3::{
-    Qwen3GenerateOptions, Qwen3Input, Qwen3Model,
-};
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub struct FunAsrTranscription {
-    pub text: String,
-    pub token_ids: Vec<u32>,
-    pub prompt_tokens: usize,
-    pub audio_tokens: usize,
-}
+const SAMPLE_RATE: usize = 16_000;
+const PROMPT_PREFIX: &str = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：";
+const PROMPT_SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
+const MIN_FBANK_FRAMES: usize = 1;
 
 /// Check whether a GGUF source is a Fun-ASR-Nano encoder.
 pub fn is_funasr_encoder(source: &dyn TensorSource) -> bool {
@@ -45,10 +41,6 @@ pub fn run_funasr_cli(
         .as_deref()
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or("Fun-ASR-Nano requires --mmproj (encoder GGUF)")?;
-    let llm_path = options
-        .model
-        .to_str()
-        .ok_or("invalid model path")?;
 
     // Load encoder
     let enc_source: Arc<dyn TensorSource> =
@@ -114,7 +106,6 @@ pub fn run_funasr_cli(
         .map_err(|e| format!("Failed to read {}: {e}", audio_path.display()))?;
     let decoded = decode_pcm16_wav_any(&wav_bytes)
         .map_err(|e| format!("WAV decode error: {e:?}"))?;
-    // Mix down to mono if needed
     let samples: Vec<f32> = if decoded.channels == 1 {
         decoded.samples
     } else {
@@ -124,33 +115,95 @@ pub fn run_funasr_cli(
             .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
             .collect()
     };
-    // Resample to 16 kHz if needed (simple linear interpolation)
-    let samples = if decoded.sample_rate == 16_000 {
+    let samples = if decoded.sample_rate as usize == SAMPLE_RATE {
         samples
     } else {
         eprintln!(
-            "Warning: audio sample rate {} != 16000, resampling (basic linear)",
+            "Warning: audio sample rate {} != {SAMPLE_RATE}, resampling (basic linear)",
             decoded.sample_rate
         );
-        linear_resample(&samples, decoded.sample_rate as usize, 16_000)
+        linear_resample(&samples, decoded.sample_rate as usize, SAMPLE_RATE)
     };
     eprintln!(
         "Audio: {} samples ({:.1}s)",
         samples.len(),
-        samples.len() as f64 / 16_000.0
+        samples.len() as f64 / SAMPLE_RATE as f64
     );
 
-    // Compute fbank
+    // Build chunk windows: --chunk sec splits into fixed windows; otherwise whole file.
+    let chunk_samples = options
+        .chunk_seconds
+        .map(|sec| (sec * SAMPLE_RATE as f64).round() as usize)
+        .unwrap_or(samples.len());
+    let wins: Vec<(usize, usize)> = (0..samples.len())
+        .step_by(chunk_samples)
+        .map(|off| {
+            let end = (off + chunk_samples).min(samples.len());
+            (off, end - off)
+        })
+        .filter(|(_, len)| *len >= 400) // WINLEN
+        .collect();
+    eprintln!("Chunks: {} ({}s each)", wins.len(), options.chunk_seconds.unwrap_or(0.0));
+
+    let max_tokens = options.max_tokens.unwrap_or(512);
+    let mut full_text = String::new();
+
+    for (win_idx, &(off, len)) in wins.iter().enumerate() {
+        let seg = &samples[off..off + len];
+        let seg_start_ms = (off * 1000) / SAMPLE_RATE;
+        let seg_end_ms = ((off + len) * 1000) / SAMPLE_RATE;
+        if wins.len() > 1 {
+            eprintln!(
+                "Chunk {}/{}: {:.1}s–{:.1}s",
+                win_idx + 1,
+                wins.len(),
+                seg_start_ms as f64 / 1000.0,
+                seg_end_ms as f64 / 1000.0
+            );
+        }
+
+        let text = transcribe_segment(
+            &encoder,
+            &decoder,
+            seg,
+            n_embd,
+            max_tokens,
+            prefill_batch_size,
+        )?;
+        full_text.push_str(&text);
+    }
+
+    let total = started.elapsed();
+    eprintln!(
+        "Total: {:.3}s (load={:.3}s transcribe={:.3}s)",
+        total.as_secs_f64(),
+        load_done.as_secs_f64(),
+        (total - load_done).as_secs_f64(),
+    );
+
+    println!("{full_text}");
+    Ok(())
+}
+
+/// Transcribe a single audio segment: fbank → encoder → LLM → text.
+fn transcribe_segment(
+    encoder: &FunAsrEncoder,
+    decoder: &Arc<Qwen3Model>,
+    samples: &[f32],
+    n_embd: usize,
+    max_tokens: usize,
+    prefill_batch_size: usize,
+) -> Result<String, String> {
     let t0 = Instant::now();
-    let (fbank_data, t_fbank) = fbank::compute_fbank(&samples);
+    let (fbank_data, t_fbank) = fbank::compute_fbank(samples);
     let t1 = Instant::now();
     eprintln!(
-        "Fbank: {} frames, 560-dim, {:.3}s",
+        "  Fbank: {} frames, {:.3}s",
         t_fbank,
         (t1 - t0).as_secs_f64()
     );
-    if t_fbank == 0 {
-        return Err("Audio too short for one fbank frame".into());
+    if t_fbank < MIN_FBANK_FRAMES {
+        return Err("Audio segment too short for one fbank frame".into());
     }
 
     // Pre-scale by sqrt(d_model) and add position encoding
@@ -167,7 +220,7 @@ pub fn run_funasr_cli(
     let adp_out = encoder.encode(&fbank_scaled, t_fbank)?;
     let t3 = Instant::now();
     eprintln!(
-        "Encoder: {} frames → {}-dim, {:.3}s",
+        "  Encoder: {} frames → {}-dim, {:.3}s",
         t_fbank,
         encoder.config.adp_llm_dim,
         (t3 - t2).as_secs_f64()
@@ -175,45 +228,40 @@ pub fn run_funasr_cli(
 
     // LFR truncation
     let n_aud = fbank::lfr_token_count(t_fbank);
-    eprintln!("LFR truncation: {} audio tokens", n_aud);
-    let n_embd = encoder.config.adp_llm_dim as usize;
+    eprintln!("  LFR truncation: {} audio tokens", n_aud);
     let audio_embeds = &adp_out[..n_aud * n_embd];
 
-    // Build prompt: prefix tokens + audio embeddings + suffix tokens
-    let prefix = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：";
-    let suffix = "<|im_end|>\n<|im_start|>assistant\n";
-
+    // Tokenize prompt
     let tokenizer = decoder.tokenizer();
     let pre_tokens = tokenizer.encode(
-        prefix,
+        PROMPT_PREFIX,
         EncodeOptions {
             add_special: false,
             parse_special: true,
         },
     );
     let suf_tokens = tokenizer.encode(
-        suffix,
+        PROMPT_SUFFIX,
         EncodeOptions {
             add_special: false,
             parse_special: true,
         },
     );
     eprintln!(
-        "Prompt: {} prefix tokens + {} audio + {} suffix = {} total",
+        "  Prompt: {} prefix + {} audio + {} suffix = {} total",
         pre_tokens.len(),
         n_aud,
         suf_tokens.len(),
         pre_tokens.len() + n_aud + suf_tokens.len()
     );
 
-    // Build combined token_ids (dummy 0 for audio positions) and embeddings
+    // Build combined token_ids (dummy 0 for audio) and embeddings
     let total_tokens = pre_tokens.len() + n_aud + suf_tokens.len();
     let mut token_ids = Vec::with_capacity(total_tokens);
     token_ids.extend_from_slice(&pre_tokens);
     token_ids.extend(std::iter::repeat_n(0u32, n_aud));
     token_ids.extend_from_slice(&suf_tokens);
 
-    // Embed prefix and suffix tokens, then concatenate: [pre_embeds | audio_embeds | suf_embeds]
     let pre_embeds = decoder.embed_tokens(&pre_tokens)?;
     let suf_embeds = decoder.embed_tokens(&suf_tokens)?;
     let mut embeddings = Vec::with_capacity(total_tokens * n_embd);
@@ -221,13 +269,8 @@ pub fn run_funasr_cli(
     embeddings.extend_from_slice(audio_embeds);
     embeddings.extend_from_slice(&suf_embeds);
 
-    // Build positions (standard sequential, all 4 dims identical)
-    let positions: Vec<[usize; 4]> = (0..total_tokens)
-        .map(|i| [i, i, i, i])
-        .collect();
+    let positions: Vec<[usize; 4]> = (0..total_tokens).map(|i| [i, i, i, i]).collect();
 
-    // Generate
-    let max_tokens = options.max_tokens.unwrap_or(512);
     let t4 = Instant::now();
     let generation = decoder.generate_asr(
         Qwen3Input {
@@ -243,24 +286,13 @@ pub fn run_funasr_cli(
         },
     )?;
     let t5 = Instant::now();
-
-    let total = started.elapsed();
     eprintln!(
-        "Generation: {} tokens, {:.3}s (prefill+decode)",
+        "  Generate: {} tokens, {:.3}s",
         generation.token_ids.len(),
         (t5 - t4).as_secs_f64()
     );
-    eprintln!(
-        "Total: {:.3}s (load={:.3}s fbank={:.3}s encode={:.3}s generate={:.3}s)",
-        total.as_secs_f64(),
-        load_done.as_secs_f64(),
-        (t1 - t0).as_secs_f64(),
-        (t3 - t2).as_secs_f64(),
-        (t5 - t4).as_secs_f64(),
-    );
 
-    println!("{}", generation.text);
-    Ok(())
+    Ok(generation.text)
 }
 
 /// Simple linear interpolation resampler.
