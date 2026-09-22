@@ -201,7 +201,7 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, false)
+        self.generate_with_asr_trace(input, options, false, 1.0)
     }
 
     pub fn generate_streaming(
@@ -280,6 +280,7 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
         asr_trace: bool,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self.model, &input, &options)?;
         let required = checked_session_capacity(
@@ -293,7 +294,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, 1.0, asr_trace, None)
+        self.generate_inner(input, options, repetition_penalty, asr_trace, None)
     }
 
     fn generate_inner(

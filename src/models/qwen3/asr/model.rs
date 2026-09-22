@@ -238,6 +238,7 @@ impl AsrRuntime {
                     temperature: 0.0,
                     prefill_batch_size: self.prefill_batch_size,
                 },
+                1.0,
             )
             .map_err(internal)?;
         let t5 = std::time::Instant::now();

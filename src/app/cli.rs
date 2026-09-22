@@ -88,6 +88,7 @@ pub struct CliOptions {
     pub jev_multi: bool,
     pub jev_blocks: Vec<JevBlockInput>,
     pub chunk_seconds: Option<f64>,
+    pub srt: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -602,6 +603,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.chunk_seconds = Some(value.parse().map_err(|_| "Invalid --chunk value")?);
                 i += 1;
             }
+            "--srt" => options.srt = true,
             "--ref-audio" => {
                 let value = args
                     .get(i + 1)

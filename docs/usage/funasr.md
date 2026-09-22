@@ -40,6 +40,8 @@ cargo build --release --bin rust-model-inference
 | `--threads N` | 推理线程数 | 自动检测 |
 | `--max-tokens N` | 最大生成 token 数 | 512 |
 | `--chunk SECONDS` | 分块窗口大小（秒），长音频分段推理 | 不分块 |
+| `--srt` | 输出 SRT 字幕格式（带时间戳） | 关闭 |
+| `--repetition-penalty α` | 重复抑制（>1 抑制，1.0 禁用） | 1.0 |
 
 ## 长音频分块
 
@@ -81,9 +83,45 @@ WAV (16kHz) → kaldi 80-mel fbank + LFR(7/6) → [T, 560]
 - GGUF 架构名：`funasr-sensevoice-encoder`
 - LLM 架构名：`qwen3`（标准 Qwen3 GGUF）
 
+## SRT 字幕输出
+
+使用 `--srt` 输出带时间戳的字幕格式（需配合 `--chunk`）：
+
+```bash
+./target/release/rust-model-inference \
+  --model models/Fun-ASR-Nano-GGUF/qwen3-0.6b-q8_0.gguf \
+  --mmproj models/Fun-ASR-Nano-GGUF/funasr-encoder-f16.gguf \
+  --audio long_audio.wav \
+  --threads 8 \
+  --chunk 15 \
+  --srt
+```
+
+输出：
+```
+1
+00:00:00,000 --> 00:00:15,000
+第一段文字
+
+2
+00:00:15,000 --> 00:00:30,000
+第二段文字
+```
+
+## 重复惩罚
+
+长音频推理可能出现 LLM 重复输出。使用 `--repetition-penalty` 抑制：
+
+```bash
+./target/release/rust-model-inference \
+  --model models/Fun-ASR-Nano-GGUF/qwen3-0.6b-q8_0.gguf \
+  --mmproj models/Fun-ASR-Nano-GGUF/funasr-encoder-f16.gguf \
+  --audio long_audio.wav \
+  --threads 8 \
+  --chunk 15 \
+  --repetition-penalty 1.2
+```
+
 ## 已知限制
 
 - 无 VAD 分段（参考实现支持 `--vad` FSMN-VAD，本仓库尚未实现）
-- 无 SRT 字幕输出
-- 无重复惩罚（`--repetition-penalty` 未接入 ASR 路径）
-- encoder attention 为标量循环 + SIMD dot product，尚未做 batch matmul 优化

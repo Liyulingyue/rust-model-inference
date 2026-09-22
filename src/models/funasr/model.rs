@@ -146,6 +146,9 @@ pub fn run_funasr_cli(
     eprintln!("Chunks: {} ({}s each)", wins.len(), options.chunk_seconds.unwrap_or(0.0));
 
     let max_tokens = options.max_tokens.unwrap_or(512);
+    let rep_penalty = options.effective_repetition_penalty();
+    let srt_mode = options.srt;
+    let mut srt_idx = 0usize;
     let mut full_text = String::new();
 
     for (win_idx, &(off, len)) in wins.iter().enumerate() {
@@ -169,8 +172,17 @@ pub fn run_funasr_cli(
             n_embd,
             max_tokens,
             prefill_batch_size,
+            rep_penalty,
         )?;
-        full_text.push_str(&text);
+
+        if srt_mode {
+            if !text.is_empty() && text != "/sil" {
+                srt_idx += 1;
+                println!("{}", format_srt_entry(srt_idx, seg_start_ms, seg_end_ms, &text));
+            }
+        } else {
+            full_text.push_str(&text);
+        }
     }
 
     let total = started.elapsed();
@@ -181,7 +193,9 @@ pub fn run_funasr_cli(
         (total - load_done).as_secs_f64(),
     );
 
-    println!("{full_text}");
+    if !srt_mode {
+        println!("{full_text}");
+    }
     Ok(())
 }
 
@@ -193,6 +207,7 @@ fn transcribe_segment(
     n_embd: usize,
     max_tokens: usize,
     prefill_batch_size: usize,
+    repetition_penalty: f32,
 ) -> Result<String, String> {
     let t0 = Instant::now();
     let (fbank_data, t_fbank) = fbank::compute_fbank(samples);
@@ -284,6 +299,7 @@ fn transcribe_segment(
             temperature: 0.0,
             prefill_batch_size,
         },
+        repetition_penalty,
     )?;
     let t5 = Instant::now();
     eprintln!(
@@ -293,6 +309,24 @@ fn transcribe_segment(
     );
 
     Ok(generation.text)
+}
+
+/// Format an SRT entry: index, timestamp range, text.
+fn format_srt_entry(idx: usize, start_ms: usize, end_ms: usize, text: &str) -> String {
+    format!(
+        "{idx}\n{} --> {}\n{text}\n",
+        format_srt_timestamp(start_ms),
+        format_srt_timestamp(end_ms),
+    )
+}
+
+fn format_srt_timestamp(ms: usize) -> String {
+    let total_s = ms / 1000;
+    let hours = total_s / 3600;
+    let minutes = (total_s % 3600) / 60;
+    let seconds = total_s % 60;
+    let millis = ms % 1000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
 }
 
 /// Simple linear interpolation resampler.

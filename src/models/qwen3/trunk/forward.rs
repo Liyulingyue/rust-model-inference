@@ -156,15 +156,16 @@ impl Qwen3Model {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, false)
+        self.generate_with_asr_trace(input, options, false, 1.0)
     }
 
     pub(crate) fn generate_asr(
         &self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, true)
+        self.generate_with_asr_trace(input, options, true, repetition_penalty)
     }
 
     fn generate_with_asr_trace(
@@ -172,6 +173,7 @@ impl Qwen3Model {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
         asr_trace: bool,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self, &input, &options)?;
         let capacity = checked_session_capacity(
@@ -179,7 +181,7 @@ impl Qwen3Model {
             options.max_new_tokens,
             self.config.n_ctx,
         )?;
-        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace)
+        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace, repetition_penalty)
     }
 
     /// Hidden-state extraction entry point. Used by VL/ASR/TTS/Z-Image
