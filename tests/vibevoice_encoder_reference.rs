@@ -73,7 +73,9 @@ fn open_mmproj() -> Option<Arc<dyn TensorSource>> {
 #[test]
 fn encoder_and_connectors_match_numpy_oracle() {
     let Some(oracle) = oracle_dir() else {
-        eprintln!("skipping: oracle dumps not found (run tools/oracle/vibevoice/vibevoice_oracle.py)");
+        eprintln!(
+            "skipping: oracle dumps not found (run tools/oracle/vibevoice/vibevoice_oracle.py)"
+        );
         return;
     };
     let Some(mmproj) = open_mmproj() else {
