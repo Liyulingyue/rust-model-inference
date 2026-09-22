@@ -17,6 +17,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
+use crate::ops::{dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_mad_f32, vec_mad_per_channel_f32};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -394,13 +395,8 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
         for row in start..end {
             let input_row = &x[row * dim..(row + 1) * dim];
             let output_row = unsafe { out_ptr.slice(row * dim, dim) };
-            let mean = input_row.iter().sum::<f32>() / dim as f32;
-            let mut var = 0.0f32;
-            for v in input_row {
-                let d = v - mean;
-                var += d * d;
-            }
-            var /= dim as f32;
+            let mean = (sum_f32(input_row) / dim as f64) as f32;
+            let var = (sum_sq_centered_f32(input_row, mean) / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
             for i in 0..dim {
                 output_row[i] = (input_row[i] - mean) * rstd * weight[i] + bias[i];
@@ -456,9 +452,7 @@ fn fsmn_shift_accumulate(
                 let pad_idx = t_idx + j;
                 let k_row = &fsmn_w[j * dim..(j + 1) * dim];
                 let pad_row = &padded[pad_idx * dim..(pad_idx + 1) * dim];
-                for i in 0..dim {
-                    out[i] += k_row[i] * pad_row[i];
-                }
+                vec_mad_per_channel_f32(out, pad_row, k_row);
             }
         }
     });
@@ -466,6 +460,8 @@ fn fsmn_shift_accumulate(
 }
 
 /// Standard multi-head attention: softmax(Q @ K^T / sqrt(dk)) @ V.
+///
+/// QK^T uses `dot_f32` (AVX2/NEON), KQV uses `vec_mad_f32` (AVX2/NEON FMA).
 fn multi_head_attention(
     q: &[f32],
     k: &[f32],
@@ -487,34 +483,28 @@ fn multi_head_attention(
         let mut scores = vec![0.0f32; t * t];
         for h in h_start..h_end {
             let off = h * dk;
+            // QK^T: scores[i, j] = dot(Q[i, off..off+dk], K[j, off..off+dk]) * scale
             for i in 0..t {
+                let q_row = &q[i * dim + off..i * dim + off + dk];
                 for j in 0..t {
-                    let mut s = 0.0f32;
-                    for d in 0..dk {
-                        s += q[i * dim + off + d] * k[j * dim + off + d];
-                    }
-                    scores[i * t + j] = s * scale;
+                    let k_row = &k[j * dim + off..j * dim + off + dk];
+                    scores[i * t + j] = dot_f32(q_row, k_row, dk) * scale;
                 }
             }
+            // Softmax per query row
             for i in 0..t {
-                let row = &mut scores[i * t..(i + 1) * t];
-                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0.0f32;
-                for s in row.iter_mut() {
-                    *s = (*s - max).exp();
-                    sum += *s;
-                }
-                for s in row.iter_mut() {
-                    *s /= sum;
-                }
+                softmax_inplace(&mut scores[i * t..(i + 1) * t]);
             }
+            // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
             for i in 0..t {
-                for d in 0..dk {
-                    let mut acc = 0.0f32;
-                    for j in 0..t {
-                        acc += scores[i * t + j] * v[j * dim + off + d];
+                let out_row = unsafe { out_ptr.slice(i * dim + off, dk) };
+                out_row.fill(0.0);
+                for j in 0..t {
+                    let s = scores[i * t + j];
+                    if s != 0.0 {
+                        let v_row = &v[j * dim + off..j * dim + off + dk];
+                        vec_mad_f32(out_row, v_row, s);
                     }
-                    unsafe { out_ptr.write(i * dim + off + d, acc); }
                 }
             }
         }
