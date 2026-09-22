@@ -87,6 +87,10 @@ pub struct CliOptions {
     pub jev_output_json: bool,
     pub jev_multi: bool,
     pub jev_blocks: Vec<JevBlockInput>,
+    pub chunk_seconds: Option<f64>,
+    pub srt: bool,
+    pub vad: Option<PathBuf>,
+    pub vad_maxseg: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -591,6 +595,26 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     .filter(|value| !value.is_empty() && !value.starts_with("--"))
                     .ok_or("Missing value for --audio")?;
                 options.audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--chunk" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --chunk")?;
+                options.chunk_seconds = Some(value.parse().map_err(|_| "Invalid --chunk value")?);
+                i += 1;
+            }
+            "--srt" => options.srt = true,
+            "--vad" => {
+                options.vad = Some(required_path_value(args, &mut i, "--vad")?);
+            }
+            "--vad-maxseg" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --vad-maxseg")?;
+                options.vad_maxseg = value.parse().map_err(|_| "Invalid --vad-maxseg value")?;
                 i += 1;
             }
             "--ref-audio" => {
