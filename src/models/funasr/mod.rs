@@ -11,10 +11,12 @@ pub mod config;
 pub mod encoder;
 pub mod fbank;
 pub mod model;
+pub mod vad;
 
 pub use config::FunAsrConfig;
 pub use encoder::FunAsrEncoder;
 pub use model::{is_funasr_encoder, run_funasr_cli};
+pub use vad::{is_fsmn_vad, FsmnVad, VadSegment};
 
 /// GGUF architecture string for the Fun-ASR-Nano encoder.
 pub const ENCODER_ARCH: &str = "funasr-sensevoice-encoder";

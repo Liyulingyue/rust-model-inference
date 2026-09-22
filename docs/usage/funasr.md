@@ -40,6 +40,8 @@ cargo build --release --bin rust-model-inference
 | `--threads N` | 推理线程数 | 自动检测 |
 | `--max-tokens N` | 最大生成 token 数 | 512 |
 | `--chunk SECONDS` | 分块窗口大小（秒），长音频分段推理 | 不分块 |
+| `--vad PATH` | FSMN-VAD GGUF 路径，自动检测语音段 | 不启用 |
+| `--vad-maxseg MS` | VAD 单段最大时长（毫秒） | 30000 |
 | `--srt` | 输出 SRT 字幕格式（带时间戳） | 关闭 |
 | `--repetition-penalty α` | 重复抑制（>1 抑制，1.0 禁用） | 1.0 |
 
@@ -83,6 +85,22 @@ WAV (16kHz) → kaldi 80-mel fbank + LFR(7/6) → [T, 560]
 - GGUF 架构名：`funasr-sensevoice-encoder`
 - LLM 架构名：`qwen3`（标准 Qwen3 GGUF）
 
+## VAD 语音分段
+
+使用 `--vad` 自动检测语音段，跳过静音：
+
+```bash
+./target/release/rust-model-inference \
+  --model models/Fun-ASR-Nano-GGUF/qwen3-0.6b-q8_0.gguf \
+  --mmproj models/Fun-ASR-Nano-GGUF/funasr-encoder-f16.gguf \
+  --audio long_audio.wav \
+  --threads 8 \
+  --vad models/Fun-ASR-Nano-GGUF/fsmn-vad.gguf \
+  --srt
+```
+
+VAD 段时间戳与 FunASR 参考实现一致（sample.wav → `770ms–5980ms`）。
+
 ## SRT 字幕输出
 
 使用 `--srt` 输出带时间戳的字幕格式（需配合 `--chunk`）：
@@ -124,4 +142,4 @@ WAV (16kHz) → kaldi 80-mel fbank + LFR(7/6) → [T, 560]
 
 ## 已知限制
 
-- 无 VAD 分段（参考实现支持 `--vad` FSMN-VAD，本仓库尚未实现）
+- 无（VAD、SRT、chunk、rep-penalty 均已实现）

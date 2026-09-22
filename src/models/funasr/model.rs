@@ -11,6 +11,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
 use crate::models::funasr::fbank;
+use crate::models::funasr::vad::{FsmnVad, VadSegment};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use std::sync::Arc;
@@ -130,20 +131,40 @@ pub fn run_funasr_cli(
         samples.len() as f64 / SAMPLE_RATE as f64
     );
 
-    // Build chunk windows: --chunk sec splits into fixed windows; otherwise whole file.
-    let chunk_samples = options
-        .chunk_seconds
-        .map(|sec| (sec * SAMPLE_RATE as f64).round() as usize)
-        .unwrap_or(samples.len());
-    let wins: Vec<(usize, usize)> = (0..samples.len())
-        .step_by(chunk_samples)
-        .map(|off| {
-            let end = (off + chunk_samples).min(samples.len());
-            (off, end - off)
-        })
-        .filter(|(_, len)| *len >= 400) // WINLEN
-        .collect();
-    eprintln!("Chunks: {} ({}s each)", wins.len(), options.chunk_seconds.unwrap_or(0.0));
+    // Build chunk windows: --vad for FSMN-VAD segments, --chunk for fixed windows,
+    // otherwise whole file.
+    let wins: Vec<(usize, usize)> = if let Some(vad_path) = options.vad.as_deref() {
+        let vad_source: Arc<dyn TensorSource> =
+            Arc::from(crate::app::open_or_exit(vad_path, ComponentRole::Mmproj));
+        let vad = FsmnVad::new(Arc::clone(&vad_source))?;
+        let max_seg_ms = if options.vad_maxseg > 0 { options.vad_maxseg } else { 30000 };
+        let segs = vad.segments(&samples, max_seg_ms);
+        eprintln!("[vad] {} segments", segs.len());
+        segs
+            .into_iter()
+            .map(|seg| {
+                let off = seg.start_ms * SAMPLE_RATE / 1000;
+                let end = seg.end_ms * SAMPLE_RATE / 1000;
+                let end = end.min(samples.len());
+                (off, end.saturating_sub(off))
+            })
+            .filter(|(_, len)| *len >= 400)
+            .collect()
+    } else {
+        let chunk_samples = options
+            .chunk_seconds
+            .map(|sec| (sec * SAMPLE_RATE as f64).round() as usize)
+            .unwrap_or(samples.len());
+        (0..samples.len())
+            .step_by(chunk_samples)
+            .map(|off| {
+                let end = (off + chunk_samples).min(samples.len());
+                (off, end - off)
+            })
+            .filter(|(_, len)| *len >= 400)
+            .collect()
+    };
+    eprintln!("Segments: {}", wins.len());
 
     let max_tokens = options.max_tokens.unwrap_or(512);
     let rep_penalty = options.effective_repetition_penalty();
