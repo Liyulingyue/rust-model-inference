@@ -9,8 +9,11 @@
 //! `docs/TODO.md` TODO-005 for the SIMD coverage plan and the future
 //! `matmul_f32_vs_f32_simd` core that should subsume these kernels.
 //!
-//! The direct F16×F32 SIMD helpers remain available for focused kernel tests;
-//! model forward paths use the ggml-compatible F16×F16 contract.
+//! Forward-path SIMD dispatch: `matmul_f16_vs_f32_avx2` / `..._neon`
+//! operate on the F32 input directly (skipping the F32→F16 input
+//! pre-conversion).  The ggml-compatible F16×F16 dot fallback
+//! (`crate::ops::dot::dot_f16_f16_bytes`) stays for callers that need
+//! bit-exact ggml semantics.
 
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
@@ -101,6 +104,10 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     /// Row-partitioned scalar F16×F32 matmul for direct prequantized callers.
     fn forward_prequantized(
         &self,
@@ -210,27 +217,38 @@ impl<'a> Kernel for F16Kernel<'a> {
         }
     }
 
-    /// F16 converts the input to F16 before the dot product, matching ggml's
-    /// `vec_dot_type = GGML_TYPE_F16` contract.
+    /// The shared path keeps F32 activations on supported SIMD hosts. Callers
+    /// that require ggml's F16 activation rounding must opt in locally.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
+        if forward_f16_dispatch(self.weight, input, output, n_in, n_out, 0, 1) {
+            return;
+        }
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
-    /// F16's `forward_batched` goes through `forward` so each F32 input row
-    /// is converted to F16 instead of using the prequantized-only entry.
+    /// Batched rows use the same shared dispatch: F16×F32 SIMD when available,
+    /// with the existing F16×F16 fallback elsewhere.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
-        let mut input_f16 = Vec::with_capacity(n_in);
         for t in 0..n_tokens {
-            self.forward_scaled(
+            if forward_f16_dispatch(
+                self.weight,
                 &input[t * n_in..(t + 1) * n_in],
                 &mut output[t * n_out..(t + 1) * n_out],
                 n_in,
                 n_out,
-                1.0,
-                &mut input_f16,
+                0,
+                1,
+            ) {
+                continue;
+            }
+            self.forward(
+                &input[t * n_in..(t + 1) * n_in],
+                &mut output[t * n_out..(t + 1) * n_out],
+                n_in,
+                n_out,
             );
         }
     }
@@ -238,6 +256,50 @@ impl<'a> Kernel for F16Kernel<'a> {
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         crate::ops::embedding::embedding_lookup_f16(self.weight, token_id, n_embd, out);
     }
+}
+
+/// Dispatch a single-token F16×F32 matmul to the SIMD kernel when available.
+///
+/// Returns `true` if the SIMD path ran (caller should skip the legacy
+/// F16×F16 fallback).  Returns `false` on architectures without a SIMD
+/// kernel — caller falls back to `forward_scaled_rows` for bit-exact
+/// ggml semantics.
+pub(crate) fn forward_f16_dispatch(
+    weight: &[u8],
+    input: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if n_in % 8 == 0 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    avx2::matmul_f16_vs_f32_avx2(weight, input, my_out, n_in, start, end);
+                }
+                return true;
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    neon::matmul_f16_vs_f32_neon(weight, input, my_out, n_in, start, end);
+                }
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -291,13 +353,13 @@ mod tests {
                 kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, thread, 3);
             }
             let mut sequential = [0.0; 5];
-            kernel.forward(&input, &mut sequential, 7, 5);
+            kernel.forward_prepared(&input, &[], &[], None, &mut sequential, 7, 5, 0, 1);
             assert_eq!(output.map(f32::to_bits), sequential.map(f32::to_bits));
             for (row, &actual) in output.iter().enumerate() {
                 let expected = values[row * 7..(row + 1) * 7]
                     .iter()
                     .zip(input)
-                    // Prepared and ordinary paths both round activations to F16.
+                    // Prepared paths round activations to F16.
                     .map(|(w, x)| w.to_f64() * f16::from_f32(x).to_f64())
                     .sum::<f64>() as f32;
                 assert!(
@@ -410,9 +472,31 @@ mod tests {
         assert_eq!(output, [5.0, 10.0, 15.0]);
     }
 
+    #[test]
+    fn f16_kernel_forward_keeps_f32_activation_precision_on_simd_hosts() {
+        #[cfg(target_arch = "x86_64")]
+        if !(crate::ops::has_avx2_fma() && crate::ops::has_f16c()) {
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if !crate::ops::has_neon() {
+            return;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return;
+
+        let weight = f16_bytes(&[f16::ONE; 8]);
+        let input = [1.0003f32; 8];
+        let mut output = [0.0];
+
+        F16Kernel::new(&weight).forward(&input, &mut output, 8, 1);
+
+        assert!(output[0] > 8.002, "F32 activation was rounded to F16");
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
-    fn f16_kernel_matches_ggml_f16_input_and_native_accumulation() {
+    fn f16_kernel_scaled_path_matches_ggml_f16_input_and_native_accumulation() {
         let input = [
             0x3e06_184f,
             0xbe8b_2d10,
@@ -458,7 +542,7 @@ mod tests {
         .collect::<Vec<_>>();
         let mut output = [0.0f32; 1];
 
-        F16Kernel::new(&weight).forward(&input, &mut output, 32, 1);
+        F16Kernel::new(&weight).forward_scaled(&input, &mut output, 32, 1, 1.0, &mut Vec::new());
 
         assert_eq!(output[0].to_bits(), 0xbf92_1000);
     }

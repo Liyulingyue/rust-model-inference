@@ -42,8 +42,9 @@ cmake -S "$clone_dir" -B "$build_dir" \
     -DLLAMA_BUILD_TESTS=OFF \
     -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX
 cmake --build "$build_dir" \
-    --target llama-eval-callback llama-mtmd-debug \
+    --target llama-eval-callback llama-debug llama-mtmd-debug \
     --parallel "${RMI_BUILD_JOBS:-4}"
-printf 'text=%s\nvision=%s\n' \
+printf 'text=%s\nembedding=%s\nvision=%s\n' \
     "$build_dir/bin/llama-eval-callback" \
+    "$build_dir/bin/llama-debug" \
     "$build_dir/bin/llama-mtmd-debug"
