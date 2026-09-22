@@ -144,7 +144,10 @@ impl FsmnVad {
             let p = format!("encoder.fsmn.{i}.");
             fsmn_layers.push(FsmnVadLayer {
                 linear: load_vad_linear(source.as_ref(), &format!("{p}linear.linear."))?,
-                fsmn_kernel: load_f32_vec(source.as_ref(), &format!("{p}fsmn_block.conv_left.weight"))?,
+                fsmn_kernel: load_f32_vec(
+                    source.as_ref(),
+                    &format!("{p}fsmn_block.conv_left.weight"),
+                )?,
                 affine: load_vad_linear(source.as_ref(), &format!("{p}affine.linear."))?,
             });
         }
@@ -181,7 +184,8 @@ impl FsmnVad {
         let mut feats = feats;
         for t in 0..t_lfr {
             for d in 0..idim {
-                feats[t * idim + d] = (feats[t * idim + d] + self.cmvn_shift[d]) * self.cmvn_scale[d];
+                feats[t * idim + d] =
+                    (feats[t * idim + d] + self.cmvn_shift[d]) * self.cmvn_scale[d];
             }
         }
 
@@ -222,7 +226,13 @@ impl FsmnVad {
         h
     }
 
-    fn state_machine(&self, scores: &[f32], t: usize, od: usize, max_seg_ms: usize) -> Vec<VadSegment> {
+    fn state_machine(
+        &self,
+        scores: &[f32],
+        t: usize,
+        od: usize,
+        max_seg_ms: usize,
+    ) -> Vec<VadSegment> {
         let max_seg = (if max_seg_ms > 0 { max_seg_ms } else { 60000 }) / FRAME_MS;
         let start_lookback = WIN_FRAMES + 20;
 
@@ -231,16 +241,28 @@ impl FsmnVad {
         let mut max_end_sil: usize = 0;
         let mut end_lookback: usize = 0;
         let mut recompute = |acc: usize, max_end_sil: &mut usize, end_lookback: &mut usize| {
-            let s = if acc <= 10000 { 2000 }
-                else if acc <= 20000 { 1000 }
-                else if acc <= 30000 { 800 }
-                else if acc <= 40000 { 600 }
-                else if acc <= 50000 { 400 }
-                else if acc <= 60000 { 200 }
-                else { 100 };
+            let s = if acc <= 10000 {
+                2000
+            } else if acc <= 20000 {
+                1000
+            } else if acc <= 30000 {
+                800
+            } else if acc <= 40000 {
+                600
+            } else if acc <= 50000 {
+                400
+            } else if acc <= 60000 {
+                200
+            } else {
+                100
+            };
             let ms = if s > 150 { s - 150 } else { 0 };
             *max_end_sil = ms / FRAME_MS;
-            *end_lookback = if *max_end_sil > LOOKAHEAD_END + 1 { *max_end_sil - LOOKAHEAD_END - 1 } else { 0 };
+            *end_lookback = if *max_end_sil > LOOKAHEAD_END + 1 {
+                *max_end_sil - LOOKAHEAD_END - 1
+            } else {
+                0
+            };
         };
         recompute(acc, &mut max_end_sil, &mut end_lookback);
 
@@ -256,7 +278,10 @@ impl FsmnVad {
 
         for t_idx in 0..t {
             if t_idx > 0 && t_idx % CHUNK_FRAMES == 0 {
-                if st == 1 || insp == 1 { acc += 60000; insp = 1; }
+                if st == 1 || insp == 1 {
+                    acc += 60000;
+                    insp = 1;
+                }
                 recompute(acc, &mut max_end_sil, &mut end_lookback);
             }
             let sil = scores[t_idx * od];
@@ -266,23 +291,44 @@ impl FsmnVad {
             wbuf[wpos] = fs;
             wpos = (wpos + 1) % WIN_FRAMES;
 
-            let ch = if pre == 0 && wsum >= SIL_TO_SPEECH as i32 { 3 }
-                else if pre == 1 && wsum <= SPEECH_TO_SIL as i32 { 1 }
-                else if pre == 0 { 0 } else { 2 };
+            let ch = if pre == 0 && wsum >= SIL_TO_SPEECH as i32 {
+                3
+            } else if pre == 1 && wsum <= SPEECH_TO_SIL as i32 {
+                1
+            } else if pre == 0 {
+                0
+            } else {
+                2
+            };
 
             match ch {
                 3 => {
                     csil = 0;
                     if st == 0 {
                         cstart = t_idx as i32 - start_lookback as i32;
-                        if cstart < prev_end as i32 { cstart = prev_end as i32; }
-                        if cstart < 0 { cstart = 0; }
+                        if cstart < prev_end as i32 {
+                            cstart = prev_end as i32;
+                        }
+                        if cstart < 0 {
+                            cstart = 0;
+                        }
                         st = 1;
                     } else if st == 1 && t_idx as i32 - cstart + 1 > max_seg as i32 {
                         let s = cstart as usize;
                         let e = t_idx.min(t);
-                        if e > s.max(prev_end) { segs.push((s.max(prev_end), e)); prev_end = e; }
-                        wbuf.fill(0); wpos = 0; wsum = 0; pre = 0; csil = 0; st = 0; cstart = -1; acc = 0; insp = 0;
+                        if e > s.max(prev_end) {
+                            segs.push((s.max(prev_end), e));
+                            prev_end = e;
+                        }
+                        wbuf.fill(0);
+                        wpos = 0;
+                        wsum = 0;
+                        pre = 0;
+                        csil = 0;
+                        st = 0;
+                        cstart = -1;
+                        acc = 0;
+                        insp = 0;
                         recompute(acc, &mut max_end_sil, &mut end_lookback);
                     }
                 }
@@ -291,8 +337,19 @@ impl FsmnVad {
                     if st == 1 && t_idx as i32 - cstart + 1 > max_seg as i32 {
                         let s = cstart as usize;
                         let e = t_idx.min(t);
-                        if e > s.max(prev_end) { segs.push((s.max(prev_end), e)); prev_end = e; }
-                        wbuf.fill(0); wpos = 0; wsum = 0; pre = 0; csil = 0; st = 0; cstart = -1; acc = 0; insp = 0;
+                        if e > s.max(prev_end) {
+                            segs.push((s.max(prev_end), e));
+                            prev_end = e;
+                        }
+                        wbuf.fill(0);
+                        wpos = 0;
+                        wsum = 0;
+                        pre = 0;
+                        csil = 0;
+                        st = 0;
+                        cstart = -1;
+                        acc = 0;
+                        insp = 0;
                         recompute(acc, &mut max_end_sil, &mut end_lookback);
                     }
                 }
@@ -300,17 +357,43 @@ impl FsmnVad {
                     csil += 1;
                     if st == 1 {
                         if csil >= max_end_sil {
-                            let end = if t_idx > end_lookback { t_idx - end_lookback } else { 0 };
+                            let end = if t_idx > end_lookback {
+                                t_idx - end_lookback
+                            } else {
+                                0
+                            };
                             let s = cstart as usize;
                             let e = end.min(t);
-                            if e > s.max(prev_end) { segs.push((s.max(prev_end), e)); prev_end = e; }
-                            wbuf.fill(0); wpos = 0; wsum = 0; pre = 0; csil = 0; st = 0; cstart = -1; acc = 0; insp = 0;
+                            if e > s.max(prev_end) {
+                                segs.push((s.max(prev_end), e));
+                                prev_end = e;
+                            }
+                            wbuf.fill(0);
+                            wpos = 0;
+                            wsum = 0;
+                            pre = 0;
+                            csil = 0;
+                            st = 0;
+                            cstart = -1;
+                            acc = 0;
+                            insp = 0;
                             recompute(acc, &mut max_end_sil, &mut end_lookback);
                         } else if t_idx as i32 - cstart + 1 > max_seg as i32 {
                             let s = cstart as usize;
                             let e = t_idx.min(t);
-                            if e > s.max(prev_end) { segs.push((s.max(prev_end), e)); prev_end = e; }
-                            wbuf.fill(0); wpos = 0; wsum = 0; pre = 0; csil = 0; st = 0; cstart = -1; acc = 0; insp = 0;
+                            if e > s.max(prev_end) {
+                                segs.push((s.max(prev_end), e));
+                                prev_end = e;
+                            }
+                            wbuf.fill(0);
+                            wpos = 0;
+                            wsum = 0;
+                            pre = 0;
+                            csil = 0;
+                            st = 0;
+                            cstart = -1;
+                            acc = 0;
+                            insp = 0;
                             recompute(acc, &mut max_end_sil, &mut end_lookback);
                         }
                     }
@@ -320,11 +403,12 @@ impl FsmnVad {
         if st == 1 {
             let s = cstart as usize;
             let e = t;
-            if e > s.max(prev_end) { segs.push((s.max(prev_end), e)); }
+            if e > s.max(prev_end) {
+                segs.push((s.max(prev_end), e));
+            }
         }
 
-        segs
-            .into_iter()
+        segs.into_iter()
             .map(|(s, e)| VadSegment {
                 start_ms: s * FRAME_MS,
                 end_ms: e * FRAME_MS,
@@ -358,7 +442,11 @@ fn compute_fbank_80(wav: &[f32]) -> Vec<f32> {
         for k in 0..nbin {
             let mf = mel_hz(bw * k as f32);
             if mf > l && mf < r {
-                fb[m][k] = if mf <= c { (mf - l) / (c - l) } else { (r - mf) / (r - c) };
+                fb[m][k] = if mf <= c {
+                    (mf - l) / (c - l)
+                } else {
+                    (r - mf) / (r - c)
+                };
             }
         }
     }
@@ -373,10 +461,16 @@ fn compute_fbank_80(wav: &[f32]) -> Vec<f32> {
     for t in 0..t_frames {
         let s = &samples[t * SHIFT..];
         let mut mn = 0.0f64;
-        for i in 0..WINLEN { mn += s[i] as f64; }
+        for i in 0..WINLEN {
+            mn += s[i] as f64;
+        }
         mn /= WINLEN as f64;
-        for i in 0..WINLEN { frame[i] = s[i] - mn as f32; }
-        for i in (1..WINLEN).rev() { frame[i] -= PREEMPH * frame[i - 1]; }
+        for i in 0..WINLEN {
+            frame[i] = s[i] - mn as f32;
+        }
+        for i in (1..WINLEN).rev() {
+            frame[i] -= PREEMPH * frame[i - 1];
+        }
         frame[0] -= PREEMPH * frame[0];
         for i in 0..NFFT {
             re[i] = if i < WINLEN { frame[i] * win[i] } else { 0.0 };
@@ -386,7 +480,9 @@ fn compute_fbank_80(wav: &[f32]) -> Vec<f32> {
         for m in 0..NMEL {
             let mut e = 0.0f32;
             for k in 0..nbin {
-                if fb[m][k] > 0.0 { e += fb[m][k] * (re[k] * re[k] + im[k] * im[k]); }
+                if fb[m][k] > 0.0 {
+                    e += fb[m][k] * (re[k] * re[k] + im[k] * im[k]);
+                }
             }
             feat[t * NMEL + m] = if e > FLT_EPS { e } else { FLT_EPS }.ln();
         }
@@ -398,9 +494,15 @@ fn fft(re: &mut [f32], im: &mut [f32], n: usize) {
     let mut j = 0;
     for i in 1..n {
         let mut b = n >> 1;
-        while j & b != 0 { j ^= b; b >>= 1; }
+        while j & b != 0 {
+            j ^= b;
+            b >>= 1;
+        }
         j ^= b;
-        if i < j { re.swap(i, j); im.swap(i, j); }
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
     }
     let mut len = 2;
     while len <= n {
@@ -429,13 +531,21 @@ fn fft(re: &mut [f32], im: &mut [f32], n: usize) {
 }
 
 fn lfr_stack(feat: &[f32], t: usize, m: usize, n: usize) -> (Vec<f32>, usize) {
-    if t < 1 { return (Vec::new(), 0); }
+    if t < 1 {
+        return (Vec::new(), 0);
+    }
     let pad = (m - 1) / 2;
     let tl = (t + n - 1) / n;
     let mut padded: Vec<Vec<f32>> = Vec::with_capacity(t + pad + m);
-    for _ in 0..pad { padded.push(feat[0..NMEL].to_vec()); }
-    for t_idx in 0..t { padded.push(feat[t_idx * NMEL..(t_idx + 1) * NMEL].to_vec()); }
-    while padded.len() < (tl - 1) * n + m { padded.push(feat[(t - 1) * NMEL..t * NMEL].to_vec()); }
+    for _ in 0..pad {
+        padded.push(feat[0..NMEL].to_vec());
+    }
+    for t_idx in 0..t {
+        padded.push(feat[t_idx * NMEL..(t_idx + 1) * NMEL].to_vec());
+    }
+    while padded.len() < (tl - 1) * n + m {
+        padded.push(feat[(t - 1) * NMEL..t * NMEL].to_vec());
+    }
     let d = m * NMEL;
     let mut out = vec![0.0f32; tl * d];
     for i in 0..tl {
@@ -458,7 +568,9 @@ fn vad_linear_fwd(lin: &VadLinear, input: &[f32], t: usize) -> Vec<f32> {
         .for_each(|(o, row)| {
             lin.weight.kernel.forward(row, o, in_dim, out_dim);
             if !lin.bias.is_empty() {
-                for i in 0..out_dim { o[i] += lin.bias[i]; }
+                for i in 0..out_dim {
+                    o[i] += lin.bias[i];
+                }
             }
         });
     out
@@ -471,22 +583,24 @@ fn fsmn_conv_shift(z: &[f32], t: usize, dim: usize, lorder: usize, kernel: &[f32
         padded[(i + pad) * dim..(i + pad + 1) * dim].copy_from_slice(&z[i * dim..(i + 1) * dim]);
     }
     let mut out = vec![0.0f32; t * dim];
-    out.par_chunks_mut(dim)
-        .enumerate()
-        .for_each(|(t_idx, o)| {
-            for j in 0..lorder {
-                let pad_idx = t_idx + j;
-                let k_row = &kernel[j * dim..(j + 1) * dim];
-                let pad_row = &padded[pad_idx * dim..(pad_idx + 1) * dim];
-                vec_mad_per_channel_f32(o, pad_row, k_row);
-            }
-        });
+    out.par_chunks_mut(dim).enumerate().for_each(|(t_idx, o)| {
+        for j in 0..lorder {
+            let pad_idx = t_idx + j;
+            let k_row = &kernel[j * dim..(j + 1) * dim];
+            let pad_row = &padded[pad_idx * dim..(pad_idx + 1) * dim];
+            vec_mad_per_channel_f32(o, pad_row, k_row);
+        }
+    });
     out
 }
 
 #[inline]
 fn relu_inplace(x: &mut [f32]) {
-    for v in x { if *v < 0.0 { *v = 0.0; } }
+    for v in x {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
 }
 
 // ======================= weight loading =======================
@@ -500,16 +614,28 @@ fn load_vad_linear(source: &dyn TensorSource, prefix: &str) -> Result<VadLinear,
     let (in_dim, out_dim) = if info.dims.len() == 2 {
         (info.dims[0] as usize, info.dims[1] as usize)
     } else {
-        return Err(format!("unexpected dims for {weight_name}: {:?}", info.dims));
+        return Err(format!(
+            "unexpected dims for {weight_name}: {:?}",
+            info.dims
+        ));
     };
     let weight = load_static_weight(source, &weight_name, in_dim, out_dim);
     let bias = load_f32_vec_optional(source, &bias_name);
-    Ok(VadLinear { weight, bias, in_dim, out_dim })
+    Ok(VadLinear {
+        weight,
+        bias,
+        in_dim,
+        out_dim,
+    })
 }
 
 fn load_f32_vec_optional(source: &dyn TensorSource, name: &str) -> Vec<f32> {
-    let Some(info) = source.tensor_info(name) else { return Vec::new() };
-    let Some(bytes) = source.tensor_slice(name) else { return Vec::new() };
+    let Some(info) = source.tensor_info(name) else {
+        return Vec::new();
+    };
+    let Some(bytes) = source.tensor_slice(name) else {
+        return Vec::new();
+    };
     let count = info.dims.iter().product::<u64>() as usize;
     let mut out = vec![0.0f32; count];
     match info.ggml_type {

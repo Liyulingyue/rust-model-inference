@@ -17,7 +17,10 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
-use crate::ops::{dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add_into, vec_mad_f32, vec_mad_per_channel_f32, vec_scale_f32};
+use crate::ops::{
+    dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add_into, vec_mad_f32,
+    vec_mad_per_channel_f32, vec_scale_f32,
+};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -147,7 +150,8 @@ impl FunAsrEncoder {
         let dk = d_model / n_head;
         let kernel = self.config.kernel_size;
 
-        let mut x = self.sanm_layer_fwd(&self.enc0, fbank, t, d, d_model, n_head, dk, kernel, false);
+        let mut x =
+            self.sanm_layer_fwd(&self.enc0, fbank, t, d, d_model, n_head, dk, kernel, false);
 
         for layer in &self.encoders {
             x = self.sanm_layer_fwd(layer, &x, t, d_model, d_model, n_head, dk, kernel, true);
@@ -257,7 +261,10 @@ fn load_linear(source: &dyn TensorSource, prefix: &str) -> Result<Linear, String
     let (in_dim, out_dim) = if info.dims.len() == 2 {
         (info.dims[0] as usize, info.dims[1] as usize)
     } else {
-        return Err(format!("unexpected dims for {weight_name}: {:?}", info.dims));
+        return Err(format!(
+            "unexpected dims for {weight_name}: {:?}",
+            info.dims
+        ));
     };
     let weight = load_static_weight(source, &weight_name, in_dim, out_dim);
     let bias = load_f32_vec(source, &bias_name)?;
@@ -369,7 +376,9 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         for row in start..end {
             let input_row = &input[row * in_dim..(row + 1) * in_dim];
             let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
-            weight.kernel.forward(input_row, output_row, in_dim, out_dim);
+            weight
+                .kernel
+                .forward(input_row, output_row, in_dim, out_dim);
             if !bias.is_empty() {
                 for i in 0..out_dim {
                     output_row[i] += bias[i];
@@ -446,8 +455,7 @@ fn fsmn_shift_accumulate(
     let pad = (kernel - 1) / 2;
     let mut padded = vec![0.0f32; (t + 2 * pad) * dim];
     for i in 0..t {
-        padded[(i + pad) * dim..(i + pad + 1) * dim]
-            .copy_from_slice(&v[i * dim..(i + 1) * dim]);
+        padded[(i + pad) * dim..(i + pad + 1) * dim].copy_from_slice(&v[i * dim..(i + 1) * dim]);
     }
     let mut fsmn = vec![0.0f32; t * dim];
     let fsmn_ptr = SharedMut(fsmn.as_mut_ptr());

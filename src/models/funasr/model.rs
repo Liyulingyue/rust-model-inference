@@ -6,19 +6,20 @@
 //! trunk via `Qwen3Input.embeddings`.
 
 use crate::core::tensor::{MetaValue, TensorSource};
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
 use crate::models::funasr::fbank;
 use crate::models::funasr::vad::{FsmnVad, VadSegment};
-use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
 use std::sync::Arc;
 use std::time::Instant;
 
 const SAMPLE_RATE: usize = 16_000;
-const PROMPT_PREFIX: &str = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：";
+const PROMPT_PREFIX: &str =
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n语音转写：";
 const PROMPT_SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
 const MIN_FBANK_FRAMES: usize = 1;
 
@@ -87,7 +88,11 @@ pub fn run_funasr_cli(
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         llm_source.metadata(key).cloned()
     })?);
-    let decoder = Arc::new(Qwen3Model::from_source(llm_source, tokenizer, Arc::clone(&pool))?);
+    let decoder = Arc::new(Qwen3Model::from_source(
+        llm_source,
+        tokenizer,
+        Arc::clone(&pool),
+    )?);
     let n_embd = decoder.config().n_embd;
     if n_embd != encoder.config.adp_llm_dim as usize {
         return Err(format!(
@@ -99,14 +104,11 @@ pub fn run_funasr_cli(
     eprintln!("Models loaded in {:.3}s", load_done.as_secs_f64());
 
     // Load audio
-    let audio_path = options
-        .audio
-        .as_ref()
-        .expect("validated audio option");
+    let audio_path = options.audio.as_ref().expect("validated audio option");
     let wav_bytes = std::fs::read(audio_path)
         .map_err(|e| format!("Failed to read {}: {e}", audio_path.display()))?;
-    let decoded = decode_pcm16_wav_any(&wav_bytes)
-        .map_err(|e| format!("WAV decode error: {e:?}"))?;
+    let decoded =
+        decode_pcm16_wav_any(&wav_bytes).map_err(|e| format!("WAV decode error: {e:?}"))?;
     let samples: Vec<f32> = if decoded.channels == 1 {
         decoded.samples
     } else {
@@ -137,11 +139,14 @@ pub fn run_funasr_cli(
         let vad_source: Arc<dyn TensorSource> =
             Arc::from(crate::app::open_or_exit(vad_path, ComponentRole::Mmproj));
         let vad = FsmnVad::new(Arc::clone(&vad_source))?;
-        let max_seg_ms = if options.vad_maxseg > 0 { options.vad_maxseg } else { 30000 };
+        let max_seg_ms = if options.vad_maxseg > 0 {
+            options.vad_maxseg
+        } else {
+            30000
+        };
         let segs = vad.segments(&samples, max_seg_ms);
         eprintln!("[vad] {} segments", segs.len());
-        segs
-            .into_iter()
+        segs.into_iter()
             .map(|seg| {
                 let off = seg.start_ms * SAMPLE_RATE / 1000;
                 let end = seg.end_ms * SAMPLE_RATE / 1000;
@@ -199,7 +204,10 @@ pub fn run_funasr_cli(
         if srt_mode {
             if !text.is_empty() && text != "/sil" {
                 srt_idx += 1;
-                println!("{}", format_srt_entry(srt_idx, seg_start_ms, seg_end_ms, &text));
+                println!(
+                    "{}",
+                    format_srt_entry(srt_idx, seg_start_ms, seg_end_ms, &text)
+                );
             }
         } else {
             full_text.push_str(&text);

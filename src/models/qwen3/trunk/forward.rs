@@ -181,7 +181,12 @@ impl Qwen3Model {
             options.max_new_tokens,
             self.config.n_ctx,
         )?;
-        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace, repetition_penalty)
+        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(
+            input,
+            options,
+            asr_trace,
+            repetition_penalty,
+        )
     }
 
     /// Hidden-state extraction entry point. Used by VL/ASR/TTS/Z-Image
