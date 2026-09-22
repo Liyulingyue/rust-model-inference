@@ -44,6 +44,7 @@ pub enum GGMLType {
     F64 = 28,
     IQ1_M = 29,
     BF16 = 30,
+    Q1_0 = 41,
 }
 
 impl GGMLType {
@@ -78,6 +79,7 @@ impl GGMLType {
             28 => Some(Self::F64),
             29 => Some(Self::IQ1_M),
             30 => Some(Self::BF16),
+            41 => Some(Self::Q1_0),
             _ => None,
         }
     }
@@ -113,6 +115,7 @@ impl GGMLType {
             Self::I64 => (1, 8),
             Self::F64 => (1, 8),
             Self::BF16 => (1, 2),
+            Self::Q1_0 => (128, 18),
         }
     }
 
