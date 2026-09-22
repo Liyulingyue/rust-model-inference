@@ -6,7 +6,7 @@ Replays the exact token-by-token forward the Rust `llama` trunk performs
 intermediate against the Rust `RUST_LLAMA_DEBUG_OUTFILE` trace.
 
 Usage:
-  models/.venv/bin/python tools/parity/minicpm5_reference.py \
+  models/.venv/bin/python tools/oracle/shared/minicpm5_reference.py \
       models/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q8_0.gguf /tmp/minicpm_parity/rust_trace.txt
 """
 import sys

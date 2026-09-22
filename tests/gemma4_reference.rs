@@ -907,7 +907,7 @@ fn ensure_gemma4_oracle_binary(env_name: &str, script_name: &str) -> Result<Path
         "LLAMA_CPP_DIR is required when LLAMA_GEMMA4_TRACE_BIN is not a file".to_owned()
     })?;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tools/gemma4")
+        .join("tools/oracle/gemma4")
         .join(script_name);
     let output = Command::new("bash")
         .arg(&script)

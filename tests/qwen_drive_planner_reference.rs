@@ -207,7 +207,7 @@ fn run_oracle(
     trace: &Path,
 ) {
     let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/qwen_drive/qwen_drive_oracle.py");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/oracle/qwen_drive/qwen_drive_oracle.py");
     let mut command = Command::new("uv");
     command.args([
         "run",

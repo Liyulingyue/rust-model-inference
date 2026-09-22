@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare llama.cpp layer-oracle dumps (step 0) with a numpy replay.
 
-Usage: models/.venv/bin/python tools/parity/lfm2moe_layer_cmp.py <model> <oracle.bin>
+Usage: models/.venv/bin/python tools/oracle/shared/lfm2moe_layer_cmp.py <model> <oracle.bin>
 """
 import sys
 import numpy as np

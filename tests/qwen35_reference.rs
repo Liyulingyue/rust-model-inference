@@ -75,7 +75,8 @@ fn command_output(command: &mut Command, label: &str) -> Output {
 }
 
 fn build_oracle(llama: &Path, artifacts: &Path) -> PathBuf {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/parity/build_qwen35_oracle.sh");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/oracle/qwen35/build_qwen35_oracle.sh");
     assert!(script.exists(), "{} does not exist", script.display());
     let output = command_output(
         Command::new("sh").arg(script).arg(llama).arg(artifacts),

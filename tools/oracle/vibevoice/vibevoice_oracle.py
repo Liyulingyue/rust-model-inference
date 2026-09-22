@@ -14,7 +14,7 @@ code. Writes f32 dumps consumed by tests/vibevoice_encoder_reference.rs:
   vibevoice_oracle_combined.f32    projected sum [26, 3584]
 
 Usage:
-  python3 tools/vibevoice/vibevoice_oracle.py models/VibeVoice-ASR-Streaming-7B --out-dir /tmp
+  python3 tools/oracle/vibevoice/vibevoice_oracle.py models/VibeVoice-ASR-Streaming-7B --out-dir /tmp
 """
 
 from __future__ import annotations

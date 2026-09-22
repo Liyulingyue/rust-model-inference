@@ -95,7 +95,7 @@ fn oracle_builder_treats_input_checkout_as_read_only() {
     let output = Command::new("bash")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tools/tts/build_qwen3_tts_oracle.sh"
+            "/tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh"
         ))
         .arg(&directory)
         .output()
