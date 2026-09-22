@@ -78,7 +78,7 @@ Perception requires a directory containing the six camera JPEGs and the
 Oracle-generated `frame-manifest.json`:
 
 ```bash
-python3 tools/qwen_drive/qwen_drive_oracle.py perception-frame \
+python3 tools/oracle/qwen_drive/qwen_drive_oracle.py perception-frame \
   --source /path/to/Qwen-Drive \
   --expected-commit 28091c1532e869bc7aee91fc0aef6b3e6fd0b2e0 \
   --frames /path/to/Qwen-Drive/data/demo/perception/FRAME_ID \

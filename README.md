@@ -492,7 +492,7 @@ curl http://localhost:8080/v1/audio/speech \
 
 ```bash
 python -m pip install openai anthropic openai-agents
-python tools/server/test_api.py --model Qwen3-0.6B-Q8_0
+python tools/scripts/test_api.py --model Qwen3-0.6B-Q8_0
 ```
 
 本地 GGUF 验收：Qwen3-0.6B-Q8_0 与 Qwen3.5-0.8B-UD-Q8_K_XL 通过上述全部

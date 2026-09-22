@@ -7,7 +7,7 @@ fn oracle_runner() -> Command {
     let mut command = Command::new("python3");
     command.arg(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tools/dots/run_dots_tts_oracle.py"
+        "/tools/oracle/dots/run_dots_tts_oracle.py"
     ));
     command
 }
@@ -18,7 +18,7 @@ fn oracle_base_schedule_includes_encoded_prompt_and_target_budget() {
         "import importlib.util; ",
         "spec=importlib.util.spec_from_file_location('runner', r'",
         env!("CARGO_MANIFEST_DIR"),
-        "/tools/dots/run_dots_tts_oracle.py'); ",
+        "/tools/oracle/dots/run_dots_tts_oracle.py'); ",
         "runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); ",
         "print(runner.base_max_generate_length(19_201, 7_680))"
     );
@@ -143,7 +143,7 @@ fn oracle_runner_rejects_trace_and_wav_inside_canonical_checkout() {
     .to_owned();
     let script = format!(
         "import importlib.util,sys; spec=importlib.util.spec_from_file_location('runner', r'{}'); runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); runner.PINNED_SHA={:?}; sys.argv=['runner','--checkout',r'{}','--model-dir',r'{}','--mode','base','--text','hello','--ref-audio',r'{}','--ref-text','reference','--latent-noise',r'{}','--dit-noise',r'{}','--trace',r'{}','--out',r'{}']; runner.main()",
-        env!("CARGO_MANIFEST_DIR").to_owned() + "/tools/dots/run_dots_tts_oracle.py",
+        env!("CARGO_MANIFEST_DIR").to_owned() + "/tools/oracle/dots/run_dots_tts_oracle.py",
         sha,
         checkout.display(),
         inputs.join("model").display(),
@@ -202,7 +202,7 @@ fn oracle_builder_treats_input_checkout_as_read_only() {
     let output = Command::new("bash")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tools/dots/build_dots_tts_oracle.sh"
+            "/tools/oracle/dots/build_dots_tts_oracle.sh"
         ))
         .arg(&directory)
         .output()
@@ -351,7 +351,7 @@ mod parity_support {
         let output = Command::new("bash")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tools/dots/build_dots_tts_oracle.sh"
+                "/tools/oracle/dots/build_dots_tts_oracle.sh"
             ))
             .arg(input)
             .output()
@@ -575,7 +575,7 @@ mod parity_support {
             .env("PYTHONNOUSERSITE", "1")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tools/dots/run_dots_tts_oracle.py"
+                "/tools/oracle/dots/run_dots_tts_oracle.py"
             ))
             .args(["--checkout", oracle_checkout.to_str().unwrap()])
             .args(["--model-dir", oracle_model.to_str().unwrap()])

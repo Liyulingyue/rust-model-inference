@@ -1,7 +1,7 @@
 //! VibeVoice ASR speech-frontend parity test.
 //!
 //! Compares the Rust ConvNeXt encoder + speech connectors against a numpy
-//! oracle (tools/vibevoice/vibevoice_oracle.py) on the same 83200-sample
+//! oracle (tools/oracle/vibevoice/vibevoice_oracle.py) on the same 83200-sample
 //! window. Skips when the oracle dumps or the mmproj gguf are absent so CI
 //! without the checkpoint stays green.
 
@@ -73,7 +73,7 @@ fn open_mmproj() -> Option<Arc<dyn TensorSource>> {
 #[test]
 fn encoder_and_connectors_match_numpy_oracle() {
     let Some(oracle) = oracle_dir() else {
-        eprintln!("skipping: oracle dumps not found (run tools/vibevoice/vibevoice_oracle.py)");
+        eprintln!("skipping: oracle dumps not found (run tools/oracle/vibevoice/vibevoice_oracle.py)");
         return;
     };
     let Some(mmproj) = open_mmproj() else {

@@ -6,7 +6,7 @@ exported Q8_0 GGUF. It prefills the exact prompt/audio rows and can dump each
 layer's last-row hidden state plus the final normalized hidden and logits.
 
 Usage:
-  python3 tools/vibevoice/vibevoice_llm_oracle.py models/VibeVoice-ASR-Streaming-7B.gguf \
+  python3 tools/oracle/vibevoice/vibevoice_llm_oracle.py models/VibeVoice-ASR-Streaming-7B.gguf \
       --prompt-ids 2610,525,264,... [--dump /tmp/vv-oracle/llm_hidden.f32]
 """
 

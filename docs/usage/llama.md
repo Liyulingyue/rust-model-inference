@@ -85,7 +85,7 @@ cargo run --release --bin rust-model-inference -- \
 `llama.cpp @ 749f688fcaa4c472ec034b08cb8a907c45cfaa02`：
 
 ```bash
-tools/parity/build_llama_oracle.sh
+tools/oracle/shared/build_llama_oracle.sh
 cargo test --test inference_parity
 ```
 

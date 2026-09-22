@@ -55,8 +55,8 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 
 构建 / 测试入口：
 
-- `tools/z_image/build_stable_diffusion_oracle.sh`
-- `tools/z_image/stable-diffusion-z-image-trace.patch`
+- `tools/oracle/z_image/build_stable_diffusion_oracle.sh`
+- `tools/oracle/z_image/stable-diffusion-z-image-trace.patch`
 - `tests/z_image_reference.rs`
 
 > 仓库口头习惯说的 `Dif.cpp` 实际指这个 stable-diffusion.cpp fork，

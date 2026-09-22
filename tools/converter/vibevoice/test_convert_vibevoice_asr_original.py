@@ -17,7 +17,7 @@ from tools.converter.vibevoice.convert_vibevoice_asr_original import (
     require_tensor,
 )
 from tools.converter.utils.gguf import quantize_q8_0
-from tools.vibevoice.vibevoice_llm_oracle import (
+from tools.oracle.vibevoice.vibevoice_llm_oracle import (
     assemble_input_rows,
     safetensors_name,
     tensor_to_f32,

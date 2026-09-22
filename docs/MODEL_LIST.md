@@ -6,9 +6,7 @@
 | dots.tts-base                 | base       | TTS                  | 原始开发 @ `32407a5`                  | https://huggingface.co/EvoAwaken-Workshop/dots-tts-base-gguf | 待核验 |
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
-| Gemma-4 E2B                   | E2B          | 文本、图像、音频      | llama.cpp @ `3173a56`（gemma4v）/ `gemma4uv` 来自 `tools/mtmd/models/gemma4uv.cpp` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
-| Gemma-4 E4B                   | E4B          | 待核验                | llama.cpp @ `3173a56` | | 尚无独立验证证据 |
-| Gemma-4 12B                   | 12B          | 文本、音频；图像（实验） | 文本：llama.cpp @ `3173a56`；`gemma4ua`：`b96806d` | https://www.modelscope.cn/models/unsloth/gemma-4-12b-it-GGUF | Q8_0 文本与 F16 `gemma4ua` 音频投影已逐位核验；`gemma4uv` 图像仅接入入口，尚未独立核验；音频要求 16 kHz mono PCM16 WAV |
+| Gemma-4                   | E2B / E4B / 12B          | 文本、图像、音频      | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B / 7B | 文本（翻译）                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
 | Jina-Embeddings-v5-Omni       |            | Embedding            |                                       |              | 待核验 |
@@ -23,14 +21,14 @@
 | Qwen2.5-Omni                  | 3B           | 文本、音频、视频、图像（文本、音频输出）               | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF             | √ |
 | Qwen2.5-VL                    | 3B           | 文本、图像               |                                       | https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF             | √ |
 | Qwen3                         | 0.6B       | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | √ |
-| Qwen3-Embedding               | 0.6B       | Embedding            |                                       |              | 待核验 |
+| Qwen3-Embedding               | 0.6B       | Embedding            |                                       | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF             | √ |
 | Qwen3-ASR                     | 0.6B       | ASR                  | llama.cpp                                      |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | √ |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |
 | Qwen3-TTS                     | 12Hz-1.7B-Base | TTS        | llama.cpp @ `201e50c`                 |              | 待核验 |
 | Qwen3-VL                      | 0.6B / 2B  | 多模态               |                                       |              | 待核验 |
 | Qwen3.5                       | 0.8B / 2B  | 文本                 | llama.cpp @ `b96806d`                 |              | 待核验 |
 | Qwen3.8                       | 27B        | 多模态               | llama.cpp @ `b96806d`                 |              | 待核验 |
-| Qwen-Drive-1.0               | 4B         | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/qwen_drive/README.md) |
+| Qwen-Drive-1.0               | 4B         | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/oracle/qwen_drive/README.md) |
 | Spark-X2.5                    | 1.7B / 4B  | 文本                 | XHToken/llama.cpp                     | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF             | √ |
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |

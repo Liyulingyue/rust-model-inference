@@ -356,7 +356,7 @@ PR / commit：
 3. **Vulkan Q5_K 端到端**：参照现有 Q4_K / Q6_K shader 改写，runtime parity test 接入 `parity_trace.rs`。
 4. **ARM64 dotprod / i8mm 内核**：Q4_0/Q8_0/Q4_K 全部走 i8mm 路径，预期 NEON 性能再提升 30-50%。
 5. **chunked prefill 跨模型推广**：先 lfm2（shortconv），再 llama / spark。
-6. **dreamx CUDA oracle**：当前 DreamX-Creator 仅 CPU，已通过 `tools/dreamx/dreamx_oracle_trace.py` 拿到上游 trace（commit `215d4cd7fbed7e161ab508ae1f85a8fee0536f62`），需要 GPU parity。
+6. **dreamx CUDA oracle**：当前 DreamX-Creator 仅 CPU，已通过 `tools/oracle/dreamx/dreamx_oracle_trace.py` 拿到上游 trace（commit `215d4cd7fbed7e161ab508ae1f85a8fee0536f62`），需要 GPU parity。
 
 ### 8.3 不建议重做的方向
 
@@ -373,7 +373,7 @@ PR / commit：
 | `parity_trace` feature | `src/parity_trace.rs` | SIMD/GPU vs scalar 运行时对照 |
 | `tests/quantized_inference.rs` | `tests/quantized_inference.rs` | 量化 dtype E2E 推理门禁 |
 | `tests/{qwen35,gemma4,nemotron_h,z_image,qwen_drive_vlm,...}_reference.rs` | `tests/` | 跨模型 Oracle 对齐 |
-| `tools/qwen_drive/` / `tools/neohorse/` / `tools/dreamx/` | `tools/` | 各模型上游 Oracle trace 工具 |
+| `tools/oracle/qwen_drive/` / `tools/converter/neohorse/` / `tools/oracle/dreamx/` | `tools/` | 各模型上游 Oracle trace 工具 |
 | `cargo build --release --features vulkan` | — | Vulkan 后端编译 |
 | `LD_LIBRARY_PATH=references/llama.cpp/build/bin/Release references/llama.cpp/build/bin/Release/llama-cli.exe` | Windows pinned | llama.cpp Oracle 验证 |
 

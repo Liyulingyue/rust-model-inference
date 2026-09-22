@@ -102,7 +102,7 @@ cargo run --release --bin rust-model-inference -- \
 `--ref-audio` / `--ref-text` 用于声音克隆；不传则使用 Base 模型的默认音色。
 
 Pinned llama.cpp Oracle：`201e50c2076a20adc460c41598593c7cd7b0813`，
-通过 `tests/qwen3_tts_reference.rs` 与 `tools/tts/build_qwen3_tts_oracle.sh` 覆盖。
+通过 `tests/qwen3_tts_reference.rs` 与 `tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh` 覆盖。
 
 ### 5.1 TTS 作为多模态回复后处理（`--tts-model` / `--tts-mmproj`）
 
@@ -177,8 +177,8 @@ cargo run --release --features parity-trace --bin rust-model-inference -- \
 
 构建 / 测试脚本：
 
-- `tools/parity/build_qwen35_oracle.sh`、`tests/qwen35_reference.rs`
-- `tools/tts/build_qwen3_tts_oracle.sh`、`tests/qwen3_tts_reference.rs`
+- `tools/oracle/qwen35/build_qwen35_oracle.sh`、`tests/qwen35_reference.rs`
+- `tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh`、`tests/qwen3_tts_reference.rs`
 
 ### CPU 性能基准
 

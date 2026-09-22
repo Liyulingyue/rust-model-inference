@@ -5,7 +5,7 @@ Memory-safe: tensors are dequantized lazily (per layer / per expert use),
 never the whole model at once.
 
 Usage:
-  models/.venv/bin/python tools/parity/lfm2moe_reference.py \
+  models/.venv/bin/python tools/oracle/shared/lfm2moe_reference.py \
       models/LFM2-8B-A1B-GGUF/LFM2-8B-A1B-Q8_0.gguf <rust_top10_stderr> [llama_logits.bin]
 """
 import sys

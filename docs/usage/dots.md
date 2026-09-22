@@ -99,9 +99,9 @@ Pinned Oracle：`studio-dots-ai/dots.tts @ 32407a55228630475c48ecdb2c4e2c0f9c09e
 
 构建 / 测试入口：
 
-- `tools/dots/build_dots_tts_oracle.sh`
-- `tools/dots/run_dots_tts_oracle.py`
-- `tools/dots/dots-tts-oracle-trace.patch`
+- `tools/oracle/dots/build_dots_tts_oracle.sh`
+- `tools/oracle/dots/run_dots_tts_oracle.py`
+- `tools/oracle/dots/dots-tts-oracle-trace.patch`
 - `tests/dots_tts_reference.rs`
 
 仓库记录的覆盖（commit `16451c2 feat(dots): dots.tts base/edit GGUF+mmproj

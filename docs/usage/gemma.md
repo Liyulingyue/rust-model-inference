@@ -98,7 +98,7 @@ Pinned Oracle：
 
 构建 / 测试入口：
 
-- `tools/gemma4/build_oracle.sh`
+- `tools/oracle/gemma4/build_oracle.sh`
 - `tests/gemma4_reference.rs`
 
 E2B 媒体门禁覆盖 attention softmax 前的 token IDs，以及

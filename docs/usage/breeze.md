@@ -114,5 +114,5 @@ Voice Design 与 Voice Clone 是两条独立路径；同时给 `--ref-audio` +
 - `src/app/breeze.rs` — CLI 入口（`run_breeze_tts_cli`）与参数校验
 - `src/app/tts.rs` — `--tts` dispatcher；按 mmproj 类型分派
 - `tools/converter/breeze/convert_breeze_plain.py` — 仓库自带 GGUF 导出器
-- `tools/breeze/compare_breeze_trace.py` — 与原生修订的 F32 逐 bit 对比
-- `tools/breeze/README.md` — 仓库转换 / 采样说明
+- `tools/oracle/breeze/compare_breeze_trace.py` — 与原生修订的 F32 逐 bit 对比
+- `tools/oracle/breeze/README.md` — 仓库转换 / 采样说明

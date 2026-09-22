@@ -28,7 +28,7 @@ Compare exact F32 checkpoint bits between native revisions when debugging a calc
 TRACE_DIR=$(mktemp -d)
 cargo build --release --features parity-trace --bin rust-model-inference
 RMI_PARITY_TRACE="$TRACE_DIR/candidate.jsonl" "$BIN" --tts --model "$MODEL" --mmproj "$CODEC" --prompt '你好。' --temperature 0 --max-tokens 2 --threads 4 --out "$TRACE_DIR/candidate.wav"
-python3 tools/breeze/compare_breeze_trace.py /path/to/reference.jsonl "$TRACE_DIR/candidate.jsonl"
+python3 tools/oracle/breeze/compare_breeze_trace.py /path/to/reference.jsonl "$TRACE_DIR/candidate.jsonl"
 ```
 
 The comparator fails at the first differing F32 bit pattern. Trace a failure through tensor layout, masks, normalization, and matrix dimensions. Use 24 kHz mono reference WAVs when checking the codec.

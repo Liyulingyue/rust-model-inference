@@ -284,7 +284,7 @@ fn git_head(path: &Path) -> String {
 
 fn build_oracles(llama: &Path, artifacts: &Path) -> (PathBuf, PathBuf) {
     let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/parity/build_qwen_drive_vlm_oracle.sh");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh");
     let output = command_output(
         Command::new("sh").arg(script).arg(llama).arg(artifacts),
         "Qwen-Drive Oracle build",
