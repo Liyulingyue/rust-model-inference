@@ -34,6 +34,7 @@
 | NeoHorse-1-9B | `qwen35` | 文本生成 | 无 | BF16 GGUF + NFC metadata | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 的 checkpoint 和 logits 与固定 llama.cpp 逐位一致；Tokenizer 对齐发布版本。发布权重不含 MTP；[转换、哈希与验证命令](../../tools/converter/neohorse/README.md)。 |
 | Ornith-1.5-9B | `qwen35` | 文本生成 | 无 | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | MiniCPM5-1B | `llama` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
+| Fun-ASR-Nano | `funasr-sensevoice-encoder` + `qwen3` | 语音识别 | FunASR encoder mmproj、WAV | F16 encoder + Q8_0 LLM | `Verified` | 真实 GGUF 端到端转写通过（6s sample.wav → "我想问我在滨海新区有房"，与 golden file 一致）；[`docs/usage/funasr.md`](../usage/funasr.md)。 |
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0 | `Verified` | 真实 GGUF 可完整生成；与 llama.cpp 前 6 个生成 token 一致，随后在 MoE 近平局处可能分叉。 |
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
@@ -76,7 +77,7 @@
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`。其中 `gemma4`、`spark2_5` 和 `dreamx` 使用各自的专用配置加载路径；`clip` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 
