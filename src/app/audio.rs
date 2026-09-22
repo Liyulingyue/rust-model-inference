@@ -23,9 +23,13 @@ pub fn run_asr_cli(
     {
         let probe = open_or_exit(mmproj_path, ComponentRole::Mmproj);
         let is_vibevoice = crate::models::vibevoice_asr::is_vibevoice_asr_mmproj(probe.as_ref());
+        let is_funasr = crate::models::funasr::is_funasr_encoder(probe.as_ref());
         drop(probe);
         if is_vibevoice {
             return crate::app::vibevoice::run_vibevoice_asr_cli(options);
+        }
+        if is_funasr {
+            return crate::models::funasr::run_funasr_cli(options, prefill_batch_size);
         }
     }
     let llm_source: Arc<dyn TensorSource> =
@@ -47,8 +51,8 @@ pub fn run_asr_cli(
         available,
     )));
     let decoder = Arc::new(Qwen3Model::from_source(llm_source, tokenizer, pool)?);
-    if decoder.config().architecture != "qwen3vl" {
-        return Err("--audio requires a qwen3vl decoder".into());
+    if decoder.config().architecture != "qwen3vl" && decoder.config().architecture != "qwen3" {
+        return Err("--audio requires a qwen3vl or qwen3 decoder".into());
     }
     let load_decoder_done = started.elapsed();
     let audio_source: Arc<dyn TensorSource> = match options.mmproj.as_deref() {
