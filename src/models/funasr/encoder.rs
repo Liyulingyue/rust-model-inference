@@ -14,9 +14,9 @@
 
 use crate::core::loader::load_static_weight;
 use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
-use rayon::prelude::*;
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -39,7 +39,7 @@ struct LayerNorm {
 struct SanmLayer {
     norm1: LayerNorm,
     qkv: Linear,
-    fsmn: Vec<f32>,      // [dim, kernel_size] row-major, F32
+    fsmn: Vec<f32>,
     linear_out: Linear,
     norm2: LayerNorm,
     ff_w1: Linear,
@@ -65,6 +65,7 @@ struct Adaptor {
 
 pub struct FunAsrEncoder {
     pub config: FunAsrConfig,
+    pool: Arc<ComputePool>,
     enc0: SanmLayer,
     encoders: Vec<SanmLayer>,
     after_norm: LayerNorm,
@@ -74,10 +75,9 @@ pub struct FunAsrEncoder {
 }
 
 impl FunAsrEncoder {
-    pub fn new(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub fn new(source: Arc<dyn TensorSource>, pool: Arc<ComputePool>) -> Result<Self, String> {
         let config = FunAsrConfig::from_source(source.as_ref())?;
 
-        // enc0: first layer (input dim may differ: input_size → output_size)
         let enc0 = load_sanm_layer(
             source.as_ref(),
             "audio_encoder.encoders0.0.",
@@ -85,7 +85,6 @@ impl FunAsrEncoder {
             config.output_size,
         )?;
 
-        // encoders.0..48
         let mut encoders = Vec::with_capacity(config.num_blocks - 1);
         for i in 0..config.num_blocks - 1 {
             encoders.push(load_sanm_layer(
@@ -99,7 +98,6 @@ impl FunAsrEncoder {
         let after_norm = load_layernorm(source.as_ref(), "audio_encoder.after_norm.")?;
         let tp_norm = load_layernorm(source.as_ref(), "audio_encoder.tp_norm.")?;
 
-        // tp_encoders.0..19
         let mut tp_encoders = Vec::with_capacity(config.tp_blocks);
         for i in 0..config.tp_blocks {
             tp_encoders.push(load_sanm_layer(
@@ -110,7 +108,6 @@ impl FunAsrEncoder {
             )?);
         }
 
-        // Adaptor
         let linear1 = load_linear(source.as_ref(), "audio_adaptor.linear1.")?;
         let linear2 = load_linear(source.as_ref(), "audio_adaptor.linear2.")?;
         let mut blocks = Vec::with_capacity(config.adp_n_layer);
@@ -124,6 +121,7 @@ impl FunAsrEncoder {
 
         Ok(Self {
             config,
+            pool,
             enc0,
             encoders,
             after_norm,
@@ -137,10 +135,6 @@ impl FunAsrEncoder {
         })
     }
 
-    /// Run the full encoder + adaptor pipeline.
-    ///
-    /// Input: `fbank` = [T * input_size] (already pre-scaled by sqrt(d_model) + position-encoded).
-    /// Output: `[T * adp_llm_dim]` row-major f32.
     pub fn encode(&self, fbank: &[f32], t: usize) -> Result<Vec<f32>, String> {
         let d = self.config.input_size;
         let d_model = self.config.output_size;
@@ -152,29 +146,23 @@ impl FunAsrEncoder {
         let dk = d_model / n_head;
         let kernel = self.config.kernel_size;
 
-        // enc0: first layer, no residual
         let mut x = self.sanm_layer_fwd(&self.enc0, fbank, t, d, d_model, n_head, dk, kernel, false);
 
-        // encoders.0..48
         for layer in &self.encoders {
             x = self.sanm_layer_fwd(layer, &x, t, d_model, d_model, n_head, dk, kernel, true);
         }
 
-        // after_norm
-        x = layernorm_fwd(&self.after_norm, &x, t);
+        x = layernorm_fwd(&self.after_norm, &x, t, &self.pool);
 
-        // tp_encoders.0..19
         for layer in &self.tp_encoders {
             x = self.sanm_layer_fwd(layer, &x, t, d_model, d_model, n_head, dk, kernel, true);
         }
 
-        // tp_norm
-        x = layernorm_fwd(&self.tp_norm, &x, t);
+        x = layernorm_fwd(&self.tp_norm, &x, t, &self.pool);
 
-        // Adaptor: linear1 → relu → linear2 → adp_layers
-        x = linear_fwd(&self.adaptor.linear1, &x, t);
+        x = linear_fwd(&self.adaptor.linear1, &x, t, &self.pool);
         relu_inplace(&mut x);
-        x = linear_fwd(&self.adaptor.linear2, &x, t);
+        x = linear_fwd(&self.adaptor.linear2, &x, t, &self.pool);
 
         let adp_n_head = self.config.adp_attention_heads;
         let adp_dk = self.config.adp_llm_dim / adp_n_head;
@@ -198,20 +186,16 @@ impl FunAsrEncoder {
         kernel: usize,
         residual: bool,
     ) -> Vec<f32> {
-        let normed = layernorm_fwd(&layer.norm1, x, t);
+        let normed = layernorm_fwd(&layer.norm1, x, t, &self.pool);
 
-        // Fused QKV
-        let qkv = linear_fwd(&layer.qkv, &normed, t);
+        let qkv = linear_fwd(&layer.qkv, &normed, t, &self.pool);
         let (q, k, v) = split_qkv(&qkv, t, out_dim);
 
-        // FSMN
-        let fsmn = fsmn_shift_accumulate(&v, t, out_dim, kernel, &layer.fsmn);
+        let fsmn = fsmn_shift_accumulate(&v, t, out_dim, kernel, &layer.fsmn, &self.pool);
 
-        // Attention
-        let attn = multi_head_attention(&q, &k, &v, t, out_dim, n_head, dk);
-        let o = linear_fwd(&layer.linear_out, &attn, t);
+        let attn = multi_head_attention(&q, &k, &v, t, out_dim, n_head, dk, &self.pool);
+        let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
 
-        // out = linear_out + fsmn
         let mut h = if residual {
             add_residual(x, &o, t * out_dim)
         } else {
@@ -221,12 +205,11 @@ impl FunAsrEncoder {
             h[i] += fsmn[i];
         }
 
-        // FFN
-        let normed2 = layernorm_fwd(&layer.norm2, &h, t);
-        let ff1 = linear_fwd(&layer.ff_w1, &normed2, t);
+        let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
+        let ff1 = linear_fwd(&layer.ff_w1, &normed2, t, &self.pool);
         let mut ff1_relu = ff1;
         relu_inplace(&mut ff1_relu);
-        let ff2 = linear_fwd(&layer.ff_w2, &ff1_relu, t);
+        let ff2 = linear_fwd(&layer.ff_w2, &ff1_relu, t, &self.pool);
 
         add_residual(&h, &ff2, t * out_dim)
     }
@@ -241,21 +224,21 @@ impl FunAsrEncoder {
         n_head: usize,
         dk: usize,
     ) -> Vec<f32> {
-        let normed = layernorm_fwd(&layer.norm1, x, t);
+        let normed = layernorm_fwd(&layer.norm1, x, t, &self.pool);
 
-        let q = linear_fwd(&layer.q, &normed, t);
-        let k = linear_fwd(&layer.k, &normed, t);
-        let v = linear_fwd(&layer.v, &normed, t);
-        let attn = multi_head_attention(&q, &k, &v, t, dim, n_head, dk);
-        let o = linear_fwd(&layer.linear_out, &attn, t);
+        let q = linear_fwd(&layer.q, &normed, t, &self.pool);
+        let k = linear_fwd(&layer.k, &normed, t, &self.pool);
+        let v = linear_fwd(&layer.v, &normed, t, &self.pool);
+        let attn = multi_head_attention(&q, &k, &v, t, dim, n_head, dk, &self.pool);
+        let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
 
         let mut h = add_residual(x, &o, t * dim);
 
-        let normed2 = layernorm_fwd(&layer.norm2, &h, t);
-        let ff1 = linear_fwd(&layer.ff_w1, &normed2, t);
+        let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
+        let ff1 = linear_fwd(&layer.ff_w1, &normed2, t, &self.pool);
         let mut ff1_relu = ff1;
         relu_inplace(&mut ff1_relu);
-        let ff2 = linear_fwd(&layer.ff_w2, &ff1_relu, t);
+        let ff2 = linear_fwd(&layer.ff_w2, &ff1_relu, t, &self.pool);
 
         h = add_residual(&h, &ff2, t * dim);
         h
@@ -295,32 +278,25 @@ fn load_layernorm(source: &dyn TensorSource, prefix: &str) -> Result<LayerNorm, 
 fn load_sanm_layer(
     source: &dyn TensorSource,
     prefix: &str,
-    in_dim: usize,
-    out_dim: usize,
+    _in_dim: usize,
+    _out_dim: usize,
 ) -> Result<SanmLayer, String> {
     let p = format!("{prefix}self_attn.");
-    let qkv = load_linear(source, &format!("{p}linear_q_k_v."))?;
-    let linear_out = load_linear(source, &format!("{p}linear_out."))?;
-    let fsmn = load_f32_vec(source, &format!("{p}fsmn_block.weight"))?;
-    let norm1 = load_layernorm(source, &format!("{prefix}norm1."))?;
-    let norm2 = load_layernorm(source, &format!("{prefix}norm2."))?;
-    let ff_w1 = load_linear(source, &format!("{prefix}feed_forward.w_1."))?;
-    let ff_w2 = load_linear(source, &format!("{prefix}feed_forward.w_2."))?;
     Ok(SanmLayer {
-        norm1,
-        qkv,
-        fsmn,
-        linear_out,
-        norm2,
-        ff_w1,
-        ff_w2,
+        norm1: load_layernorm(source, &format!("{prefix}norm1."))?,
+        qkv: load_linear(source, &format!("{p}linear_q_k_v."))?,
+        fsmn: load_f32_vec(source, &format!("{p}fsmn_block.weight"))?,
+        linear_out: load_linear(source, &format!("{p}linear_out."))?,
+        norm2: load_layernorm(source, &format!("{prefix}norm2."))?,
+        ff_w1: load_linear(source, &format!("{prefix}feed_forward.w_1."))?,
+        ff_w2: load_linear(source, &format!("{prefix}feed_forward.w_2."))?,
     })
 }
 
 fn load_adp_layer(
     source: &dyn TensorSource,
     prefix: &str,
-    dim: usize,
+    _dim: usize,
 ) -> Result<AdpLayer, String> {
     let p = format!("{prefix}self_attn.");
     Ok(AdpLayer {
@@ -360,45 +336,77 @@ fn load_f32_vec(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, Strin
     Ok(out)
 }
 
-// ======================= Forward primitives =======================
+// ======================= Forward primitives (ComputePool-based) =======================
+
+struct SharedMut<T>(*mut T);
+unsafe impl<T> Send for SharedMut<T> {}
+unsafe impl<T> Sync for SharedMut<T> {}
+impl<T> SharedMut<T> {
+    #[inline]
+    unsafe fn write(&self, index: usize, value: T) {
+        self.0.add(index).write(value);
+    }
+    #[inline]
+    unsafe fn slice(&self, start: usize, len: usize) -> &mut [T] {
+        std::slice::from_raw_parts_mut(self.0.add(start), len)
+    }
+}
 
 #[inline]
-fn linear_fwd(lin: &Linear, input: &[f32], t: usize) -> Vec<f32> {
+fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
     let in_dim = lin.in_dim;
     let out_dim = lin.out_dim;
     let mut out = vec![0.0f32; t * out_dim];
-    out.par_chunks_mut(out_dim)
-        .zip(input.par_chunks(in_dim))
-        .for_each(|(o, row)| {
-            lin.weight.kernel.forward(row, o, in_dim, out_dim);
-            if !lin.bias.is_empty() {
+    let out_ptr = SharedMut(out.as_mut_ptr());
+    let bias = &lin.bias;
+    let weight = &lin.weight;
+
+    pool.compute(move |ith, nth| {
+        let per = t.div_ceil(nth);
+        let start = ith * per;
+        let end = (start + per).min(t);
+        for row in start..end {
+            let input_row = &input[row * in_dim..(row + 1) * in_dim];
+            let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
+            weight.kernel.forward(input_row, output_row, in_dim, out_dim);
+            if !bias.is_empty() {
                 for i in 0..out_dim {
-                    o[i] += lin.bias[i];
+                    output_row[i] += bias[i];
                 }
             }
-        });
+        }
+    });
     out
 }
 
 #[inline]
-fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize) -> Vec<f32> {
+fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
     let dim = ln.dim;
+    let weight = &ln.weight;
+    let bias = &ln.bias;
     let mut out = vec![0.0f32; t * dim];
-    out.par_chunks_mut(dim)
-        .zip(x.par_chunks(dim))
-        .for_each(|(o, row)| {
-            let mean = row.iter().sum::<f32>() / dim as f32;
+    let out_ptr = SharedMut(out.as_mut_ptr());
+
+    pool.compute(move |ith, nth| {
+        let per = t.div_ceil(nth);
+        let start = ith * per;
+        let end = (start + per).min(t);
+        for row in start..end {
+            let input_row = &x[row * dim..(row + 1) * dim];
+            let output_row = unsafe { out_ptr.slice(row * dim, dim) };
+            let mean = input_row.iter().sum::<f32>() / dim as f32;
             let mut var = 0.0f32;
-            for v in row {
+            for v in input_row {
                 let d = v - mean;
                 var += d * d;
             }
             var /= dim as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
             for i in 0..dim {
-                o[i] = (row[i] - mean) * rstd * ln.weight[i] + ln.bias[i];
+                output_row[i] = (input_row[i] - mean) * rstd * weight[i] + bias[i];
             }
-        });
+        }
+    });
     out
 }
 
@@ -420,7 +428,14 @@ fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>
 /// output frame t: fsmn[t] = v[t] + sum_j kernel[:,j] * pad_v[t + j].
 ///
 /// `fsmn_w` is [dim, kernel_size] row-major (transposed from PyTorch at export).
-fn fsmn_shift_accumulate(v: &[f32], t: usize, dim: usize, kernel: usize, fsmn_w: &[f32]) -> Vec<f32> {
+fn fsmn_shift_accumulate(
+    v: &[f32],
+    t: usize,
+    dim: usize,
+    kernel: usize,
+    fsmn_w: &[f32],
+    pool: &ComputePool,
+) -> Vec<f32> {
     let pad = (kernel - 1) / 2;
     let mut padded = vec![0.0f32; (t + 2 * pad) * dim];
     for i in 0..t {
@@ -428,9 +443,14 @@ fn fsmn_shift_accumulate(v: &[f32], t: usize, dim: usize, kernel: usize, fsmn_w:
             .copy_from_slice(&v[i * dim..(i + 1) * dim]);
     }
     let mut fsmn = vec![0.0f32; t * dim];
-    fsmn.par_chunks_mut(dim)
-        .enumerate()
-        .for_each(|(t_idx, out)| {
+    let fsmn_ptr = SharedMut(fsmn.as_mut_ptr());
+
+    pool.compute(move |ith, nth| {
+        let per = t.div_ceil(nth);
+        let start = ith * per;
+        let end = (start + per).min(t);
+        for t_idx in start..end {
+            let out = unsafe { fsmn_ptr.slice(t_idx * dim, dim) };
             out.copy_from_slice(&v[t_idx * dim..(t_idx + 1) * dim]);
             for j in 0..kernel {
                 let pad_idx = t_idx + j;
@@ -440,7 +460,8 @@ fn fsmn_shift_accumulate(v: &[f32], t: usize, dim: usize, kernel: usize, fsmn_w:
                     out[i] += k_row[i] * pad_row[i];
                 }
             }
-        });
+        }
+    });
     fsmn
 }
 
@@ -453,43 +474,51 @@ fn multi_head_attention(
     dim: usize,
     n_head: usize,
     dk: usize,
+    pool: &ComputePool,
 ) -> Vec<f32> {
     let scale = 1.0 / (dk as f32).sqrt();
     let mut out = vec![0.0f32; t * dim];
-    let mut scores = vec![0.0f32; t * t];
-    for h in 0..n_head {
-        let off = h * dk;
-        for i in 0..t {
-            for j in 0..t {
-                let mut s = 0.0f32;
-                for d in 0..dk {
-                    s += q[i * dim + off + d] * k[j * dim + off + d];
-                }
-                scores[i * t + j] = s * scale;
-            }
-        }
-        for i in 0..t {
-            let row = &mut scores[i * t..(i + 1) * t];
-            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for s in row.iter_mut() {
-                *s = (*s - max).exp();
-                sum += *s;
-            }
-            for s in row.iter_mut() {
-                *s /= sum;
-            }
-        }
-        for i in 0..t {
-            for d in 0..dk {
-                let mut acc = 0.0f32;
+    let out_ptr = SharedMut(out.as_mut_ptr());
+
+    pool.compute(move |ith, nth| {
+        let per = n_head.div_ceil(nth);
+        let h_start = ith * per;
+        let h_end = (h_start + per).min(n_head);
+        let mut scores = vec![0.0f32; t * t];
+        for h in h_start..h_end {
+            let off = h * dk;
+            for i in 0..t {
                 for j in 0..t {
-                    acc += scores[i * t + j] * v[j * dim + off + d];
+                    let mut s = 0.0f32;
+                    for d in 0..dk {
+                        s += q[i * dim + off + d] * k[j * dim + off + d];
+                    }
+                    scores[i * t + j] = s * scale;
                 }
-                out[i * dim + off + d] = acc;
+            }
+            for i in 0..t {
+                let row = &mut scores[i * t..(i + 1) * t];
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0f32;
+                for s in row.iter_mut() {
+                    *s = (*s - max).exp();
+                    sum += *s;
+                }
+                for s in row.iter_mut() {
+                    *s /= sum;
+                }
+            }
+            for i in 0..t {
+                for d in 0..dk {
+                    let mut acc = 0.0f32;
+                    for j in 0..t {
+                        acc += scores[i * t + j] * v[j * dim + off + d];
+                    }
+                    unsafe { out_ptr.write(i * dim + off + d, acc); }
+                }
             }
         }
-    }
+    });
     out
 }
 

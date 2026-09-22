@@ -63,7 +63,14 @@ pub fn run_funasr_cli(
                 .unwrap_or_default()
         ));
     }
-    let encoder = FunAsrEncoder::new(Arc::clone(&enc_source))?;
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let pool = Arc::new(ComputePool::new(crate::app::cli::resolve_thread_count(
+        options.threads,
+        available,
+    )));
+    let encoder = FunAsrEncoder::new(Arc::clone(&enc_source), Arc::clone(&pool))?;
     eprintln!(
         "Fun-ASR-Nano encoder: {}+{} layers, d_model={}, adp_llm_dim={}",
         encoder.config.num_blocks,
@@ -87,14 +94,7 @@ pub fn run_funasr_cli(
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         llm_source.metadata(key).cloned()
     })?);
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let pool = Arc::new(ComputePool::new(crate::app::cli::resolve_thread_count(
-        options.threads,
-        available,
-    )));
-    let decoder = Arc::new(Qwen3Model::from_source(llm_source, tokenizer, pool)?);
+    let decoder = Arc::new(Qwen3Model::from_source(llm_source, tokenizer, Arc::clone(&pool))?);
     let n_embd = decoder.config().n_embd;
     if n_embd != encoder.config.adp_llm_dim as usize {
         return Err(format!(
