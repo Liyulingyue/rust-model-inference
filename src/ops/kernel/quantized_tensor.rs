@@ -185,9 +185,9 @@ impl<'a> QuantizedTensor<'a> {
     /// `Box<dyn Kernel>` view of self. This is intentionally a separate
     /// method rather than inline because `into_kernel` consumes `self`.
     pub(crate) fn clone_to_kernel(&self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-            use crate::ops::kernel::{
-                bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
-            };
+        use crate::ops::kernel::{
+            bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
+        };
         match self {
             Self::F32 { data, n_in, n_out } => {
                 Box::new(f32::F32Kernel::new(data.clone(), *n_in, *n_out))
@@ -470,9 +470,9 @@ impl<'a> QuantizedTensor<'a> {
 
     /// Build a `Box<dyn Kernel>` from this weight tensor.
     pub fn into_kernel(self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
-            use crate::ops::kernel::{
-                bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
-            };
+        use crate::ops::kernel::{
+            bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
+        };
         match self {
             Self::F32 { data, n_in, n_out } => Box::new(f32::F32Kernel::new(data, n_in, n_out)),
             Self::F16(w) => Box::new(f16::F16Kernel::new(w.bytes)),
