@@ -170,7 +170,7 @@ impl Qwen25OmniAudioModel {
         apply_gelu_erf(&mut hidden)?;
 
         for token in 0..layout.post_conv_tokens {
-            let position = token % (self.positions.len() / self.config.hidden);
+            let position = token % self.config.window;
             let position_row =
                 &self.positions[position * self.config.hidden..(position + 1) * self.config.hidden];
             let hidden_row =
@@ -510,11 +510,7 @@ fn prepare_whisper_mel(
         return Err("Audio samples must be non-empty and finite".into());
     }
     let layout = AudioLayout::for_real_frames(samples.len().div_ceil(HOP))?;
-    // llama.cpp's Whisper preprocessor appends silence before computing Mel
-    // frames. Leave enough zeros for the centered final FFT window.
-    let mut padded_samples = samples.to_vec();
-    padded_samples.extend([0.0; 400]);
-    let mel = compute_log_mel(&padded_samples)
+    let mel = compute_log_mel(samples)
         .map_err(|error| format!("Audio Mel error: {error:?}"))?;
     if mel.normalized.len() != mel.frames * mel_bins {
         return Err("Audio Mel output shape does not match the projector".into());
