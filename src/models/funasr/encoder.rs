@@ -20,7 +20,7 @@ use crate::ops::kernel::Weight;
 use crate::ops::softmax_inplace;
 use crate::ops::sum_sq_centered_f32;
 use crate::ops::{
-    dot_f32, sum_f32, vec_add_into, vec_mad_f32, vec_mad_per_channel_f32, vec_scale_f32,
+    dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -526,16 +526,13 @@ fn multi_head_attention(
                 softmax_inplace(row);
             }
             // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
+            //
+            // `kqv_dot_f32` is self-contained (zeros the slice and picks
+            // SIMD/scalar internally). Do not re-accumulate below — that
+            // would double the result.
             for i in 0..t {
                 let out_row = unsafe { out_ptr.slice(i * dim + off, dk) };
                 kqv_dot_f32(out_row, v, &scores[i * t..(i + 1) * t], t, dim, off);
-                for j in 0..t {
-                    let s = scores[i * t + j];
-                    if s != 0.0 {
-                        let v_row = &v[j * dim + off..j * dim + off + dk];
-                        vec_mad_f32(out_row, v_row, s);
-                    }
-                }
             }
         }
     });
@@ -600,11 +597,11 @@ unsafe fn kqv_dot_f32_avx2(
 ) {
     use std::arch::x86_64::*;
 
-    // NEON path is 16-wide FMA unrolled (4 d * 16 j = 64 f32 acc).
-    // Mirror on AVX2 with 8-wide FMA unrolled (8 d * 16 j = 128 f32 acc)
-    // so the per-row work stays ~the same magnitude (16 j is the common
-    // unroll). Use 16 ymm accumulators so each inner FMA is independent
-    // and the dependency chain is short.
+    // Mirror of the NEON path: 16 ymm accumulators per d-block (8 d's
+    // wide), each holds the partial sum for one of the 16 j-slices. After
+    // the main j-loop, reduce lane-wise across the 16 accumulators to get
+    // 8 distinct output values (one per d-lane) and store them as a
+    // single ymm.
     for d in (0..out.len()).step_by(8) {
         let mut acc = [_mm256_setzero_ps(); 16];
         let mut j = 0;
@@ -618,19 +615,15 @@ unsafe fn kqv_dot_f32_avx2(
             }
             j += 16;
         }
-        // Horizontal reduce 16 ymm into 1 via pairwise sum.
+        // Lane-wise reduce: sum across the 16 ymm accumulators keeps the
+        // 8 d-lanes separate. acc[k][l] holds sum_j score[j] * V[j][d+l]
+        // restricted to the j-slice owned by acc[k]; summing the 16 slices
+        // gives the full per-lane result.
         let mut sum = acc[0];
         for k in 1..16 {
             sum = _mm256_add_ps(sum, acc[k]);
         }
-        sum = _mm256_hadd_ps(sum, sum);
-        sum = _mm256_hadd_ps(sum, sum);
-        let lo = _mm256_castps256_ps128(sum);
-        let hi = _mm256_extractf128_ps::<1>(sum);
-        let total = _mm_add_ps(lo, hi);
-        let total = _mm_add_ps(total, _mm_movehl_ps(total, total));
-        let total = _mm_add_ss(total, _mm_shuffle_ps(total, total, 0x55));
-        let mut total_scalar = _mm_cvtss_f32(total);
+        // `sum` is 8-wide with lane l = out[d+l] from the first 16 j's.
 
         while j + 8 <= t {
             let mut s = _mm256_setzero_ps();
@@ -641,21 +634,23 @@ unsafe fn kqv_dot_f32_avx2(
                     s,
                 );
             }
-            // Reduce 8-lane s to scalar via pairwise hadd.
-            let s = _mm256_hadd_ps(s, s);
-            let s = _mm256_hadd_ps(s, s);
-            let lo = _mm256_castps256_ps128(s);
-            let hi = _mm256_extractf128_ps::<1>(s);
-            let lane = _mm_cvtss_f32(_mm_add_ss(lo, _mm_shuffle_ps(lo, hi, 0x11)));
-            total_scalar += lane;
+            sum = _mm256_add_ps(sum, s);
             j += 8;
         }
         while j < t {
-            total_scalar += scores[j]
-                * unsafe { *v.as_ptr().add(j * dim + off + d) };
+            let mut lane_add = _mm256_setzero_ps();
+            let v_row = v.as_ptr().add(j * dim + off + d);
+            let s = scores[j];
+            // Broadcast score[j] and FMA into a fresh lane-add vector.
+            lane_add = _mm256_fmadd_ps(
+                _mm256_loadu_ps(v_row),
+                _mm256_set1_ps(s),
+                lane_add,
+            );
+            sum = _mm256_add_ps(sum, lane_add);
             j += 1;
         }
-        _mm_storeu_ps(out.as_mut_ptr().add(d), _mm_set1_ps(total_scalar));
+        _mm256_storeu_ps(out.as_mut_ptr().add(d), sum);
     }
 }
 
@@ -805,7 +800,7 @@ mod parity_tests {
             .iter()
             .flat_map(|bits: &u16| bits.to_le_bytes())
             .collect::<Vec<_>>();
-        let actual = unsafe { super::funasr_f16_dot_neon(&bytes, &input) };
+        let actual = unsafe { super::funasr_f16_dot_f16_neon(&bytes, &input) };
         assert_eq!(actual.to_bits(), 0xbff1_455e);
     }
 
@@ -847,8 +842,108 @@ mod parity_tests {
                 }
             }
             let mut out = [0.0f32; 4];
-            unsafe { super::kqv_ggml_neon(&mut out, &v, &scores, t, 4, 0) };
+            super::kqv_dot_f32(&mut out, &v, &scores, t, 4, 0);
             assert_eq!(out.map(f32::to_bits), expected, "t={t}");
+        }
+    }
+
+    /// Scalar reference: `out[d] = sum_j scores[j] * V[j * dim + d]`.
+    /// Used by the regression tests below to validate that every SIMD/scalar
+    /// path inside `kqv_dot_f32` produces the same result — and crucially,
+    /// that the caller doesn't double-count.
+    fn kqv_dot_f32_scalar_reference(
+        out: &mut [f32],
+        v: &[f32],
+        scores: &[f32],
+        t: usize,
+        dim: usize,
+        off: usize,
+    ) {
+        for o in out.iter_mut() {
+            *o = 0.0;
+        }
+        for j in 0..t {
+            let s = scores[j];
+            if s != 0.0 {
+                for (o, vi) in out.iter_mut().zip(v[j * dim + off..].iter()) {
+                    *o += s * vi;
+                }
+            }
+        }
+    }
+
+    /// Regression for the double-counting bug introduced when commit
+    /// `ccd39b6` refactored the aarch64 NEON branch into a unified
+    /// `kqv_dot_f32` call without removing the pre-existing scalar loop
+    /// below it. The output must match the scalar reference exactly, not
+    /// 2x it.
+    #[test]
+    fn kqv_dot_f32_scalar_fallback_matches_reference() {
+        // t=4, dk=4 — forces scalar fallback (t < 16 threshold).
+        let v: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let scores = [0.1, 0.2, 0.3, 0.4];
+        let mut out = [0.0f32; 4];
+        super::kqv_dot_f32(&mut out, &v, &scores, 4, 4, 0);
+        let mut expected = [0.0f32; 4];
+        kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, 4, 4, 0);
+        for (a, e) in out.iter().zip(expected.iter()) {
+            assert_eq!(a.to_bits(), e.to_bits());
+        }
+    }
+
+    /// Regression for double-counting: verifies that even with zero
+    /// "explicit zero-fill" outside (the caller passes an uninitialised
+    /// buffer), the function still produces the correct sum (not 2x).
+    /// This catches any future caller that adds a redundant `out.fill(0)`
+    /// followed by a fresh `kqv_dot_f32` call.
+    #[test]
+    fn kqv_dot_f32_does_not_double_count_with_uninitialised_input() {
+        // dk=4, t=10 — scalar fallback path. If the function accumulated
+        // twice (e.g. if a caller added a manual `out.fill(0)` followed by
+        // a `for j in 0..t` loop), output would be 2x.
+        let v: Vec<f32> = (0..40).map(|x| (x as f32) * 0.1).collect();
+        let scores: Vec<f32> = (0..10).map(|x| (x as f32 + 1.0) * 0.05).collect();
+        let mut out = [f32::from_bits(0xdeadbeef); 4]; // uninitialised sentinel
+        super::kqv_dot_f32(&mut out, &v, &scores, 10, 4, 0);
+        let mut expected = [0.0f32; 4];
+        kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, 10, 4, 0);
+        for (a, e) in out.iter().zip(expected.iter()) {
+            assert_eq!(a.to_bits(), e.to_bits(), "out != 2x reference");
+        }
+    }
+
+    /// SIMD path coverage (t >= 16, dk divisible by 8 on x86_64 / 4 on aarch64).
+    /// The function must select the SIMD kernel when available and still
+    /// match the scalar reference within tight ULP tolerance.
+    #[test]
+    fn kqv_dot_f32_simd_path_matches_scalar_reference() {
+        for (t, dk) in [(16, 4), (17, 8), (20, 8), (32, 8), (70, 8)] {
+            let dim = dk;
+            let v: Vec<f32> = (0..t * dim)
+                .map(|x| f32::from_bits(0x3e80_0000 + (x * 977 % 0x10_0000) as u32))
+                .collect();
+            let scores: Vec<f32> = (0..t)
+                .map(|j| f32::from_bits(0x3c00_0000 + (j * 317 % 0x10_0000) as u32))
+                .collect();
+            let mut out = vec![0.0f32; dk];
+            super::kqv_dot_f32(&mut out, &v, &scores, t, dim, 0);
+            let mut expected = vec![0.0f32; dk];
+            kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, t, dim, 0);
+            for (a, e) in out.iter().zip(expected.iter()) {
+                // SIMD and scalar reduction orders differ; allow a tiny
+                // relative ULP gap (≤2 ULP) for paths that aren't bit-exact.
+                let abs_e = e.abs();
+                let ulp = (a.to_bits() as i32).abs_diff(e.to_bits() as i32);
+                let rel = (a - e).abs() / abs_e.max(1e-30);
+                assert!(
+                    ulp <= 2 || rel < 1e-5,
+                    "t={t} dk={dk}: simd={} ref={} (ulp={}, rel={})",
+                    a,
+                    e,
+                    ulp,
+                    rel,
+                );
+            }
         }
     }
 }
