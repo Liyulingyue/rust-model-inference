@@ -99,10 +99,7 @@ pub unsafe fn matmul_q1_0_vs_q8_0_neon(
 }
 
 #[inline(always)]
-unsafe fn sum_i8x32(
-    lo: std::arch::aarch64::int8x16_t,
-    hi: std::arch::aarch64::int8x16_t,
-) -> i32 {
+unsafe fn sum_i8x32(lo: std::arch::aarch64::int8x16_t, hi: std::arch::aarch64::int8x16_t) -> i32 {
     use std::arch::aarch64::*;
     // Widen each 16×i8 to 8×i16, then pairwise to 4×i32, sum
     let lo16 = vmovl_s8(vget_low_s8(lo));
