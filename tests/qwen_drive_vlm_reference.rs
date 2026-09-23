@@ -335,13 +335,18 @@ fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
         let pool =
             std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
         encoder.encode_image(&pixels, 256, 256, &mut scratch, &pool)?;
-        let projected_rows = scratch.projected.len() / encoder.config.projection_dim;
-        rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint(
-            "omni.vision.projected",
-            None,
-            &[projected_rows, encoder.config.projection_dim],
-            &scratch.projected,
-        ));
+        #[cfg(feature = "parity-trace")]
+        {
+            let projected_rows = scratch.projected.len() / encoder.config.projection_dim;
+            rust_model_inference::parity_trace::report(
+                rust_model_inference::parity_trace::checkpoint(
+                    "omni.vision.projected",
+                    None,
+                    &[projected_rows, encoder.config.projection_dim],
+                    &scratch.projected,
+                ),
+            );
+        }
         Ok::<(), String>(())
     })();
     std::env::remove_var("RMI_PARITY_FILTER");
