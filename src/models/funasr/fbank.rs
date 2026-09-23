@@ -109,6 +109,15 @@ pub fn compute_fbank(wav: &[f32]) -> (Vec<f32>, usize) {
     let mut frame = vec![0.0f32; WINLEN];
     let mut win = vec![0.0f32; WINLEN];
     for i in 0..WINLEN {
+        // Compute the angle in f64 first so the ratio `i / (WINLEN - 1)`
+        // is not truncated to f32 precision before the multiply by 2*PI.
+        // The original all-f32 form
+        //   `(2.0 * PI * i as f32 / (WINLEN - 1) as f32).cos()`
+        // rounds the intermediate division at ~7 decimal digits and can
+        // drift in the last few bits of the Hann window; doing the
+        // division in f64 and casting back to f32 before `cos` matches
+        // llama.cpp's reference computation. The window is built once
+        // at startup so the f64 path is not a hot-path concern.
         let angle = (2.0f64 * std::f64::consts::PI * i as f64 / (WINLEN - 1) as f64) as f32;
         win[i] = 0.54 - 0.46 * angle.cos();
     }
