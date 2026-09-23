@@ -226,6 +226,27 @@ impl<'a> Kernel for F16Kernel<'a> {
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
+    /// Bit-exact llama.cpp semantics: quantise F32 activations to F16,
+    /// then do F16×F16 dot per output row with f64 lane accumulator (cast
+    /// back to f32 at the end). Used by parity-oracle paths (FunASR
+    /// mtmd-audio embedding) where the last-bit ULP drift of the F16×F32
+    /// SIMD path matters. Always opts in when the kernel holds F16
+    /// weights.
+    fn forward_f16_strict(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        _n_out: usize,
+    ) -> bool {
+        let mut input_f16: Vec<u16> = input.iter().map(|&v| crate::ops::f32_to_f16(v)).collect();
+        for (i, out_i) in output.iter_mut().enumerate() {
+            let row = &self.weight[i * n_in * 2..(i + 1) * n_in * 2];
+            *out_i = unsafe { dot_f16_f16_strict(row, &mut input_f16) };
+        }
+        true
+    }
+
     /// Batched rows use the same shared dispatch: F16×F32 SIMD when available,
     /// with the existing F16×F16 fallback elsewhere.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
@@ -300,6 +321,114 @@ pub(crate) fn forward_f16_dispatch(
         }
     }
     false
+}
+
+/// Strict F16×F16 dot product with f64 lane accumulator (bit-exact
+/// llama.cpp mtmd-audio embedding path).
+///
+/// The kernel's `forward()` path uses F16×F32 SIMD (`matmul_f16_vs_f32_*`)
+/// which is faster but drifts by a few ULP at the last mantissa bit. This
+/// helper matches llama.cpp, which quantises activations to F16 first
+/// then does F16×F16 dot in f64 accumulator (f32 intermediate widen on
+/// each lane, f64 lane reduce, then f32 cast).
+unsafe fn dot_f16_f16_strict(weight: &[u8], input: &[u16]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("f16c")
+        {
+            return unsafe { dot_f16_f16_strict_avx2(weight, input) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return unsafe { dot_f16_f16_strict_neon(weight, input) };
+        }
+    }
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    sum as f32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "f16c")]
+unsafe fn dot_f16_f16_strict_avx2(weight: &[u8], input: &[u16]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let mut sums = [_mm256_setzero_pd(); 4];
+    let mut i = 0;
+    while i + 16 <= input.len() {
+        let w_lo = _mm256_cvtph_ps(_mm_loadu_si128(
+            weight.as_ptr().add(i * 2) as *const __m128i,
+        ));
+        let w_hi = _mm256_cvtph_ps(_mm_loadu_si128(
+            weight.as_ptr().add(i * 2 + 16) as *const __m128i,
+        ));
+        let x_lo = _mm256_cvtph_ps(_mm_loadu_si128(
+            input.as_ptr().add(i) as *const __m128i,
+        ));
+        let x_hi = _mm256_cvtph_ps(_mm_loadu_si128(
+            input.as_ptr().add(i + 8) as *const __m128i,
+        ));
+        let lo = _mm256_mul_ps(w_lo, x_lo);
+        let hi = _mm256_mul_ps(w_hi, x_hi);
+        sums[0] = _mm256_add_pd(sums[0], _mm256_cvtps_pd(_mm256_extractf128_ps::<0>(lo)));
+        sums[1] = _mm256_add_pd(sums[1], _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(lo)));
+        sums[2] = _mm256_add_pd(sums[2], _mm256_cvtps_pd(_mm256_extractf128_ps::<0>(hi)));
+        sums[3] = _mm256_add_pd(sums[3], _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(hi)));
+        i += 16;
+    }
+    let mut sum = 0.0f64;
+    for lane in sums {
+        let hi = _mm256_extractf128_pd::<1>(lane);
+        let lo = _mm256_castpd256_pd128(lane);
+        sum += _mm_cvtsd_f64(_mm_add_sd(lo, hi));
+    }
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    _mm_cvtss_f32(_mm_set_ss(sum as f32))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f16_f16_strict_neon(weight: &[u8], input: &[u16]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let mut sums = [vdupq_n_f64(0.0); 4];
+    let mut i = 0;
+    while i + 8 <= input.len() {
+        let w = vreinterpretq_f16_u16(vld1q_u16(weight.as_ptr().add(i * 2).cast()));
+        let x = vreinterpretq_f16_u16(vld1q_u16(input.as_ptr().add(i)));
+        let low = vmulq_f32(vcvt_f32_f16(vget_low_f16(w)), vcvt_f32_f16(vget_low_f16(x)));
+        let high = vmulq_f32(
+            vcvt_f32_f16(vget_high_f16(w)),
+            vcvt_f32_f16(vget_high_f16(x)),
+        );
+        sums[0] = vaddq_f64(sums[0], vcvt_f64_f32(vget_low_f32(low)));
+        sums[1] = vaddq_f64(sums[1], vcvt_f64_f32(vget_high_f32(low)));
+        sums[2] = vaddq_f64(sums[2], vcvt_f64_f32(vget_low_f32(high)));
+        sums[3] = vaddq_f64(sums[3], vcvt_f64_f32(vget_high_f32(high)));
+        i += 8;
+    }
+    let mut sum = 0.0f64;
+    for lane in sums {
+        sum += vgetq_lane_f64(lane, 0) + vgetq_lane_f64(lane, 1);
+    }
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    sum as f32
 }
 
 #[cfg(test)]
