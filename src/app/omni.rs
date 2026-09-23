@@ -526,6 +526,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Jina v5 Omni retrieval GGUF"]
+    fn jina_audio_markers_use_the_models_real_token_ids() {
+        let model = std::env::var("RMI_JINA_OMNI_MODEL").unwrap();
+        let source = crate::GGUFLoader::from_file(Path::new(&model)).unwrap();
+        let tokenizer =
+            BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned()).unwrap();
+        let (start_name, pad_name, end_name) = marker_names(MediaKind::Audio);
+        let start = tokenizer.special_token_id(start_name).unwrap();
+        let pad = tokenizer.special_token_id(pad_name).unwrap();
+        let end = tokenizer.special_token_id(end_name).unwrap();
+        assert_eq!((start, pad, end), (151_670, 151_669, 151_671));
+
+        let mut tokens = tokenizer.encode(
+            "Represent this audio for retrieval.",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        let prompt_len = tokens.len();
+        append_media_markers(
+            &mut tokens,
+            &tokenizer,
+            MediaKind::Audio,
+            start,
+            pad,
+            end,
+            &[750],
+        );
+        assert_eq!(tokens.len(), prompt_len + 752);
+        assert_eq!(tokens[prompt_len], start);
+        assert!(tokens[prompt_len + 1..prompt_len + 751]
+            .iter()
+            .all(|&token| token == pad));
+        assert_eq!(tokens[prompt_len + 751], end);
+    }
+
+    #[test]
     fn generative_qwen_architecture_rejects_omni_embedding_mode() {
         use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
         use std::collections::HashMap;

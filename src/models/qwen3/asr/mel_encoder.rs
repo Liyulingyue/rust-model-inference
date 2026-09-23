@@ -649,6 +649,25 @@ impl AudioLinear {
         rows: usize,
         result: &mut Vec<f32>,
     ) -> Result<(), String> {
+        self.project_f16_impl(input, rows, result, false)
+    }
+
+    pub(in crate::models::qwen3) fn project_f16_ggml(
+        &self,
+        input: &[f32],
+        rows: usize,
+        result: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        self.project_f16_impl(input, rows, result, true)
+    }
+
+    fn project_f16_impl(
+        &self,
+        input: &[f32],
+        rows: usize,
+        result: &mut Vec<f32>,
+        ggml_f16_input: bool,
+    ) -> Result<(), String> {
         // Accept F16 or BF16 — the matmul contract is identical and the
         // F16/BF16 kernel dispatch handles both.
         if !matches!(self.weight.ggml_type, GGMLType::F16 | GGMLType::BF16)
@@ -668,9 +687,23 @@ impl AudioLinear {
             .zip(input.par_chunks(self.input))
             .try_for_each(|(output_row, input_row)| {
                 if !input_row.iter().all(|value| *value == 0.0) {
-                    self.weight
-                        .kernel
-                        .forward(input_row, output_row, self.input, self.output);
+                    if ggml_f16_input {
+                        self.weight.kernel.forward_prepared(
+                            input_row,
+                            &[],
+                            &[],
+                            None,
+                            output_row,
+                            self.input,
+                            self.output,
+                            0,
+                            1,
+                        );
+                    } else {
+                        self.weight
+                            .kernel
+                            .forward(input_row, output_row, self.input, self.output);
+                    }
                 }
                 if !self.bias.is_empty() {
                     for (value, bias) in output_row.iter_mut().zip(&self.bias) {
@@ -1134,6 +1167,57 @@ pub(in crate::models::qwen3) fn layer_norm_rows(
             epsilon,
             &mut output[row * width..(row + 1) * width],
         )?;
+    }
+    Ok(())
+}
+
+pub(in crate::models::qwen3) fn layer_norm_rows_qwen25(
+    input: &[f32],
+    rows: usize,
+    weights: &LayerNormWeights,
+    epsilon: f32,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
+    let width = weights.weight.len();
+    if rows == 0
+        || width == 0
+        || weights.bias.len() != width
+        || input.len() != checked_product("Qwen2.5 audio layer norm", rows, width)?
+        || !epsilon.is_finite()
+        || epsilon < 0.0
+    {
+        return Err("Invalid Qwen2.5 audio layer norm tensors".into());
+    }
+    resize_f32(output, "Qwen2.5 audio layer norm", input.len())?;
+    for row in 0..rows {
+        let values = &input[row * width..(row + 1) * width];
+        let sum = values
+            .iter()
+            .fold(0.0f64, |sum, &value| sum + f64::from(value));
+        let mean = (sum as f32) / width as f32;
+        let square = |value: f32| {
+            let centered = value - mean;
+            centered * centered
+        };
+        let mut variance = 0.0f64;
+        let mut groups = values.chunks_exact(4);
+        for group in &mut groups {
+            variance += f64::from(
+                (square(group[0]) + square(group[1])) + (square(group[2]) + square(group[3])),
+            );
+        }
+        for &value in groups.remainder() {
+            variance += f64::from(square(value));
+        }
+        let variance = (variance / width as f64) as f32;
+        let scale = 1.0 / (variance + epsilon).sqrt();
+        for lane in 0..width {
+            output[row * width + lane] =
+                (values[lane] - mean) * scale * weights.weight[lane] + weights.bias[lane];
+        }
+    }
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite Qwen2.5 audio layer norm output".into());
     }
     Ok(())
 }
@@ -2905,6 +2989,30 @@ mod tests {
         linear.project_f16(&[0.0], 1, &mut result).unwrap();
 
         assert_eq!(result, [0.0]);
+    }
+
+    #[test]
+    fn qwen25_f16_projection_rounds_activations_like_ggml() {
+        let weight: &'static [u8] = Box::leak(
+            crate::ops::f32_to_f16(1.0)
+                .to_le_bytes()
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        let linear = AudioLinear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight,
+                GGMLType::F16,
+                1,
+                1,
+            )),
+            input: 1,
+            output: 1,
+            bias: Vec::new(),
+        };
+        let mut result = Vec::new();
+        linear.project_f16_ggml(&[1.0001], 1, &mut result).unwrap();
+        assert_eq!(result[0].to_bits(), 1.0f32.to_bits());
     }
 
     #[test]

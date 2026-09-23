@@ -104,6 +104,10 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     /// Row-partitioned scalar F16×F32 matmul for direct prequantized callers.
     fn forward_prequantized(
         &self,
@@ -213,11 +217,8 @@ impl<'a> Kernel for F16Kernel<'a> {
         }
     }
 
-    /// F16 converts the input to F16 before the dot product, matching ggml's
-    /// `vec_dot_type = GGML_TYPE_F16` contract.  When AVX2+F16C is available
-    /// we skip the input pre-conversion and run the F16 weight × F32 input
-    /// kernel directly — same precision (F16→F32 inside the kernel via
-    /// `_mm256_cvtph_ps`) and ~2× faster than the legacy F16×F16 path.
+    /// The shared path keeps F32 activations on supported SIMD hosts. Callers
+    /// that require ggml's F16 activation rounding must opt in locally.
     fn forward(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         if forward_f16_dispatch(self.weight, input, output, n_in, n_out, 0, 1) {
             return;
@@ -225,8 +226,8 @@ impl<'a> Kernel for F16Kernel<'a> {
         self.forward_scaled(input, output, n_in, n_out, 1.0, &mut Vec::new());
     }
 
-    /// F16's `forward_batched` goes through `forward` so each F32 input row
-    /// is converted to F16 instead of using the prequantized-only entry.
+    /// Batched rows use the same shared dispatch: F16×F32 SIMD when available,
+    /// with the existing F16×F16 fallback elsewhere.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
@@ -352,13 +353,13 @@ mod tests {
                 kernel.forward_prepared(&input, &[], &[], None, &mut output, 7, 5, thread, 3);
             }
             let mut sequential = [0.0; 5];
-            kernel.forward(&input, &mut sequential, 7, 5);
+            kernel.forward_prepared(&input, &[], &[], None, &mut sequential, 7, 5, 0, 1);
             assert_eq!(output.map(f32::to_bits), sequential.map(f32::to_bits));
             for (row, &actual) in output.iter().enumerate() {
                 let expected = values[row * 7..(row + 1) * 7]
                     .iter()
                     .zip(input)
-                    // Prepared and ordinary paths both round activations to F16.
+                    // Prepared paths round activations to F16.
                     .map(|(w, x)| w.to_f64() * f16::from_f32(x).to_f64())
                     .sum::<f64>() as f32;
                 assert!(
@@ -471,9 +472,31 @@ mod tests {
         assert_eq!(output, [5.0, 10.0, 15.0]);
     }
 
+    #[test]
+    fn f16_kernel_forward_keeps_f32_activation_precision_on_simd_hosts() {
+        #[cfg(target_arch = "x86_64")]
+        if !(crate::ops::has_avx2_fma() && crate::ops::has_f16c()) {
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if !crate::ops::has_neon() {
+            return;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return;
+
+        let weight = f16_bytes(&[f16::ONE; 8]);
+        let input = [1.0003f32; 8];
+        let mut output = [0.0];
+
+        F16Kernel::new(&weight).forward(&input, &mut output, 8, 1);
+
+        assert!(output[0] > 8.002, "F32 activation was rounded to F16");
+    }
+
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
-    fn f16_kernel_matches_ggml_f16_input_and_native_accumulation() {
+    fn f16_kernel_scaled_path_matches_ggml_f16_input_and_native_accumulation() {
         let input = [
             0x3e06_184f,
             0xbe8b_2d10,
@@ -519,7 +542,7 @@ mod tests {
         .collect::<Vec<_>>();
         let mut output = [0.0f32; 1];
 
-        F16Kernel::new(&weight).forward(&input, &mut output, 32, 1);
+        F16Kernel::new(&weight).forward_scaled(&input, &mut output, 32, 1, 1.0, &mut Vec::new());
 
         assert_eq!(output[0].to_bits(), 0xbf92_1000);
     }

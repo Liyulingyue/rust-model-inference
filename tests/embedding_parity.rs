@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use rust_model_inference::GGUFLoader;
+
 const FIXTURES: &[&str] = &[
     "hello",
     "Hello, 世界! 123",
@@ -338,6 +340,40 @@ fn qwen3_embedding_bits_match_pinned_llama_cpp() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "requires RMI_JINA_OMNI_MODEL and QWEN3_EMBEDDING_MODEL"]
+fn jina_omni_and_qwen3_metadata_select_different_reduction_scopes() {
+    let metadata = |env| {
+        let source = GGUFLoader::from_file(std::env::var(env).unwrap()).unwrap();
+        [
+            source
+                .metadata("general.architecture")
+                .and_then(|value| value.to_string_val())
+                .map(str::to_owned),
+            source
+                .metadata("general.basename")
+                .and_then(|value| value.to_string_val())
+                .map(str::to_owned),
+            source
+                .metadata("general.finetune")
+                .and_then(|value| value.to_string_val())
+                .map(str::to_owned),
+        ]
+    };
+    assert_eq!(
+        metadata("RMI_JINA_OMNI_MODEL"),
+        [
+            Some("qwen3".into()),
+            Some("omni".into()),
+            Some("retrieval-text-hf".into())
+        ]
+    );
+    assert_eq!(
+        metadata("QWEN3_EMBEDDING_MODEL"),
+        [Some("qwen3".into()), Some("qwen3-embedding".into()), None]
+    );
 }
 
 #[test]

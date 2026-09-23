@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-20，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-09-23，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -21,6 +21,7 @@
 |---|---|---|---|---|---|---|
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
+| Jina Embeddings v5 Omni Small Retrieval | `qwen3` + `clip` mmproj | 文本、图像、音频 Embedding | 文本只需 `--embedding`；图像或音频还需对应 mmproj | Q8_0 LLM + F16 vision/audio mmproj | `Verified` | 文本通过 [`tests/embedding_parity.rs`](../../tests/embedding_parity.rs) 的 token IDs、pooled/final 1024 维 F32 位级对照；图像通过 [`tests/qwen_drive_vlm_reference.rs`](../../tests/qwen_drive_vlm_reference.rs) 的 patch、LayerNorm、Q 投影、首尾层和最终 `[64, 1024]` 投影逐位对照。音频在 macOS ARM CPU 上以 16 kHz 单声道 PCM16 WAV 对固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 的 `-fa off` 路径完成 `[750, 1024]` 投影 F32 全量逐位对照，主 CLI 实测输出 1024 维 Embedding；仅支持不超过 30 秒的单个 Whisper 块，超过会报错。[复现方法](../../tools/oracle/jina_audio/README.md)。视频组件未核验。 |
 | Qwen3-ASR-0.6B | `qwen3vl` | 语音识别 | Qwen3-ASR mmproj、WAV | Q8_0 LLM + Q8_0 mmproj | `Verified` | [`src/format/ggufrs.rs`](src/format/ggufrs.rs) 有固定文件哈希的 raw GGUF/GGUFRS 转写等价测试；仅支持 greedy 解码，不能同时传图像。 |
 | Qwen3-TTS-12Hz-1.7B-Base | `qwen3tts` | TTS、参考音频声音克隆 | mmproj；克隆时还需参考 WAV/文本 | Q8_0 GGUF + mmproj | `Verified` | [`tests/qwen3_tts_reference.rs`](tests/qwen3_tts_reference.rs) 覆盖 pinned llama.cpp Oracle。 |
 | Breeze-TTS-2 | `breeze` + `breeze_audio` | TTS、指令控制、参考音频声音克隆 | F32 codec GGUF；克隆时还需 24 kHz WAV/文本 | BF16 主模型 + F32 codec | `Verified` | 2026-09-10 从原始 checkpoint 转换并通过普通、instruction + CFG、参考音频三种真实 CLI；覆盖 tokenizer、配置、张量 shape/dtype、codec 和路由单测，未做主观音质评估。 |
@@ -53,7 +54,6 @@
 | Qwen2.5-Omni 兼容 GGUF 对 | `qwen2vl` + `qwen2.5o` projector | 文本、图像、视频、音频 | 匹配 mmproj | 多媒体编码、投影和生成路径 | `Supported` | 架构级覆盖，不代表所有 Qwen2.5-Omni 尺寸均可用。 |
 | Qwen3-Omni MoE 兼容 GGUF 对 | `qwen3vlmoe` + `qwen3vl_merger` projector | 文本、图像、视频、音频 | 匹配 mmproj | MoE、媒体投影和生成路径 | `Supported` | shared-expert 张量仍会被明确拒绝。 |
 | Qwen-Drive-1.0-4B（感知） | `qwen35` + `qwen_drive_perception` | 六相机 3D 检测、占用和地图分割 | `clip` BF16 mmproj、F32 perception、官方 frame manifest | F32 存储、BF16 计算；固定 fixture、真实 827-tensor 加载与单帧 CPU CLI 输出 | `Experimental` | ARM64 CPU 已核验 Tokenizer、预处理、FPN/view 与 head/postprocess 的原始 BF16 words；官方 nuScenes 六相机帧的真实 CLI 产出 300 个检测框、`[200,200,16]` 占用和 `[200,400]` 地图。NVIDIA CUDA 端到端 parity 尚未执行，不据此声明 CUDA 等价。 |
-| Jina Embeddings v5 Omni retrieval | 带 `pooling_type` 的 Qwen-family arch | 文本、图像、视频、音频 Embedding | 媒体输入需要匹配 mmproj | pooling、媒体编码、CLI 参数和单元测试 | `Supported` | 当前仓库没有固定真实 GGUF/Oracle 的回归测试。 |
 | LFM2.5-VL | `lfm2` | 图文生成 | SigLIP + LFM2 projector mmproj | 图像预处理、投影和生成路径 | `Supported` | 未在仓库中固定具体型号和真实 GGUF Oracle。 |
 | Hunyuan-MT2 1.8B | `hunyuan-dense` | 多语言翻译（33+5）、通用 chat | 无 | Q8_0 | `Verified` | 真实 GGUF 端到端翻译通过（中↔英三组用例），详见 [`docs/usage/hunyuan.md`](../usage/hunyuan.md)。Oracle pin 待补；其他 Hunyuan 尺寸（7B / 30B-A3B-MoE）尚未验证。 |
 | Granite 兼容文本 GGUF | `granite` | 文本生成 | 无 | 专用 prompt、attention/logit scaling | `Supported` | 架构路径已接入，但未固定一个具体 Granite 型号作为 E2E 回归。 |

@@ -14,7 +14,7 @@ index 102c6924d..02b4fa0e3 100644
  #include <regex>
  #include <string>
  #include <vector>
-@@ -74,6 +79,85 @@ static float common_ggml_get_float_value(const uint8_t * data,
+@@ -74,6 +79,91 @@ static float common_ggml_get_float_value(const uint8_t * data,
      return v;
  }
 
@@ -52,6 +52,12 @@ index 102c6924d..02b4fa0e3 100644
 +        name = "omni.vision.patch_bias";
 +    } else if (source_name == "inp_pos_emb") {
 +        name = "omni.vision.inp_pos_emb";
++    } else if (source_name == "ln1-0") {
++        name = "omni.vision.ln1";
++        layer = 0;
++    } else if (source_name == "Qcur-0" && t->ne[2] == 256) {
++        name = "omni.vision.q";
++        layer = 0;
 +    } else if (source_name == "projected") {
 +        name = "omni.vision.projected";
 +    } else if (source_name.rfind("layer_out-", 0) == 0) {
@@ -100,7 +106,7 @@ index 102c6924d..02b4fa0e3 100644
  #define INDENT "    "
 
  static void common_debug_print_tensor(uint8_t * data, ggml_type type, const int64_t * ne, const size_t * nb, int64_t n, bool abort_on_nan) {
-@@ -183,6 +267,7 @@ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
+@@ -183,6 +273,7 @@ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
 
      if (!ggml_is_quantized(t->type) && matches_filter) {
          uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
@@ -118,7 +124,7 @@ index 2719dae9b..51548daf7 100644
      common_init_result_ptr llama_init;
 -    common_debug_cb_user_data cb_data;
 +    common_debug_cb_user_data cb_data(params, {
-+        "patch_conv0", "patch_conv1", "patch_sum", "patch_bias", "inp_pos_emb", "layer_out-0", "layer_out-23", "projected"
++        "patch_conv0", "patch_conv1", "patch_sum", "patch_bias", "inp_pos_emb", "ln1-0", "Qcur-0", "layer_out-0", "layer_out-23", "projected"
 +    });
 
      llama_init = common_init_from_params(params);
