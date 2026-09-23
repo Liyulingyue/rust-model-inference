@@ -17,11 +17,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
-#[cfg(target_arch = "aarch64")]
-use crate::ops::softmax_approx_inplace;
-#[cfg(not(target_arch = "aarch64"))]
 use crate::ops::softmax_inplace;
-#[cfg(not(target_arch = "aarch64"))]
 use crate::ops::sum_sq_centered_f32;
 use crate::ops::{
     dot_f32, sum_f32, vec_add_into, vec_mad_f32, vec_mad_per_channel_f32, vec_scale_f32,
@@ -461,9 +457,6 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
             let input_row = &x[row * dim..(row + 1) * dim];
             let output_row = unsafe { out_ptr.slice(row * dim, dim) };
             let mean = (sum_f32(input_row) as f32) / dim as f32;
-            #[cfg(target_arch = "aarch64")]
-            let variance_sum = ggml_neon_variance_sum(input_row, mean);
-            #[cfg(not(target_arch = "aarch64"))]
             let variance_sum = sum_sq_centered_f32(input_row, mean);
             let var = (variance_sum / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
@@ -486,25 +479,6 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
     out
 }
 
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn ggml_neon_variance_sum(values: &[f32], mean: f32) -> f64 {
-    let mut sum = 0.0f64;
-    let mut chunks = values.chunks_exact(4);
-    for chunk in &mut chunks {
-        let a = (chunk[0] - mean).powi(2);
-        let b = (chunk[1] - mean).powi(2);
-        let c = (chunk[2] - mean).powi(2);
-        let d = (chunk[3] - mean).powi(2);
-        sum += ((a + b) + (c + d)) as f64;
-    }
-    for &value in chunks.remainder() {
-        sum += (value - mean).powi(2) as f64;
-    }
-    sum
-}
-
-#[inline]
 fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut q = vec![0.0f32; t * dim];
     let mut k = vec![0.0f32; t * dim];
@@ -623,9 +597,6 @@ fn multi_head_attention(
             // Softmax per query row
             for i in 0..t {
                 let row = &mut scores[i * t..(i + 1) * t];
-                #[cfg(target_arch = "aarch64")]
-                softmax_approx_inplace(row);
-                #[cfg(not(target_arch = "aarch64"))]
                 softmax_inplace(row);
             }
             // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
