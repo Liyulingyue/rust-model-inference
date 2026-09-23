@@ -4,9 +4,8 @@ use crate::models::qwen3::asr::audio_processor::log_mel_windows;
 use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, apply_gelu_erf, checked_product, full_attention_into,
-    layer_norm_rows, load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear,
-    LayerNormWeights,
+    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows,
+    load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
 };
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
@@ -140,11 +139,7 @@ impl Qwen25OmniAudioModel {
     /// audio. `use_whisper_fixed = true` uses the 30 s Whisper
     /// fixed-layout path used by Jina Embeddings v5 Omni (output is
     /// always 750 rows regardless of input length; max input 30 s).
-    pub fn encode(
-        &self,
-        samples: &[f32],
-        use_whisper_fixed: bool,
-    ) -> Result<Vec<f32>, String> {
+    pub fn encode(&self, samples: &[f32], use_whisper_fixed: bool) -> Result<Vec<f32>, String> {
         if use_whisper_fixed {
             self.encode_whisper_fixed(samples)
         } else {
@@ -757,8 +752,7 @@ fn prepare_chunked_mel(
     )?;
     for frame in 0..real_mel_frames {
         for mel_bin in 0..mel_bins {
-            input[frame * mel_bins + mel_bin] =
-                mel.normalized[mel_bin * mel.frames + frame];
+            input[frame * mel_bins + mel_bin] = mel.normalized[mel_bin * mel.frames + frame];
         }
     }
     Ok(input)
@@ -1197,8 +1191,18 @@ mod tests {
 
     #[test]
     fn audio_layout_whisper_fixed_rejects_a_second_whisper_chunk() {
-        assert_eq!(AudioLayout::for_real_frames_whisper_fixed(1).unwrap().output_rows, 750);
-        assert_eq!(AudioLayout::for_real_frames_whisper_fixed(3000).unwrap().output_rows, 750);
+        assert_eq!(
+            AudioLayout::for_real_frames_whisper_fixed(1)
+                .unwrap()
+                .output_rows,
+            750
+        );
+        assert_eq!(
+            AudioLayout::for_real_frames_whisper_fixed(3000)
+                .unwrap()
+                .output_rows,
+            750
+        );
         assert!(AudioLayout::for_real_frames_whisper_fixed(3001).is_err());
     }
 

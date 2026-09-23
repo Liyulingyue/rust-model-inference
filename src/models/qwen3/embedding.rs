@@ -687,11 +687,7 @@ mod tests {
             )),
             _ => None,
         };
-        assert!(
-            embedding_config("qwen3", metadata)
-                .unwrap()
-                .padded_dot
-        );
+        assert!(embedding_config("qwen3", metadata).unwrap().padded_dot);
 
         let other_arch = |key: &str| match key {
             "qwen35.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),
@@ -702,11 +698,7 @@ mod tests {
             )),
             _ => None,
         };
-        assert!(
-            !embedding_config("qwen35", other_arch)
-                .unwrap()
-                .padded_dot
-        );
+        assert!(!embedding_config("qwen35", other_arch).unwrap().padded_dot);
 
         let ordinary_qwen3 = |key: &str| match key {
             "qwen3.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),

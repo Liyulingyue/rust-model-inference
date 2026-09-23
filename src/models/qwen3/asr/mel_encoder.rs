@@ -2964,9 +2964,7 @@ mod tests {
         let mut result = Vec::new();
         // 1.0001 rounds to 1.0 in F16, so the matmul returns
         // 1.0 × 1.0 = 1.0 (bit-exact).
-        linear
-            .project_f16(&[1.0001], 1, &mut result, true)
-            .unwrap();
+        linear.project_f16(&[1.0001], 1, &mut result, true).unwrap();
         assert_eq!(result[0].to_bits(), 1.0f32.to_bits());
     }
 
