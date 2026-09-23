@@ -203,11 +203,9 @@ impl FunAsrEncoder {
         let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
 
         let mut h = o;
-        for i in 0..h.len() {
-            h[i] += fsmn[i];
-        }
+        vec_add_into(&fsmn, &mut h);
         if residual {
-            h = add_residual(x, &h, t * out_dim);
+            vec_add_into(&x[..t * out_dim], &mut h);
         }
 
         let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
