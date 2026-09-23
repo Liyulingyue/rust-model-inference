@@ -27,7 +27,7 @@ enum EmbeddingPooling {
 struct EmbeddingConfig {
     causal_attn: bool,
     pooling: EmbeddingPooling,
-    padded_value_reduction: bool,
+    padded_dot: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -97,7 +97,7 @@ fn embedding_config(
             ));
         }
     };
-    let padded_value_reduction = arch == "qwen3"
+    let padded_dot = arch == "qwen3"
         && matches!(
             get_meta("general.basename"),
             Some(crate::core::tensor::MetaValue::String(value)) if value == "omni"
@@ -110,7 +110,7 @@ fn embedding_config(
     Ok(EmbeddingConfig {
         causal_attn,
         pooling,
-        padded_value_reduction,
+        padded_dot,
     })
 }
 
@@ -477,7 +477,7 @@ pub fn run_embedding_tokens(
                 let n_padded = (n_cached + 255) / 256 * 256;
                 // Jina Omni's pinned ggml oracle reduces the zero-padded row.
                 // Other Qwen3 embedding models retain their established reduction order.
-                let n_value = if embedding_cfg.padded_value_reduction {
+                let n_value = if embedding_cfg.padded_dot {
                     n_padded
                 } else {
                     n_cached
@@ -564,13 +564,6 @@ pub fn run_embedding_tokens(
     }
 
     let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
-    #[cfg(feature = "parity-trace")]
-    crate::parity_trace::report(crate::parity_trace::checkpoint(
-        "embedding.pooled",
-        None,
-        &[n_embd],
-        &pooled,
-    ));
     l2_normalize_embedding(&mut pooled)?;
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -684,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_value_reduction_is_scoped_to_jina_omni() {
+    fn padded_dot_is_scoped_to_jina_omni() {
         let metadata = |key: &str| match key {
             "qwen3.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),
             "qwen3.attention.causal" => Some(crate::core::tensor::MetaValue::Bool(true)),
@@ -697,7 +690,7 @@ mod tests {
         assert!(
             embedding_config("qwen3", metadata)
                 .unwrap()
-                .padded_value_reduction
+                .padded_dot
         );
 
         let other_arch = |key: &str| match key {
@@ -712,7 +705,7 @@ mod tests {
         assert!(
             !embedding_config("qwen35", other_arch)
                 .unwrap()
-                .padded_value_reduction
+                .padded_dot
         );
 
         let ordinary_qwen3 = |key: &str| match key {
@@ -723,7 +716,7 @@ mod tests {
         assert!(
             !embedding_config("qwen3", ordinary_qwen3)
                 .unwrap()
-                .padded_value_reduction
+                .padded_dot
         );
     }
 
