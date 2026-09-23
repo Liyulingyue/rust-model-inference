@@ -1303,28 +1303,6 @@ thread_local! {
         std::cell::RefCell::new((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 }
 
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct FloatSinCos {
-    sine: f32,
-    cosine: f32,
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn __sincosf_stret(value: f32) -> FloatSinCos;
-}
-
-fn torch_sin_cos(value: f32) -> (f32, f32) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let result = __sincosf_stret(value);
-        return (result.cosine, result.sine);
-    }
-    #[cfg(not(target_os = "macos"))]
-    (value.cos(), value.sin())
-}
-
 pub(crate) struct TorchMt19937 {
     state: [u32; MT_N],
     left: usize,
@@ -1418,7 +1396,7 @@ impl TorchMt19937 {
             let u2 = values[index + 8];
             let radius = (-2.0 * u1.ln()).sqrt();
             let theta = (2.0 * std::f64::consts::PI * f64::from(u2)) as f32;
-            let (cosine, sine) = torch_sin_cos(theta);
+            let (sine, cosine) = theta.sin_cos();
             values[index] = radius * cosine;
             values[index + 8] = radius * sine;
         }

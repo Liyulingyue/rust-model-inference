@@ -1,7 +1,7 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::log_mel_windows;
-use crate::models::qwen3::asr::audio_processor::{compute_log_mel_qwen25, HOP};
+use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
     add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows_qwen25,
@@ -513,7 +513,7 @@ fn prepare_whisper_mel(
     // frames. Leave enough zeros for the centered final FFT window.
     let mut padded_samples = samples.to_vec();
     padded_samples.extend([0.0; 400]);
-    let mel = compute_log_mel_qwen25(&padded_samples)
+    let mel = compute_log_mel(&padded_samples)
         .map_err(|error| format!("Audio Mel error: {error:?}"))?;
     if mel.normalized.len() != mel.frames * mel_bins {
         return Err("Audio Mel output shape does not match the projector".into());

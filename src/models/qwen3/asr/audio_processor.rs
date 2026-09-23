@@ -18,19 +18,6 @@ unsafe extern "C" {
     fn log10(value: f64) -> f64;
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[repr(C)]
-struct SinCosF32 {
-    sin: f32,
-    cos: f32,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-unsafe extern "C" {
-    #[link_name = "__sincosf_stret"]
-    fn macos_sincosf(value: f32) -> SinCosF32;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsrAudioError {
     Unsupported(String),
@@ -311,10 +298,6 @@ pub(crate) struct RealFft {
 
 impl RealFft {
     pub(crate) fn new(size: usize) -> Result<Self, AsrAudioError> {
-        Self::new_with_oracle_twiddles(size, false)
-    }
-
-    fn new_with_oracle_twiddles(size: usize, oracle: bool) -> Result<Self, AsrAudioError> {
         if size == 0 {
             return Err(AsrAudioError::Invalid(
                 "FFT size must be greater than zero".into(),
@@ -334,18 +317,16 @@ impl RealFft {
             .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
         for index in 0..size {
             let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            let (sine, cosine) = if oracle {
-                let pair = unsafe { macos_sincosf(angle) };
-                (pair.sin, pair.cos)
-            } else {
-                angle.sin_cos()
-            };
-            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-            let (sine, cosine) = {
-                let _ = oracle;
-                angle.sin_cos()
-            };
+            // Twiddle table — uses `f32::sin_cos` from stdlib. Earlier
+            // revisions bound Apple libsystem's `__sincosf_stret` here
+            // to chase llama.cpp parity on macOS, but Rust's
+            // `@llvm.sincos.f32` lowers to the same `__sincosf_stret`
+            // call on aarch64-apple-darwin (and to glibc sincosf on
+            // Linux), so the explicit FFI added nothing. The
+            // Jina-audio parity oracle test that motivated it is
+            // #[ignore]'d and was never run; if it fails when run,
+            // re-introduce the helper from git history.
+            let (sine, cosine) = angle.sin_cos();
             sin.push(sine);
             cos.push(cosine);
         }
@@ -461,14 +442,6 @@ fn fft_real(
 }
 
 pub(crate) fn compute_log_mel(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
-    compute_log_mel_impl(samples, false)
-}
-
-pub(crate) fn compute_log_mel_qwen25(samples: &[f32]) -> Result<LogMel, AsrAudioError> {
-    compute_log_mel_impl(samples, true)
-}
-
-fn compute_log_mel_impl(samples: &[f32], oracle_twiddles: bool) -> Result<LogMel, AsrAudioError> {
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err(AsrAudioError::Invalid(
             "audio samples must be non-empty and finite".into(),
@@ -495,7 +468,7 @@ fn compute_log_mel_impl(samples: &[f32], oracle_twiddles: bool) -> Result<LogMel
     let fft_bins = FFT_SIZE / 2 + 1;
     let mut frame = zeroed_f32(FFT_SIZE)?;
     let hann = periodic_hann_window();
-    let mut fft = RealFft::new_with_oracle_twiddles(FFT_SIZE, oracle_twiddles)?;
+    let mut fft = RealFft::new(FFT_SIZE)?;
     let mut power = zeroed_f32(fft_bins)?;
 
     for frame_index in 0..frames {
