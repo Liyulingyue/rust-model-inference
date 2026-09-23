@@ -14,11 +14,6 @@
 //!   match libsystem_sleef.dylib bit-for-bit on macOS.
 //! - `sleef_rope` — Public Neox RoPE entry points built on `sleef_math`.
 
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn __sincosf(value: f32, sin: *mut f32, cos: *mut f32);
-}
-
 mod mrope;
 pub mod neox;
 mod norm;

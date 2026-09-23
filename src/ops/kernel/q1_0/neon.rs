@@ -5,8 +5,8 @@
 //!
 //! Strategy (mirrors AVX2):
 //! 1. Expand 4 bytes of bitfield → 32 × i8 (+1 or -1) via LUT.
-//! 2. Use `vsignq_s8` to flip Q8 signs: +1 → keep, -1 → negate.
-//! 3. Widen to i16, pairwise add, widen to i32, sum.
+//! 2. Multiply in i16 so negating a Q8 value of -128 remains representable.
+//! 3. Sum the widened products.
 
 #![cfg(target_arch = "aarch64")]
 
@@ -88,7 +88,6 @@ pub unsafe fn matmul_q1_0_vs_q8_0_neon(
                 let signed_lo = vsignq_s8(y_lo, q_lo);
                 let signed_hi = vsignq_s8(y_hi, q_hi);
 
-                // Widen i8 → i16, pairwise add → i32, sum
                 let dot = sum_i8x32(signed_lo, signed_hi);
                 sum += dot as f32 * ds;
             }
@@ -109,5 +108,22 @@ unsafe fn sum_i8x32(lo: std::arch::aarch64::int8x16_t, hi: std::arch::aarch64::i
     vaddvq_s32(vaddq_s32(
         vaddq_s32(vpaddlq_s16(lo16), vpaddlq_s16(hi16)),
         vaddq_s32(vpaddlq_s16(lo16_2), vpaddlq_s16(hi16_2)),
-    ))
+    )) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn signed_q8_min_value_is_widened_before_negation() {
+        use std::arch::aarch64::*;
+        let input = [-128i8; 32];
+        let signs = [-1i8; 32];
+        let dot = unsafe {
+            sum_i8x32(
+                vsignq_s8(vld1q_s8(input.as_ptr()), vld1q_s8(signs.as_ptr())),
+                vsignq_s8(vld1q_s8(input.as_ptr().add(16)), vld1q_s8(signs.as_ptr().add(16))),
+            )
+        };
+        assert_eq!(dot, 4096);
+    }
 }

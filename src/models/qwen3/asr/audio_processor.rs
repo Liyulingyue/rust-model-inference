@@ -317,6 +317,15 @@ impl RealFft {
             .map_err(|_| AsrAudioError::Invalid("FFT table allocation failed".into()))?;
         for index in 0..size {
             let angle = (2.0 * std::f64::consts::PI * index as f64 / size as f64) as f32;
+            // Twiddle table — uses `f32::sin_cos` from stdlib. Earlier
+            // revisions bound Apple libsystem's `__sincosf_stret` here
+            // to chase llama.cpp parity on macOS, but Rust's
+            // `@llvm.sincos.f32` lowers to the same `__sincosf_stret`
+            // call on aarch64-apple-darwin (and to glibc sincosf on
+            // Linux), so the explicit FFI added nothing. The
+            // Jina-audio parity oracle test that motivated it is
+            // #[ignore]'d and was never run; if it fails when run,
+            // re-introduce the helper from git history.
             let (sine, cosine) = angle.sin_cos();
             sin.push(sine);
             cos.push(cosine);

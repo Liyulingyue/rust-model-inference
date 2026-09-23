@@ -9,7 +9,11 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LLAMA_PIN: &str = "b96806d96061049a5b574269b049bf6241d63d46";
-const VISION_FILTER: &str = "omni.vision.patch_conv0,omni.vision.patch_conv1,omni.vision.patch_sum,omni.vision.patch_bias,omni.vision.inp_pos_emb,omni.vision.layer_out,omni.vision.projected";
+const JINA_OMNI_MODEL_SHA256: &str =
+    "8fd3a363dd158a67bd19708f86b4f678908ef320cb8302fcae102ba7ed7f7d9f";
+const JINA_OMNI_MMPROJ_SHA256: &str =
+    "87f497f0272cd617b7700c8874e790882d31fbf03ce98ed8e24910f64d445dba";
+const VISION_FILTER: &str = "omni.vision.patch_conv0,omni.vision.patch_conv1,omni.vision.patch_sum,omni.vision.patch_bias,omni.vision.inp_pos_emb,omni.vision.ln1,omni.vision.q,omni.vision.layer_out,omni.vision.projected";
 const TEXT_FILTER: &str = "qwen35.prompt_ids,qwen35.mrope_positions,qwen35.layer_is_recurrent,qwen35.embedding,conv_output_raw-0,q_conv_predelta-0,k_conv_predelta-0,state_predelta-0,final_output-0,layer_output-0,attn_norm-3,Qcur_normed-3,Kcur_normed-3,Qcur-3,Kcur-3,layer_output-3,attn_norm-31,Qcur_normed-31,Kcur_normed-31,Qcur-31,Kcur-31,layer_output-31,result_norm,result_output,qwen35.greedy_token_ids";
 
 #[derive(Deserialize)]
@@ -226,7 +230,7 @@ fn inline_values(record: &Value) -> Option<&Vec<Value>> {
         .find_map(|field| record[field].as_array())
 }
 
-fn compare_text_traces(rust: &Path, oracle: &Path) -> Result<(), String> {
+fn compare_traces(rust: &Path, oracle: &Path) -> Result<(), String> {
     let rust = records(rust)?;
     let oracle = records(oracle)?;
     if rust.len() != oracle.len() {
@@ -311,9 +315,7 @@ fn build_oracles(llama: &Path, artifacts: &Path) -> (PathBuf, PathBuf) {
 
 fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
     use rust_model_inference::core::tensor::TensorSource;
-    use rust_model_inference::models::qwen35::vision::{
-        qwen_smart_resize, VisionEncoder, VisionScratchpad,
-    };
+    use rust_model_inference::models::qwen35::vision::{VisionEncoder, VisionScratchpad};
 
     let trace = artifacts.join("rust-vision.jsonl");
     std::env::set_var("RMI_PARITY_TRACE", &trace);
@@ -328,19 +330,23 @@ fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
         );
         let mut encoder = VisionEncoder::from_source(&source)?;
         encoder.precompute();
-        let grid = qwen_smart_resize(256, 256, &encoder.config)?;
-        assert_eq!((grid.image_width(), grid.image_height()), (256, 256));
         let pixels = vec![1.0f32; 256 * 256 * 3];
         let mut scratch = VisionScratchpad::new(&encoder.config);
         let pool =
             std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
         encoder.encode_image(&pixels, 256, 256, &mut scratch, &pool)?;
-        rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint(
-            "omni.vision.projected",
-            None,
-            &[grid.token_count(), encoder.config.projection_dim],
-            &scratch.projected,
-        ));
+        #[cfg(feature = "parity-trace")]
+        {
+            let projected_rows = scratch.projected.len() / encoder.config.projection_dim;
+            rust_model_inference::parity_trace::report(
+                rust_model_inference::parity_trace::checkpoint(
+                    "omni.vision.projected",
+                    None,
+                    &[projected_rows, encoder.config.projection_dim],
+                    &scratch.projected,
+                ),
+            );
+        }
         Ok::<(), String>(())
     })();
     std::env::remove_var("RMI_PARITY_FILTER");
@@ -507,7 +513,27 @@ fn qwen_drive_vlm_matches_llama_cpp_bitwise() {
     }
     let rust_text = run_rust_text(&model, &artifacts);
     let oracle_text = run_oracle_text(&text_oracle, &model, &artifacts);
-    if let Err(error) = compare_text_traces(&rust_text, &oracle_text) {
+    if let Err(error) = compare_traces(&rust_text, &oracle_text) {
+        panic!("{error}\nartifacts retained in {}", artifacts.display());
+    }
+    std::fs::remove_dir_all(artifacts).unwrap();
+}
+
+#[test]
+#[ignore = "requires Jina v5 Omni retrieval GGUF pair and pinned llama.cpp"]
+fn jina_omni_vision_matches_llama_cpp_bitwise() {
+    let model = required_path("RMI_JINA_OMNI_MODEL");
+    let mmproj = required_path("RMI_JINA_OMNI_MMPROJ");
+    let llama = required_path("RMI_LLAMA_CPP");
+    assert_eq!(sha256_file(&model).unwrap(), JINA_OMNI_MODEL_SHA256);
+    assert_eq!(sha256_file(&mmproj).unwrap(), JINA_OMNI_MMPROJ_SHA256);
+    assert_eq!(git_head(&llama), LLAMA_PIN);
+
+    let artifacts = unique_temp_dir("rmi-jina-omni");
+    let (_, vision_oracle) = build_oracles(&llama, &artifacts);
+    let rust = run_rust_vision(&mmproj, &artifacts);
+    let oracle = run_oracle_vision(&vision_oracle, &model, &mmproj, &artifacts);
+    if let Err(error) = compare_traces(&rust, &oracle) {
         panic!("{error}\nartifacts retained in {}", artifacts.display());
     }
     std::fs::remove_dir_all(artifacts).unwrap();

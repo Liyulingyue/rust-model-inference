@@ -21,27 +21,8 @@ unsafe extern "C" {
     fn powf(base: f32, exponent: f32) -> f32;
 }
 
-#[cfg(target_vendor = "apple")]
-#[repr(C)]
-struct SinCos {
-    sin: f32,
-    cos: f32,
-}
-
-#[cfg(target_vendor = "apple")]
-unsafe extern "C" {
-    #[link_name = "__sincosf_stret"]
-    fn sincosf(value: f32) -> SinCos;
-}
-
 #[inline]
 pub(super) fn sin_cos(value: f32) -> (f32, f32) {
-    #[cfg(target_vendor = "apple")]
-    {
-        let result = unsafe { sincosf(value) };
-        (result.sin, result.cos)
-    }
-    #[cfg(not(target_vendor = "apple"))]
     value.sin_cos()
 }
 
