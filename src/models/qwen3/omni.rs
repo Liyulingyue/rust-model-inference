@@ -1,16 +1,16 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::qwen3::asr::audio_processor::log_mel_windows;
-use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
+use crate::models::qwen3::asr::audio_processor::{compute_log_mel_qwen25, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows,
+    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows_qwen25,
     load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
 };
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
 
-const MEL_CHUNK: usize = 200;
+const WHISPER_CHUNK: usize = 3000;
 
 struct Conv1dWeights {
     weight: &'static [u8],
@@ -133,33 +133,7 @@ impl Qwen25OmniAudioModel {
     }
 
     pub fn encode(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
-        if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
-            return Err("Audio samples must be non-empty and finite".into());
-        }
-        let mel =
-            compute_log_mel(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
-        let real_frames = samples.len().div_ceil(HOP);
-        if mel.frames < real_frames || mel.normalized.len() != mel.frames * self.config.mel_bins {
-            return Err("Audio Mel output is shorter than the real sample duration".into());
-        }
-        let layout = AudioLayout::for_real_frames(real_frames)?;
-        if layout.output_rows == 0 {
-            return Err("Audio is too short to produce an embedding row".into());
-        }
-        let mut input = reserved_f32(
-            "Qwen2.5-Omni Mel input",
-            checked_product(
-                "Qwen2.5-Omni Mel input",
-                layout.padded_mel_frames,
-                self.config.mel_bins,
-            )?,
-        )?;
-        for frame in 0..real_frames {
-            for mel_bin in 0..self.config.mel_bins {
-                input[frame * self.config.mel_bins + mel_bin] =
-                    mel.normalized[mel_bin * mel.frames + frame];
-            }
-        }
+        let (layout, input) = prepare_whisper_mel(samples, self.config.mel_bins)?;
 
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -169,51 +143,33 @@ impl Qwen25OmniAudioModel {
             &input,
         ));
 
-        let mut hidden = reserved_f32(
-            "Qwen2.5-Omni convolution output",
-            checked_product(
-                "Qwen2.5-Omni convolution output",
-                layout.post_conv_tokens,
-                self.config.hidden,
-            )?,
-        )?;
         let mut conv1 = Vec::new();
-        let mut conv2 = Vec::new();
-        let mel_chunk_values = MEL_CHUNK * self.config.mel_bins;
-        let hidden_chunk_values = self.config.window * self.config.hidden;
-        for chunk in 0..layout.padded_mel_frames / MEL_CHUNK {
-            let input_start = chunk * mel_chunk_values;
-            conv1d_same_f16(
-                &input[input_start..input_start + mel_chunk_values],
-                MEL_CHUNK,
-                self.conv1.input,
-                self.conv1.output,
-                self.conv1.weight,
-                &self.conv1.bias,
-                1,
-                &mut conv1,
-            )?;
-            apply_gelu_erf(&mut conv1)?;
-            let chunk_start = chunk * MEL_CHUNK;
-            let valid_rows = real_frames.saturating_sub(chunk_start).min(MEL_CHUNK);
-            conv1[valid_rows * self.config.hidden..].fill(0.0);
-            conv1d_same_f16(
-                &conv1,
-                MEL_CHUNK,
-                self.conv2.input,
-                self.conv2.output,
-                self.conv2.weight,
-                &self.conv2.bias,
-                2,
-                &mut conv2,
-            )?;
-            apply_gelu_erf(&mut conv2)?;
-            let output_start = chunk * hidden_chunk_values;
-            hidden[output_start..output_start + hidden_chunk_values].copy_from_slice(&conv2);
-        }
+        conv1d_same_f16(
+            &input,
+            layout.padded_mel_frames,
+            self.conv1.input,
+            self.conv1.output,
+            self.conv1.weight,
+            &self.conv1.bias,
+            1,
+            &mut conv1,
+        )?;
+        apply_gelu_erf(&mut conv1)?;
+        let mut hidden = Vec::new();
+        conv1d_same_f16(
+            &conv1,
+            layout.padded_mel_frames,
+            self.conv2.input,
+            self.conv2.output,
+            self.conv2.weight,
+            &self.conv2.bias,
+            2,
+            &mut hidden,
+        )?;
+        apply_gelu_erf(&mut hidden)?;
 
         for token in 0..layout.post_conv_tokens {
-            let position = token % self.config.window;
+            let position = token % (self.positions.len() / self.config.hidden);
             let position_row =
                 &self.positions[position * self.config.hidden..(position + 1) * self.config.hidden];
             let hidden_row =
@@ -244,7 +200,7 @@ impl Qwen25OmniAudioModel {
         let mut scores = reserved_f32("Qwen2.5-Omni scores", self.config.window)?;
         let head_dim = self.config.hidden / self.config.heads;
         for layer in &self.layers {
-            layer_norm_rows(
+            layer_norm_rows_qwen25(
                 &hidden,
                 layout.post_conv_tokens,
                 &layer.ln1,
@@ -253,30 +209,28 @@ impl Qwen25OmniAudioModel {
             )?;
             layer
                 .q
-                .project_f16(&normed, layout.post_conv_tokens, &mut q)?;
+                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut q)?;
             layer
                 .k
-                .project_f16(&normed, layout.post_conv_tokens, &mut k)?;
+                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut k)?;
             layer
                 .v
-                .project_f16(&normed, layout.post_conv_tokens, &mut v)?;
-            block_attention_into(
+                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut v)?;
+            full_attention_into(
                 &q,
                 &k,
                 &v,
                 layout.post_conv_tokens,
-                real_frames.div_ceil(2),
                 self.config.heads,
                 head_dim,
-                self.config.window,
                 &mut scores,
                 &mut attention,
             )?;
             layer
                 .output
-                .project_f16(&attention, layout.post_conv_tokens, &mut update)?;
+                .project_f16_ggml(&attention, layout.post_conv_tokens, &mut update)?;
             add_residual(&mut hidden, &update)?;
-            layer_norm_rows(
+            layer_norm_rows_qwen25(
                 &hidden,
                 layout.post_conv_tokens,
                 &layer.ln2,
@@ -285,18 +239,18 @@ impl Qwen25OmniAudioModel {
             )?;
             layer
                 .up
-                .project_f16(&normed, layout.post_conv_tokens, &mut ffn_up)?;
+                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut ffn_up)?;
             apply_gelu_erf(&mut ffn_up)?;
             layer
                 .down
-                .project_f16(&ffn_up, layout.post_conv_tokens, &mut ffn_down)?;
+                .project_f16_ggml(&ffn_up, layout.post_conv_tokens, &mut ffn_down)?;
             add_residual(&mut hidden, &ffn_down)?;
         }
 
         let mut pooled = Vec::new();
         average_pool_pairs(&hidden, self.config.hidden, &mut pooled)?;
         pooled.truncate(layout.output_rows * self.config.hidden);
-        layer_norm_rows(
+        layer_norm_rows_qwen25(
             &pooled,
             layout.output_rows,
             &self.post_ln,
@@ -314,7 +268,7 @@ impl Qwen25OmniAudioModel {
 
         let mut projected = Vec::new();
         self.projector
-            .project_f16(&normed, layout.output_rows, &mut projected)?;
+            .project_f16_ggml(&normed, layout.output_rows, &mut projected)?;
         if projected.iter().any(|value| !value.is_finite()) {
             return Err("Non-finite Qwen2.5-Omni audio projection".into());
         }
@@ -535,20 +489,46 @@ impl AudioLayout {
         if real_mel_frames == 0 {
             return Err("Audio must contain at least one Mel frame".into());
         }
-        let padded_mel_frames = real_mel_frames
-            .checked_add(MEL_CHUNK - 1)
-            .ok_or("Audio Mel frame count overflow")?
-            / MEL_CHUNK
-            * MEL_CHUNK;
+        if real_mel_frames > WHISPER_CHUNK {
+            return Err("Audio exceeds the supported 30-second Whisper chunk".into());
+        }
+        let padded_mel_frames = WHISPER_CHUNK;
         Ok(Self {
             padded_mel_frames,
             post_conv_tokens: padded_mel_frames / 2,
-            output_rows: real_mel_frames
-                .checked_add(1)
-                .ok_or("Audio output row count overflow")?
-                / 4,
+            output_rows: padded_mel_frames / 4,
         })
     }
+}
+
+fn prepare_whisper_mel(
+    samples: &[f32],
+    mel_bins: usize,
+) -> Result<(AudioLayout, Vec<f32>), String> {
+    if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("Audio samples must be non-empty and finite".into());
+    }
+    let layout = AudioLayout::for_real_frames(samples.len().div_ceil(HOP))?;
+    // llama.cpp's Whisper preprocessor appends silence before computing Mel
+    // frames. Leave enough zeros for the centered final FFT window.
+    let mut padded_samples = samples.to_vec();
+    padded_samples.extend([0.0; 400]);
+    let mel = compute_log_mel_qwen25(&padded_samples)
+        .map_err(|error| format!("Audio Mel error: {error:?}"))?;
+    if mel.normalized.len() != mel.frames * mel_bins {
+        return Err("Audio Mel output shape does not match the projector".into());
+    }
+    let mut input = reserved_f32(
+        "Qwen2.5-Omni Mel input",
+        checked_product("Qwen2.5-Omni Mel input", layout.padded_mel_frames, mel_bins)?,
+    )?;
+    for frame in 0..layout.padded_mel_frames {
+        let source_frame = frame.min(mel.frames - 1);
+        for mel_bin in 0..mel_bins {
+            input[frame * mel_bins + mel_bin] = mel.normalized[mel_bin * mel.frames + source_frame];
+        }
+    }
+    Ok((layout, input))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -616,57 +596,6 @@ fn conv1d_same_f16(
             }
             output[output_row * output_dim + output_channel] = value;
         }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn block_attention_into(
-    query: &[f32],
-    key: &[f32],
-    value: &[f32],
-    tokens: usize,
-    valid_tokens: usize,
-    heads: usize,
-    head_dim: usize,
-    window: usize,
-    scores: &mut Vec<f32>,
-    output: &mut Vec<f32>,
-) -> Result<(), String> {
-    if window == 0
-        || tokens == 0
-        || tokens % window != 0
-        || valid_tokens == 0
-        || valid_tokens > tokens
-    {
-        return Err("Invalid Qwen2.5-Omni block-attention shape".into());
-    }
-    let width = checked_product("Qwen2.5-Omni attention width", heads, head_dim)?;
-    let len = checked_product("Qwen2.5-Omni attention values", tokens, width)?;
-    if query.len() != len || key.len() != len || value.len() != len {
-        return Err("Invalid Qwen2.5-Omni block-attention tensors".into());
-    }
-    resize_f32(output, "Qwen2.5-Omni attention output", len)?;
-    output.fill(0.0);
-    let mut chunk_output = Vec::new();
-    for start in (0..tokens).step_by(window) {
-        let chunk_rows = valid_tokens.saturating_sub(start).min(window);
-        if chunk_rows == 0 {
-            break;
-        }
-        let chunk_len = checked_product("Qwen2.5-Omni attention chunk", chunk_rows, width)?;
-        let offset = start * width;
-        full_attention_into(
-            &query[offset..offset + chunk_len],
-            &key[offset..offset + chunk_len],
-            &value[offset..offset + chunk_len],
-            chunk_rows,
-            heads,
-            head_dim,
-            scores,
-            &mut chunk_output,
-        )?;
-        output[offset..offset + chunk_len].copy_from_slice(&chunk_output);
     }
     Ok(())
 }
@@ -934,19 +863,43 @@ mod tests {
     }
 
     #[test]
-    fn audio_layout_chunks_200_mel_frames() {
+    fn audio_layout_uses_whisper_30_second_chunks() {
         let layout = AudioLayout::for_real_frames(201).unwrap();
-        assert_eq!(layout.padded_mel_frames, 400);
-        assert_eq!(layout.post_conv_tokens, 200);
-        assert_eq!(layout.output_rows, 50);
+        assert_eq!(layout.padded_mel_frames, 3000);
+        assert_eq!(layout.post_conv_tokens, 1500);
+        assert_eq!(layout.output_rows, 750);
     }
 
     #[test]
-    fn output_rows_follow_real_mel_frames_after_stride_and_avg_pool() {
-        assert_eq!(AudioLayout::for_real_frames(1).unwrap().output_rows, 0);
-        assert_eq!(AudioLayout::for_real_frames(2).unwrap().output_rows, 0);
-        assert_eq!(AudioLayout::for_real_frames(3).unwrap().output_rows, 1);
-        assert_eq!(AudioLayout::for_real_frames(1100).unwrap().output_rows, 275);
+    fn audio_layout_rejects_a_second_whisper_chunk() {
+        assert_eq!(AudioLayout::for_real_frames(1).unwrap().output_rows, 750);
+        assert_eq!(AudioLayout::for_real_frames(3000).unwrap().output_rows, 750);
+        assert!(AudioLayout::for_real_frames(3001).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Jina audio mmproj, WAV, and pinned llama.cpp projected sidecar"]
+    fn jina_audio_projection_matches_llama_cpp_bits() {
+        let read_words = |name: &str| {
+            let bytes = std::fs::read(std::env::var(name).expect(name)).unwrap();
+            assert_eq!(bytes.len() % 4, 0);
+            bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let wav = std::fs::read(std::env::var("RMI_JINA_AUDIO_WAV").unwrap()).unwrap();
+        let pcm = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav(&wav).unwrap();
+        let mmproj = std::env::var("RMI_JINA_AUDIO_MMPROJ").unwrap();
+        let source: Arc<dyn TensorSource> =
+            Arc::new(crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap());
+        let actual = encode_audio(source, &pcm, 1).unwrap();
+        let oracle = read_words("RMI_JINA_AUDIO_ORACLE_PROJECTED");
+        assert_eq!(actual.len(), 750 * 1024);
+        assert_eq!(actual.len(), oracle.len());
+        for (index, (actual, oracle)) in actual.iter().zip(oracle).enumerate() {
+            assert_eq!(actual.to_bits(), oracle, "projected value {index}");
+        }
     }
 
     #[test]
@@ -963,56 +916,6 @@ mod tests {
 
         conv1d_same_f16(&[1.0, 2.0, 3.0], 3, 1, 1, &weights, &[0.0], 2, &mut output).unwrap();
         assert_eq!(output, [210.0, 32.0]);
-    }
-
-    #[test]
-    fn block_attention_never_reads_an_adjacent_chunk() {
-        let query = [1.0, 1.0, 1.0, 1.0];
-        let key = [1.0, 1.0, 1.0, 1.0];
-        let value = [1.0, 3.0, 100.0, 300.0];
-        let mut scores = Vec::new();
-        let mut output = Vec::new();
-
-        block_attention_into(
-            &query,
-            &key,
-            &value,
-            4,
-            4,
-            1,
-            1,
-            2,
-            &mut scores,
-            &mut output,
-        )
-        .unwrap();
-
-        assert_eq!(output, [2.0, 2.0, 200.0, 200.0]);
-    }
-
-    #[test]
-    fn partial_audio_chunk_does_not_attend_to_padding() {
-        let query = [1.0, 1.0, 1.0, 1.0];
-        let key = [1.0, 1.0, 1.0, 1.0];
-        let value = [1.0, 3.0, 100.0, 300.0];
-        let mut scores = Vec::new();
-        let mut output = Vec::new();
-
-        block_attention_into(
-            &query,
-            &key,
-            &value,
-            4,
-            2,
-            1,
-            1,
-            4,
-            &mut scores,
-            &mut output,
-        )
-        .unwrap();
-
-        assert_eq!(&output[..2], [2.0, 2.0]);
     }
 
     #[test]
