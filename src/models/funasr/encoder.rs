@@ -376,28 +376,33 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         for row in start..end {
             let input_row = &input[row * in_dim..(row + 1) * in_dim];
             let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
-            #[cfg(target_arch = "aarch64")]
-            if let Some(bytes) = (weight.ggml_type == GGMLType::F16)
-                .then(|| weight.kernel.weight_bytes().expect("F16 kernel bytes"))
-            {
-                let input_f16 = input_row
-                    .iter()
-                    .map(|&value| crate::ops::f32_to_f16(value))
-                    .collect::<Vec<_>>();
-                for (output_index, result) in output_row.iter_mut().enumerate() {
-                    let weight_row =
-                        &bytes[output_index * in_dim * 2..(output_index + 1) * in_dim * 2];
-                    *result = unsafe { funasr_f16_dot_neon(weight_row, &input_f16) };
+            if weight.ggml_type == GGMLType::F16 {
+                // Llama.cpp's mtmd-audio embedding path quantises
+                // activations to F16 before the F16xF16 dot; F16xF32
+                // (Kernel::forward default) drifts by a few ULP at the
+                // last mantissa bit. Match llama.cpp via the dedicated
+                // helper.
+                if let Some(bytes) = weight.kernel.weight_bytes() {
+                    let input_f16 = input_row
+                        .iter()
+                        .map(|&value| crate::ops::f32_to_f16(value))
+                        .collect::<Vec<_>>();
+                    for (output_index, result) in output_row.iter_mut().enumerate() {
+                        let weight_row = &bytes
+                            [output_index * in_dim * 2..(output_index + 1) * in_dim * 2];
+                        *result =
+                            unsafe { funasr_f16_dot_f16(weight_row, &input_f16) };
+                    }
+                } else {
+                    weight
+                        .kernel
+                        .forward(input_row, output_row, in_dim, out_dim);
                 }
             } else {
                 weight
                     .kernel
                     .forward(input_row, output_row, in_dim, out_dim);
             }
-            #[cfg(not(target_arch = "aarch64"))]
-            weight
-                .kernel
-                .forward(input_row, output_row, in_dim, out_dim);
             if !bias.is_empty() {
                 for i in 0..out_dim {
                     output_row[i] += bias[i];
@@ -408,9 +413,86 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
     out
 }
 
+/// FunASR F16 weight x F16 input dot product.
+///
+/// `Kernel::forward` uses F16 x F32 (NEON `matmul_f16_vs_f32_neon` on
+/// aarch64) which is generally faster but slightly different precision.
+/// This path matches llama.cpp's mtmd-audio embedding path which
+/// quantises activations to F16 first, then does F16 x F16 dot in f64
+/// accumulator (i.e. f32 intermediate widen on each lane, f64 lane
+/// reduce, then f32 cast).
+pub(crate) unsafe fn funasr_f16_dot_f16(weight: &[u8], input: &[u16]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("f16c")
+        {
+            return unsafe { funasr_f16_dot_f16_avx2(weight, input) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return unsafe { funasr_f16_dot_f16_neon(weight, input) };
+        }
+    }
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    sum as f32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "f16c")]
+unsafe fn funasr_f16_dot_f16_avx2(weight: &[u8], input: &[u16]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let mut sums = [_mm256_setzero_pd(); 4];
+    let mut i = 0;
+    while i + 16 <= input.len() {
+        // Load 16 weight halves (32 bytes) + 16 input halves (32 bytes).
+        // f16c converts 8 halves at a time: do two unrolled halves.
+        let w_lo = _mm256_cvtph_ps(_mm_loadu_si128(
+            weight.as_ptr().add(i * 2) as *const __m128i,
+        ));
+        let w_hi = _mm256_cvtph_ps(_mm_loadu_si128(
+            weight.as_ptr().add(i * 2 + 16) as *const __m128i,
+        ));
+        let x_lo = _mm256_cvtph_ps(_mm_loadu_si128(
+            input.as_ptr().add(i) as *const __m128i,
+        ));
+        let x_hi = _mm256_cvtph_ps(_mm_loadu_si128(
+            input.as_ptr().add(i + 8) as *const __m128i,
+        ));
+        let lo = _mm256_mul_ps(w_lo, x_lo);
+        let hi = _mm256_mul_ps(w_hi, x_hi);
+        sums[0] = _mm256_add_pd(sums[0], _mm256_cvtps_pd(_mm256_extractf128_ps::<0>(lo)));
+        sums[1] = _mm256_add_pd(sums[1], _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(lo)));
+        sums[2] = _mm256_add_pd(sums[2], _mm256_cvtps_pd(_mm256_extractf128_ps::<0>(hi)));
+        sums[3] = _mm256_add_pd(sums[3], _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(hi)));
+        i += 16;
+    }
+    let mut sum = 0.0f64;
+    for lane in sums {
+        let hi = _mm256_extractf128_pd::<1>(lane);
+        let lo = _mm256_castpd256_pd128(lane);
+        sum += _mm_cvtsd_f64(_mm_add_sd(lo, hi));
+    }
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    _mm_cvtss_f32(_mm_set_ss(sum as f32))
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn funasr_f16_dot_neon(weight: &[u8], input: &[u16]) -> f32 {
+unsafe fn funasr_f16_dot_f16_neon(weight: &[u8], input: &[u16]) -> f32 {
     use std::arch::aarch64::*;
 
     let mut sums = [vdupq_n_f64(0.0); 4];
@@ -523,39 +605,11 @@ fn fsmn_shift_accumulate(
                 let pad_idx = t_idx + j;
                 let k_row = &fsmn_w[j * dim..(j + 1) * dim];
                 let pad_row = &padded[pad_idx * dim..(pad_idx + 1) * dim];
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    fsmn_add_unfused_neon(out, pad_row, k_row);
-                }
-                #[cfg(not(target_arch = "aarch64"))]
                 vec_mad_per_channel_f32(out, pad_row, k_row);
             }
         }
     });
     fsmn
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn fsmn_add_unfused_neon(out: &mut [f32], input: &[f32], weight: &[f32]) {
-    use std::arch::aarch64::*;
-
-    let mut i = 0;
-    while i + 4 <= out.len() {
-        let product = vmulq_f32(
-            vld1q_f32(input.as_ptr().add(i)),
-            vld1q_f32(weight.as_ptr().add(i)),
-        );
-        vst1q_f32(
-            out.as_mut_ptr().add(i),
-            vaddq_f32(vld1q_f32(out.as_ptr().add(i)), product),
-        );
-        i += 4;
-    }
-    while i < out.len() {
-        out[i] += input[i] * weight[i];
-        i += 1;
-    }
 }
 
 /// Standard multi-head attention: softmax(Q @ K^T / sqrt(dk)) @ V.
@@ -602,12 +656,7 @@ fn multi_head_attention(
             // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
             for i in 0..t {
                 let out_row = unsafe { out_ptr.slice(i * dim + off, dk) };
-                #[cfg(target_arch = "aarch64")]
-                if dk % 4 == 0 {
-                    unsafe { kqv_ggml_neon(out_row, v, &scores[i * t..(i + 1) * t], t, dim, off) };
-                    continue;
-                }
-                out_row.fill(0.0);
+                kqv_dot_f32(out_row, v, &scores[i * t..(i + 1) * t], t, dim, off);
                 for j in 0..t {
                     let s = scores[i * t + j];
                     if s != 0.0 {
@@ -621,9 +670,126 @@ fn multi_head_attention(
     out
 }
 
+/// `out[d] = sum_j scores[j] * V[j * dim + off + d]` for d in [0, dk).
+/// Self-contained: zero-fills `out`, then accumulates via the SIMD
+/// path on aarch64 or scalar fallback elsewhere. Mirrors the reduction
+/// order in llama.cpp's mtmd-audio attention path so the bit pattern
+/// matches the pinned CPU oracle.
+pub(crate) fn kqv_dot_f32(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    out.fill(0.0);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if out.len() % 8 == 0
+            && t >= 16
+            && std::arch::is_x86_feature_detected!("avx2")
+        {
+            unsafe {
+                kqv_dot_f32_avx2(out, v, scores, t, dim, off);
+                return;
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if out.len() % 4 == 0 && t >= 16 && std::arch::is_aarch64_feature_detected!("neon") {
+            unsafe {
+                kqv_dot_f32_neon(out, v, scores, t, dim, off);
+                return;
+            }
+        }
+    }
+    for j in 0..t {
+        let s = scores[j];
+        if s != 0.0 {
+            let v_row = &v[j * dim + off..j * dim + off + out.len()];
+            for (o, &vi) in out.iter_mut().zip(v_row.iter()) {
+                *o += s * vi;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn kqv_dot_f32_avx2(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    use std::arch::x86_64::*;
+
+    // NEON path is 16-wide FMA unrolled (4 d * 16 j = 64 f32 acc).
+    // Mirror on AVX2 with 8-wide FMA unrolled (8 d * 16 j = 128 f32 acc)
+    // so the per-row work stays ~the same magnitude (16 j is the common
+    // unroll). Use 16 ymm accumulators so each inner FMA is independent
+    // and the dependency chain is short.
+    for d in (0..out.len()).step_by(8) {
+        let mut acc = [_mm256_setzero_ps(); 16];
+        let mut j = 0;
+        while j + 16 <= t {
+            for slot in 0..16 {
+                acc[slot] = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(v.as_ptr().add((j + slot) * dim + off + d)),
+                    _mm256_set1_ps(scores[j + slot]),
+                    acc[slot],
+                );
+            }
+            j += 16;
+        }
+        // Horizontal reduce 16 ymm into 1 via pairwise sum.
+        let mut sum = acc[0];
+        for k in 1..16 {
+            sum = _mm256_add_ps(sum, acc[k]);
+        }
+        sum = _mm256_hadd_ps(sum, sum);
+        sum = _mm256_hadd_ps(sum, sum);
+        let lo = _mm256_castps256_ps128(sum);
+        let hi = _mm256_extractf128_ps::<1>(sum);
+        let total = _mm_add_ps(lo, hi);
+        let total = _mm_add_ps(total, _mm_movehl_ps(total, total));
+        let total = _mm_add_ss(total, _mm_shuffle_ps(total, total, 0x55));
+        let mut total_scalar = _mm_cvtss_f32(total);
+
+        while j + 8 <= t {
+            let mut s = _mm256_setzero_ps();
+            for slot in 0..8 {
+                s = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(v.as_ptr().add((j + slot) * dim + off + d)),
+                    _mm256_set1_ps(scores[j + slot]),
+                    s,
+                );
+            }
+            // Reduce 8-lane s to scalar via pairwise hadd.
+            let s = _mm256_hadd_ps(s, s);
+            let s = _mm256_hadd_ps(s, s);
+            let lo = _mm256_castps256_ps128(s);
+            let hi = _mm256_extractf128_ps::<1>(s);
+            let lane = _mm_cvtss_f32(_mm_add_ss(lo, _mm_shuffle_ps(lo, hi, 0x11)));
+            total_scalar += lane;
+            j += 8;
+        }
+        while j < t {
+            total_scalar += scores[j]
+                * unsafe { *v.as_ptr().add(j * dim + off + d) };
+            j += 1;
+        }
+        _mm_storeu_ps(out.as_mut_ptr().add(d), _mm_set1_ps(total_scalar));
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn kqv_ggml_neon(
+unsafe fn kqv_dot_f32_neon(
     out: &mut [f32],
     v: &[f32],
     scores: &[f32],
