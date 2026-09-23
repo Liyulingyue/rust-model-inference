@@ -4,8 +4,9 @@ use crate::models::qwen3::asr::audio_processor::log_mel_windows;
 use crate::models::qwen3::asr::audio_processor::{compute_log_mel, HOP};
 use crate::models::qwen3::asr::mel_encoder::Qwen3AudioModel;
 use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, apply_gelu_erf, checked_product, full_attention_into, layer_norm_rows_qwen25,
-    load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear, LayerNormWeights,
+    add_residual, apply_gelu_erf, checked_product, full_attention_into,
+    layer_norm_rows, load_f32_tensor, reserved_f32, resize_f32, static_tensor, AudioLinear,
+    LayerNormWeights,
 };
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
@@ -200,7 +201,7 @@ impl Qwen25OmniAudioModel {
         let mut scores = reserved_f32("Qwen2.5-Omni scores", self.config.window)?;
         let head_dim = self.config.hidden / self.config.heads;
         for layer in &self.layers {
-            layer_norm_rows_qwen25(
+            layer_norm_rows(
                 &hidden,
                 layout.post_conv_tokens,
                 &layer.ln1,
@@ -209,13 +210,13 @@ impl Qwen25OmniAudioModel {
             )?;
             layer
                 .q
-                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut q)?;
+                .project_f16(&normed, layout.post_conv_tokens, &mut q, true)?;
             layer
                 .k
-                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut k)?;
+                .project_f16(&normed, layout.post_conv_tokens, &mut k, true)?;
             layer
                 .v
-                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut v)?;
+                .project_f16(&normed, layout.post_conv_tokens, &mut v, true)?;
             full_attention_into(
                 &q,
                 &k,
@@ -228,9 +229,9 @@ impl Qwen25OmniAudioModel {
             )?;
             layer
                 .output
-                .project_f16_ggml(&attention, layout.post_conv_tokens, &mut update)?;
+                .project_f16(&attention, layout.post_conv_tokens, &mut update, true)?;
             add_residual(&mut hidden, &update)?;
-            layer_norm_rows_qwen25(
+            layer_norm_rows(
                 &hidden,
                 layout.post_conv_tokens,
                 &layer.ln2,
@@ -239,18 +240,18 @@ impl Qwen25OmniAudioModel {
             )?;
             layer
                 .up
-                .project_f16_ggml(&normed, layout.post_conv_tokens, &mut ffn_up)?;
+                .project_f16(&normed, layout.post_conv_tokens, &mut ffn_up, true)?;
             apply_gelu_erf(&mut ffn_up)?;
             layer
                 .down
-                .project_f16_ggml(&ffn_up, layout.post_conv_tokens, &mut ffn_down)?;
+                .project_f16(&ffn_up, layout.post_conv_tokens, &mut ffn_down, true)?;
             add_residual(&mut hidden, &ffn_down)?;
         }
 
         let mut pooled = Vec::new();
         average_pool_pairs(&hidden, self.config.hidden, &mut pooled)?;
         pooled.truncate(layout.output_rows * self.config.hidden);
-        layer_norm_rows_qwen25(
+        layer_norm_rows(
             &pooled,
             layout.output_rows,
             &self.post_ln,
@@ -268,7 +269,7 @@ impl Qwen25OmniAudioModel {
 
         let mut projected = Vec::new();
         self.projector
-            .project_f16_ggml(&normed, layout.output_rows, &mut projected)?;
+            .project_f16(&normed, layout.output_rows, &mut projected, true)?;
         if projected.iter().any(|value| !value.is_finite()) {
             return Err("Non-finite Qwen2.5-Omni audio projection".into());
         }
