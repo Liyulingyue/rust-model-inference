@@ -104,6 +104,10 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
+    fn weight_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     /// Row-partitioned scalar F16×F32 matmul for direct prequantized callers.
     fn forward_prequantized(
         &self,

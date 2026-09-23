@@ -17,9 +17,14 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
+#[cfg(target_arch = "aarch64")]
+use crate::ops::softmax_approx_inplace;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::softmax_inplace;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::ops::sum_sq_centered_f32;
 use crate::ops::{
-    dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add_into, vec_mad_f32,
-    vec_mad_per_channel_f32, vec_scale_f32,
+    dot_f32, sum_f32, vec_add_into, vec_mad_f32, vec_mad_per_channel_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -201,13 +206,12 @@ impl FunAsrEncoder {
         let attn = multi_head_attention(&q, &k, &v, t, out_dim, n_head, dk, &self.pool);
         let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
 
-        let mut h = if residual {
-            add_residual(x, &o, t * out_dim)
-        } else {
-            o
-        };
+        let mut h = o;
         for i in 0..h.len() {
             h[i] += fsmn[i];
+        }
+        if residual {
+            h = add_residual(x, &h, t * out_dim);
         }
 
         let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
@@ -376,6 +380,25 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         for row in start..end {
             let input_row = &input[row * in_dim..(row + 1) * in_dim];
             let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
+            #[cfg(target_arch = "aarch64")]
+            if let Some(bytes) = (weight.ggml_type == GGMLType::F16)
+                .then(|| weight.kernel.weight_bytes().expect("F16 kernel bytes"))
+            {
+                let input_f16 = input_row
+                    .iter()
+                    .map(|&value| crate::ops::f32_to_f16(value))
+                    .collect::<Vec<_>>();
+                for (output_index, result) in output_row.iter_mut().enumerate() {
+                    let weight_row =
+                        &bytes[output_index * in_dim * 2..(output_index + 1) * in_dim * 2];
+                    *result = unsafe { funasr_f16_dot_neon(weight_row, &input_f16) };
+                }
+            } else {
+                weight
+                    .kernel
+                    .forward(input_row, output_row, in_dim, out_dim);
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             weight
                 .kernel
                 .forward(input_row, output_row, in_dim, out_dim);
@@ -387,6 +410,39 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         }
     });
     out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn funasr_f16_dot_neon(weight: &[u8], input: &[u16]) -> f32 {
+    use std::arch::aarch64::*;
+
+    let mut sums = [vdupq_n_f64(0.0); 4];
+    let mut i = 0;
+    while i + 8 <= input.len() {
+        let w = vreinterpretq_f16_u16(vld1q_u16(weight.as_ptr().add(i * 2).cast()));
+        let x = vreinterpretq_f16_u16(vld1q_u16(input.as_ptr().add(i)));
+        let low = vmulq_f32(vcvt_f32_f16(vget_low_f16(w)), vcvt_f32_f16(vget_low_f16(x)));
+        let high = vmulq_f32(
+            vcvt_f32_f16(vget_high_f16(w)),
+            vcvt_f32_f16(vget_high_f16(x)),
+        );
+        sums[0] = vaddq_f64(sums[0], vcvt_f64_f32(vget_low_f32(low)));
+        sums[1] = vaddq_f64(sums[1], vcvt_f64_f32(vget_high_f32(low)));
+        sums[2] = vaddq_f64(sums[2], vcvt_f64_f32(vget_low_f32(high)));
+        sums[3] = vaddq_f64(sums[3], vcvt_f64_f32(vget_high_f32(high)));
+        i += 8;
+    }
+    let mut sum = 0.0f64;
+    for lane in sums {
+        sum += vgetq_lane_f64(lane, 0) + vgetq_lane_f64(lane, 1);
+    }
+    while i < input.len() {
+        let bits = u16::from_le_bytes([weight[i * 2], weight[i * 2 + 1]]);
+        sum += f64::from(crate::ops::f16_to_f32(bits) * crate::ops::f16_to_f32(input[i]));
+        i += 1;
+    }
+    sum as f32
 }
 
 #[inline]
@@ -404,8 +460,12 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
         for row in start..end {
             let input_row = &x[row * dim..(row + 1) * dim];
             let output_row = unsafe { out_ptr.slice(row * dim, dim) };
-            let mean = (sum_f32(input_row) / dim as f64) as f32;
-            let var = (sum_sq_centered_f32(input_row, mean) / dim as f64) as f32;
+            let mean = (sum_f32(input_row) as f32) / dim as f32;
+            #[cfg(target_arch = "aarch64")]
+            let variance_sum = ggml_neon_variance_sum(input_row, mean);
+            #[cfg(not(target_arch = "aarch64"))]
+            let variance_sum = sum_sq_centered_f32(input_row, mean);
+            let var = (variance_sum / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
             // output[i] = (input[i] - mean) * rstd * weight[i] + bias[i]
             // Fused as: output = bias + normalized * weight, where normalized = (input - mean) * rstd
@@ -424,6 +484,24 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
         }
     });
     out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn ggml_neon_variance_sum(values: &[f32], mean: f32) -> f64 {
+    let mut sum = 0.0f64;
+    let mut chunks = values.chunks_exact(4);
+    for chunk in &mut chunks {
+        let a = (chunk[0] - mean).powi(2);
+        let b = (chunk[1] - mean).powi(2);
+        let c = (chunk[2] - mean).powi(2);
+        let d = (chunk[3] - mean).powi(2);
+        sum += ((a + b) + (c + d)) as f64;
+    }
+    for &value in chunks.remainder() {
+        sum += (value - mean).powi(2) as f64;
+    }
+    sum
 }
 
 #[inline]
@@ -471,6 +549,11 @@ fn fsmn_shift_accumulate(
                 let pad_idx = t_idx + j;
                 let k_row = &fsmn_w[j * dim..(j + 1) * dim];
                 let pad_row = &padded[pad_idx * dim..(pad_idx + 1) * dim];
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    fsmn_add_unfused_neon(out, pad_row, k_row);
+                }
+                #[cfg(not(target_arch = "aarch64"))]
                 vec_mad_per_channel_f32(out, pad_row, k_row);
             }
         }
@@ -478,9 +561,33 @@ fn fsmn_shift_accumulate(
     fsmn
 }
 
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn fsmn_add_unfused_neon(out: &mut [f32], input: &[f32], weight: &[f32]) {
+    use std::arch::aarch64::*;
+
+    let mut i = 0;
+    while i + 4 <= out.len() {
+        let product = vmulq_f32(
+            vld1q_f32(input.as_ptr().add(i)),
+            vld1q_f32(weight.as_ptr().add(i)),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(i),
+            vaddq_f32(vld1q_f32(out.as_ptr().add(i)), product),
+        );
+        i += 4;
+    }
+    while i < out.len() {
+        out[i] += input[i] * weight[i];
+        i += 1;
+    }
+}
+
 /// Standard multi-head attention: softmax(Q @ K^T / sqrt(dk)) @ V.
 ///
-/// QK^T uses `dot_f32` (AVX2/NEON), KQV uses `vec_mad_f32` (AVX2/NEON FMA).
+/// QK^T uses `dot_f32` (AVX2/NEON). On ARM, KQV follows ggml's F32 dot
+/// reduction order so the attention output matches the pinned CPU oracle.
 fn multi_head_attention(
     q: &[f32],
     k: &[f32],
@@ -515,11 +622,20 @@ fn multi_head_attention(
             }
             // Softmax per query row
             for i in 0..t {
-                softmax_inplace(&mut scores[i * t..(i + 1) * t]);
+                let row = &mut scores[i * t..(i + 1) * t];
+                #[cfg(target_arch = "aarch64")]
+                softmax_approx_inplace(row);
+                #[cfg(not(target_arch = "aarch64"))]
+                softmax_inplace(row);
             }
             // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
             for i in 0..t {
                 let out_row = unsafe { out_ptr.slice(i * dim + off, dk) };
+                #[cfg(target_arch = "aarch64")]
+                if dk % 4 == 0 {
+                    unsafe { kqv_ggml_neon(out_row, v, &scores[i * t..(i + 1) * t], t, dim, off) };
+                    continue;
+                }
                 out_row.fill(0.0);
                 for j in 0..t {
                     let s = scores[i * t + j];
@@ -532,6 +648,60 @@ fn multi_head_attention(
         }
     });
     out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn kqv_ggml_neon(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    use std::arch::aarch64::*;
+
+    for d in (0..out.len()).step_by(4) {
+        let mut acc = [vdupq_n_f32(0.0); 16];
+        let mut j = 0;
+        while j + 16 <= t {
+            for slot in 0..16 {
+                acc[slot] = vfmaq_f32(
+                    acc[slot],
+                    vld1q_f32(v.as_ptr().add((j + slot) * dim + off + d)),
+                    vdupq_n_f32(scores[j + slot]),
+                );
+            }
+            j += 16;
+        }
+
+        let a = vaddq_f32(vaddq_f32(acc[0], acc[8]), vaddq_f32(acc[4], acc[12]));
+        let b = vaddq_f32(vaddq_f32(acc[1], acc[9]), vaddq_f32(acc[5], acc[13]));
+        let c = vaddq_f32(vaddq_f32(acc[2], acc[10]), vaddq_f32(acc[6], acc[14]));
+        let e = vaddq_f32(vaddq_f32(acc[3], acc[11]), vaddq_f32(acc[7], acc[15]));
+        let mut sum = vaddq_f32(vaddq_f32(a, b), vaddq_f32(c, e));
+
+        while j + 4 <= t {
+            for slot in 0..4 {
+                let product = vmulq_f32(
+                    vld1q_f32(v.as_ptr().add((j + slot) * dim + off + d)),
+                    vdupq_n_f32(scores[j + slot]),
+                );
+                sum = vaddq_f32(sum, product);
+            }
+            j += 4;
+        }
+        while j < t {
+            sum = vfmaq_f32(
+                sum,
+                vld1q_f32(v.as_ptr().add(j * dim + off + d)),
+                vdupq_n_f32(scores[j]),
+            );
+            j += 1;
+        }
+        vst1q_f32(out.as_mut_ptr().add(d), sum);
+    }
 }
 
 #[inline]
@@ -550,4 +720,126 @@ fn add_residual(x: &[f32], delta: &[f32], len: usize) -> Vec<f32> {
         out[i] += delta[i];
     }
     out
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::{fsmn_shift_accumulate, layernorm_fwd, linear_fwd, LayerNorm, Linear};
+    #[cfg(target_arch = "aarch64")]
+    use crate::core::tensor::GGMLType;
+    use crate::core::thread_pool::ComputePool;
+    #[cfg(target_arch = "aarch64")]
+    use crate::ops::kernel::{QuantizedTensor, Weight};
+
+    #[test]
+    fn layernorm_rounds_sum_before_dividing_like_ggml() {
+        let x = [207.840_07, 251.440_61, -868.942_26];
+        let ln = LayerNorm {
+            weight: vec![1.0; 3],
+            bias: vec![0.0; 3],
+            dim: 3,
+        };
+        let output = layernorm_fwd(&ln, &x, 1, &ComputePool::new(1));
+        assert_eq!(
+            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0x3f2a_2475, 0x3f3f_aebd, 0xbfb4_e99a]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn fsmn_rounds_product_before_adding_like_ggml() {
+        let value = f32::from_bits(0xbf0b_ed36);
+        let weight = f32::from_bits(0x3f6c_b1ef);
+        let output =
+            fsmn_shift_accumulate(&[value; 4], 1, 4, 1, &[weight; 4], &ComputePool::new(1));
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [0xbf86_a692; 4]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn f16_linear_rounds_input_to_half_like_scalar_ggml() {
+        let bytes = Box::leak(Box::new([0xb1, 0x30, 0x8d, 0x3a, 0x0c, 0xb6, 0x1a, 0x2d]));
+        let linear = Linear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::F16, 4, 1)),
+            bias: vec![0.0],
+            in_dim: 4,
+            out_dim: 1,
+        };
+        let output = linear_fwd(
+            &linear,
+            &[0.33331, -0.17299, 0.92345, -0.78231],
+            1,
+            &ComputePool::new(1),
+        );
+        assert_eq!(output[0].to_bits(), 0xbf01_0c34);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn f16_neon_dot_matches_scalar_ggml_with_tail() {
+        let weight = [
+            0xb9a1, 0x336c, 0xb949, 0x36cd, 0x32e7, 0xb367, 0x3385, 0x303d, 0xbb4f, 0x2bb6, 0x33a8,
+            0x2905, 0x3a12, 0x3788, 0xb3dd, 0xb85f, 0xb9f4,
+        ];
+        let input = [
+            0x38f7, 0x3613, 0x32ff, 0xaf75, 0x1844, 0xb873, 0x2bc9, 0xb9ad, 0x33c0, 0x342a, 0x3573,
+            0xb80f, 0xba87, 0xb558, 0x3601, 0x2513, 0x37ec,
+        ];
+        let bytes = weight
+            .iter()
+            .flat_map(|bits: &u16| bits.to_le_bytes())
+            .collect::<Vec<_>>();
+        let actual = unsafe { super::funasr_f16_dot_neon(&bytes, &input) };
+        assert_eq!(actual.to_bits(), 0xbff1_455e);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn layernorm_accumulates_variance_in_ggml_neon_groups() {
+        let x = [2.240_905_8, -826.513_1, -855.897_7, -161.255_62];
+        let ln = LayerNorm {
+            weight: vec![1.0; 4],
+            bias: vec![0.0; 4],
+            dim: 4,
+        };
+        let output = layernorm_fwd(&ln, &x, 1, &ComputePool::new(1));
+        assert_eq!(
+            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0x3f99_a896, 0xbf73_3fae, 0xbf83_6289, 0x3f46_b395]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn kqv_matches_ggml_f32_dot_bits_for_vector_and_scalar_tails() {
+        for (t, expected) in [
+            (17, [0x3c20_3a26, 0x3c60_7cf1, 0x3c20_7854, 0x3c20_ae2f]),
+            (20, [0x3c40_50e8, 0x3c80_4efc, 0x3c40_9c08, 0x3c40_dc28]),
+            (70, [0x3d30_f017, 0x3d41_2d1c, 0x3d41_6a24, 0x3d31_6fdc]),
+        ] {
+            let scores = (0..t)
+                .map(|j| f32::from_bits(0x3c00_0000 + (j * 317 % 0x10_0000) as u32))
+                .collect::<Vec<_>>();
+            let mut v = vec![0.0f32; t * 4];
+            for j in 0..t {
+                for d in 0..4 {
+                    let mut bits = 0x3e80_0000 + ((j * 977 + d * 7919) % 0x10_0000) as u32;
+                    if (j + d) % 3 == 0 {
+                        bits |= 0x8000_0000;
+                    }
+                    v[j * 4 + d] = f32::from_bits(bits);
+                }
+            }
+            let mut out = [0.0f32; 4];
+            unsafe { super::kqv_ggml_neon(&mut out, &v, &scores, t, 4, 0) };
+            assert_eq!(out.map(f32::to_bits), expected, "t={t}");
+        }
+    }
 }

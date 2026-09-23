@@ -109,7 +109,8 @@ pub fn compute_fbank(wav: &[f32]) -> (Vec<f32>, usize) {
     let mut frame = vec![0.0f32; WINLEN];
     let mut win = vec![0.0f32; WINLEN];
     for i in 0..WINLEN {
-        win[i] = 0.54 - 0.46 * (2.0 * PI * i as f32 / (WINLEN - 1) as f32).cos();
+        let angle = (2.0f64 * std::f64::consts::PI * i as f64 / (WINLEN - 1) as f64) as f32;
+        win[i] = 0.54 - 0.46 * angle.cos();
     }
     for t in 0..t_frames {
         let s = &samples[t * SHIFT..];
@@ -162,6 +163,46 @@ pub fn compute_fbank(wav: &[f32]) -> (Vec<f32>, usize) {
         }
     }
     (out, t_lfr)
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::compute_fbank;
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn fbank_matches_scalar_oracle_for_pcm16_audio() {
+        let samples = (0..800)
+            .map(|i| (((i * 37) % 101) - 50) as f32 * 300.0 / 32768.0)
+            .collect::<Vec<_>>();
+        let (features, frames) = compute_fbank(&samples);
+        assert_eq!(frames, 1);
+        assert_eq!(features.len(), 560);
+        assert_eq!(
+            features[..16]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            [
+                0x415f_d9a5,
+                0x416d_e1e7,
+                0x4165_c66c,
+                0x416f_a58b,
+                0x417a_620a,
+                0x417c_9cec,
+                0x414d_74c1,
+                0x4173_dd61,
+                0x415f_e1d1,
+                0x4179_da07,
+                0x4187_5e73,
+                0x417b_105c,
+                0x4176_6c9d,
+                0x4182_5a76,
+                0x4196_2d7a,
+                0x419b_df64,
+            ]
+        );
+    }
 }
 
 /// Low-frame-rate truncation: compute the number of audio tokens from fbank length.
