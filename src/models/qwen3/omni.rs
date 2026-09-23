@@ -11,7 +11,7 @@ use crate::models::qwen3::asr::mel_encoder::{
 use crate::ops::dot_f16_f16_bytes;
 use std::sync::Arc;
 
-const WHISPER_CHUNK: usize = 3000;
+const MEL_CHUNK: usize = 200;
 
 struct Conv1dWeights {
     weight: &'static [u8],
@@ -133,7 +133,216 @@ impl Qwen25OmniAudioModel {
         })
     }
 
-    pub fn encode(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
+    /// Encode an audio clip into the multimodal projection.
+    ///
+    /// `use_whisper_fixed = false` (default) uses the original
+    /// MEL_CHUNK=200 chunked path that supports arbitrary-length
+    /// audio. `use_whisper_fixed = true` uses the 30 s Whisper
+    /// fixed-layout path used by Jina Embeddings v5 Omni (output is
+    /// always 750 rows regardless of input length; max input 30 s).
+    pub fn encode(
+        &self,
+        samples: &[f32],
+        use_whisper_fixed: bool,
+    ) -> Result<Vec<f32>, String> {
+        if use_whisper_fixed {
+            self.encode_whisper_fixed(samples)
+        } else {
+            self.encode_chunked(samples)
+        }
+    }
+
+    /// Original chunked path: MEL_CHUNK=200 per Conv1d window,
+    /// block-attention skips padding rows, output row count reflects
+    /// real audio length. Supports arbitrary-length audio.
+    fn encode_chunked(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
+        if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
+            return Err("Audio samples must be non-empty and finite".into());
+        }
+        let real_frames = samples.len().div_ceil(HOP);
+        let layout = AudioLayout::for_real_frames(real_frames)?;
+        if layout.output_rows == 0 {
+            return Err("Audio is too short to produce an embedding row".into());
+        }
+        let input = prepare_chunked_mel(
+            samples,
+            self.config.mel_bins,
+            real_frames,
+            layout.padded_mel_frames,
+        )?;
+
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.audio.mel",
+            None,
+            &[layout.padded_mel_frames, self.config.mel_bins],
+            &input,
+        ));
+
+        let mut hidden = reserved_f32(
+            "Qwen2.5-Omni convolution output",
+            checked_product(
+                "Qwen2.5-Omni convolution output",
+                layout.post_conv_tokens,
+                self.config.hidden,
+            )?,
+        )?;
+        let mut conv1 = Vec::new();
+        let mut conv2 = Vec::new();
+        let mel_chunk_values = MEL_CHUNK * self.config.mel_bins;
+        let hidden_chunk_values = self.config.window * self.config.hidden;
+        for chunk in 0..layout.padded_mel_frames / MEL_CHUNK {
+            let input_start = chunk * mel_chunk_values;
+            conv1d_same_f16(
+                &input[input_start..input_start + mel_chunk_values],
+                MEL_CHUNK,
+                self.conv1.input,
+                self.conv1.output,
+                self.conv1.weight,
+                &self.conv1.bias,
+                1,
+                &mut conv1,
+            )?;
+            apply_gelu_erf(&mut conv1)?;
+            let chunk_start = chunk * MEL_CHUNK;
+            let valid_rows = real_frames.saturating_sub(chunk_start).min(MEL_CHUNK);
+            conv1[valid_rows * self.config.hidden..].fill(0.0);
+            conv1d_same_f16(
+                &conv1,
+                MEL_CHUNK,
+                self.conv2.input,
+                self.conv2.output,
+                self.conv2.weight,
+                &self.conv2.bias,
+                2,
+                &mut conv2,
+            )?;
+            apply_gelu_erf(&mut conv2)?;
+            let output_start = chunk * hidden_chunk_values;
+            hidden[output_start..output_start + hidden_chunk_values].copy_from_slice(&conv2);
+        }
+
+        for token in 0..layout.post_conv_tokens {
+            let position = token % self.config.window;
+            let position_row =
+                &self.positions[position * self.config.hidden..(position + 1) * self.config.hidden];
+            let hidden_row =
+                &mut hidden[token * self.config.hidden..(token + 1) * self.config.hidden];
+            for (value, position) in hidden_row.iter_mut().zip(position_row) {
+                *value += *position;
+            }
+        }
+
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.audio.after_conv1d_chunked",
+            None,
+            &[layout.post_conv_tokens, self.config.hidden],
+            &hidden,
+        ));
+
+        let values = layout.post_conv_tokens * self.config.hidden;
+        let ffn_values = layout.post_conv_tokens * self.config.ffn;
+        let mut normed = reserved_f32("Qwen2.5-Omni normalized", values)?;
+        let mut q = reserved_f32("Qwen2.5-Omni queries", values)?;
+        let mut k = reserved_f32("Qwen2.5-Omni keys", values)?;
+        let mut v = reserved_f32("Qwen2.5-Omni values", values)?;
+        let mut attention = reserved_f32("Qwen2.5-Omni attention", values)?;
+        let mut update = reserved_f32("Qwen2.5-Omni update", values)?;
+        let mut ffn_up = reserved_f32("Qwen2.5-Omni FFN up", ffn_values)?;
+        let mut ffn_down = reserved_f32("Qwen2.5-Omni FFN down", values)?;
+        let mut scores = reserved_f32("Qwen2.5-Omni scores", self.config.window)?;
+        let head_dim = self.config.hidden / self.config.heads;
+        for layer in &self.layers {
+            layer_norm_rows(
+                &hidden,
+                layout.post_conv_tokens,
+                &layer.ln1,
+                self.config.epsilon,
+                &mut normed,
+            )?;
+            layer
+                .q
+                .project_f16(&normed, layout.post_conv_tokens, &mut q, false)?;
+            layer
+                .k
+                .project_f16(&normed, layout.post_conv_tokens, &mut k, false)?;
+            layer
+                .v
+                .project_f16(&normed, layout.post_conv_tokens, &mut v, false)?;
+            block_attention_into(
+                &q,
+                &k,
+                &v,
+                layout.post_conv_tokens,
+                real_frames.div_ceil(2),
+                self.config.heads,
+                head_dim,
+                self.config.window,
+                &mut scores,
+                &mut attention,
+            )?;
+            layer
+                .output
+                .project_f16(&attention, layout.post_conv_tokens, &mut update, false)?;
+            add_residual(&mut hidden, &update)?;
+            layer_norm_rows(
+                &hidden,
+                layout.post_conv_tokens,
+                &layer.ln2,
+                self.config.epsilon,
+                &mut normed,
+            )?;
+            layer
+                .up
+                .project_f16(&normed, layout.post_conv_tokens, &mut ffn_up, false)?;
+            apply_gelu_erf(&mut ffn_up)?;
+            layer
+                .down
+                .project_f16(&ffn_up, layout.post_conv_tokens, &mut ffn_down, false)?;
+            add_residual(&mut hidden, &ffn_down)?;
+        }
+
+        let mut pooled = Vec::new();
+        average_pool_pairs(&hidden, self.config.hidden, &mut pooled)?;
+        pooled.truncate(layout.output_rows * self.config.hidden);
+        layer_norm_rows(
+            &pooled,
+            layout.output_rows,
+            &self.post_ln,
+            self.config.epsilon,
+            &mut normed,
+        )?;
+
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.audio.after_transformer",
+            None,
+            &[layout.output_rows, self.config.hidden],
+            &normed,
+        ));
+
+        let mut projected = Vec::new();
+        self.projector
+            .project_f16(&normed, layout.output_rows, &mut projected, false)?;
+        if projected.iter().any(|value| !value.is_finite()) {
+            return Err("Non-finite Qwen2.5-Omni audio projection".into());
+        }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "omni.audio.projected",
+            None,
+            &[layout.output_rows, self.config.projection],
+            &projected,
+        ));
+        Ok(projected)
+    }
+
+    /// Jina Omni path: 30 s Whisper fixed layout. Pads input to
+    /// 3000 mel frames via last-frame replication, runs Conv1d +
+    /// transformer in a single 1500-token shot (no block-attention
+    /// chunking), and emits a fixed 750-row output.
+    fn encode_whisper_fixed(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
         let (layout, input) = prepare_whisper_mel(samples, self.config.mel_bins)?;
 
         #[cfg(feature = "parity-trace")]
@@ -312,7 +521,7 @@ pub fn encode_audio(
             log_mel_windows(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
         return Ok(model.encode(&windows)?.values);
     }
-    Qwen25OmniAudioModel::from_source(source)?.encode(samples)
+    Qwen25OmniAudioModel::from_source(source)?.encode(samples, false)
 }
 
 fn load_conv1d(
@@ -485,21 +694,74 @@ struct AudioLayout {
     output_rows: usize,
 }
 
+/// Jina Embeddings v5 Omni uses a different audio encoder setup
+/// (30 s Whisper preprocessor, fixed-size 750-row output).
+const WHISPER_CHUNK: usize = 3000;
+
 impl AudioLayout {
+    /// Default path: chunked MEL_CHUNK=200, supports arbitrary-length
+    /// audio. Output row count follows the real mel frame count.
     fn for_real_frames(real_mel_frames: usize) -> Result<Self, String> {
+        if real_mel_frames == 0 {
+            return Err("Audio must contain at least one Mel frame".into());
+        }
+        let padded_mel_frames = real_mel_frames
+            .checked_add(MEL_CHUNK - 1)
+            .ok_or("Audio Mel frame count overflow")?
+            / MEL_CHUNK
+            * MEL_CHUNK;
+        Ok(Self {
+            padded_mel_frames,
+            post_conv_tokens: padded_mel_frames / 2,
+            output_rows: real_mel_frames
+                .checked_add(1)
+                .ok_or("Audio output row count overflow")?
+                / 4,
+        })
+    }
+
+    /// Jina Omni path: fixed 30 s Whisper layout. Output is always
+    /// 750 rows regardless of input length. Used only when the caller
+    /// passes `use_whisper_fixed = true` to `encode`.
+    fn for_real_frames_whisper_fixed(real_mel_frames: usize) -> Result<Self, String> {
         if real_mel_frames == 0 {
             return Err("Audio must contain at least one Mel frame".into());
         }
         if real_mel_frames > WHISPER_CHUNK {
             return Err("Audio exceeds the supported 30-second Whisper chunk".into());
         }
-        let padded_mel_frames = WHISPER_CHUNK;
         Ok(Self {
-            padded_mel_frames,
-            post_conv_tokens: padded_mel_frames / 2,
-            output_rows: padded_mel_frames / 4,
+            padded_mel_frames: WHISPER_CHUNK,
+            post_conv_tokens: WHISPER_CHUNK / 2,
+            output_rows: WHISPER_CHUNK / 4,
         })
     }
+}
+
+fn prepare_chunked_mel(
+    samples: &[f32],
+    mel_bins: usize,
+    real_mel_frames: usize,
+    padded_mel_frames: usize,
+) -> Result<Vec<f32>, String> {
+    if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("Audio samples must be non-empty and finite".into());
+    }
+    let mel = compute_log_mel(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
+    if mel.frames < real_mel_frames || mel.normalized.len() != mel.frames * mel_bins {
+        return Err("Audio Mel output is shorter than the real sample duration".into());
+    }
+    let mut input = reserved_f32(
+        "Qwen2.5-Omni Mel input",
+        checked_product("Qwen2.5-Omni Mel input", padded_mel_frames, mel_bins)?,
+    )?;
+    for frame in 0..real_mel_frames {
+        for mel_bin in 0..mel_bins {
+            input[frame * mel_bins + mel_bin] =
+                mel.normalized[mel_bin * mel.frames + frame];
+        }
+    }
+    Ok(input)
 }
 
 fn prepare_whisper_mel(
@@ -509,9 +771,8 @@ fn prepare_whisper_mel(
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err("Audio samples must be non-empty and finite".into());
     }
-    let layout = AudioLayout::for_real_frames(samples.len().div_ceil(HOP))?;
-    let mel = compute_log_mel(samples)
-        .map_err(|error| format!("Audio Mel error: {error:?}"))?;
+    let layout = AudioLayout::for_real_frames_whisper_fixed(samples.len().div_ceil(HOP))?;
+    let mel = compute_log_mel(samples).map_err(|error| format!("Audio Mel error: {error:?}"))?;
     if mel.normalized.len() != mel.frames * mel_bins {
         return Err("Audio Mel output shape does not match the projector".into());
     }
@@ -526,6 +787,57 @@ fn prepare_whisper_mel(
         }
     }
     Ok((layout, input))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn block_attention_into(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    tokens: usize,
+    valid_tokens: usize,
+    heads: usize,
+    head_dim: usize,
+    window: usize,
+    scores: &mut Vec<f32>,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
+    if window == 0
+        || tokens == 0
+        || tokens % window != 0
+        || valid_tokens == 0
+        || valid_tokens > tokens
+    {
+        return Err("Invalid Qwen2.5-Omni block-attention shape".into());
+    }
+    let width = checked_product("Qwen2.5-Omni attention width", heads, head_dim)?;
+    let len = checked_product("Qwen2.5-Omni attention values", tokens, width)?;
+    if query.len() != len || key.len() != len || value.len() != len {
+        return Err("Invalid Qwen2.5-Omni block-attention tensors".into());
+    }
+    resize_f32(output, "Qwen2.5-Omni attention output", len)?;
+    output.fill(0.0);
+    let mut chunk_output = Vec::new();
+    for start in (0..tokens).step_by(window) {
+        let chunk_rows = valid_tokens.saturating_sub(start).min(window);
+        if chunk_rows == 0 {
+            break;
+        }
+        let chunk_len = checked_product("Qwen2.5-Omni attention chunk", chunk_rows, width)?;
+        let offset = start * width;
+        full_attention_into(
+            &query[offset..offset + chunk_len],
+            &key[offset..offset + chunk_len],
+            &value[offset..offset + chunk_len],
+            chunk_rows,
+            heads,
+            head_dim,
+            scores,
+            &mut chunk_output,
+        )?;
+        output[offset..offset + chunk_len].copy_from_slice(&chunk_output);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -860,18 +1172,84 @@ mod tests {
     }
 
     #[test]
-    fn audio_layout_uses_whisper_30_second_chunks() {
+    fn audio_layout_chunks_200_mel_frames() {
         let layout = AudioLayout::for_real_frames(201).unwrap();
+        assert_eq!(layout.padded_mel_frames, 400);
+        assert_eq!(layout.post_conv_tokens, 200);
+        assert_eq!(layout.output_rows, 50);
+    }
+
+    #[test]
+    fn output_rows_follow_real_mel_frames_after_stride_and_avg_pool() {
+        assert_eq!(AudioLayout::for_real_frames(1).unwrap().output_rows, 0);
+        assert_eq!(AudioLayout::for_real_frames(2).unwrap().output_rows, 0);
+        assert_eq!(AudioLayout::for_real_frames(3).unwrap().output_rows, 1);
+        assert_eq!(AudioLayout::for_real_frames(1100).unwrap().output_rows, 275);
+    }
+
+    #[test]
+    fn audio_layout_whisper_fixed_pads_to_30_seconds() {
+        let layout = AudioLayout::for_real_frames_whisper_fixed(201).unwrap();
         assert_eq!(layout.padded_mel_frames, 3000);
         assert_eq!(layout.post_conv_tokens, 1500);
         assert_eq!(layout.output_rows, 750);
     }
 
     #[test]
-    fn audio_layout_rejects_a_second_whisper_chunk() {
-        assert_eq!(AudioLayout::for_real_frames(1).unwrap().output_rows, 750);
-        assert_eq!(AudioLayout::for_real_frames(3000).unwrap().output_rows, 750);
-        assert!(AudioLayout::for_real_frames(3001).is_err());
+    fn audio_layout_whisper_fixed_rejects_a_second_whisper_chunk() {
+        assert_eq!(AudioLayout::for_real_frames_whisper_fixed(1).unwrap().output_rows, 750);
+        assert_eq!(AudioLayout::for_real_frames_whisper_fixed(3000).unwrap().output_rows, 750);
+        assert!(AudioLayout::for_real_frames_whisper_fixed(3001).is_err());
+    }
+
+    #[test]
+    fn block_attention_never_reads_an_adjacent_chunk() {
+        let query = [1.0, 1.0, 1.0, 1.0];
+        let key = [1.0, 1.0, 1.0, 1.0];
+        let value = [1.0, 3.0, 100.0, 300.0];
+        let mut scores = Vec::new();
+        let mut output = Vec::new();
+
+        block_attention_into(
+            &query,
+            &key,
+            &value,
+            4,
+            4,
+            1,
+            1,
+            2,
+            &mut scores,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, [2.0, 2.0, 200.0, 200.0]);
+    }
+
+    #[test]
+    fn partial_audio_chunk_does_not_attend_to_padding() {
+        let query = [1.0, 1.0, 1.0, 1.0];
+        let key = [1.0, 1.0, 1.0, 1.0];
+        let value = [1.0, 3.0, 100.0, 300.0];
+        let mut scores = Vec::new();
+        let mut output = Vec::new();
+
+        block_attention_into(
+            &query,
+            &key,
+            &value,
+            4,
+            2,
+            1,
+            1,
+            4,
+            &mut scores,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(&output[..2], [2.0, 2.0]);
     }
 
     #[test]
