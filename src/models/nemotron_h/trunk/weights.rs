@@ -1,11 +1,9 @@
 //! Nemotron-3 Nano weight loading.
 //!
 //! Hybrid Mamba-Transformer: every layer carries both attention and SSM
-//! weights. We load both branches up front. (Mamba2 SSM weights are
-//! stored as `blk.X.ssm_*` per the reference.)
+//! weights. Each block loads its FFN, attention, or Mamba2 branch.
 
-use crate::core::loader::load_static_weight;
-use crate::core::tensor::{load_f32_tensor, TensorSource};
+use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::ops::kernel::QuantizedTensor;
 use crate::ops::kernel::Weight;
 
@@ -43,25 +41,34 @@ pub struct NemotronLayerWeights<'a> {
     pub ssm_out: Option<Weight<'a>>,
 }
 
-pub(crate) fn static_q8_into_weight(
+pub(crate) fn load_weight(
     source: &dyn TensorSource,
     name: &str,
     n_in: usize,
     n_out: usize,
-) -> Weight<'static> {
-    let bytes = source
-        .tensor_slice(name)
-        .unwrap_or_else(|| panic!("tensor {name} not found"));
+) -> Result<Weight<'static>, String> {
     let info = source
         .tensor_info(name)
-        .unwrap_or_else(|| panic!("tensor info {name} not found"));
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [n_in as u64, n_out as u64] || info.ggml_type != GGMLType::Q8_0 {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] Q8_0",
+            info.dims, info.ggml_type
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if Some(bytes.len() as u64) != info.checked_nbytes() {
+        return Err(format!("Invalid tensor byte length: {name}"));
+    }
     let bytes_static: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
-    Weight::from_quantized(QuantizedTensor::from_bytes(
+    Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
         bytes_static,
         info.ggml_type,
         n_in,
         n_out,
-    ))
+    )))
 }
 
 pub fn load_layers(
@@ -72,10 +79,8 @@ pub fn load_layers(
     let n_attn_q = config.n_head * config.n_embd_head_k;
     let n_attn_k = config.n_head_kv * config.n_embd_head_k;
     let n_attn_v = config.n_head_kv * config.n_embd_head_v;
-    let head_dim = config.head_dim();
-    let has_qk_norm = source
-        .tensor_info(&format!("blk.0.attn_q_norm.weight"))
-        .is_some();
+    let n_attn_out = config.n_head * config.n_embd_head_v;
+    let head_dim = config.n_embd_head_k;
     let layer_has_attn = |idx: usize| -> bool {
         source
             .tensor_info(&format!("blk.{idx}.attn_q.weight"))
@@ -103,32 +108,46 @@ pub fn load_layers(
         )?;
         let this_has_attn = layer_has_attn(layer_idx);
         let this_has_ssm = layer_has_ssm(layer_idx);
+        let has_layer_ffn = layer_has_ffn(layer_idx);
+        let expected_attn = config.attention_layers.contains(&layer_idx);
+        let expected_ffn = config.ffn_layers.contains(&layer_idx);
+        if this_has_attn != expected_attn
+            || has_layer_ffn != expected_ffn
+            || this_has_ssm != (!expected_attn && !expected_ffn)
+        {
+            return Err(format!(
+                "Nemotron layer {layer_idx} tensors do not match layer metadata"
+            ));
+        }
         let (wq, wk, wv, wo, attn_q_norm, attn_k_norm) = if this_has_attn {
-            let wq = load_static_weight(
+            let wq = load_weight(
                 source,
                 &format!("{prefix}.attn_q.weight"),
-                n_attn_q,
                 config.n_embd,
-            );
-            let wk = load_static_weight(
+                n_attn_q,
+            )?;
+            let wk = load_weight(
                 source,
                 &format!("{prefix}.attn_k.weight"),
-                n_attn_k,
                 config.n_embd,
-            );
-            let wv = load_static_weight(
+                n_attn_k,
+            )?;
+            let wv = load_weight(
                 source,
                 &format!("{prefix}.attn_v.weight"),
-                n_attn_v,
                 config.n_embd,
-            );
-            let wo = load_static_weight(
+                n_attn_v,
+            )?;
+            let wo = load_weight(
                 source,
                 &format!("{prefix}.attn_output.weight"),
+                n_attn_out,
                 config.n_embd,
-                n_attn_v,
-            );
-            let qn = if has_qk_norm {
+            )?;
+            let qn = if source
+                .tensor_info(&format!("{prefix}.attn_q_norm.weight"))
+                .is_some()
+            {
                 Some(load_f32_tensor(
                     source,
                     &format!("{prefix}.attn_q_norm.weight"),
@@ -137,7 +156,10 @@ pub fn load_layers(
             } else {
                 None
             };
-            let kn = if has_qk_norm {
+            let kn = if source
+                .tensor_info(&format!("{prefix}.attn_k_norm.weight"))
+                .is_some()
+            {
                 Some(load_f32_tensor(
                     source,
                     &format!("{prefix}.attn_k_norm.weight"),
@@ -157,7 +179,6 @@ pub fn load_layers(
         // sometimes reuses attn_norm; the forward path always falls back
         // to attn_norm if ffn_norm is absent. FFN is a plain 2-layer
         // (`up → activation → down`); no `ffn_gate` weight.
-        let has_layer_ffn = layer_has_ffn(layer_idx);
         let ffn_norm_present = has_layer_ffn
             && source
                 .tensor_info(&format!("{prefix}.ffn_norm.weight"))
@@ -172,23 +193,23 @@ pub fn load_layers(
             } else {
                 None
             };
-            let wu = load_static_weight(
+            let wu = load_weight(
                 source,
                 &format!("{prefix}.ffn_up.weight"),
-                config.n_ff,
                 config.n_embd,
-            );
-            let wd = load_static_weight(
+                config.n_ff,
+            )?;
+            let wd = load_weight(
                 source,
                 &format!("{prefix}.ffn_down.weight"),
-                config.n_embd,
                 config.n_ff,
-            );
+                config.n_embd,
+            )?;
             (ffn_norm, Some(wu), Some(wd))
         } else {
             (None, None, None)
         };
-        // Mamba2 SSM branch — present in ~21 of 42 layers.
+        // Mamba2 SSM branch.
         let (ssm_in, ssm_conv1d_w, ssm_conv1d_b, ssm_dt_bias, ssm_a_log, ssm_d, ssm_norm, ssm_out) =
             if this_has_ssm {
                 // ssm_in.shape is (n_embd, d_in_proj) where
@@ -199,21 +220,21 @@ pub fn load_layers(
                 let d_in_proj = 2 * config.ssm_inner_size
                     + 2 * config.ssm_state_size * config.ssm_group_count
                     + config.ssm_time_step_rank;
-                let ssm_in = static_q8_into_weight(
+                let ssm_in = load_weight(
                     source,
                     &format!("{prefix}.ssm_in.weight"),
-                    d_in_proj,
                     config.n_embd,
-                );
-                // Mamba2 SSM tensors in this checkpoint are F32 (not quantized).
+                    d_in_proj,
+                )?;
+                // Mamba2 state and convolution tensors in this checkpoint are F32.
                 // Layout per the reference:
                 //   ssm_conv1d.weight (4, 9728) — fused causal conv + b + c outputs
                 //   ssm_conv1d.bias   (9728,)   — bias for the same fused tensor
-                //   ssm_dt.bias       (inner,)  — dt bias
-                //   ssm_a             (1, inner) — A_log
-                //   ssm_d             (1, inner) — D skip
+                //   ssm_dt.bias       (dt_rank,) — dt bias
+                //   ssm_a             (1, dt_rank) — decay factor
+                //   ssm_d             (1, dt_rank) — D skip
                 //   ssm_norm.weight   (per_group, n_groups) — group RMSNorm
-                //   ssm_out.weight    (n_embd, inner) — out_proj (Q5_K, quantized)
+                //   ssm_out.weight    (inner, n_embd) — Q8_0 out_proj
                 let ssm_conv1d_w = load_f32_tensor(
                     source,
                     &format!("{prefix}.ssm_conv1d.weight"),
@@ -234,19 +255,13 @@ pub fn load_layers(
                         "ssm conv1d bias",
                     )?],
                 )?;
-                // ssm_dt.bias is per-time_step_rank (96), not per-inner_size.
-                // A proper Mamba2 would project (B, L, dt_rank) → (B, L,
-                // inner_size); this checkpoint appears to broadcast dt to
-                // per-channel via the time_step_rank dim. The dt is
-                // effectively a per-timestep-rank bias, not a per-channel
-                // weight.
+                // ssm_dt.bias is per SSM head (96).
                 let ssm_dt_bias = load_f32_tensor(
                     source,
                     &format!("{prefix}.ssm_dt.bias"),
                     &[usize_to_u64(config.ssm_time_step_rank, "ssm dt bias")?],
                 )?;
-                // ssm_a is shape [1, time_step_rank=96]. The A_log is the
-                // negative exponential of state decay.
+                // ssm_a is shape [1, time_step_rank=96].
                 let ssm_a_log = load_f32_tensor(
                     source,
                     &format!("{prefix}.ssm_a"),
@@ -259,9 +274,7 @@ pub fn load_layers(
                     &[1, usize_to_u64(config.ssm_time_step_rank, "ssm d")?],
                 )?;
                 // ssm_norm.weight is (per_group, n_groups). per_group is
-                // 960 (= inner_size 7680 / n_groups 8) in this checkpoint;
-                // the per-group dim doesn't follow a standard formula
-                // (it's not d_state, dt_rank, or anything conventional).
+                // 960 (= inner_size 7680 / n_groups 8) in this checkpoint.
                 let ssm_norm = load_f32_tensor(
                     source,
                     &format!("{prefix}.ssm_norm.weight"),
@@ -273,12 +286,12 @@ pub fn load_layers(
                         usize_to_u64(config.ssm_group_count, "ssm norm groups")?,
                     ],
                 )?;
-                let ssm_out = static_q8_into_weight(
+                let ssm_out = load_weight(
                     source,
                     &format!("{prefix}.ssm_out.weight"),
-                    config.n_embd,
                     config.ssm_inner_size,
-                );
+                    config.n_embd,
+                )?;
                 (
                     Some(ssm_in),
                     Some(ssm_conv1d_w),

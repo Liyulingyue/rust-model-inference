@@ -9,6 +9,8 @@ pub struct NemotronConfig {
     pub n_layer: usize,
     pub n_head: usize,
     pub n_head_kv: usize,
+    pub attention_layers: Vec<usize>,
+    pub ffn_layers: Vec<usize>,
     pub n_embd_head_k: usize,
     pub n_embd_head_v: usize,
     pub n_ff: usize,
@@ -48,14 +50,28 @@ impl NemotronConfig {
                 "Unsupported architecture for NemotronConfig: {architecture}"
             ));
         }
-        let get_u32 = |key: &str| -> Result<u32, String> {
+        let get_usize = |key: &str| -> Result<usize, String> {
             let v = source
                 .metadata(key)
                 .and_then(MetaValue::to_u64)
                 .ok_or_else(|| format!("Missing metadata: {key}"))?;
-            Ok(v as u32)
+            usize::try_from(v).map_err(|_| format!("Invalid metadata: {key} exceeds usize"))
         };
-        let as_usize = |key: &str| -> Result<usize, String> { get_u32(key).map(|v| v as usize) };
+        let layer_values = |key: &str| -> Result<Vec<usize>, String> {
+            let values = source
+                .metadata(key)
+                .and_then(MetaValue::to_arr)
+                .ok_or_else(|| format!("Missing array metadata: {key}"))?;
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .to_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or_else(|| format!("Invalid array metadata: {key}"))
+                })
+                .collect()
+        };
         let get_f32 = |key: &str, default: f32| -> Result<f32, String> {
             Ok(source
                 .metadata(key)
@@ -63,49 +79,80 @@ impl NemotronConfig {
                 .map(|v| v as f32)
                 .unwrap_or(default))
         };
-        let vocab_size = match get_u32("nemotron_h.vocab_size") {
-            Ok(v) => v as usize,
+        let vocab_size = match get_usize("nemotron_h.vocab_size") {
+            Ok(v) => v,
             Err(_) => source
                 .metadata("tokenizer.ggml.tokens")
                 .and_then(MetaValue::to_arr)
                 .map(Vec::len)
                 .unwrap_or(0),
         };
-        Ok(Self {
+        let n_layer = get_usize("nemotron_h.block_count")?;
+        let ff_lengths = layer_values("nemotron_h.feed_forward_length")?;
+        let kv_heads = layer_values("nemotron_h.attention.head_count_kv")?;
+        if ff_lengths.len() != n_layer || kv_heads.len() != n_layer {
+            return Err("Nemotron layer metadata length does not match block_count".into());
+        }
+        let n_ff = ff_lengths.iter().copied().max().unwrap_or(0);
+        let n_head_kv = kv_heads.iter().copied().max().unwrap_or(0);
+        let attention_layers: Vec<usize> = kv_heads
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, &heads)| (heads != 0).then_some(layer))
+            .collect();
+        let ffn_layers: Vec<usize> = ff_lengths
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, &width)| (width != 0).then_some(layer))
+            .collect();
+        if n_ff == 0 || n_head_kv == 0 {
+            return Err("Nemotron requires FFN and attention layers".into());
+        }
+        if ff_lengths.iter().any(|&value| value != 0 && value != n_ff)
+            || kv_heads
+                .iter()
+                .any(|&value| value != 0 && value != n_head_kv)
+            || ff_lengths
+                .iter()
+                .zip(&kv_heads)
+                .any(|(&ff, &kv)| ff != 0 && kv != 0)
+        {
+            return Err("Unsupported Nemotron layer dimensions".into());
+        }
+        let config = Self {
             architecture: architecture.to_string(),
-            n_embd: as_usize("nemotron_h.embedding_length")?,
-            n_layer: as_usize("nemotron_h.block_count")?,
-            n_head: as_usize("nemotron_h.attention.head_count")?,
-            // head_count_kv metadata for Nemotron-H is a histogram-style
-            // summary, not per-layer values. The actual KV-head count is
-            // encoded in the attn_k.weight shape. For this checkpoint the
-            // 4 attention layers have n_head_kv=8, head_dim_k=128.
-            n_head_kv: 8,
-            n_embd_head_k: as_usize("nemotron_h.attention.key_length")?,
-            n_embd_head_v: as_usize("nemotron_h.attention.value_length")?,
-            n_ff: source
-                .metadata("nemotron_h.feed_forward_length")
-                .and_then(MetaValue::to_u64)
-                .map(|v| v as usize)
-                .or_else(|| {
-                    source
-                        .metadata("nemotron_h.feed_forward_length")
-                        .and_then(MetaValue::to_arr)
-                        .and_then(|arr| arr.first().and_then(MetaValue::to_u64))
-                        .map(|v| v as usize)
-                })
-                .unwrap_or(0),
-            n_ctx: as_usize("nemotron_h.context_length")?,
+            n_embd: get_usize("nemotron_h.embedding_length")?,
+            n_layer,
+            n_head: get_usize("nemotron_h.attention.head_count")?,
+            n_head_kv,
+            attention_layers,
+            ffn_layers,
+            n_embd_head_k: get_usize("nemotron_h.attention.key_length")?,
+            n_embd_head_v: get_usize("nemotron_h.attention.value_length")?,
+            n_ff,
+            n_ctx: get_usize("nemotron_h.context_length")?,
             vocab_size,
             rope_freq_base: get_f32("nemotron_h.rope.freq_base", 1_000_000.0)?,
-            rope_dim: as_usize("nemotron_h.rope.dimension_count")?,
+            rope_dim: get_usize("nemotron_h.rope.dimension_count")?,
             norm_eps: get_f32("nemotron_h.attention.layer_norm_rms_epsilon", 1e-5)?,
-            ssm_conv_kernel: as_usize("nemotron_h.ssm.conv_kernel")?,
-            ssm_state_size: as_usize("nemotron_h.ssm.state_size")?,
-            ssm_group_count: as_usize("nemotron_h.ssm.group_count")?,
-            ssm_inner_size: as_usize("nemotron_h.ssm.inner_size")?,
-            ssm_time_step_rank: as_usize("nemotron_h.ssm.time_step_rank")?,
-        })
+            ssm_conv_kernel: get_usize("nemotron_h.ssm.conv_kernel")?,
+            ssm_state_size: get_usize("nemotron_h.ssm.state_size")?,
+            ssm_group_count: get_usize("nemotron_h.ssm.group_count")?,
+            ssm_inner_size: get_usize("nemotron_h.ssm.inner_size")?,
+            ssm_time_step_rank: get_usize("nemotron_h.ssm.time_step_rank")?,
+        };
+        if config.n_head == 0
+            || config.n_head % config.n_head_kv != 0
+            || config.ssm_conv_kernel < 2
+            || config.ssm_group_count == 0
+            || config.ssm_time_step_rank == 0
+            || config.ssm_inner_size % config.ssm_group_count != 0
+            || config.ssm_inner_size % config.ssm_time_step_rank != 0
+            || config.ssm_time_step_rank % config.ssm_group_count != 0
+        {
+            return Err("Unsupported Nemotron attention or SSM dimensions".into());
+        }
+        Ok(config)
     }
 
     pub fn head_dim(&self) -> usize {
