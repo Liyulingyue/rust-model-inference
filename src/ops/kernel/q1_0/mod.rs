@@ -7,6 +7,8 @@
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 pub mod scalar;
 
 pub use scalar::matmul_q1_0_scalar_range;
@@ -59,6 +61,28 @@ impl<'a> Kernel for Q1_0Kernel<'a> {
                         my_start,
                         my_end,
                     );
+                    return;
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                let per_thread = (n_out + nth - 1) / nth;
+                let my_start = ith * per_thread;
+                let my_end = (my_start + per_thread).min(n_out);
+                if my_start < my_end {
+                    unsafe {
+                        neon::matmul_q1_0_vs_q8_0_neon(
+                            self.weight,
+                            input_q8,
+                            input_scales,
+                            &mut output[my_start..my_end],
+                            n_in,
+                            my_start,
+                            my_end,
+                        );
+                    }
                     return;
                 }
             }
