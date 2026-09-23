@@ -91,11 +91,7 @@ pub unsafe fn matmul_q1_0_vs_q8_0_avx2(
                 // Combine into 32-byte vector: [q0(8), q1(8), q2(8), q3(8)]
                 let q01 = _mm_unpacklo_epi64(q0, q1);
                 let q23 = _mm_unpacklo_epi64(q2, q3);
-                let q32 = _mm256_inserti128_si256(
-                    _mm256_castsi128_si256(q01),
-                    q23,
-                    1,
-                );
+                let q32 = _mm256_inserti128_si256(_mm256_castsi128_si256(q01), q23, 1);
 
                 // Load 32 Q8 values as i8
                 let y = _mm256_loadu_si256(iq_ptr.add(q8_base + sub * 32) as *const __m256i);

@@ -1,6 +1,6 @@
 # 参考实现与 Oracle 清单
 
-> 更新于 2026-09-18。这里记录本项目实际参考过的外部实现，以及用于回归对齐的固定 Oracle。
+> 更新于 2026-09-22。这里记录本项目实际参考过的外部实现，以及用于回归对齐的固定 Oracle。
 
 “参考源码”只表示实现时对照过其格式、算子或模型逻辑；“Pinned Oracle”则表示仓库提交已固定，并有构建脚本、补丁或回归测试。二者不能混用：没有 pin 和可执行测试的仓库，不能作为当前结果已经对齐的证据。
 
@@ -21,7 +21,7 @@
 | 仓库 | 对应范围 | 用途 | 固定提交 | 本地入口 / 证据 | 状态 |
 |---|---|---|---|---|---|
 | [ggml-org/ggml](https://github.com/ggml-org/ggml) | 通用 GGUF、量化和 CPU kernel | 对照量化格式、NEON/AVX kernel、RoPE 和 reduction 顺序 | 未固定 | [`docs/develop/OPTIMIZATION.md`](OPTIMIZATION.md) | `Reference only` |
-| [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | 文本、Embedding、Qwen3.5/Qwen3.8、Gemma 4、Qwen3-TTS、Qwen-Drive、Nemotron-3 Nano 4B 和性能基准 | 生成 token、checkpoint、logits、音频及性能对照 | 按用途固定，见 §「llama.cpp 固定版本」 | `tools/oracle/shared/`、`tools/oracle/gemma4/`、`tools/oracle/qwen3_tts/`、`tools/oracle/qwen_drive/` 和对应 `tests/*_reference.rs` | `Pinned Oracle` |
+| [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | 文本、Embedding、Jina Embeddings v5 Omni、Qwen3.5/Qwen3.8、Gemma 4、Qwen3-TTS、Qwen-Drive、Nemotron-3 Nano 4B 和性能基准 | 生成 token、checkpoint、logits、Embedding、音频及性能对照 | 按用途固定，见 §「llama.cpp 固定版本」 | `tools/oracle/shared/`、`tools/oracle/gemma4/`、`tools/oracle/qwen3_tts/`、`tools/oracle/qwen_drive/` 和对应 `tests/*_reference.rs` | `Pinned Oracle` |
 | [hqu-little-boy/asr.cpp](https://github.com/hqu-little-boy/asr.cpp) | Qwen3-ASR | C++/GGML 行为参考 | 未固定 | 当前没有 checkout、builder 或外部 Oracle 测试；现有回归见 [`src/format/ggufrs.rs`](../../src/format/ggufrs.rs) | `Reference only` |
 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) | Z-Image Turbo | 文生图 checkpoint 与最终图像 Oracle | `97d2990807fe6d558e395f8764198d7c7e7b411c` | [`tools/oracle/z_image/build_stable_diffusion_oracle.sh`](../../tools/oracle/z_image/build_stable_diffusion_oracle.sh)、[`tools/oracle/z_image/stable-diffusion-z-image-trace.patch`](../../tools/oracle/z_image/stable-diffusion-z-image-trace.patch)、[`tests/z_image_reference.rs`](../../tests/z_image_reference.rs) | `Pinned Oracle` |
 | [XHToken/llama.cpp](https://github.com/XHToken/llama.cpp) | Spark-X2.5 | Spark2.5 模型实现参考（仓库历史沿用名 `XFllama.cpp`，对应上游即 XHToken fork） | 未固定 | [`src/models/spark/trunk/config.rs`](../../src/models/spark/trunk/config.rs)、[`docs/TODO.md`](../TODO.md)；尚无可执行 Oracle | `Pending pin` |
@@ -45,6 +45,7 @@
 | 通用 scalar 位级回归（Q4_0、Q4_K_M 等基础回归） | `749f688fcaa4c472ec034b08cb8a907c45cfaa02` | [`tools/oracle/shared/build_llama_oracle.sh`](../../tools/oracle/shared/build_llama_oracle.sh)、[`tests/inference_parity.rs`](../../tests/inference_parity.rs)；亦供 MiniCPM5 `dump_tokens_oracle`、LFM2-MoE layer dump 使用 |
 | Qwen3.5 / Qwen3.8-27B | `b96806d96061049a5b574269b049bf6241d63d46` | [`tools/oracle/qwen35/build_qwen35_oracle.sh`](../../tools/oracle/qwen35/build_qwen35_oracle.sh)、[`tests/qwen35_reference.rs`](../../tests/qwen35_reference.rs) |
 | Qwen-Drive-1.0-4B VLM（qwen2vl/qwen3vl mtmd-debug） | `b96806d96061049a5b574269b049bf6241d63d46`（同 Qwen3.5） | [`tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh`](../../tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh)（复用 Qwen3.5 pin，patch 替换为 `qwen_drive_vlm_trace.patch`，target `mtmd-debug`）、[`tests/qwen_drive_vlm_reference.rs`](../../tests/qwen_drive_vlm_reference.rs) |
+| Jina Embeddings v5 Omni Small Retrieval（Q8_0 text + F16 vision） | `b96806d96061049a5b574269b049bf6241d63d46` | [`tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh`](../../tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh) 构建固定 `llama-debug` / vision Oracle；[`tests/embedding_parity.rs`](../../tests/embedding_parity.rs) 对照 token IDs 与 pooled/final F32 bits，[`tests/qwen_drive_vlm_reference.rs`](../../tests/qwen_drive_vlm_reference.rs) 对照 vision checkpoints |
 | Gemma 4 E2B / 12B 文本 | `3173a56471c1753650cd806694145ffd6dcace67` | [`tools/oracle/gemma4/build_oracle.sh`](../../tools/oracle/gemma4/build_oracle.sh)、[`tests/gemma4_reference.rs`](../../tests/gemma4_reference.rs) |
 | Gemma 4 12B `gemma4ua` 音频 | `b96806d96061049a5b574269b049bf6241d63d46` | [`tools/oracle/gemma4/build_audio_oracle.sh`](../../tools/oracle/gemma4/build_audio_oracle.sh)、[`tools/oracle/gemma4/gemma4ua-trace.patch`](../../tools/oracle/gemma4/gemma4ua-trace.patch)、[`tests/gemma4_reference.rs`](../../tests/gemma4_reference.rs)（AVX2+FMA+F16C x86_64 CPU RMSNorm + F16 projector raw-bit parity） |
 | Qwen3-TTS Base | `201e50cc2076a20adc460c41598593c7cd7b0813` | [`tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh`](../../tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh)、[`tests/qwen3_tts_reference.rs`](../../tests/qwen3_tts_reference.rs) |

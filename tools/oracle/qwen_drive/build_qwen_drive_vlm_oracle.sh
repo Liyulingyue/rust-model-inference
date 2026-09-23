@@ -20,13 +20,14 @@ if [ -n "$(git -C "$source_dir" status --porcelain)" ]; then
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+qwen35_dir=$(CDPATH= cd -- "$script_dir/../qwen35" && pwd)
 clone_dir=$work_dir/llama.cpp
 build_dir=$work_dir/build
 git clone --shared --no-checkout "$source_dir" "$clone_dir"
 git -C "$clone_dir" checkout --detach "$pin"
 git -C "$clone_dir" apply "$script_dir/qwen_drive_vlm_trace.patch"
-git -C "$clone_dir" apply "$script_dir/qwen35-llama-trace.patch"
-git -C "$clone_dir" apply "$script_dir/qwen35-scalar-softmax.patch"
+git -C "$clone_dir" apply "$qwen35_dir/qwen35-llama-trace.patch"
+git -C "$clone_dir" apply "$qwen35_dir/qwen35-scalar-softmax.patch"
 cmake -S "$clone_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
@@ -41,8 +42,9 @@ cmake -S "$clone_dir" -B "$build_dir" \
     -DLLAMA_BUILD_TESTS=OFF \
     -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX
 cmake --build "$build_dir" \
-    --target llama-eval-callback llama-mtmd-debug \
+    --target llama-eval-callback llama-debug llama-mtmd-debug \
     --parallel "${RMI_BUILD_JOBS:-4}"
-printf 'text=%s\nvision=%s\n' \
+printf 'text=%s\nembedding=%s\nvision=%s\n' \
     "$build_dir/bin/llama-eval-callback" \
+    "$build_dir/bin/llama-debug" \
     "$build_dir/bin/llama-mtmd-debug"

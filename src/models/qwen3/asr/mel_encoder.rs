@@ -511,7 +511,7 @@ impl Qwen3AudioModel {
             ));
 
             flatten_conv_output(&stage_a, 480, height, width, &mut flattened)?;
-            conv_out.project_f16(&flattened, width, &mut projected)?;
+            conv_out.project_f16(&flattened, width, &mut projected, false)?;
             let tcc2 = std::time::Instant::now();
 
             // Only chunk 0 reports timing (matches original behaviour).
@@ -643,11 +643,21 @@ impl AudioLinear {
         })
     }
 
+    /// Project F32 activations through an F16 (or BF16) weight matrix.
+    ///
+    /// When `round_activations` is `true`, the F32 input is rounded to
+    /// F16 before the matmul (the ggml F16×F16 activation-quantization
+    /// contract used by Qwen2.5-Omni's audio path). When `false`, the
+    /// F32 input is consumed directly via the F16×F32 SIMD path (used
+    /// by Qwen3-ASR's audio path). The two paths give the same result
+    /// bit-for-bit when activations are exact in F16; they may differ
+    /// at the LSB for values near F16 quantization boundaries.
     pub(in crate::models::qwen3) fn project_f16(
         &self,
         input: &[f32],
         rows: usize,
         result: &mut Vec<f32>,
+        round_activations: bool,
     ) -> Result<(), String> {
         // Accept F16 or BF16 — the matmul contract is identical and the
         // F16/BF16 kernel dispatch handles both.
@@ -668,9 +678,23 @@ impl AudioLinear {
             .zip(input.par_chunks(self.input))
             .try_for_each(|(output_row, input_row)| {
                 if !input_row.iter().all(|value| *value == 0.0) {
-                    self.weight
-                        .kernel
-                        .forward(input_row, output_row, self.input, self.output);
+                    if round_activations {
+                        self.weight.kernel.forward_prepared(
+                            input_row,
+                            &[],
+                            &[],
+                            None,
+                            output_row,
+                            self.input,
+                            self.output,
+                            0,
+                            1,
+                        );
+                    } else {
+                        self.weight
+                            .kernel
+                            .forward(input_row, output_row, self.input, self.output);
+                    }
                 }
                 if !self.bias.is_empty() {
                     for (value, bias) in output_row.iter_mut().zip(&self.bias) {
@@ -1110,6 +1134,13 @@ fn layer_norm(
     Ok(())
 }
 
+/// Apply layer normalization to `rows` independent rows.
+///
+/// If a future Jina/Qwen2.5 audio parity test reveals that the f32
+/// accumulator here drifts from llama.cpp, swap it for a higher-
+/// precision (f64) variant. See git history for a prior f64
+/// implementation that was removed without an oracle test verifying
+/// it was necessary.
 pub(in crate::models::qwen3) fn layer_norm_rows(
     input: &[f32],
     rows: usize,
@@ -1760,7 +1791,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut output = Vec::new();
 
-        linear.project_f16(&input, 1, &mut output).unwrap();
+        linear.project_f16(&input, 1, &mut output, false).unwrap();
 
         // Tolerance: F16→F32 AVX2 conversion (`_mm256_cvtph_ps` in
         // `dot_f16_avx2`) and F16×F32 FMA accumulation (`matmul_f16_vs_f32_avx2`)
@@ -1824,7 +1855,7 @@ mod tests {
         };
         let mut output = Vec::new();
 
-        linear.project_f16(&[0.0], 1, &mut output).unwrap();
+        linear.project_f16(&[0.0], 1, &mut output, false).unwrap();
 
         assert_eq!(output, [0.25]);
     }
@@ -2900,11 +2931,41 @@ mod tests {
         };
         let mut result = Vec::new();
 
-        linear.project_f16(&[3.0], 1, &mut result).unwrap();
+        linear.project_f16(&[3.0], 1, &mut result, false).unwrap();
         assert_eq!(result, [6.0]);
-        linear.project_f16(&[0.0], 1, &mut result).unwrap();
+        linear.project_f16(&[0.0], 1, &mut result, false).unwrap();
 
         assert_eq!(result, [0.0]);
+    }
+
+    #[test]
+    fn project_f16_with_round_activations_quantizes_to_f16() {
+        // The kernel API takes `QuantizedTensor<'a>`, so we need a
+        // weight buffer that lives at least as long as `linear`. For
+        // a 2-byte test fixture the leak is fine; the test process
+        // exits and frees everything.
+        let weight: &'static [u8] = Box::leak(
+            crate::ops::f32_to_f16(1.0)
+                .to_le_bytes()
+                .to_vec()
+                .into_boxed_slice(),
+        );
+        let linear = AudioLinear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(
+                weight,
+                GGMLType::F16,
+                1,
+                1,
+            )),
+            input: 1,
+            output: 1,
+            bias: Vec::new(),
+        };
+        let mut result = Vec::new();
+        // 1.0001 rounds to 1.0 in F16, so the matmul returns
+        // 1.0 × 1.0 = 1.0 (bit-exact).
+        linear.project_f16(&[1.0001], 1, &mut result, true).unwrap();
+        assert_eq!(result[0].to_bits(), 1.0f32.to_bits());
     }
 
     #[test]

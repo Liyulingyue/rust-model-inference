@@ -69,15 +69,39 @@ fn load_source_weight<'a, S: TensorSource + ?Sized>(
 }
 
 fn matmul_weight_batch(weight: &Weight<'_>, input: &[f32], output: &mut [f32]) {
+    if weight.ggml_type == GGMLType::F16 {
+        let weight_bytes = weight
+            .kernel
+            .weight_bytes()
+            .expect("F16 kernel must expose its storage bytes");
+        matmul_f16_bytes_batch(weight_bytes, weight.n_in, weight.n_out, input, output);
+        return;
+    }
     weight
         .kernel
         .forward_batched(input, output, weight.n_in, weight.n_out);
 }
 
+fn matmul_f16_bytes_batch(
+    weight_bytes: &[u8],
+    n_in: usize,
+    n_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+) {
+    let mut input_f16 = vec![0; n_in];
+    for (input, output) in input.chunks_exact(n_in).zip(output.chunks_exact_mut(n_out)) {
+        crate::ops::f32_slice_to_f16(input, &mut input_f16);
+        for (row, value) in weight_bytes.chunks_exact(n_in * 2).zip(output) {
+            *value = crate::ops::dot_f16_f16_bytes_ggml(&input_f16, row, n_in);
+        }
+    }
+}
+
 /// Parallel batched matmul for vision-encoder prefill: partitions the
 /// `n_tokens` input rows across the pool's worker threads. Each worker
-/// runs `forward_batched` on its slice of tokens; the kernel still owns
-/// the inner SIMD path. Used by `encode_pair` and `project` to avoid
+/// runs the vision-local matmul dispatch on its slice of tokens. Used by
+/// `encode_pair` and `project` to avoid
 /// the single-threaded bottleneck we measured at 247 s for a 401×287
 /// apple.png image (vit_layers ≈ 97.5 % of total).
 fn matmul_weight_batch_pooled(
@@ -94,7 +118,7 @@ fn matmul_weight_batch_pooled(
     if n_tokens < pool.n_threads() * 4 {
         // Not enough work to justify dispatch overhead: fall back to the
         // single-threaded batched path (matches the original behaviour).
-        weight.kernel.forward_batched(input, output, n_in, n_out);
+        matmul_weight_batch(weight, input, output);
         return;
     }
     // ComputePool's `compute` takes an `Fn` (not `FnMut`) closure, so we
@@ -122,11 +146,9 @@ fn matmul_weight_batch_pooled(
             let inp_slice =
                 std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in);
             let out_slice = out_ptr.slice(start, end);
-            // The kernel's `forward_batched` is `&self -> &mut [...]`, so
-            // we still need a `Weight<'_>` here; it borrows from outside.
-            weight
-                .kernel
-                .forward_batched(inp_slice, out_slice, n_in, n_out);
+            // The local dispatch only borrows the weight and this worker's
+            // disjoint input/output slices.
+            matmul_weight_batch(weight, inp_slice, out_slice);
         }
     });
     // Touch `n_threads` to silence the unused warning when the early
@@ -2249,8 +2271,8 @@ fn ggml_layer_norm_stats(x: &[f32]) -> (f32, f32) {
             return unsafe { ggml_layer_norm_stats_neon(x) };
         }
     }
-    let sum = x.iter().fold(0.0f64, |sum, &value| sum + f64::from(value)) as f32;
-    let mean = sum / x.len() as f32;
+    let mean =
+        (x.iter().fold(0.0f64, |sum, &value| sum + f64::from(value)) / x.len() as f64) as f32;
     let mut variance = 0.0f64;
     let mut groups = x.chunks_exact(4);
     for group in &mut groups {
@@ -2284,13 +2306,6 @@ unsafe fn ggml_layer_norm_stats_avx2(x: &[f32]) -> (f32, f32) {
     let mut sum_v = _mm256_setzero_pd();
     let mut sumsq_v = _mm256_setzero_pd();
     let mut i = 0;
-    // Process 8 f32 lanes at a time; widen to two f64 lanes for
-    // accumulation so each SIMD iteration contributes 8 of the 4
-    // f64 lanes inside `sum_v` / `sumsq_v` (which has only 4 lanes
-    // — eight i32 lanes becomes two sets of four i64 lanes after
-    // widening). To keep things simple we just accumulate scalar
-    // into a per-iter partial sum and add into the SIMD vector every
-    // 4 iters (32 floats).
     let mut partial_sum = 0.0f64;
     let mut partial_sumsq = 0.0f64;
     while i + 8 <= n {
@@ -2339,8 +2354,6 @@ unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
     let mut i = 0;
     while i + 8 <= n {
         let v = vld1q_f32(x.as_ptr().add(i));
-        // Widen two f32x4 → f64x2 lanes each (8 floats → 4 f64 lanes
-        // total per iteration).
         let lo = vcvt_f64_f32(vget_low_f32(v));
         let hi = vcvt_high_f64_f32(v);
         sum0 = vaddq_f64(sum0, lo);
@@ -2927,6 +2940,54 @@ mod tests {
     }
 
     #[test]
+    fn qwen35_vision_f16_matmul_rounds_activations_to_f16() {
+        let mut source = MapTensorSource::default();
+        source.tensors.insert(
+            "v.test.weight".into(),
+            TensorInfo {
+                name: "v.test.weight".into(),
+                dims: vec![8, 1],
+                ggml_type: GGMLType::F16,
+                offset: 0,
+            },
+        );
+        source.data.insert(
+            "v.test.weight".into(),
+            [1.0f32; 8]
+                .into_iter()
+                .flat_map(|value| crate::ops::f32_to_f16(value).to_le_bytes())
+                .collect(),
+        );
+        let weight = load_source_weight(&source, "v.test.weight", &[8, 1], 8, 1).unwrap();
+        let mut output = [0.0];
+
+        // 1.0003 rounds to 1.0 in F16, then F16×F16 matmul yields
+        // 1.0 × 8 = 8.0 (bit-exact).
+        matmul_weight_batch(&weight, &[1.0003; 8], &mut output);
+
+        assert_eq!(output[0], 8.0);
+    }
+
+    #[test]
+    fn f32_patch_weight_keeps_u16_f16_cache() {
+        let bytes: Vec<u8> = [1.0f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let weight =
+            Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::F32, 2, 1));
+        let f16 = f32_weight_as_f16(&weight).unwrap();
+        assert_eq!(
+            f16,
+            [crate::ops::f32_to_f16(1.0), crate::ops::f32_to_f16(-2.0)]
+        );
+
+        let mut output = [0.0];
+        matmul_patch_weight_batch(&weight, Some(&f16), &[1.0003, 1.0], &mut output);
+        assert_eq!(output, [-1.0]);
+    }
+
+    #[test]
     fn projection_width_comes_from_mm2_tensor() {
         let mut source = MapTensorSource {
             metadata: HashMap::from([
@@ -2970,10 +3031,9 @@ mod tests {
         let encoder = VisionEncoder::from_source(&source).unwrap();
 
         assert_eq!(encoder.config.projection_dim, 1024);
-        assert_eq!(
-            encoder.precomputed.as_ref().unwrap().mm_2_weight.ggml_type,
-            GGMLType::F16
-        );
+        let precomputed = encoder.precomputed.as_ref().unwrap();
+        assert_eq!(precomputed.mm_2_weight.ggml_type, GGMLType::F16);
+        assert!(precomputed.patch_weight_f16.is_none());
     }
 
     #[test]
