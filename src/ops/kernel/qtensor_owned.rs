@@ -231,6 +231,7 @@ impl QTensorOwned {
             // use them and qwen3 uses QuantizedTensor directly).
             QuantizedTensor::Q4_0 { .. }
             | QuantizedTensor::Q4_1 { .. }
+            | QuantizedTensor::Q1_0 { .. }
             | QuantizedTensor::IQ2XXS { .. }
             | QuantizedTensor::IQ2S { .. }
             | QuantizedTensor::IQ2XS { .. }

@@ -11,6 +11,7 @@ pub const SUPPORTED_EMBEDDING_TYPES: &[GGMLType] = &[
     GGMLType::Q6K,
     GGMLType::Q5K,
     GGMLType::IQ4_NL,
+    GGMLType::Q1_0,
 ];
 
 pub fn is_supported_embedding(ggml_type: GGMLType) -> bool {
@@ -42,6 +43,7 @@ pub fn embedding_lookup(
         GGMLType::Q5K => embedding_lookup_q5_k(weight, token_id, n_embd, out),
         GGMLType::BF16 => embedding_lookup_bf16(weight, token_id, n_embd, out),
         GGMLType::IQ4_NL => embedding_lookup_iq4_nl(weight, token_id, n_embd, out),
+        GGMLType::Q1_0 => embedding_lookup_q1_0(weight, token_id, n_embd, out),
         _ => panic!(
             "unsupported embedding type {embd_type:?}; supported: {:?}",
             SUPPORTED_EMBEDDING_TYPES
@@ -136,4 +138,22 @@ pub fn embedding_lookup_q5_k(weight: &[u8], token_id: u32, n_embd: usize, out: &
         &weight[row_start..row_start + row_bytes],
         &mut out[..n_embd],
     );
+}
+
+pub fn embedding_lookup_q1_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    const BLOCK_ELEMENTS: usize = 128;
+    const BLOCK_BYTES: usize = 18;
+    let blocks_per_row = n_embd / BLOCK_ELEMENTS;
+    let row_off = token_id as usize * blocks_per_row * BLOCK_BYTES;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * BLOCK_BYTES;
+        let d = super::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        let bits = &weight[off + 2..off + BLOCK_BYTES];
+        for j in 0..BLOCK_ELEMENTS {
+            let byte_idx = j / 8;
+            let bit_idx = j % 8;
+            let bit = (bits[byte_idx] >> bit_idx) & 1;
+            out[b * BLOCK_ELEMENTS + j] = if bit != 0 { d } else { -d };
+        }
+    }
 }
