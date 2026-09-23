@@ -33,4 +33,4 @@
 | Spark-X2.5                    | 1.7B / 4B  | 文本                 | XHToken/llama.cpp                     | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF             | √ |
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |
-| NVIDIA-Nemotron-3-Nano        | 4B         | 文本                 |                                      |              | 待核验 |
+| NVIDIA-Nemotron-3-Nano        | 4B         | 文本                 | llama.cpp @ `b96806d`               |              | Q8_0 已验证：真实 GGUF 加载、Tokenizer、标量 Oracle 全量 logits 逐位一致，4 步 greedy 与 release CLI 通过；默认 SIMD 路径数值不逐位一致。 |
