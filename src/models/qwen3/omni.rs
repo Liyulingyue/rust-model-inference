@@ -159,12 +159,7 @@ impl Qwen25OmniAudioModel {
         if layout.output_rows == 0 {
             return Err("Audio is too short to produce an embedding row".into());
         }
-        let input = prepare_chunked_mel(
-            samples,
-            self.config.mel_bins,
-            real_frames,
-            layout.padded_mel_frames,
-        )?;
+        let input = prepare_chunked_mel(samples, self.config.mel_bins, real_frames)?;
 
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -737,7 +732,6 @@ fn prepare_chunked_mel(
     samples: &[f32],
     mel_bins: usize,
     real_mel_frames: usize,
-    padded_mel_frames: usize,
 ) -> Result<Vec<f32>, String> {
     if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
         return Err("Audio samples must be non-empty and finite".into());
@@ -746,6 +740,11 @@ fn prepare_chunked_mel(
     if mel.frames < real_mel_frames || mel.normalized.len() != mel.frames * mel_bins {
         return Err("Audio Mel output is shorter than the real sample duration".into());
     }
+    let padded_mel_frames = real_mel_frames
+        .checked_add(MEL_CHUNK - 1)
+        .ok_or("Audio Mel frame count overflow")?
+        / MEL_CHUNK
+        * MEL_CHUNK;
     let mut input = reserved_f32(
         "Qwen2.5-Omni Mel input",
         checked_product("Qwen2.5-Omni Mel input", padded_mel_frames, mel_bins)?,
