@@ -156,31 +156,21 @@ fn matmul_weight_batch_pooled(
     let _ = n_threads;
 }
 
-fn patch_weight_as_f16_bytes<S: TensorSource + ?Sized>(
-    source: &S,
-    name: &str,
-    weight: &Weight<'_>,
-) -> Option<Vec<u8>> {
-    match weight.ggml_type {
-        GGMLType::F16 => source.tensor_slice(name).map(<[u8]>::to_vec),
-        GGMLType::F32 => {
-            let values = weight
-                .kernel
-                .f32_slice()
-                .expect("F32 kernel must expose its values");
-            let mut bytes = Vec::with_capacity(values.len() * 2);
-            for &value in values {
-                bytes.extend_from_slice(&crate::ops::f32_to_f16(value).to_le_bytes());
-            }
-            Some(bytes)
-        }
-        _ => None,
-    }
+fn f32_weight_as_f16(weight: &Weight<'_>) -> Option<Vec<u16>> {
+    (weight.ggml_type == GGMLType::F32).then(|| {
+        weight
+            .kernel
+            .f32_slice()
+            .expect("F32 kernel must expose its values")
+            .iter()
+            .map(|&value| crate::ops::f32_to_f16(value))
+            .collect()
+    })
 }
 
 fn matmul_patch_weight_batch(
     weight: &Weight<'_>,
-    weight_f16: Option<&[u8]>,
+    weight_f16: Option<&[u16]>,
     input: &[f32],
     output: &mut [f32],
 ) {
@@ -188,7 +178,16 @@ fn matmul_patch_weight_batch(
         matmul_weight_batch(weight, input, output);
         return;
     };
-    matmul_f16_bytes_batch(weight_f16, weight.n_in, weight.n_out, input, output);
+    let mut input_f16 = vec![0; weight.n_in];
+    for (input, output) in input
+        .chunks_exact(weight.n_in)
+        .zip(output.chunks_exact_mut(weight.n_out))
+    {
+        crate::ops::f32_slice_to_f16(input, &mut input_f16);
+        for (row, value) in weight_f16.chunks_exact(weight.n_in).zip(output) {
+            *value = crate::ops::dot_f16(row, &input_f16, weight.n_in);
+        }
+    }
 }
 
 #[cfg(feature = "parity-trace")]
@@ -367,9 +366,9 @@ pub struct VisionEncoder<'a> {
 
 pub struct VisionPrecomputed<'a> {
     pub patch_weight: Weight<'a>,
-    patch_weight_f16_bytes: Option<Vec<u8>>,
+    patch_weight_f16: Option<Vec<u16>>,
     pub patch_weight_1: Option<Weight<'a>>,
-    patch_weight_1_f16_bytes: Option<Vec<u8>>,
+    patch_weight_1_f16: Option<Vec<u16>>,
     pub qkv_weights: Vec<Option<Weight<'a>>>,
     pub qkv_biases: Vec<Option<Vec<f32>>>,
     pub q_weights: Vec<Option<Weight<'a>>>,
@@ -443,11 +442,8 @@ impl<'a> VisionPrecomputed<'a> {
                 )
             })
             .transpose()?;
-        let patch_weight_f16_bytes =
-            patch_weight_as_f16_bytes(source, "v.patch_embd.weight", &patch_weight);
-        let patch_weight_1_f16_bytes = patch_weight_1
-            .as_ref()
-            .and_then(|weight| patch_weight_as_f16_bytes(source, "v.patch_embd.weight.1", weight));
+        let patch_weight_f16 = f32_weight_as_f16(&patch_weight);
+        let patch_weight_1_f16 = patch_weight_1.as_ref().and_then(f32_weight_as_f16);
         let mut qkv_weights = Vec::with_capacity(config.n_layer);
         let mut qkv_biases = Vec::with_capacity(config.n_layer);
         let mut q_weights = Vec::with_capacity(config.n_layer);
@@ -606,9 +602,9 @@ impl<'a> VisionPrecomputed<'a> {
         let merged = n_embd * config.spatial_merge_size * config.spatial_merge_size;
         Ok(Self {
             patch_weight,
-            patch_weight_f16_bytes,
+            patch_weight_f16,
             patch_weight_1,
-            patch_weight_1_f16_bytes,
+            patch_weight_1_f16,
             qkv_weights,
             qkv_biases,
             q_weights,
@@ -1070,7 +1066,7 @@ impl<'a> VisionEncoder<'a> {
             fill_patches(frame_a, &mut scratch.patch_weight_buf);
             matmul_patch_weight_batch(
                 &pc.patch_weight,
-                pc.patch_weight_f16_bytes.as_deref(),
+                pc.patch_weight_f16.as_deref(),
                 &scratch.patch_weight_buf,
                 &mut scratch.patch_embd[..n_patches * n_embd],
             );
@@ -1086,7 +1082,7 @@ impl<'a> VisionEncoder<'a> {
                 fill_patches(frame_b, &mut scratch.patch_weight_buf);
                 matmul_patch_weight_batch(
                     weight,
-                    pc.patch_weight_1_f16_bytes.as_deref(),
+                    pc.patch_weight_1_f16.as_deref(),
                     &scratch.patch_weight_buf,
                     &mut scratch.project_concat_buf[..n_patches * n_embd],
                 );
@@ -2886,6 +2882,25 @@ mod tests {
     }
 
     #[test]
+    fn f32_patch_weight_keeps_u16_f16_cache() {
+        let bytes: Vec<u8> = [1.0f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let weight =
+            Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::F32, 2, 1));
+        let f16 = f32_weight_as_f16(&weight).unwrap();
+        assert_eq!(
+            f16,
+            [crate::ops::f32_to_f16(1.0), crate::ops::f32_to_f16(-2.0)]
+        );
+
+        let mut output = [0.0];
+        matmul_patch_weight_batch(&weight, Some(&f16), &[1.0003, 1.0], &mut output);
+        assert_eq!(output, [-1.0]);
+    }
+
+    #[test]
     fn projection_width_comes_from_mm2_tensor() {
         let mut source = MapTensorSource {
             metadata: HashMap::from([
@@ -2931,10 +2946,7 @@ mod tests {
         assert_eq!(encoder.config.projection_dim, 1024);
         let precomputed = encoder.precomputed.as_ref().unwrap();
         assert_eq!(precomputed.mm_2_weight.ggml_type, GGMLType::F16);
-        assert_eq!(
-            precomputed.patch_weight_f16_bytes.as_deref(),
-            source.data.get("v.patch_embd.weight").map(Vec::as_slice)
-        );
+        assert!(precomputed.patch_weight_f16.is_none());
     }
 
     #[test]
