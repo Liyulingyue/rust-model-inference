@@ -499,6 +499,9 @@ fn multi_head_attention(
         let per = n_head.div_ceil(nth);
         let h_start = ith * per;
         let h_end = (h_start + per).min(n_head);
+        if h_start >= h_end {
+            return;
+        }
         let mut scores = vec![0.0f32; t * t];
         for h in h_start..h_end {
             let off = h * dk;

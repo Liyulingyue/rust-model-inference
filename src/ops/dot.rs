@@ -935,7 +935,7 @@ unsafe fn vec_mad_per_channel_f32_neon(y: &mut [f32], x: &[f32], scale: &[f32]) 
         let yi = vld1q_f32(y.as_ptr().add(i));
         let xi = vld1q_f32(x.as_ptr().add(i));
         let si = vld1q_f32(scale.as_ptr().add(i));
-        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, si, yi));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(yi, xi, si));
         i += 4;
     }
     while i < y.len() {
@@ -1027,7 +1027,7 @@ unsafe fn vec_mad_per_channel_f32_broadcast_neon(
         let sc = vld1q_f32(scale.as_ptr().add(c0));
         let yi = vld1q_f32(y.as_ptr().add(i));
         let xi = vld1q_f32(x.as_ptr().add(i));
-        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(xi, sc, yi));
+        vst1q_f32(y.as_mut_ptr().add(i), vfmaq_f32(yi, xi, sc));
         i += 4;
     }
     while i < y.len() {
