@@ -1391,25 +1391,6 @@ impl<'a> VisionEncoder<'a> {
             }
         }
         t_ln1 = t_ln1_start.elapsed().as_secs_f64();
-        #[cfg(feature = "parity-trace")]
-        if il == 0 {
-            crate::parity_trace::report(crate::parity_trace::checkpoint(
-                "omni.vision.ln1",
-                Some(il),
-                &[n_tokens, n_embd],
-                &scratch.merged[..n_tokens * n_embd],
-            ));
-            let mut q = Vec::with_capacity(n_tokens * n_embd);
-            for token in scratch.qkv_buf[..n_tokens * n_embd * 3].chunks_exact(n_embd * 3) {
-                q.extend_from_slice(&token[..n_embd]);
-            }
-            crate::parity_trace::report(crate::parity_trace::checkpoint(
-                "omni.vision.q",
-                Some(il),
-                &[n_tokens, n_head, d_head],
-                &q,
-            ));
-        }
         let t_rope_start = std::time::Instant::now();
         for t in 0..n_tokens {
             let src_off = t * n_embd * 3;
@@ -2274,6 +2255,22 @@ fn f32_from_le_bytes(b: &[u8]) -> f32 {
 }
 
 fn ggml_layer_norm_stats(x: &[f32]) -> (f32, f32) {
+    // ggml matches: accumulate sum and sum-of-squares in f64 for
+    // numerical stability over long row reductions. Two AVX2/NEON fast
+    // paths exist; the scalar fallback handles small buffers and
+    // pre-feature hosts.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() {
+            return unsafe { ggml_layer_norm_stats_avx2(x) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            return unsafe { ggml_layer_norm_stats_neon(x) };
+        }
+    }
     let mean =
         (x.iter().fold(0.0f64, |sum, &value| sum + f64::from(value)) / x.len() as f64) as f32;
     let mut variance = 0.0f64;
@@ -2292,6 +2289,94 @@ fn ggml_layer_norm_stats(x: &[f32]) -> (f32, f32) {
         variance += f64::from(centered * centered);
     }
     (mean, (variance / x.len() as f64) as f32)
+}
+
+/// AVX2 + FMA `ggml_layer_norm_stats`.
+///
+/// Computes `(mean, variance)` over `x` in f64 accumulator pairs to
+/// match ggml's precision contract. `_mm256_loadu_ps` does eight lanes
+/// per iteration; the final horizontal sum is done in f64 via
+/// `_mm256_cvtps_pd` + `_mm_add_pd` to avoid precision loss on long
+/// rows.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn ggml_layer_norm_stats_avx2(x: &[f32]) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let n = x.len();
+    let mut sum_v = _mm256_setzero_pd();
+    let mut sumsq_v = _mm256_setzero_pd();
+    let mut i = 0;
+    let mut partial_sum = 0.0f64;
+    let mut partial_sumsq = 0.0f64;
+    while i + 8 <= n {
+        let v = _mm256_loadu_ps(x.as_ptr().add(i));
+        let lo = _mm256_cvtps_pd(_mm256_castps256_ps128(v));
+        let hi = _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(v));
+        let sq = _mm256_mul_pd(lo, lo);
+        let sq_hi = _mm256_mul_pd(hi, hi);
+        sum_v = _mm256_add_pd(sum_v, _mm256_add_pd(lo, hi));
+        sumsq_v = _mm256_add_pd(sumsq_v, _mm256_add_pd(sq, sq_hi));
+        i += 8;
+    }
+    while i < n {
+        let v = f64::from(*x.as_ptr().add(i));
+        partial_sum += v;
+        partial_sumsq += v * v;
+        i += 1;
+    }
+    let mut hsum = |v: std::arch::x86_64::__m256d| -> f64 {
+        let hi = _mm256_extractf128_pd::<1>(v);
+        let lo = _mm256_castpd256_pd128(v);
+        let sum128 = _mm_add_pd(hi, lo);
+        let t = _mm_add_sd(sum128, _mm_unpackhi_pd(sum128, sum128));
+        _mm_cvtsd_f64(t)
+    };
+    let total_sum = hsum(sum_v) + partial_sum;
+    let total_sumsq = hsum(sumsq_v) + partial_sumsq;
+    let mean = (total_sum / n as f64) as f32;
+    let variance = (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
+    (mean, variance)
+}
+
+/// NEON `ggml_layer_norm_stats`.
+///
+/// Same precision contract as AVX2: accumulate in f64, then compute
+/// variance as `E[x²] − (E[x])²` once at the end.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn ggml_layer_norm_stats_neon(x: &[f32]) -> (f32, f32) {
+    use std::arch::aarch64::*;
+    let n = x.len();
+    let mut sum0 = vdupq_n_f64(0.0);
+    let mut sum1 = vdupq_n_f64(0.0);
+    let mut sumsq0 = vdupq_n_f64(0.0);
+    let mut sumsq1 = vdupq_n_f64(0.0);
+    let mut i = 0;
+    while i + 8 <= n {
+        let v = vld1q_f32(x.as_ptr().add(i));
+        let lo = vcvt_f64_f32(vget_low_f32(v));
+        let hi = vcvt_high_f64_f32(v);
+        sum0 = vaddq_f64(sum0, lo);
+        sum1 = vaddq_f64(sum1, hi);
+        let sq_lo = vmulq_f64(lo, lo);
+        let sq_hi = vmulq_f64(hi, hi);
+        sumsq0 = vaddq_f64(sumsq0, sq_lo);
+        sumsq1 = vaddq_f64(sumsq1, sq_hi);
+        i += 8;
+    }
+    let mut partial_sum = 0.0f64;
+    let mut partial_sumsq = 0.0f64;
+    while i < n {
+        let v = f64::from(*x.as_ptr().add(i));
+        partial_sum += v;
+        partial_sumsq += v * v;
+        i += 1;
+    }
+    let total_sum = vaddvq_f64(vaddq_f64(sum0, sum1)) + partial_sum;
+    let total_sumsq = vaddvq_f64(vaddq_f64(sumsq0, sumsq1)) + partial_sumsq;
+    let mean = (total_sum / n as f64) as f32;
+    let variance = (total_sumsq / n as f64 - f64::from(mean) * f64::from(mean)) as f32;
+    (mean, variance)
 }
 
 fn layer_norm_with_bias(x: &mut [f32], w: &[f32], b: &[f32], eps: f32) {
@@ -2855,7 +2940,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_vision_f16_matmul_uses_ggml_f16_activations() {
+    fn qwen35_vision_f16_matmul_rounds_activations_to_f16() {
         let mut source = MapTensorSource::default();
         source.tensors.insert(
             "v.test.weight".into(),
@@ -2876,6 +2961,8 @@ mod tests {
         let weight = load_source_weight(&source, "v.test.weight", &[8, 1], 8, 1).unwrap();
         let mut output = [0.0];
 
+        // 1.0003 rounds to 1.0 in F16, then F16×F16 matmul yields
+        // 1.0 × 8 = 8.0 (bit-exact).
         matmul_weight_batch(&weight, &[1.0003; 8], &mut output);
 
         assert_eq!(output[0], 8.0);
