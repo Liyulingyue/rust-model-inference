@@ -120,6 +120,69 @@ unsafe fn vec_add_avx2(a: &[f32], b: &mut [f32]) {
     }
 }
 
+/// `y[i] -= s` for all `i`, with `s` broadcast across the lane group.
+/// Used by FunASR's `layernorm_fwd` to center the row before scaling.
+/// Scalar fallback is `y[i] -= s` in a tight loop; AVX2 broadcasts
+/// `s` once per 8 lanes.
+#[inline(always)]
+pub fn vec_sub_scalar_inplace(y: &mut [f32], s: f32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if super::super::has_avx2_fma() {
+            unsafe { vec_sub_scalar_avx2(y, s) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if super::super::has_neon() {
+            unsafe { vec_sub_scalar_neon(y, s) };
+            return;
+        }
+    }
+    for v in y {
+        *v -= s;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn vec_sub_scalar_avx2(y: &mut [f32], s: f32) {
+    use std::arch::x86_64::*;
+    let n = y.len();
+    let n8 = n / 8 * 8;
+    let v_s = _mm256_set1_ps(s);
+    let mut i = 0;
+    while i < n8 {
+        let v = _mm256_loadu_ps(y.as_ptr().add(i));
+        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_sub_ps(v, v_s));
+        i += 8;
+    }
+    while i < n {
+        y[i] -= s;
+        i += 1;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn vec_sub_scalar_neon(y: &mut [f32], s: f32) {
+    use std::arch::aarch64::*;
+    let n = y.len();
+    let n4 = n / 4 * 4;
+    let v_s = vdupq_n_f32(s);
+    let mut i = 0;
+    while i < n4 {
+        let v = vld1q_f32(y.as_ptr().add(i));
+        vst1q_f32(y.as_mut_ptr().add(i), vsubq_f32(v, v_s));
+        i += 4;
+    }
+    while i < n {
+        y[i] -= s;
+        i += 1;
+    }
+}
+
 #[inline(always)]
 pub fn vec_add(a: &[f32], b: &[f32], c: &mut [f32]) {
     debug_assert_eq!(a.len(), b.len());

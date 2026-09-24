@@ -8,7 +8,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, quantize_q8_0_into, sum_f32,
-    sum_sq_centered_f32,
+    sum_sq_centered_f32, vec_add_into,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -1336,11 +1336,13 @@ pub(in crate::models::qwen3) fn add_residual(
     {
         return Err("Invalid audio residual tensors".into());
     }
-    for (hidden, update) in hidden.iter_mut().zip(update) {
-        *hidden += *update;
-        if !hidden.is_finite() {
-            return Err("Non-finite audio residual".into());
-        }
+    // SIMD via `vec_add_into` (AVX2 / NEON / scalar fallback). The
+    // post-add validation scans `hidden` once via the existing
+    // SIMD-accelerated `iter().any(|v| !v.is_finite())` chain to
+    // keep the NaN/Inf guard without per-element branching.
+    vec_add_into(update, hidden);
+    if hidden.iter().any(|v| !v.is_finite()) {
+        return Err("Non-finite audio residual".into());
     }
     Ok(())
 }

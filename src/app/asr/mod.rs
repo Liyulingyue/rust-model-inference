@@ -24,6 +24,23 @@ pub fn run_asr_cli(
     prefill_batch_size: usize,
 ) -> Result<(), String> {
     let started = Instant::now();
+
+    // Standalone ASR models (no mmproj needed): check --model arch directly.
+    let model_path = &options.model;
+    if !model_path.as_os_str().is_empty() {
+        let probe = open_or_exit(model_path, ComponentRole::Llm);
+        let is_sensevoice = crate::models::funasr::sensevoice::is_sensevoice(probe.as_ref());
+        let is_paraformer = crate::models::funasr::paraformer::is_paraformer(probe.as_ref());
+        drop(probe);
+        if is_sensevoice {
+            return funasr::run_sensevoice_cli(options);
+        }
+        if is_paraformer {
+            return funasr::run_paraformer_cli(options);
+        }
+    }
+
+    // Models that use a separate mmproj: probe it for encoder type.
     if let Some(mmproj_path) = options
         .mmproj
         .as_deref()

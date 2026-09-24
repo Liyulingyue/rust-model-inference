@@ -41,8 +41,9 @@ enum AudioRoute {
 fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
     match arch {
         // qwen3 covers Fun-ASR-Nano (qwen3-0.6b LLM + funasr encoder mmproj);
-        // qwen3vl covers Qwen3-Audio ASR; qwen2 covers VibeVoice ASR.
-        "qwen3" | "qwen3vl" | "qwen2" => Ok(AudioRoute::Asr),
+        // qwen3vl covers Qwen3-Audio ASR; qwen2 covers VibeVoice ASR;
+        // sensevoice-small and paraformer are standalone ASR models.
+        "qwen3" | "qwen3vl" | "qwen2" | "sensevoice-small" | "paraformer" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
