@@ -214,3 +214,185 @@ pub fn run_funasr_cli(options: &CliOptions, prefill_batch_size: usize) -> Result
     }
     Ok(())
 }
+
+/// Run SenseVoice ASR: WAV → fbank → encoder → CTC → text.
+pub fn run_sensevoice_cli(options: &CliOptions) -> Result<(), String> {
+    let started = Instant::now();
+
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    if !crate::models::funasr::sensevoice::is_sensevoice(source.as_ref()) {
+        return Err(format!(
+            "Expected sensevoice-small, got {:?}",
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                .unwrap_or_default()
+        ));
+    }
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        available,
+    )));
+    let model = crate::models::funasr::sensevoice::SenseVoiceModel::new(
+        Arc::clone(&source),
+        Arc::clone(&pool),
+    )?;
+    let load_done = started.elapsed();
+    eprintln!("SenseVoice model loaded in {:.3}s", load_done.as_secs_f64());
+
+    let audio_path = options.audio.as_ref().expect("validated audio option");
+    let wav_bytes = std::fs::read(audio_path)
+        .map_err(|e| format!("Failed to read {}: {e}", audio_path.display()))?;
+    let decoded =
+        decode_pcm16_wav_any(&wav_bytes).map_err(|e| format!("WAV decode error: {e:?}"))?;
+    let samples: Vec<f32> = if decoded.channels == 1 {
+        decoded.samples
+    } else {
+        decoded
+            .samples
+            .chunks(decoded.channels as usize)
+            .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
+            .collect()
+    };
+    let samples = if decoded.sample_rate as usize == SAMPLE_RATE {
+        samples
+    } else {
+        crate::models::funasr::model::linear_resample(
+            &samples,
+            decoded.sample_rate as usize,
+            SAMPLE_RATE,
+        )
+    };
+    eprintln!(
+        "Audio: {} samples ({:.1}s)",
+        samples.len(),
+        samples.len() as f64 / SAMPLE_RATE as f64
+    );
+
+    let chunk_samples = options
+        .chunk_seconds
+        .map(|sec| (sec * SAMPLE_RATE as f64).round() as usize)
+        .unwrap_or(samples.len());
+    let wins: Vec<(usize, usize)> = (0..samples.len())
+        .step_by(chunk_samples)
+        .map(|off| {
+            let end = (off + chunk_samples).min(samples.len());
+            (off, end - off)
+        })
+        .filter(|(_, len)| *len >= 400)
+        .collect();
+
+    let mut full_text = String::new();
+    for (win_idx, &(off, len)) in wins.iter().enumerate() {
+        let seg = &samples[off..off + len];
+        if wins.len() > 1 {
+            eprintln!("Chunk {}/{}", win_idx + 1, wins.len());
+        }
+        let text = model.transcribe(seg)?;
+        full_text.push_str(&text);
+    }
+
+    let total = started.elapsed();
+    eprintln!(
+        "Total: {:.3}s (load={:.3}s transcribe={:.3}s)",
+        total.as_secs_f64(),
+        load_done.as_secs_f64(),
+        (total - load_done).as_secs_f64(),
+    );
+    println!("{full_text}");
+    Ok(())
+}
+
+/// Run Paraformer ASR: WAV → fbank → CMVN → encoder → CIF → decoder → text.
+pub fn run_paraformer_cli(options: &CliOptions) -> Result<(), String> {
+    let started = Instant::now();
+
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    if !crate::models::funasr::paraformer::is_paraformer(source.as_ref()) {
+        return Err(format!(
+            "Expected paraformer, got {:?}",
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                .unwrap_or_default()
+        ));
+    }
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        available,
+    )));
+    let model = crate::models::funasr::paraformer::ParaformerModel::new(
+        Arc::clone(&source),
+        Arc::clone(&pool),
+    )?;
+    let load_done = started.elapsed();
+    eprintln!("Paraformer model loaded in {:.3}s", load_done.as_secs_f64());
+
+    let audio_path = options.audio.as_ref().expect("validated audio option");
+    let wav_bytes = std::fs::read(audio_path)
+        .map_err(|e| format!("Failed to read {}: {e}", audio_path.display()))?;
+    let decoded =
+        decode_pcm16_wav_any(&wav_bytes).map_err(|e| format!("WAV decode error: {e:?}"))?;
+    let samples: Vec<f32> = if decoded.channels == 1 {
+        decoded.samples
+    } else {
+        decoded
+            .samples
+            .chunks(decoded.channels as usize)
+            .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
+            .collect()
+    };
+    let samples = if decoded.sample_rate as usize == SAMPLE_RATE {
+        samples
+    } else {
+        crate::models::funasr::model::linear_resample(
+            &samples,
+            decoded.sample_rate as usize,
+            SAMPLE_RATE,
+        )
+    };
+    eprintln!(
+        "Audio: {} samples ({:.1}s)",
+        samples.len(),
+        samples.len() as f64 / SAMPLE_RATE as f64
+    );
+
+    let chunk_samples = options
+        .chunk_seconds
+        .map(|sec| (sec * SAMPLE_RATE as f64).round() as usize)
+        .unwrap_or(samples.len());
+    let wins: Vec<(usize, usize)> = (0..samples.len())
+        .step_by(chunk_samples)
+        .map(|off| {
+            let end = (off + chunk_samples).min(samples.len());
+            (off, end - off)
+        })
+        .filter(|(_, len)| *len >= 400)
+        .collect();
+
+    let mut full_text = String::new();
+    for (win_idx, &(off, len)) in wins.iter().enumerate() {
+        let seg = &samples[off..off + len];
+        if wins.len() > 1 {
+            eprintln!("Chunk {}/{}", win_idx + 1, wins.len());
+        }
+        let text = model.transcribe(seg)?;
+        full_text.push_str(&text);
+    }
+
+    let total = started.elapsed();
+    eprintln!(
+        "Total: {:.3}s (load={:.3}s transcribe={:.3}s)",
+        total.as_secs_f64(),
+        load_done.as_secs_f64(),
+        (total - load_done).as_secs_f64(),
+    );
+    println!("{full_text}");
+    Ok(())
+}

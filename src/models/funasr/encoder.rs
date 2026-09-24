@@ -26,27 +26,27 @@ const LN_EPS: f32 = 1e-5;
 
 // ======================= Pre-loaded weight structs =======================
 
-struct Linear {
-    weight: Weight<'static>,
-    bias: Vec<f32>,
-    in_dim: usize,
-    out_dim: usize,
+pub(crate) struct Linear {
+    pub(crate) weight: Weight<'static>,
+    pub(crate) bias: Vec<f32>,
+    pub(crate) in_dim: usize,
+    pub(crate) out_dim: usize,
 }
 
-struct LayerNorm {
-    weight: Vec<f32>,
-    bias: Vec<f32>,
-    dim: usize,
+pub(crate) struct LayerNorm {
+    pub(crate) weight: Vec<f32>,
+    pub(crate) bias: Vec<f32>,
+    pub(crate) dim: usize,
 }
 
-struct SanmLayer {
-    norm1: LayerNorm,
-    qkv: Linear,
-    fsmn: Vec<f32>,
-    linear_out: Linear,
-    norm2: LayerNorm,
-    ff_w1: Linear,
-    ff_w2: Linear,
+pub(crate) struct SanmLayer {
+    pub(crate) norm1: LayerNorm,
+    pub(crate) qkv: Linear,
+    pub(crate) fsmn: Vec<f32>,
+    pub(crate) linear_out: Linear,
+    pub(crate) norm2: LayerNorm,
+    pub(crate) ff_w1: Linear,
+    pub(crate) ff_w2: Linear,
 }
 
 struct AdpLayer {
@@ -248,7 +248,7 @@ impl FunAsrEncoder {
 
 // ======================= Weight loading =======================
 
-fn load_linear(source: &dyn TensorSource, prefix: &str) -> Result<Linear, String> {
+pub(crate) fn load_linear(source: &dyn TensorSource, prefix: &str) -> Result<Linear, String> {
     let weight_name = format!("{prefix}weight");
     let bias_name = format!("{prefix}bias");
     let info = source
@@ -272,14 +272,14 @@ fn load_linear(source: &dyn TensorSource, prefix: &str) -> Result<Linear, String
     })
 }
 
-fn load_layernorm(source: &dyn TensorSource, prefix: &str) -> Result<LayerNorm, String> {
+pub(crate) fn load_layernorm(source: &dyn TensorSource, prefix: &str) -> Result<LayerNorm, String> {
     let weight = load_f32_vec(source, &format!("{prefix}weight"))?;
     let bias = load_f32_vec(source, &format!("{prefix}bias"))?;
     let dim = weight.len();
     Ok(LayerNorm { weight, bias, dim })
 }
 
-fn load_sanm_layer(
+pub(crate) fn load_sanm_layer(
     source: &dyn TensorSource,
     prefix: &str,
     _in_dim: usize,
@@ -315,7 +315,7 @@ fn load_adp_layer(
     })
 }
 
-fn load_f32_vec(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
+pub(crate) fn load_f32_vec(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("tensor {name} not found"))?;
@@ -342,22 +342,22 @@ fn load_f32_vec(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, Strin
 
 // ======================= Forward primitives (ComputePool-based) =======================
 
-struct SharedMut<T>(*mut T);
+pub(crate) struct SharedMut<T>(pub(crate) *mut T);
 unsafe impl<T> Send for SharedMut<T> {}
 unsafe impl<T> Sync for SharedMut<T> {}
 impl<T> SharedMut<T> {
     #[inline]
-    unsafe fn write(&self, index: usize, value: T) {
+    pub(crate) unsafe fn write(&self, index: usize, value: T) {
         self.0.add(index).write(value);
     }
     #[inline]
-    unsafe fn slice(&self, start: usize, len: usize) -> &mut [T] {
+    pub(crate) unsafe fn slice(&self, start: usize, len: usize) -> &mut [T] {
         std::slice::from_raw_parts_mut(self.0.add(start), len)
     }
 }
 
 #[inline]
-fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
+pub(crate) fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
     let in_dim = lin.in_dim;
     let out_dim = lin.out_dim;
     let mut out = vec![0.0f32; t * out_dim];
@@ -397,7 +397,7 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
 }
 
 #[inline]
-fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
+pub(crate) fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec<f32> {
     let dim = ln.dim;
     let weight = &ln.weight;
     let bias = &ln.bias;
@@ -434,7 +434,7 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
     out
 }
 
-fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+pub(crate) fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut q = vec![0.0f32; t * dim];
     let mut k = vec![0.0f32; t * dim];
     let mut v = vec![0.0f32; t * dim];
@@ -451,7 +451,7 @@ fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>
 /// output frame t: fsmn[t] = v[t] + sum_j kernel[:,j] * pad_v[t + j].
 ///
 /// `fsmn_w` is [dim, kernel_size] row-major (transposed from PyTorch at export).
-fn fsmn_shift_accumulate(
+pub(crate) fn fsmn_shift_accumulate(
     v: &[f32],
     t: usize,
     dim: usize,
@@ -489,7 +489,7 @@ fn fsmn_shift_accumulate(
 ///
 /// QK^T uses `dot_f32` (AVX2/NEON). On ARM, KQV follows ggml's F32 dot
 /// reduction order so the attention output matches the pinned CPU oracle.
-fn multi_head_attention(
+pub(crate) fn multi_head_attention(
     q: &[f32],
     k: &[f32],
     v: &[f32],
@@ -703,7 +703,7 @@ unsafe fn kqv_dot_f32_neon(
 }
 
 #[inline]
-fn relu_inplace(x: &mut [f32]) {
+pub(crate) fn relu_inplace(x: &mut [f32]) {
     for v in x {
         if *v < 0.0 {
             *v = 0.0;
@@ -712,12 +712,173 @@ fn relu_inplace(x: &mut [f32]) {
 }
 
 #[inline]
-fn add_residual(x: &[f32], delta: &[f32], len: usize) -> Vec<f32> {
+pub(crate) fn add_residual(x: &[f32], delta: &[f32], len: usize) -> Vec<f32> {
     let mut out = x.to_vec();
     for i in 0..len {
         out[i] += delta[i];
     }
     out
+}
+
+pub(crate) fn load_linear_opt_bias(
+    source: &dyn TensorSource,
+    prefix: &str,
+) -> Result<Linear, String> {
+    let weight_name = format!("{prefix}weight");
+    let info = source
+        .tensor_info(&weight_name)
+        .ok_or_else(|| format!("tensor {weight_name} not found"))?;
+    let (in_dim, out_dim) = if info.dims.len() == 2 {
+        (info.dims[0] as usize, info.dims[1] as usize)
+    } else {
+        return Err(format!(
+            "unexpected dims for {weight_name}: {:?}",
+            info.dims
+        ));
+    };
+    let weight = load_static_weight(source, &weight_name, in_dim, out_dim);
+    let bias_name = format!("{prefix}bias");
+    let bias = source
+        .tensor_info(&bias_name)
+        .and_then(|_| load_f32_vec(source, &bias_name).ok())
+        .unwrap_or_default();
+    Ok(Linear {
+        weight,
+        bias,
+        in_dim,
+        out_dim,
+    })
+}
+
+// ======================= Reusable SAN-M encoder (no adaptor) =======================
+
+pub(crate) struct SanmEncoder {
+    pub(crate) config: FunAsrConfig,
+    pool: Arc<ComputePool>,
+    enc0: SanmLayer,
+    encoders: Vec<SanmLayer>,
+    after_norm: LayerNorm,
+    tp_encoders: Vec<SanmLayer>,
+    tp_norm: Option<LayerNorm>,
+}
+
+impl SanmEncoder {
+    pub(crate) fn new(
+        source: &dyn TensorSource,
+        pool: Arc<ComputePool>,
+        prefix: &str,
+        config: FunAsrConfig,
+    ) -> Result<Self, String> {
+        let enc0 = load_sanm_layer(
+            source,
+            &format!("{prefix}encoders0.0."),
+            config.input_size,
+            config.output_size,
+        )?;
+
+        let mut encoders = Vec::with_capacity(config.num_blocks.saturating_sub(1));
+        for i in 0..config.num_blocks.saturating_sub(1) {
+            encoders.push(load_sanm_layer(
+                source,
+                &format!("{prefix}encoders.{i}."),
+                config.output_size,
+                config.output_size,
+            )?);
+        }
+
+        let after_norm = load_layernorm(source, &format!("{prefix}after_norm."))?;
+
+        let (tp_encoders, tp_norm) = if config.tp_blocks > 0 {
+            let mut tp = Vec::with_capacity(config.tp_blocks);
+            for i in 0..config.tp_blocks {
+                tp.push(load_sanm_layer(
+                    source,
+                    &format!("{prefix}tp_encoders.{i}."),
+                    config.output_size,
+                    config.output_size,
+                )?);
+            }
+            let tn = load_layernorm(source, &format!("{prefix}tp_norm."))?;
+            (tp, Some(tn))
+        } else {
+            (Vec::new(), None)
+        };
+
+        Ok(Self {
+            config,
+            pool,
+            enc0,
+            encoders,
+            after_norm,
+            tp_encoders,
+            tp_norm,
+        })
+    }
+
+    pub(crate) fn encode(&self, x: &[f32], t: usize) -> Result<Vec<f32>, String> {
+        let d = self.config.input_size;
+        let d_model = self.config.output_size;
+        let n_head = self.config.attention_heads;
+        let dk = d_model / n_head;
+        let kernel = self.config.kernel_size;
+
+        let mut out =
+            self.sanm_layer_fwd(&self.enc0, x, t, d, d_model, n_head, dk, kernel, false);
+
+        for layer in &self.encoders {
+            out = self.sanm_layer_fwd(layer, &out, t, d_model, d_model, n_head, dk, kernel, true);
+        }
+
+        out = layernorm_fwd(&self.after_norm, &out, t, &self.pool);
+
+        for layer in &self.tp_encoders {
+            out = self.sanm_layer_fwd(layer, &out, t, d_model, d_model, n_head, dk, kernel, true);
+        }
+
+        if let Some(ref tn) = self.tp_norm {
+            out = layernorm_fwd(tn, &out, t, &self.pool);
+        }
+
+        Ok(out)
+    }
+
+    #[inline]
+    fn sanm_layer_fwd(
+        &self,
+        layer: &SanmLayer,
+        x: &[f32],
+        t: usize,
+        _in_dim: usize,
+        out_dim: usize,
+        n_head: usize,
+        dk: usize,
+        kernel: usize,
+        residual: bool,
+    ) -> Vec<f32> {
+        let normed = layernorm_fwd(&layer.norm1, x, t, &self.pool);
+
+        let qkv = linear_fwd(&layer.qkv, &normed, t, &self.pool);
+        let (q, k, v) = split_qkv(&qkv, t, out_dim);
+
+        let fsmn = fsmn_shift_accumulate(&v, t, out_dim, kernel, &layer.fsmn, &self.pool);
+
+        let attn = multi_head_attention(&q, &k, &v, t, out_dim, n_head, dk, &self.pool);
+        let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
+
+        let mut h = o;
+        vec_add_into(&fsmn, &mut h);
+        if residual {
+            vec_add_into(&x[..t * out_dim], &mut h);
+        }
+
+        let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
+        let ff1 = linear_fwd(&layer.ff_w1, &normed2, t, &self.pool);
+        let mut ff1_relu = ff1;
+        relu_inplace(&mut ff1_relu);
+        let ff2 = linear_fwd(&layer.ff_w2, &ff1_relu, t, &self.pool);
+
+        add_residual(&h, &ff2, t * out_dim)
+    }
 }
 
 #[cfg(test)]

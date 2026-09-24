@@ -165,13 +165,10 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             Ok(())
         };
     }
-    if options
-        .mmproj
-        .as_deref()
-        .is_none_or(|path| path.as_os_str().is_empty())
-    {
-        return Err("--audio requires --mmproj".into());
-    }
+    // --audio requires either --mmproj (for encoder+LLM split models)
+    // or a standalone ASR model (sensevoice-small, paraformer).
+    // The actual routing happens in app::asr::run_asr_cli.
+    // Skip the mmproj requirement here; it's enforced by the ASR dispatcher.
     let conflict = if options.embedding {
         Some("--embedding")
     } else if options.dump_logits {

@@ -11,6 +11,8 @@ pub mod config;
 pub mod encoder;
 pub mod fbank;
 pub mod model;
+pub mod paraformer;
+pub mod sensevoice;
 pub mod vad;
 
 pub use config::FunAsrConfig;
