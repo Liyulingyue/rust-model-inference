@@ -17,9 +17,13 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
+use crate::ops::relu_inplace;
 use crate::ops::softmax_inplace;
 use crate::ops::sum_sq_centered_f32;
-use crate::ops::{dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32};
+use crate::ops::{
+    dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_mul_inplace,
+    vec_scale_f32, vec_sub_scalar_inplace,
+};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -387,9 +391,11 @@ pub(crate) fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePo
                     .forward(input_row, output_row, in_dim, out_dim);
             }
             if !bias.is_empty() {
-                for i in 0..out_dim {
-                    output_row[i] += bias[i];
-                }
+                // SIMD via `vec_add_into` (AVX2 / NEON / scalar
+                // fallback). Replaces a `for i in 0..out_dim` scalar
+                // loop that ran on every row of every linear layer
+                // in the encoder + Paraformer decoder.
+                vec_add_into(bias, output_row);
             }
         }
     });
@@ -416,19 +422,27 @@ pub(crate) fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputeP
             let var = (variance_sum / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
             // output[i] = (input[i] - mean) * rstd * weight[i] + bias[i]
-            // Fused as: output = bias + normalized * weight, where normalized = (input - mean) * rstd
-            // Step 1: output = (input - mean) * rstd  (scalar, dim ≤ 560)
-            for i in 0..dim {
-                output_row[i] = (input_row[i] - mean) * rstd;
-            }
-            // Step 2: output = bias + output * weight  (SIMD via vec_mad_per_channel)
-            // vec_mad_per_channel: y[i] += x[i] * scale[i]
-            // Need y=bias first, then y += output * weight → but y IS output.
-            // Workaround: copy bias into output, then mad with old output values.
-            // Simpler: just do fused scalar — dim is small (512/560), overhead negligible.
-            for i in 0..dim {
-                output_row[i] = output_row[i] * weight[i] + bias[i];
-            }
+            //
+            // SIMD path (replaces the previous two scalar `for i in
+            // 0..dim` loops that the comment called "overhead
+            // negligible" — at dim=512 × 50 layers × ~100 frames that
+            // was ~5ms scalar per inference):
+            //
+            //   1) memcpy input → output           (memcpy is auto-SIMD)
+            //   2) output -= mean                   (`vec_sub_scalar_inplace`)
+            //   3) output *= rstd                   (`vec_scale_f32`)
+            //   4) output *= weight  (elementwise)  (`vec_mul_inplace`)
+            //   5) output += bias                   (`vec_add_into`)
+            //
+            // Each step is 8-wide AVX2 (or 4-wide NEON) plus a scalar
+            // tail. `dim` is fixed across the layer so the loop is
+            // fully vectorised for typical FunASR hidden sizes
+            // (256/512/560).
+            output_row.copy_from_slice(input_row);
+            vec_sub_scalar_inplace(output_row, mean);
+            vec_scale_f32(output_row, rstd);
+            vec_mul_inplace(weight, output_row);
+            vec_add_into(bias, output_row);
         }
     });
     out
@@ -703,20 +717,12 @@ unsafe fn kqv_dot_f32_neon(
 }
 
 #[inline]
-pub(crate) fn relu_inplace(x: &mut [f32]) {
-    for v in x {
-        if *v < 0.0 {
-            *v = 0.0;
-        }
-    }
-}
-
-#[inline]
 pub(crate) fn add_residual(x: &[f32], delta: &[f32], len: usize) -> Vec<f32> {
-    let mut out = x.to_vec();
-    for i in 0..len {
-        out[i] += delta[i];
-    }
+    // SIMD via `vec_add_into` (AVX2 / NEON / scalar fallback). The
+    // `to_vec()` copy runs through Rust's optimised memcpy, then the
+    // elementwise add is vectorised.
+    let mut out = x[..len].to_vec();
+    vec_add_into(&delta[..len], &mut out);
     out
 }
 

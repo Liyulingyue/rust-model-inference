@@ -1,4 +1,5 @@
 pub mod activation;
+pub mod argmax;
 pub mod dot;
 pub mod embedding;
 pub mod float;
@@ -13,6 +14,7 @@ pub mod sampling;
 pub mod softmax;
 pub mod ssm;
 pub use activation::*;
+pub use argmax::*;
 pub use dot::*;
 pub use embedding::*;
 pub use float::*;

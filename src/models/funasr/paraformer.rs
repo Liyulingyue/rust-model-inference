@@ -9,11 +9,11 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::models::funasr::encoder::{
     add_residual, fsmn_shift_accumulate, kqv_dot_f32, layernorm_fwd, load_f32_vec,
-    load_layernorm, load_linear, load_linear_opt_bias, linear_fwd, relu_inplace, LayerNorm, Linear,
+    load_layernorm, load_linear, load_linear_opt_bias, linear_fwd, LayerNorm, Linear,
     SanmEncoder, SharedMut,
 };
 use crate::models::funasr::fbank;
-use crate::ops::{dot_f32, sigmoid_inplace, softmax_inplace};
+use crate::ops::{dot_f32, relu_inplace, sigmoid_inplace, softmax_inplace, vec_mad_f32, vec_scale_f32};
 use std::sync::Arc;
 
 pub const ARCH: &str = "paraformer";
@@ -54,6 +54,13 @@ pub struct ParaformerModel {
     pool: Arc<ComputePool>,
     cmvn_shift: Vec<f32>,
     cmvn_scale: Vec<f32>,
+    /// CIF predictor conv1d weight in **transposed** layout
+    /// `[out_ch, kernel, in_ch]`, derived once from the GGUF
+    /// `[out_ch, in_ch, kernel]` blob in `new()`. The transpose makes
+    /// the inner SIMD-friendly `dot_f32(w_slice, p_slice, in_ch)`
+    /// kernel read contiguous weight memory for fixed `(out_ch, k)`,
+    /// avoiding the strided gather that the original PyTorch layout
+    /// would force.
     cif_conv1d_w: Vec<f32>,
     cif_conv1d_b: Vec<f32>,
     cif_out: Linear,
@@ -81,8 +88,41 @@ impl ParaformerModel {
         let cmvn_shift = load_f32_vec(source.as_ref(), "cmvn.shift")?;
         let cmvn_scale = load_f32_vec(source.as_ref(), "cmvn.scale")?;
 
-        let cif_conv1d_w = load_f32_vec(source.as_ref(), "predictor.cif_conv1d.weight")?;
+        let cif_conv1d_w_raw = load_f32_vec(source.as_ref(), "predictor.cif_conv1d.weight")?;
         let cif_conv1d_b = load_f32_vec(source.as_ref(), "predictor.cif_conv1d.bias")?;
+        // CIF conv1d is `[out_ch=dim, in_ch=dim, kernel=3]` from GGUF.
+        // Transpose to `[out_ch, kernel, in_ch]` so the SIMD inner
+        // loop reads contiguous weight memory per `(out_ch, k)`. The
+        // d_model default in FunAsrConfig is 512 and the CIF conv1d
+        // is square (in_ch == out_ch == d_model).
+        let d_model_cif = config.output_size;
+        let kernel_cif = cif_conv1d_w_raw.len() / (d_model_cif * d_model_cif);
+        let cif_conv1d_w = if kernel_cif == 3 {
+            // Hot path: hard-coded 3-kernel transpose.
+            let mut t = vec![0.0f32; cif_conv1d_w_raw.len()];
+            for c in 0..d_model_cif {
+                for c2 in 0..d_model_cif {
+                    for k in 0..3 {
+                        // GGUF [c][c2][k]  ->  transposed [c][k][c2]
+                        t[c * 3 * d_model_cif + k * d_model_cif + c2] =
+                            cif_conv1d_w_raw[c * d_model_cif * 3 + c2 * 3 + k];
+                    }
+                }
+            }
+            t
+        } else {
+            // Generic fallback (any kernel size). Same end layout.
+            let mut t = vec![0.0f32; cif_conv1d_w_raw.len()];
+            for c in 0..d_model_cif {
+                for c2 in 0..d_model_cif {
+                    for k in 0..kernel_cif {
+                        t[c * kernel_cif * d_model_cif + k * d_model_cif + c2] =
+                            cif_conv1d_w_raw[c * d_model_cif * kernel_cif + c2 * kernel_cif + k];
+                    }
+                }
+            }
+            t
+        };
         let cif_out = load_linear(source.as_ref(), "predictor.cif_output.")?;
 
         let n_dec_layers = 16usize;
@@ -323,7 +363,7 @@ fn load_vocab(source: &dyn TensorSource, key: &str) -> Result<Vec<String>, Strin
 
 fn conv1d_fwd(
     input: &[f32],
-    weight: &[f32],
+    weight: &[f32], // expects [out_ch, kernel, in_ch] (transposed)
     bias: &[f32],
     t: usize,
     in_ch: usize,
@@ -340,7 +380,6 @@ fn conv1d_fwd(
 
     let mut out = vec![0.0f32; t * out_ch];
     let out_ptr = SharedMut(out.as_mut_ptr());
-    let stride = in_ch * kernel;
 
     pool.compute(move |ith, nth| {
         let per = t.div_ceil(nth);
@@ -348,14 +387,23 @@ fn conv1d_fwd(
         let end = (start + per).min(t);
         for t_idx in start..end {
             let out_row = unsafe { out_ptr.slice(t_idx * out_ch, out_ch) };
+            // SIMD-ize the inner c2 loop via `dot_f32` (AVX2 / NEON
+            // FMA). The transposed weight layout `[out_ch][kernel][in_ch]`
+            // makes `&weight[c * kernel * in_ch + k * in_ch..]` contiguous
+            // in memory, so the kernel's `dot_f32_avx2` runs full-width
+            // without gather. For Paraformer CIF (dim=512, kernel=3)
+            // that's `out_ch * kernel * 1` dot call per output position;
+            // each dot is `in_ch` f32 with 8-wide FMA → ~64 vector ops.
             for c in 0..out_ch {
                 let mut sum = bias[c];
-                let w_off = c * stride;
+                let w_base = c * kernel * in_ch;
                 for k in 0..kernel {
                     let pad_idx = t_idx + k;
-                    for c2 in 0..in_ch {
-                        sum += weight[w_off + c2 * kernel + k] * padded[pad_idx * in_ch + c2];
-                    }
+                    sum += dot_f32(
+                        &weight[w_base + k * in_ch..w_base + (k + 1) * in_ch],
+                        &padded[pad_idx * in_ch..(pad_idx + 1) * in_ch],
+                        in_ch,
+                    );
                 }
                 out_row[c] = sum;
             }
@@ -450,16 +498,18 @@ fn cif_integrate_fire(
         let cur = if fire { dc } else { alpha_t };
         let rem = alpha_t - cur;
 
-        for d in 0..dim {
-            frame[d] += cur * hid[t_idx * dim + d];
-        }
+        // SIMD `frame += cur * hid_slice` via `vec_mad_f32`. For
+        // dim=512 this is 8 AVX2 FMA ops instead of 512 scalar
+        // multiply-adds.
+        vec_mad_f32(&mut frame, &hid[t_idx * dim..(t_idx + 1) * dim], cur);
 
         if fire {
             embeddings.extend_from_slice(&frame);
             integrate -= 1.0;
-            for d in 0..dim {
-                frame[d] = rem * hid[t_idx * dim + d];
-            }
+            // SIMD `frame = rem * hid_slice` via in-place copy +
+            // `vec_scale_f32` (which broadcasts `rem` over 8 lanes).
+            frame.copy_from_slice(&hid[t_idx * dim..(t_idx + 1) * dim]);
+            vec_scale_f32(&mut frame, rem);
         }
     }
 
