@@ -15,10 +15,7 @@
 
 use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::{
-    dot_f32_exact, gelu_inplace, softmax_inplace, vec_add_into,
-    vec_mad_f32,
-};
+use crate::ops::{dot_f32_exact, gelu_inplace, softmax_inplace, vec_add_into, vec_mad_f32};
 
 use super::trunk::forward::{run_inference_stream, Lfm2StreamItem};
 use crate::core::scratchpad::KvFormat;

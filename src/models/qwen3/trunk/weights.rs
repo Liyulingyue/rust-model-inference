@@ -493,9 +493,7 @@ impl Qwen3Model {
         tokenizer: Arc<BPETokenizer>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        use super::util::{
-            checked_product, load_f32_tensor, usize_to_u64,
-        };
+        use super::util::{checked_product, load_f32_tensor, usize_to_u64};
 
         let config = Qwen3Config::from_source(source.as_ref())?;
         if config.vocab != tokenizer.vocab_size() {

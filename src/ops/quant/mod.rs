@@ -1527,7 +1527,7 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
         let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000) ;
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0);
         let qs = &block_bytes[boff..boff + 32];
         let qh = &block_bytes[boff + 32..boff + 48];
@@ -1600,7 +1600,7 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000) ;
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0) * q8k[i].d;
         let qs = &iq1m_data[boff..boff + 32];
         let qh = &iq1m_data[boff + 32..boff + 48];

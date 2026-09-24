@@ -1,8 +1,8 @@
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into,
-    rms_norm_inplace, silu,
+    dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm_inplace,
+    silu,
 };
 use std::sync::Arc;
 

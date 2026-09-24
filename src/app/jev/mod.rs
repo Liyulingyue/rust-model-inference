@@ -22,10 +22,7 @@ pub(crate) mod types;
 
 pub use grouped::run_jev_grouped_decision;
 pub use single::run_jev_decision;
-pub use types::{
-    JevGroupInput, JevGroupedQuestionInput,
-    JevMode, JevQuestionInput,
-};
+pub use types::{JevGroupInput, JevGroupedQuestionInput, JevMode, JevQuestionInput};
 
 use crate::app::cli::CliOptions;
 

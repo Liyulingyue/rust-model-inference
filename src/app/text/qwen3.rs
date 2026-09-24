@@ -10,7 +10,9 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session};
-use crate::prompt::{build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage};
+use crate::prompt::{
+    build_hunyuan_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, QwenMessage,
+};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

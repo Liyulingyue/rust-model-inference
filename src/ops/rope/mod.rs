@@ -27,9 +27,7 @@ pub use norm::rope_norm;
 pub use partial::rope_neox_partial;
 
 pub(crate) use sleef_math::rope_sin_cos_sleef;
-pub(crate) use sleef_rope::{
-    rope_neox_sleef, rope_neox_sleef_rows,
-};
+pub(crate) use sleef_rope::{rope_neox_sleef, rope_neox_sleef_rows};
 
 #[cfg(test)]
 mod tests;

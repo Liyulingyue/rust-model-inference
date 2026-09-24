@@ -7,15 +7,13 @@ use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf,
-    quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, quantize_q8_0_into, sum_f32,
+    sum_sq_centered_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use super::audio_processor::{
-    MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
-};
+use super::audio_processor::{MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Qwen3AudioConfig {

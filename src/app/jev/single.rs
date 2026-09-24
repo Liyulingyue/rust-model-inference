@@ -1,11 +1,7 @@
-use super::types::{
-    JevMode, JevQuestionInput, JevResult,
-};
+use super::types::{JevMode, JevQuestionInput, JevResult};
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::prompt::{
-    append_qwen_assistant_prefix, append_qwen_message_tokens,
-};
+use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::sync::Arc;
 use std::time::Instant;
 

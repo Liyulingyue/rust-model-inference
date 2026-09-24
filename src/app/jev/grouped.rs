@@ -1,6 +1,6 @@
 use super::types::{
-    JevGroupResult, JevGroupedQuestionInput, JevGroupedResult,
-    JevMode, PreparedGroup, PreparedGroupedQuestion,
+    JevGroupResult, JevGroupedQuestionInput, JevGroupedResult, JevMode, PreparedGroup,
+    PreparedGroupedQuestion,
 };
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};

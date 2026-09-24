@@ -10,10 +10,7 @@
 //! the stride-alignment `extra` right padding.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
-use crate::ops::{
-    gelu_erf_inplace, rms_norm, rms_norm_inplace,
-    vec_mad_per_channel_f32_broadcast,
-};
+use crate::ops::{gelu_erf_inplace, rms_norm, rms_norm_inplace, vec_mad_per_channel_f32_broadcast};
 
 // --------------------------------------------------------------------------- //
 // GGUF tensor loading helpers (BF16 or F32 storage → f32)

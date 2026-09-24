@@ -1,6 +1,6 @@
 use super::super::contract::{
-    require_array, require_bool, require_clip, require_clippable, require_f32,
-    require_tensor, require_u32,
+    require_array, require_bool, require_clip, require_clippable, require_f32, require_tensor,
+    require_u32,
 };
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 

@@ -9,10 +9,7 @@ use super::{
 use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::BPETokenizer;
-use crate::prompt::{
-    build_hunyuan_chat_prompt,
-    HunyuanMessage,
-};
+use crate::prompt::{build_hunyuan_chat_prompt, HunyuanMessage};
 use std::sync::Arc;
 
 pub(crate) fn run_jev_grouped_hunyuan(

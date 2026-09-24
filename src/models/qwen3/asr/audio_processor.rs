@@ -3,7 +3,6 @@
 // Phase 4b split from qwen3a.rs. Owns: AsrAudioError, decode_pcm16_wav, MelWindow,
 // LogMel, AudioFft, compute_log_mel, split_mel_windows, log_mel_windows.
 
-
 pub(crate) const SAMPLE_RATE: usize = 16_000;
 pub(crate) const FFT_SIZE: usize = 400;
 pub(crate) const HOP: usize = 160;

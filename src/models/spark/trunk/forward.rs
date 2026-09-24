@@ -9,7 +9,6 @@
 //! - GeGLU FFN: `down(gelu(gate(x)) * up(x))`.
 //! - Tied embeddings: `output.weight` absent → reuse `token_embd.weight`.
 
-
 use super::config::SparkConfig;
 use super::weights::{load_layers, SparkLayerWeights};
 
