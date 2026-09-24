@@ -406,8 +406,7 @@ fn main() {
                 prefill_batch_size,
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
-                options.system.as_deref(),
-                options.chat_mode,
+                options.chat_template.as_deref(),
             ));
         } else {
             app::run_or_exit(app::run_inference(
@@ -423,8 +422,7 @@ fn main() {
                 prefill_batch_size,
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
-                options.system.as_deref(),
-                options.chat_mode,
+                options.chat_template.as_deref(),
             ));
         }
     } else {

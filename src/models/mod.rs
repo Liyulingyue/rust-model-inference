@@ -1,4 +1,5 @@
 pub mod breeze;
+pub mod chat_template;
 pub mod diffusion;
 pub mod dots;
 pub mod funasr;

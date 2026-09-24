@@ -760,8 +760,7 @@ pub fn run_inference(
     n_threads_arg: usize,
     _kv_format: crate::app::cli::KvFormat,
     repetition_penalty: f32,
-    system: Option<&str>,
-    chat_mode: bool,
+    chat_template: Option<&str>,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
     use std::collections::HashMap;
@@ -781,28 +780,23 @@ pub fn run_inference(
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|e| format!("Failed to initialize tokenizer: {e}"))?;
-    // Wrap the prompt with a minimal Qwen-style chat template when
-    // --system or --chat is set. Mirrors the GGUF's
-    // `tokenizer.chat_template` markers (Nemotron Nano 3 is based on
-    // Qwen3 and uses `<|im_start|>` / `<|im_end|>`); we deliberately
-    // skip thinking + tool-call rendering for the base model since
-    // the model produces raw continuations without an instruct
-    // fine-tune in our reference path.
-    let formatted_prompt = if chat_mode || system.is_some() {
-        let mut s = String::new();
-        if let Some(sys) = system {
-            s.push_str("<|im_start|>system\n");
-            s.push_str(sys);
-            s.push_str("<|im_end|>\n");
-        }
-        s.push_str("<|im_start|>user\n");
-        s.push_str(prompt);
-        s.push_str("<|im_end|>\n");
-        s.push_str("<|im_start|>assistant\n");
-        s
-    } else {
-        prompt.to_string()
-    };
+    // Wrap the prompt with the model's canonical chat template.
+    // `--chat-template <preset>` overrides the per-arch default; an
+    // unknown architecture stays in raw base-model mode so parity
+    // tests against llama.cpp still match byte-for-byte.
+    let formatted_prompt = crate::models::chat_template::format_chat(
+        &model.config.architecture,
+        chat_template,
+        prompt,
+    )
+    .unwrap_or_else(|| prompt.to_string());
+    if formatted_prompt != prompt {
+        let preset_name = chat_template.unwrap_or("auto");
+        eprintln!(
+            "Nemotron: chat-template preset = {preset_name} (resolved via {})",
+            model.config.architecture
+        );
+    }
     let prompt_ids = tokenizer.encode(
         &formatted_prompt,
         EncodeOptions {
