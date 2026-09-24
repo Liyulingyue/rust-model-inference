@@ -28,6 +28,8 @@ pub fn run_inference(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    system: Option<&str>,
+    chat_mode: bool,
 ) -> Result<(), String> {
     let arch = source
         .metadata("general.architecture")
@@ -127,6 +129,9 @@ pub fn run_inference(
             temperature,
             n_threads_arg,
             kv_format,
+            repetition_penalty,
+            system,
+            chat_mode,
         )
     } else {
         crate::app::text::run_qwen3_inference(
@@ -196,8 +201,9 @@ pub fn run_interactive(
             prefill_batch_size,
             CliOptions::DEFAULT_MAX_CONTEXT,
             repetition_penalty,
+            None,
+            false,
         )?;
-        let _ = repetition_penalty;
         println!();
     }
     Ok(())

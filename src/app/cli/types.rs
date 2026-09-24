@@ -36,6 +36,8 @@ pub struct CliOptions {
     pub text_encoder: Option<PathBuf>,
     pub prompt: Option<String>,
     pub negative_prompt: Option<String>,
+    pub system: Option<String>,
+    pub chat_mode: bool,
     pub language: Option<String>,
     pub max_tokens: Option<usize>,
     pub max_context: Option<usize>,

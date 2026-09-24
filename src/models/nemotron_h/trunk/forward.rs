@@ -9,8 +9,10 @@ use super::weights::NemotronLayerWeights;
 use crate::core::scratchpad::KvState;
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::Weight;
-use crate::ops::{f32_slice_to_f16, quantize_q8_0_into, rms_norm, softmax_inplace};
+use crate::ops::kernel::{Kernel, Weight};
+use crate::ops::{
+    f32_slice_to_f16, quantize_q8_0_into, rms_norm, sample_llama_cpp, softmax_inplace,
+};
 
 fn split_mamba2_projection(
     values: &[f32],
@@ -757,8 +759,12 @@ pub fn run_inference(
     temperature: f32,
     n_threads_arg: usize,
     _kv_format: crate::app::cli::KvFormat,
+    repetition_penalty: f32,
+    system: Option<&str>,
+    chat_mode: bool,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+    use std::collections::HashMap;
 
     let _ = n_threads_arg;
     eprintln!("Loading Nemotron-3 Nano from model");
@@ -775,8 +781,30 @@ pub fn run_inference(
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|e| format!("Failed to initialize tokenizer: {e}"))?;
+    // Wrap the prompt with a minimal Qwen-style chat template when
+    // --system or --chat is set. Mirrors the GGUF's
+    // `tokenizer.chat_template` markers (Nemotron Nano 3 is based on
+    // Qwen3 and uses `<|im_start|>` / `<|im_end|>`); we deliberately
+    // skip thinking + tool-call rendering for the base model since
+    // the model produces raw continuations without an instruct
+    // fine-tune in our reference path.
+    let formatted_prompt = if chat_mode || system.is_some() {
+        let mut s = String::new();
+        if let Some(sys) = system {
+            s.push_str("<|im_start|>system\n");
+            s.push_str(sys);
+            s.push_str("<|im_end|>\n");
+        }
+        s.push_str("<|im_start|>user\n");
+        s.push_str(prompt);
+        s.push_str("<|im_end|>\n");
+        s.push_str("<|im_start|>assistant\n");
+        s
+    } else {
+        prompt.to_string()
+    };
     let prompt_ids = tokenizer.encode(
-        prompt,
+        &formatted_prompt,
         EncodeOptions {
             add_special: true,
             parse_special: true,
@@ -797,12 +825,17 @@ pub fn run_inference(
     );
 
     let mut generated = Vec::with_capacity(max_tokens);
+    // Track per-token counts so `apply_repetition_penalty` can divide each
+    // repeated token's logit by penalty^count (llama.cpp / HF semantics).
+    let mut token_counts: HashMap<u32, u32> = HashMap::new();
     for step in 0..max_tokens {
+        crate::ops::apply_repetition_penalty(&mut logits, &token_counts, repetition_penalty);
         let next_token = sample_argmax(&logits, temperature);
         if Some(next_token) == tokenizer.eos_id() {
             break;
         }
         generated.push(next_token);
+        *token_counts.entry(next_token).or_insert(0) += 1;
         if step + 1 < max_tokens {
             logits = model.prefill(&[next_token], &mut scratch)?;
         }
@@ -812,8 +845,11 @@ pub fn run_inference(
     Ok(())
 }
 
+/// Greedy decode if `temperature <= 0.0`; otherwise sample with
+/// llama.cpp's chain (temperature + top-k 0 + top-p 1.0). Uses
+/// `sample_llama_cpp` from `crate::ops::sampling`.
 fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
-    if temperature == 0.0 {
+    if temperature <= 0.0 {
         let mut best = f32::NEG_INFINITY;
         let mut idx = 0u32;
         for (i, &v) in logits.iter().enumerate() {
@@ -824,7 +860,9 @@ fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
         }
         idx
     } else {
-        sample_argmax(logits, 0.0)
+        let mut owned = logits.to_vec();
+        let rng_u64 = rand::random::<u64>();
+        sample_llama_cpp(&mut owned, 0, 1.0, temperature, rng_u64) as u32
     }
 }
 

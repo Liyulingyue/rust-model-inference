@@ -51,6 +51,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--system" => {
+                if i + 1 < args.len() {
+                    options.system = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--chat" | "--chat-mode" => {
+                options.chat_mode = true;
+            }
             "--negative-prompt" => {
                 let value = args
                     .get(i + 1)

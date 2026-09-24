@@ -41,6 +41,19 @@ pub struct NemotronLayerWeights<'a> {
     pub ssm_out: Option<Weight<'a>>,
 }
 
+/// Single source of truth for the GGML types the kernel layer accepts
+/// for matmul. Mirrors `QuantizedTensor::from_bytes`
+/// (`src/ops/kernel/quantized_tensor.rs`). When that list grows (e.g.
+/// IQ4_XL), update this match — no caller needs to know.
+fn is_supported_weight_type(t: GGMLType) -> bool {
+    use GGMLType::*;
+    matches!(
+        t,
+        F32 | F16 | BF16 | Q8_0 | Q4_0 | Q4_1 | Q2K | Q3K | Q4K | Q5K | Q6K | IQ4_NL | IQ2_XXS
+            | IQ2_XS | IQ3_XXS | IQ1_S | IQ3_S | IQ2_S | IQ4_XS | IQ1_M
+    )
+}
+
 pub(crate) fn load_weight(
     source: &dyn TensorSource,
     name: &str,
@@ -50,9 +63,11 @@ pub(crate) fn load_weight(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != [n_in as u64, n_out as u64] || info.ggml_type != GGMLType::Q8_0 {
+    if info.dims != [n_in as u64, n_out as u64]
+        || !is_supported_weight_type(info.ggml_type)
+    {
         return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] Q8_0",
+            "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q2K/Q3K/Q4K/Q5K/Q6K/IQ*",
             info.dims, info.ggml_type
         ));
     }
