@@ -84,7 +84,7 @@ pub unsafe fn matmul_q1_0_vs_q8_0_neon(
                 let y_lo = vld1q_s8(iq_ptr.add(q8_base + sub * 32) as *const i8);
                 let y_hi = vld1q_s8(iq_ptr.add(q8_base + sub * 32 + 16) as *const i8);
 
-                let dot = sum_signed_i8x32(y_lo, y_hi, q_lo, q_hi);
+                let dot = dot_i8x32(y_lo, y_hi, q_lo, q_hi);
                 sum += dot as f32 * ds;
             }
         }
@@ -94,35 +94,37 @@ pub unsafe fn matmul_q1_0_vs_q8_0_neon(
 }
 
 #[inline(always)]
-unsafe fn sum_signed_i8x32(
-    lo: std::arch::aarch64::int8x16_t,
-    hi: std::arch::aarch64::int8x16_t,
-    sign_lo: std::arch::aarch64::int8x16_t,
-    sign_hi: std::arch::aarch64::int8x16_t,
+unsafe fn dot_i8x32(
+    y_lo: std::arch::aarch64::int8x16_t,
+    y_hi: std::arch::aarch64::int8x16_t,
+    q_lo: std::arch::aarch64::int8x16_t,
+    q_hi: std::arch::aarch64::int8x16_t,
 ) -> i32 {
     use std::arch::aarch64::*;
-    let a = vmull_s8(vget_low_s8(lo), vget_low_s8(sign_lo));
-    let b = vmull_s8(vget_high_s8(lo), vget_high_s8(sign_lo));
-    let c = vmull_s8(vget_low_s8(hi), vget_low_s8(sign_hi));
-    let d = vmull_s8(vget_high_s8(hi), vget_high_s8(sign_hi));
-    vaddvq_s16(vaddq_s16(vaddq_s16(a, b), vaddq_s16(c, d))) as i32
+    // Widen before multiplying so -1 × -128 remains +128.
+    let p0 = vmull_s8(vget_low_s8(y_lo), vget_low_s8(q_lo));
+    let p1 = vmull_s8(vget_high_s8(y_lo), vget_high_s8(q_lo));
+    let p2 = vmull_s8(vget_low_s8(y_hi), vget_low_s8(q_hi));
+    let p3 = vmull_s8(vget_high_s8(y_hi), vget_high_s8(q_hi));
+    vaddvq_s32(vaddq_s32(
+        vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1)),
+        vaddq_s32(vpaddlq_s16(p2), vpaddlq_s16(p3)),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn signed_q8_min_value_is_widened_before_negation() {
-        use std::arch::aarch64::*;
-        let input = [-128i8; 32];
-        let signs = [-1i8; 32];
-        let dot = unsafe {
-            super::sum_signed_i8x32(
-                vld1q_s8(input.as_ptr()),
-                vld1q_s8(input.as_ptr().add(16)),
-                vld1q_s8(signs.as_ptr()),
-                vld1q_s8(signs.as_ptr().add(16)),
-            )
-        };
-        assert_eq!(dot, 4096);
+    fn q1_0_neon_preserves_signed_q8_min_value() {
+        let mut weight = [0u8; 36];
+        weight[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        weight[18..20].copy_from_slice(&0x3c00u16.to_le_bytes());
+        weight[20..36].fill(0xff);
+        let input = [-128i8 as u8; 128];
+        let mut output = [0.0f32; 2];
+        unsafe {
+            super::matmul_q1_0_vs_q8_0_neon(&weight, &input, &[1.0; 4], &mut output, 128, 0, 2);
+        }
+        assert_eq!(output, [16384.0, -16384.0]);
     }
 }

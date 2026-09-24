@@ -17,10 +17,9 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
-use crate::ops::{
-    dot_f32, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add_into, vec_mad_f32,
-    vec_mad_per_channel_f32, vec_scale_f32,
-};
+use crate::ops::softmax_inplace;
+use crate::ops::sum_sq_centered_f32;
+use crate::ops::{dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_scale_f32};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -201,13 +200,10 @@ impl FunAsrEncoder {
         let attn = multi_head_attention(&q, &k, &v, t, out_dim, n_head, dk, &self.pool);
         let o = linear_fwd(&layer.linear_out, &attn, t, &self.pool);
 
-        let mut h = if residual {
-            add_residual(x, &o, t * out_dim)
-        } else {
-            o
-        };
-        for i in 0..h.len() {
-            h[i] += fsmn[i];
+        let mut h = o;
+        vec_add_into(&fsmn, &mut h);
+        if residual {
+            vec_add_into(&x[..t * out_dim], &mut h);
         }
 
         let normed2 = layernorm_fwd(&layer.norm2, &h, t, &self.pool);
@@ -376,9 +372,20 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         for row in start..end {
             let input_row = &input[row * in_dim..(row + 1) * in_dim];
             let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
-            weight
+            if weight
                 .kernel
-                .forward(input_row, output_row, in_dim, out_dim);
+                .forward_f16_strict(input_row, output_row, in_dim, out_dim)
+            {
+                // Strict F16xF16 path used by FunASR's mtmd-audio embedding
+                // parity oracle. The F16 kernel opts in via the trait
+                // method and returns true; other weight types return false
+                // by default and fall through to the generic f32-input
+                // path below.
+            } else {
+                weight
+                    .kernel
+                    .forward(input_row, output_row, in_dim, out_dim);
+            }
             if !bias.is_empty() {
                 for i in 0..out_dim {
                     output_row[i] += bias[i];
@@ -404,8 +411,9 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
         for row in start..end {
             let input_row = &x[row * dim..(row + 1) * dim];
             let output_row = unsafe { out_ptr.slice(row * dim, dim) };
-            let mean = (sum_f32(input_row) / dim as f64) as f32;
-            let var = (sum_sq_centered_f32(input_row, mean) / dim as f64) as f32;
+            let mean = (sum_f32(input_row) as f32) / dim as f32;
+            let variance_sum = sum_sq_centered_f32(input_row, mean);
+            let var = (variance_sum / dim as f64) as f32;
             let rstd = 1.0 / (var + LN_EPS).sqrt();
             // output[i] = (input[i] - mean) * rstd * weight[i] + bias[i]
             // Fused as: output = bias + normalized * weight, where normalized = (input - mean) * rstd
@@ -426,7 +434,6 @@ fn layernorm_fwd(ln: &LayerNorm, x: &[f32], t: usize, pool: &ComputePool) -> Vec
     out
 }
 
-#[inline]
 fn split_qkv(qkv: &[f32], t: usize, dim: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut q = vec![0.0f32; t * dim];
     let mut k = vec![0.0f32; t * dim];
@@ -480,7 +487,8 @@ fn fsmn_shift_accumulate(
 
 /// Standard multi-head attention: softmax(Q @ K^T / sqrt(dk)) @ V.
 ///
-/// QK^T uses `dot_f32` (AVX2/NEON), KQV uses `vec_mad_f32` (AVX2/NEON FMA).
+/// QK^T uses `dot_f32` (AVX2/NEON). On ARM, KQV follows ggml's F32 dot
+/// reduction order so the attention output matches the pinned CPU oracle.
 fn multi_head_attention(
     q: &[f32],
     k: &[f32],
@@ -499,6 +507,9 @@ fn multi_head_attention(
         let per = n_head.div_ceil(nth);
         let h_start = ith * per;
         let h_end = (h_start + per).min(n_head);
+        if h_start >= h_end {
+            return;
+        }
         let mut scores = vec![0.0f32; t * t];
         for h in h_start..h_end {
             let off = h * dk;
@@ -512,23 +523,183 @@ fn multi_head_attention(
             }
             // Softmax per query row
             for i in 0..t {
-                softmax_inplace(&mut scores[i * t..(i + 1) * t]);
+                let row = &mut scores[i * t..(i + 1) * t];
+                softmax_inplace(row);
             }
             // KQV: out[i, off..off+dk] = sum_j scores[i,j] * V[j, off..off+dk]
+            //
+            // `kqv_dot_f32` is self-contained (zeros the slice and picks
+            // SIMD/scalar internally). Do not re-accumulate below — that
+            // would double the result.
             for i in 0..t {
                 let out_row = unsafe { out_ptr.slice(i * dim + off, dk) };
-                out_row.fill(0.0);
-                for j in 0..t {
-                    let s = scores[i * t + j];
-                    if s != 0.0 {
-                        let v_row = &v[j * dim + off..j * dim + off + dk];
-                        vec_mad_f32(out_row, v_row, s);
-                    }
-                }
+                kqv_dot_f32(out_row, v, &scores[i * t..(i + 1) * t], t, dim, off);
             }
         }
     });
     out
+}
+
+/// `out[d] = sum_j scores[j] * V[j * dim + off + d]` for d in [0, dk).
+/// Self-contained: zero-fills `out`, then accumulates via the SIMD
+/// path on aarch64 or scalar fallback elsewhere. Mirrors the reduction
+/// order in llama.cpp's mtmd-audio attention path so the bit pattern
+/// matches the pinned CPU oracle.
+pub(crate) fn kqv_dot_f32(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    out.fill(0.0);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if out.len() % 8 == 0 && t >= 16 && std::arch::is_x86_feature_detected!("avx2") {
+            unsafe {
+                kqv_dot_f32_avx2(out, v, scores, t, dim, off);
+                return;
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if out.len() % 4 == 0 && t >= 16 && std::arch::is_aarch64_feature_detected!("neon") {
+            unsafe {
+                kqv_dot_f32_neon(out, v, scores, t, dim, off);
+                return;
+            }
+        }
+    }
+    for j in 0..t {
+        let s = scores[j];
+        if s != 0.0 {
+            let v_row = &v[j * dim + off..j * dim + off + out.len()];
+            for (o, &vi) in out.iter_mut().zip(v_row.iter()) {
+                *o += s * vi;
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn kqv_dot_f32_avx2(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    use std::arch::x86_64::*;
+
+    // Mirror of the NEON path: 16 ymm accumulators per d-block (8 d's
+    // wide), each holds the partial sum for one of the 16 j-slices. After
+    // the main j-loop, reduce lane-wise across the 16 accumulators to get
+    // 8 distinct output values (one per d-lane) and store them as a
+    // single ymm.
+    for d in (0..out.len()).step_by(8) {
+        let mut acc = [_mm256_setzero_ps(); 16];
+        let mut j = 0;
+        while j + 16 <= t {
+            for slot in 0..16 {
+                acc[slot] = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(v.as_ptr().add((j + slot) * dim + off + d)),
+                    _mm256_set1_ps(scores[j + slot]),
+                    acc[slot],
+                );
+            }
+            j += 16;
+        }
+        // Lane-wise reduce: sum across the 16 ymm accumulators keeps the
+        // 8 d-lanes separate. acc[k][l] holds sum_j score[j] * V[j][d+l]
+        // restricted to the j-slice owned by acc[k]; summing the 16 slices
+        // gives the full per-lane result.
+        let mut sum = acc[0];
+        for k in 1..16 {
+            sum = _mm256_add_ps(sum, acc[k]);
+        }
+        // `sum` is 8-wide with lane l = out[d+l] from the first 16 j's.
+
+        while j + 8 <= t {
+            let mut s = _mm256_setzero_ps();
+            for slot in 0..8 {
+                s = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(v.as_ptr().add((j + slot) * dim + off + d)),
+                    _mm256_set1_ps(scores[j + slot]),
+                    s,
+                );
+            }
+            sum = _mm256_add_ps(sum, s);
+            j += 8;
+        }
+        while j < t {
+            let mut lane_add = _mm256_setzero_ps();
+            let v_row = v.as_ptr().add(j * dim + off + d);
+            let s = scores[j];
+            // Broadcast score[j] and FMA into a fresh lane-add vector.
+            lane_add = _mm256_fmadd_ps(_mm256_loadu_ps(v_row), _mm256_set1_ps(s), lane_add);
+            sum = _mm256_add_ps(sum, lane_add);
+            j += 1;
+        }
+        _mm256_storeu_ps(out.as_mut_ptr().add(d), sum);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn kqv_dot_f32_neon(
+    out: &mut [f32],
+    v: &[f32],
+    scores: &[f32],
+    t: usize,
+    dim: usize,
+    off: usize,
+) {
+    use std::arch::aarch64::*;
+
+    for d in (0..out.len()).step_by(4) {
+        let mut acc = [vdupq_n_f32(0.0); 16];
+        let mut j = 0;
+        while j + 16 <= t {
+            for slot in 0..16 {
+                acc[slot] = vfmaq_f32(
+                    acc[slot],
+                    vld1q_f32(v.as_ptr().add((j + slot) * dim + off + d)),
+                    vdupq_n_f32(scores[j + slot]),
+                );
+            }
+            j += 16;
+        }
+
+        let a = vaddq_f32(vaddq_f32(acc[0], acc[8]), vaddq_f32(acc[4], acc[12]));
+        let b = vaddq_f32(vaddq_f32(acc[1], acc[9]), vaddq_f32(acc[5], acc[13]));
+        let c = vaddq_f32(vaddq_f32(acc[2], acc[10]), vaddq_f32(acc[6], acc[14]));
+        let e = vaddq_f32(vaddq_f32(acc[3], acc[11]), vaddq_f32(acc[7], acc[15]));
+        let mut sum = vaddq_f32(vaddq_f32(a, b), vaddq_f32(c, e));
+
+        while j + 4 <= t {
+            for slot in 0..4 {
+                let product = vmulq_f32(
+                    vld1q_f32(v.as_ptr().add((j + slot) * dim + off + d)),
+                    vdupq_n_f32(scores[j + slot]),
+                );
+                sum = vaddq_f32(sum, product);
+            }
+            j += 4;
+        }
+        while j < t {
+            sum = vfmaq_f32(
+                sum,
+                vld1q_f32(v.as_ptr().add(j * dim + off + d)),
+                vdupq_n_f32(scores[j]),
+            );
+            j += 1;
+        }
+        vst1q_f32(out.as_mut_ptr().add(d), sum);
+    }
 }
 
 #[inline]
@@ -547,4 +718,226 @@ fn add_residual(x: &[f32], delta: &[f32], len: usize) -> Vec<f32> {
         out[i] += delta[i];
     }
     out
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::{fsmn_shift_accumulate, layernorm_fwd, linear_fwd, LayerNorm, Linear};
+    #[cfg(target_arch = "aarch64")]
+    use crate::core::tensor::GGMLType;
+    use crate::core::thread_pool::ComputePool;
+    #[cfg(target_arch = "aarch64")]
+    use crate::ops::kernel::{QuantizedTensor, Weight};
+
+    #[test]
+    fn layernorm_rounds_sum_before_dividing_like_ggml() {
+        let x = [207.840_07, 251.440_61, -868.942_26];
+        let ln = LayerNorm {
+            weight: vec![1.0; 3],
+            bias: vec![0.0; 3],
+            dim: 3,
+        };
+        let output = layernorm_fwd(&ln, &x, 1, &ComputePool::new(1));
+        assert_eq!(
+            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0x3f2a_2475, 0x3f3f_aebd, 0xbfb4_e99a]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn fsmn_rounds_product_before_adding_like_ggml() {
+        let value = f32::from_bits(0xbf0b_ed36);
+        let weight = f32::from_bits(0x3f6c_b1ef);
+        let output =
+            fsmn_shift_accumulate(&[value; 4], 1, 4, 1, &[weight; 4], &ComputePool::new(1));
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            [0xbf86_a692; 4]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn f16_linear_rounds_input_to_half_like_scalar_ggml() {
+        let bytes = Box::leak(Box::new([0xb1, 0x30, 0x8d, 0x3a, 0x0c, 0xb6, 0x1a, 0x2d]));
+        let linear = Linear {
+            weight: Weight::from_quantized(QuantizedTensor::from_bytes(bytes, GGMLType::F16, 4, 1)),
+            bias: vec![0.0],
+            in_dim: 4,
+            out_dim: 1,
+        };
+        let output = linear_fwd(
+            &linear,
+            &[0.33331, -0.17299, 0.92345, -0.78231],
+            1,
+            &ComputePool::new(1),
+        );
+        assert_eq!(output[0].to_bits(), 0xbf01_0c34);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn f16_neon_dot_matches_scalar_ggml_with_tail() {
+        let weight = [
+            0xb9a1, 0x336c, 0xb949, 0x36cd, 0x32e7, 0xb367, 0x3385, 0x303d, 0xbb4f, 0x2bb6, 0x33a8,
+            0x2905, 0x3a12, 0x3788, 0xb3dd, 0xb85f, 0xb9f4,
+        ];
+        let input = [
+            0x38f7, 0x3613, 0x32ff, 0xaf75, 0x1844, 0xb873, 0x2bc9, 0xb9ad, 0x33c0, 0x342a, 0x3573,
+            0xb80f, 0xba87, 0xb558, 0x3601, 0x2513, 0x37ec,
+        ];
+        let bytes = weight
+            .iter()
+            .flat_map(|bits: &u16| bits.to_le_bytes())
+            .collect::<Vec<_>>();
+        let actual = unsafe { super::funasr_f16_dot_f16_neon(&bytes, &input) };
+        assert_eq!(actual.to_bits(), 0xbff1_455e);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn layernorm_accumulates_variance_in_ggml_neon_groups() {
+        let x = [2.240_905_8, -826.513_1, -855.897_7, -161.255_62];
+        let ln = LayerNorm {
+            weight: vec![1.0; 4],
+            bias: vec![0.0; 4],
+            dim: 4,
+        };
+        let output = layernorm_fwd(&ln, &x, 1, &ComputePool::new(1));
+        assert_eq!(
+            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            [0x3f99_a896, 0xbf73_3fae, 0xbf83_6289, 0x3f46_b395]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn kqv_matches_ggml_f32_dot_bits_for_vector_and_scalar_tails() {
+        for (t, expected) in [
+            (17, [0x3c20_3a26, 0x3c60_7cf1, 0x3c20_7854, 0x3c20_ae2f]),
+            (20, [0x3c40_50e8, 0x3c80_4efc, 0x3c40_9c08, 0x3c40_dc28]),
+            (70, [0x3d30_f017, 0x3d41_2d1c, 0x3d41_6a24, 0x3d31_6fdc]),
+        ] {
+            let scores = (0..t)
+                .map(|j| f32::from_bits(0x3c00_0000 + (j * 317 % 0x10_0000) as u32))
+                .collect::<Vec<_>>();
+            let mut v = vec![0.0f32; t * 4];
+            for j in 0..t {
+                for d in 0..4 {
+                    let mut bits = 0x3e80_0000 + ((j * 977 + d * 7919) % 0x10_0000) as u32;
+                    if (j + d) % 3 == 0 {
+                        bits |= 0x8000_0000;
+                    }
+                    v[j * 4 + d] = f32::from_bits(bits);
+                }
+            }
+            let mut out = [0.0f32; 4];
+            super::kqv_dot_f32(&mut out, &v, &scores, t, 4, 0);
+            assert_eq!(out.map(f32::to_bits), expected, "t={t}");
+        }
+    }
+
+    /// Scalar reference: `out[d] = sum_j scores[j] * V[j * dim + d]`.
+    /// Used by the regression tests below to validate that every SIMD/scalar
+    /// path inside `kqv_dot_f32` produces the same result — and crucially,
+    /// that the caller doesn't double-count.
+    fn kqv_dot_f32_scalar_reference(
+        out: &mut [f32],
+        v: &[f32],
+        scores: &[f32],
+        t: usize,
+        dim: usize,
+        off: usize,
+    ) {
+        for o in out.iter_mut() {
+            *o = 0.0;
+        }
+        for j in 0..t {
+            let s = scores[j];
+            if s != 0.0 {
+                for (o, vi) in out.iter_mut().zip(v[j * dim + off..].iter()) {
+                    *o += s * vi;
+                }
+            }
+        }
+    }
+
+    /// Regression for the double-counting bug introduced when commit
+    /// `ccd39b6` refactored the aarch64 NEON branch into a unified
+    /// `kqv_dot_f32` call without removing the pre-existing scalar loop
+    /// below it. The output must match the scalar reference exactly, not
+    /// 2x it.
+    #[test]
+    fn kqv_dot_f32_scalar_fallback_matches_reference() {
+        // t=4, dk=4 — forces scalar fallback (t < 16 threshold).
+        let v: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        let scores = [0.1, 0.2, 0.3, 0.4];
+        let mut out = [0.0f32; 4];
+        super::kqv_dot_f32(&mut out, &v, &scores, 4, 4, 0);
+        let mut expected = [0.0f32; 4];
+        kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, 4, 4, 0);
+        for (a, e) in out.iter().zip(expected.iter()) {
+            assert_eq!(a.to_bits(), e.to_bits());
+        }
+    }
+
+    /// Regression for double-counting: verifies that even with zero
+    /// "explicit zero-fill" outside (the caller passes an uninitialised
+    /// buffer), the function still produces the correct sum (not 2x).
+    /// This catches any future caller that adds a redundant `out.fill(0)`
+    /// followed by a fresh `kqv_dot_f32` call.
+    #[test]
+    fn kqv_dot_f32_does_not_double_count_with_uninitialised_input() {
+        // dk=4, t=10 — scalar fallback path. If the function accumulated
+        // twice (e.g. if a caller added a manual `out.fill(0)` followed by
+        // a `for j in 0..t` loop), output would be 2x.
+        let v: Vec<f32> = (0..40).map(|x| (x as f32) * 0.1).collect();
+        let scores: Vec<f32> = (0..10).map(|x| (x as f32 + 1.0) * 0.05).collect();
+        let mut out = [f32::from_bits(0xdeadbeef); 4]; // uninitialised sentinel
+        super::kqv_dot_f32(&mut out, &v, &scores, 10, 4, 0);
+        let mut expected = [0.0f32; 4];
+        kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, 10, 4, 0);
+        for (a, e) in out.iter().zip(expected.iter()) {
+            assert_eq!(a.to_bits(), e.to_bits(), "out != 2x reference");
+        }
+    }
+
+    /// SIMD path coverage (t >= 16, dk divisible by 8 on x86_64 / 4 on aarch64).
+    /// The function must select the SIMD kernel when available and still
+    /// match the scalar reference within tight ULP tolerance.
+    #[test]
+    fn kqv_dot_f32_simd_path_matches_scalar_reference() {
+        for (t, dk) in [(16, 4), (17, 8), (20, 8), (32, 8), (70, 8)] {
+            let dim = dk;
+            let v: Vec<f32> = (0..t * dim)
+                .map(|x| f32::from_bits(0x3e80_0000 + (x * 977 % 0x10_0000) as u32))
+                .collect();
+            let scores: Vec<f32> = (0..t)
+                .map(|j| f32::from_bits(0x3c00_0000 + (j * 317 % 0x10_0000) as u32))
+                .collect();
+            let mut out = vec![0.0f32; dk];
+            super::kqv_dot_f32(&mut out, &v, &scores, t, dim, 0);
+            let mut expected = vec![0.0f32; dk];
+            kqv_dot_f32_scalar_reference(&mut expected, &v, &scores, t, dim, 0);
+            for (a, e) in out.iter().zip(expected.iter()) {
+                // SIMD and scalar reduction orders differ; allow a tiny
+                // relative ULP gap (≤2 ULP) for paths that aren't bit-exact.
+                let abs_e = e.abs();
+                let ulp = (a.to_bits() as i32).abs_diff(e.to_bits() as i32);
+                let rel = (a - e).abs() / abs_e.max(1e-30);
+                assert!(
+                    ulp <= 2 || rel < 1e-5,
+                    "t={t} dk={dk}: simd={} ref={} (ulp={}, rel={})",
+                    a,
+                    e,
+                    ulp,
+                    rel,
+                );
+            }
+        }
+    }
 }

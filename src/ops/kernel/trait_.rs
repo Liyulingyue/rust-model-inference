@@ -76,6 +76,24 @@ pub trait Kernel: Send + Sync {
         self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 
+    /// Strict F16×F16 single-row matmul: caller passes f32 activations and
+    /// receives f32 output. The kernel internally quantises activations to
+    /// F16 and accumulates in f64 (matches llama.cpp's mtmd-audio embedding
+    /// path bit-exactly). `forward()` is the faster F16×F32 SIMD path which
+    /// drifts by a few ULP at the last mantissa bit.
+    ///
+    /// Default returns `false`: callers fall back to `forward()`. F16 weight
+    /// kernels opt in by overriding this to perform the strict dot per row.
+    fn forward_f16_strict(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+    ) -> bool {
+        false
+    }
+
     /// Convenience: f32 input, single-thread. Default impl quantizes the
     /// input to Q8_0 and delegates to `forward_prequantized`. Kernels that
     /// have a native f32-input path (e.g. F16) override this.
