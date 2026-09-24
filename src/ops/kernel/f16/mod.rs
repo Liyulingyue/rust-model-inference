@@ -364,18 +364,12 @@ unsafe fn dot_f16_f16_strict_avx2(weight: &[u8], input: &[u16]) -> f32 {
     let mut sums = [_mm256_setzero_pd(); 4];
     let mut i = 0;
     while i + 16 <= input.len() {
-        let w_lo = _mm256_cvtph_ps(_mm_loadu_si128(
-            weight.as_ptr().add(i * 2) as *const __m128i,
-        ));
+        let w_lo = _mm256_cvtph_ps(_mm_loadu_si128(weight.as_ptr().add(i * 2) as *const __m128i));
         let w_hi = _mm256_cvtph_ps(_mm_loadu_si128(
-            weight.as_ptr().add(i * 2 + 16) as *const __m128i,
+            weight.as_ptr().add(i * 2 + 16) as *const __m128i
         ));
-        let x_lo = _mm256_cvtph_ps(_mm_loadu_si128(
-            input.as_ptr().add(i) as *const __m128i,
-        ));
-        let x_hi = _mm256_cvtph_ps(_mm_loadu_si128(
-            input.as_ptr().add(i + 8) as *const __m128i,
-        ));
+        let x_lo = _mm256_cvtph_ps(_mm_loadu_si128(input.as_ptr().add(i) as *const __m128i));
+        let x_hi = _mm256_cvtph_ps(_mm_loadu_si128(input.as_ptr().add(i + 8) as *const __m128i));
         let lo = _mm256_mul_ps(w_lo, x_lo);
         let hi = _mm256_mul_ps(w_hi, x_hi);
         sums[0] = _mm256_add_pd(sums[0], _mm256_cvtps_pd(_mm256_extractf128_ps::<0>(lo)));

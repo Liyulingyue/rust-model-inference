@@ -19,9 +19,7 @@ use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
 use crate::ops::softmax_inplace;
 use crate::ops::sum_sq_centered_f32;
-use crate::ops::{
-    dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_scale_f32,
-};
+use crate::ops::{dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_scale_f32};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -374,7 +372,10 @@ fn linear_fwd(lin: &Linear, input: &[f32], t: usize, pool: &ComputePool) -> Vec<
         for row in start..end {
             let input_row = &input[row * in_dim..(row + 1) * in_dim];
             let output_row = unsafe { out_ptr.slice(row * out_dim, out_dim) };
-            if weight.kernel.forward_f16_strict(input_row, output_row, in_dim, out_dim) {
+            if weight
+                .kernel
+                .forward_f16_strict(input_row, output_row, in_dim, out_dim)
+            {
                 // Strict F16xF16 path used by FunASR's mtmd-audio embedding
                 // parity oracle. The F16 kernel opts in via the trait
                 // method and returns true; other weight types return false
@@ -555,10 +556,7 @@ pub(crate) fn kqv_dot_f32(
     out.fill(0.0);
     #[cfg(target_arch = "x86_64")]
     {
-        if out.len() % 8 == 0
-            && t >= 16
-            && std::arch::is_x86_feature_detected!("avx2")
-        {
+        if out.len() % 8 == 0 && t >= 16 && std::arch::is_x86_feature_detected!("avx2") {
             unsafe {
                 kqv_dot_f32_avx2(out, v, scores, t, dim, off);
                 return;
@@ -642,11 +640,7 @@ unsafe fn kqv_dot_f32_avx2(
             let v_row = v.as_ptr().add(j * dim + off + d);
             let s = scores[j];
             // Broadcast score[j] and FMA into a fresh lane-add vector.
-            lane_add = _mm256_fmadd_ps(
-                _mm256_loadu_ps(v_row),
-                _mm256_set1_ps(s),
-                lane_add,
-            );
+            lane_add = _mm256_fmadd_ps(_mm256_loadu_ps(v_row), _mm256_set1_ps(s), lane_add);
             sum = _mm256_add_ps(sum, lane_add);
             j += 1;
         }
