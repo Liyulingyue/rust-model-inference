@@ -9,8 +9,8 @@ pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
 pub(crate) mod text;
-pub mod tts;
-pub(crate) mod vibevoice;
+pub(crate) mod tts;
+pub(crate) mod vibevoice_asr;
 
 pub use asr::run_asr_cli;
 pub use cli::{

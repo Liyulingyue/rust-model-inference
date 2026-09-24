@@ -26,7 +26,7 @@ pub fn run_asr_cli(
         let is_funasr = crate::models::funasr::is_funasr_encoder(probe.as_ref());
         drop(probe);
         if is_vibevoice {
-            return crate::app::vibevoice::run_vibevoice_asr_cli(options);
+            return crate::app::vibevoice_asr::run_vibevoice_asr_cli(options);
         }
         if is_funasr {
             return crate::app::funasr::run_funasr_cli(options, prefill_batch_size);
