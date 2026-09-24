@@ -6,7 +6,7 @@
 //! Module layout:
 //! - [`tensor`]: GGMLType, MetaValue*, TensorInfo, TensorSource trait
 //! - [`loader`]: ByteReader, GGUFLoader, model_config_from_source
-//! - [`model`]: QuantizedLinear, ModelGraph (generic Layer container)
+//! - [`model`]: ModelGraph (generic Layer container)
 //! - [`tokenizer`]: BPETokenizer, EncodeOptions, StreamingDecoder
 //! - [`memory`]: BlockAllocator, MemoryArena, PagedKVBlock, KVCacheView
 //! - [`thread_pool`]: ComputePool

@@ -59,12 +59,7 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
     }
 }
 
-#[derive(Clone)]
-pub struct BlockQ8K {
-    pub d: f32,
-    pub qs: [i8; 256],
-    pub bsums: [i16; 16],
-}
+pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
     #[cfg(target_arch = "x86_64")]
