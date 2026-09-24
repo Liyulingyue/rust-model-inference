@@ -30,10 +30,7 @@ struct NemotronHJevGroupedScorer {
 }
 
 impl NemotronHJevGroupedScorer {
-    fn new(
-        source: Arc<dyn TensorSource>,
-        n_threads: usize,
-    ) -> Result<Self, String> {
+    fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         Ok(Self {
             inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source, n_threads)?,
         })

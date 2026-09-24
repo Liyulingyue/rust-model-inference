@@ -40,10 +40,7 @@ pub(crate) struct NemotronHJevScorer {
 }
 
 impl NemotronHJevScorer {
-    pub(crate) fn new(
-        source: Arc<dyn TensorSource>,
-        n_threads: usize,
-    ) -> Result<Self, String> {
+    pub(crate) fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let tokenizer = crate::models::nemotron_h::trunk::load_nemotron_tokenizer(source.as_ref())?;
         verify_label_tokens_single(&tokenizer)?;
         Ok(Self {

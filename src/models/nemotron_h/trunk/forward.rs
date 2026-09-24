@@ -136,27 +136,11 @@ impl NemotronModel {
             // `[my_start, my_end)` row range computed inside the kernel.
             // The full output slice is shared by pointer only; no thread
             // reads another's rows.
-            let my_in =
-                unsafe { std::slice::from_raw_parts(input_ptr, n_in) };
-            let my_q8 =
-                unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
-            let my_sc = unsafe {
-                std::slice::from_raw_parts(sc_ptr, n_in.div_ceil(32))
-            };
-            let my_out = unsafe {
-                std::slice::from_raw_parts_mut(out_ptr, n_out)
-            };
-            kernel.forward_prepared(
-                my_in,
-                my_q8,
-                my_sc,
-                None,
-                my_out,
-                n_in,
-                n_out,
-                ith,
-                nth,
-            );
+            let my_in = unsafe { std::slice::from_raw_parts(input_ptr, n_in) };
+            let my_q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
+            let my_sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_in.div_ceil(32)) };
+            let my_out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_out) };
+            kernel.forward_prepared(my_in, my_q8, my_sc, None, my_out, n_in, n_out, ith, nth);
         });
     }
 }
@@ -1004,7 +988,10 @@ pub fn ssm_scan_row(
     ssm_scan_row_scalar(state_row, b_row, c_row, dA, x_dt)
 }
 
-#[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx2", enable = "fma"))]
+#[cfg_attr(
+    target_arch = "x86_64",
+    target_feature(enable = "avx2", enable = "fma")
+)]
 #[inline]
 unsafe fn ssm_scan_row_avx2(
     state_row: &mut [f32],
@@ -1029,8 +1016,7 @@ unsafe fn ssm_scan_row_avx2(
             // new_state = state * dA + b * x_dt  (FMA, exact when the
             // multiply result fits in f32 — both inputs are pre-cast
             // f32, so no rounding between the two FMA operands).
-            let v_new_state =
-                _mm256_fmadd_ps(v_b, v_x_dt, _mm256_mul_ps(v_state, v_dA));
+            let v_new_state = _mm256_fmadd_ps(v_b, v_x_dt, _mm256_mul_ps(v_state, v_dA));
             // Persist updated state for the next token. Safe to
             // overwrite: the next read of state_row[i] is the next
             // (head, k) pair's first load, not this iteration's.
@@ -1080,8 +1066,7 @@ unsafe fn ssm_scan_row_neon(
             let v_state = vld1q_f32(state_row.as_ptr().add(i));
             let v_b = vld1q_f32(b_row.as_ptr().add(i));
             // new_state = state * dA + b * x_dt
-            let v_new_state =
-                vfmaq_f32(vmulq_f32(v_state, v_dA), v_b, v_x_dt);
+            let v_new_state = vfmaq_f32(vmulq_f32(v_state, v_dA), v_b, v_x_dt);
             vst1q_f32(state_row.as_mut_ptr().add(i), v_new_state);
             let v_c = vld1q_f32(c_row.as_ptr().add(i));
             v_sumf = vfmaq_f32(v_sumf, v_new_state, v_c);
@@ -1187,8 +1172,7 @@ mod nemotron_math_tests {
         let sumf_simd = ssm_scan_row(&mut state_simd, &b, &c, dA, x_dt);
 
         // sumf check: allow 16 ULP relative error.
-        let rel_err = (sumf_simd - sumf_ref).abs()
-            / sumf_ref.abs().max(f32::EPSILON);
+        let rel_err = (sumf_simd - sumf_ref).abs() / sumf_ref.abs().max(f32::EPSILON);
         assert!(
             rel_err < 16.0 * f32::EPSILON,
             "ssm_scan_row sumf diverged: ref={sumf_ref} simd={sumf_simd} rel={rel_err}"
@@ -1233,15 +1217,12 @@ mod nemotron_math_tests {
             let mut state_simd = state.clone();
             let sumf_simd = ssm_scan_row(&mut state_simd, &b, &c, 0.9, 0.1);
 
-            let rel = (sumf_simd - sumf_ref).abs()
-                / sumf_ref.abs().max(f32::EPSILON);
+            let rel = (sumf_simd - sumf_ref).abs() / sumf_ref.abs().max(f32::EPSILON);
             assert!(
                 rel < 16.0 * f32::EPSILON,
                 "d={d}: ref={sumf_ref} simd={sumf_simd} rel={rel}"
             );
-            for (i, (&r, &s)) in
-                state_ref.iter().zip(&state_simd).enumerate()
-            {
+            for (i, (&r, &s)) in state_ref.iter().zip(&state_simd).enumerate() {
                 let lane_rel = if r.abs() < f32::EPSILON {
                     (s - r).abs()
                 } else {
