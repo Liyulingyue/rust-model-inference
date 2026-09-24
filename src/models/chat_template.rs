@@ -119,7 +119,11 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
 /// Parse a `--chat-template <preset>` value into a `ChatTemplate`.
 ///
 /// Accepted presets:
-/// - `chatml` / `qwen` / `qwen3` / `nemotron_h` → ChatML
+/// - `chatml` / `qwen` / `qwen3` → ChatML
+/// - `nemotron` / `nemotron_h` → ChatML (Nemotron-3 Nano is built on Qwen3
+///   so the marker set is shared; if/when we add Jinja2 rendering this
+///   preset will load the GGUF's bespoke 10 KB Jinja template with
+///   thinking + tool-call rendering)
 /// - `llama3` / `llama` → Llama-3
 /// - `gemma` / `gemma4` → Gemma turn
 /// - `lfm2` → LFM2
@@ -131,7 +135,8 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
 /// the explicit presets. Names are case-insensitive.
 pub fn parse_preset(name: &str) -> Option<ChatTemplate> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "chatml" | "qwen" | "qwen3" | "nemotron_h" => Some(ChatTemplate::ChatML),
+        "chatml" | "qwen" | "qwen3" => Some(ChatTemplate::ChatML),
+        "nemotron" | "nemotron_h" => Some(ChatTemplate::ChatML),
         "llama3" | "llama" => Some(ChatTemplate::Llama3),
         "gemma" | "gemma4" => Some(ChatTemplate::GemmaTurn),
         "lfm2" => Some(ChatTemplate::Lfm2),
@@ -188,6 +193,7 @@ mod tests {
     fn parse_preset_recognises_known_names() {
         assert_eq!(parse_preset("chatml"), Some(ChatTemplate::ChatML));
         assert_eq!(parse_preset("ChatML"), Some(ChatTemplate::ChatML));
+        assert_eq!(parse_preset("nemotron"), Some(ChatTemplate::ChatML));
         assert_eq!(parse_preset("llama3"), Some(ChatTemplate::Llama3));
         assert_eq!(parse_preset("gemma"), Some(ChatTemplate::GemmaTurn));
         assert_eq!(parse_preset("lfm2"), Some(ChatTemplate::Lfm2));
