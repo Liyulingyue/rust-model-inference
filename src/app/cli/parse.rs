@@ -51,6 +51,12 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--chat-template" => {
+                if i + 1 < args.len() {
+                    options.chat_template = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             "--negative-prompt" => {
                 let value = args
                     .get(i + 1)

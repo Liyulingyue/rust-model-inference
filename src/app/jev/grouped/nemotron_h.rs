@@ -14,11 +14,11 @@ pub(crate) fn run_jev_grouped_nemotron_h(
     source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedGroupedQuestion],
-    _n_threads_arg: usize,
+    n_threads_arg: usize,
     _prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<Vec<JevGroupedResult>, String> {
-    let mut scorer = NemotronHJevGroupedScorer::new(source.clone())?;
+    let mut scorer = NemotronHJevGroupedScorer::new(source.clone(), n_threads_arg)?;
     let _ = output_json;
     run_jev_grouped_core(source, context, per_question, false, &mut scorer)
 }
@@ -30,9 +30,9 @@ struct NemotronHJevGroupedScorer {
 }
 
 impl NemotronHJevGroupedScorer {
-    fn new(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    fn new(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         Ok(Self {
-            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source)?,
+            inner: super::super::single::nemotron_h::NemotronHJevScorer::new(source, n_threads)?,
         })
     }
 }
@@ -62,6 +62,7 @@ impl JevGroupedScorer for NemotronHJevGroupedScorer {
         crate::models::nemotron_h::trunk::run_forward_logits_nemotron_h(
             self.inner.source.clone(),
             &token_ids,
+            self.inner.n_threads,
         )
         .map_err(|e| format!("Nemotron-H forward_logits failed: {e}"))
     }

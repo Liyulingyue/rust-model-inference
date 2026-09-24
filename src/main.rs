@@ -392,6 +392,22 @@ fn main() {
                 options.thinking,
                 prefill_batch_size,
             ));
+        } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
+            app::run_or_exit(app::run_inference(
+                source.clone(),
+                prompt,
+                max_tokens,
+                temperature,
+                options.threads,
+                options.thinking,
+                options.bench,
+                options.profile,
+                options.kv_format,
+                prefill_batch_size,
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
+                options.chat_template.as_deref(),
+            ));
         } else {
             app::run_or_exit(app::run_inference(
                 source.clone(),
@@ -406,6 +422,7 @@ fn main() {
                 prefill_batch_size,
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
+                options.chat_template.as_deref(),
             ));
         }
     } else {
