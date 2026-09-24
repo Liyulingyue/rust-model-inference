@@ -8,6 +8,7 @@ use super::weights::NemotronLayerWeights;
 
 use crate::core::scratchpad::KvState;
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::{
@@ -61,10 +62,17 @@ pub struct NemotronModel {
     pub tok_embd: Weight<'static>,
     pub output_norm: Vec<f32>,
     pub output: Weight<'static>,
+    /// Thread pool used to parallelise every matmul in `prefill` /
+    /// `forward_layer`. Mirrors the `ComputePool` plumbing used by
+    /// `llama::LlamaModel` and `spark::SparkSession` so the user-visible
+    /// `--threads N` flag actually partitions the output rows of each
+    /// matmul across N worker threads instead of forcing single-threaded
+    /// execution (the previous hard-coded `nth=1`).
+    pub pool: Arc<ComputePool>,
 }
 
 impl NemotronModel {
-    pub fn from_source(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub fn from_source(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let config = NemotronConfig::from_source(source.as_ref())?;
         let layers = super::weights::load_layers(source.as_ref(), &config)?;
         let output_norm = crate::core::tensor::load_f32_tensor(
@@ -84,6 +92,7 @@ impl NemotronModel {
             config.n_embd,
             config.vocab_size,
         )?;
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         Ok(Self {
             _source: source,
             config,
@@ -91,7 +100,64 @@ impl NemotronModel {
             tok_embd,
             output_norm,
             output,
+            pool,
         })
+    }
+
+    /// Run a single Q8_0 matmul with the kernel's output rows
+    /// `[0, n_out)` partitioned across `self.pool`. Replaces the previous
+    /// hard-coded `kernel.forward_prepared(..., 0, 1)` pattern that
+    /// silently ran every matmul single-threaded regardless of
+    /// `--threads N`. The kernel uses per-row accumulator state only —
+    /// `ith` and `nth` are forwarded so `matmul_q4_0_vs_q8_0_avx2` (and
+    /// friends) can compute their own `[my_start, my_end)` row range.
+    #[inline]
+    fn run_matmul(
+        &self,
+        kernel: &dyn Kernel,
+        input: &[f32],
+        q8: &[u8],
+        sc: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
+        debug_assert_eq!(input.len(), n_in);
+        debug_assert_eq!(q8.len(), n_in);
+        debug_assert_eq!(sc.len(), n_in.div_ceil(32));
+        debug_assert_eq!(output.len(), n_out);
+
+        let input_ptr = input.as_ptr();
+        let q8_ptr = q8.as_ptr();
+        let sc_ptr = sc.as_ptr();
+        let out_ptr = output.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            // SAFETY: each thread writes to the disjoint
+            // `[my_start, my_end)` row range computed inside the kernel.
+            // The full output slice is shared by pointer only; no thread
+            // reads another's rows.
+            let my_in =
+                unsafe { std::slice::from_raw_parts(input_ptr, n_in) };
+            let my_q8 =
+                unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
+            let my_sc = unsafe {
+                std::slice::from_raw_parts(sc_ptr, n_in.div_ceil(32))
+            };
+            let my_out = unsafe {
+                std::slice::from_raw_parts_mut(out_ptr, n_out)
+            };
+            kernel.forward_prepared(
+                my_in,
+                my_q8,
+                my_sc,
+                None,
+                my_out,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
+        });
     }
 }
 
@@ -240,16 +306,14 @@ impl NemotronModel {
             &mut scratch.q8_buf[..self.config.n_embd],
             &mut scratch.scale_buf[..blocks],
         );
-        self.output.kernel.forward_prepared(
+        self.run_matmul(
+            &*self.output.kernel,
             &scratch.normed,
             &scratch.q8_buf[..self.config.n_embd],
             &scratch.scale_buf[..blocks],
-            None,
             &mut scratch.logits,
             self.config.n_embd,
             self.config.vocab_size,
-            0,
-            1,
         );
         scratch.next_position += n;
         Ok(scratch.logits.clone())
@@ -312,38 +376,32 @@ impl NemotronModel {
                     })?;
                 let k_base = attn_slot * scratch.capacity * n_attn_kv;
                 let v_base = attn_slot * scratch.capacity * n_attn_v_kv;
-                wq.kernel.forward_prepared(
+                self.run_matmul(
+                    &*wq.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut q,
                     n_embd,
                     n_attn_q,
-                    0,
-                    1,
                 );
-                wk.kernel.forward_prepared(
+                self.run_matmul(
+                    &*wk.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut k,
                     n_embd,
                     n_attn_kv,
-                    0,
-                    1,
                 );
-                wv.kernel.forward_prepared(
+                self.run_matmul(
+                    &*wv.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut v,
                     n_embd,
                     n_attn_v_kv,
-                    0,
-                    1,
                 );
                 // Persist per-token K and V into the layer's
                 // scratch cache so the next tokens can attend to
@@ -421,16 +479,14 @@ impl NemotronModel {
                         &mut scratch.q8_buf[..n_attn_v],
                         &mut scratch.scale_buf[..blocks2],
                     );
-                    wo.kernel.forward_prepared(
+                    self.run_matmul(
+                        &*wo.kernel,
                         &attn_out,
                         &scratch.q8_buf[..n_attn_v],
                         &scratch.scale_buf[..blocks2],
-                        None,
                         &mut scratch.ffn_out,
                         n_attn_v,
                         n_embd,
-                        0,
-                        1,
                     );
                 }
             }
@@ -501,16 +557,14 @@ impl NemotronModel {
                 // ssm_in's larger output).
                 let conv_out_cols = inner_size + 2 * n_group * d_state;
                 let mut ssm_in_out = vec![0.0f32; d_in_proj];
-                ssm_in.kernel.forward_prepared(
+                self.run_matmul(
+                    &*ssm_in.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut ssm_in_out,
                     n_embd,
                     d_in_proj,
-                    0,
-                    1,
                 );
                 // Causal depthwise conv1d producing [x_conv, B, C] in the
                 // fused output. The conv1d weight has shape
@@ -673,16 +727,14 @@ impl NemotronModel {
                     &mut scratch.q8_buf[..inner_size],
                     &mut scratch.scale_buf[..blocks_out],
                 );
-                ssm_out.kernel.forward_prepared(
+                self.run_matmul(
+                    &*ssm_out.kernel,
                     &y_buf,
                     &scratch.q8_buf[..inner_size],
                     &scratch.scale_buf[..blocks_out],
-                    None,
                     &mut scratch.ffn_out,
                     inner_size,
                     n_embd,
-                    0,
-                    1,
                 );
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
@@ -705,16 +757,14 @@ impl NemotronModel {
                 );
                 let q8f = &scratch.q8_buf[..n_embd];
                 let scf = &scratch.scale_buf[..blocks3];
-                w_up.kernel.forward_prepared(
+                self.run_matmul(
+                    &*w_up.kernel,
                     &scratch.normed,
                     q8f,
                     scf,
-                    None,
                     &mut up_buf,
                     n_embd,
                     cfg.n_ff,
-                    0,
-                    1,
                 );
                 // Activation: ReLU(x)^2 (LLM_FFN_RELU_SQR).
                 // llama.cpp's nemotron-h.cpp builds FFN as
@@ -732,16 +782,14 @@ impl NemotronModel {
                     &mut scratch.q8_buf[..cfg.n_ff],
                     &mut scratch.scale_buf[..cfg.n_ff.div_ceil(32)],
                 );
-                w_down.kernel.forward_prepared(
+                self.run_matmul(
+                    &*w_down.kernel,
                     &up_buf,
                     &scratch.q8_buf[..cfg.n_ff],
                     &scratch.scale_buf[..cfg.n_ff.div_ceil(32)],
-                    None,
                     &mut scratch.ffn_out,
                     cfg.n_ff,
                     n_embd,
-                    0,
-                    1,
                 );
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
@@ -765,9 +813,8 @@ pub fn run_inference(
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
     use std::collections::HashMap;
 
-    let _ = n_threads_arg;
     eprintln!("Loading Nemotron-3 Nano from model");
-    let model = NemotronModel::from_source(source.clone())?;
+    let model = NemotronModel::from_source(source.clone(), n_threads_arg)?;
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} vocab={}",
         model.config.architecture,
@@ -809,6 +856,7 @@ pub fn run_inference(
     }
 
     let mut scratch = NemotronScratch::new(&model.config, prompt_ids.len() + max_tokens);
+    let infer_started = std::time::Instant::now();
     let started = std::time::Instant::now();
     let mut logits = model.prefill(&prompt_ids, &mut scratch)?;
     let t_prefill = started.elapsed();
@@ -822,6 +870,7 @@ pub fn run_inference(
     // Track per-token counts so `apply_repetition_penalty` can divide each
     // repeated token's logit by penalty^count (llama.cpp / HF semantics).
     let mut token_counts: HashMap<u32, u32> = HashMap::new();
+    let decode_started = std::time::Instant::now();
     for step in 0..max_tokens {
         crate::ops::apply_repetition_penalty(&mut logits, &token_counts, repetition_penalty);
         let next_token = sample_argmax(&logits, temperature);
@@ -834,8 +883,27 @@ pub fn run_inference(
             logits = model.prefill(&[next_token], &mut scratch)?;
         }
     }
+    let t_decode = decode_started.elapsed();
     let piece = tokenizer.decode(&generated, true);
     println!("Output: {}", piece);
+
+    // Throughput summary, matching llama trunk's
+    //   "Prompt: X t/s | Generation: Y t/s | end-to-end: Z tok/s"
+    // so users can compare against llama.cpp numbers without leaving the
+    // Nemotron console output. End-to-end is total wall time from
+    // `infer_started` (before prefill) to here.
+    let infer_ms = infer_started.elapsed().as_millis();
+    let tok_s = if infer_ms > 0 {
+        generated.len() as f64 / infer_ms as f64 * 1000.0
+    } else {
+        0.0
+    };
+    eprintln!(
+        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        crate::app::cli::per_second(prompt_ids.len(), t_prefill),
+        crate::app::cli::per_second(generated.len(), t_decode),
+        tok_s
+    );
     Ok(())
 }
 
@@ -868,8 +936,9 @@ fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
 pub fn run_forward_logits_nemotron_h(
     source: Arc<dyn TensorSource>,
     prompt_tokens: &[u32],
+    n_threads: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
-    let model = NemotronModel::from_source(source)?;
+    let model = NemotronModel::from_source(source, n_threads)?;
     let mut scratch = NemotronScratch::new(&model.config, prompt_tokens.len());
 
     let prefill_started = std::time::Instant::now();
