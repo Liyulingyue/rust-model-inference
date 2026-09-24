@@ -398,7 +398,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         #[cfg(feature = "parity-trace")]
         let trace_each_token = std::env::var_os("RMI_PARITY_TRACE").is_some();
         #[cfg(not(feature = "parity-trace"))]
-        let _trace_each_token = false;
+        let trace_each_token = false;
         #[cfg(feature = "vulkan")]
         if trace_each_token {
             self.gpu = None;
