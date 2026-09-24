@@ -1,7 +1,7 @@
 //! WAV writer for the Qwen3-TTS codec decoder.
 //!
-//! Writes a single-channel 16-bit PCM WAV file (the de-facto default for
-//! speech samples). Sample rate is taken from the caller.
+//! Writes interleaved 16-bit PCM WAV files. Sample rate and channel count are
+//! taken from the caller.
 
 use std::io;
 use std::path::Path;
@@ -37,17 +37,45 @@ pub fn write_wav_f32<P: AsRef<Path>>(
     samples: &[f32],
     sample_rate: u32,
 ) -> Result<(), WavError> {
-    let bytes = encode_wav_pcm16(samples, sample_rate)?;
+    write_wav_f32_channels(path, samples, sample_rate, 1)
+}
+
+pub fn write_wav_f32_channels<P: AsRef<Path>>(
+    path: P,
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<(), WavError> {
+    let bytes = encode_wav_pcm16_channels(samples, sample_rate, channels)?;
     std::fs::write(path, bytes)?;
     Ok(())
 }
 
 pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, WavError> {
+    encode_wav_pcm16_channels(samples, sample_rate, 1)
+}
+
+pub fn encode_wav_pcm16_channels(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Vec<u8>, WavError> {
     if samples.is_empty() {
         return Err(WavError::Empty);
     }
     if sample_rate == 0 {
         return Err(WavError::Invalid("sample rate must be nonzero".into()));
+    }
+    if channels == 0 {
+        return Err(WavError::Invalid("channel count must be nonzero".into()));
+    }
+    if samples.len() % usize::from(channels) != 0 {
+        return Err(WavError::Invalid(
+            "PCM sample count must contain complete frames".into(),
+        ));
+    }
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err(WavError::Invalid("PCM contains a non-finite sample".into()));
     }
     let data_bytes = samples
         .len()
@@ -57,8 +85,11 @@ pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, Wa
     let chunk_size = 36u32
         .checked_add(data_bytes)
         .ok_or_else(|| WavError::Invalid("RIFF chunk size overflow".into()))?;
-    let byte_rate = sample_rate
+    let block_align = channels
         .checked_mul(2)
+        .ok_or_else(|| WavError::Invalid("block alignment overflow".into()))?;
+    let byte_rate = sample_rate
+        .checked_mul(u32::from(block_align))
         .ok_or_else(|| WavError::Invalid("byte rate overflow".into()))?;
     let capacity = 44usize
         .checked_add(data_bytes as usize)
@@ -72,17 +103,14 @@ pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, Wa
     bytes.extend_from_slice(b"WAVEfmt ");
     bytes.extend_from_slice(&16u32.to_le_bytes());
     bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
     bytes.extend_from_slice(&sample_rate.to_le_bytes());
     bytes.extend_from_slice(&byte_rate.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
     bytes.extend_from_slice(&16u16.to_le_bytes());
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&data_bytes.to_le_bytes());
     for &sample in samples {
-        if !sample.is_finite() {
-            return Err(WavError::Invalid("PCM contains a non-finite sample".into()));
-        }
         let clamped = sample.clamp(-1.0, 1.0);
         let pcm = (clamped * i16::MAX as f32) as i16;
         bytes.extend_from_slice(&pcm.to_le_bytes());
@@ -110,5 +138,31 @@ mod tests {
             -32767
         );
         assert_eq!(i16::from_le_bytes(bytes[48..50].try_into().unwrap()), 32767);
+    }
+
+    #[test]
+    fn wav_serialization_supports_interleaved_stereo_48k_and_preserves_mono() {
+        let stereo = encode_wav_pcm16_channels(&[-1.0, 1.0, 0.5, -0.5], 48_000, 2).unwrap();
+        assert_eq!(u16::from_le_bytes(stereo[22..24].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(stereo[24..28].try_into().unwrap()),
+            48_000
+        );
+        assert_eq!(
+            u32::from_le_bytes(stereo[28..32].try_into().unwrap()),
+            192_000
+        );
+        assert_eq!(u16::from_le_bytes(stereo[32..34].try_into().unwrap()), 4);
+        assert_eq!(
+            encode_wav_pcm16(&[0.0], 24_000).unwrap()[22..24],
+            1u16.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn wav_rejects_zero_channels_partial_frames_and_non_finite_samples() {
+        assert!(encode_wav_pcm16_channels(&[0.0], 48_000, 0).is_err());
+        assert!(encode_wav_pcm16_channels(&[0.0, 1.0, 2.0], 48_000, 2).is_err());
+        assert!(encode_wav_pcm16_channels(&[0.0, f32::NAN], 48_000, 2).is_err());
     }
 }

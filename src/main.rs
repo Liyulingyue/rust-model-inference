@@ -15,6 +15,7 @@ const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [
 enum DispatchMode {
     DreamX,
     QwenDrive,
+    Yue2,
     Tts,
     Model,
 }
@@ -24,6 +25,8 @@ fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
         DispatchMode::DreamX
     } else if options.planner.is_some() || options.perception.is_some() {
         DispatchMode::QwenDrive
+    } else if options.yue2 {
+        DispatchMode::Yue2
     } else if options.tts {
         DispatchMode::Tts
     } else {
@@ -96,10 +99,18 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    let z_image_options = app::z_image_cli_options(&options).unwrap_or_else(|error| {
+    let yue2_options = app::yue2_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    let z_image_options = if yue2_options.is_none() {
+        app::z_image_cli_options(&options).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2);
+        })
+    } else {
+        None
+    };
     let qwen_drive_options = app::qwen_drive_cli_options(&options).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);
@@ -128,6 +139,13 @@ fn main() {
                 DreamXConfig::from_sources(main.as_ref(), mmproj.as_ref()).map(|_| ()),
             );
             app::run_or_exit(app::run_dreamx_cli(main, mmproj, dreamx, n_threads));
+            return;
+        }
+        DispatchMode::Yue2 => {
+            app::run_or_exit(app::run_yue2_cli(
+                yue2_options.expect("validated YuE2 options"),
+                n_threads,
+            ));
             return;
         }
         DispatchMode::Tts => {
@@ -493,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn dreamx_and_tts_dispatch_before_main_model_open() {
+    fn dedicated_pipelines_dispatch_before_main_model_open() {
         assert_eq!(
             dispatch_mode(&app::CliOptions {
                 dreamx: true,
@@ -507,6 +525,13 @@ mod tests {
                 ..app::CliOptions::default()
             }),
             DispatchMode::Tts
+        );
+        assert_eq!(
+            dispatch_mode(&app::CliOptions {
+                yue2: true,
+                ..app::CliOptions::default()
+            }),
+            DispatchMode::Yue2
         );
         assert_eq!(
             dispatch_mode(&app::CliOptions {

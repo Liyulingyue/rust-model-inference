@@ -1,7 +1,12 @@
-use super::options::{dreamx_cli_options, qwen_drive_cli_options, z_image_cli_options};
+use super::options::{
+    dreamx_cli_options, qwen_drive_cli_options, yue2_cli_options, z_image_cli_options,
+};
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if yue2_cli_options(options)?.is_some() {
+        return Ok(());
+    }
     if (options.top_k.is_some() || options.top_p.is_some()) && (!options.tts || options.edit) {
         return Err("--top-k/--top-p require Breeze --tts without --edit".into());
     }

@@ -13,6 +13,7 @@ converter/
 ├── neohorse/     ← NeoHorse 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
+├── yue2/         ← YuE2 主模型与 decoder-only VAE 转换器
 └── utils/        ← 共享 GGUF reader/writer、dtype 和量化工具
 ```
 
@@ -28,6 +29,7 @@ converter/
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
+| `yue2/convert_yue2.py` | 流式导出 `yue2` BF16 主模型和 `yue2_vae` F32 decoder；固定协议/tokenizer metadata，原子写入并读回校验 |
 
 ## breeze 量化支持现状
 
@@ -79,7 +81,8 @@ PYTHONPATH=. python3 -m unittest \
   tools.converter.neohorse.test_convert_neohorse \
   tools.converter.qwen_drive.test_convert_qwen_drive \
   tools.converter.vibevoice.test_convert_vibevoice_asr_original \
-  tools.converter.vibevoice.test_convert_vibevoice_asr
+  tools.converter.vibevoice.test_convert_vibevoice_asr \
+  tools.converter.yue2.test_convert_yue2
 ```
 
 ## 不变原则

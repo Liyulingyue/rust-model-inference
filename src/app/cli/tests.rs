@@ -107,6 +107,65 @@ fn args(values: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn yue2_cli_resolves_complete_create_request() {
+    let parsed = parse_cli_options(&args(&[
+        "rmi",
+        "--yue2",
+        "--model",
+        "main.gguf",
+        "--vae",
+        "vae.gguf",
+        "--prompt",
+        "jazz",
+        "--lyrics",
+        "hello",
+        "--out",
+        "song.wav",
+        "--seed",
+        "831001",
+        "--max-tokens",
+        "400",
+        "--steps",
+        "32",
+    ]))
+    .unwrap();
+    let resolved = yue2_cli_options(&parsed).unwrap().unwrap();
+    assert_eq!(resolved.seed, 831001);
+    assert_eq!(resolved.semantic.max_tokens, 400);
+    assert_eq!(resolved.steps, 32);
+}
+
+#[test]
+fn yue2_cli_rejects_incomplete_conflicting_or_invalid_requests_before_load() {
+    for argv in [
+        vec!["rmi", "--yue2", "--model", "missing.gguf"],
+        vec![
+            "rmi", "--yue2", "--model", "m", "--vae", "v", "--prompt", " ", "--lyrics", "x",
+            "--out", "x.wav",
+        ],
+        vec![
+            "rmi", "--yue2", "--model", "m", "--vae", "v", "--prompt", "x", "--lyrics", " ",
+            "--out", "x.wav",
+        ],
+        vec![
+            "rmi", "--yue2", "--model", "m", "--vae", "v", "--prompt", "x", "--lyrics", "y",
+            "--out", "x.flac",
+        ],
+        vec![
+            "rmi", "--yue2", "--model", "m", "--vae", "v", "--prompt", "x", "--lyrics", "y",
+            "--out", "x.wav", "--tts",
+        ],
+        vec![
+            "rmi", "--yue2", "--model", "m", "--vae", "v", "--prompt", "x", "--lyrics", "y",
+            "--out", "x.wav", "--steps", "0",
+        ],
+    ] {
+        let options = parse_cli_options(&args(&argv)).unwrap();
+        assert!(validate_cli_options(&options).is_err(), "{argv:?}");
+    }
+}
+
+#[test]
 fn planner_cli_requires_complete_component_set() {
     let options = parse_cli_options(&args(&[
         "rmi",

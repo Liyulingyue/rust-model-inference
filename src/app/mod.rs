@@ -9,6 +9,7 @@ pub(crate) mod selftest;
 pub mod server;
 pub(crate) mod text;
 pub(crate) mod tts;
+pub(crate) mod yue2;
 
 pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
 pub use asr::run_asr_cli;
@@ -16,10 +17,10 @@ pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
     parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
     resolve_thread_count, transcription_options, validate_cli_options,
-    validate_qwen3vl_decoder_mode, z_image_cli_options, CliOptions, DreamXCliOptions,
-    DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, JevBlockInput, KvFormat,
-    LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind,
-    ZImageCliOptions, DEFAULT_THREAD_CAP,
+    validate_qwen3vl_decoder_mode, yue2_cli_options, z_image_cli_options, CliOptions,
+    DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput, JevBlockInput,
+    KvFormat, LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead,
+    RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
 pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
 pub use jev::{
@@ -36,6 +37,7 @@ pub use text::{
     run_multimodal_with_video_capture_text, run_shared_inference,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
+pub use yue2::run_yue2_cli;
 
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::{open_model_source, ComponentRole};

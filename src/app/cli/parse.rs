@@ -11,6 +11,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
             "--planner" => {
                 options.planner = Some(required_path_value(args, &mut i, "--planner")?);
@@ -50,6 +51,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     options.prompt = Some(args[i + 1].clone());
                     i += 1;
                 }
+            }
+            "--lyrics" => {
+                options.lyrics = Some(required_string_value(args, &mut i, "--lyrics")?);
             }
             "--chat-template" => {
                 if i + 1 < args.len() {
