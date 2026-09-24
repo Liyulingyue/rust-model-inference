@@ -75,8 +75,7 @@ unsafe fn argmax_f32_avx2(values: &[f32]) -> usize {
         // `_mm256_cmp_ps` returned all-1s / all-0s per lane).
         let idx_as_ps = _mm256_castsi256_ps(idx);
         let best_idx_as_ps = _mm256_castsi256_ps(v_best_idx);
-        let merged_idx_as_ps =
-            _mm256_blendv_ps(best_idx_as_ps, idx_as_ps, mask);
+        let merged_idx_as_ps = _mm256_blendv_ps(best_idx_as_ps, idx_as_ps, mask);
         v_best_val = merged_val;
         v_best_idx = _mm256_castps_si256(merged_idx_as_ps);
         i += 8;
@@ -225,8 +224,7 @@ mod tests {
     #[test]
     fn tail_handles_non_aligned_lengths() {
         for &n in &[1usize, 3, 7, 8, 9, 16, 17, 33, 65, 100, 129, 256, 1024] {
-            let values: Vec<f32> =
-                (0..n).map(|i| i as f32 * 0.13 - 7.0).collect();
+            let values: Vec<f32> = (0..n).map(|i| i as f32 * 0.13 - 7.0).collect();
             // Make last element the max for varying lengths.
             let mut values = values;
             if n > 0 {

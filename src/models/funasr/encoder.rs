@@ -21,8 +21,8 @@ use crate::ops::relu_inplace;
 use crate::ops::softmax_inplace;
 use crate::ops::sum_sq_centered_f32;
 use crate::ops::{
-    dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_mul_inplace,
-    vec_scale_f32, vec_sub_scalar_inplace,
+    dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_mul_inplace, vec_scale_f32,
+    vec_sub_scalar_inplace,
 };
 use std::sync::Arc;
 
@@ -828,8 +828,7 @@ impl SanmEncoder {
         let dk = d_model / n_head;
         let kernel = self.config.kernel_size;
 
-        let mut out =
-            self.sanm_layer_fwd(&self.enc0, x, t, d, d_model, n_head, dk, kernel, false);
+        let mut out = self.sanm_layer_fwd(&self.enc0, x, t, d, d_model, n_head, dk, kernel, false);
 
         for layer in &self.encoders {
             out = self.sanm_layer_fwd(layer, &out, t, d_model, d_model, n_head, dk, kernel, true);

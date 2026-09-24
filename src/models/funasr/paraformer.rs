@@ -8,12 +8,13 @@ use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
 use crate::models::funasr::encoder::{
-    add_residual, fsmn_shift_accumulate, kqv_dot_f32, layernorm_fwd, load_f32_vec,
-    load_layernorm, load_linear, load_linear_opt_bias, linear_fwd, LayerNorm, Linear,
-    SanmEncoder, SharedMut,
+    add_residual, fsmn_shift_accumulate, kqv_dot_f32, layernorm_fwd, linear_fwd, load_f32_vec,
+    load_layernorm, load_linear, load_linear_opt_bias, LayerNorm, Linear, SanmEncoder, SharedMut,
 };
 use crate::models::funasr::fbank;
-use crate::ops::{dot_f32, relu_inplace, sigmoid_inplace, softmax_inplace, vec_mad_f32, vec_scale_f32};
+use crate::ops::{
+    dot_f32, relu_inplace, sigmoid_inplace, softmax_inplace, vec_mad_f32, vec_scale_f32,
+};
 use std::sync::Arc;
 
 pub const ARCH: &str = "paraformer";
@@ -289,9 +290,7 @@ impl ParaformerModel {
         let q = linear_fwd(&layer.linear_q, &z, n, &self.pool);
         let kv = linear_fwd(&layer.linear_kv, enc_out, t_enc, &self.pool);
         let (k, v) = split_kv(&kv, t_enc, dim);
-        let attn = cross_attention(
-            &q, &k, &v, n, t_enc, dim, self.n_head, self.dk, &self.pool,
-        );
+        let attn = cross_attention(&q, &k, &v, n, t_enc, dim, self.n_head, self.dk, &self.pool);
         let o = linear_fwd(&layer.linear_out, &attn, n, &self.pool);
         // 9. return x + o
         add_residual(&x, &o, n * dim)
@@ -470,12 +469,7 @@ fn cross_attention(
     out
 }
 
-fn cif_integrate_fire(
-    enc_out: &[f32],
-    alpha: &[f32],
-    t: usize,
-    dim: usize,
-) -> Vec<f32> {
+fn cif_integrate_fire(enc_out: &[f32], alpha: &[f32], t: usize, dim: usize) -> Vec<f32> {
     let threshold = 1.0f32;
     let tail_threshold = 0.45f32;
 

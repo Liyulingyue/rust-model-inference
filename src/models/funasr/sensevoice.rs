@@ -7,7 +7,7 @@
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::funasr::config::FunAsrConfig;
-use crate::models::funasr::encoder::{load_f32_vec, load_linear, linear_fwd, Linear, SanmEncoder};
+use crate::models::funasr::encoder::{linear_fwd, load_f32_vec, load_linear, Linear, SanmEncoder};
 use crate::models::funasr::fbank;
 use std::sync::Arc;
 
@@ -101,7 +101,10 @@ fn load_query_tokens(source: &dyn TensorSource) -> Result<Vec<usize>, String> {
         .metadata("sv.query_tokens")
         .and_then(MetaValue::to_arr)
         .ok_or_else(|| "missing sv.query_tokens metadata".to_string())?;
-    Ok(arr.iter().map(|v| v.to_u64().unwrap_or(0) as usize).collect())
+    Ok(arr
+        .iter()
+        .map(|v| v.to_u64().unwrap_or(0) as usize)
+        .collect())
 }
 
 fn load_vocab(source: &dyn TensorSource, key: &str) -> Result<Vec<String>, String> {
