@@ -36,7 +36,9 @@ struct DecoderFfn {
 struct DecoderLayer {
     norm1: LayerNorm,
     ff: DecoderFfn,
+    norm2: LayerNorm,
     fsmn: Vec<f32>,
+    norm3: LayerNorm,
     linear_q: Linear,
     linear_kv: Linear,
     linear_out: Linear,
@@ -219,28 +221,40 @@ impl ParaformerModel {
     fn decoder_layer_fwd(
         &self,
         layer: &DecoderLayer,
-        x: &[f32],
+        tgt: &[f32],
         n: usize,
         enc_out: &[f32],
         t_enc: usize,
         dim: usize,
     ) -> Vec<f32> {
-        let normed1 = layernorm_fwd(&layer.norm1, x, n, &self.pool);
-        let ff_out = self.ffn_fwd(&layer.ff, &normed1, n, dim);
-        let mut h = add_residual(x, &ff_out, n * dim);
-
-        let fsmn = fsmn_shift_accumulate(&h, n, dim, self.kernel_size, &layer.fsmn, &self.pool);
-        h = add_residual(&h, &fsmn, n * dim);
-
-        let q = linear_fwd(&layer.linear_q, &h, n, &self.pool);
+        // 1. residual = tgt
+        let residual = tgt;
+        // 2. h = LN(norm1)(tgt)
+        let h = layernorm_fwd(&layer.norm1, tgt, n, &self.pool);
+        // 3. h = FFN(h)  (w_1+bias → relu → internal LN → w_2 no-bias)
+        let ff_out = self.ffn_fwd(&layer.ff, &h, n, dim);
+        // 4. y = LN(norm2)(h + ff_out?)  — NO: ref does y = LN(norm2)(h)
+        //    Actually ref: h = dec_ffn(h); y = lnorm(norm2, h)
+        //    dec_ffn returns w_2(matmul(relu(w_1(h)))), so y = LN(norm2)(ff_out)
+        let y = layernorm_fwd(&layer.norm2, &ff_out, n, &self.pool);
+        // 5. sa = FSMN(y)  (fsmn includes residual y internally)
+        let sa = fsmn_shift_accumulate(&y, n, dim, self.kernel_size, &layer.fsmn, &self.pool);
+        //    fsmn_shift_accumulate starts with v (=y) and adds kernel contributions,
+        //    so result = y + sum_j(kernel * pad(y)). This IS the residual+conv.
+        // 6. x = residual + sa
+        let x = add_residual(residual, &sa, n * dim);
+        // 7. z = LN(norm3)(x)
+        let z = layernorm_fwd(&layer.norm3, &x, n, &self.pool);
+        // 8. ca = cross_attn(z, enc_out)
+        let q = linear_fwd(&layer.linear_q, &z, n, &self.pool);
         let kv = linear_fwd(&layer.linear_kv, enc_out, t_enc, &self.pool);
         let (k, v) = split_kv(&kv, t_enc, dim);
         let attn = cross_attention(
             &q, &k, &v, n, t_enc, dim, self.n_head, self.dk, &self.pool,
         );
         let o = linear_fwd(&layer.linear_out, &attn, n, &self.pool);
-        h = add_residual(&h, &o, n * dim);
-        h
+        // 9. return x + o
+        add_residual(&x, &o, n * dim)
     }
 
     #[inline]
@@ -277,7 +291,9 @@ fn load_decoder_layer(source: &dyn TensorSource, idx: usize) -> Result<DecoderLa
     Ok(DecoderLayer {
         norm1: load_layernorm(source, &format!("{p}norm1."))?,
         ff: load_decoder_ffn(source, &p)?,
+        norm2: load_layernorm(source, &format!("{p}norm2."))?,
         fsmn: load_f32_vec(source, &format!("{sa}fsmn_block.weight"))?,
+        norm3: load_layernorm(source, &format!("{p}norm3."))?,
         linear_q: load_linear(source, &format!("{ca}linear_q."))?,
         linear_kv: load_linear(source, &format!("{ca}linear_k_v."))?,
         linear_out: load_linear(source, &format!("{ca}linear_out."))?,
@@ -415,29 +431,36 @@ fn cif_integrate_fire(
     let threshold = 1.0f32;
     let tail_threshold = 0.45f32;
 
+    // Extend enc_out and alpha by one frame (tail_threshold as the extra alpha)
+    let l = t + 1;
+    let mut hid = vec![0.0f32; l * dim];
+    hid[..t * dim].copy_from_slice(enc_out);
+    let mut al = alpha.to_vec();
+    al.push(tail_threshold);
+
     let mut embeddings: Vec<f32> = Vec::new();
-    let mut acc = 0.0f32;
-    let mut cache = vec![0.0f32; dim];
+    let mut integrate = 0.0f32;
+    let mut frame = vec![0.0f32; dim];
 
-    for t_idx in 0..t {
-        let w = alpha[t_idx];
-        acc += w;
+    for t_idx in 0..l {
+        let alpha_t = al[t_idx];
+        let dc = 1.0 - integrate;
+        integrate += alpha_t;
+        let fire = integrate >= threshold;
+        let cur = if fire { dc } else { alpha_t };
+        let rem = alpha_t - cur;
+
         for d in 0..dim {
-            cache[d] += w * enc_out[t_idx * dim + d];
+            frame[d] += cur * hid[t_idx * dim + d];
         }
 
-        if acc >= threshold {
-            let fire: Vec<f32> = cache.iter().map(|&v| v / acc).collect();
-            embeddings.extend_from_slice(&fire);
-            let residual = acc - threshold;
-            cache = fire.iter().map(|&v| v * residual).collect();
-            acc = residual;
+        if fire {
+            embeddings.extend_from_slice(&frame);
+            integrate -= 1.0;
+            for d in 0..dim {
+                frame[d] = rem * hid[t_idx * dim + d];
+            }
         }
-    }
-
-    if acc >= tail_threshold {
-        let fire: Vec<f32> = cache.iter().map(|&v| v / acc).collect();
-        embeddings.extend_from_slice(&fire);
     }
 
     embeddings
