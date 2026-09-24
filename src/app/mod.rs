@@ -1,11 +1,9 @@
 pub(crate) mod asr;
 pub(crate) mod breeze;
 pub mod cli;
+pub(crate) mod diffusion;
 pub(crate) mod dots;
-pub(crate) mod dreamx;
-pub(crate) mod embedding;
 pub(crate) mod funasr;
-pub(crate) mod image;
 pub(crate) mod jev;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
@@ -24,9 +22,8 @@ pub use cli::{
     LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind,
     ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
-pub use dreamx::run_dreamx_cli;
-pub use embedding::{compute_embedding, run_embedding};
-pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
+pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
+pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
 pub use jev::{
     run_jev_decision, run_jev_grouped_decision, JevGroupInput, JevGroupedQuestionInput, JevMode,
     JevQuestionInput,
