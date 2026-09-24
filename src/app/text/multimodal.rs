@@ -1,8 +1,9 @@
 use super::generation::{sample_token, validate_gemma4_temperature};
 use super::vision::{
-    build_qwen3_media_positions, decode_image, inject_qwen_media_embeddings,
-    inject_vision_embeddings, normalize_resized_image, validate_single_qwen_media,
+    build_qwen3_media_positions, inject_qwen_media_embeddings,
+    inject_vision_embeddings, validate_single_qwen_media,
 };
+use crate::app::media::{decode_image, normalize_resized_image};
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -58,25 +59,25 @@ pub(super) fn run_qwen3_family_multimodal(
             .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
     );
     let media_kind = if audio_path.is_some() {
-        crate::app::omni::MediaKind::Audio
+        crate::app::media::MediaKind::Audio
     } else if video_path.is_some() {
-        crate::app::omni::MediaKind::Video
+        crate::app::media::MediaKind::Video
     } else {
-        crate::app::omni::MediaKind::Image
+        crate::app::media::MediaKind::Image
     };
-    let family = crate::app::omni::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let family = crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
     let mut media = Vec::new();
     let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
     let mut media_grid_shapes = Vec::new();
     if let Some(audio_path) = audio_path {
-        let samples = crate::app::omni::decode_audio(audio_path)?;
+        let samples = crate::app::media::decode_audio(audio_path)?;
         media =
             crate::models::qwen3::omni::encode_audio(Arc::clone(&mmproj), &samples, n_threads_arg)?;
     } else {
         let mut frames = if let Some(path) = image_path {
             vec![decode_image(path)?]
         } else {
-            crate::app::omni::decode_video(video_path.ok_or("missing image or video input")?)?
+            crate::app::media::decode_video(video_path.ok_or("missing image or video input")?)?
         };
         let is_video = video_path.is_some();
         let (first_w, first_h) = {
@@ -84,13 +85,13 @@ pub(super) fn run_qwen3_family_multimodal(
             (first.width() as usize, first.height() as usize)
         };
         let (grid_w, grid_h) = match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 if is_video {
@@ -102,12 +103,12 @@ pub(super) fn run_qwen3_family_multimodal(
             }
         };
         let (mean, std) = match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
@@ -126,7 +127,7 @@ pub(super) fn run_qwen3_family_multimodal(
             vec![(0, 0)]
         };
         match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let mut encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
@@ -168,7 +169,7 @@ pub(super) fn run_qwen3_family_multimodal(
                     media_grid_shapes.push((grid.grid_h, grid.grid_w));
                 }
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
@@ -206,9 +207,9 @@ pub(super) fn run_qwen3_family_multimodal(
         ));
     }
     let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::omni::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::omni::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::omni::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
+        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
+        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
+        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
     };
     let start = tokenizer
         .special_token_id(start_name)
@@ -257,15 +258,15 @@ pub(super) fn run_qwen3_family_multimodal(
     // system turn when the projector family matches `Qwen25Omni`, so
     // qwen3vl / qwen3vlmoe (Qwen3-VL family) keep their existing
     // system-less behaviour.
-    if matches!(family, crate::app::omni::ProjectorFamily::Qwen25Omni) {
+    if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
         let system_text = match media_kind {
-            crate::app::omni::MediaKind::Audio => {
+            crate::app::media::MediaKind::Audio => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
-            crate::app::omni::MediaKind::Video => {
+            crate::app::media::MediaKind::Video => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
-            crate::app::omni::MediaKind::Image => {
+            crate::app::media::MediaKind::Image => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
         };

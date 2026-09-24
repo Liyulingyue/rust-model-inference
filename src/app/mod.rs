@@ -2,6 +2,7 @@ pub(crate) mod asr;
 pub mod cli;
 pub(crate) mod diffusion;
 pub(crate) mod jev;
+pub(crate) mod media;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
@@ -25,7 +26,8 @@ pub use jev::{
     build_jev_inputs, run_jev_decision, run_jev_grouped_decision, JevGroupInput,
     JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput,
 };
-pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
+pub use media::{MediaKind, ProjectorFamily, validate_mmproj_capabilities};
+pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{

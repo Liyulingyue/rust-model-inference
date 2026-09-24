@@ -44,48 +44,6 @@ pub fn inject_vision_embeddings(
     Ok(embeddings)
 }
 
-pub fn decode_image(path: &Path) -> Result<image::DynamicImage, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
-    image::load_from_memory(&bytes)
-        .map_err(|error| format!("Failed to decode image {}: {error}", path.display()))
-}
-
-pub fn normalize_resized_image(
-    image: &image::DynamicImage,
-    target_w: usize,
-    target_h: usize,
-    mean: &[f32; 3],
-    std: &[f32; 3],
-) -> Result<Vec<f32>, String> {
-    if std.iter().any(|value| *value == 0.0) {
-        return Err("Vision normalization std must be nonzero".into());
-    }
-    let source = image.to_rgb8();
-    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
-        source.as_raw(),
-        source.width() as usize,
-        source.height() as usize,
-        target_w,
-        target_h,
-    )?;
-    let output_len = target_w
-        .checked_mul(target_h)
-        .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or("Normalized image length overflow")?;
-    let mut output = vec![0.0f32; output_len];
-    for y in 0..target_h {
-        for x in 0..target_w {
-            let offset = (y * target_w + x) * 3;
-            for channel in 0..3 {
-                output[offset + channel] =
-                    (f32::from(resized[offset + channel]) / 255.0 - mean[channel]) / std[channel];
-            }
-        }
-    }
-    Ok(output)
-}
-
 pub(crate) fn build_qwen3_media_positions(
     token_ids: &[u32],
     placeholder_id: u32,

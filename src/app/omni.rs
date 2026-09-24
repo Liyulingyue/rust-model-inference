@@ -289,7 +289,7 @@ fn encode_vision(
         .map_err(|error| format!("Failed to load vision encoder: {error}"))?;
     encoder.precompute();
     let mut frames = if let Some(path) = image_path {
-        vec![super::text::decode_image(path)?]
+        vec![super::media::decode_image(path)?]
     } else {
         decode_video(video_path.ok_or("Missing image or video input")?)?
     };
@@ -307,7 +307,7 @@ fn encode_vision(
     let normalized = frames
         .drain(..)
         .map(|frame| {
-            super::text::normalize_resized_image(
+            super::media::normalize_resized_image(
                 &frame,
                 grid.image_width(),
                 grid.image_height(),

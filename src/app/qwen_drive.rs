@@ -1,5 +1,6 @@
 use super::cli::{PlanningMode, QwenDriveCliOptions, QwenDriveHead};
-use super::text::{decode_image, inject_vision_embeddings};
+use super::media::decode_image;
+use super::text::inject_vision_embeddings;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
