@@ -222,6 +222,56 @@ pub fn run_interactive(
     Ok(())
 }
 
+/// Interactive REPL for qwen35 architecture (uses multimodal path even for text-only).
+pub fn run_interactive_qwen35(
+    source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+) -> Result<(), String> {
+    println!("=== RustModelInference Interactive Mode (qwen35) ===");
+    println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
+    loop {
+        print!("> ");
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("Failed to flush prompt: {error}"))?;
+        let mut line = String::new();
+        if io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| format!("Failed to read prompt: {error}"))?
+            == 0
+        {
+            break;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        run_multimodal_with_video(
+            source.clone(),
+            model_path,
+            None,
+            None,
+            None,
+            None,
+            line,
+            max_tokens,
+            temperature,
+            n_threads,
+            prefill_batch_size,
+            max_context,
+            repetition_penalty,
+        )?;
+        println!();
+    }
+    Ok(())
+}
+
 pub fn run_shared_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,

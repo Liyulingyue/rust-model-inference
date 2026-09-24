@@ -22,15 +22,16 @@ pub use cli::{
 pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
 pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
 pub use jev::{
-    run_jev_decision, run_jev_grouped_decision, JevGroupInput, JevGroupedQuestionInput, JevMode,
-    JevQuestionInput,
+    build_jev_inputs, run_jev_decision, run_jev_grouped_decision, JevGroupInput,
+    JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput,
 };
 pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
-    run_inference, run_interactive, run_multimodal, run_multimodal_with_tts_postproc,
-    run_multimodal_with_video, run_multimodal_with_video_capture_text, run_shared_inference,
+    run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
+    run_multimodal_with_tts_postproc, run_multimodal_with_video,
+    run_multimodal_with_video_capture_text, run_shared_inference,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 
