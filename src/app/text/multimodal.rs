@@ -1,5 +1,10 @@
-use crate::app::cli::{resolve_thread_count, CliOptions, KvFormat};
-use crate::core::loader::model_config_from_source;
+use super::generation::{sample_token, validate_gemma4_temperature};
+use super::vision::{
+    build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
+    validate_single_qwen_media,
+};
+use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::media::{decode_image, normalize_resized_image};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -14,418 +19,12 @@ use crate::models::qwen35::vision::{
     VisionScratchpad as VisionScratchpad35,
 };
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use crate::prompt::{
-    append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
-    build_lfm2_chat_prompt, build_qwen_chat_prompt, HunyuanMessage, Lfm2Message, QwenMessage,
-};
+use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Result<(), String> {
-    if arch == "gemma4" && temperature != 0.0 {
-        return Err("Gemma4 requires greedy decoding; --temp must be 0".into());
-    }
-    Ok(())
-}
-
-fn uses_llama_trunk(arch: &str) -> bool {
-    matches!(arch, "llama" | "k2-horizon" | "granite" | "nanbeige")
-}
-
-pub fn run_inference(
-    source: Arc<dyn TensorSource>,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    thinking: bool,
-    bench: bool,
-    profile: bool,
-    kv_format: KvFormat,
-    prefill_batch_size: usize,
-    max_context: usize,
-    repetition_penalty: f32,
-) -> Result<(), String> {
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        .unwrap_or_default();
-
-    if arch == "hunyuan-dense" {
-        crate::models::qwen3::hunyuan::run_inference(
-            source.clone(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            profile,
-            kv_format,
-            prefill_batch_size,
-            max_context,
-            repetition_penalty,
-        )
-    } else if arch == "lfm2" {
-        let is_lfm25 = source
-            .metadata("general.basename")
-            .and_then(|v| v.to_string_val())
-            .map(|v| v.contains("2.5"))
-            .unwrap_or(false);
-
-        if is_lfm25 {
-            crate::models::lfm25::run_inference(
-                source.as_ref(),
-                prompt,
-                max_tokens,
-                temperature,
-                n_threads_arg,
-                profile,
-                kv_format,
-                max_context,
-                thinking,
-            )
-        } else {
-            crate::models::lfm2::run_inference(
-                source.as_ref(),
-                prompt,
-                max_tokens,
-                temperature,
-                n_threads_arg,
-                profile,
-                kv_format,
-                max_context,
-                repetition_penalty,
-                thinking,
-            )
-        }
-    } else if arch == "lfm2moe" {
-        crate::models::lfm2moe::run_inference_with_batch(
-            source.as_ref(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            profile,
-            kv_format,
-            max_context,
-            repetition_penalty,
-            prefill_batch_size,
-        )
-    } else if uses_llama_trunk(&arch) {
-        crate::models::llama::run_inference(
-            source.as_ref(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            bench,
-            profile,
-            kv_format,
-            max_context,
-            repetition_penalty,
-            thinking,
-        )
-    } else if arch == "spark2_5" {
-        crate::models::spark::run_inference(
-            source.as_ref(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            thinking,
-            bench,
-            profile,
-            kv_format,
-        )
-    } else if arch == "nemotron_h" {
-        crate::models::nemotron_h::trunk::run_inference(
-            source.clone(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            kv_format,
-        )
-    } else {
-        crate::models::qwen3::text::run_inference(
-            source.clone(),
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            thinking,
-            bench,
-            profile,
-            kv_format,
-            prefill_batch_size,
-            max_context,
-            repetition_penalty,
-        )
-    }
-}
-
-/// One question inside a JEV request. Options are stored in their original
-/// user-supplied form (e.g. "晴天:5" for score mode, "晴天" otherwise); the
-/// decision logic parses the `:value` suffix and decides the per-question
-/// mode from the option shapes.
-
-// JEV types + decision scoring live in `src/app/jev/mod.rs`.
-
-// JEV decision scoring has moved to `src/app/jev/mod.rs`.
-
-pub fn run_interactive(
-    source: Arc<dyn TensorSource>,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    prefill_batch_size: usize,
-    repetition_penalty: f32,
-) -> Result<(), String> {
-    println!("=== RustModelInference Interactive Mode ===");
-    println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
-
-    loop {
-        print!("> ");
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("Failed to flush prompt: {error}"))?;
-        let mut line = String::new();
-        if io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| format!("Failed to read prompt: {error}"))?
-            == 0
-        {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        run_inference(
-            source.clone(),
-            line,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            false,
-            false,
-            false,
-            KvFormat::F16,
-            prefill_batch_size,
-            CliOptions::DEFAULT_MAX_CONTEXT,
-            repetition_penalty,
-        )?;
-        let _ = repetition_penalty;
-        println!();
-    }
-    Ok(())
-}
-
-pub fn run_shared_inference(
-    source: Arc<dyn TensorSource>,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    thinking: bool,
-    prefill_batch_size: usize,
-) -> Result<(), String> {
-    crate::models::qwen3::run_shared_inference(
-        source,
-        prompt,
-        max_tokens,
-        temperature,
-        n_threads_arg,
-        thinking,
-        prefill_batch_size,
-    )
-}
-
-pub fn inject_vision_embeddings(
-    llm: &Qwen35Model,
-    tokens: &[i32],
-    image_token_id: Option<i32>,
-    vis_embd: &[f32],
-    n_vis_tokens: usize,
-    proj_dim: usize,
-) -> Result<Vec<f32>, String> {
-    let n_embd = llm.config.n_embd;
-    let expected_vis_len = n_vis_tokens
-        .checked_mul(proj_dim)
-        .ok_or("Qwen3.5 vision embedding length overflow")?;
-    let placeholders = tokens
-        .iter()
-        .filter(|&&token| image_token_id == Some(token))
-        .count();
-    if proj_dim != n_embd || vis_embd.len() != expected_vis_len || placeholders != n_vis_tokens {
-        return Err(format!(
-            "Qwen3.5 vision embedding mismatch: placeholders={placeholders}, rows={n_vis_tokens}, projection_dim={proj_dim}, model_dim={n_embd}, values={}",
-            vis_embd.len()
-        ));
-    }
-    let token_ids = tokens
-        .iter()
-        .copied()
-        .filter(|&token| image_token_id != Some(token))
-        .map(|token| u32::try_from(token).map_err(|_| format!("invalid negative token id {token}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let text_embeddings = llm.embed_tokens(&token_ids)?;
-    let mut embeddings = vec![0.0; tokens.len() * n_embd];
-    let (mut text_idx, mut vis_idx) = (0, 0);
-    for (token, row) in tokens.iter().zip(embeddings.chunks_exact_mut(n_embd)) {
-        if image_token_id == Some(*token) {
-            row.copy_from_slice(&vis_embd[vis_idx * n_embd..(vis_idx + 1) * n_embd]);
-            vis_idx += 1;
-        } else {
-            row.copy_from_slice(&text_embeddings[text_idx * n_embd..(text_idx + 1) * n_embd]);
-            text_idx += 1;
-        }
-    }
-    Ok(embeddings)
-}
-
-pub fn sample_token(logits: &[f32], temperature: f32) -> i32 {
-    if temperature <= 0.0 {
-        return logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as i32)
-            .unwrap_or(0);
-    }
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    let mut probs = vec![0.0f32; logits.len()];
-    for (i, l) in logits.iter().enumerate() {
-        probs[i] = ((l - max_logit) / temperature).exp();
-        sum += probs[i];
-    }
-    for p in probs.iter_mut() {
-        *p /= sum;
-    }
-
-    let r = 0.5f32;
-    let mut cumsum = 0.0f32;
-    for (i, p) in probs.iter().enumerate() {
-        cumsum += p;
-        if cumsum >= r {
-            return i as i32;
-        }
-    }
-    (logits.len() - 1) as i32
-}
-
-pub fn decode_image(path: &Path) -> Result<image::DynamicImage, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
-    image::load_from_memory(&bytes)
-        .map_err(|error| format!("Failed to decode image {}: {error}", path.display()))
-}
-
-pub fn normalize_resized_image(
-    image: &image::DynamicImage,
-    target_w: usize,
-    target_h: usize,
-    mean: &[f32; 3],
-    std: &[f32; 3],
-) -> Result<Vec<f32>, String> {
-    if std.iter().any(|value| *value == 0.0) {
-        return Err("Vision normalization std must be nonzero".into());
-    }
-    let source = image.to_rgb8();
-    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
-        source.as_raw(),
-        source.width() as usize,
-        source.height() as usize,
-        target_w,
-        target_h,
-    )?;
-    let output_len = target_w
-        .checked_mul(target_h)
-        .and_then(|pixels| pixels.checked_mul(3))
-        .ok_or("Normalized image length overflow")?;
-    let mut output = vec![0.0f32; output_len];
-    for y in 0..target_h {
-        for x in 0..target_w {
-            let offset = (y * target_w + x) * 3;
-            for channel in 0..3 {
-                output[offset + channel] =
-                    (f32::from(resized[offset + channel]) / 255.0 - mean[channel]) / std[channel];
-            }
-        }
-    }
-    Ok(output)
-}
-
-pub(crate) fn build_qwen3_media_positions(
-    token_ids: &[u32],
-    placeholder_id: u32,
-    grid_shapes: &[(usize, usize)],
-) -> Result<Vec<[usize; 4]>, String> {
-    let mut positions = Vec::with_capacity(token_ids.len());
-    let mut next = 0usize;
-    let mut token = 0usize;
-    let mut grid_index = 0usize;
-    while token < token_ids.len() {
-        if token_ids[token] != placeholder_id {
-            positions.push([next, next, next, 0]);
-            next = next.checked_add(1).ok_or("Qwen media position overflow")?;
-            token += 1;
-            continue;
-        }
-        if grid_shapes.is_empty() {
-            positions.push([next, next, next, 0]);
-            next = next.checked_add(1).ok_or("Qwen audio position overflow")?;
-            token += 1;
-            continue;
-        }
-        let (grid_h, grid_w) = *grid_shapes
-            .get(grid_index)
-            .ok_or("Media placeholder has no matching vision grid")?;
-        let count = grid_h
-            .checked_mul(grid_w)
-            .ok_or("Qwen media grid token count overflow")?;
-        let end = token
-            .checked_add(count)
-            .ok_or("Qwen media placeholder range overflow")?;
-        if count == 0
-            || end > token_ids.len()
-            || token_ids[token..end].iter().any(|id| *id != placeholder_id)
-        {
-            return Err(format!(
-                "Vision grid {grid_index} requires {count} contiguous placeholders"
-            ));
-        }
-        let base = next;
-        for index in 0..count {
-            let row = index / grid_w;
-            let column = index % grid_w;
-            positions.push([
-                base,
-                base.checked_add(row)
-                    .ok_or("Qwen media row position overflow")?,
-                base.checked_add(column)
-                    .ok_or("Qwen media column position overflow")?,
-                0,
-            ]);
-        }
-        next = base
-            .checked_add(grid_h.max(grid_w))
-            .ok_or("Qwen media logical position overflow")?;
-        token = end;
-        grid_index += 1;
-    }
-    if !grid_shapes.is_empty() && grid_index != grid_shapes.len() {
-        return Err(format!(
-            "Unused vision grids: consumed {grid_index}, provided {}",
-            grid_shapes.len()
-        ));
-    }
-    Ok(positions)
-}
-
-fn run_qwen3_family_multimodal(
+pub(super) fn run_qwen3_family_multimodal(
     llm_source: &dyn TensorSource,
     model_source: Arc<dyn TensorSource>,
     mmproj_path: &Path,
@@ -460,25 +59,26 @@ fn run_qwen3_family_multimodal(
             .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
     );
     let media_kind = if audio_path.is_some() {
-        crate::app::omni::MediaKind::Audio
+        crate::app::media::MediaKind::Audio
     } else if video_path.is_some() {
-        crate::app::omni::MediaKind::Video
+        crate::app::media::MediaKind::Video
     } else {
-        crate::app::omni::MediaKind::Image
+        crate::app::media::MediaKind::Image
     };
-    let family = crate::app::omni::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let family =
+        crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
     let mut media = Vec::new();
     let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
     let mut media_grid_shapes = Vec::new();
     if let Some(audio_path) = audio_path {
-        let samples = crate::app::omni::decode_audio(audio_path)?;
+        let samples = crate::app::media::decode_audio(audio_path)?;
         media =
             crate::models::qwen3::omni::encode_audio(Arc::clone(&mmproj), &samples, n_threads_arg)?;
     } else {
         let mut frames = if let Some(path) = image_path {
             vec![decode_image(path)?]
         } else {
-            crate::app::omni::decode_video(video_path.ok_or("missing image or video input")?)?
+            crate::app::media::decode_video(video_path.ok_or("missing image or video input")?)?
         };
         let is_video = video_path.is_some();
         let (first_w, first_h) = {
@@ -486,13 +86,13 @@ fn run_qwen3_family_multimodal(
             (first.width() as usize, first.height() as usize)
         };
         let (grid_w, grid_h) = match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 if is_video {
@@ -504,12 +104,12 @@ fn run_qwen3_family_multimodal(
             }
         };
         let (mean, std) = match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
@@ -528,7 +128,7 @@ fn run_qwen3_family_multimodal(
             vec![(0, 0)]
         };
         match family {
-            crate::app::omni::ProjectorFamily::Qwen3VlMerger => {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
                 let mut encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
@@ -570,7 +170,7 @@ fn run_qwen3_family_multimodal(
                     media_grid_shapes.push((grid.grid_h, grid.grid_w));
                 }
             }
-            crate::app::omni::ProjectorFamily::Qwen25Omni => {
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
                 let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
                     .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
@@ -608,9 +208,9 @@ fn run_qwen3_family_multimodal(
         ));
     }
     let (start_name, pad_name, end_name) = match media_kind {
-        crate::app::omni::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
-        crate::app::omni::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
-        crate::app::omni::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
+        crate::app::media::MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
+        crate::app::media::MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
+        crate::app::media::MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
     };
     let start = tokenizer
         .special_token_id(start_name)
@@ -652,22 +252,22 @@ fn run_qwen3_family_multimodal(
     ));
     let mut token_ids = Vec::new();
     // Qwen2.5-Omni (qwen2vl arch with `qwen2.5o` projector) requires a
-    // modality-aware system prompt per the upstream README — without it,
+    // modality-aware system prompt per the upstream README—without it,
     // the assistant role can drift (audio output only works with the
     // exact prompt; for text-only multimodal a generic variant still helps
     // the model behave as a virtual-human assistant). We only inject the
     // system turn when the projector family matches `Qwen25Omni`, so
     // qwen3vl / qwen3vlmoe (Qwen3-VL family) keep their existing
     // system-less behaviour.
-    if matches!(family, crate::app::omni::ProjectorFamily::Qwen25Omni) {
+    if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
         let system_text = match media_kind {
-            crate::app::omni::MediaKind::Audio => {
+            crate::app::media::MediaKind::Audio => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
-            crate::app::omni::MediaKind::Video => {
+            crate::app::media::MediaKind::Video => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
-            crate::app::omni::MediaKind::Image => {
+            crate::app::media::MediaKind::Image => {
                 "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
             }
         };
@@ -714,69 +314,6 @@ fn run_qwen3_family_multimodal(
     io::stdout().flush().map_err(|error| error.to_string())?;
     println!();
     Ok(generation.text)
-}
-
-fn inject_qwen_media_embeddings(
-    token_ids: &[u32],
-    pad: u32,
-    embeddings: &mut [f32],
-    media: &[f32],
-    media_deepstack: &[f32],
-    width: usize,
-) -> Result<Vec<f32>, String> {
-    if width == 0 || embeddings.len() != token_ids.len().saturating_mul(width) {
-        return Err("Prompt embedding shape mismatch".into());
-    }
-    if media.len() % width != 0 {
-        return Err("Media embeddings are not row aligned".into());
-    }
-    let media_rows = media.len() / width;
-    let per_layer = media.len();
-    if !media_deepstack.is_empty() && (per_layer == 0 || media_deepstack.len() % per_layer != 0) {
-        return Err("Media deepstack embeddings are not layer aligned".into());
-    }
-    let deepstack_layers = if per_layer == 0 {
-        0
-    } else {
-        media_deepstack.len() / per_layer
-    };
-    let mut deepstack = vec![0.0; deepstack_layers * embeddings.len()];
-    let mut media_row = 0;
-    for (token_index, (&token, row)) in token_ids
-        .iter()
-        .zip(embeddings.chunks_exact_mut(width))
-        .enumerate()
-    {
-        if token != pad {
-            continue;
-        }
-        if media_row >= media_rows {
-            return Err("Media placeholder count exceeds projector rows".into());
-        }
-        row.copy_from_slice(&media[media_row * width..(media_row + 1) * width]);
-        for layer in 0..deepstack_layers {
-            let src = (layer * media_rows + media_row) * width;
-            let dst = (layer * token_ids.len() + token_index) * width;
-            deepstack[dst..dst + width].copy_from_slice(&media_deepstack[src..src + width]);
-        }
-        media_row += 1;
-    }
-    if media_row != media_rows {
-        return Err(format!(
-            "Media placeholder count mismatch: placeholders={media_row}, rows={media_rows}"
-        ));
-    }
-    Ok(deepstack)
-}
-
-fn validate_single_qwen_media(image: bool, video: bool, audio: bool) -> Result<(), String> {
-    if usize::from(image) + usize::from(video) + usize::from(audio) != 1 {
-        return Err(
-            "Qwen multimodal generation requires exactly one of --image, --video, or --audio"
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 pub fn run_multimodal(
@@ -845,152 +382,7 @@ pub fn run_multimodal_with_video(
     )
 }
 
-/// Run multimodal inference and feed the generated text through a
-/// separate TTS model (Qwen3-TTS / Qwen2.5-Omni Talker compatible) to
-/// produce a 24 kHz WAV. Used to bridge Qwen2.5-Omni (no bundled Talker
-/// in our GGUF set) to a usable audio output. Currently uses
-/// Qwen3-TTS-12Hz-1.7B-Base as the post-processor.
-///
-/// Note: this implementation streams the Omni text to stdout AND
-/// synthesises it for TTS in parallel. The text is captured by running
-/// the multimodal flow in a subprocess-style redirect; we use a small
-/// helper (`run_multimodal_with_video_capture_text`) that returns the
-/// reply as a String instead of printing.
-#[allow(clippy::too_many_arguments)]
-pub fn run_multimodal_with_tts_postproc(
-    llm_source: Arc<dyn TensorSource>,
-    model_path: &Path,
-    mmproj_path: Option<&Path>,
-    image_path: Option<&Path>,
-    video_path: Option<&Path>,
-    audio_path: Option<&Path>,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    prefill_batch_size: usize,
-    max_context: usize,
-    repetition_penalty: f32,
-    tts_model: &Path,
-    tts_mmproj: &Path,
-    wav_out: &Path,
-    language: &str,
-) -> Result<(), String> {
-    let reply = run_multimodal_with_video_capture_text(
-        Arc::clone(&llm_source),
-        model_path,
-        mmproj_path,
-        image_path,
-        video_path,
-        audio_path,
-        prompt,
-        max_tokens,
-        temperature,
-        n_threads_arg,
-        prefill_batch_size,
-        max_context,
-        repetition_penalty,
-    )?;
-    eprintln!(
-        "Omni → TTS: captured {} chars from reply; running Qwen3-TTS...",
-        reply.chars().count()
-    );
-    // `synthesize_tts_to_wav` expects the Qwen3-TTS internal language
-    // tag (e.g. "english") rather than the ISO code ("en"). Translate
-    // via the same normalizer the standalone --tts path uses so the
-    // Talker's `<|codec_language_english|>` literal resolves correctly.
-    let internal_language = crate::app::cli::normalize_tts_language(Some(language))?;
-    let wav_bytes = crate::app::tts::synthesize_tts_to_wav(
-        tts_model,
-        tts_mmproj,
-        &reply,
-        internal_language,
-        // TTS frame budget: the user's --max-tokens bounds the Omni reply
-        // length; the Qwen3-TTS Talker emits one 80 ms audio frame per
-        // step and stops on EOS, so `max_tokens * 4` frames (~80 ms per
-        // frame) caps audio at ~3.2 seconds per Omni token. Clamp to a
-        // floor of 128 so short captions (e.g. 30 tokens) still produce
-        // usable audio; cap at 1024 so very long replies don't run the
-        // expensive DAC decoder for minutes on end.
-        max_tokens.saturating_mul(4).clamp(128, 1024),
-        temperature,
-        n_threads_arg,
-        None,
-    )?;
-    std::fs::write(wav_out, &wav_bytes)
-        .map_err(|error| format!("Failed to write WAV {}: {error}", wav_out.display()))?;
-    eprintln!(
-        "Omni → TTS: wrote {} bytes ({} samples) to {}",
-        wav_bytes.len(),
-        wav_bytes.len() / 2,
-        wav_out.display()
-    );
-    Ok(())
-}
-
-/// Same as `run_multimodal_with_video` but returns the generated text
-/// instead of streaming it to stdout. Used by the TTS post-processor
-/// pipeline so we can capture the Omni reply.
-pub fn run_multimodal_with_video_capture_text(
-    llm_source: Arc<dyn TensorSource>,
-    model_path: &Path,
-    mmproj_path: Option<&Path>,
-    image_path: Option<&Path>,
-    video_path: Option<&Path>,
-    audio_path: Option<&Path>,
-    prompt: &str,
-    max_tokens: usize,
-    temperature: f32,
-    n_threads_arg: usize,
-    prefill_batch_size: usize,
-    max_context: usize,
-    repetition_penalty: f32,
-) -> Result<String, String> {
-    let owned_source = Arc::clone(&llm_source);
-    let arch = llm_source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        .unwrap_or_default();
-    validate_gemma4_temperature(arch, temperature)?;
-    if arch == "gemma4" {
-        // gemma4 path uses its own `run_gemma4`; it doesn't go through
-        // `run_qwen3_family_multimodal`. For now, capture the text by
-        // delegating to `run_multimodal_with_video` and parsing the
-        // output via stdout redirection.
-        return run_gemma4_capture_text(
-            model_path,
-            mmproj_path,
-            image_path,
-            audio_path,
-            prompt,
-            max_tokens,
-            n_threads_arg,
-            prefill_batch_size,
-        );
-    }
-    if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")
-        && (image_path.is_some() || video_path.is_some() || audio_path.is_some())
-    {
-        return run_qwen3_family_multimodal(
-            llm_source.as_ref(),
-            owned_source,
-            mmproj_path.ok_or("multimodal Qwen models require --mmproj")?,
-            image_path,
-            video_path,
-            audio_path,
-            prompt,
-            max_tokens,
-            temperature,
-            n_threads_arg,
-            prefill_batch_size,
-        );
-    }
-    Err(format!(
-        "Only qwen35, qwen3vl, qwen3vlmoe and gemma4 architectures are supported for multimodal capture, got: {arch}"
-    ))
-}
-
-fn run_gemma4_capture_text(
+pub(super) fn run_gemma4_capture_text(
     _model_path: &Path,
     _mmproj_path: Option<&Path>,
     _image_path: Option<&Path>,
@@ -1006,7 +398,7 @@ fn run_gemma4_capture_text(
     Err("Omni → TTS capture-text is not yet implemented for gemma4".into())
 }
 
-fn run_multimodal_with_video_ref(
+pub(super) fn run_multimodal_with_video_ref(
     llm_source: &dyn TensorSource,
     model_path: &Path,
     mmproj_path: Option<&Path>,
@@ -1573,175 +965,4 @@ fn run_multimodal_with_video_ref(
         tok_s
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
-        run_multimodal, uses_llama_trunk, validate_single_qwen_media,
-    };
-    use crate::app::cli::CliOptions;
-    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
-    use crate::models::qwen35::{Qwen35Config, Qwen35Model};
-    use crate::ops::kernel::{QuantizedTensor, Weight};
-    use std::path::Path;
-
-    fn qwen35_embedding_model() -> Qwen35Model<'static> {
-        let mut tok_embd = Weight::from_quantized(QuantizedTensor::F32 {
-            data: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-            n_in: 0,
-            n_out: 0,
-        });
-        tok_embd.n_in = 2;
-        tok_embd.n_out = 3;
-        let mut output_weight = Weight::from_quantized(QuantizedTensor::F32 {
-            data: Vec::new(),
-            n_in: 0,
-            n_out: 0,
-        });
-        output_weight.n_in = 2;
-        output_weight.n_out = 3;
-        Qwen35Model {
-            config: Qwen35Config {
-                n_nextn: 0,
-                n_embd: 2,
-                n_layer: 0,
-                n_head: 1,
-                n_head_kv: 1,
-                n_ff: 2,
-                n_ctx: 4,
-                vocab_size: 3,
-                rope_freq_base: 1.0,
-                norm_eps: 0.0,
-                rope_dimension_count: 2,
-                rope_dimension_sections: [0; 4],
-                ssm_d_conv: 1,
-                ssm_d_state: 1,
-                ssm_n_group: 1,
-                ssm_dt_rank: 1,
-                ssm_d_inner: 1,
-                full_attention_interval: 1,
-                is_recurrent: Vec::new(),
-                key_length: 2,
-                value_length: 2,
-            },
-            tok_embd,
-            output_norm: vec![1.0; 2],
-            output_weight,
-            layers: Vec::new(),
-            #[cfg(feature = "vulkan")]
-            gpu: None,
-        }
-    }
-
-    struct ArchSource(MetaValue);
-
-    impl TensorSource for ArchSource {
-        fn metadata(&self, key: &str) -> Option<&MetaValue> {
-            (key == "general.architecture").then_some(&self.0)
-        }
-
-        fn tensor_info(&self, _name: &str) -> Option<&TensorInfo> {
-            None
-        }
-
-        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
-            None
-        }
-    }
-
-    #[test]
-    fn k2_horizon_uses_llama_trunk() {
-        assert!(uses_llama_trunk("k2-horizon"));
-    }
-
-    #[test]
-    fn gemma4_cli_rejects_nonzero_temperature() {
-        let source = ArchSource(MetaValue::String("gemma4".into()));
-        let error = run_multimodal(
-            &source,
-            Path::new("missing.gguf"),
-            None,
-            None,
-            None,
-            "hello",
-            1,
-            0.1,
-            1,
-            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-            CliOptions::DEFAULT_MAX_CONTEXT,
-            1.0,
-        )
-        .unwrap_err();
-        assert!(error.contains("--temp"), "{error}");
-    }
-
-    #[test]
-    fn qwen_media_positions_expand_grid_rows_and_audio_rows() {
-        assert_eq!(
-            build_qwen3_media_positions(&[10, 99, 99, 99, 99, 11], 99, &[(2, 2)]).unwrap(),
-            vec![
-                [0, 0, 0, 0],
-                [1, 1, 1, 0],
-                [1, 1, 2, 0],
-                [1, 2, 1, 0],
-                [1, 2, 2, 0],
-                [3, 3, 3, 0]
-            ]
-        );
-        assert_eq!(
-            build_qwen3_media_positions(&[10, 99, 99, 11], 99, &[]).unwrap(),
-            vec![[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]]
-        );
-        assert!(build_qwen3_media_positions(&[99, 99], 99, &[(1, 1)]).is_err());
-    }
-
-    #[test]
-    fn qwen_multimodal_generation_rejects_combined_media() {
-        assert!(validate_single_qwen_media(true, false, false).is_ok());
-        assert!(validate_single_qwen_media(false, true, true).is_err());
-    }
-
-    #[test]
-    fn qwen_media_injection_preserves_deepstack_layer_and_prompt_order() {
-        let tokens = [1, 99, 2, 99];
-        let mut embeddings = vec![0.0; tokens.len() * 2];
-        let media = [10.0, 11.0, 20.0, 21.0];
-        let media_deepstack = [
-            100.0, 101.0, 200.0, 201.0, // layer 0 media rows
-            300.0, 301.0, 400.0, 401.0, // layer 1 media rows
-        ];
-
-        let deepstack =
-            inject_qwen_media_embeddings(&tokens, 99, &mut embeddings, &media, &media_deepstack, 2)
-                .unwrap();
-
-        assert_eq!(embeddings, [0.0, 0.0, 10.0, 11.0, 0.0, 0.0, 20.0, 21.0]);
-        assert_eq!(
-            deepstack,
-            [
-                0.0, 0.0, 100.0, 101.0, 0.0, 0.0, 200.0, 201.0, // layer 0
-                0.0, 0.0, 300.0, 301.0, 0.0, 0.0, 400.0, 401.0, // layer 1
-            ]
-        );
-    }
-
-    #[test]
-    fn inject_vision_embeddings_preserves_text_and_image_row_order() {
-        let model = qwen35_embedding_model();
-
-        assert_eq!(
-            inject_vision_embeddings(&model, &[0, 99, 1], Some(99), &[9.0, 8.0], 1, 2).unwrap(),
-            [0.0, 1.0, 9.0, 8.0, 2.0, 3.0]
-        );
-    }
-
-    #[test]
-    fn inject_vision_embeddings_rejects_invalid_rows() {
-        let model = qwen35_embedding_model();
-
-        assert!(inject_vision_embeddings(&model, &[-1], None, &[], 0, 2).is_err());
-        assert!(inject_vision_embeddings(&model, &[99], Some(99), &[1.0], 1, 1).is_err());
-    }
 }

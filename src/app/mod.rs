@@ -1,19 +1,17 @@
-pub(crate) mod audio;
-pub(crate) mod breeze;
+pub(crate) mod asr;
 pub mod cli;
-pub(crate) mod dots;
-pub(crate) mod dreamx;
-pub(crate) mod embedding;
-pub(crate) mod image;
+pub(crate) mod diffusion;
 pub(crate) mod jev;
+pub(crate) mod media;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
+pub mod server;
 pub(crate) mod text;
-pub mod tts;
-pub(crate) mod vibevoice;
+pub(crate) mod tts;
 
-pub use audio::run_asr_cli;
+pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
+pub use asr::run_asr_cli;
 pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
     parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
@@ -23,19 +21,19 @@ pub use cli::{
     LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead, RefinerDecoderKind,
     ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
-pub use dreamx::run_dreamx_cli;
-pub use embedding::{compute_embedding, run_embedding};
-pub use image::{run_pig_image, run_z_image_cli, write_png_atomically};
+pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
 pub use jev::{
-    run_jev_decision, run_jev_grouped_decision, JevGroupInput, JevGroupedQuestionInput, JevMode,
-    JevQuestionInput,
+    build_jev_inputs, run_jev_decision, run_jev_grouped_decision, JevGroupInput,
+    JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput,
 };
-pub use omni::{run_omni_embedding, validate_mmproj_capabilities, MediaKind, ProjectorFamily};
+pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
+pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
-    run_inference, run_interactive, run_multimodal, run_multimodal_with_tts_postproc,
-    run_multimodal_with_video, run_multimodal_with_video_capture_text, run_shared_inference,
+    run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
+    run_multimodal_with_tts_postproc, run_multimodal_with_video,
+    run_multimodal_with_video_capture_text, run_shared_inference,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 

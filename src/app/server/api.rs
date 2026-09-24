@@ -1,8 +1,5 @@
-#[path = "api/protocol.rs"]
 pub mod protocol;
-#[path = "api/stop.rs"]
 mod stop;
-#[path = "api/tools.rs"]
 pub mod tools;
 
 use protocol::{Message, Request};

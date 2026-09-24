@@ -1,5 +1,5 @@
 use super::protocol::{Delta, Message, Tool, ToolCall, ToolChoice};
-use rust_model_inference::{
+use crate::{
     prompt::{build_qwen_chat_prompt, QwenMessage},
     BPETokenizer,
 };
@@ -677,7 +677,7 @@ fn validate_arguments(arguments: &Map<String, Value>, schema: &Value) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_model_inference::{MetaValue, MetaValueType};
+    use crate::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
     fn tools() -> Vec<Tool> {

@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)";
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -69,6 +69,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("{USAGE}");
+        return;
+    }
+    // Server mode: --serve delegates to app::server::run_server which has its
+    // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
+    if args.iter().any(|arg| arg == "--serve") {
+        app::server::run_server();
         return;
     }
     let options = app::parse_cli_options(&args).unwrap_or_else(|error| {
@@ -305,120 +311,44 @@ fn main() {
             options.effective_repetition_penalty(),
         ));
     } else if options.jev {
-        let jev_context = options
-            .jev_context
-            .as_deref()
-            .ok_or_else(|| "--jev requires --jev-context <text>".to_string());
-        let output_json = options.jev_output_json;
-        match jev_context {
-            Ok(ctx) => {
-                if options.jev_multi || !options.jev_blocks.is_empty() {
-                    if options.jev_multi && !options.jev_blocks.is_empty() {
-                        app::run_or_exit(Err(
-                            "--jev-multi and --jev-block are mutually exclusive".to_string()
-                        ));
-                        return;
-                    }
-                    if options.jev_questions.is_empty() {
-                        app::run_or_exit(Err(
-                            "--jev requires at least one --jev-question".to_string()
-                        ));
-                        return;
-                    }
-                    let mode = if options.jev_multi {
-                        app::JevMode::MultiSelect
-                    } else {
-                        app::JevMode::BlockChoice
-                    };
-                    let inputs: Vec<app::JevGroupedQuestionInput> = options
-                        .jev_questions
-                        .iter()
-                        .map(|q| {
-                            if !options.jev_blocks.is_empty() {
-                                app::JevGroupedQuestionInput {
-                                    text: q.text.clone(),
-                                    groups: options
-                                        .jev_blocks
-                                        .iter()
-                                        .map(|b| app::JevGroupInput {
-                                            label: b.label.clone(),
-                                            options: b.options.clone(),
-                                        })
-                                        .collect(),
-                                }
-                            } else {
-                                let pairs: Vec<app::JevGroupInput> = q
-                                    .options
-                                    .chunks(2)
-                                    .enumerate()
-                                    .filter_map(|(i, chunk)| {
-                                        if chunk.len() == 2 {
-                                            Some(app::JevGroupInput {
-                                                label: format!("pair_{}", i + 1),
-                                                options: chunk.to_vec(),
-                                            })
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
-                                if pairs.is_empty() {
-                                    None
-                                } else {
-                                    Some(app::JevGroupedQuestionInput {
-                                        text: q.text.clone(),
-                                        groups: pairs,
-                                    })
-                                }
-                                .unwrap_or_else(|| {
-                                    app::JevGroupedQuestionInput {
-                                        text: q.text.clone(),
-                                        groups: Vec::new(),
-                                    }
-                                })
-                            }
-                        })
-                        .collect();
-                    app::run_or_exit(app::run_jev_grouped_decision(
-                        source.clone(),
-                        ctx,
-                        &inputs,
-                        mode,
-                        n_threads,
-                        prefill_batch_size,
-                        output_json,
-                    ));
-                    return;
-                }
-                let jev_questions = options.jev_questions.clone();
-                let positive = options.jev_positive.clone();
-                if jev_questions.is_empty() {
-                    app::run_or_exit(Err("--jev requires at least one --jev-question".to_string()));
-                    return;
-                }
-                let inputs: Vec<app::JevQuestionInput> = jev_questions
-                    .into_iter()
-                    .map(|q| app::JevQuestionInput {
-                        text: q.text,
-                        options: q.options,
-                    })
-                    .collect();
+        match app::build_jev_inputs(&options) {
+            Ok(Some(app::JevInputs::Grouped {
+                context,
+                questions,
+                mode,
+            })) => {
+                app::run_or_exit(app::run_jev_grouped_decision(
+                    source.clone(),
+                    &context,
+                    &questions,
+                    mode,
+                    n_threads,
+                    prefill_batch_size,
+                    options.jev_output_json,
+                ));
+            }
+            Ok(Some(app::JevInputs::Single {
+                context,
+                questions,
+                positive,
+            })) => {
                 app::run_or_exit(app::run_jev_decision(
                     source.clone(),
-                    ctx,
-                    &inputs,
+                    &context,
+                    &questions,
                     positive.as_deref(),
                     n_threads,
                     prefill_batch_size,
-                    output_json,
+                    options.jev_output_json,
                 ));
-                return;
             }
+            Ok(None) => {}
             Err(e) => {
                 app::run_or_exit(Err(e));
                 return;
             }
         }
+        return;
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
             app::run_or_exit(app::run_multimodal_with_video(
@@ -462,21 +392,6 @@ fn main() {
                 options.thinking,
                 prefill_batch_size,
             ));
-        } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
-            app::run_or_exit(app::run_inference(
-                source.clone(),
-                prompt,
-                max_tokens,
-                temperature,
-                options.threads,
-                options.thinking,
-                options.bench,
-                options.profile,
-                options.kv_format,
-                prefill_batch_size,
-                options.effective_max_context(),
-                options.effective_repetition_penalty(),
-            ));
         } else {
             app::run_or_exit(app::run_inference(
                 source.clone(),
@@ -510,46 +425,16 @@ fn main() {
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
         if arch == "qwen35" {
-            use std::io::{self, BufRead, Write};
-            println!("=== RustModelInference Interactive Mode (qwen35) ===");
-            println!("Type your prompt and press Enter. Ctrl+C to exit.\n");
-            loop {
-                print!("> ");
-                if let Err(error) = io::stdout().flush() {
-                    app::run_or_exit(Err(format!("Failed to flush prompt: {error}")));
-                    return;
-                }
-                let mut line = String::new();
-                let read_result = io::stdin().read_line(&mut line);
-                match read_result {
-                    Err(error) => {
-                        app::run_or_exit(Err(format!("Failed to read prompt: {error}")));
-                        return;
-                    }
-                    Ok(0) => break,
-                    Ok(_) => {}
-                }
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                app::run_or_exit(app::run_multimodal_with_video(
-                    Arc::clone(&source),
-                    model_path,
-                    None,
-                    None,
-                    None,
-                    None,
-                    line,
-                    max_tokens,
-                    temperature,
-                    options.threads,
-                    prefill_batch_size,
-                    options.effective_max_context(),
-                    options.effective_repetition_penalty(),
-                ));
-                println!();
-            }
+            app::run_or_exit(app::run_interactive_qwen35(
+                Arc::clone(&source),
+                model_path,
+                max_tokens,
+                temperature,
+                options.threads,
+                prefill_batch_size,
+                options.effective_max_context(),
+                options.effective_repetition_penalty(),
+            ));
             return;
         }
         app::run_or_exit(app::run_interactive(
