@@ -1,16 +1,12 @@
 pub(crate) mod asr;
-pub(crate) mod breeze;
 pub mod cli;
 pub(crate) mod diffusion;
-pub(crate) mod dots;
-pub(crate) mod funasr;
 pub(crate) mod jev;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
 pub(crate) mod text;
 pub(crate) mod tts;
-pub(crate) mod vibevoice_asr;
 
 pub use asr::run_asr_cli;
 pub use cli::{

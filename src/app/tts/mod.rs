@@ -1,3 +1,6 @@
+mod breeze;
+mod dots;
+
 use crate::app::cli::{normalize_tts_language, resolve_thread_count};
 use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
@@ -92,13 +95,13 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         crate::models::dots::is_dots_tts_mmproj(mmproj_probe.as_ref()),
     )? {
         TtsFrontend::Breeze => {
-            return crate::app::breeze::run_breeze_tts_cli(
+            return breeze::run_breeze_tts_cli(
                 options,
                 source.as_ref(),
                 mmproj_probe.as_ref(),
             )
         }
-        TtsFrontend::Dots => return crate::app::dots::run_dots_tts_cli(options),
+        TtsFrontend::Dots => return dots::run_dots_tts_cli(options),
         TtsFrontend::Qwen3 {
             prompt_text,
             language,

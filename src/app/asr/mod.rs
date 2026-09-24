@@ -1,3 +1,13 @@
+//! ASR CLI dispatcher and model-specific sub-pipelines.
+//!
+//! Dispatches based on mmproj architecture:
+//! - `vibevoice_asr` → VibeVoice ASR streaming pipeline
+//! - `funasr-sensevoice-encoder` → Fun-ASR-Nano pipeline
+//! - default → Qwen3-VL ASR pipeline
+
+mod funasr;
+mod vibevoice;
+
 use crate::app::cli::{resolve_thread_count, transcription_options};
 use crate::app::open_or_exit;
 use crate::core::tensor::TensorSource;
@@ -14,8 +24,6 @@ pub fn run_asr_cli(
     prefill_batch_size: usize,
 ) -> Result<(), String> {
     let started = Instant::now();
-    // VibeVoice ASR ships an arch-qwen2 LLM gguf + a vibevoice_asr mmproj;
-    // dispatch on the projector metadata before the qwen3vl path.
     if let Some(mmproj_path) = options
         .mmproj
         .as_deref()
@@ -26,12 +34,21 @@ pub fn run_asr_cli(
         let is_funasr = crate::models::funasr::is_funasr_encoder(probe.as_ref());
         drop(probe);
         if is_vibevoice {
-            return crate::app::vibevoice_asr::run_vibevoice_asr_cli(options);
+            return vibevoice::run_vibevoice_asr_cli(options);
         }
         if is_funasr {
-            return crate::app::funasr::run_funasr_cli(options, prefill_batch_size);
+            return funasr::run_funasr_cli(options, prefill_batch_size);
         }
     }
+    run_qwen3_asr_cli(options, prefill_batch_size, started)
+}
+
+/// Qwen3-VL ASR pipeline (default when no VibeVoice/FunASR mmproj detected).
+fn run_qwen3_asr_cli(
+    options: &crate::app::cli::CliOptions,
+    prefill_batch_size: usize,
+    started: Instant,
+) -> Result<(), String> {
     let llm_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let arch = llm_source
