@@ -26,7 +26,7 @@ pub struct ExecutionScratchpad {
     /// Pre-quantized Q8_K blocks for K-quant kernels (Q4_K / Q6_K). One
     /// block holds 256 f32 elements as i8 + scales. Sized for the largest
     /// n_in a K-quant matmul will see (= max(n_embd_q, n_ff)).
-    pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
+    pub q8k_buf: Vec<crate::core::tensor::BlockQ8K>,
     pub score_stride: usize,
     pub scores: Vec<f32>,
     /// Maximum number of rows a single chunked prefill may hold.
@@ -164,7 +164,7 @@ impl ExecutionScratchpad {
             q8_buf: vec![0u8; max_n_in * row_scale],
             scale_buf: vec![0.0f32; max_n_in / 32 * row_scale],
             q8k_buf: vec![
-                crate::ops::quant::BlockQ8K {
+                crate::core::tensor::BlockQ8K {
                     d: 0.0,
                     qs: [0; 256],
                     bsums: [0; 16],

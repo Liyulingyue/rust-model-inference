@@ -6,13 +6,11 @@ use std::sync::Arc;
 use super::config::NemotronConfig;
 use super::weights::NemotronLayerWeights;
 
-use crate::core::scratchpad::{KvArch, KvCache, KvLifecycle, KvState};
+use crate::core::scratchpad::KvState;
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::{Kernel, Weight};
+use crate::ops::kernel::Weight;
 use crate::ops::{f32_slice_to_f16, quantize_q8_0_into, rms_norm, softmax_inplace};
-use std::io::{self, Write};
 
 fn split_mamba2_projection(
     values: &[f32],
@@ -762,7 +760,7 @@ pub fn run_inference(
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 
-    let _ = (n_threads_arg);
+    let _ = n_threads_arg;
     eprintln!("Loading Nemotron-3 Nano from model");
     let model = NemotronModel::from_source(source.clone())?;
     println!(

@@ -1,11 +1,9 @@
-#[cfg(target_arch = "x86_64")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
 pub mod activation;
 pub mod dot;
 pub mod embedding;
 pub mod float;
 pub mod kernel;
+pub mod linear;
 pub mod math;
 pub mod matmul;
 pub mod norm;

@@ -930,12 +930,12 @@ impl<'a> VisionEncoder<'a> {
         let d_head = cfg.d_head();
         let eps = cfg.eps;
 
-        let t0_res = std::time::Instant::now();
+        let _t0_res = std::time::Instant::now();
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
 
         let (
             mut t_ln1,
-            mut t_qkv,
+            _t_qkv,
             mut t_rope,
             mut t_attn,
             mut t_attn_out,
@@ -1842,7 +1842,7 @@ fn matmul_f16_f32_single(
         crate::ops::quantize_q8_0_into(&input[..n_in], n_in, &mut q8_buf, &mut scales);
         let weight_row_off = row * blocks * 34;
         let mut sum = 0.0f32;
-        for (bi, &scale) in scales.iter().enumerate() {
+        for (bi, &_scale) in scales.iter().enumerate() {
             let off = weight_row_off + bi * 34;
             let d = crate::ops::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
             for j in 0..32 {

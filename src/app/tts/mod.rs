@@ -256,7 +256,7 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
     );
     let next_semantic = Cell::new(session.sample_semantic(temperature, rng)?);
     let mut frames = Vec::with_capacity(max_frames);
-    let mut t_total = std::time::Instant::now();
+    let t_total = std::time::Instant::now();
     let mut t_hidden = std::time::Duration::ZERO;
     let mut t_codec = std::time::Duration::ZERO;
     let mut t_tts = std::time::Duration::ZERO;

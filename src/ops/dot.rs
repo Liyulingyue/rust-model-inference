@@ -1,6 +1,5 @@
 use super::super::has_avx2_fma;
 use super::super::has_f16c;
-use super::super::has_neon;
 use super::super::{bf16_to_f32, f16_to_f32};
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 use std::arch::asm;
@@ -713,7 +712,6 @@ unsafe fn vec_scale_f32_avx2(y: &mut [f32], v: f32) {
 // pairwise summation, add it here behind a config flag and keep the current
 // fast path as the default.
 #[inline(always)]
-#[inline]
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn hsum_ps(v: std::arch::x86_64::__m256) -> f32 {
     use std::arch::x86_64::*;
@@ -1041,7 +1039,7 @@ unsafe fn vec_mad_per_channel_f32_broadcast_neon(
 /// `Σ(x - mean)² = sum_sq - 2·mean·sum + n·mean²`。
 /// 实测：AVX2 上 ~4-5× 标量 f64 reduce。
 pub fn sum_f32(values: &[f32]) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1073,7 +1071,7 @@ pub fn sum_f32(values: &[f32]) -> f64 {
 ///
 /// AVX2 实测：~4-5× 标量 f64 reduce（单 pass：broadcast mean → sub → square → 累加到 f64）。
 pub fn sum_sq_centered_f32(values: &[f32], mean: f32) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1101,7 +1099,7 @@ pub fn sum_sq_centered_f32(values: &[f32], mean: f32) -> f64 {
 /// 精度策略：每 8 f32 squares 立即 promote 到 4 f64 doubles 再 hsum 到 1 f64，
 /// 不在 f32 lane 内 partial sum（hsum_ps 会引入 ~3 ULP 误差 → PNG 不一致）。
 pub fn sum_sq_f32(values: &[f32]) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1243,7 +1241,7 @@ unsafe fn sum_f32_avx2(values: &[f32]) -> f64 {
         acc += hsum_pd_256(lo) + hsum_pd_256(hi);
         i += 8;
     }
-    let mut tail = 0.0f64;
+    let _tail = 0.0f64;
     while i < n {
         acc += f64::from(values[i]);
         i += 1;

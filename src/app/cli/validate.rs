@@ -1,5 +1,5 @@
 use super::options::{dreamx_cli_options, qwen_drive_cli_options, z_image_cli_options};
-use super::types::{normalize_tts_language, CliOptions, EmbeddingOutput};
+use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if (options.top_k.is_some() || options.top_p.is_some()) && (!options.tts || options.edit) {

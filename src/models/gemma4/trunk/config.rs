@@ -78,7 +78,7 @@ impl Gemma4Config {
 
     /// Max Q projection width across all layers (`n_heads × head_dim`).
     pub fn max_q_width(&self) -> usize {
-        let max_kv = self.kv_heads_per_layer.iter().copied().max().unwrap_or(0);
+        let _max_kv = self.kv_heads_per_layer.iter().copied().max().unwrap_or(0);
         let max_dim = self.full_head_dim.max(self.swa_head_dim);
         // Q width is the same for every layer (only head_dim varies);
         // use n_heads × max_dim as an upper bound.

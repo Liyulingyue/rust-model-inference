@@ -7,7 +7,7 @@
 //! Returns `None` when row layouts are inconsistent, leaving the caller to fall
 //! back to the per-projection path.
 
-use super::{BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE, BLOCK_Q80_SIZE, QK_K};
+use super::BLOCK_Q80_SIZE;
 
 const Q8_0_BLOCK_ELEMS: usize = 32;
 

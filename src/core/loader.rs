@@ -1102,7 +1102,7 @@ mod tests {
         let loader = parse_temp(&build_minimal_gguf()).unwrap();
         let source = DelegatingSource(&loader);
         assert_eq!(source.model_config().unwrap().n_embd, 1024);
-        assert!(crate::core::model::QuantizedLinear::from_source(
+        assert!(crate::ops::linear::QuantizedLinear::from_source(
             &source,
             "blk.0.attn_q.weight",
             None,

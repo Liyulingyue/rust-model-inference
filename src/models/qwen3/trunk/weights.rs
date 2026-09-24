@@ -13,7 +13,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::bf16_to_f32;
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
 pub use super::config::Qwen3Config;
@@ -493,9 +493,7 @@ impl Qwen3Model {
         tokenizer: Arc<BPETokenizer>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        use super::util::{
-            check_allocation, checked_product, load_f32_tensor, usize_to_u64, validate_token_ids,
-        };
+        use super::util::{checked_product, load_f32_tensor, usize_to_u64};
 
         let config = Qwen3Config::from_source(source.as_ref())?;
         if config.vocab != tokenizer.vocab_size() {
@@ -579,7 +577,7 @@ impl Qwen3Model {
         Arc::clone(&self.pool)
     }
 
-    pub fn layers(&self) -> &Vec<Qwen3LayerWeights> {
+    pub fn layers(&self) -> &Vec<Qwen3LayerWeights<'_>> {
         &self.layers
     }
 

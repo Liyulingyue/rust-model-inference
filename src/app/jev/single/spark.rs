@@ -1,6 +1,6 @@
 //! JEV single-mode scorer for spark.
 
-use super::super::types::{JevMode, JevQuestionInput, JevResult};
+use super::super::types::JevResult;
 use super::jev_labels;
 use super::jev_payload_json;
 use super::jev_system_prompt;
@@ -8,13 +8,12 @@ use super::run_jev_decision_core;
 use super::verify_label_tokens_single;
 use super::JevScorer;
 use super::PreparedQuestion;
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::spark::SparkSession;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(crate) fn run_jev_decision_spark(
     source: Arc<dyn TensorSource>,

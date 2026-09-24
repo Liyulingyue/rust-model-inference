@@ -1,4 +1,4 @@
-use rust_model_inference::{GGMLType, GGUFLoader};
+use rust_model_inference::GGUFLoader;
 
 fn dump(path: &str) {
     println!("=== {path} ===");
@@ -18,15 +18,6 @@ fn dump(path: &str) {
         println!("  {:<60} dims={:?} type={:?}", t.name, dims, t.ggml_type);
     }
     println!();
-}
-
-fn type_bits(t: GGMLType) -> u32 {
-    match t {
-        GGMLType::F32 => 32,
-        GGMLType::F16 => 16,
-        GGMLType::BF16 => 16,
-        _ => 0,
-    }
 }
 
 fn main() {

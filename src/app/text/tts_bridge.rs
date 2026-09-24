@@ -102,8 +102,8 @@ pub fn run_multimodal_with_video_capture_text(
     temperature: f32,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-    max_context: usize,
-    repetition_penalty: f32,
+    _max_context: usize,
+    _repetition_penalty: f32,
 ) -> Result<String, String> {
     let owned_source = Arc::clone(&llm_source);
     let arch = llm_source

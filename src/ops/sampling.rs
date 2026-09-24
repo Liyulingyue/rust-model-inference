@@ -145,7 +145,7 @@ pub fn sample_llama_cpp(
     }
 
     // 3. Find the max logit (for softmax numerical stability).
-    let max_l = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let _max_l = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
     // 4. Build a partial sorted vector: first by top_k (if > 0), then by
     //    top_p nucleus. llama.cpp does top_k first, then top_p, on the

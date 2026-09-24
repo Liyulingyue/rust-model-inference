@@ -274,7 +274,7 @@ impl FluxVae {
         ));
         let mut scratch = VaeScratch::new();
         let t_vae_total = std::time::Instant::now();
-        let t_vae_map = std::time::Instant::now().elapsed();
+        let _t_vae_map = std::time::Instant::now().elapsed();
         let mid_len = checked_feature_len(512, latent_spatial, "VAE middle feature")?;
         resize_f32(&mut scratch.first, "VAE convolution input output", mid_len)?;
         let t_conv_in = std::time::Instant::now();

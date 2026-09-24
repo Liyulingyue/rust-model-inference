@@ -1,25 +1,9 @@
-use super::types::{
-    JevGroupInput, JevGroupResult, JevGroupedOption, JevGroupedQuestionInput, JevGroupedResult,
-    JevMode, JevQuestionInput, JevResult,
-};
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use super::types::{JevMode, JevQuestionInput, JevResult};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::gemma4::{Gemma4Model, Gemma4Session};
-use crate::models::lfm2::trunk::forward::run_forward_logits_lfm2_with_batch;
-use crate::models::lfm25::trunk::forward::run_forward_logits_lfm25_with_batch;
-use crate::models::lfm2moe::trunk::forward::run_forward_logits_lfm2moe_with_batch;
-use crate::models::llama::trunk::forward::run_forward_logits_llama_with_batch;
-use crate::models::qwen3::{Qwen3Input, Qwen3Model, Qwen3Session};
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use crate::models::spark::SparkSession;
-use crate::prompt::{
-    append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
-    HunyuanMessage,
-};
+use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub fn run_jev_decision(
     source: Arc<dyn TensorSource>,
@@ -385,7 +369,7 @@ pub(crate) fn build_jev_prompt(
     _output_json: bool,
 ) -> Result<(Vec<u32>, String), String> {
     let system = jev_system_prompt(q.mode);
-    let labels = jev_labels(q);
+    let _labels = jev_labels(q);
     let payload = jev_payload_json(context, q)?;
 
     let mut token_ids = Vec::new();

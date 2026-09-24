@@ -1098,7 +1098,7 @@ fn run_block(
     let mut t_linear_out = std::time::Duration::ZERO;
     let mut t_linear_ffn = std::time::Duration::ZERO;
     let mut t_residual = std::time::Duration::ZERO;
-    let mut t_other = std::time::Duration::ZERO;
+    let _t_other = std::time::Duration::ZERO;
     let block_start = std::time::Instant::now();
 
     let modulations = if let Some(weights) = &block.modulation {

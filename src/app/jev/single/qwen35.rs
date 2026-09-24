@@ -1,6 +1,6 @@
 //! JEV single-mode scorer for qwen35.
 
-use super::super::types::{JevMode, JevQuestionInput, JevResult};
+use super::super::types::JevResult;
 use super::jev_labels;
 use super::jev_payload_json;
 use super::jev_system_prompt;

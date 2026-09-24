@@ -6,18 +6,14 @@
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, matmul_q8_0_quantized_parallel,
-    quantize_q8_0_into, sum_f32, sum_sq_centered_f32,
+    bf16_to_f32, dot_f16_f16_bytes, dot_f32, f16_to_f32, gelu_erf, quantize_q8_0_into, sum_f32,
+    sum_sq_centered_f32,
 };
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use super::audio_processor::{
-    compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
-    split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
-};
+use super::audio_processor::{MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Qwen3AudioConfig {
@@ -712,7 +708,7 @@ impl AudioLinear {
         &self,
         input: &[f32],
         rows: usize,
-        pool: &ComputePool,
+        _pool: &ComputePool,
         result: &mut Vec<f32>,
         q8: &mut [u8],
         scales: &mut [f32],

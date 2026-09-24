@@ -12,6 +12,18 @@ pub(crate) const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 /// Default GGUF tensor alignment when `general.alignment` is absent.
 pub(crate) const GGUF_DEFAULT_ALIGNMENT: u64 = 32;
 
+/// Q8_K quantization block (256 elements per block).
+///
+/// This is a pure data structure — the quantization/dequantization operations
+/// live in `ops::quant`. It is defined here in `core` because `scratchpad`
+/// (a core-layer type) needs to pre-allocate Q8_K buffers for K-quant kernels.
+#[derive(Clone)]
+pub struct BlockQ8K {
+    pub d: f32,
+    pub qs: [i8; 256],
+    pub bsums: [i16; 16],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum GGMLType {

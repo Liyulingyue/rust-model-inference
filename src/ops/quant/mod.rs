@@ -59,12 +59,7 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
     }
 }
 
-#[derive(Clone)]
-pub struct BlockQ8K {
-    pub d: f32,
-    pub qs: [i8; 256],
-    pub bsums: [i16; 16],
-}
+pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
     #[cfg(target_arch = "x86_64")]
@@ -736,7 +731,7 @@ pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
         let mut q_off = 0usize;
         let mut out_idx = 0usize;
         for _n in 0..(QK_K / 128) {
-            for j in 0..4 {
+            for _j in 0..4 {
                 let scale_a = (scales_signed[is] as i32) - 32;
                 is += 1;
                 let dl_a = d_all * scale_a as f32;
@@ -1529,10 +1524,10 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12)
+        let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000));
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0);
         let qs = &block_bytes[boff..boff + 32];
         let qh = &block_bytes[boff + 32..boff + 48];
@@ -1602,10 +1597,10 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12)
+        let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000));
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0) * q8k[i].d;
         let qs = &iq1m_data[boff..boff + 32];
         let qh = &iq1m_data[boff + 32..boff + 48];
@@ -2214,7 +2209,7 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let kmask3: u32 = 0x03030303;
 
     let m4 = _mm256_set1_epi8(0xF);
-    let mone = _mm256_set1_epi8(1);
+    let _mone = _mm256_set1_epi8(1);
 
     let scale_shuffle: [[u8; 32]; 8] = {
         let mut tbl = [[0u8; 32]; 8];

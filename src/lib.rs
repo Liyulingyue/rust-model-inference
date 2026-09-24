@@ -17,7 +17,7 @@ pub mod wgpu;
 
 pub use core::loader::{model_config_from_source, GGUFLoader};
 pub use core::memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
-pub use core::model::{ModelGraph, QuantizedLinear};
+pub use core::model::ModelGraph;
 pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32, KvLifecycle};
 pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 pub use core::thread_pool::ComputePool;
@@ -42,6 +42,7 @@ pub use models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, V
 pub use models::qwen35::{
     build_qwen35_positions, Qwen35Config, Qwen35DenseKvSnapshot, Qwen35Model,
 };
+pub use ops::linear::QuantizedLinear;
 
 pub use ops::quant::{dequant_weight_q4k, dequantize_q4_k_weight, BlockQ8K, QK_K};
 pub use ops::*;

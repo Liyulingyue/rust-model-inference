@@ -417,7 +417,7 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
                     ith,
                     nth,
                 ),
-            Self::Q8_0 { data, .. } => {
+            Self::Q8_0 { data: _, .. } => {
                 // Q8_0 ignores q8_k — delegate via prequantized.
                 self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }

@@ -13,15 +13,12 @@
 
 pub mod asr;
 pub mod embedding;
-pub mod hunyuan;
 pub mod omni;
-pub mod text;
 pub mod trunk;
 pub mod tts;
 pub mod vision;
 
 pub use embedding::run_embedding;
-pub use text::{run_inference, run_inference_tokens};
 pub use trunk::{
     get_f32_tensor, load_layers, load_layers_static, qwen_text_positions, run_shared_inference,
     static_weight, text_encode, Qwen3Config, Qwen3GenerateOptions, Qwen3Generation, Qwen3Input,

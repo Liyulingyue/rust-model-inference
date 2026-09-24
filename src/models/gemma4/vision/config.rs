@@ -1,6 +1,6 @@
 use super::super::contract::{
-    require_array, require_bool, require_clip, require_clippable, require_f32, require_string,
-    require_tensor, require_u32,
+    require_array, require_bool, require_clip, require_clippable, require_f32, require_tensor,
+    require_u32,
 };
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
@@ -22,7 +22,7 @@ impl Gemma4VisionConfig {
         // The E2B mmproj uses the exact string "gemma4v". The 12B Unsloth
         // variant uses "gemma4uv" and is dispatched to its own config —
         // see `Gemma4UvConfig::from_source`.
-        let projector_type = match source.metadata("clip.vision.projector_type") {
+        let _projector_type = match source.metadata("clip.vision.projector_type") {
             Some(MetaValue::String(value)) if value == "gemma4v" => value.clone(),
             Some(value) => {
                 return Err(format!(

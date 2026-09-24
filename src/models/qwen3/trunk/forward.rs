@@ -16,16 +16,13 @@ use super::config::{Qwen3Config, Qwen3Rope};
 use super::positions::qwen_text_positions;
 use super::session::Qwen3Session;
 use super::util::{
-    check_allocation, checked_product, checked_session_capacity, validate_generation,
-    validate_input_shapes, validate_token_ids,
+    checked_product, checked_session_capacity, validate_generation, validate_token_ids,
 };
 use super::weights::{Qwen3LayerWeights, Qwen3Model};
 use crate::app::cli::resolve_thread_count;
-use crate::core::scratchpad::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::{Kernel, Weight};
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]

@@ -4,14 +4,14 @@
 
 use crate::app::cli::EmbeddingOutput;
 use crate::core::loader::model_config_from_source;
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::qwen3::{get_f32_tensor, load_layers, Qwen3LayerWeights};
 use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    dot_f32, embedding_lookup, f32_slice_to_f16, rms_norm, rms_norm_inplace, rope_neox_inplace,
+    dot_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace,
     silu_mul_approx_inplace, softmax_inplace,
 };
 use std::sync::Arc;

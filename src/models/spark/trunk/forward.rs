@@ -9,8 +9,6 @@
 //! - GeGLU FFN: `down(gelu(gate(x)) * up(x))`.
 //! - Tied embeddings: `output.weight` absent → reuse `token_embd.weight`.
 
-use half::f16;
-
 use super::config::SparkConfig;
 use super::weights::{load_layers, SparkLayerWeights};
 
@@ -19,7 +17,7 @@ use crate::core::scratchpad::{KvArch, KvCache, KvLifecycle, KvState};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     dot_f32, f16_slice_to_f32, f32_slice_to_f16, gelu_inplace, rms_norm, rope_neox_partial,
     sigmoid_inplace, softmax_approx_inplace, softmax_inplace, vec_add_into, vec_mad_f32,

@@ -1,18 +1,15 @@
 //! JEV grouped-mode scorer for lfm25.
 
-use super::super::single::lfm25::Lfm25JevScorer;
-use super::super::single::{verify_label_tokens_single, JevScorer};
-use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
+use super::super::single::JevScorer;
+use super::super::types::{JevGroupedResult, PreparedGroupedQuestion};
 use super::{
     allocate_group_labels, build_grouped_payload, build_grouped_system,
     build_jev_token_ids_for_arch, run_jev_grouped_core, JevGroupedScorer,
 };
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::tokenizer::BPETokenizer;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub(crate) fn run_jev_grouped_lfm25(
     source: Arc<dyn TensorSource>,
