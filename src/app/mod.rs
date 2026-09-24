@@ -1,4 +1,4 @@
-pub(crate) mod audio;
+pub(crate) mod asr;
 pub(crate) mod breeze;
 pub mod cli;
 pub(crate) mod dots;
@@ -14,7 +14,7 @@ pub(crate) mod text;
 pub mod tts;
 pub(crate) mod vibevoice;
 
-pub use audio::run_asr_cli;
+pub use asr::run_asr_cli;
 pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
     parse_cli_options, per_second, qwen_drive_cli_options, resolve_cli_generation_options,
