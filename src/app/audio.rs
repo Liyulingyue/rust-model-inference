@@ -29,7 +29,7 @@ pub fn run_asr_cli(
             return crate::app::vibevoice::run_vibevoice_asr_cli(options);
         }
         if is_funasr {
-            return crate::models::funasr::run_funasr_cli(options, prefill_batch_size);
+            return crate::app::funasr::run_funasr_cli(options, prefill_batch_size);
         }
     }
     let llm_source: Arc<dyn TensorSource> =

@@ -4,6 +4,7 @@ pub mod cli;
 pub(crate) mod dots;
 pub(crate) mod dreamx;
 pub(crate) mod embedding;
+pub(crate) mod funasr;
 pub(crate) mod image;
 pub(crate) mod jev;
 pub(crate) mod omni;

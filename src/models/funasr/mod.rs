@@ -15,7 +15,7 @@ pub mod vad;
 
 pub use config::FunAsrConfig;
 pub use encoder::FunAsrEncoder;
-pub use model::{is_funasr_encoder, run_funasr_cli};
+pub use model::{format_srt_entry, is_funasr_encoder, linear_resample, transcribe_segment};
 pub use vad::{is_fsmn_vad, FsmnVad, VadSegment};
 
 /// GGUF architecture string for the Fun-ASR-Nano encoder.
