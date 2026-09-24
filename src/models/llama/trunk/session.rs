@@ -28,7 +28,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::load_tokenizer;
 use crate::core::tokenizer::Tokenizer;
-use crate::ops::kernel::{Kernel, PreparedRows, QuantizedTensor, Weight};
+use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
 use crate::core::tensor::GGMLType;
 use crate::ops::{
@@ -390,7 +390,7 @@ impl<'a> LlamaSession<'a> {
         let norm_groups = self.norm_groups;
         let max_ctx = cfg.max_ctx;
         let vocab = cfg.vocab;
-        let max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
+        let _max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
 
         if base_position != self.seq_len {
             return Err(format!(
@@ -909,7 +909,7 @@ impl<'a> LlamaSession<'a> {
             // chunked path is identical to the legacy loop. Future
             // work: lift into a tiled `Q × Kᵀ → softmax → @V` that
             // handles `rows × n_head` queries in one pass.
-            let attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
+            let _attn_out = unsafe { std::slice::from_raw_parts_mut(attn_out_ptr, n_embd_q) };
             let n_cached = pos + 1;
             pool.compute(move |ith: usize, nth: usize| {
                 let q = unsafe { std::slice::from_raw_parts(q_ptr, n_embd_q) };
@@ -1032,7 +1032,7 @@ impl<'a> LlamaSession<'a> {
                 &mut scratch.scale_buf[..n_embd_q / 32],
             );
             crate::ops::quantize_row_q8_k_into(attn_out, &mut scratch.q8k_buf[..n_embd_q / 256]);
-            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            let _attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
             let q8_ptr_wo = scratch.q8_buf.as_ptr();
             let sc_ptr_wo = scratch.scale_buf.as_ptr();
             let q8k_ptr_wo = scratch.q8k_buf.as_ptr();

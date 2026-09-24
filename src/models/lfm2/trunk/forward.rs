@@ -33,8 +33,7 @@
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::kernel::Kernel;
+use crate::core::tokenizer::BPETokenizer;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
     rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace,
@@ -105,10 +104,10 @@ pub fn run_inference_stream(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
-    profile: bool,
+    _profile: bool,
     kv_format: KvFormat,
     max_context: usize,
-    repetition_penalty: f32,
+    _repetition_penalty: f32,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
@@ -482,10 +481,10 @@ fn forward_layer(
 
     let x_ptr = scratch.x.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let q_ptr = scratch.q.as_mut_ptr();
-    let k_ptr = scratch.k_new.as_mut_ptr();
-    let v_ptr = scratch.v_new.as_mut_ptr();
-    let attn_out_ptr = scratch.attn_out.as_mut_ptr();
+    let _q_ptr = scratch.q.as_mut_ptr();
+    let _k_ptr = scratch.k_new.as_mut_ptr();
+    let _v_ptr = scratch.v_new.as_mut_ptr();
+    let _attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
     let up_buf_ptr = scratch.up_buf.as_mut_ptr();
@@ -517,9 +516,9 @@ fn forward_layer(
         }
     }
 
-    let q8 = &q8_buf[..n_embd];
-    let sc = &scale_buf[..n_embd / 32];
-    let q8k = &q8k_buf[..n_embd / 256];
+    let _q8 = &q8_buf[..n_embd];
+    let _sc = &scale_buf[..n_embd / 32];
+    let _q8k = &q8k_buf[..n_embd / 256];
 
     if lw.is_attn {
         forward_attention_chunked(
@@ -706,7 +705,7 @@ fn forward_attention_chunked(
     let n_embd_head_v = cfg.n_embd_head_v;
     let n_embd_q = n_head * n_embd_head_k;
     let n_embd_gqa = n_head_kv * n_embd_head_v;
-    let group_size = n_head / n_head_kv;
+    let _group_size = n_head / n_head_kv;
     // When `rows == 1` `base_position == pos` so the legacy
     // per-token math falls out unchanged. When `rows > 1` we
     // exercise the `PreparedRows` batched matmul path.
@@ -1032,7 +1031,7 @@ fn forward_attention_chunked(
 fn forward_shortconv(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
-    layer_idx: usize,
+    _layer_idx: usize,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     pos: usize,
@@ -1244,7 +1243,7 @@ pub fn run_forward_logits_lfm2_with_batch(
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     let _ = batch_size;
 
-    let t0 = Instant::now();
+    let _t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
     let n_embd = cfg.n_embd;
     let n_layer = cfg.n_layer;

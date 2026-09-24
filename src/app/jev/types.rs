@@ -1,4 +1,3 @@
-use serde::Serialize;
 
 pub struct JevQuestionInput {
     pub text: String,

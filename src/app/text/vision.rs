@@ -1,5 +1,4 @@
 use crate::models::qwen35::Qwen35Model;
-use std::path::Path;
 
 pub fn inject_vision_embeddings(
     llm: &Qwen35Model,

@@ -1,6 +1,6 @@
 //! Qwen35Config — hyperparameters for the Qwen3.5 hybrid LLM trunk.
 
-use crate::core::tensor::{MetaValue, MetaValueType, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct Qwen35Config {

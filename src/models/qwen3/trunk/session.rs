@@ -306,7 +306,7 @@ impl<'model> Qwen3Session<'model> {
         mut on_token: Option<&mut dyn FnMut(&str) -> bool>,
     ) -> Result<Qwen3Generation, String> {
         let model = self.model;
-        let config = &model.config;
+        let _config = &model.config;
         let n_prompt = input.token_ids.len();
 
         #[cfg(feature = "parity-trace")]

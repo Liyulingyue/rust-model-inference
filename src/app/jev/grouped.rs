@@ -1,19 +1,12 @@
-use super::single::{
-    build_jev_prompt, jev_labels, print_jev_question, run_jev_decision_core,
-    verify_label_tokens_single,
-};
 use super::types::{
-    JevGroupInput, JevGroupResult, JevGroupedOption, JevGroupedQuestionInput, JevGroupedResult,
-    JevMode, JevQuestionInput, JevResult, PreparedGroup, PreparedGroupedQuestion,
+    JevGroupResult, JevGroupedQuestionInput, JevGroupedResult,
+    JevMode, PreparedGroup, PreparedGroupedQuestion,
 };
-use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(crate) trait JevGroupedScorer {
     /// Display name used in the dispatch table's error message

@@ -105,7 +105,7 @@ pub(crate) unsafe fn vec_dot_q2k_q8k_avx2(q2k_data: &[u8], q8k: &[super::BlockQ8
         let dmin_total = -super::f16_to_f32(dmin_raw) * q8k[i].d;
 
         let mins_and_scales = _mm_loadu_si128(q2k_data.as_ptr().add(boff) as *const __m128i);
-        let scales8 = _mm_and_si128(mins_and_scales, m4);
+        let _scales8 = _mm_and_si128(mins_and_scales, m4);
         let mins8 = _mm_and_si128(_mm_srli_epi16(mins_and_scales, 4), m4);
         let mins = _mm256_cvtepi8_epi16(mins8);
         let bsums = _mm256_loadu_si256(q8k[i].bsums.as_ptr() as *const __m256i);

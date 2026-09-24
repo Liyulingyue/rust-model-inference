@@ -1,7 +1,7 @@
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into, rms_norm,
+    dot_f32, f16_to_f32, matmul_q8_0_quantized_parallel_rows, quantize_q8_0_into,
     rms_norm_inplace, silu,
 };
 use std::sync::Arc;
@@ -197,7 +197,7 @@ impl PigModel {
 fn load_refiner_layer(
     source: &dyn TensorSource,
     prefix: &str,
-    config: &PigConfig,
+    _config: &PigConfig,
 ) -> Result<RefinerLayer, String> {
     let qkv_weight = load_q8_0(source, &format!("{}.attention.qkv.weight", prefix))?;
     let out_weight = load_q8_0(source, &format!("{}.attention.out.weight", prefix))?;
@@ -242,7 +242,7 @@ fn load_refiner_layer(
 fn load_pig_layer(
     source: &dyn TensorSource,
     i: usize,
-    config: &PigConfig,
+    _config: &PigConfig,
 ) -> Result<PigLayer, String> {
     let adaln_weight = load_q8_0(source, &format!("layers.{}.adaLN_modulation.0.weight", i))?;
     let adaln_bias = load_f32(source, &format!("layers.{}.adaLN_modulation.0.bias", i))?;
@@ -519,7 +519,7 @@ impl<'a> PigSession<'a> {
         let patches_per_dim = latent_size / cfg.patch_size;
         let n_patches = patches_per_dim * patches_per_dim;
         let n_embed = cfg.n_embed;
-        let seq_len = cfg.context_len + n_patches;
+        let _seq_len = cfg.context_len + n_patches;
 
         let sigma_min = 0.029f32;
         let sigma_max = 1.0f32;
@@ -589,9 +589,9 @@ impl<'a> PigSession<'a> {
     ) -> Result<Vec<f32>, String> {
         let cfg = &self.model.config;
         let n_embed = cfg.n_embed;
-        let head_dim = cfg.head_dim;
-        let n_head = cfg.n_head;
-        let n_head_kv = cfg.n_head_kv;
+        let _head_dim = cfg.head_dim;
+        let _n_head = cfg.n_head;
+        let _n_head_kv = cfg.n_head_kv;
         let context_len = cfg.context_len;
 
         let t_embed = self.compute_t_embed(sigma);
@@ -658,7 +658,7 @@ impl<'a> PigSession<'a> {
     }
 
     fn compute_t_embed(&self, sigma: f32) -> Vec<f32> {
-        let cfg = &self.model.config;
+        let _cfg = &self.model.config;
         let theta = 10000.0f32;
 
         let freqs = (0..128i32)
@@ -749,7 +749,7 @@ impl<'a> PigSession<'a> {
         pe
     }
 
-    fn cap_embedder(&self, text_context: &[f32], context_len: usize) -> Result<Vec<f32>, String> {
+    fn cap_embedder(&self, text_context: &[f32], _context_len: usize) -> Result<Vec<f32>, String> {
         let cfg = &self.model.config;
         let cap_feat_dim = cfg.cap_feat_dim;
         let n_embed = cfg.n_embed;
@@ -836,7 +836,7 @@ impl<'a> PigSession<'a> {
         let group_size = n_head / n_head_kv;
         let kq_scale = 1.0 / (head_dim as f32).sqrt();
 
-        let mut h = input.to_vec();
+        let h = input.to_vec();
 
         let adaln_mod = if let (Some(w), Some(b), Some(t_emb)) = (
             layer.adaln_weight.as_deref(),
@@ -983,7 +983,7 @@ impl<'a> PigSession<'a> {
             }
         }
 
-        let attn_proj = self.matmul_q8_single(&layer.out_weight, &attn_out, n_embed, n_embed);
+        let _attn_proj = self.matmul_q8_single(&layer.out_weight, &attn_out, n_embed, n_embed);
 
         let modulated: Vec<f32> = h
             .iter()
@@ -1166,12 +1166,12 @@ impl<'a> PigSession<'a> {
             }
         }
 
-        let attn_proj = self.matmul_q8_single(&layer.out_weight, &attn_out, n_embed, n_embed);
+        let _attn_proj = self.matmul_q8_single(&layer.out_weight, &attn_out, n_embed, n_embed);
 
         let scale_msa = &adaln_mod[..n_embed];
         let gate_msa = &adaln_mod[n_embed..2 * n_embed];
         let scale_mlp = &adaln_mod[2 * n_embed..3 * n_embed];
-        let gate_mlp = &adaln_mod[3 * n_embed..];
+        let _gate_mlp = &adaln_mod[3 * n_embed..];
 
         let modulated: Vec<f32> = input
             .iter()

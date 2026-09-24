@@ -1,17 +1,16 @@
 //! JEV grouped-mode scorer for qwen35.
 
 use super::super::single::verify_label_tokens_single;
-use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
+use super::super::types::{JevGroupedResult, PreparedGroupedQuestion};
 use super::allocate_group_labels;
 use super::build_grouped_payload;
 use super::build_grouped_system;
 use super::build_jev_token_ids_for_arch;
-use super::compute_grouped_jev_result;
 use super::run_jev_grouped_core;
 use super::JevGroupedScorer;
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::tokenizer::BPETokenizer;
 use crate::models::qwen35::run_forward_logits_qwen35_with_batch;
 use std::sync::Arc;
 

@@ -10,7 +10,6 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
-use crate::models::funasr::fbank;
 use crate::models::funasr::model::{format_srt_entry, transcribe_segment};
 use crate::models::funasr::vad::FsmnVad;
 use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;

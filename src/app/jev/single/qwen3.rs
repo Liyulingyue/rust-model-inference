@@ -1,6 +1,6 @@
 //! JEV single-mode scorer for qwen3.
 
-use super::super::types::{JevMode, JevQuestionInput, JevResult};
+use super::super::types::JevResult;
 use super::build_jev_prompt;
 use super::jev_labels;
 use super::run_jev_decision_core;
@@ -11,10 +11,7 @@ use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::models::qwen3::{Qwen3Input, Qwen3Model, Qwen3Session};
-use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub(crate) fn run_jev_decision_qwen3(
     source: Arc<dyn TensorSource>,

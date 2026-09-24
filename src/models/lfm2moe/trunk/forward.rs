@@ -43,10 +43,9 @@
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::kernel::Kernel;
+use crate::core::tokenizer::BPETokenizer;
 use crate::ops::{
-    dot_f16_f32, dot_f32, embedding_lookup, f32_slice_to_f16, quantize_q8_0_into,
+    dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into,
     quantize_row_q8_k_into, rms_norm, rms_norm_inplace, rope_neox_inplace, sample_top_k,
     sigmoid_inplace, silu_mul_inplace, softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mad_f32,
     vec_mul_inplace, vec_scale_f32,
@@ -74,7 +73,7 @@ pub fn run_inference_with_batch(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
-    profile: bool,
+    _profile: bool,
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
@@ -187,7 +186,7 @@ pub fn run_inference_with_batch(
 
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut generated_token_counts: std::collections::HashMap<u32, u32> =
+    let generated_token_counts: std::collections::HashMap<u32, u32> =
         std::collections::HashMap::new();
     let mut all_tokens: Vec<u32> = input_tokens.clone();
     let mut decoder = tokenizer.streaming_decoder(false);
@@ -686,10 +685,10 @@ fn forward_layer(
 
     let x_ptr = scratch.x.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let q_ptr = scratch.q.as_mut_ptr();
-    let k_ptr = scratch.k_new.as_mut_ptr();
-    let v_ptr = scratch.v_new.as_mut_ptr();
-    let attn_out_ptr = scratch.attn_out.as_mut_ptr();
+    let _q_ptr = scratch.q.as_mut_ptr();
+    let _k_ptr = scratch.k_new.as_mut_ptr();
+    let _v_ptr = scratch.v_new.as_mut_ptr();
+    let _attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
     let up_buf_ptr = scratch.up_buf.as_mut_ptr();
@@ -720,9 +719,9 @@ fn forward_layer(
         quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
     }
 
-    let q8 = &q8_buf[..n_embd];
-    let sc = &scale_buf[..n_embd / 32];
-    let q8k = &q8k_buf[..n_embd / 256];
+    let _q8 = &q8_buf[..n_embd];
+    let _sc = &scale_buf[..n_embd / 32];
+    let _q8k = &q8k_buf[..n_embd / 256];
 
     if lw.is_attn {
         forward_attention(
@@ -956,7 +955,7 @@ fn forward_moe_ffn(
         .map(|e| dot_f32(&lw.router[e * n_embd..(e + 1) * n_embd], normed, n_embd))
         .collect();
     dbg_out(step, layer, "ffn_moe_logits", &logits);
-    let mut probs: Vec<f32> = match cfg.expert_gating_func {
+    let probs: Vec<f32> = match cfg.expert_gating_func {
         // softmax over all expert logits
         1 => {
             let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);

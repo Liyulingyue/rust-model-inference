@@ -4,8 +4,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, sum_sq_f32, vec_add,
-    vec_add_into, vec_mad_f32,
+    dot_f16_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, vec_add,
+    vec_add_into,
 };
 use clip_config::ClipVisionConfig;
 use rayon::prelude::*;
@@ -1214,12 +1214,12 @@ impl<'a> VisionEncoder<'a> {
         let d_head = cfg.d_head();
         let eps = cfg.eps;
 
-        let t0_res = std::time::Instant::now();
+        let _t0_res = std::time::Instant::now();
         scratch.residual[..n_tokens * n_embd].copy_from_slice(&scratch.merged[..n_tokens * n_embd]);
 
         let (
             mut t_ln1,
-            mut t_qkv,
+            _t_qkv,
             mut t_rope,
             mut t_attn,
             mut t_attn_out,
@@ -2324,7 +2324,7 @@ unsafe fn ggml_layer_norm_stats_avx2(x: &[f32]) -> (f32, f32) {
         partial_sumsq += v * v;
         i += 1;
     }
-    let mut hsum = |v: std::arch::x86_64::__m256d| -> f64 {
+    let hsum = |v: std::arch::x86_64::__m256d| -> f64 {
         let hi = _mm256_extractf128_pd::<1>(v);
         let lo = _mm256_castpd256_pd128(v);
         let sum128 = _mm_add_pd(hi, lo);
@@ -2606,7 +2606,7 @@ unsafe fn patch_embed_simd_avx2(
     use std::arch::x86_64::*;
     let n_patches_x = img_w / ps;
     let n_patches_y = img_h / ps;
-    let patch_dim = 3 * ps * ps;
+    let _patch_dim = 3 * ps * ps;
     let n_embd_8 = n_embd / 8;
 
     for py in 0..n_patches_y {

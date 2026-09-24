@@ -9,12 +9,12 @@
 //! - dense-attention softmax + padded value reduction
 //! - `Qwen35Session` state management + embed-lookup helpers
 
-use super::session::{required_token_count, Qwen35Session};
+use super::session::Qwen35Session;
 use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::{Kernel, PreparedRows, QuantizedTensor, Weight};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::quant::{self, BlockQ8K};
 use std::sync::Arc;
 

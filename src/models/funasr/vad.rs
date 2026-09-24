@@ -7,7 +7,6 @@
 
 use crate::core::loader::load_static_weight;
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
-use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
 use crate::ops::{softmax_inplace, vec_mad_per_channel_f32};
 use rayon::prelude::*;
@@ -196,7 +195,7 @@ impl FsmnVad {
     }
 
     fn forward(&self, feats: &[f32], t: usize) -> Vec<f32> {
-        let idim = self.config.input_dim;
+        let _idim = self.config.input_dim;
         let pd = self.config.proj_dim;
         let lorder = self.config.lorder;
         let od = self.config.output_dim;
@@ -240,7 +239,7 @@ impl FsmnVad {
         let mut insp: usize = 0;
         let mut max_end_sil: usize = 0;
         let mut end_lookback: usize = 0;
-        let mut recompute = |acc: usize, max_end_sil: &mut usize, end_lookback: &mut usize| {
+        let recompute = |acc: usize, max_end_sil: &mut usize, end_lookback: &mut usize| {
             let s = if acc <= 10000 {
                 2000
             } else if acc <= 20000 {

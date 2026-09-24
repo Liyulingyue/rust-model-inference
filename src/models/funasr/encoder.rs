@@ -19,7 +19,7 @@ use crate::models::funasr::config::FunAsrConfig;
 use crate::ops::kernel::Weight;
 use crate::ops::softmax_inplace;
 use crate::ops::sum_sq_centered_f32;
-use crate::ops::{dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32, vec_scale_f32};
+use crate::ops::{dot_f32, sum_f32, vec_add_into, vec_mad_per_channel_f32};
 use std::sync::Arc;
 
 const LN_EPS: f32 = 1e-5;
@@ -183,7 +183,7 @@ impl FunAsrEncoder {
         layer: &SanmLayer,
         x: &[f32],
         t: usize,
-        in_dim: usize,
+        _in_dim: usize,
         out_dim: usize,
         n_head: usize,
         dk: usize,

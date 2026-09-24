@@ -1,22 +1,19 @@
 //! JEV grouped-mode scorer for hunyuan.
 
-use super::super::single::hunyuan::HunyuanJevScorer;
-use super::super::single::{verify_label_tokens_single, JevScorer};
-use super::super::types::{JevGroupedQuestionInput, JevGroupedResult, PreparedGroupedQuestion};
+use super::super::single::JevScorer;
+use super::super::types::{JevGroupedResult, PreparedGroupedQuestion};
 use super::{
     allocate_group_labels, build_grouped_payload, build_grouped_system, run_jev_grouped_core,
     JevGroupedScorer,
 };
-use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::cli::resolve_thread_count;
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::core::tokenizer::BPETokenizer;
 use crate::prompt::{
-    append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
+    build_hunyuan_chat_prompt,
     HunyuanMessage,
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub(crate) fn run_jev_grouped_hunyuan(
     source: Arc<dyn TensorSource>,

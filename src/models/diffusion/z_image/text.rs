@@ -325,7 +325,7 @@ fn attention(
     position: usize,
     token_count: usize,
     scores: &mut [f32],
-    value_column: &mut [f32],
+    _value_column: &mut [f32],
     output: &mut [f32],
 ) {
     output.fill(0.0);

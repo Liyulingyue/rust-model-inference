@@ -9,9 +9,9 @@ use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{load_tokenizer, EncodeOptions, Tokenizer};
+use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
     dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped,
     rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
@@ -359,7 +359,7 @@ pub fn run_inference_tokens(
         let l = n_layer - 1; // L23 = last layer
         let layer = &layers[l];
         let dump_n = 256usize; // first 256 bytes (= ~7.5 Q8_0 blocks)
-        for (name, qw) in [
+        for (name, _qw) in [
             ("w_gate", &layer.w_gate),
             ("w_up", &layer.w_up),
             ("w_down", &layer.w_down),
@@ -1916,7 +1916,7 @@ pub(crate) fn silu_mul_rows(
     let per_thread = (n_ff + n_threads - 1) / n_threads;
     let gate_ptr = gate.as_mut_ptr();
     let up_ptr = up.as_ptr();
-    pool.compute(move |ith, nth| {
+    pool.compute(move |ith, _nth| {
         let r_start = ith * per_thread;
         let r_end = (r_start + per_thread).min(n_ff);
         for row in 0..rows {

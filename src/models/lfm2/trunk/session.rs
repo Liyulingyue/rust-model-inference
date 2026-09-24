@@ -283,4 +283,3 @@ mod tests {
 
 // Avoid an "unused import" warning for the alias re-export used by
 // the tests module above.
-use crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE as _;

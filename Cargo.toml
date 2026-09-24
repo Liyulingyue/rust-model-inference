@@ -58,3 +58,23 @@ path = "src/bin/codec_test.rs"
 [[bin]]
 name = "rust-model-server"
 path = "src/bin/server.rs"
+
+[[bin]]
+name = "dump_meta"
+path = "src/bin/dump_meta.rs"
+
+[[bin]]
+name = "dump_tensors"
+path = "src/bin/dump_tensors.rs"
+
+[[bin]]
+name = "dump_dims"
+path = "src/bin/dump_dims.rs"
+
+[[bin]]
+name = "dump_emb"
+path = "src/bin/dump_emb.rs"
+
+[[bin]]
+name = "ggufrs"
+path = "src/bin/ggufrs.rs"

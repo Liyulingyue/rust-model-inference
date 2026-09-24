@@ -16,8 +16,8 @@
 use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f32_exact, gelu, gelu_inplace, rms_norm, softmax_inplace, vec_add, vec_add_into,
-    vec_mad_f32, vec_mul_inplace,
+    dot_f32_exact, gelu_inplace, softmax_inplace, vec_add_into,
+    vec_mad_f32,
 };
 
 use super::trunk::forward::{run_inference_stream, Lfm2StreamItem};
@@ -90,7 +90,6 @@ impl VisionConfig {
 
 // std430-free helper: metadata array reference without importing the variant
 // type twice.
-use crate::core::tensor::MetaValue as MetaValueRef;
 
 pub struct VisionLayerWeights<'a> {
     pub ln1: (Vec<f32>, Vec<f32>),

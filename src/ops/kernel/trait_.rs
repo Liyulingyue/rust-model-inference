@@ -143,7 +143,7 @@ pub trait Kernel: Send + Sync {
         }
     }
 
-    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+    fn embedding_lookup(&self, _token_id: u32, _n_embd: usize, _out: &mut [f32]) {
         panic!("embedding_lookup not implemented for this kernel type");
     }
 }

@@ -1,6 +1,6 @@
 //! VibeVoice ASR model configuration, derived from the mmproj GGUF metadata.
 
-use crate::core::tensor::{MetaValue, MetaValueType, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct VibeVoiceAsrConfig {

@@ -176,7 +176,7 @@ fn rempif(value: f32) -> (Df2, i32) {
 
 #[inline(always)]
 pub(crate) fn sleef_sin_mode(theta: f32, force_large_range: bool) -> f32 {
-    let (mut reduced, quadrant) = if !force_large_range && theta.abs() < 125.0 {
+    let (reduced, quadrant) = if !force_large_range && theta.abs() < 125.0 {
         let quadrant = (theta * 0.318_309_873_342_392_6_f32).round_ties_even() as i32;
         let q = quadrant as f32;
         let v = q.mul_add(-3.141_479_492_187_5, theta);

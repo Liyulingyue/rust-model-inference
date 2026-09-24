@@ -1,4 +1,4 @@
-use rust_model_inference::{GGMLType, GGUFLoader, TensorSource};
+use rust_model_inference::{GGMLType, GGUFLoader};
 
 fn main() {
     let path = std::env::args()

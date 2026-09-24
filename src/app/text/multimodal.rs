@@ -411,7 +411,7 @@ pub(super) fn run_multimodal_with_video_ref(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     max_context: usize,
-    repetition_penalty: f32,
+    _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<(), String> {
     let arch = llm_source

@@ -203,7 +203,7 @@ impl<'a> DiT<'a> {
         embedding
     }
 
-    fn time_mlp_batch(&self, times: &[f32], trace_internal: bool) -> Vec<f32> {
+    fn time_mlp_batch(&self, times: &[f32], _trace_internal: bool) -> Vec<f32> {
         let mut embeddings = Vec::with_capacity(times.len() * TIME_EMBED_DIM);
         for &time in times {
             embeddings.extend(Self::time_embedding(time));
@@ -327,7 +327,7 @@ impl<'a> DiT<'a> {
         mask: &[bool],
         positions: &[usize],
         out: &mut [f32],
-        trace_internal: bool,
+        _trace_internal: bool,
     ) {
         let branch_len = positions.len();
         let rows = x_in.len() / DIT_HIDDEN;
