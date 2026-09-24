@@ -8,7 +8,7 @@
 use crate::core::loader::load_static_weight;
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::Weight;
-use crate::ops::{softmax_inplace, vec_mad_per_channel_f32};
+use crate::ops::{relu_inplace, softmax_inplace, vec_mad_per_channel_f32};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -591,15 +591,6 @@ fn fsmn_conv_shift(z: &[f32], t: usize, dim: usize, lorder: usize, kernel: &[f32
         }
     });
     out
-}
-
-#[inline]
-fn relu_inplace(x: &mut [f32]) {
-    for v in x {
-        if *v < 0.0 {
-            *v = 0.0;
-        }
-    }
 }
 
 // ======================= weight loading =======================

@@ -15,6 +15,7 @@ use super::weights::{linear_forward, load_weight};
 
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
+use crate::ops::relu_inplace;
 
 pub(crate) mod exp;
 mod log;
@@ -2045,12 +2046,6 @@ fn cam_stats_pooling(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
 
 fn conv1d_length(t: usize, kernel: usize, stride: usize, pad: usize) -> usize {
     (t + 2 * pad).saturating_sub(kernel) / stride + 1
-}
-
-fn relu_inplace(x: &mut [f32]) {
-    for value in x.iter_mut() {
-        *value = value.max(0.0);
-    }
 }
 
 fn fcm_input_layout(input: &[f32], frames: usize, features: usize) -> Vec<f32> {

@@ -12,7 +12,7 @@ use super::video_vae::VideoLatent;
 use super::DreamXOptions;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::{gelu_inplace, silu_inplace};
+use crate::ops::{gelu_inplace, silu_inplace, vec_add_into};
 
 const VIDEO_PREFIX: &str = "dreamx.creator.video";
 const AUDIO_PREFIX: &str = "dreamx.creator.audio";
@@ -1344,9 +1344,8 @@ pub(super) fn add_residual(output: &mut [f32], residual: &[f32]) -> Result<(), S
     if output.len() != residual.len() {
         return Err("DreamX Creator residual length mismatch".into());
     }
-    for (output, &residual) in output.iter_mut().zip(residual) {
-        *output += residual;
-    }
+    // SIMD via `vec_add_into` (AVX2 / NEON / scalar fallback).
+    vec_add_into(residual, output);
     Ok(())
 }
 
