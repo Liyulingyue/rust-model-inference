@@ -108,9 +108,14 @@ pub fn append_media_markers(
 pub fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
     let probe = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
         ])
         .arg(path)
         .output()
@@ -128,11 +133,14 @@ pub fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
         .trim()
         .split_once('x')
         .ok_or_else(|| format!("ffprobe returned invalid dimensions: {dimensions:?}"))?;
-    let width = width.parse::<usize>()
+    let width = width
+        .parse::<usize>()
         .map_err(|error| format!("Invalid video width: {error}"))?;
-    let height = height.parse::<usize>()
+    let height = height
+        .parse::<usize>()
         .map_err(|error| format!("Invalid video height: {error}"))?;
-    let frame_bytes = width.checked_mul(height)
+    let frame_bytes = width
+        .checked_mul(height)
         .and_then(|value| value.checked_mul(3))
         .ok_or("Video frame size overflow")?;
     if frame_bytes == 0 {
@@ -143,8 +151,15 @@ pub fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
         .args(["-v", "error", "-noautorotate", "-i"])
         .arg(path)
         .args([
-            "-vf", "fps=2", "-frames:v", "32",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+            "-vf",
+            "fps=2",
+            "-frames:v",
+            "32",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
         ])
         .output()
         .map_err(|error| format!("Failed to run ffmpeg; install FFmpeg: {error}"))?;
@@ -160,7 +175,8 @@ pub fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
     }
     let width_u32 = u32::try_from(width).map_err(|_| "Video width exceeds u32")?;
     let height_u32 = u32::try_from(height).map_err(|_| "Video height exceeds u32")?;
-    let mut frames = decoded.stdout
+    let mut frames = decoded
+        .stdout
         .chunks_exact(frame_bytes)
         .map(|bytes| {
             image::RgbImage::from_raw(width_u32, height_u32, bytes.to_vec())
@@ -182,8 +198,15 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
         .args(["-v", "error", "-i"])
         .arg(path)
         .args([
-            "-ac", "1", "-ar", "16000",
-            "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
         ])
         .output()
     {
@@ -191,7 +214,8 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
             if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
                 return Err("ffmpeg returned invalid F32 audio".into());
             }
-            let samples = decoded.stdout
+            let samples = decoded
+                .stdout
                 .chunks_exact(4)
                 .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
                 .collect::<Vec<_>>();
@@ -210,20 +234,25 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read audio {}: {error}", path.display()))?;
     let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
-        .map_err(|error| format!(
-            "Pure-Rust audio decode failed for {}: {:?}",
-            path.display(), error
-        ))?;
+        .map_err(|error| {
+            format!(
+                "Pure-Rust audio decode failed for {}: {:?}",
+                path.display(),
+                error
+            )
+        })?;
     if decoded.channels != 1 {
         return Err(format!(
             "Audio {} has {} channels; Omni requires mono. Install ffmpeg to mix-down.",
-            path.display(), decoded.channels
+            path.display(),
+            decoded.channels
         ));
     }
     if decoded.sample_rate != 16_000 {
         return Err(format!(
             "Audio {} has {} Hz; Omni requires 16000 Hz. Install ffmpeg to resample.",
-            path.display(), decoded.sample_rate
+            path.display(),
+            decoded.sample_rate
         ));
     }
     Ok(decoded.samples)

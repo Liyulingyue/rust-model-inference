@@ -1,13 +1,13 @@
-mod types;
 mod helpers;
-mod parse;
 mod options;
+mod parse;
+mod types;
 mod validate;
 
-pub use types::*;
 pub use helpers::*;
-pub use parse::parse_cli_options;
 pub use options::*;
+pub use parse::parse_cli_options;
+pub use types::*;
 pub use validate::*;
 
 #[cfg(test)]

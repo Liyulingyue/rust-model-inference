@@ -95,11 +95,7 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         crate::models::dots::is_dots_tts_mmproj(mmproj_probe.as_ref()),
     )? {
         TtsFrontend::Breeze => {
-            return breeze::run_breeze_tts_cli(
-                options,
-                source.as_ref(),
-                mmproj_probe.as_ref(),
-            )
+            return breeze::run_breeze_tts_cli(options, source.as_ref(), mmproj_probe.as_ref())
         }
         TtsFrontend::Dots => return dots::run_dots_tts_cli(options),
         TtsFrontend::Qwen3 {

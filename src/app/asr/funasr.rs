@@ -11,7 +11,7 @@ use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::models::funasr::encoder::FunAsrEncoder;
 use crate::models::funasr::fbank;
-use crate::models::funasr::model::{transcribe_segment, format_srt_entry};
+use crate::models::funasr::model::{format_srt_entry, transcribe_segment};
 use crate::models::funasr::vad::FsmnVad;
 use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use crate::models::qwen3::Qwen3Model;
@@ -19,10 +19,7 @@ use crate::models::qwen3::Qwen3Model;
 const SAMPLE_RATE: usize = 16_000;
 
 /// Run the full Fun-ASR-Nano pipeline: WAV → fbank → encoder → LLM → text.
-pub fn run_funasr_cli(
-    options: &CliOptions,
-    prefill_batch_size: usize,
-) -> Result<(), String> {
+pub fn run_funasr_cli(options: &CliOptions, prefill_batch_size: usize) -> Result<(), String> {
     let started = Instant::now();
 
     let enc_path = options
@@ -47,7 +44,10 @@ pub fn run_funasr_cli(
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
-    let pool = Arc::new(ComputePool::new(resolve_thread_count(options.threads, available)));
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        available,
+    )));
     let encoder = FunAsrEncoder::new(Arc::clone(&enc_source), Arc::clone(&pool))?;
     eprintln!(
         "Fun-ASR-Nano encoder: {}+{} layers, d_model={}, adp_llm_dim={}",
@@ -72,7 +72,11 @@ pub fn run_funasr_cli(
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
         llm_source.metadata(key).cloned()
     })?);
-    let decoder = Arc::new(Qwen3Model::from_source(llm_source, tokenizer, Arc::clone(&pool))?);
+    let decoder = Arc::new(Qwen3Model::from_source(
+        llm_source,
+        tokenizer,
+        Arc::clone(&pool),
+    )?);
     let n_embd = decoder.config().n_embd;
     if n_embd != encoder.config.adp_llm_dim as usize {
         return Err(format!(
@@ -105,7 +109,11 @@ pub fn run_funasr_cli(
             "Warning: audio sample rate {} != {SAMPLE_RATE}, resampling (basic linear)",
             decoded.sample_rate
         );
-        crate::models::funasr::model::linear_resample(&samples, decoded.sample_rate as usize, SAMPLE_RATE)
+        crate::models::funasr::model::linear_resample(
+            &samples,
+            decoded.sample_rate as usize,
+            SAMPLE_RATE,
+        )
     };
     eprintln!(
         "Audio: {} samples ({:.1}s)",
@@ -119,7 +127,11 @@ pub fn run_funasr_cli(
         let vad_source: Arc<dyn TensorSource> =
             Arc::from(open_or_exit(vad_path, ComponentRole::Mmproj));
         let vad = FsmnVad::new(Arc::clone(&vad_source))?;
-        let max_seg_ms = if options.vad_maxseg > 0 { options.vad_maxseg } else { 30000 };
+        let max_seg_ms = if options.vad_maxseg > 0 {
+            options.vad_maxseg
+        } else {
+            30000
+        };
         let segs = vad.segments(&samples, max_seg_ms);
         eprintln!("[vad] {} segments", segs.len());
         segs.into_iter()
@@ -180,7 +192,10 @@ pub fn run_funasr_cli(
         if srt_mode {
             if !text.is_empty() && text != "/sil" {
                 srt_idx += 1;
-                println!("{}", format_srt_entry(srt_idx, seg_start_ms, seg_end_ms, &text));
+                println!(
+                    "{}",
+                    format_srt_entry(srt_idx, seg_start_ms, seg_end_ms, &text)
+                );
             }
         } else {
             full_text.push_str(&text);

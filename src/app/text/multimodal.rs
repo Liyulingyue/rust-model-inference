@@ -1,10 +1,10 @@
 use super::generation::{sample_token, validate_gemma4_temperature};
 use super::vision::{
-    build_qwen3_media_positions, inject_qwen_media_embeddings,
-    inject_vision_embeddings, validate_single_qwen_media,
+    build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
+    validate_single_qwen_media,
 };
-use crate::app::media::{decode_image, normalize_resized_image};
 use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::media::{decode_image, normalize_resized_image};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -65,7 +65,8 @@ pub(super) fn run_qwen3_family_multimodal(
     } else {
         crate::app::media::MediaKind::Image
     };
-    let family = crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let family =
+        crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
     let mut media = Vec::new();
     let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
     let mut media_grid_shapes = Vec::new();

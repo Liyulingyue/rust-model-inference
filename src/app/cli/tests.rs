@@ -87,18 +87,10 @@ fn qwen3vl_rejects_legacy_decoder_modes() {
         assert!(result.unwrap_err().contains(expected_mode));
     }
 
-    assert!(validate_qwen3vl_decoder_mode(
-        "qwen3vl",
-        false,
-        false,
-        false,
-        KvFormat::F16,
-        false
-    )
-    .is_ok());
     assert!(
-        validate_qwen3vl_decoder_mode("qwen3", true, true, true, KvFormat::F32, true).is_ok()
+        validate_qwen3vl_decoder_mode("qwen3vl", false, false, false, KvFormat::F16, false).is_ok()
     );
+    assert!(validate_qwen3vl_decoder_mode("qwen3", true, true, true, KvFormat::F32, true).is_ok());
 }
 
 fn asr_cli_options() -> CliOptions {
@@ -432,8 +424,7 @@ fn dreamx_cli_rejects_edit_only_options() {
     ] {
         let mut argv = base.to_vec();
         argv.extend(extra);
-        let error =
-            validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+        let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
         assert!(error.contains(expected), "{argv:?}: {error}");
     }
 }
@@ -649,8 +640,7 @@ fn z_image_rejects_other_modes_before_model_loading() {
     ] {
         let mut argv = base.to_vec();
         argv.extend(extra);
-        let error =
-            validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
+        let error = validate_cli_options(&parse_cli_options(&args(&argv)).unwrap()).unwrap_err();
         assert!(error.contains(expected), "{argv:?}: {error}");
     }
 }

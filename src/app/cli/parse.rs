@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use super::types::{
-    CliOptions, JevBlockInput, JevQuestion, KvFormat, LatentUpsampleKind, RefinerDecoderKind,
-    XVectorMode, parse_embedding_output,
+    parse_embedding_output, CliOptions, JevBlockInput, JevQuestion, KvFormat, LatentUpsampleKind,
+    RefinerDecoderKind, XVectorMode,
 };
 
 pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {

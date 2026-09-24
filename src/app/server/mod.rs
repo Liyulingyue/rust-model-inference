@@ -26,15 +26,9 @@ use crate::models::qwen3::asr::model::{
 use crate::models::qwen3::tts::codec::{
     encode_wav_pcm16, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
-use crate::models::qwen3::tts::speaker::{
-    reference_wav_to_mel, Qwen3TtsSpeakerEncoder,
-};
-use crate::models::qwen3::tts::{
-    predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession,
-};
-use crate::models::qwen3::{
-    Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session,
-};
+use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
+use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session};
 use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::KvLifecycle;
 

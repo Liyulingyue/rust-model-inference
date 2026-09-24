@@ -312,7 +312,11 @@ fn main() {
         ));
     } else if options.jev {
         match app::build_jev_inputs(&options) {
-            Ok(Some(app::JevInputs::Grouped { context, questions, mode })) => {
+            Ok(Some(app::JevInputs::Grouped {
+                context,
+                questions,
+                mode,
+            })) => {
                 app::run_or_exit(app::run_jev_grouped_decision(
                     source.clone(),
                     &context,
@@ -323,7 +327,11 @@ fn main() {
                     options.jev_output_json,
                 ));
             }
-            Ok(Some(app::JevInputs::Single { context, questions, positive })) => {
+            Ok(Some(app::JevInputs::Single {
+                context,
+                questions,
+                positive,
+            })) => {
                 app::run_or_exit(app::run_jev_decision(
                     source.clone(),
                     &context,

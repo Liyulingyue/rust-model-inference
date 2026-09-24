@@ -164,7 +164,11 @@ pub(super) fn inject_qwen_media_embeddings(
     Ok(deepstack)
 }
 
-pub(super) fn validate_single_qwen_media(image: bool, video: bool, audio: bool) -> Result<(), String> {
+pub(super) fn validate_single_qwen_media(
+    image: bool,
+    video: bool,
+    audio: bool,
+) -> Result<(), String> {
     if usize::from(image) + usize::from(video) + usize::from(audio) != 1 {
         return Err(
             "Qwen multimodal generation requires exactly one of --image, --video, or --audio"

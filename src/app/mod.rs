@@ -10,6 +10,7 @@ pub mod server;
 pub(crate) mod text;
 pub(crate) mod tts;
 
+pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
 pub use asr::run_asr_cli;
 pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
@@ -21,12 +22,11 @@ pub use cli::{
     ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
 pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
-pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
 pub use jev::{
     build_jev_inputs, run_jev_decision, run_jev_grouped_decision, JevGroupInput,
     JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput,
 };
-pub use media::{MediaKind, ProjectorFamily, validate_mmproj_capabilities};
+pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
