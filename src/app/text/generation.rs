@@ -35,7 +35,7 @@ pub fn run_inference(
         .unwrap_or_default();
 
     if arch == "hunyuan-dense" {
-        crate::models::qwen3::hunyuan::run_inference(
+        crate::app::text::run_hunyuan_inference(
             source.clone(),
             prompt,
             max_tokens,
@@ -129,7 +129,7 @@ pub fn run_inference(
             kv_format,
         )
     } else {
-        crate::models::qwen3::text::run_inference(
+        crate::app::text::run_qwen3_inference(
             source.clone(),
             prompt,
             max_tokens,
