@@ -25,11 +25,7 @@
 /// Returns `Some(formatted)` when a template is selected; `None` when
 /// the architecture is unknown AND no override is supplied (caller
 /// keeps the raw prompt for parity tests).
-pub fn format_chat(
-    arch: &str,
-    preset_override: Option<&str>,
-    user_msg: &str,
-) -> Option<String> {
+pub fn format_chat(arch: &str, preset_override: Option<&str>, user_msg: &str) -> Option<String> {
     let template = resolve_template(arch, preset_override)?;
     Some(template.render(user_msg))
 }
@@ -102,8 +98,8 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
     Some(match arch {
         // Qwen family — ChatML is the standard format and matches the
         // GGUF `tokenizer.chat_template` field for these archs.
-        "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35"
-        | "qwen3tts" | "nemotron_h" => ChatTemplate::ChatML,
+        "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen3tts"
+        | "nemotron_h" => ChatTemplate::ChatML,
 
         // Llama family.
         "llama" | "k2-horizon" | "granite" | "nanbeige" => ChatTemplate::Llama3,
@@ -171,7 +167,9 @@ mod tests {
 
     #[test]
     fn chatml_wraps_user_and_assistant() {
-        let s = ChatTemplate::ChatML.render("Capital of France?").replace('\n', "\\n");
+        let s = ChatTemplate::ChatML
+            .render("Capital of France?")
+            .replace('\n', "\\n");
         assert_eq!(
             s,
             "<|im_start|>user\\nCapital of France?<|im_end|>\\n\

@@ -49,8 +49,25 @@ fn is_supported_weight_type(t: GGMLType) -> bool {
     use GGMLType::*;
     matches!(
         t,
-        F32 | F16 | BF16 | Q8_0 | Q4_0 | Q4_1 | Q2K | Q3K | Q4K | Q5K | Q6K | IQ4_NL | IQ2_XXS
-            | IQ2_XS | IQ3_XXS | IQ1_S | IQ3_S | IQ2_S | IQ4_XS | IQ1_M
+        F32 | F16
+            | BF16
+            | Q8_0
+            | Q4_0
+            | Q4_1
+            | Q2K
+            | Q3K
+            | Q4K
+            | Q5K
+            | Q6K
+            | IQ4_NL
+            | IQ2_XXS
+            | IQ2_XS
+            | IQ3_XXS
+            | IQ1_S
+            | IQ3_S
+            | IQ2_S
+            | IQ4_XS
+            | IQ1_M
     )
 }
 
@@ -63,9 +80,7 @@ pub(crate) fn load_weight(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != [n_in as u64, n_out as u64]
-        || !is_supported_weight_type(info.ggml_type)
-    {
+    if info.dims != [n_in as u64, n_out as u64] || !is_supported_weight_type(info.ggml_type) {
         return Err(format!(
             "Invalid tensor {name}: shape {:?} type {:?}; expected [{n_in}, {n_out}] F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q2K/Q3K/Q4K/Q5K/Q6K/IQ*",
             info.dims, info.ggml_type
