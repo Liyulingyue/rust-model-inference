@@ -76,53 +76,41 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let d = f16_to_f32(d_raw) * q8k[i].d;
         let dmin = f16_to_f32(dmin_raw) * q8k[i].d;
 
-        // --- Unpack scales and mins (same bit twiddling as scalar/AVX2) ---
+        // --- Unpack scales and mins via NEON bit manipulation ---
         let sc_base = boff + 4;
-        let mut utmp = [0u32; 4];
-        utmp[0] = u32::from_le_bytes([
-            q4k_data[sc_base],
-            q4k_data[sc_base + 1],
-            q4k_data[sc_base + 2],
-            q4k_data[sc_base + 3],
-        ]);
-        utmp[1] = u32::from_le_bytes([
-            q4k_data[sc_base + 4],
-            q4k_data[sc_base + 5],
-            q4k_data[sc_base + 6],
-            q4k_data[sc_base + 7],
-        ]);
-        utmp[2] = u32::from_le_bytes([
-            q4k_data[sc_base + 8],
-            q4k_data[sc_base + 9],
-            q4k_data[sc_base + 10],
-            q4k_data[sc_base + 11],
-        ]);
+        let raw = vld1q_u8(q4k_data.as_ptr().add(sc_base));
+        // We only use 12 bytes; the 4th u32 is padding. Extract three u32 lanes.
+        let raw_u32 = vreinterpretq_u32_u8(raw);
+        let u0 = vgetq_lane_u32(raw_u32, 0);
+        let u1 = vgetq_lane_u32(raw_u32, 1);
+        let u2 = vgetq_lane_u32(raw_u32, 2);
 
-        utmp[3] = ((utmp[2] >> 4) & kmask2) | (((utmp[1] >> 6) & kmask3) << 4);
-        let uaux = utmp[1] & kmask1;
-        utmp[1] = (utmp[2] & kmask2) | (((utmp[0] >> 6) & kmask3) << 4);
-        utmp[2] = uaux;
-        utmp[0] &= kmask1;
+        let utmp3 = ((u2 >> 4) & kmask2) | (((u1 >> 6) & kmask3) << 4);
+        let uaux = u1 & kmask1;
+        let utmp1 = (u2 & kmask2) | (((u0 >> 6) & kmask3) << 4);
+        let utmp2 = uaux;
+        let utmp0 = u0 & kmask1;
 
-        // utmp[0..3] bytes: first 8 bytes = scales, next 8 bytes = mins
-        // (each utmp contributes 4 bytes; scales come from utmp[0..2] low halves,
-        //  mins from utmp[2..3] — but the layout is interleaved per the scalar code)
-        // Actually: all_bytes[0..8] = scales, all_bytes[8..16] = mins
-        let mut all_bytes = [0u8; 16];
-        for k in 0..4 {
-            let bytes = utmp[k].to_le_bytes();
-            all_bytes[k * 4..k * 4 + 4].copy_from_slice(&bytes);
-        }
-        let scales = &all_bytes[0..8];
-        let mins = &all_bytes[8..16];
+        // Pack into 16 bytes: [scales(8), mins(8)]
+        let packed_lo = vcreate_u64(utmp0 as u64 | ((utmp1 as u64) << 32));
+        let packed_hi = vcreate_u64(utmp2 as u64 | ((utmp3 as u64) << 32));
+        let packed_u8 = vcombine_u8(vreinterpret_u8_u64(packed_lo), vreinterpret_u8_u64(packed_hi));
+        let scales_v = vget_low_u8(packed_u8);   // 8 bytes = scales
+        let mins_v = vget_high_u8(packed_u8);    // 8 bytes = mins
 
-        // --- Min correction: sum(mins[j/2] * bsums[j]) for j=0..16 ---
-        // bsums is [i16; 16], mins is [u8; 8] -> each min applies to 2 bsums
-        let mut sumi_min = 0i32;
-        for j in 0..16 {
-            sumi_min += q8k[i].bsums[j] as i32 * mins[j / 2] as i32;
-        }
-        let min_correction = -dmin * sumi_min as f32;
+        // --- Min correction via NEON: sum(mins[j/2] * bsums[j]) ---
+        // bsums is [i16; 16], mins is [u8; 8] -> each min applies to 2 bsums.
+        // Duplicate each min to pairs: [m0,m0, m1,m1, ... m7,m7]
+        let mins_dup = vzip1_u8(mins_v, mins_v); // [m0,m0,m1,m1,...,m7,m7] (8 bytes)
+        let mins_dup16 = vcombine_u8(mins_dup, mins_dup); // 16 bytes
+        let mins_i16 = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(mins_dup16))); // 8 x i16
+        let mins_i16_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(mins_dup16))); // 8 x i16
+        let bsums_v = vld1q_s16(q8k[i].bsums.as_ptr());
+        let min_prod = vmull_s16(vget_low_s16(mins_i16), vget_low_s16(bsums_v));
+        let min_prod2 = vmull_s16(vget_low_s16(mins_i16_hi), vget_high_s16(bsums_v));
+        let min_sum_lo = vaddvq_s32(min_prod);
+        let min_sum_hi = vaddvq_s32(min_prod2);
+        let min_correction = -dmin * (min_sum_lo + min_sum_hi) as f32;
 
         // --- Main dot product: 8 groups of 32 values ---
         let q4_ptr = q4k_data.as_ptr().add(boff + 16);
@@ -160,12 +148,18 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
             group_sums[2 * j + 1] = vaddvq_s32(dot_g1);
         }
 
-        // Apply scales and accumulate
-        let mut main_sum = 0.0f32;
-        for g in 0..8 {
-            main_sum += scales[g] as f32 * group_sums[g] as f32;
-        }
-        main_sum *= d;
+        // Apply scales via NEON: sum(scales[g] * group_sums[g]) for g=0..8
+        // scales_v is u8x8, group_sums is [i32; 8]
+        let scales_wide = vmovl_u8(scales_v);  // u16x8
+        let scales_lo = vget_low_u16(scales_wide);  // u16x4
+        let scales_hi = vget_high_u16(scales_wide); // u16x4
+        let scales_i32_lo = vreinterpretq_s32_u32(vmovl_u16(scales_lo));  // i32x4
+        let scales_i32_hi = vreinterpretq_s32_u32(vmovl_u16(scales_hi));  // i32x4
+        let group_lo = vld1q_s32(group_sums.as_ptr());        // i32x4
+        let group_hi = vld1q_s32(group_sums.as_ptr().add(4));  // i32x4
+        let prod_lo = vmulq_s32(scales_i32_lo, group_lo);
+        let prod_hi = vmulq_s32(scales_i32_hi, group_hi);
+        let main_sum = d * (vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi)) as f32;
 
         total += main_sum + min_correction;
     }
