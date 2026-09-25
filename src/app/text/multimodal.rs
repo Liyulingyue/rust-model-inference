@@ -343,9 +343,9 @@ pub fn run_qwen3_family_multimodal_logits(
     n_threads_arg: usize,
     prefill_batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
-    use crate::models::qwen3::Qwen3Session;
-    use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
     use crate::app::media::{frame_pairs, normalize_resized_image};
+    use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
+    use crate::models::qwen3::Qwen3Session;
 
     validate_single_qwen_media(
         image_path.is_some(),
@@ -438,20 +438,17 @@ pub fn run_qwen3_family_multimodal_logits(
                         &mut scratch,
                     )?;
                     media.extend_from_slice(&scratch.projected);
-                    let deepstack_layers = scratch
-                        .deepstack
-                        .len()
-                        / (scratch.projected.len() / encoder.config.n_embd).max(1)
-                        .max(1);
+                    let deepstack_layers = scratch.deepstack.len()
+                        / (scratch.projected.len() / encoder.config.n_embd)
+                            .max(1)
+                            .max(1);
                     if scratch.deepstack.len() % deepstack_layers != 0 {
                         return Err("Vision deepstack output is not layer aligned".into());
                     }
                     if media_deepstack_layers.is_empty() {
                         media_deepstack_layers.resize_with(deepstack_layers, Vec::new);
                     } else if media_deepstack_layers.len() != deepstack_layers {
-                        return Err(
-                            "Vision deepstack layer count changed between frames".into()
-                        );
+                        return Err("Vision deepstack layer count changed between frames".into());
                     }
                     let per_layer = scratch.deepstack.len() / deepstack_layers;
                     for (layer, output) in media_deepstack_layers.iter_mut().enumerate() {
@@ -586,12 +583,12 @@ pub fn run_qwen35_family_multimodal_logits(
     prefill_batch_size: usize,
     max_context: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
+    use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
-        qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35,
-        VisionGrid, VisionScratchpad as VisionScratchpad35,
+        qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
+        VisionScratchpad as VisionScratchpad35,
     };
     use crate::models::qwen35::{Qwen35Model, Qwen35Session};
-    use crate::app::media::frame_pairs;
 
     if audio_path.is_some() {
         return Err(format!(
@@ -695,11 +692,8 @@ pub fn run_qwen35_family_multimodal_logits(
     let image_token_id_u32 = image_token_id;
     let image_token_id_i32 = i32::try_from(image_token_id_u32)
         .map_err(|_| format!("Token ID {image_token_id_u32} exceeds i32"))?;
-    let (prompt_positions, _next_text_position) = build_qwen35_positions(
-        &prompt_ids,
-        Some(image_token_id_u32),
-        &image_grids,
-    )?;
+    let (prompt_positions, _next_text_position) =
+        build_qwen35_positions(&prompt_ids, Some(image_token_id_u32), &image_grids)?;
     let prompt_tokens: Vec<i32> = prompt_ids
         .iter()
         .copied()
@@ -708,7 +702,9 @@ pub fn run_qwen35_family_multimodal_logits(
 
     let mut llm = Qwen35Model::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
-    let max_seq = (prompt_tokens.len() + 1).min(llm.config.n_ctx).min(max_context);
+    let max_seq = (prompt_tokens.len() + 1)
+        .min(llm.config.n_ctx)
+        .min(max_context);
     let prompt_embd = inject_vision_embeddings(
         &llm,
         &prompt_tokens,

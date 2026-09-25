@@ -1208,9 +1208,7 @@ async fn jev_grouped(
         other => {
             return jev_error(
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "mode must be 'multi_select' or 'block_choice', got {other:?}"
-                ),
+                format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
             );
         }
     };
@@ -1442,9 +1440,7 @@ async fn jev_image_grouped(
         other => {
             return jev_error(
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "mode must be 'multi_select' or 'block_choice', got {other:?}"
-                ),
+                format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
             );
         }
     };
@@ -1533,11 +1529,7 @@ async fn run_image_jev_blocking(
         // We can't wrap in Qwen chat template from here without
         // duplicating logic, so delegate to the chat-template-aware
         // helper `build_jev_image_prompt`.
-        let prompt = build_jev_image_prompt(
-            &tokenizer,
-            system_prompt,
-            &user_payload.to_string(),
-        )?;
+        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
 
         let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
         let label_token_ids: Vec<u32> = labels
@@ -1559,7 +1551,12 @@ async fn run_image_jev_blocking(
             .collect();
         let label_logits: Vec<f32> = label_token_ids
             .iter()
-            .map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY))
+            .map(|&id| {
+                logits
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(f32::NEG_INFINITY)
+            })
             .collect();
         let probs = softmax(&label_logits);
         let chosen_idx = probs
@@ -1603,19 +1600,21 @@ async fn run_image_jev_blocking(
             "method": "multimodal_logits_argmax",
         });
         if is_binary {
-            let pos_ch = positive.as_deref().unwrap().chars().next().unwrap_or('A').to_ascii_uppercase();
-            let pos_idx = labels
-                .iter()
-                .position(|l| *l == pos_ch)
-                .unwrap_or(0);
+            let pos_ch = positive
+                .as_deref()
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap_or('A')
+                .to_ascii_uppercase();
+            let pos_idx = labels.iter().position(|l| *l == pos_ch).unwrap_or(0);
             obj.as_object_mut().unwrap().insert(
                 "positive".to_string(),
                 serde_json::Value::String(pos_ch.to_string()),
             );
-            obj.as_object_mut().unwrap().insert(
-                "probability".to_string(),
-                serde_json::json!(probs[pos_idx]),
-            );
+            obj.as_object_mut()
+                .unwrap()
+                .insert("probability".to_string(), serde_json::json!(probs[pos_idx]));
         }
         results.push(obj);
     }
@@ -1659,10 +1658,7 @@ async fn run_image_grouped_jev_blocking(
         let mut all_group_labels: Vec<Vec<char>> = Vec::with_capacity(q.groups.len());
         for g in q.groups.iter() {
             if g.options.len() < 2 {
-                return Err(format!(
-                    "Group {:?} needs at least 2 options",
-                    g.label
-                ));
+                return Err(format!("Group {:?} needs at least 2 options", g.label));
             }
             total_options += g.options.len();
             if total_options > 26 {
@@ -1678,21 +1674,23 @@ async fn run_image_grouped_jev_blocking(
             // per-group preferences via the shared label-token
             // vocabulary. Per-group softmax normalises independently.
             let n = g.options.len() as u8;
-            let group_letters: Vec<char> = (next_label..(next_label + n))
-                .map(|b| b as char)
-                .collect();
+            let group_letters: Vec<char> =
+                (next_label..(next_label + n)).map(|b| b as char).collect();
             next_label += n;
             all_group_labels.push(group_letters);
         }
         // Build multimodal chat prompt with all groups' labels
         // listed contiguously.
-        let system_prompt = "For each group, select the best option. Reply with only a letter label.";
+        let system_prompt =
+            "For each group, select the best option. Reply with only a letter label.";
         let groups_payload: Vec<serde_json::Value> = q
             .groups
             .iter()
             .zip(all_group_labels.iter())
             .map(|(g, labels)| {
-                serde_json::json!(labels.iter().zip(g.options.iter())
+                serde_json::json!(labels
+                    .iter()
+                    .zip(g.options.iter())
                     .map(|(l, d)| (l.to_string(), d.clone()))
                     .collect::<std::collections::BTreeMap<_, _>>())
             })
@@ -1702,11 +1700,7 @@ async fn run_image_grouped_jev_blocking(
             "question": q.text,
             "groups": groups_payload,
         });
-        let prompt = build_jev_image_prompt(
-            &tokenizer,
-            system_prompt,
-            &user_payload.to_string(),
-        )?;
+        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
 
         let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
         let mut group_results = Vec::with_capacity(q.groups.len());
@@ -1731,7 +1725,12 @@ async fn run_image_grouped_jev_blocking(
                 .collect();
             let group_logits: Vec<f32> = label_token_ids
                 .iter()
-                .map(|&id| logits.get(id as usize).copied().unwrap_or(f32::NEG_INFINITY))
+                .map(|&id| {
+                    logits
+                        .get(id as usize)
+                        .copied()
+                        .unwrap_or(f32::NEG_INFINITY)
+                })
                 .collect();
             let probs = softmax(&group_logits);
             let chosen_idx = probs
@@ -1861,19 +1860,17 @@ async fn run_multimodal_text_only(
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
     tokio::task::spawn_blocking(move || match arch.as_str() {
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" => {
-            crate::app::run_qwen3_family_multimodal_logits(
-                source.as_ref(),
-                source.clone(),
-                mmproj_path.as_path(),
-                Some(image_path.as_path()),
-                None,
-                None,
-                &prompt,
-                threads,
-                prefill_batch_size,
-            )
-        }
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" => crate::app::run_qwen3_family_multimodal_logits(
+            source.as_ref(),
+            source.clone(),
+            mmproj_path.as_path(),
+            Some(image_path.as_path()),
+            None,
+            None,
+            &prompt,
+            threads,
+            prefill_batch_size,
+        ),
         "qwen35" => {
             let max_context = match state_for_max_ctx(&state) {
                 Ok(v) => v,
@@ -1926,7 +1923,9 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
     } else if image_url.starts_with("http://") || image_url.starts_with("https://") {
         // For HTTP URLs we'd need a runtime fetch — punt for now since
         // test payloads use base64 data URLs.
-        return Err("http(s) image URLs are not supported; send base64 (data:image/png;base64,...)".into());
+        return Err(
+            "http(s) image URLs are not supported; send base64 (data:image/png;base64,...)".into(),
+        );
     } else if let Ok(rest) = base64_decode(image_url) {
         // Bare base64 (no data: prefix).
         rest
@@ -1943,7 +1942,8 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
             .unwrap_or(0)
     ));
     let mut f = std::fs::File::create(&tmp).map_err(|e| format!("create tmp file: {e}"))?;
-    f.write_all(&bytes).map_err(|e| format!("write tmp file: {e}"))?;
+    f.write_all(&bytes)
+        .map_err(|e| format!("write tmp file: {e}"))?;
     drop(f);
     Ok(tmp)
 }

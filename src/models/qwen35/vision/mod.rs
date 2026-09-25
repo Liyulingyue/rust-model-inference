@@ -121,9 +121,8 @@ fn matmul_f16_bytes_pooled(
         if start >= end {
             return;
         }
-        let chunk_in = unsafe {
-            std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in)
-        };
+        let chunk_in =
+            unsafe { std::slice::from_raw_parts(inp_ptr.add(start * n_in), (end - start) * n_in) };
         let chunk_out = unsafe {
             std::slice::from_raw_parts_mut(out_ptr.add(start * n_out), (end - start) * n_out)
         };
@@ -1388,8 +1387,10 @@ impl<'a> VisionEncoder<'a> {
                             crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                         for t in start..end {
                             unsafe {
-                                let row =
-                                    std::slice::from_raw_parts_mut(qkv_buf_ptr.add(t * chunk), chunk);
+                                let row = std::slice::from_raw_parts_mut(
+                                    qkv_buf_ptr.add(t * chunk),
+                                    chunk,
+                                );
                                 vec_add_into(&bias, row);
                             }
                         }
@@ -1805,10 +1806,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                ffn_buf_ptr.add(t * chunk),
-                                chunk,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(ffn_buf_ptr.add(t * chunk), chunk);
                             vec_add_into(&bias, row);
                         }
                     }
@@ -1880,10 +1879,8 @@ impl<'a> VisionEncoder<'a> {
                         crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                     for t in start..end {
                         unsafe {
-                            let row = std::slice::from_raw_parts_mut(
-                                proj_buf_ptr.add(t * chunk),
-                                chunk,
-                            );
+                            let row =
+                                std::slice::from_raw_parts_mut(proj_buf_ptr.add(t * chunk), chunk);
                             vec_add_into(&bias, row);
                         }
                     }
