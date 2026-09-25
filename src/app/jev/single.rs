@@ -5,6 +5,120 @@ use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Single forward-pass JEV scorer that returns the structured
+/// `Vec<JevResult>` instead of printing to stdout. The HTTP server
+/// (`POST /v1/jev/score`) uses this to wrap results in a JSON
+/// response; the CLI's `--jev` mode still goes through
+/// [`run_jev_decision`] which calls this and then formats output.
+pub fn run_jev_decision_data(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevQuestionInput],
+    positive: Option<&str>,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+) -> Result<Vec<JevResult>, String> {
+    let prepared = prepare_jev_questions(questions, positive)?;
+
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    eprintln!("JEV: arch = {:?}", arch);
+
+    match &*arch {
+        "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "qwen35" => qwen35::run_jev_decision_qwen35(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+            llama::run_jev_decision_llama(
+                source.clone(),
+                context,
+                &prepared,
+                n_threads_arg,
+                prefill_batch_size,
+                false,
+            )
+        }
+        "gemma4" => gemma4::run_jev_decision_gemma4(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "lfm2" => lfm2::run_jev_decision_lfm2(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "lfm25" => lfm25::run_jev_decision_lfm25(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "lfm2moe" => lfm2moe::run_jev_decision_lfm2moe(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "spark2_5" => spark::run_jev_decision_spark(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
+        other => Err(format!(
+            "--jev is not yet supported for architecture {:?}; \
+             currently supported: qwen3 / qwen3vl / qwen35 / \
+             llama / k2-horizon / granite / nanbeige / qwen2_2 / \
+             gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
+            other
+        )),
+    }
+}
+
 pub fn run_jev_decision(
     source: Arc<dyn TensorSource>,
     context: &str,
@@ -14,108 +128,15 @@ pub fn run_jev_decision(
     prefill_batch_size: usize,
     output_json: bool,
 ) -> Result<(), String> {
-    let prepared = prepare_jev_questions(questions, positive)?;
-
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(|v| v.to_string_val())
-        .unwrap_or_default();
-    eprintln!("JEV: arch = {:?}", arch);
-
     let t0 = Instant::now();
-    let results = match &*arch {
-        "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "qwen35" => qwen35::run_jev_decision_qwen35(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
-            llama::run_jev_decision_llama(
-                source.clone(),
-                context,
-                &prepared,
-                n_threads_arg,
-                prefill_batch_size,
-                output_json,
-            )?
-        }
-        "gemma4" => gemma4::run_jev_decision_gemma4(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "lfm2" => lfm2::run_jev_decision_lfm2(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "spark2_5" => spark::run_jev_decision_spark(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "lfm25" => lfm25::run_jev_decision_lfm25(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "lfm2moe" => lfm2moe::run_jev_decision_lfm2moe(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            output_json,
-        )?,
-        other => {
-            return Err(format!(
-                "--jev is not yet supported for architecture {:?}; \
-                 currently supported: qwen3 / qwen3vl / qwen35 / \
-                 llama / k2-horizon / granite / nanbeige / qwen2_2 / \
-                 gemma4 / lfm2 / lfm25 / spark2_5 / hunyuan-dense / nemotron_h",
-                other
-            ));
-        }
-    };
+    let results = run_jev_decision_data(
+        source.clone(),
+        context,
+        questions,
+        positive,
+        n_threads_arg,
+        prefill_batch_size,
+    )?;
 
     if output_json {
         for r in &results {
