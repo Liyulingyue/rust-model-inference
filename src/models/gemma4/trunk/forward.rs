@@ -6,7 +6,7 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
-    dot_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace, rms_unit_inplace,
+    dot_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace, rms_unit_inplace, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,6 +426,10 @@ impl Gemma4Session<'_> {
                 trace_layer(row, "attn_out", layer_index, hidden);
             }
 
+            // ---- FFN branch ----
+            // Dense models (E2B/E4B): ffn_norm → gate/up → geglu → down → post_ffw_norm → residual
+            // MoE models (26B): shared expert (same dense path) + MoE experts, summed.
+            let is_moe = layer.moe.is_some();
             for (input, output) in scratch.x[..x_len]
                 .chunks_exact(embd)
                 .zip(scratch.normed[..x_len].chunks_exact_mut(embd))
@@ -437,13 +441,6 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
-            trace_layer_rows(
-                "ffn_norm",
-                layer_index,
-                &scratch.normed[..x_len],
-                row_count,
-                embd,
-            );
             let ffn_len = row_count * ffn;
             matmul_group_rows(
                 [
@@ -467,41 +464,12 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            ensure_finite(
-                &format!("blk.{layer_index}.ffn_gate.weight"),
-                &scratch.gate[..ffn_len],
-            )?;
-            ensure_finite(
-                &format!("blk.{layer_index}.ffn_up.weight"),
-                &scratch.up[..ffn_len],
-            )?;
-            trace_layer_rows(
-                "ffn_gate",
-                layer_index,
-                &scratch.gate[..ffn_len],
-                row_count,
-                ffn,
-            );
-            trace_layer_rows(
-                "ffn_up",
-                layer_index,
-                &scratch.up[..ffn_len],
-                row_count,
-                ffn,
-            );
             for (gate, up) in scratch.gate[..ffn_len]
                 .chunks_exact_mut(ffn)
                 .zip(scratch.up[..ffn_len].chunks_exact(ffn))
             {
                 ggml_geglu_fp16_inplace(gate, up);
             }
-            trace_layer_rows(
-                "ffn_activated",
-                layer_index,
-                &scratch.gate[..ffn_len],
-                row_count,
-                ffn,
-            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.ffn_down.weight"),
                 &layer.ffn_down,
@@ -515,102 +483,184 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            trace_layer_rows(
-                "ffn_down",
-                layer_index,
-                &scratch.down[..x_len],
-                row_count,
-                embd,
-            );
-            for row in 0..row_count {
-                let down = &scratch.down[row * embd..(row + 1) * embd];
-                let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
-                checked_rms_norm(
-                    &format!("blk.{layer_index}.post_ffw_norm.weight"),
-                    down,
-                    &layer.post_ffw_norm,
-                    projected,
-                )?;
-                let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                for (hidden, ffn) in hidden.iter_mut().zip(projected) {
-                    *hidden += *ffn;
-                }
-                ensure_finite(&format!("gemma4.layer.{layer_index}.ffn_out"), hidden)?;
-                trace_layer(row, "ffn_out", layer_index, hidden);
-            }
-
-            if use_per_layer {
-                let ig = layer
-                    .inp_gate
-                    .as_ref()
-                    .expect("per-layer projection enabled but inp_gate missing");
-                let pj = layer
-                    .proj
-                    .as_ref()
-                    .expect("per-layer projection enabled but proj missing");
-                let pn = layer
-                    .post_norm
-                    .as_ref()
-                    .expect("per-layer projection enabled but post_norm missing");
-                prefill_matmul_rows(
-                    &format!("blk.{layer_index}.inp_gate.weight"),
-                    ig,
-                    &scratch.x[..x_len],
-                    &mut scratch.per_layer_gate[..row_count * per_layer_width],
-                    row_count,
-                    model,
-                    linear,
-                    model.pool(),
-                    &mut scratch.prepared,
-                    &mut scratch.q8,
-                    &mut scratch.scales,
-                )?;
-                for row in 0..row_count {
-                    let start = row * per_layer_all + layer_index * per_layer_width;
-                    ggml_geglu_fp16_inplace(
-                        &mut scratch.per_layer_gate
-                            [row * per_layer_width..(row + 1) * per_layer_width],
-                        &scratch.per_layer[start..start + per_layer_width],
-                    );
-                }
-                prefill_matmul_rows(
-                    &format!("blk.{layer_index}.proj.weight"),
-                    pj,
-                    &scratch.per_layer_gate[..row_count * per_layer_width],
-                    &mut scratch.down[..x_len],
-                    row_count,
-                    model,
-                    linear,
-                    model.pool(),
-                    &mut scratch.prepared,
-                    &mut scratch.q8,
-                    &mut scratch.scales,
-                )?;
+            // Shared expert post-norm (post_ffw_norm_1).
+            if is_moe {
+                let moe = layer.moe.as_ref().unwrap();
                 for row in 0..row_count {
                     let down = &scratch.down[row * embd..(row + 1) * embd];
                     let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
                     checked_rms_norm(
-                        &format!("blk.{layer_index}.post_norm.weight"),
+                        &format!("blk.{layer_index}.post_ffw_norm_1.weight"),
                         down,
-                        pn,
+                        &moe.post_ffw_norm_1,
+                        projected,
+                    )?;
+                }
+
+                // ---- MoE expert branch ----
+                // Router operates on attn_out (residual stream), not on
+                // pre_ffw_norm_2 output. The expert input is pre_ffw_norm_2(attn_out).
+                for row in 0..row_count {
+                    let attn_out = &scratch.x[row * embd..(row + 1) * embd];
+                    let normed = &mut scratch.moe_normed[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.pre_ffw_norm_2.weight"),
+                        attn_out,
+                        &moe.pre_ffw_norm_2,
+                        normed,
+                    )?;
+                }
+                let moe_down = &mut scratch.moe_down[..x_len];
+                for row in 0..row_count {
+                    let router_input = &scratch.x[row * embd..(row + 1) * embd];
+                    let expert_input = &scratch.moe_normed[row * embd..(row + 1) * embd];
+                    let moe_out = &mut moe_down[row * embd..(row + 1) * embd];
+                    forward_moe_expert(
+                        moe,
+                        cfg,
+                        router_input,
+                        expert_input,
+                        moe_out,
+                        model.pool(),
+                        &mut scratch.moe_gate_up,
+                        &mut scratch.moe_q8,
+                        &mut scratch.moe_scales,
+                        row,
+                        row_count,
+                        &format!("blk.{layer_index}"),
+                    )?;
+                }
+                // MoE post-norm (post_ffw_norm_2).
+                for row in 0..row_count {
+                    let moe_out = &moe_down[row * embd..(row + 1) * embd];
+                    let normed_moe = &mut scratch.normed[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm_2.weight"),
+                        moe_out,
+                        &moe.post_ffw_norm_2,
+                        normed_moe,
+                    )?;
+                }
+                // Combine: shared + moe → post_ffw_norm → residual + output_scale.
+                for row in 0..row_count {
+                    let shared = &scratch.projected[row * embd..(row + 1) * embd];
+                    let moe = &scratch.normed[row * embd..(row + 1) * embd];
+                    let combined = &mut scratch.down[row * embd..(row + 1) * embd];
+                    for i in 0..embd {
+                        combined[i] = shared[i] + moe[i];
+                    }
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm.weight"),
+                        combined,
+                        &layer.post_ffw_norm,
                         projected,
                     )?;
                     let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                    for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
-                        *hidden = (*hidden + *per_layer) * layer.output_scale;
+                    for (h, &p) in hidden.iter_mut().zip(projected.iter()) {
+                        *h = (*h + p) * layer.output_scale;
                     }
-                    ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
-                    trace_layer(row, "per_layer_out", layer_index, hidden);
+                    ensure_finite(
+                        &format!("gemma4.layer.{layer_index}.ffn_out"),
+                        &scratch.x[row * embd..(row + 1) * embd],
+                    )?;
                 }
             } else {
-                // Per-layer projection disabled (12B). Apply the
-                // residual scale directly to x and continue.
                 for row in 0..row_count {
+                    let down = &scratch.down[row * embd..(row + 1) * embd];
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm.weight"),
+                        down,
+                        &layer.post_ffw_norm,
+                        projected,
+                    )?;
                     let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                    for value in hidden.iter_mut() {
-                        *value *= layer.output_scale;
+                    for (hidden, ffn) in hidden.iter_mut().zip(projected) {
+                        *hidden += *ffn;
                     }
-                    ensure_finite(&format!("gemma4.layer.{layer_index}.residual_out"), hidden)?;
+                    ensure_finite(
+                        &format!("gemma4.layer.{layer_index}.ffn_out"),
+                        &scratch.x[row * embd..(row + 1) * embd],
+                    )?;
+                }
+
+                if use_per_layer {
+                    let ig = layer
+                        .inp_gate
+                        .as_ref()
+                        .expect("per-layer projection enabled but inp_gate missing");
+                    let pj = layer
+                        .proj
+                        .as_ref()
+                        .expect("per-layer projection enabled but proj missing");
+                    let pn = layer
+                        .post_norm
+                        .as_ref()
+                        .expect("per-layer projection enabled but post_norm missing");
+                    prefill_matmul_rows(
+                        &format!("blk.{layer_index}.inp_gate.weight"),
+                        ig,
+                        &scratch.x[..x_len],
+                        &mut scratch.per_layer_gate[..row_count * per_layer_width],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    for row in 0..row_count {
+                        let start = row * per_layer_all + layer_index * per_layer_width;
+                        ggml_geglu_fp16_inplace(
+                            &mut scratch.per_layer_gate
+                                [row * per_layer_width..(row + 1) * per_layer_width],
+                            &scratch.per_layer[start..start + per_layer_width],
+                        );
+                    }
+                    prefill_matmul_rows(
+                        &format!("blk.{layer_index}.proj.weight"),
+                        pj,
+                        &scratch.per_layer_gate[..row_count * per_layer_width],
+                        &mut scratch.down[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    for row in 0..row_count {
+                        let down = &scratch.down[row * embd..(row + 1) * embd];
+                        let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                        checked_rms_norm(
+                            &format!("blk.{layer_index}.post_norm.weight"),
+                            down,
+                            pn,
+                            projected,
+                        )?;
+                        let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                        for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
+                            *hidden = (*hidden + *per_layer) * layer.output_scale;
+                        }
+                        ensure_finite(
+                            &format!("gemma4.layer.{layer_index}.per_layer_out"),
+                            &scratch.x[row * embd..(row + 1) * embd],
+                        )?;
+                    }
+                } else {
+                    for row in 0..row_count {
+                        let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                        for value in hidden.iter_mut() {
+                            *value *= layer.output_scale;
+                        }
+                        ensure_finite(
+                            &format!("gemma4.layer.{layer_index}.residual_out"),
+                            &scratch.x[row * embd..(row + 1) * embd],
+                        )?;
+                    }
                 }
             }
             trace_layer_rows(
@@ -642,6 +692,11 @@ impl Gemma4Session<'_> {
                 )?;
                 ensure_finite("gemma4.final.norm", &scratch.normed[..embd])?;
                 trace(row, "gemma4.final.norm", None, &scratch.normed[..embd]);
+                let _t_lm = if std::env::var_os("GEMMA4_PROF").is_some() && row_count == 1 {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 matmul(
                     "token_embd.weight (tied output)",
                     &model.token_embedding,
@@ -651,6 +706,9 @@ impl Gemma4Session<'_> {
                     &mut scratch.q8,
                     &mut scratch.scales,
                 )?;
+                if let Some(t) = _t_lm {
+                    eprintln!("[prof] lm_head: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+                }
                 trace(row, "gemma4.logits.raw", None, &scratch.logits);
                 for logit in &mut scratch.logits {
                     *logit = softcap(*logit, model.config.logit_softcap);
@@ -925,6 +983,154 @@ pub(super) fn matmul(
                 threads,
             );
         });
+    }
+    ensure_finite(name, output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_moe_expert(
+    moe: &super::weights::Gemma4MoELayer,
+    cfg: &super::config::Gemma4Config,
+    router_input: &[f32],
+    expert_input: &[f32],
+    output: &mut [f32],
+    pool: &ComputePool,
+    gate_up_buf: &mut [f32],
+    q8: &mut [u8],
+    scales: &mut [f32],
+    _row: usize,
+    _row_count: usize,
+    name: &str,
+) -> Result<(), String> {
+    let embd = cfg.embd;
+    let n_expert = cfg.n_expert;
+    let n_used = cfg.n_expert_used;
+    let n_ff_exp = cfg.n_ff_exp;
+    output.fill(0.0);
+
+    // ---- Router: unweighted RMS norm(attn_out) → scale 1/√n_embd → mul router_scale → matmul → softmax ----
+    // llama.cpp: tmp = rms_norm(attn_out, eps)  [no weight/affine]
+    //            tmp *= 1/sqrt(n_embd); tmp *= router_scale
+    //            logits = router.weight @ tmp
+    let scale = 1.0 / (embd as f32).sqrt();
+    let mut router_normed = vec![0.0f32; embd];
+    {
+        let sq_sum: f64 = router_input.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        let inv_rms = (1.0 / (sq_sum / embd as f64).max(f64::from(1e-6 * 1e-6))).sqrt() as f32;
+        for i in 0..embd {
+            router_normed[i] = router_input[i] * inv_rms * scale * moe.router_scale[i];
+        }
+    }
+    let mut logits = vec![0.0f32; n_expert];
+    for e in 0..n_expert {
+        let router_row = &moe.router[e * embd..(e + 1) * embd];
+        logits[e] = dot_f32(router_row, &router_normed, embd);
+    }
+    softmax_inplace(&mut logits);
+
+    // ---- Top-k selection ----
+    let mut selection: Vec<(usize, f32)> =
+        logits.iter().enumerate().map(|(e, &p)| (e, p)).collect();
+    selection.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    selection.truncate(n_used);
+
+    // Normalize weights to sum=1.
+    let mut weights: Vec<f32> = selection.iter().map(|&(_, p)| p).collect();
+    let w_sum: f32 = weights.iter().sum::<f32>().max(6.103515625e-5);
+    for w in weights.iter_mut() {
+        *w /= w_sum;
+    }
+
+    let selected: Vec<usize> = selection.iter().map(|&(e, _)| e).collect();
+
+    // ---- Expert dispatch: gate_up_exps → split → geglu → down_exps → weighted sum ----
+    let input_ptr = expert_input.as_ptr();
+    let gate_up_ptr = gate_up_buf.as_mut_ptr();
+    let q8_ptr = q8.as_ptr();
+    let scales_ptr = scales.as_ptr();
+    let mut down_tmp = vec![0.0f32; embd];
+    let prof = std::env::var_os("GEMMA4_PROF").is_some();
+    let t_router = std::time::Instant::now();
+    let mut t_gu = std::time::Duration::ZERO;
+    let mut t_geglu = std::time::Duration::ZERO;
+    let mut t_down = std::time::Duration::ZERO;
+
+    for (k, &e) in selected.iter().enumerate() {
+        let gate_up_weight = &moe.experts_gate_up[e];
+        let down_weight = &moe.experts_down[e];
+
+        // Quantize expert_input for gate_up.
+        let blocks = embd.div_ceil(32);
+        quantize_q8_0_into(expert_input, embd, &mut q8[..embd], &mut scales[..blocks]);
+
+        // gate_up matmul.
+        let gu_out = k * n_ff_exp * 2;
+        let t0 = std::time::Instant::now();
+        pool.compute(move |thread, threads| unsafe {
+            gate_up_weight.kernel.forward_prepared(
+                std::slice::from_raw_parts(input_ptr, embd),
+                std::slice::from_raw_parts(q8_ptr, embd),
+                std::slice::from_raw_parts(scales_ptr, blocks),
+                None,
+                std::slice::from_raw_parts_mut(gate_up_ptr.add(gu_out), n_ff_exp * 2),
+                embd,
+                n_ff_exp * 2,
+                thread,
+                threads,
+            );
+        });
+        if prof { t_gu += t0.elapsed(); }
+
+        // Split fused output: gate [n_ff_exp] + up [n_ff_exp] → geglu.
+        let t1 = std::time::Instant::now();
+        unsafe {
+            let gate = std::slice::from_raw_parts_mut(gate_up_ptr.add(gu_out), n_ff_exp);
+            let up = std::slice::from_raw_parts(gate_up_ptr.add(gu_out + n_ff_exp), n_ff_exp);
+            ggml_geglu_fp16_inplace(gate, up);
+        }
+        if prof { t_geglu += t1.elapsed(); }
+
+        // Down projection into down_tmp.
+        let h_blocks = n_ff_exp.div_ceil(32);
+        let gate_slice =
+            unsafe { std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp) };
+        quantize_q8_0_into(
+            gate_slice,
+            n_ff_exp,
+            &mut q8[..n_ff_exp],
+            &mut scales[..h_blocks],
+        );
+        let down_tmp_ptr = down_tmp.as_mut_ptr();
+        let t2 = std::time::Instant::now();
+        pool.compute(move |thread, threads| unsafe {
+            down_weight.kernel.forward_prepared(
+                std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp),
+                std::slice::from_raw_parts(q8_ptr, n_ff_exp),
+                std::slice::from_raw_parts(scales_ptr, h_blocks),
+                None,
+                std::slice::from_raw_parts_mut(down_tmp_ptr, embd),
+                n_ff_exp,
+                embd,
+                thread,
+                threads,
+            );
+        });
+
+        // Weighted accumulate into output.
+        for (o, &v) in output.iter_mut().zip(down_tmp.iter()) {
+            *o += v * weights[k];
+        }
+        if prof { t_down += t2.elapsed(); }
+    }
+    if prof {
+        eprintln!(
+            "[prof-moe] router={:.2}ms gate_up={:.2}ms geglu={:.2}ms down={:.2}ms ({} experts)",
+            t_router.elapsed().as_secs_f64() * 1000.0,
+            t_gu.as_secs_f64() * 1000.0,
+            t_geglu.as_secs_f64() * 1000.0,
+            t_down.as_secs_f64() * 1000.0,
+            selected.len(),
+        );
     }
     ensure_finite(name, output)
 }

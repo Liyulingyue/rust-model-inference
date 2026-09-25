@@ -22,6 +22,13 @@ pub(super) struct Gemma4Scratch {
     pub(super) v_norm_weight: Vec<f32>,
     pub(super) logits: Vec<f32>,
     pub(super) prepared: PreparedRows,
+    // MoE scratch (empty for dense models).
+    pub(super) moe_gate_up: Vec<f32>,
+    pub(super) moe_down: Vec<f32>,
+    pub(super) moe_logits: Vec<f32>,
+    pub(super) moe_normed: Vec<f32>,
+    pub(super) moe_q8: Vec<u8>,
+    pub(super) moe_scales: Vec<f32>,
 }
 
 impl Gemma4Scratch {
@@ -64,6 +71,36 @@ impl Gemma4Scratch {
             v_norm_weight: vec![1.0; cfg.full_head_dim],
             logits: vec![0.0; VOCAB],
             prepared: PreparedRows::new(max_rows, max_input.max(embd)),
+            moe_gate_up: if cfg.is_moe() {
+                vec![0.0; max_rows * cfg.n_expert_used * cfg.n_ff_exp * 2]
+            } else {
+                Vec::new()
+            },
+            moe_down: if cfg.is_moe() {
+                vec![0.0; max_rows * embd]
+            } else {
+                Vec::new()
+            },
+            moe_logits: if cfg.is_moe() {
+                vec![0.0; cfg.n_expert]
+            } else {
+                Vec::new()
+            },
+            moe_normed: if cfg.is_moe() {
+                vec![0.0; max_rows * embd]
+            } else {
+                Vec::new()
+            },
+            moe_q8: if cfg.is_moe() {
+                vec![0; embd.max(cfg.n_ff_exp * 2)]
+            } else {
+                Vec::new()
+            },
+            moe_scales: if cfg.is_moe() {
+                vec![0.0; (embd.max(cfg.n_ff_exp * 2)).div_ceil(32)]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -85,7 +122,12 @@ impl Gemma4Scratch {
             + self.scores.capacity()
             + self.attention_values.capacity()
             + self.v_norm_weight.len()
-            + self.logits.len();
-        f32_values * std::mem::size_of::<f32>() + self.q8.len() + self.prepared.bytes()
+            + self.logits.len()
+            + self.moe_gate_up.len()
+            + self.moe_down.len()
+            + self.moe_logits.len()
+            + self.moe_normed.len()
+            + self.moe_scales.len();
+        f32_values * std::mem::size_of::<f32>() + self.q8.len() + self.prepared.bytes() + self.moe_q8.len()
     }
 }
