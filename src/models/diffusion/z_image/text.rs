@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
@@ -215,7 +216,6 @@ impl Qwen3TextEncoder {
                     position,
                     token_count,
                     &mut scratch.scores,
-                    &mut scratch.value_column,
                     &mut scratch.attention,
                 );
                 linear_into(
@@ -295,7 +295,6 @@ struct TextScratch {
     gate: Vec<f32>,
     up: Vec<f32>,
     scores: Vec<f32>,
-    value_column: Vec<f32>,
     q8: Q8Scratch,
 }
 
@@ -312,7 +311,6 @@ impl TextScratch {
             gate: vec![0.0; FFN_WIDTH],
             up: vec![0.0; FFN_WIDTH],
             scores: vec![0.0; token_count],
-            value_column: vec![0.0; token_count],
             q8: Q8Scratch::new(FFN_WIDTH),
         }
     }
@@ -325,7 +323,6 @@ fn attention(
     position: usize,
     token_count: usize,
     scores: &mut [f32],
-    _value_column: &mut [f32],
     output: &mut [f32],
 ) {
     output.fill(0.0);
@@ -347,27 +344,17 @@ fn attention(
         }
         softmax_inplace(&mut scores[..=position]);
         let output_head = &mut output[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
-        #[cfg(target_arch = "aarch64")]
-        for dimension in 0..HEAD_WIDTH {
-            for (value_position, value) in value_column.iter_mut().enumerate() {
-                let value_start = (layer * token_count + value_position) * KV_WIDTH
-                    + kv_head * HEAD_WIDTH
-                    + dimension;
-                *value = cache.v[value_start];
-            }
-            output_head[dimension] = dot_f32(value_column, scores, value_column.len());
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        for (value_position, &weight) in scores[..=position].iter().enumerate() {
-            let value_start =
-                (layer * token_count + value_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-            for (result, &value) in output_head
-                .iter_mut()
-                .zip(&cache.v[value_start..value_start + HEAD_WIDTH])
-            {
-                *result += weight * value;
-            }
-        }
+        let base = (layer * token_count) * KV_WIDTH;
+        attention_value_reduce(
+            &cache.v,
+            &scores[..=position],
+            output_head,
+            base,
+            KV_WIDTH,
+            kv_head * HEAD_WIDTH,
+            position + 1,
+            HEAD_WIDTH,
+        );
     }
 }
 

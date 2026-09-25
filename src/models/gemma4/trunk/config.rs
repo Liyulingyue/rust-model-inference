@@ -397,11 +397,11 @@ impl Gemma4Config {
             ));
         }
         if self.use_per_layer_projection() {
-            require_tensor(
+            require_tensor_any(
                 source,
                 "per_layer_model_proj.weight",
                 &[self.embd as u64, per_layer_all as u64],
-                GGMLType::BF16,
+                &[GGMLType::BF16, GGMLType::F16],
             )?;
             require_tensor(
                 source,
@@ -413,7 +413,7 @@ impl Gemma4Config {
                 source,
                 "per_layer_token_embd.weight",
                 &[per_layer_all as u64, VOCAB as u64],
-                &[GGMLType::Q8_0, GGMLType::Q5K],
+                &[GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
             )?;
         } else {
             // Verify the per-layer projection tensors are *absent*
@@ -427,7 +427,7 @@ impl Gemma4Config {
             source,
             "token_embd.weight",
             &[self.embd as u64, VOCAB as u64],
-            &[GGMLType::Q8_0, GGMLType::Q4K],
+            &[GGMLType::Q8_0, GGMLType::Q4K, GGMLType::Q6K],
         )?;
 
         for layer in 0..self.layers {
@@ -450,12 +450,16 @@ impl Gemma4Config {
                 GGMLType::Q5_0,
                 GGMLType::Q5_1,
             ];
-            require_tensor_any(
-                source,
-                &format!("{prefix}.attn_k.weight"),
-                &[self.embd as u64, kv_dim as u64],
-                &k_quant,
-            )?;
+            // attn_k is only required for base kv layers; shared kv
+            // layers (layer >= base_kv_layers) omit K and V entirely.
+            if layer < self.base_kv_layers() {
+                require_tensor_any(
+                    source,
+                    &format!("{prefix}.attn_k.weight"),
+                    &[self.embd as u64, kv_dim as u64],
+                    &k_quant,
+                )?;
+            }
             // attn_k_norm is optional in some 12B exports when
             // kv_heads == 1; treat as optional.
             let _ = source.tensor_info(&format!("{prefix}.attn_k_norm.weight"));
@@ -483,10 +487,11 @@ impl Gemma4Config {
                 &[head_dim as u64],
                 GGMLType::F32,
             )?;
-            // attn_v is required for layers with kv_heads > 1. For
-            // 12B full-attn (kv_heads=1) layers the export omits V and
+            // attn_v is required for base kv layers with kv_heads > 1.
+            // Shared kv layers (layer >= base_kv_layers) omit V entirely.
+            // For 12B full-attn (kv_heads=1) layers the export omits V and
             // the engine falls back to V := K (MQA sharing).
-            if self.kv_heads(layer) > 1 {
+            if layer < self.base_kv_layers() && self.kv_heads(layer) > 1 {
                 require_tensor_any(
                     source,
                     &format!("{prefix}.attn_v.weight"),
@@ -494,8 +499,6 @@ impl Gemma4Config {
                     &k_quant,
                 )?;
             } else {
-                // Verify absence (informational; the runtime will reuse
-                // K as V if V is missing).
                 let _ = source.tensor_info(&format!("{prefix}.attn_v.weight"));
             }
             require_tensor_any(
@@ -523,11 +526,21 @@ impl Gemma4Config {
                 &k_quant,
             )?;
             if self.use_per_layer_projection() {
-                require_tensor(
+                let per_layer_quant = [
+                    GGMLType::F32,
+                    GGMLType::Q8_0,
+                    GGMLType::Q4K,
+                    GGMLType::Q6K,
+                    GGMLType::Q4_0,
+                    GGMLType::Q4_1,
+                    GGMLType::Q5_0,
+                    GGMLType::Q5_1,
+                ];
+                require_tensor_any(
                     source,
                     &format!("{prefix}.inp_gate.weight"),
                     &[self.embd as u64, self.per_layer_width as u64],
-                    GGMLType::F32,
+                    &per_layer_quant,
                 )?;
                 require_tensor(
                     source,
@@ -553,11 +566,11 @@ impl Gemma4Config {
                     &[self.embd as u64],
                     GGMLType::F32,
                 )?;
-                require_tensor(
+                require_tensor_any(
                     source,
                     &format!("{prefix}.proj.weight"),
                     &[self.per_layer_width as u64, self.embd as u64],
-                    GGMLType::F32,
+                    &per_layer_quant,
                 )?;
             } else {
                 // Per-layer projection is disabled for 12B. Skip the

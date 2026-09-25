@@ -33,7 +33,7 @@ pub(super) struct Gemma4Layer {
     pub(super) kv_shared_with_k: bool,
     pub(super) attn_norm: Vec<f32>,
     pub(super) attn_q: Weight<'static>,
-    pub(super) attn_k: Weight<'static>,
+    pub(super) attn_k: Option<Weight<'static>>,
     /// `None` when V is shared with K (12B MQA). The runtime
     /// reuses the freshly-matmuled K as V in that case.
     pub(super) attn_v: Option<Weight<'static>>,
@@ -62,7 +62,7 @@ impl Gemma4Model {
             source.as_ref(),
             "token_embd.weight",
             &[embd as u64, VOCAB as u64],
-            &[GGMLType::Q8_0, GGMLType::Q4K],
+            &[GGMLType::Q8_0, GGMLType::Q4K, GGMLType::Q6K],
         )?;
 
         // Per-layer projection tensors are optional (E2B/E4B: on, 12B: off).
@@ -72,13 +72,13 @@ impl Gemma4Model {
                     source.as_ref(),
                     "per_layer_token_embd.weight",
                     &[per_layer_all as u64, VOCAB as u64],
-                    &[GGMLType::Q8_0, GGMLType::Q5K],
+                    &[GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
                 )?;
-                let pm = load_weight(
+                let pm = load_weight_any(
                     source.as_ref(),
                     "per_layer_model_proj.weight",
                     &[embd as u64, per_layer_all as u64],
-                    GGMLType::BF16,
+                    &[GGMLType::BF16, GGMLType::F16],
                 )?;
                 let pn = load_f32(
                     source.as_ref(),
@@ -167,8 +167,12 @@ fn load_layer(
         GGMLType::Q5_1,
     ];
     // V is required for kv_heads > 1; for kv_heads == 1 we fall back
-    // to V := K (12B MQA sharing).
-    let (attn_v, kv_shared_with_k) = if kv_heads > 1 {
+    // to V := K (12B MQA sharing). Shared KV layers (layer >= base_kv)
+    // omit both K and V entirely.
+    let is_shared_kv = layer >= cfg.base_kv_layers();
+    let (attn_v, kv_shared_with_k) = if is_shared_kv {
+        (None, true)
+    } else if kv_heads > 1 {
         let v = load_weight_any(
             source,
             &format!("{prefix}.attn_v.weight"),
@@ -209,17 +213,27 @@ fn load_layer(
     };
     // Per-layer projection is optional (12B disables it).
     let (inp_gate, proj, post_norm) = if cfg.use_per_layer_projection() {
-        let ig = load_weight(
+        let per_layer_quant = [
+            GGMLType::F32,
+            GGMLType::Q8_0,
+            GGMLType::Q4K,
+            GGMLType::Q6K,
+            GGMLType::Q4_0,
+            GGMLType::Q4_1,
+            GGMLType::Q5_0,
+            GGMLType::Q5_1,
+        ];
+        let ig = load_weight_any(
             source,
             &format!("{prefix}.inp_gate.weight"),
             &[embd as u64, PER_LAYER as u64],
-            GGMLType::F32,
+            &per_layer_quant,
         )?;
-        let p = load_weight(
+        let p = load_weight_any(
             source,
             &format!("{prefix}.proj.weight"),
             &[PER_LAYER as u64, embd as u64],
-            GGMLType::F32,
+            &per_layer_quant,
         )?;
         let pn = load_f32(
             source,
@@ -246,12 +260,16 @@ fn load_layer(
             &[embd as u64, q_dim as u64],
             &k_quant,
         )?,
-        attn_k: load_weight_any(
-            source,
-            &format!("{prefix}.attn_k.weight"),
-            &[embd as u64, kv_dim as u64],
-            &k_quant,
-        )?,
+        attn_k: if layer < cfg.base_kv_layers() {
+            Some(load_weight_any(
+                source,
+                &format!("{prefix}.attn_k.weight"),
+                &[embd as u64, kv_dim as u64],
+                &k_quant,
+            )?)
+        } else {
+            None
+        },
         attn_v,
         attn_output: load_weight_any(
             source,

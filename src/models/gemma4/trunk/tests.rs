@@ -220,7 +220,7 @@ fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
         kv_shared_with_k: false,
         attn_norm: vec![1.0; embd],
         attn_q: zero_q8_weight(embd, q_heads * dim),
-        attn_k: zero_q8_weight(embd, kv_heads * dim),
+        attn_k: Some(zero_q8_weight(embd, kv_heads * dim)),
         attn_v: Some(zero_q8_weight(embd, kv_heads * dim)),
         attn_output: zero_q8_weight(q_heads * dim, embd),
         attn_q_norm: vec![1.0; dim],
@@ -303,7 +303,7 @@ fn deterministic_model_with_config(
                 kv_shared_with_k: false,
                 attn_norm: vec![1.0; cfg.embd],
                 attn_q: deterministic_weight(cfg.embd, q_heads * dim, layer * 11 + 1),
-                attn_k: deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 2),
+                attn_k: Some(deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 2)),
                 attn_v: Some(deterministic_weight(
                     cfg.embd,
                     kv_heads * dim,

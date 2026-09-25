@@ -4,7 +4,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, vec_add, vec_add_into,
+    dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, vec_add,
+    vec_add_into,
 };
 use clip_config::ClipVisionConfig;
 use rayon::prelude::*;
