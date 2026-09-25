@@ -6,8 +6,7 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f32, f16_to_f32, f32_slice_to_f16, f32_to_bf16, quantize_q8_0_into,
-    rms_norm, rms_norm_inplace, rms_unit_inplace,
+    dot_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace, rms_unit_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -730,9 +729,7 @@ fn prefill_matmul_rows(
     let _ = (model, linear);
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
-    if (name == "per_layer_model_proj.weight" && weight.ggml_type == GGMLType::BF16)
-        || weight.ggml_type == GGMLType::F32
-    {
+    if weight.ggml_type == GGMLType::F32 {
         for (input, output) in input
             .chunks_exact(weight.n_in)
             .zip(output.chunks_exact_mut(weight.n_out))
@@ -882,20 +879,7 @@ pub(super) fn matmul(
             weight.n_out
         ));
     }
-    if name == "per_layer_model_proj.weight" {
-        if weight.ggml_type == GGMLType::BF16 {
-            let bytes = weight
-                .kernel
-                .bf16_bytes()
-                .ok_or_else(|| format!("Invalid {name} BF16 kernel"))?;
-            gemma4_bf16_projection_matmul(bytes, input, output, pool, q8)?;
-        } else {
-            return Err(format!(
-                "{name} special path requires BF16 weight, got {:?}",
-                weight.ggml_type
-            ));
-        }
-    } else if weight.ggml_type == GGMLType::F32 {
+    if weight.ggml_type == GGMLType::F32 {
         let values = weight
             .kernel
             .f32_slice()
@@ -943,123 +927,6 @@ pub(super) fn matmul(
         });
     }
     ensure_finite(name, output)
-}
-
-fn gemma4_bf16_projection_matmul(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    pool: &ComputePool,
-    input_bf16: &mut [u8],
-) -> Result<(), String> {
-    let input_bytes = input
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| "Gemma4 BF16 projection input byte size overflow".to_owned())?;
-    let weight_bytes = input_bytes
-        .checked_mul(output.len())
-        .ok_or_else(|| "Gemma4 BF16 projection weight byte size overflow".to_owned())?;
-    if input_bf16.len() < input_bytes {
-        return Err("Invalid Gemma4 BF16 projection storage length".to_owned());
-    }
-    if weight.len() != weight_bytes {
-        return Err(format!(
-            "Invalid Gemma4 BF16 projection weight storage length: expected {weight_bytes} bytes, got {}",
-            weight.len()
-        ));
-    }
-
-    for (bytes, value) in input_bf16[..input_bytes].chunks_exact_mut(2).zip(input) {
-        bytes.copy_from_slice(&f32_to_bf16(*value).to_le_bytes());
-    }
-
-    let n_in = input.len();
-    let n_out = output.len();
-    let weight_ptr = weight.as_ptr();
-    let input_ptr = input_bf16.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-    pool.compute(|thread, threads| unsafe {
-        let start = n_out * thread / threads;
-        let end = n_out * (thread + 1) / threads;
-        for row in start..end {
-            let mut sum = 0.0f64;
-            for column in 0..n_in {
-                let weight_offset = (row * n_in + column) * 2;
-                let input_offset = column * 2;
-                let weight_bits = u16::from_le_bytes([
-                    *weight_ptr.add(weight_offset),
-                    *weight_ptr.add(weight_offset + 1),
-                ]);
-                let input_bits = u16::from_le_bytes([
-                    *input_ptr.add(input_offset),
-                    *input_ptr.add(input_offset + 1),
-                ]);
-                let product = bf16_to_f32(weight_bits) * bf16_to_f32(input_bits);
-                sum += f64::from(product);
-            }
-            *output_ptr.add(row) = sum as f32;
-        }
-    });
-    Ok(())
-}
-
-fn gemma4_f16_projection_matmul(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    pool: &ComputePool,
-    input_f16: &mut [u8],
-) -> Result<(), String> {
-    let input_bytes = input
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| "Gemma4 F16 projection input byte size overflow".to_owned())?;
-    let weight_bytes = input_bytes
-        .checked_mul(output.len())
-        .ok_or_else(|| "Gemma4 F16 projection weight byte size overflow".to_owned())?;
-    if input_f16.len() < input_bytes {
-        return Err("Invalid Gemma4 F16 projection storage length".to_owned());
-    }
-    if weight.len() != weight_bytes {
-        return Err(format!(
-            "Invalid Gemma4 F16 projection weight storage length: expected {weight_bytes} bytes, got {}",
-            weight.len()
-        ));
-    }
-
-    let input_u16: &mut [u16] = unsafe {
-        std::slice::from_raw_parts_mut(input_f16.as_mut_ptr() as *mut u16, input.len())
-    };
-    f32_slice_to_f16(input, input_u16);
-
-    let n_in = input.len();
-    let n_out = output.len();
-    let weight_ptr = weight.as_ptr();
-    let input_ptr = input_f16.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-    pool.compute(|thread, threads| unsafe {
-        let start = n_out * thread / threads;
-        let end = n_out * (thread + 1) / threads;
-        for row in start..end {
-            let mut sum = 0.0f64;
-            for column in 0..n_in {
-                let weight_offset = (row * n_in + column) * 2;
-                let input_offset = column * 2;
-                let weight_bits = u16::from_le_bytes([
-                    *weight_ptr.add(weight_offset),
-                    *weight_ptr.add(weight_offset + 1),
-                ]);
-                let input_bits = u16::from_le_bytes([
-                    *input_ptr.add(input_offset),
-                    *input_ptr.add(input_offset + 1),
-                ]);
-                let product = f16_to_f32(weight_bits) * f16_to_f32(input_bits);
-                sum += f64::from(product);
-            }
-            *output_ptr.add(row) = sum as f32;
-        }
-    });
-    Ok(())
 }
 
 fn checked_rms_norm(
