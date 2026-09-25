@@ -167,19 +167,13 @@ fn load_layer(
         GGMLType::Q5_1,
     ];
     // V is required for kv_heads > 1; for kv_heads == 1 we fall back
-    // to V := K (12B MQA sharing). Shared KV layers (layer >= base_kv)
-    // omit both K and V entirely.
+    // to V := K (MQA sharing). Shared KV layers (layer >= base_kv)
+    // omit both K and V entirely. Some MoE exports omit V even when
+    // kv_heads > 1 (the export tooling treats V as optional); in that
+    // case the runtime reuses K as V.
     let is_shared_kv = layer >= cfg.base_kv_layers();
     let (attn_v, kv_shared_with_k) = if is_shared_kv {
         (None, true)
-    } else if kv_heads > 1 {
-        let v = load_weight_any(
-            source,
-            &format!("{prefix}.attn_v.weight"),
-            &[embd as u64, kv_dim as u64],
-            &k_quant,
-        )?;
-        (Some(v), false)
     } else if source
         .tensor_info(&format!("{prefix}.attn_v.weight"))
         .is_some()
@@ -192,7 +186,6 @@ fn load_layer(
         )?;
         (Some(v), false)
     } else {
-        // V is shared with K (12B MQA). Runtime will reuse K as V.
         (None, true)
     };
     // attn_k_norm is required by E2B/E4B and present in 12B; load if

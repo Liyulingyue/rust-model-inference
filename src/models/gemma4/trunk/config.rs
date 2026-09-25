@@ -487,19 +487,19 @@ impl Gemma4Config {
                 &[head_dim as u64],
                 GGMLType::F32,
             )?;
-            // attn_v is required for base kv layers with kv_heads > 1.
-            // Shared kv layers (layer >= base_kv_layers) omit V entirely.
-            // For 12B full-attn (kv_heads=1) layers the export omits V and
-            // the engine falls back to V := K (MQA sharing).
-            if layer < self.base_kv_layers() && self.kv_heads(layer) > 1 {
+            // attn_v is optional: some exports omit V even when
+            // kv_heads > 1 (MoE models). The runtime falls back to
+            // V := K when V is missing. Only validate if present.
+            if source
+                .tensor_info(&format!("{prefix}.attn_v.weight"))
+                .is_some()
+            {
                 require_tensor_any(
                     source,
                     &format!("{prefix}.attn_v.weight"),
                     &[self.embd as u64, kv_dim as u64],
                     &k_quant,
                 )?;
-            } else {
-                let _ = source.tensor_info(&format!("{prefix}.attn_v.weight"));
             }
             require_tensor_any(
                 source,
