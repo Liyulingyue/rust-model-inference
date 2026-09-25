@@ -4,6 +4,7 @@ use half::f16;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::{
     rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_inplace, silu_mul_inplace,
@@ -85,7 +86,6 @@ pub(crate) struct DitScratch {
     attention: Vec<f32>,
     ffn: Vec<f32>,
     scores: Vec<f32>,
-    value_column: Vec<f32>,
     modulation: Vec<f32>,
     rope: Vec<f32>,
     patches: Vec<f32>,
@@ -106,7 +106,6 @@ impl DitScratch {
             attention: Vec::new(),
             ffn: Vec::new(),
             scores: Vec::new(),
-            value_column: Vec::new(),
             modulation: Vec::new(),
             rope: Vec::new(),
             patches: Vec::new(),
@@ -158,11 +157,6 @@ impl DitScratch {
             "Z-Image FFN",
         )?;
         resize_zeroed(&mut self.scores, total_tokens, "Z-Image attention scores")?;
-        resize_zeroed(
-            &mut self.value_column,
-            total_tokens,
-            "Z-Image attention values",
-        )?;
         resize_zeroed(&mut self.modulation, HIDDEN * 4, "Z-Image AdaLN modulation")?;
         resize_zeroed(
             &mut self.rope,
@@ -535,7 +529,6 @@ fn attention_into(
     heads: usize,
     head_width: usize,
     scores: &mut [f32],
-    value_column: &mut [f32],
     output: &mut [f32],
 ) -> Result<(), String> {
     let hidden = checked_product(heads, head_width, "attention hidden")?;
@@ -543,36 +536,35 @@ fn attention_into(
     if qkv.len() != checked_product(tokens, qkv_width, "attention QKV rows")?
         || output.len() != checked_product(tokens, hidden, "attention output")?
         || scores.len() < tokens
-        || value_column.len() < tokens
     {
         return Err("Invalid Z-Image attention buffers".into());
     }
     let scale = 1.0 / (head_width as f32).sqrt();
+    let value_base = hidden * 2;
     for query in 0..tokens {
         for head in 0..heads {
             let query_start = query * qkv_width + head * head_width;
             let query_values = &qkv[query_start..query_start + head_width];
             for key in 0..tokens {
                 let key_start = key * qkv_width + hidden + head * head_width;
-                // aarch64 上 `dot_f32` 内部 `has_neon()` 是 `const true`，
-                // 编译器会消除分支，等价于直接调 `dot_f32_neon`。
-                let dot = dot_f32(
+                scores[key] = dot_f32(
                     query_values,
                     &qkv[key_start..key_start + head_width],
                     head_width,
-                );
-                scores[key] = dot * scale;
+                ) * scale;
             }
             softmax_inplace(&mut scores[..tokens]);
             let output_start = query * hidden + head * head_width;
-            for dimension in 0..head_width {
-                for key in 0..tokens {
-                    value_column[key] =
-                        qkv[key * qkv_width + hidden * 2 + head * head_width + dimension];
-                }
-                output[output_start + dimension] =
-                    dot_f32(&value_column[..tokens], &scores[..tokens], tokens);
-            }
+            attention_value_reduce(
+                qkv,
+                &scores[..tokens],
+                &mut output[output_start..output_start + head_width],
+                value_base + head * head_width,
+                qkv_width,
+                0,
+                tokens,
+                head_width,
+            );
         }
     }
     Ok(())
@@ -823,7 +815,6 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
             )?;
@@ -848,7 +839,6 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
             )?;
@@ -880,7 +870,6 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
             )?;
@@ -1069,7 +1058,6 @@ fn run_block(
     attention: &mut [f32],
     ffn: &mut [f32],
     scores: &mut [f32],
-    value_column: &mut [f32],
     modulation: &mut [f32],
     q8: &mut Q8Scratch,
 ) -> Result<(), String> {
@@ -1082,7 +1070,6 @@ fn run_block(
         || attention.len() < hidden_len
         || ffn.len() < ffn_len
         || scores.len() < rows
-        || value_column.len() < rows
         || modulation.len() < HIDDEN * 4
     {
         return Err("Invalid Z-Image transformer scratch".into());
@@ -1177,7 +1164,6 @@ fn run_block(
         HEADS,
         ROPE_HEAD_WIDTH,
         scores,
-        value_column,
         &mut attention[..hidden_len],
     )?;
     t_attention = t.elapsed();
@@ -2237,9 +2223,8 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 6.0, 8.0, // token 1: q, k, v
         ];
         let mut scores = [0.0; 2];
-        let mut value_column = [0.0; 2];
         let mut output = [0.0; 4];
-        attention_into(&qkv, 2, 1, 2, &mut scores, &mut value_column, &mut output).unwrap();
+        attention_into(&qkv, 2, 1, 2, &mut scores, &mut output).unwrap();
         assert_eq!(output, [4.0, 6.0, 4.0, 6.0]);
     }
 
@@ -2289,10 +2274,9 @@ mod tests {
             ]);
         }
         let mut scores = [0.0f32; 32];
-        let mut value_column = [0.0f32; 32];
         let mut output = [0.0f32; 32];
 
-        attention_into(&qkv, 32, 1, 1, &mut scores, &mut value_column, &mut output).unwrap();
+        attention_into(&qkv, 32, 1, 1, &mut scores, &mut output).unwrap();
 
         assert_eq!(output[5].to_bits(), 0x3ffa_6cf2);
     }

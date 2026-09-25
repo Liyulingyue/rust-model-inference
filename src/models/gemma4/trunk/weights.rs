@@ -33,7 +33,7 @@ pub(super) struct Gemma4Layer {
     pub(super) kv_shared_with_k: bool,
     pub(super) attn_norm: Vec<f32>,
     pub(super) attn_q: Weight<'static>,
-    pub(super) attn_k: Weight<'static>,
+    pub(super) attn_k: Option<Weight<'static>>,
     /// `None` when V is shared with K (12B MQA). The runtime
     /// reuses the freshly-matmuled K as V in that case.
     pub(super) attn_v: Option<Weight<'static>>,
@@ -51,6 +51,25 @@ pub(super) struct Gemma4Layer {
     pub(super) proj: Option<Weight<'static>>,
     pub(super) post_norm: Option<Vec<f32>>,
     pub(super) output_scale: f32,
+    // MoE fields (None for dense layers).
+    pub(super) moe: Option<Gemma4MoELayer>,
+}
+
+pub(super) struct Gemma4MoELayer {
+    /// Router weight `[n_embd, n_expert]` as flat f32.
+    pub(super) router: Vec<f32>,
+    /// Router per-dimension scale `[n_embd]`.
+    pub(super) router_scale: Vec<f32>,
+    /// Fused gate+up experts, split per expert. Each is `[n_embd, n_ff_exp*2]`.
+    pub(super) experts_gate_up: Vec<Weight<'static>>,
+    /// Down projection experts, split per expert. Each is `[n_ff_exp, n_embd]`.
+    pub(super) experts_down: Vec<Weight<'static>>,
+    /// Pre-FFN norm for the MoE branch.
+    pub(super) pre_ffw_norm_2: Vec<f32>,
+    /// Post-FFN norm for the shared (dense) branch.
+    pub(super) post_ffw_norm_1: Vec<f32>,
+    /// Post-FFN norm for the MoE branch.
+    pub(super) post_ffw_norm_2: Vec<f32>,
 }
 
 impl Gemma4Model {
@@ -62,7 +81,15 @@ impl Gemma4Model {
             source.as_ref(),
             "token_embd.weight",
             &[embd as u64, VOCAB as u64],
-            &[GGMLType::Q8_0, GGMLType::Q4K],
+            &[
+                GGMLType::Q8_0,
+                GGMLType::Q4K,
+                GGMLType::Q6K,
+                GGMLType::Q4_0,
+                GGMLType::Q4_1,
+                GGMLType::Q5_0,
+                GGMLType::Q5_1,
+            ],
         )?;
 
         // Per-layer projection tensors are optional (E2B/E4B: on, 12B: off).
@@ -72,13 +99,13 @@ impl Gemma4Model {
                     source.as_ref(),
                     "per_layer_token_embd.weight",
                     &[per_layer_all as u64, VOCAB as u64],
-                    &[GGMLType::Q8_0, GGMLType::Q5K],
+                    &[GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
                 )?;
-                let pm = load_weight(
+                let pm = load_weight_any(
                     source.as_ref(),
                     "per_layer_model_proj.weight",
                     &[embd as u64, per_layer_all as u64],
-                    GGMLType::BF16,
+                    &[GGMLType::BF16, GGMLType::F16],
                 )?;
                 let pn = load_f32(
                     source.as_ref(),
@@ -167,15 +194,13 @@ fn load_layer(
         GGMLType::Q5_1,
     ];
     // V is required for kv_heads > 1; for kv_heads == 1 we fall back
-    // to V := K (12B MQA sharing).
-    let (attn_v, kv_shared_with_k) = if kv_heads > 1 {
-        let v = load_weight_any(
-            source,
-            &format!("{prefix}.attn_v.weight"),
-            &[embd as u64, kv_dim as u64],
-            &k_quant,
-        )?;
-        (Some(v), false)
+    // to V := K (MQA sharing). Shared KV layers (layer >= base_kv)
+    // omit both K and V entirely. Some MoE exports omit V even when
+    // kv_heads > 1 (the export tooling treats V as optional); in that
+    // case the runtime reuses K as V.
+    let is_shared_kv = layer >= cfg.base_kv_layers();
+    let (attn_v, kv_shared_with_k) = if is_shared_kv {
+        (None, true)
     } else if source
         .tensor_info(&format!("{prefix}.attn_v.weight"))
         .is_some()
@@ -188,7 +213,6 @@ fn load_layer(
         )?;
         (Some(v), false)
     } else {
-        // V is shared with K (12B MQA). Runtime will reuse K as V.
         (None, true)
     };
     // attn_k_norm is required by E2B/E4B and present in 12B; load if
@@ -209,17 +233,27 @@ fn load_layer(
     };
     // Per-layer projection is optional (12B disables it).
     let (inp_gate, proj, post_norm) = if cfg.use_per_layer_projection() {
-        let ig = load_weight(
+        let per_layer_quant = [
+            GGMLType::F32,
+            GGMLType::Q8_0,
+            GGMLType::Q4K,
+            GGMLType::Q6K,
+            GGMLType::Q4_0,
+            GGMLType::Q4_1,
+            GGMLType::Q5_0,
+            GGMLType::Q5_1,
+        ];
+        let ig = load_weight_any(
             source,
             &format!("{prefix}.inp_gate.weight"),
             &[embd as u64, PER_LAYER as u64],
-            GGMLType::F32,
+            &per_layer_quant,
         )?;
-        let p = load_weight(
+        let p = load_weight_any(
             source,
             &format!("{prefix}.proj.weight"),
             &[PER_LAYER as u64, embd as u64],
-            GGMLType::F32,
+            &per_layer_quant,
         )?;
         let pn = load_f32(
             source,
@@ -246,12 +280,16 @@ fn load_layer(
             &[embd as u64, q_dim as u64],
             &k_quant,
         )?,
-        attn_k: load_weight_any(
-            source,
-            &format!("{prefix}.attn_k.weight"),
-            &[embd as u64, kv_dim as u64],
-            &k_quant,
-        )?,
+        attn_k: if layer < cfg.base_kv_layers() {
+            Some(load_weight_any(
+                source,
+                &format!("{prefix}.attn_k.weight"),
+                &[embd as u64, kv_dim as u64],
+                &k_quant,
+            )?)
+        } else {
+            None
+        },
         attn_v,
         attn_output: load_weight_any(
             source,
@@ -298,7 +336,115 @@ fn load_layer(
         proj,
         post_norm,
         output_scale: load_f32(source, &format!("{prefix}.layer_output_scale.weight"), &[1])?[0],
+        moe: load_moe_layer(source, cfg, &prefix, &k_quant, embd)?,
     })
+}
+
+fn load_moe_layer(
+    source: &dyn TensorSource,
+    cfg: &Gemma4Config,
+    prefix: &str,
+    k_quant: &[GGMLType],
+    embd: usize,
+) -> Result<Option<Gemma4MoELayer>, String> {
+    if !cfg.is_moe() {
+        return Ok(None);
+    }
+    let router_name = format!("{prefix}.ffn_gate_inp.weight");
+    if source.tensor_info(&router_name).is_none() {
+        return Ok(None);
+    }
+    let n_expert = cfg.n_expert;
+    let n_ff_exp = cfg.n_ff_exp;
+
+    // Router: [n_embd, n_expert] as flat f32 (row-major per expert).
+    let router = crate::core::tensor::load_f32_tensor(
+        source,
+        &router_name,
+        &[embd as u64, n_expert as u64],
+    )?;
+    let router_scale = crate::core::tensor::load_f32_tensor(
+        source,
+        &format!("{prefix}.ffn_gate_inp.scale"),
+        &[embd as u64],
+    )?;
+
+    // Fused gate_up_exps: [n_embd, n_ff_exp*2, n_expert].
+    // Split per expert into n_expert weights of [n_embd, n_ff_exp*2].
+    let experts_gate_up = expert_weights_split(
+        source,
+        &format!("{prefix}.ffn_gate_up_exps.weight"),
+        n_expert,
+        embd,
+        n_ff_exp * 2,
+    )?;
+    // down_exps: [n_ff_exp, n_embd, n_expert].
+    // Split per expert into n_expert weights of [n_ff_exp, n_embd].
+    let experts_down = expert_weights_split(
+        source,
+        &format!("{prefix}.ffn_down_exps.weight"),
+        n_expert,
+        n_ff_exp,
+        embd,
+    )?;
+
+    let pre_ffw_norm_2 = crate::core::tensor::load_f32_tensor(
+        source,
+        &format!("{prefix}.pre_ffw_norm_2.weight"),
+        &[embd as u64],
+    )?;
+    let post_ffw_norm_1 = crate::core::tensor::load_f32_tensor(
+        source,
+        &format!("{prefix}.post_ffw_norm_1.weight"),
+        &[embd as u64],
+    )?;
+    let post_ffw_norm_2 = crate::core::tensor::load_f32_tensor(
+        source,
+        &format!("{prefix}.post_ffw_norm_2.weight"),
+        &[embd as u64],
+    )?;
+
+    Ok(Some(Gemma4MoELayer {
+        router,
+        router_scale,
+        experts_gate_up,
+        experts_down,
+        pre_ffw_norm_2,
+        post_ffw_norm_1,
+        post_ffw_norm_2,
+    }))
+}
+
+fn expert_weights_split(
+    source: &dyn TensorSource,
+    name: &str,
+    n_expert: usize,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<Weight<'static>>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    if bytes.len() % n_expert != 0 {
+        return Err(format!("{name}: size not divisible by {n_expert} experts"));
+    }
+    let per_expert = bytes.len() / n_expert;
+    let ggml_type = info.ggml_type;
+    // SAFETY: Gemma4Model retains the immutable TensorSource Arc.
+    let bytes = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
+    Ok((0..n_expert)
+        .map(|e| {
+            Weight::from_quantized(QuantizedTensor::from_bytes(
+                &bytes[e * per_expert..(e + 1) * per_expert],
+                ggml_type,
+                n_in,
+                n_out,
+            ))
+        })
+        .collect())
 }
 
 pub(super) fn load_weight(

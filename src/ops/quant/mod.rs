@@ -245,6 +245,10 @@ pub fn vec_dot_q4k_q8k(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     if crate::ops::has_avx2_fma() {
         return unsafe { vec_dot_q4k_q8k_avx2(q4k_data, q8k) };
     }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+        return unsafe { neon_k::vec_dot_q4k_q8k_neon(q4k_data, q8k) };
+    }
     vec_dot_q4k_q8k_scalar(q4k_data, q8k)
 }
 
@@ -2667,6 +2671,49 @@ mod avx2_parity {
             avx2,
             scalar,
             rel
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q4k_neon_matches_scalar_multi_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut weight = Vec::new();
+        for i in 0..4 {
+            let mut ql = [0u8; 128];
+            let mut qh = [0u8; 64];
+            for j in 0..128 {
+                ql[j] = ((i * 7 + j) % 16) as u8;
+            }
+            for j in 0..64 {
+                qh[j] = ((i + j * 3) % 4) as u8;
+            }
+            let scales: [i8; 16] = std::array::from_fn(|k| ((i * 3 + k) as i8) - 8);
+            weight.extend(make_q4k_block(
+                &ql,
+                &qh,
+                &scales,
+                0.01 + i as f32 * 0.1,
+                0.005,
+            ));
+        }
+        let input: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) * 0.01).collect();
+        let q8k = block_q8k(&input);
+
+        let neon = unsafe { neon_k::vec_dot_q4k_q8k_neon(&weight, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        eprintln!("q4k neon vs scalar: neon={neon} scalar={scalar}");
+        let diff = (neon - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "q4k NEON diverged: neon={neon} scalar={scalar} rel={rel}"
         );
     }
 

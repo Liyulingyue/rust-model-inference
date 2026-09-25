@@ -62,9 +62,20 @@ pub struct Gemma4Config {
     pub rope_freq_base: f32,
     /// RoPE base for SWA layers.
     pub rope_freq_base_swa: f32,
+    /// Total number of experts per MoE layer (0 = dense-only model).
+    pub n_expert: usize,
+    /// Number of experts selected per token (top-k).
+    pub n_expert_used: usize,
+    /// Per-expert FFN width (0 for dense models).
+    pub n_ff_exp: usize,
 }
 
 impl Gemma4Config {
+    /// `true` when the model has MoE layers (26B A4B).
+    pub fn is_moe(&self) -> bool {
+        self.n_expert > 0
+    }
+
     /// `layers - shared_kv_layers`: count of leading layers with their own
     /// (non-shared) KV cache.
     pub fn base_kv_layers(&self) -> usize {
@@ -73,7 +84,12 @@ impl Gemma4Config {
 
     /// Max FFN width across all layers (drives scratch buffer sizing).
     pub fn max_ffn(&self) -> usize {
-        self.ffn_per_layer.iter().copied().max().unwrap_or(0)
+        let dense = self.ffn_per_layer.iter().copied().max().unwrap_or(0);
+        if self.is_moe() {
+            dense.max(self.n_ff_exp * 2)
+        } else {
+            dense
+        }
     }
 
     /// Max Q projection width across all layers (`n_heads × head_dim`).
@@ -288,6 +304,32 @@ impl Gemma4Config {
         // the per-layer embedding dim (E2B/E4B: 256).
         let per_layer_width = read_u32(source, "gemma4.embedding_length_per_layer_input")? as usize;
 
+        // MoE metadata (26B A4B). Absent for dense models (E2B/E4B).
+        let n_expert = source
+            .metadata("gemma4.expert_count")
+            .and_then(|v| match v {
+                MetaValue::Uint32(n) => Some(*n as usize),
+                MetaValue::Int32(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let n_expert_used = source
+            .metadata("gemma4.expert_used_count")
+            .and_then(|v| match v {
+                MetaValue::Uint32(n) => Some(*n as usize),
+                MetaValue::Int32(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let n_ff_exp = source
+            .metadata("gemma4.expert_feed_forward_length")
+            .and_then(|v| match v {
+                MetaValue::Uint32(n) => Some(*n as usize),
+                MetaValue::Int32(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+
         // head dims. E2B/E4B full=512, swa=256. 12B same.
         let full_head_dim = read_u32(source, "gemma4.attention.key_length")? as usize;
         let value_length = read_u32(source, "gemma4.attention.value_length")? as usize;
@@ -352,6 +394,9 @@ impl Gemma4Config {
             n_ctx,
             rope_freq_base,
             rope_freq_base_swa,
+            n_expert,
+            n_expert_used,
+            n_ff_exp,
         };
 
         cfg.validate_tensors(source)?;
@@ -397,11 +442,11 @@ impl Gemma4Config {
             ));
         }
         if self.use_per_layer_projection() {
-            require_tensor(
+            require_tensor_any(
                 source,
                 "per_layer_model_proj.weight",
                 &[self.embd as u64, per_layer_all as u64],
-                GGMLType::BF16,
+                &[GGMLType::BF16, GGMLType::F16],
             )?;
             require_tensor(
                 source,
@@ -413,7 +458,7 @@ impl Gemma4Config {
                 source,
                 "per_layer_token_embd.weight",
                 &[per_layer_all as u64, VOCAB as u64],
-                &[GGMLType::Q8_0, GGMLType::Q5K],
+                &[GGMLType::Q8_0, GGMLType::Q5K, GGMLType::Q6K],
             )?;
         } else {
             // Verify the per-layer projection tensors are *absent*
@@ -427,7 +472,15 @@ impl Gemma4Config {
             source,
             "token_embd.weight",
             &[self.embd as u64, VOCAB as u64],
-            &[GGMLType::Q8_0, GGMLType::Q4K],
+            &[
+                GGMLType::Q8_0,
+                GGMLType::Q4K,
+                GGMLType::Q6K,
+                GGMLType::Q4_0,
+                GGMLType::Q4_1,
+                GGMLType::Q5_0,
+                GGMLType::Q5_1,
+            ],
         )?;
 
         for layer in 0..self.layers {
@@ -450,12 +503,16 @@ impl Gemma4Config {
                 GGMLType::Q5_0,
                 GGMLType::Q5_1,
             ];
-            require_tensor_any(
-                source,
-                &format!("{prefix}.attn_k.weight"),
-                &[self.embd as u64, kv_dim as u64],
-                &k_quant,
-            )?;
+            // attn_k is only required for base kv layers; shared kv
+            // layers (layer >= base_kv_layers) omit K and V entirely.
+            if layer < self.base_kv_layers() {
+                require_tensor_any(
+                    source,
+                    &format!("{prefix}.attn_k.weight"),
+                    &[self.embd as u64, kv_dim as u64],
+                    &k_quant,
+                )?;
+            }
             // attn_k_norm is optional in some 12B exports when
             // kv_heads == 1; treat as optional.
             let _ = source.tensor_info(&format!("{prefix}.attn_k_norm.weight"));
@@ -483,20 +540,19 @@ impl Gemma4Config {
                 &[head_dim as u64],
                 GGMLType::F32,
             )?;
-            // attn_v is required for layers with kv_heads > 1. For
-            // 12B full-attn (kv_heads=1) layers the export omits V and
-            // the engine falls back to V := K (MQA sharing).
-            if self.kv_heads(layer) > 1 {
+            // attn_v is optional: some exports omit V even when
+            // kv_heads > 1 (MoE models). The runtime falls back to
+            // V := K when V is missing. Only validate if present.
+            if source
+                .tensor_info(&format!("{prefix}.attn_v.weight"))
+                .is_some()
+            {
                 require_tensor_any(
                     source,
                     &format!("{prefix}.attn_v.weight"),
                     &[self.embd as u64, kv_dim as u64],
                     &k_quant,
                 )?;
-            } else {
-                // Verify absence (informational; the runtime will reuse
-                // K as V if V is missing).
-                let _ = source.tensor_info(&format!("{prefix}.attn_v.weight"));
             }
             require_tensor_any(
                 source,
@@ -523,11 +579,21 @@ impl Gemma4Config {
                 &k_quant,
             )?;
             if self.use_per_layer_projection() {
-                require_tensor(
+                let per_layer_quant = [
+                    GGMLType::F32,
+                    GGMLType::Q8_0,
+                    GGMLType::Q4K,
+                    GGMLType::Q6K,
+                    GGMLType::Q4_0,
+                    GGMLType::Q4_1,
+                    GGMLType::Q5_0,
+                    GGMLType::Q5_1,
+                ];
+                require_tensor_any(
                     source,
                     &format!("{prefix}.inp_gate.weight"),
                     &[self.embd as u64, self.per_layer_width as u64],
-                    GGMLType::F32,
+                    &per_layer_quant,
                 )?;
                 require_tensor(
                     source,
@@ -553,11 +619,11 @@ impl Gemma4Config {
                     &[self.embd as u64],
                     GGMLType::F32,
                 )?;
-                require_tensor(
+                require_tensor_any(
                     source,
                     &format!("{prefix}.proj.weight"),
                     &[self.per_layer_width as u64, self.embd as u64],
-                    GGMLType::F32,
+                    &per_layer_quant,
                 )?;
             } else {
                 // Per-layer projection is disabled for 12B. Skip the
@@ -580,6 +646,59 @@ impl Gemma4Config {
                 require_tensor(
                     source,
                     &format!("{prefix}.post_ffw_norm.weight"),
+                    &[self.embd as u64],
+                    GGMLType::F32,
+                )?;
+            }
+
+            // MoE tensors: present when ffn_gate_inp.weight exists.
+            if source
+                .tensor_info(&format!("{prefix}.ffn_gate_inp.weight"))
+                .is_some()
+            {
+                require_tensor_any(
+                    source,
+                    &format!("{prefix}.ffn_gate_inp.weight"),
+                    &[self.embd as u64, self.n_expert as u64],
+                    &[GGMLType::F32, GGMLType::BF16, GGMLType::F16],
+                )?;
+                require_tensor(
+                    source,
+                    &format!("{prefix}.ffn_gate_inp.scale"),
+                    &[self.embd as u64],
+                    GGMLType::F32,
+                )?;
+                require_tensor_any(
+                    source,
+                    &format!("{prefix}.ffn_gate_up_exps.weight"),
+                    &[
+                        self.embd as u64,
+                        (self.n_ff_exp * 2) as u64,
+                        self.n_expert as u64,
+                    ],
+                    &k_quant,
+                )?;
+                require_tensor_any(
+                    source,
+                    &format!("{prefix}.ffn_down_exps.weight"),
+                    &[self.n_ff_exp as u64, self.embd as u64, self.n_expert as u64],
+                    &k_quant,
+                )?;
+                require_tensor(
+                    source,
+                    &format!("{prefix}.pre_ffw_norm_2.weight"),
+                    &[self.embd as u64],
+                    GGMLType::F32,
+                )?;
+                require_tensor(
+                    source,
+                    &format!("{prefix}.post_ffw_norm_1.weight"),
+                    &[self.embd as u64],
+                    GGMLType::F32,
+                )?;
+                require_tensor(
+                    source,
+                    &format!("{prefix}.post_ffw_norm_2.weight"),
                     &[self.embd as u64],
                     GGMLType::F32,
                 )?;

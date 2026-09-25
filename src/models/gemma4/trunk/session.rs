@@ -89,7 +89,9 @@ impl Gemma4PrefillLinear {
                     items.push(pj);
                 }
                 if index < base_kv {
-                    items.push(&layer.attn_k);
+                    if let Some(k) = layer.attn_k.as_ref() {
+                        items.push(k);
+                    }
                     if let Some(v) = layer.attn_v.as_ref() {
                         items.push(v);
                     }
