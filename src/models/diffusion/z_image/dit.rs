@@ -547,7 +547,11 @@ fn attention_into(
             let query_values = &qkv[query_start..query_start + head_width];
             for key in 0..tokens {
                 let key_start = key * qkv_width + hidden + head * head_width;
-                scores[key] = dot_f32(query_values, &qkv[key_start..key_start + head_width], head_width) * scale;
+                scores[key] = dot_f32(
+                    query_values,
+                    &qkv[key_start..key_start + head_width],
+                    head_width,
+                ) * scale;
             }
             softmax_inplace(&mut scores[..tokens]);
             let output_start = query * hidden + head * head_width;

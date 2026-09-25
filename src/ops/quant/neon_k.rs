@@ -94,9 +94,12 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         // Pack into 16 bytes: [scales(8), mins(8)]
         let packed_lo = vcreate_u64(utmp0 as u64 | ((utmp1 as u64) << 32));
         let packed_hi = vcreate_u64(utmp2 as u64 | ((utmp3 as u64) << 32));
-        let packed_u8 = vcombine_u8(vreinterpret_u8_u64(packed_lo), vreinterpret_u8_u64(packed_hi));
-        let scales_v = vget_low_u8(packed_u8);   // 8 bytes = scales
-        let mins_v = vget_high_u8(packed_u8);    // 8 bytes = mins
+        let packed_u8 = vcombine_u8(
+            vreinterpret_u8_u64(packed_lo),
+            vreinterpret_u8_u64(packed_hi),
+        );
+        let scales_v = vget_low_u8(packed_u8); // 8 bytes = scales
+        let mins_v = vget_high_u8(packed_u8); // 8 bytes = mins
 
         // --- Min correction via NEON: sum(mins[j/2] * bsums[j]) ---
         // bsums is [i16; 16], mins is [u8; 8] -> each min applies to 2 bsums.
@@ -150,13 +153,13 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
 
         // Apply scales via NEON: sum(scales[g] * group_sums[g]) for g=0..8
         // scales_v is u8x8, group_sums is [i32; 8]
-        let scales_wide = vmovl_u8(scales_v);  // u16x8
-        let scales_lo = vget_low_u16(scales_wide);  // u16x4
+        let scales_wide = vmovl_u8(scales_v); // u16x8
+        let scales_lo = vget_low_u16(scales_wide); // u16x4
         let scales_hi = vget_high_u16(scales_wide); // u16x4
-        let scales_i32_lo = vreinterpretq_s32_u32(vmovl_u16(scales_lo));  // i32x4
-        let scales_i32_hi = vreinterpretq_s32_u32(vmovl_u16(scales_hi));  // i32x4
-        let group_lo = vld1q_s32(group_sums.as_ptr());        // i32x4
-        let group_hi = vld1q_s32(group_sums.as_ptr().add(4));  // i32x4
+        let scales_i32_lo = vreinterpretq_s32_u32(vmovl_u16(scales_lo)); // i32x4
+        let scales_i32_hi = vreinterpretq_s32_u32(vmovl_u16(scales_hi)); // i32x4
+        let group_lo = vld1q_s32(group_sums.as_ptr()); // i32x4
+        let group_hi = vld1q_s32(group_sums.as_ptr().add(4)); // i32x4
         let prod_lo = vmulq_s32(scales_i32_lo, group_lo);
         let prod_hi = vmulq_s32(scales_i32_hi, group_hi);
         let main_sum = d * (vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi)) as f32;

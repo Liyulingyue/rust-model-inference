@@ -707,7 +707,10 @@ impl Gemma4Session<'_> {
                     &mut scratch.scales,
                 )?;
                 if let Some(t) = _t_lm {
-                    eprintln!("[prof] lm_head: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!(
+                        "[prof] lm_head: {:.1}ms",
+                        t.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 trace(row, "gemma4.logits.raw", None, &scratch.logits);
                 for logit in &mut scratch.logits {
@@ -1015,7 +1018,10 @@ fn forward_moe_expert(
     let scale = 1.0 / (embd as f32).sqrt();
     let mut router_normed = vec![0.0f32; embd];
     {
-        let sq_sum: f64 = router_input.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        let sq_sum: f64 = router_input
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
         let inv_rms = (1.0 / (sq_sum / embd as f64).max(f64::from(1e-6 * 1e-6))).sqrt() as f32;
         for i in 0..embd {
             router_normed[i] = router_input[i] * inv_rms * scale * moe.router_scale[i];
@@ -1079,7 +1085,9 @@ fn forward_moe_expert(
                 threads,
             );
         });
-        if prof { t_gu += t0.elapsed(); }
+        if prof {
+            t_gu += t0.elapsed();
+        }
 
         // Split fused output: gate [n_ff_exp] + up [n_ff_exp] → geglu.
         let t1 = std::time::Instant::now();
@@ -1088,12 +1096,13 @@ fn forward_moe_expert(
             let up = std::slice::from_raw_parts(gate_up_ptr.add(gu_out + n_ff_exp), n_ff_exp);
             ggml_geglu_fp16_inplace(gate, up);
         }
-        if prof { t_geglu += t1.elapsed(); }
+        if prof {
+            t_geglu += t1.elapsed();
+        }
 
         // Down projection into down_tmp.
         let h_blocks = n_ff_exp.div_ceil(32);
-        let gate_slice =
-            unsafe { std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp) };
+        let gate_slice = unsafe { std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp) };
         quantize_q8_0_into(
             gate_slice,
             n_ff_exp,
@@ -1120,7 +1129,9 @@ fn forward_moe_expert(
         for (o, &v) in output.iter_mut().zip(down_tmp.iter()) {
             *o += v * weights[k];
         }
-        if prof { t_down += t2.elapsed(); }
+        if prof {
+            t_down += t2.elapsed();
+        }
     }
     if prof {
         eprintln!(

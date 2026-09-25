@@ -303,7 +303,11 @@ fn deterministic_model_with_config(
                 kv_shared_with_k: false,
                 attn_norm: vec![1.0; cfg.embd],
                 attn_q: deterministic_weight(cfg.embd, q_heads * dim, layer * 11 + 1),
-                attn_k: Some(deterministic_weight(cfg.embd, kv_heads * dim, layer * 11 + 2)),
+                attn_k: Some(deterministic_weight(
+                    cfg.embd,
+                    kv_heads * dim,
+                    layer * 11 + 2,
+                )),
                 attn_v: Some(deterministic_weight(
                     cfg.embd,
                     kv_heads * dim,

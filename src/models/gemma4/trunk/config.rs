@@ -681,11 +681,7 @@ impl Gemma4Config {
                 require_tensor_any(
                     source,
                     &format!("{prefix}.ffn_down_exps.weight"),
-                    &[
-                        self.n_ff_exp as u64,
-                        self.embd as u64,
-                        self.n_expert as u64,
-                    ],
+                    &[self.n_ff_exp as u64, self.embd as u64, self.n_expert as u64],
                     &k_quant,
                 )?;
                 require_tensor(

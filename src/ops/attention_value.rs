@@ -200,8 +200,12 @@ mod tests {
         let scores = [0.25, 0.75];
         let mut out = vec![0.0f32; 4];
         attention_value_reduce(&values, &scores, &mut out, 0, 4, 0, 2, 4);
-        let expected = [0.25 * 1.0 + 0.75 * 5.0, 0.25 * 2.0 + 0.75 * 6.0,
-                        0.25 * 3.0 + 0.75 * 7.0, 0.25 * 4.0 + 0.75 * 8.0];
+        let expected = [
+            0.25 * 1.0 + 0.75 * 5.0,
+            0.25 * 2.0 + 0.75 * 6.0,
+            0.25 * 3.0 + 0.75 * 7.0,
+            0.25 * 4.0 + 0.75 * 8.0,
+        ];
         for (a, &b) in out[..4].iter().zip(&expected) {
             assert!((a - b).abs() < 1e-5, "mismatch: {a} vs {b}");
         }

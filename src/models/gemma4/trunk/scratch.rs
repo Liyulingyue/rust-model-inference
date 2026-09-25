@@ -128,6 +128,9 @@ impl Gemma4Scratch {
             + self.moe_logits.len()
             + self.moe_normed.len()
             + self.moe_scales.len();
-        f32_values * std::mem::size_of::<f32>() + self.q8.len() + self.prepared.bytes() + self.moe_q8.len()
+        f32_values * std::mem::size_of::<f32>()
+            + self.q8.len()
+            + self.prepared.bytes()
+            + self.moe_q8.len()
     }
 }
