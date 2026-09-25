@@ -45,98 +45,57 @@ impl YuE2Model {
             abc: options.abc,
             semantic: options.semantic,
         };
-        run_pipeline(
-            || {
-                let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
-                self.generate_abc(&prefix, options.abc, request.seed)
-            },
-            |abc_ids| {
-                let prefix = protocol.semantic_prefix(self.tokenizer(), request, abc_ids)?;
-                self.generate_semantic(&prefix, options.semantic, request.seed)
-            },
-            |abc_ids, semantic_ids| {
-                let prefix = protocol.semantic_prefix(self.tokenizer(), request, abc_ids)?;
-                let codec_ids = semantic_ids
-                    .iter()
-                    .map(|&token| {
-                        token
-                            .checked_sub(CODEC_OFFSET)
-                            .filter(|&token| (token as usize) < CODEC_SIZE)
-                            .ok_or_else(|| {
-                                format!("YuE2 semantic token {token} is outside the codec range")
-                            })
+        let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
+        let abc_ids = self.generate_abc(&prefix, options.abc, request.seed)?;
+        let prefix = protocol.semantic_prefix(self.tokenizer(), request, &abc_ids)?;
+        let semantic_ids = self.generate_semantic(&prefix, options.semantic, request.seed)?;
+        let codec_ids = semantic_ids
+            .iter()
+            .map(|&token| {
+                token
+                    .checked_sub(CODEC_OFFSET)
+                    .filter(|&token| (token as usize) < CODEC_SIZE)
+                    .ok_or_else(|| {
+                        format!("YuE2 semantic token {token} is outside the codec range")
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let chunks = song_chunks(&prefix, &codec_ids, request.seed, self.config().context)?;
-                let mut latents = Vec::with_capacity(
-                    codec_ids
-                        .len()
-                        .checked_mul(self.config().latent_channels)
-                        .ok_or("YuE2 latent length overflow")?,
-                );
-                for chunk in chunks {
-                    latents.extend(YuE2NarSession::new(self, chunk)?.solve(options.steps)?);
-                }
-                if latents.len()
-                    != codec_ids
-                        .len()
-                        .checked_mul(self.config().latent_channels)
-                        .ok_or("YuE2 latent length overflow")?
-                {
-                    return Err("YuE2 NAR produced the wrong latent shape".into());
-                }
-                Ok((latents, codec_ids.len()))
-            },
-            |latents, frames| vae.decode_tiled(latents, frames, 1024, 16),
-            |_| {},
-        )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let latent_frames = codec_ids.len();
+        let chunks = song_chunks(&prefix, &codec_ids, request.seed, self.config().context)?;
+        let latent_len = latent_frames
+            .checked_mul(self.config().latent_channels)
+            .ok_or("YuE2 latent length overflow")?;
+        let mut latents = Vec::with_capacity(latent_len);
+        for chunk in chunks {
+            latents.extend(YuE2NarSession::new(self, chunk)?.solve(options.steps)?);
+        }
+        if latents.len() != latent_len {
+            return Err("YuE2 NAR produced the wrong latent shape".into());
+        }
+        if latent_frames == 0
+            || latents.is_empty()
+            || latents.len() % latent_frames != 0
+            || latents.iter().any(|value| !value.is_finite())
+        {
+            return Err("YuE2 NAR produced invalid frame-major latents".into());
+        }
+        let channel_major_audio = vae.decode_tiled(&latents, latent_frames, 1024, 16)?;
+        if channel_major_audio.is_empty()
+            || channel_major_audio.len() % 2 != 0
+            || channel_major_audio.iter().any(|value| !value.is_finite())
+        {
+            return Err("YuE2 VAE produced invalid channel-major stereo audio".into());
+        }
+        let samples_per_channel = channel_major_audio.len() / 2;
+        Ok(YuE2Generation {
+            abc_ids,
+            semantic_ids,
+            latents,
+            latent_frames,
+            channel_major_audio,
+            samples_per_channel,
+        })
     }
-}
-
-fn run_pipeline<Abc, Semantic, Nar, Vae, Stage>(
-    abc: Abc,
-    semantic: Semantic,
-    nar: Nar,
-    vae: Vae,
-    mut stage: Stage,
-) -> Result<YuE2Generation, String>
-where
-    Abc: FnOnce() -> Result<Vec<u32>, String>,
-    Semantic: FnOnce(&[u32]) -> Result<Vec<u32>, String>,
-    Nar: FnOnce(&[u32], &[u32]) -> Result<(Vec<f32>, usize), String>,
-    Vae: FnOnce(&[f32], usize) -> Result<Vec<f32>, String>,
-    Stage: FnMut(&'static str),
-{
-    stage("abc");
-    let abc_ids = abc()?;
-    stage("semantic");
-    let semantic_ids = semantic(&abc_ids)?;
-    stage("nar");
-    let (latents, latent_frames) = nar(&abc_ids, &semantic_ids)?;
-    if latent_frames == 0
-        || latents.is_empty()
-        || latents.len() % latent_frames != 0
-        || latents.iter().any(|value| !value.is_finite())
-    {
-        return Err("YuE2 NAR produced invalid frame-major latents".into());
-    }
-    stage("vae");
-    let channel_major_audio = vae(&latents, latent_frames)?;
-    if channel_major_audio.is_empty()
-        || channel_major_audio.len() % 2 != 0
-        || channel_major_audio.iter().any(|value| !value.is_finite())
-    {
-        return Err("YuE2 VAE produced invalid channel-major stereo audio".into());
-    }
-    let samples_per_channel = channel_major_audio.len() / 2;
-    Ok(YuE2Generation {
-        abc_ids,
-        semantic_ids,
-        latents,
-        latent_frames,
-        channel_major_audio,
-        samples_per_channel,
-    })
 }
 
 pub(crate) fn interleave_stereo(

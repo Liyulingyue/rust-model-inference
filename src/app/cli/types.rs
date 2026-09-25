@@ -149,7 +149,6 @@ pub struct YuE2CliOptions {
     pub seed: u64,
     pub semantic: crate::models::yue2::SamplingConfig,
     pub steps: usize,
-    pub threads: usize,
 }
 
 #[derive(Debug, PartialEq)]

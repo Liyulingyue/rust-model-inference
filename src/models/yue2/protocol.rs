@@ -203,22 +203,6 @@ impl YuE2Protocol {
         prefix.extend([ABC_END, MUSIC_START]);
         Ok(prefix)
     }
-
-    pub fn validate_generation(
-        &self,
-        prefix_tokens: usize,
-        requested_tokens: usize,
-    ) -> Result<(), String> {
-        let total = prefix_tokens
-            .checked_add(requested_tokens)
-            .ok_or("YuE2 generation length overflow")?;
-        if total > CONTEXT {
-            return Err(format!(
-                "YuE2 prefix plus generation requires {total} positions, maximum is {CONTEXT}"
-            ));
-        }
-        Ok(())
-    }
 }
 
 fn require_string(source: &dyn TensorSource, key: &str, expected: &str) -> Result<(), String> {

@@ -15,7 +15,7 @@ use super::protocol::{
     MUSIC_START, VOCAB_SIZE,
 };
 use super::vae::{materialize_weight_norm, YuE2Vae};
-use super::{SamplingConfig, YuE2Config, YuE2Model};
+use super::{SamplingConfig, YuE2ArSession, YuE2Config, YuE2Model};
 
 fn synthetic_vae_source() -> MapTensorSource {
     let mut source = MapTensorSource::default();
@@ -114,25 +114,11 @@ fn vae_full_and_tiled_decode_have_natural_length_and_bits() {
 }
 
 #[test]
-fn pipeline_runs_in_order_and_interleaves_stereo_once() {
-    let mut stages = Vec::new();
-    let generation = run_tiny_pipeline(|stage| stages.push(stage)).unwrap();
-    assert_eq!(stages, ["abc", "semantic", "nar", "vae"]);
+fn interleaves_stereo_once() {
     assert_eq!(
         super::interleave_stereo(&[1.0, 2.0, 10.0, 20.0], 2).unwrap(),
         vec![1.0, 10.0, 2.0, 20.0],
     );
-    assert_eq!(generation.samples_per_channel, 2);
-}
-
-fn run_tiny_pipeline(on_stage: impl FnMut(&'static str)) -> Result<super::YuE2Generation, String> {
-    super::run_pipeline(
-        || Ok(vec![1, 2]),
-        |_| Ok(vec![CODEC_OFFSET]),
-        |_, _| Ok((vec![0.0; 64], 1)),
-        |_, _| Ok(vec![1.0, 2.0, 10.0, 20.0]),
-        on_stage,
-    )
 }
 
 #[derive(Default)]
@@ -299,18 +285,13 @@ fn full_cot_prompt_and_prefix_are_checkpoint_native() {
 }
 
 #[test]
-fn protocol_rejects_empty_text_and_context_overflow() {
-    let protocol = YuE2Protocol::from_source(&protocol_source()).unwrap();
+fn protocol_rejects_empty_text() {
     assert!(YuE2Request::new(" ", "lyrics", 1)
         .unwrap_err()
         .contains("style"));
     assert!(YuE2Request::new("style", "\n", 1)
         .unwrap_err()
         .contains("lyrics"));
-    assert!(protocol
-        .validate_generation(CONTEXT - 1, 2)
-        .unwrap_err()
-        .contains("24576"));
 }
 
 #[test]
@@ -607,12 +588,13 @@ fn main_loader_rejects_missing_nar_weight_and_wrong_bf16_shape() {
 }
 
 #[test]
-fn ar_prefill_and_one_token_decode_reuse_kv() {
+fn ar_prefill_one_token_reuses_kv() {
     let model = tiny_yue2_model();
-    let mut session = model.new_ar_session(8).unwrap();
+    assert!(YuE2ArSession::new(&model, 9).is_err());
+    let mut session = YuE2ArSession::new(&model, 8).unwrap();
     let prefill = session.prefill(&[1, 2, 3]).unwrap().to_vec();
     assert_eq!(session.position(), 3);
-    let decode = session.decode(4).unwrap().to_vec();
+    let decode = session.prefill(&[4]).unwrap().to_vec();
     assert_eq!(session.position(), 4);
     assert_ne!(prefill, decode);
 }

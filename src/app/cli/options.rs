@@ -160,7 +160,6 @@ pub fn yue2_cli_options(options: &CliOptions) -> Result<Option<YuE2CliOptions>, 
         seed,
         semantic,
         steps,
-        threads: options.threads,
     }))
 }
 

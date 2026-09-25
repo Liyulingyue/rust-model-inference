@@ -362,10 +362,6 @@ impl YuE2Model {
         &self.tokenizer
     }
 
-    pub fn new_ar_session(&self, capacity: usize) -> Result<YuE2ArSession<'_>, String> {
-        YuE2ArSession::new(self, capacity)
-    }
-
     pub fn generate_abc(
         &self,
         prefix: &[u32],
@@ -402,7 +398,7 @@ impl YuE2Model {
                 self.config.context
             ));
         }
-        let mut session = self.new_ar_session(capacity)?;
+        let mut session = YuE2ArSession::new(self, capacity)?;
         let mut logits = session.prefill(prefix)?.to_vec();
         let mut rng = Mt19937::new(seed);
         let mut output = Vec::with_capacity(sampling.max_tokens);
@@ -413,7 +409,7 @@ impl YuE2Model {
             }
             output.push(token);
             if step + 1 < sampling.max_tokens {
-                logits = session.decode(token)?.to_vec();
+                logits = session.prefill(&[token])?.to_vec();
             }
         }
         #[cfg(feature = "parity-trace")]
@@ -513,7 +509,7 @@ pub struct YuE2ArSession<'model> {
 }
 
 impl<'model> YuE2ArSession<'model> {
-    fn new(model: &'model YuE2Model, capacity: usize) -> Result<Self, String> {
+    pub fn new(model: &'model YuE2Model, capacity: usize) -> Result<Self, String> {
         if capacity == 0 || capacity > model.config.context {
             return Err(format!(
                 "YuE2 session capacity {capacity} must be within 1..={}",
@@ -591,10 +587,6 @@ impl<'model> YuE2ArSession<'model> {
         }
         self.kv.update_access();
         Ok(&self.logits)
-    }
-
-    pub fn decode(&mut self, token_id: u32) -> Result<&[f32], String> {
-        self.prefill(std::slice::from_ref(&token_id))
     }
 
     fn forward_token(&mut self, token_id: u32, position: usize) -> Result<(), String> {
