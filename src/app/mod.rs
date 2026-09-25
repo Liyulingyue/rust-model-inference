@@ -23,8 +23,9 @@ pub use cli::{
 };
 pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
 pub use jev::{
-    build_jev_inputs, run_jev_decision, run_jev_grouped_decision, JevGroupInput,
-    JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput,
+    build_jev_inputs, run_jev_decision, run_jev_decision_data, run_jev_grouped_decision,
+    run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
+    JevQuestionInput, JevResult,
 };
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
@@ -33,7 +34,8 @@ pub use selftest::run_self_test;
 pub use text::{
     run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
     run_multimodal_with_tts_postproc, run_multimodal_with_video,
-    run_multimodal_with_video_capture_text, run_shared_inference,
+    run_multimodal_with_video_capture_text, run_qwen35_family_multimodal_logits,
+    run_qwen3_family_multimodal, run_qwen3_family_multimodal_logits, run_shared_inference,
 };
 pub use tts::{run_tts_cli, synthesize_tts_to_wav};
 

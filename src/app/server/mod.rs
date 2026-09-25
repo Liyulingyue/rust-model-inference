@@ -63,6 +63,23 @@ struct TextBackend {
     prefill_batch_size: usize,
     context_length: usize,
     inner: TextInner,
+    /// `TensorSource` for the loaded LLM. Used by the JEV scoring
+    /// endpoints (`/v1/jev/score`, `/v1/jev/grouped`) so they can
+    /// run the existing CLI JEV pipeline without re-loading the model
+    /// from disk. The pool and tokenizer above are still derived from
+    /// this source at startup; this is a duplicate handle, not a
+    /// second copy of the model tensors.
+    pub(crate) source: Arc<dyn TensorSource>,
+    /// On-disk path of the LLM GGUF (kept for the multimodal path
+    /// which takes `&Path` for the model).
+    pub(crate) model_path: Option<std::path::PathBuf>,
+    /// Optional multimodal vision encoder (CLIP / Qwen2.5-Omni /
+    /// etc.). Required for `/v1/jev/image` / `/v1/jev/image_grouped`.
+    pub(crate) mmproj: Option<Arc<dyn TensorSource>>,
+    /// On-disk path of the mmproj blob (kept alongside the in-memory
+    /// source because the existing multimodal CLI helper expects
+    /// `&Path` for both the model and the vision encoder).
+    pub(crate) mmproj_path: Option<std::path::PathBuf>,
 }
 
 enum TextInner {
@@ -685,6 +702,7 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let model_path: std::path::PathBuf = options.model.clone();
     let arch = source
         .metadata("general.architecture")
         .and_then(crate::MetaValue::to_string_val)
@@ -694,6 +712,19 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         source.metadata(k).cloned()
     })?);
     let pool = Arc::new(ComputePool::new(options.threads));
+    // Optional CLIP / Omni vision encoder. Only loaded when the user
+    // passed `--mmproj`; the multimodal JEV endpoints
+    // (`/v1/jev/image`, `/v1/jev/image_grouped`) refuse to operate
+    // without it. Held as `Option<Arc<dyn TensorSource>>` rather than
+    // a typed `VisionEncoder` because the encoder shape differs across
+    // qwen3vl-merge / Qwen2.5-Omni / gemma4 and the multimodal
+    // dispatch in `app::text::multimodal` already does the
+    // arch-specific opening for us.
+    let mmproj: Option<Arc<dyn TensorSource>> = options
+        .mmproj
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
     let inner = match &*arch {
         "qwen3" | "qwen3vl" => {
             let model = Qwen3Model::from_source(source.clone(), tokenizer.clone(), pool.clone())?;
@@ -728,6 +759,10 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         prefill_batch_size,
         context_length,
         inner,
+        source,
+        model_path: Some(model_path),
+        mmproj,
+        mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
     })
 }
 

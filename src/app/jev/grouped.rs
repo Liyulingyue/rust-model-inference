@@ -477,15 +477,19 @@ fn compute_grouped_jev_result(
     }
 }
 
-pub fn run_jev_grouped_decision(
+/// Same as [`run_jev_grouped_decision`] but returns the structured
+/// `Vec<JevGroupedResult>` instead of formatting output. The HTTP
+/// server's `/v1/jev/grouped` endpoint uses this; the CLI
+/// `--jev-multi` / `--jev-block` paths still go through the printer
+/// wrapper below.
+pub fn run_jev_grouped_decision_data(
     source: Arc<dyn TensorSource>,
     context: &str,
     questions: &[JevGroupedQuestionInput],
     mode: JevMode,
     n_threads_arg: usize,
     prefill_batch_size: usize,
-    output_json: bool,
-) -> Result<(), String> {
+) -> Result<Vec<JevGroupedResult>, String> {
     let prepared = prepare_jev_grouped_questions(questions, mode)?;
     let arch = source
         .metadata("general.architecture")
@@ -493,7 +497,6 @@ pub fn run_jev_grouped_decision(
         .unwrap_or_default();
     eprintln!("JEV grouped: arch = {:?}, mode = {:?}", arch, mode);
 
-    let t0 = Instant::now();
     let results = match &*arch {
         "qwen3" | "qwen3vl" => qwen3::run_jev_grouped_qwen3(
             source.clone(),
@@ -501,7 +504,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "qwen35" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
@@ -509,7 +512,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
             llama::run_jev_grouped_llama(
@@ -518,7 +521,7 @@ pub fn run_jev_grouped_decision(
                 &prepared,
                 n_threads_arg,
                 prefill_batch_size,
-                output_json,
+                false,
             )?
         }
         "gemma4" => gemma4::run_jev_grouped_gemma4(
@@ -527,7 +530,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "lfm2" => lfm2::run_jev_grouped_lfm2(
             source.clone(),
@@ -535,7 +538,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "lfm25" => lfm25::run_jev_grouped_lfm25(
             source.clone(),
@@ -543,7 +546,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "spark2_5" => spark::run_jev_grouped_spark(
             source.clone(),
@@ -551,7 +554,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
@@ -559,7 +562,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         "hunyuan-dense" => hunyuan::run_jev_grouped_hunyuan(
             source.clone(),
@@ -567,7 +570,7 @@ pub fn run_jev_grouped_decision(
             &prepared,
             n_threads_arg,
             prefill_batch_size,
-            output_json,
+            false,
         )?,
         other => {
             return Err(format!(
@@ -579,6 +582,28 @@ pub fn run_jev_grouped_decision(
             ));
         }
     };
+
+    Ok(results)
+}
+
+pub fn run_jev_grouped_decision(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevGroupedQuestionInput],
+    mode: JevMode,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    output_json: bool,
+) -> Result<(), String> {
+    let t0 = Instant::now();
+    let results = run_jev_grouped_decision_data(
+        source.clone(),
+        context,
+        questions,
+        mode,
+        n_threads_arg,
+        prefill_batch_size,
+    )?;
 
     if output_json {
         for r in &results {

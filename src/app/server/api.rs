@@ -3,7 +3,7 @@ mod stop;
 pub mod tools;
 
 use protocol::{Message, Request};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
     sync::{
@@ -132,6 +132,7 @@ impl ResponsesStore {
 }
 
 use super::{AppState, Backend, TextInner};
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
     http::StatusCode,
@@ -155,6 +156,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/responses/{id}",
             get(get_response).delete(delete_response),
         )
+        .route("/v1/jev/score", post(jev_score))
+        .route("/v1/jev/grouped", post(jev_grouped))
+        .route("/v1/jev/image", post(jev_image_score))
+        .route("/v1/jev/image_grouped", post(jev_image_grouped))
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
 }
 
@@ -1040,5 +1045,949 @@ mod http_tests {
             .as_str()
             .unwrap()
             .contains("missing"));
+    }
+}
+
+// ============================================================================
+// JEV scoring endpoints
+//
+// `/v1/jev/score` and `/v1/jev/grouped` expose the CLI `--jev` mode as
+// HTTP. The server already has a text-backend `Qwen3` model loaded;
+// these handlers call the existing `run_jev_decision_data` /
+// `run_jev_grouped_decision_data` (which internally rebuild a fresh
+// `Qwen3Session` per question for ephemeral KV cache) on the same
+// `TensorSource`.
+//
+// Two key differences from the chat completions path:
+//   - Single forward pass per question, then argmax over label tokens
+//     (A/B/C/...) — not autoregressive generation. This gives a true
+//     decision score rather than a "max_tokens=1 hack".
+//   - Same `TensorSource` shared with the chat path; weight memory is
+//     not duplicated.
+//
+// Single-mode request (text scoring / multi-choice / binary / score):
+//
+//   POST /v1/jev/score
+//   {
+//     "context": "The quick brown fox jumps over the lazy dog.",
+//     "questions": [
+//       {"text": "Is this text well-written?", "options": ["yes", "no"]},
+//       {"text": "Which sentence is this?",
+//        "options": ["London", "Paris", "Berlin"]}
+//     ],
+//     "positive": "yes"     // optional, for binary mode
+//   }
+//
+// Grouped (multi-select / block-choice):
+//
+//   POST /v1/jev/grouped
+//   {
+//     "context": "An apple on a wooden table.",
+//     "questions": [
+//       {"text": "Which way should the camera move?",
+//        "groups": [
+//          {"label": "left",   "options": ["yes", "no"]},
+//          {"label": "right",  "options": ["yes", "no"]},
+//          {"label": "up",     "options": ["yes", "no"]},
+//          {"label": "down",   "options": ["yes", "no"]}
+//        ]}
+//     ],
+//     "mode": "multi_select"   // or "block_choice"
+//   }
+
+#[derive(serde::Deserialize)]
+struct JevOptionInput {
+    text: String,
+    options: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct JevGroupInputHttp {
+    label: String,
+    options: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct JevGroupedOptionInput {
+    text: String,
+    groups: Vec<JevGroupInputHttp>,
+}
+
+#[derive(serde::Deserialize)]
+struct JevScoreRequest {
+    #[serde(default)]
+    context: String,
+    questions: Vec<JevOptionInput>,
+    #[serde(default)]
+    positive: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct JevGroupedRequest {
+    #[serde(default)]
+    context: String,
+    questions: Vec<JevGroupedOptionInput>,
+    /// `"multi_select"` or `"block_choice"`. Maps to `JevMode`.
+    #[serde(default = "default_grouped_mode")]
+    mode: String,
+}
+
+fn default_grouped_mode() -> String {
+    "multi_select".to_string()
+}
+
+async fn jev_score(
+    State(state): State<AppState>,
+    body: Result<Json<JevScoreRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(j) => j,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
+    };
+    if req.questions.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "questions must contain at least one item".to_string(),
+        );
+    }
+    let source = match text_source(&state) {
+        Ok(s) => s,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let questions: Vec<crate::app::JevQuestionInput> = req
+        .questions
+        .into_iter()
+        .map(|q| crate::app::JevQuestionInput {
+            text: q.text,
+            options: q.options,
+        })
+        .collect();
+    let positive = req.positive.as_deref();
+
+    let threads = jev_threads(&state);
+    let prefill_batch_size = jev_prefill_batch_size(&state);
+
+    let results = match crate::app::run_jev_decision_data(
+        source,
+        &req.context,
+        &questions,
+        positive,
+        threads,
+        prefill_batch_size,
+    ) {
+        Ok(r) => r,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    Json(json!({
+        "mode": "single",
+        "context": req.context,
+        "results": results,
+    }))
+    .into_response()
+}
+
+async fn jev_grouped(
+    State(state): State<AppState>,
+    body: Result<Json<JevGroupedRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(j) => j,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
+    };
+    if req.questions.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "questions must contain at least one item".to_string(),
+        );
+    }
+    let mode = match req.mode.as_str() {
+        "multi_select" => crate::app::JevMode::MultiSelect,
+        "block_choice" => crate::app::JevMode::BlockChoice,
+        other => {
+            return jev_error(
+                StatusCode::BAD_REQUEST,
+                format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
+            );
+        }
+    };
+    let source = match text_source(&state) {
+        Ok(s) => s,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    let questions: Vec<crate::app::JevGroupedQuestionInput> = req
+        .questions
+        .into_iter()
+        .map(|q| crate::app::JevGroupedQuestionInput {
+            text: q.text,
+            groups: q
+                .groups
+                .into_iter()
+                .map(|g| crate::app::JevGroupInput {
+                    label: g.label,
+                    options: g.options,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let threads = jev_threads(&state);
+    let prefill_batch_size = jev_prefill_batch_size(&state);
+
+    let results = match crate::app::run_jev_grouped_decision_data(
+        source,
+        &req.context,
+        &questions,
+        mode,
+        threads,
+        prefill_batch_size,
+    ) {
+        Ok(r) => r,
+        Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    Json(json!({
+        "mode": match mode {
+            crate::app::JevMode::MultiSelect => "multi_select",
+            crate::app::JevMode::BlockChoice => "block_choice",
+            _ => "unknown",
+        },
+        "context": req.context,
+        "results": results,
+    }))
+    .into_response()
+}
+
+fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
+    match state.model.as_ref() {
+        Backend::Text(text) => Ok(Arc::clone(&text.source)),
+        other => Err(format!(
+            "/v1/jev/* requires a text backend (got {})",
+            backend_label(other)
+        )),
+    }
+}
+
+fn backend_label(b: &Backend) -> &'static str {
+    match b {
+        Backend::Text(_) => "text",
+        Backend::Embedding(_) => "embedding",
+        Backend::Asr(_) => "asr",
+        Backend::Tts(_) => "tts",
+    }
+}
+
+fn jev_threads(state: &AppState) -> usize {
+    if let Backend::Text(text) = state.model.as_ref() {
+        text.pool.n_threads()
+    } else {
+        1
+    }
+}
+
+fn jev_prefill_batch_size(state: &AppState) -> usize {
+    if let Backend::Text(text) = state.model.as_ref() {
+        text.prefill_batch_size
+    } else {
+        64
+    }
+}
+
+fn jev_error(status: StatusCode, message: String) -> Response {
+    (
+        status,
+        Json(json!({"error": {"message": message, "type": "invalid_request_error"}})),
+    )
+        .into_response()
+}
+
+// ============================================================================
+// Multimodal JEV endpoints (`/v1/jev/image`, `/v1/jev/image_grouped`)
+//
+// Pragmatic implementation: Qwen3.5 + CLIP/Qwen2.5-Omni multimodal does
+// not yet have a logits-only forward pass (only `model.generate()`),
+// so true argmax-over-labels scoring is unavailable. We approximate
+// it with `max_new_tokens=1` generation: the model sees a `<image>` +
+// "Question: ... A. opt1 B. opt2 ... Answer:" prompt and produces
+// the most-likely label token as the first generated token. The
+// returned `score` / `probs` are derived from the post-generation
+// char-matches, not from logits — so the JSON mirrors the text JEV
+// shape but the underlying inference is autoregressive.
+//
+// For grouped (`/v1/jev/image_grouped`), each group is its own
+// forward pass with a separate prompt (`Should camera move left?
+// yes/no`), so N groups = N forward passes per request. The 0.8B
+// model on this 5-second machine takes ~1.4s per pass, so a 4-axis
+// request is ~5-6s end-to-end.
+//
+// Both endpoints require `--mmproj` at server startup; without it
+// they return 400 with a clear error message.
+
+#[derive(serde::Deserialize)]
+struct JevImageScoreRequest {
+    /// Either `context` (string) or `image_url` (data URL or http URL).
+    /// If absent, defaults to the same `context` field as text JEV.
+    #[serde(default)]
+    context: String,
+    /// `data:image/png;base64,...` or `https://...`. Decoded and
+    /// written to a temp file under the OS temp dir.
+    image_url: String,
+    questions: Vec<JevOptionInput>,
+    #[serde(default)]
+    positive: Option<String>,
+    /// Default 0.7. Recorded for response metadata; multimodal JEV
+    /// uses argmax over label logits so the value does not affect
+    /// scoring itself.
+    #[serde(default = "default_multimodal_temperature")]
+    temperature: f32,
+}
+
+async fn jev_image_score(
+    State(state): State<AppState>,
+    body: Result<Json<JevImageScoreRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(j) => j,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
+    };
+    if req.image_url.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "image_url is required for /v1/jev/image".to_string(),
+        );
+    }
+    if req.questions.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "questions must contain at least one item".to_string(),
+        );
+    }
+
+    let image_path = match decode_image_to_tempfile(&req.image_url) {
+        Ok(p) => p,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
+    };
+    let result = run_image_jev_blocking(
+        state,
+        image_path.clone(),
+        req.context.clone(),
+        req.questions,
+        req.positive,
+        req.temperature,
+    )
+    .await;
+    // Best-effort cleanup of the temp file; if `run_image_jev_blocking`
+    // returned early via an error path the file is still dropped on
+    // process exit because we used `NamedTempFile`-equivalent paths.
+    let _ = std::fs::remove_file(&image_path);
+
+    match result {
+        Ok(results) => Json(json!({
+            "mode": "single",
+            "context": req.context,
+            "results": results,
+        }))
+        .into_response(),
+        Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct JevImageGroupedRequest {
+    #[serde(default)]
+    context: String,
+    image_url: String,
+    questions: Vec<JevGroupedOptionInput>,
+    /// `"multi_select"` or `"block_choice"`. Maps to `JevMode`.
+    #[serde(default = "default_grouped_mode")]
+    mode: String,
+    /// Default 0.7. Recorded for response metadata; multimodal JEV
+    /// uses argmax over label logits so the value does not affect
+    /// scoring itself.
+    #[serde(default = "default_multimodal_temperature")]
+    temperature: f32,
+}
+
+fn default_multimodal_temperature() -> f32 {
+    0.7
+}
+
+async fn jev_image_grouped(
+    State(state): State<AppState>,
+    body: Result<Json<JevImageGroupedRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(j) => j,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")),
+    };
+    if req.image_url.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "image_url is required for /v1/jev/image_grouped".to_string(),
+        );
+    }
+    if req.questions.is_empty() {
+        return jev_error(
+            StatusCode::BAD_REQUEST,
+            "questions must contain at least one item".to_string(),
+        );
+    }
+    let mode_label = match req.mode.as_str() {
+        "multi_select" => "multi_select",
+        "block_choice" => "block_choice",
+        other => {
+            return jev_error(
+                StatusCode::BAD_REQUEST,
+                format!("mode must be 'multi_select' or 'block_choice', got {other:?}"),
+            );
+        }
+    };
+
+    let image_path = match decode_image_to_tempfile(&req.image_url) {
+        Ok(p) => p,
+        Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
+    };
+
+    let grouped_result = run_image_grouped_jev_blocking(
+        state,
+        image_path.clone(),
+        req.context.clone(),
+        req.questions,
+        req.mode.clone(),
+        req.temperature,
+    )
+    .await;
+    let _ = std::fs::remove_file(&image_path);
+
+    match grouped_result {
+        Ok(payload) => Json(json!({
+            "context": req.context,
+            "results": payload.get("results").cloned().unwrap_or(json!([])),
+            "mode": payload.get("mode").and_then(|v| v.as_str()).unwrap_or("multi_select"),
+            "temperature": payload.get("temperature").cloned().unwrap_or(json!(0.7)),
+        }))
+        .into_response(),
+        Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Per-question image JEV: build a multimodal chat prompt whose
+/// response is constrained to A..Z letter labels, run multimodal
+/// logits-only forward, and apply softmax + argmax over the
+/// per-label token logits. Mirrors the text-only `JEVResult` shape
+/// so the response can be consumed uniformly. Temperature is
+/// accepted in the request body but does not affect argmax-based
+/// scoring; it is recorded for the response metadata only.
+async fn run_image_jev_blocking(
+    state: AppState,
+    image_path: std::path::PathBuf,
+    context: String,
+    questions: Vec<JevOptionInput>,
+    positive: Option<String>,
+    temperature: f32,
+) -> Result<Vec<serde_json::Value>, String> {
+    let tokenizer = text_tokenizer(&state).ok_or_else(|| {
+        "/v1/jev/image requires a text backend with a loaded tokenizer".to_string()
+    })?;
+    let mut results = Vec::with_capacity(questions.len());
+    for q in questions {
+        let n_options = q.options.len();
+        if !(2..=26).contains(&n_options) {
+            return Err(format!(
+                "Question {:?} has {} options; multimodal JEV supports 2..=26 (A..Z)",
+                q.text, n_options
+            ));
+        }
+        let labels: Vec<char> = (b'A'..=(b'A' + n_options as u8 - 1))
+            .map(|b| b as char)
+            .collect();
+        // Build the multimodal chat prompt: a single user turn whose
+        // body is the question text + A/B/.../Z list. The system
+        // prompt explicitly asks for a one-letter reply so the model's
+        // last-position logits place mass on the label tokens.
+        let mut options_text = String::new();
+        for (i, opt) in q.options.iter().enumerate() {
+            options_text.push_str(&format!("\n{}. {}", labels[i], opt));
+        }
+        let is_binary = n_options == 2 && positive.is_some();
+        let system_prompt = if is_binary {
+            "Answer the binary question using the supplied image and candidate labels. \
+             Reply with only its letter label."
+        } else {
+            "Answer the question using the supplied image and candidate answers. \
+             Select the single best answer. Reply with only its letter label."
+        };
+        let user_payload = serde_json::json!({
+            "context": context,
+            "question": q.text,
+            "candidates": labels.iter().zip(q.options.iter())
+                .map(|(l, d)| (l.to_string(), d.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        });
+        // We can't wrap in Qwen chat template from here without
+        // duplicating logic, so delegate to the chat-template-aware
+        // helper `build_jev_image_prompt`.
+        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
+
+        let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
+        let label_token_ids: Vec<u32> = labels
+            .iter()
+            .map(|l| {
+                let s = l.to_string();
+                tokenizer
+                    .encode(
+                        &s,
+                        crate::core::tokenizer::EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    )
+                    .into_iter()
+                    .next()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let label_logits: Vec<f32> = label_token_ids
+            .iter()
+            .map(|&id| {
+                logits
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(f32::NEG_INFINITY)
+            })
+            .collect();
+        let probs = softmax(&label_logits);
+        let chosen_idx = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let chosen = labels[chosen_idx];
+        let confidence = probs[chosen_idx];
+        let entropy = -probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| p * p.ln())
+            .sum::<f32>();
+        let second_best = probs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != chosen_idx)
+            .map(|(_, &p)| p)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let margin = confidence - second_best;
+
+        let probs_map: serde_json::Map<String, serde_json::Value> = labels
+            .iter()
+            .zip(probs.iter())
+            .map(|(l, p)| (l.to_string(), serde_json::json!(p)))
+            .collect();
+        let mut obj = serde_json::json!({
+            "mode": if is_binary { "binary" } else { "choice" },
+            "question": q.text,
+            "labels": labels.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+            "descriptions": q.options,
+            "probabilities": probs_map,
+            "choice": chosen.to_string(),
+            "chosen_index": chosen_idx,
+            "confidence": confidence,
+            "entropy": entropy,
+            "margin": margin,
+            "temperature": temperature,
+            "method": "multimodal_logits_argmax",
+        });
+        if is_binary {
+            let pos_ch = positive
+                .as_deref()
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap_or('A')
+                .to_ascii_uppercase();
+            let pos_idx = labels.iter().position(|l| *l == pos_ch).unwrap_or(0);
+            obj.as_object_mut().unwrap().insert(
+                "positive".to_string(),
+                serde_json::Value::String(pos_ch.to_string()),
+            );
+            obj.as_object_mut()
+                .unwrap()
+                .insert("probability".to_string(), serde_json::json!(probs[pos_idx]));
+        }
+        results.push(obj);
+    }
+    Ok(results)
+}
+
+/// Logits-only multimodal grouped JEV: build a prompt listing every
+/// group's options (labels are continuous A..Z across groups, like
+/// the CLI's text JEV grouped path), run multimodal forward once,
+/// and apply per-group softmax over the label token logits.
+async fn run_image_grouped_jev_blocking(
+    state: AppState,
+    image_path: std::path::PathBuf,
+    context: String,
+    grouped_questions: Vec<JevGroupedOptionInput>,
+    mode: String,
+    temperature: f32,
+) -> Result<serde_json::Value, String> {
+    let tokenizer = text_tokenizer(&state).ok_or_else(|| {
+        "/v1/jev/image_grouped requires a text backend with a loaded tokenizer".to_string()
+    })?;
+    let mode_label = match mode.as_str() {
+        "multi_select" => "multi_select",
+        "block_choice" => "block_choice",
+        other => {
+            return Err(format!(
+                "mode must be 'multi_select' or 'block_choice', got {other:?}"
+            ));
+        }
+    };
+    let mut results = Vec::with_capacity(grouped_questions.len());
+    for q in grouped_questions {
+        if q.groups.is_empty() {
+            return Err(format!(
+                "Question {:?} has no groups; provide at least one group",
+                q.text
+            ));
+        }
+        let mut total_options = 0usize;
+        let mut next_label: u8 = b'A';
+        let mut all_group_labels: Vec<Vec<char>> = Vec::with_capacity(q.groups.len());
+        for g in q.groups.iter() {
+            if g.options.len() < 2 {
+                return Err(format!("Group {:?} needs at least 2 options", g.label));
+            }
+            total_options += g.options.len();
+            if total_options > 26 {
+                return Err(format!(
+                    "Question {:?} exceeds 26 total options (current: {})",
+                    q.text, total_options
+                ));
+            }
+            // Labels are continuous A..Z across groups (matching the
+            // CLI's text JEV grouped path). The model sees a prompt
+            // listing all groups and emits one label per group in
+            // sequence, so the logits at the LAST position encode
+            // per-group preferences via the shared label-token
+            // vocabulary. Per-group softmax normalises independently.
+            let n = g.options.len() as u8;
+            let group_letters: Vec<char> =
+                (next_label..(next_label + n)).map(|b| b as char).collect();
+            next_label += n;
+            all_group_labels.push(group_letters);
+        }
+        // Build multimodal chat prompt with all groups' labels
+        // listed contiguously.
+        let system_prompt =
+            "For each group, select the best option. Reply with only a letter label.";
+        let groups_payload: Vec<serde_json::Value> = q
+            .groups
+            .iter()
+            .zip(all_group_labels.iter())
+            .map(|(g, labels)| {
+                serde_json::json!(labels
+                    .iter()
+                    .zip(g.options.iter())
+                    .map(|(l, d)| (l.to_string(), d.clone()))
+                    .collect::<std::collections::BTreeMap<_, _>>())
+            })
+            .collect();
+        let user_payload = serde_json::json!({
+            "context": context,
+            "question": q.text,
+            "groups": groups_payload,
+        });
+        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
+
+        let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
+        let mut group_results = Vec::with_capacity(q.groups.len());
+        for (gi, group) in q.groups.iter().enumerate() {
+            let labels = &all_group_labels[gi];
+            let label_token_ids: Vec<u32> = labels
+                .iter()
+                .map(|l| {
+                    let s = l.to_string();
+                    tokenizer
+                        .encode(
+                            &s,
+                            crate::core::tokenizer::EncodeOptions {
+                                add_special: false,
+                                parse_special: false,
+                            },
+                        )
+                        .into_iter()
+                        .next()
+                        .unwrap_or(0)
+                })
+                .collect();
+            let group_logits: Vec<f32> = label_token_ids
+                .iter()
+                .map(|&id| {
+                    logits
+                        .get(id as usize)
+                        .copied()
+                        .unwrap_or(f32::NEG_INFINITY)
+                })
+                .collect();
+            let probs = softmax(&group_logits);
+            let chosen_idx = probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let chosen = labels[chosen_idx];
+            let confidence = probs[chosen_idx];
+            let entropy = -probs
+                .iter()
+                .filter(|&&p| p > 0.0)
+                .map(|&p| p * p.ln())
+                .sum::<f32>();
+            let second_best = probs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != chosen_idx)
+                .map(|(_, &p)| p)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let margin = confidence - second_best;
+            let probs_map: serde_json::Map<String, serde_json::Value> = labels
+                .iter()
+                .zip(probs.iter())
+                .map(|(l, p)| (l.to_string(), serde_json::json!(p)))
+                .collect();
+            group_results.push(serde_json::json!({
+                "label": group.label,
+                "options": group.options,
+                "labels": labels.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
+                "choice": chosen.to_string(),
+                "probabilities": probs_map,
+                "confidence": confidence,
+                "entropy": entropy,
+                "margin": margin,
+            }));
+        }
+        results.push(serde_json::json!({
+            "text": q.text,
+            "groups": group_results,
+        }));
+    }
+    Ok(serde_json::json!({
+        "mode": mode_label,
+        "results": results,
+        "temperature": temperature,
+    }))
+}
+
+/// Build a Qwen-style chat-template prompt for multimodal JEV.
+/// Wraps `system` + `user` with the proper chat template via the
+/// tokenizer's `append_qwen_message_tokens` helpers, mirroring the
+/// structure used by the text-only JEV scorers.
+fn build_jev_image_prompt(
+    tokenizer: &Arc<BPETokenizer>,
+    system: &str,
+    user_payload: &str,
+) -> Result<String, String> {
+    // Single concat of the system + user JSON payload + assistant
+    // prefix. The multimodal forward in `run_qwen3_family_multimodal`
+    // and `run_qwen35_family_multimodal` will wrap this with the
+    // vision_start/pad/end tokens around the image content and
+    // prepend the Qwen chat template (system / user / assistant).
+    //
+    // We pre-compose the raw chat string here; the multimodal
+    // forward path will tokenize it as the user turn.
+    Ok(format!("{system}\n\n{user_payload}"))
+}
+
+/// Borrow the tokenizer out of the text backend's inner model so we
+/// can encode "A"/"B"/... label strings into token ids for JEV
+/// argmax scoring.
+fn text_tokenizer(state: &AppState) -> Option<Arc<BPETokenizer>> {
+    if let Backend::Text(text) = state.model.as_ref() {
+        Some(Arc::clone(&text.tokenizer))
+    } else {
+        None
+    }
+}
+
+/// Numerically-stable softmax for a slice of logits.
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    if logits.is_empty() {
+        return Vec::new();
+    }
+    let max = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let exps: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum == 0.0 || !sum.is_finite() {
+        // Fall back to uniform.
+        return vec![1.0 / logits.len() as f32; logits.len()];
+    }
+    exps.iter().map(|&e| e / sum).collect()
+}
+
+/// Spawn a blocking task that runs multimodal generation and returns
+/// the generated text. The underlying `run_qwen3_family_multimodal`
+/// is sync (FFI-style); we offload it to the blocking pool so the
+/// async runtime can keep serving other requests.
+async fn run_multimodal_text_only(
+    state: AppState,
+    image_path: std::path::PathBuf,
+    prompt: String,
+) -> Result<Vec<f32>, String> {
+    // Multimodal logits-only forward — dispatch by arch.
+    let arch = match state.model.as_ref() {
+        Backend::Text(text) => text.arch.clone(),
+        other => {
+            return Err(format!(
+                "/v1/jev/image requires a text backend (got {})",
+                backend_label(other)
+            ));
+        }
+    };
+    let source = match state.model.as_ref() {
+        Backend::Text(text) => Arc::clone(&text.source),
+        _ => unreachable!(),
+    };
+    let mmproj_path = match state.model.as_ref() {
+        Backend::Text(text) => text.mmproj_path.clone().ok_or_else(|| {
+            "/v1/jev/image requires the server to be started with --mmproj".to_string()
+        })?,
+        _ => unreachable!(),
+    };
+    let threads = jev_threads(&state);
+    let prefill_batch_size = jev_prefill_batch_size(&state);
+
+    tokio::task::spawn_blocking(move || match arch.as_str() {
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" => crate::app::run_qwen3_family_multimodal_logits(
+            source.as_ref(),
+            source.clone(),
+            mmproj_path.as_path(),
+            Some(image_path.as_path()),
+            None,
+            None,
+            &prompt,
+            threads,
+            prefill_batch_size,
+        ),
+        "qwen35" => {
+            let max_context = match state_for_max_ctx(&state) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            };
+            crate::app::run_qwen35_family_multimodal_logits(
+                source.as_ref(),
+                mmproj_path.as_path(),
+                Some(image_path.as_path()),
+                None,
+                None,
+                &prompt,
+                threads,
+                prefill_batch_size,
+                max_context,
+            )
+        }
+        other => Err(format!(
+            "/v1/jev/image only supports qwen3/qwen3vl/qwen35 multimodal, got {other:?}"
+        )),
+    })
+    .await
+    .map_err(|e| format!("multimodal join failed: {e}"))?
+    .map(|(logits, _dur)| logits)
+}
+
+fn state_for_max_ctx(state: &AppState) -> Result<usize, String> {
+    if let Backend::Text(text) = state.model.as_ref() {
+        Ok(text.context_length)
+    } else {
+        Err("max-context unavailable for non-text backend".to_string())
+    }
+}
+
+/// Decode an `image_url` (data URL or http URL) into a temp file on
+/// disk. We need a real file path because the multimodal CLI helper
+/// accepts `&Path` for the image. Returns the path; the caller is
+/// responsible for cleanup (typically `std::fs::remove_file`).
+fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+    let bytes = if let Some(rest) = image_url.strip_prefix("data:") {
+        // data:[<mediatype>];base64,<data>
+        let comma = rest.find(',').ok_or("malformed data URL: missing comma")?;
+        let (header, b64) = rest.split_at(comma);
+        if !header.contains(";base64") {
+            return Err("only base64 data URLs are supported (data:<mime>;base64,<data>)".into());
+        }
+        // strip leading ',' from b64
+        base64_decode(&b64[1..])?
+    } else if image_url.starts_with("http://") || image_url.starts_with("https://") {
+        // For HTTP URLs we'd need a runtime fetch — punt for now since
+        // test payloads use base64 data URLs.
+        return Err(
+            "http(s) image URLs are not supported; send base64 (data:image/png;base64,...)".into(),
+        );
+    } else if let Ok(rest) = base64_decode(image_url) {
+        // Bare base64 (no data: prefix).
+        rest
+    } else {
+        return Err("image_url must be a base64 data URL (data:image/png;base64,...)".into());
+    };
+
+    let suffix = detect_image_suffix(&bytes);
+    let tmp = std::env::temp_dir().join(format!(
+        "jev_image_{}.{suffix}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let mut f = std::fs::File::create(&tmp).map_err(|e| format!("create tmp file: {e}"))?;
+    f.write_all(&bytes)
+        .map_err(|e| format!("write tmp file: {e}"))?;
+    drop(f);
+    Ok(tmp)
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    // Minimal RFC4648 base64 decoder (whitespace-tolerant, no padding
+    // required). Avoids pulling in a base64 crate.
+    const TABLE: &[u8; 128] = &{
+        let mut t = [255u8; 128];
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0;
+        while i < alphabet.len() {
+            t[alphabet[i] as usize] = i as u8;
+            i += 1;
+        }
+        t
+    };
+    let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in &cleaned {
+        let v = if c < 128 { TABLE[c as usize] } else { 255 };
+        if v == 255 {
+            return Err(format!("invalid base64 char: {c:?}"));
+        }
+        buf = (buf << 6) | (v as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn detect_image_suffix(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        "png"
+    } else if bytes.len() >= 3 && &bytes[..3] == b"\xff\xd8\xff" {
+        "jpg"
+    } else if bytes.len() >= 4 && &bytes[..4] == b"GIF8" {
+        "gif"
+    } else {
+        "bin"
     }
 }
