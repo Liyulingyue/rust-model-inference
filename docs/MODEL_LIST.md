@@ -7,6 +7,7 @@
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |
 | DreamX-Creator                | 7B + 5B Refiner | 首帧驱动音视频生成 | AMAP-ML/DreamX-Creator | https://modelscope.cn/models/GD-ML/DreamX-Creator | CPU 缩小全链路已核验 |
 | Fun-ASR                  | FunASR / SenseVoiceSmall / Paraformer  | ASR | FunASR llama.cpp @ `v0.2.6` | https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-GGUF / https://www.modelscope.cn/models/FunAudioLLM/fsmn-vad-GGUF / https://www.modelscope.cn/models/FunAudioLLM/SenseVoiceSmall-GGUF / https://www.modelscope.cn/models/FunAudioLLM/Paraformer-GGUF | √ |
+| Falcon-H1                  | 1.5B / 3B | 文本                 | llama.cpp @ `171e8846b`                | https://modelscope.cn/models/unsloth/Falcon-H1-1.5B-Instruct-GGUF / https://modelscope.cn/models/unsloth/Falcon-H1-3B-Instruct-GGUF | √ (Experimental；1.5B/3B 同型（仅 n_embd/n_layer/n_head/n_ff/ssm_* 变），零代码改动；连贯 ChatML/raw 生成 + 逐位 tokenizer 对齐；张量级 Q8 matmul 余 ulp 误差) |
 | Gemma-4                   | E2B / E4B / 12B          | 文本、图像、音频      | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
 | Granite-4.0                       | 1B           | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/granite-4.0-1b-GGUF             | √ |
 | Hy-MT2                       | 1.8B / 7B | 文本（翻译）                 | llama.cpp                   | https://www.modelscope.cn/models/fss618/Hy-MT2-1.8B-GGUF        | √ |
@@ -22,6 +23,7 @@
 | Qwen2.5-Omni                  | 3B           | 文本、音频、视频、图像（文本、音频输出）               | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF             | √ |
 | Qwen2.5-VL                    | 3B           | 文本、图像               |                                       | https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF             | √ |
 | Qwen3                         | 0.6B       | 文本                 | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF             | √ |
+| Qwen3-Reranker                 | 0.6B       | 跨编码器重排序（query/document 打分） | 复用 qwen3 trunk + `cls.output.weight` | https://modelscope.cn/models/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF | √ (Experimental；`qwen3_rerank` CLI + `rust-model-server --model ...` 自动检测 `pooling_type=4` 并开 `/v1/rerank` HTTP 路由（Cohere/Jina 兼容 schema）；ChatML prompt；巴黎/光合基准验证相关 vs 不相关文档区分 >1.5 数量级；`tests/qwen3_rerank.rs` 单元测试 + `tests/qwen3_rerank_http.rs` 起 axum + curl 集成测试 3/3 过) |
 | Qwen3-Embedding               | 0.6B       | Embedding            |                                       | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF             | √ |
 | Qwen3-ASR                     | 0.6B       | ASR                  | llama.cpp                                      |  https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF            | √ |
 | Qwen3-Omni-MoE                |            | 多模态               |                                       |              | 待核验 |
