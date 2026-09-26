@@ -1,7 +1,7 @@
 use super::generation::{sample_token, validate_gemma4_temperature};
 use super::vision::{
-    build_qwen3_media_positions, inject_qwen_media_embeddings, inject_vision_embeddings,
-    validate_single_qwen_media,
+    build_qwen3_media_positions, encode_qwen35_image, inject_qwen_media_embeddings,
+    inject_vision_embeddings, validate_single_qwen_media,
 };
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::app::media::{decode_image, normalize_resized_image};
@@ -1000,87 +1000,9 @@ pub(super) fn run_multimodal_with_video_ref(
                 scratch.projected.clone(),
             )
         } else {
-            let mut encoder = VisionEncoder35::from_source(mmproj_source.as_ref())
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-            encoder.precompute();
-            println!(
-                "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
-                encoder.config.n_layer,
-                encoder.config.n_embd,
-                encoder.config.image_size,
-                encoder.config.patch_size,
-                encoder.config.spatial_merge_size
-            );
-            let t_load = std::time::Instant::now();
-            let image = decode_image(image_path)?;
-            let t_load = t_load.elapsed();
-            let original_w = usize::try_from(image.width())
-                .map_err(|_| "Original image width does not fit usize")?;
-            let original_h = usize::try_from(image.height())
-                .map_err(|_| "Original image height does not fit usize")?;
-            let grid = qwen35_smart_resize(original_w, original_h, &encoder.config)?;
-            let t_preproc = std::time::Instant::now();
-            let venc_pool = Arc::new(ComputePool::new(resolve_thread_count(
-                n_threads_arg,
-                std::thread::available_parallelism()
-                    .map(|value| value.get())
-                    .unwrap_or(1),
-            )));
-            let pixels = normalize_resized_image(
-                &image,
-                grid.image_width(),
-                grid.image_height(),
-                &encoder.config.image_mean,
-                &encoder.config.image_std,
-            )?;
-            let t_preproc = t_preproc.elapsed();
-            println!(
-                "Image resized to {}x{} ({} vision tokens)",
-                grid.image_width(),
-                grid.image_height(),
-                grid.token_count()
-            );
-            let projection_dim = encoder.config.projection_dim;
-            let mut scratch = VisionScratchpad35::new(&encoder.config);
-            println!("Encoding image...");
-            let t_venc = std::time::Instant::now();
-            let encoded_grid = encoder.encode_image(
-                &pixels,
-                grid.image_width(),
-                grid.image_height(),
-                &mut scratch,
-                &venc_pool,
-            )?;
-            let t_venc = t_venc.elapsed();
-            if encoded_grid != grid {
-                return Err(format!(
-                    "Vision grid mismatch: preprocess={grid:?}, encoder={encoded_grid:?}"
-                ));
-            }
-            let projected_len = grid
-                .token_count()
-                .checked_mul(projection_dim)
-                .ok_or("Projected vision length overflow")?;
-            if scratch.projected.len() != projected_len {
-                return Err(format!(
-                    "Projected vision length mismatch: expected {projected_len}, got {}",
-                    scratch.projected.len()
-                ));
-            }
-            let t_img_total = t_img_start.elapsed();
-            eprintln!(
-                "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
-                t_img_total.as_secs_f64(),
-                t_load.as_secs_f64(), t_load.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
-                t_preproc.as_secs_f64(), t_preproc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
-                t_venc.as_secs_f64(), t_venc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
-            );
-            println!(
-                "Vision tokens: {} (dim={})",
-                grid.token_count(),
-                projection_dim
-            );
-            (Some(grid), scratch.projected.clone())
+            let (grid, projected) =
+                encode_qwen35_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
+            (Some(grid), projected)
         }
     } else {
         (None, Vec::new())

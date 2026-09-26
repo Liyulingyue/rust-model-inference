@@ -2,6 +2,7 @@ use super::types::{JevMode, JevQuestionInput, JevResult};
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,6 +19,28 @@ pub fn run_jev_decision_data(
     n_threads_arg: usize,
     prefill_batch_size: usize,
 ) -> Result<Vec<JevResult>, String> {
+    run_jev_decision_data_with_image(
+        source,
+        context,
+        questions,
+        positive,
+        n_threads_arg,
+        prefill_batch_size,
+        None,
+        None,
+    )
+}
+
+fn run_jev_decision_data_with_image(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevQuestionInput],
+    positive: Option<&str>,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+) -> Result<Vec<JevResult>, String> {
     let prepared = prepare_jev_questions(questions, positive)?;
 
     let arch = source
@@ -25,6 +48,9 @@ pub fn run_jev_decision_data(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     eprintln!("JEV: arch = {:?}", arch);
+    if image_path.is_some() && arch != "qwen35" {
+        return Err("--jev --image currently supports only Qwen3.5".into());
+    }
 
     match &*arch {
         "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(
@@ -42,6 +68,8 @@ pub fn run_jev_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            mmproj_path,
+            image_path,
         ),
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
             llama::run_jev_decision_llama(
@@ -127,15 +155,19 @@ pub fn run_jev_decision(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
 ) -> Result<(), String> {
     let t0 = Instant::now();
-    let results = run_jev_decision_data(
+    let results = run_jev_decision_data_with_image(
         source.clone(),
         context,
         questions,
         positive,
         n_threads_arg,
         prefill_batch_size,
+        mmproj_path,
+        image_path,
     )?;
 
     if output_json {
@@ -423,16 +455,16 @@ pub(crate) fn build_jev_prompt(
 }
 
 pub(crate) fn print_jev_question(q: &PreparedQuestion, labels: &[char]) {
-    println!(
+    eprintln!(
         "\n--- JEV question ({} candidates) ---",
         q.descriptions.len()
     );
-    println!("Q: {}", q.text);
+    eprintln!("Q: {}", q.text);
     for (i, desc) in q.descriptions.iter().enumerate() {
         if q.mode == JevMode::Score {
-            println!("  {}: {} = {}", labels[i], desc, q.values[i]);
+            eprintln!("  {}: {} = {}", labels[i], desc, q.values[i]);
         } else {
-            println!("  {}: {}", labels[i], desc);
+            eprintln!("  {}: {}", labels[i], desc);
         }
     }
 }
