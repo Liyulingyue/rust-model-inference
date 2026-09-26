@@ -64,16 +64,16 @@ pub struct JevGroupedQuestionInput {
     pub groups: Vec<JevGroupInput>,
 }
 
-pub(crate) struct PreparedGroup {
-    pub(crate) label: String,
-    pub(crate) descriptions: Vec<String>,
-    pub(crate) values: Vec<f32>,
+pub struct PreparedGroup {
+    pub label: String,
+    pub descriptions: Vec<String>,
+    pub values: Vec<f32>,
 }
 
-pub(crate) struct PreparedGroupedQuestion {
-    pub(crate) mode: JevMode,
-    pub(crate) text: String,
-    pub(crate) groups: Vec<PreparedGroup>,
+pub struct PreparedGroupedQuestion {
+    pub mode: JevMode,
+    pub text: String,
+    pub groups: Vec<PreparedGroup>,
 }
 
 #[derive(Clone, Debug)]

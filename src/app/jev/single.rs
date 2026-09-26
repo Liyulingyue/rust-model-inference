@@ -275,7 +275,7 @@ pub fn run_jev_decision(
     Ok(())
 }
 
-fn prepare_jev_questions(
+pub fn prepare_jev_questions(
     questions: &[JevQuestionInput],
     positive: Option<&str>,
 ) -> Result<Vec<PreparedQuestion>, String> {
@@ -377,7 +377,7 @@ pub(crate) fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn jev_system_prompt(mode: JevMode) -> &'static str {
+pub fn jev_system_prompt(mode: JevMode) -> &'static str {
     match mode {
         JevMode::Score => {
             "Score the situation using the supplied context and numeric candidates. \
@@ -410,7 +410,10 @@ pub(crate) fn jev_labels(q: &PreparedQuestion) -> Vec<char> {
 /// Renders the JEV JSON payload (context + question + candidates)
 /// for embedding in the per-arch chat template. Used by every
 /// per-arch `run_jev_decision_*` so the JSON shape stays in sync.
-pub(crate) fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
+pub fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
+    // Kept public so the HTTP multimodal endpoints render the same bytes as
+    // the CLI scorer; `serde_json::json!` keys in a different order, which
+    // shifts the token ids and moves the label logits.
     let labels = jev_labels(q);
     let mut payload = String::from("{\"context\": ");
     payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
@@ -577,12 +580,12 @@ pub(crate) fn compute_jev_result(
     }
 }
 
-pub(crate) struct PreparedQuestion {
-    pub(crate) mode: JevMode,
-    pub(crate) text: String,
-    pub(crate) descriptions: Vec<String>,
-    pub(crate) values: Vec<f32>,
-    pub(crate) positive_label: Option<char>,
+pub struct PreparedQuestion {
+    pub mode: JevMode,
+    pub text: String,
+    pub descriptions: Vec<String>,
+    pub values: Vec<f32>,
+    pub positive_label: Option<char>,
 }
 
 /// Per-architecture JEV scorer.

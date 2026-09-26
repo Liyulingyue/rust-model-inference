@@ -1545,35 +1545,35 @@ async fn run_image_jev_blocking(
         let labels: Vec<char> = (b'A'..=(b'A' + n_options as u8 - 1))
             .map(|b| b as char)
             .collect();
-        // Build the multimodal chat prompt: a single user turn whose
-        // body is the question text + A/B/.../Z list. The system
-        // prompt explicitly asks for a one-letter reply so the model's
-        // last-position logits place mass on the label tokens.
-        let mut options_text = String::new();
-        for (i, opt) in q.options.iter().enumerate() {
-            options_text.push_str(&format!("\n{}. {}", labels[i], opt));
-        }
-        let is_binary = n_options == 2 && positive.is_some();
-        let system_prompt = if is_binary {
-            "Answer the binary question using the supplied image and candidate labels. \
-             Reply with only its letter label."
-        } else {
-            "Answer the question using the supplied image and candidate answers. \
-             Select the single best answer. Reply with only its letter label."
-        };
-        let user_payload = serde_json::json!({
-            "context": context,
-            "question": q.text,
-            "candidates": labels.iter().zip(q.options.iter())
-                .map(|(l, d)| (l.to_string(), d.clone()))
-                .collect::<std::collections::BTreeMap<_, _>>(),
-        });
-        // We can't wrap in Qwen chat template from here without
-        // duplicating logic, so delegate to the chat-template-aware
-        // helper `build_jev_image_prompt`.
-        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
-
-        let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
+        // Reuse the CLI scorer's preparation verbatim: same mode
+        // selection, same system wording and, critically, the same payload
+        // bytes. `serde_json::json!` orders `candidates` alphabetically while
+        // `jev_payload_json` keeps insertion order, and that difference alone
+        // shifts the token ids enough to move the label logits.
+        let prepared = crate::app::prepare_jev_questions(
+            &[crate::app::JevQuestionInput {
+                text: q.text.clone(),
+                options: q.options.clone(),
+            }],
+            positive.as_deref(),
+        )?
+        .into_iter()
+        .next()
+        .ok_or("multimodal JEV produced no prepared question")?;
+        let system_prompt = crate::app::jev_system_prompt(prepared.mode);
+        // The user turn holds only the scored payload; `system_prompt` is
+        // forwarded separately so the multimodal helper renders it as its own
+        // system turn. Folding the two into one string here would put the
+        // instructions in the user turn, which is what this endpoint used to do
+        // and which scored worse than the CLI.
+        let user_payload = crate::app::jev_payload_json(&context, &prepared)?;
+        let logits = run_multimodal_text_only(
+            state.clone(),
+            image_path.clone(),
+            user_payload,
+            system_prompt.to_string(),
+        )
+        .await?;
         let label_token_ids: Vec<u32> = labels
             .iter()
             .map(|l| {
@@ -1628,7 +1628,11 @@ async fn run_image_jev_blocking(
             .map(|(l, p)| (l.to_string(), serde_json::json!(p)))
             .collect();
         let mut obj = serde_json::json!({
-            "mode": if is_binary { "binary" } else { "choice" },
+            "mode": if prepared.mode == crate::app::JevMode::Binary {
+                "binary"
+            } else {
+                "choice"
+            },
             "question": q.text,
             "labels": labels.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
             "descriptions": q.options,
@@ -1641,7 +1645,7 @@ async fn run_image_jev_blocking(
             "temperature": temperature,
             "method": "multimodal_logits_argmax",
         });
-        if is_binary {
+        if prepared.mode == crate::app::JevMode::Binary {
             let pos_ch = positive
                 .as_deref()
                 .unwrap()
@@ -1721,30 +1725,37 @@ async fn run_image_grouped_jev_blocking(
             next_label += n;
             all_group_labels.push(group_letters);
         }
-        // Build multimodal chat prompt with all groups' labels
-        // listed contiguously.
-        let system_prompt =
-            "For each group, select the best option. Reply with only a letter label.";
-        let groups_payload: Vec<serde_json::Value> = q
-            .groups
-            .iter()
-            .zip(all_group_labels.iter())
-            .map(|(g, labels)| {
-                serde_json::json!(labels
+        // Reuse the CLI grouped scorer's preparation and payload builder so
+        // both paths emit identical bytes; `serde_json::json!` here ordered the
+        // candidates alphabetically, which shifted the token ids versus the CLI.
+        let prepared = crate::app::prepare_jev_grouped_questions(&[
+            crate::app::JevGroupedQuestionInput {
+                text: q.text.clone(),
+                groups: q
+                    .groups
                     .iter()
-                    .zip(g.options.iter())
-                    .map(|(l, d)| (l.to_string(), d.clone()))
-                    .collect::<std::collections::BTreeMap<_, _>>())
-            })
-            .collect();
-        let user_payload = serde_json::json!({
-            "context": context,
-            "question": q.text,
-            "groups": groups_payload,
-        });
-        let prompt = build_jev_image_prompt(&tokenizer, system_prompt, &user_payload.to_string())?;
-
-        let logits = run_multimodal_text_only(state.clone(), image_path.clone(), prompt).await?;
+                    .map(|g| crate::app::JevGroupInput {
+                        label: g.label.clone(),
+                        options: g.options.clone(),
+                    })
+                    .collect(),
+            },
+        ], match mode_label {
+            "multi_select" => crate::app::JevMode::MultiSelect,
+            _ => crate::app::JevMode::BlockChoice,
+        })?
+        .into_iter()
+        .next()
+        .ok_or("multimodal grouped JEV produced no prepared question")?;
+        let system_prompt = crate::app::build_grouped_system().to_string();
+        let user_payload = crate::app::build_grouped_payload(&context, &prepared)?;
+        let logits = run_multimodal_text_only(
+            state.clone(),
+            image_path.clone(),
+            user_payload,
+            system_prompt,
+        )
+        .await?;
         let mut group_results = Vec::with_capacity(q.groups.len());
         for (gi, group) in q.groups.iter().enumerate() {
             let labels = &all_group_labels[gi];
@@ -1823,26 +1834,6 @@ async fn run_image_grouped_jev_blocking(
     }))
 }
 
-/// Build a Qwen-style chat-template prompt for multimodal JEV.
-/// Wraps `system` + `user` with the proper chat template via the
-/// tokenizer's `append_qwen_message_tokens` helpers, mirroring the
-/// structure used by the text-only JEV scorers.
-fn build_jev_image_prompt(
-    tokenizer: &Arc<BPETokenizer>,
-    system: &str,
-    user_payload: &str,
-) -> Result<String, String> {
-    // Single concat of the system + user JSON payload + assistant
-    // prefix. The multimodal forward in `run_qwen3_family_multimodal`
-    // and `run_qwen35_family_multimodal` will wrap this with the
-    // vision_start/pad/end tokens around the image content and
-    // prepend the Qwen chat template (system / user / assistant).
-    //
-    // We pre-compose the raw chat string here; the multimodal
-    // forward path will tokenize it as the user turn.
-    Ok(format!("{system}\n\n{user_payload}"))
-}
-
 /// Borrow the tokenizer out of the text backend's inner model so we
 /// can encode "A"/"B"/... label strings into token ids for JEV
 /// argmax scoring.
@@ -1877,6 +1868,10 @@ async fn run_multimodal_text_only(
     state: AppState,
     image_path: std::path::PathBuf,
     prompt: String,
+    // Rendered into the chat template's own system turn. Passing it
+    // separately keeps the JEV instructions out of the user content, matching
+    // the CLI scorer; folding it into `prompt` puts it in the user turn instead.
+    system_prompt: String,
 ) -> Result<Vec<f32>, String> {
     // Multimodal logits-only forward — dispatch by arch.
     let arch = match state.model.as_ref() {
@@ -1914,8 +1909,7 @@ async fn run_multimodal_text_only(
             &prompt,
             threads,
             prefill_batch_size,
-            // The HTTP multimodal endpoints keep Qwen's default system text.
-            None,
+            Some(system_prompt.as_str()),
         ),
         "qwen35" => {
             let max_context = match state_for_max_ctx(&state) {
@@ -1932,8 +1926,7 @@ async fn run_multimodal_text_only(
                 threads,
                 prefill_batch_size,
                 max_context,
-                // The HTTP multimodal endpoints keep Qwen's default system text.
-                None,
+                Some(system_prompt.as_str()),
             )
         }
         other => Err(format!(

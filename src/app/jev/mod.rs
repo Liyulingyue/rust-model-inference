@@ -20,8 +20,14 @@ pub(crate) mod grouped;
 pub(crate) mod single;
 pub(crate) mod types;
 
-pub use grouped::{run_jev_grouped_decision, run_jev_grouped_decision_data};
-pub use single::{image_supported_arch, run_jev_decision, run_jev_decision_data};
+pub use grouped::{
+    build_grouped_payload, build_grouped_system, prepare_jev_grouped_questions,
+    run_jev_grouped_decision, run_jev_grouped_decision_data,
+};
+pub use single::{
+    image_supported_arch, jev_payload_json, jev_system_prompt, prepare_jev_questions,
+    run_jev_decision, run_jev_decision_data
+};
 pub use types::{JevGroupInput, JevGroupedQuestionInput, JevMode, JevQuestionInput, JevResult};
 
 use crate::app::cli::CliOptions;
