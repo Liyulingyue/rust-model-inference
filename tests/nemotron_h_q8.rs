@@ -41,7 +41,7 @@ fn q8_rejects_missing_attention_projection() {
         inner: GGUFLoader::from_file(path).unwrap(),
         missing: "blk.12.attn_output.weight",
     });
-    let error = NemotronModel::from_source(source)
+    let error = NemotronModel::from_source(source, 1)
         .err()
         .expect("missing attention must fail");
     assert!(error.contains("layer 12 tensors do not match"), "{error}");
@@ -50,7 +50,7 @@ fn q8_rejects_missing_attention_projection() {
 #[test]
 fn q8_single_token_forward_is_finite() {
     let Some(source) = model_source() else { return };
-    let model = NemotronModel::from_source(source).unwrap();
+    let model = NemotronModel::from_source(source, 1).unwrap();
     let mut scratch = NemotronScratch::new(&model.config, 2);
     let logits = model.prefill(&[1], &mut scratch).unwrap();
     assert_eq!(logits.len(), model.config.vocab_size);
@@ -61,7 +61,7 @@ fn q8_single_token_forward_is_finite() {
 #[test]
 fn q8_chunked_and_incremental_logits_match() {
     let Some(source) = model_source() else { return };
-    let model = NemotronModel::from_source(source).unwrap();
+    let model = NemotronModel::from_source(source, 1).unwrap();
     let mut chunked = NemotronScratch::new(&model.config, 2);
     let mut incremental = NemotronScratch::new(&model.config, 2);
     let expected = model.prefill(&[1, 2], &mut chunked).unwrap();
@@ -82,7 +82,7 @@ fn q8_model_contract_loads() {
     assert_eq!(config.n_layer, 42);
     assert_eq!(config.n_ff, 12_544);
     assert_eq!(config.n_head_kv, 8);
-    let model = NemotronModel::from_source(source).unwrap();
+    let model = NemotronModel::from_source(source, 1).unwrap();
     assert_eq!(model.layers.len(), 42);
     let attention = &model.layers[12];
     assert_eq!(attention.wq.as_ref().unwrap().n_in, 3136);
@@ -107,7 +107,7 @@ fn q8_hello_greedy_matches_scalar_llama_cpp() {
         },
     );
     assert_eq!(ids, [1, 22177]);
-    let model = NemotronModel::from_source(source).unwrap();
+    let model = NemotronModel::from_source(source, 1).unwrap();
     let mut scratch = NemotronScratch::new(&model.config, ids.len() + 3);
     let mut logits = model.prefill(&ids, &mut scratch).unwrap();
     let hash = logits.iter().fold(14695981039346656037u64, |hash, value| {

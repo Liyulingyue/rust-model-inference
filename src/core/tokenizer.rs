@@ -403,6 +403,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "exaone" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "falcon-h1" => {
                     force_add_bos = true;
                     PreTokenizer::LlamaBpe
@@ -411,7 +412,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, k2-horizon, or minicpm5"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, or minicpm5"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
