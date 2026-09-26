@@ -194,6 +194,19 @@ impl KvCache {
             v: vec![0.0f32; size],
         })
     }
+
+    pub fn clear(&mut self) {
+        match self {
+            KvCache::F16(c) => {
+                c.k.fill(0);
+                c.v.fill(0);
+            }
+            KvCache::F32(c) => {
+                c.k.fill(0.0);
+                c.v.fill(0.0);
+            }
+        }
+    }
 }
 
 // =============================================================================

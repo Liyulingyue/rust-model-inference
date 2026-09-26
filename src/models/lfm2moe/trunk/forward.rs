@@ -662,7 +662,7 @@ fn dbg_out(step: usize, il: usize, label: &str, buf: &[f32]) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn forward_layer(
+pub(super) fn forward_layer(
     pool: &Arc<ComputePool>,
     lw: &Lfm2MoeLayerWeights<'_>,
     layer: usize,
