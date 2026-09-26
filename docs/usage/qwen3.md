@@ -269,6 +269,20 @@ rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
   --jev-option "悲观:2" --jev-option "极度悲观:1"
 ```
 
+Qwen3.5 图片 JEV 二选一评分：
+
+```bash
+cargo run --profile release-fast --bin rust-model-inference -- \
+  --model models/qwen3.5-0.8B/Qwen3.5-0.8B-UD-Q8_K_XL.gguf \
+  --mmproj models/qwen3.5-0.8B/mmproj-F16.gguf \
+  --image /绝对路径/天气照片.jpg \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
+  --jev-question "现在在下雨吗？" \
+  --jev-option "是的" --jev-option "没有" --jev-positive A
+```
+
+图片 JEV 当前支持 Qwen3.5 单题模式；图片参与预填充，结果是 A/B 标签的概率评分。
+
 Qwen3 使用的 chat template 是标准 `<|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n`，
 由 `src/prompt.rs::append_qwen_message_tokens` / `append_qwen_assistant_prefix`
 构造。Qwen3-VL 走同一个 chat template，只是文本 + 图像拼接；多模态路径

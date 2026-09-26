@@ -20,6 +20,8 @@ use image::{imageops::FilterType, RgbImage};
 use media::{mux_audio_atomic, write_wav_atomic, FfmpegVideoWriter};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::sync::Arc;
 use text::DreamXTextEncoder;
 use video_vae::Wan22Vae;

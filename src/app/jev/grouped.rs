@@ -149,11 +149,11 @@ pub fn prepare_jev_grouped_questions(
     Ok(per_question)
 }
 
-fn build_grouped_system() -> &'static str {
+pub fn build_grouped_system() -> &'static str {
     "For each group, select the best option. Reply with only a letter label."
 }
 
-fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Result<String, String> {
+pub fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Result<String, String> {
     let mut payload = String::from("{\"context\": ");
     payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
     payload.push_str(", \"question\": ");

@@ -8,19 +8,13 @@
 //!
 //! Learned operators use native Weight kernels; their reduction order may
 //! differ from the Torch bit fixtures retained below as diagnostics.
-
 use crate::ops::kernel::Weight;
-
 use super::weights::{linear_forward, load_weight};
-
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
 use crate::ops::relu_inplace;
-
-pub(crate) mod exp;
 mod log;
 mod melbank;
-
 const MEL_BINS: usize = 80;
 const SR_16K: usize = 16_000;
 const FRAME_LEN: usize = 400; // 25 ms
@@ -29,11 +23,9 @@ const FFT_SIZE: usize = 512;
 const PREEMPH: f32 = 0.97;
 const MEL_FLOOR: f32 = f32::EPSILON;
 const BN_EPS: f32 = 1e-5;
-
 // ---------------------------------------------------------------------------
 // Generic high-quality resampler (kaiser-windowed sinc, 64 taps, rolloff 0.95)
 // ---------------------------------------------------------------------------
-
 pub struct Resampler {
     kernel: Vec<f32>,
     ratio: f64, // orig / new (>= 1 assumed; downsampling path used for 48k->16k)
@@ -41,7 +33,6 @@ pub struct Resampler {
     phases: usize,
     stride: usize,
 }
-
 fn bessel_i0(x: f64) -> f64 {
     if x == 0.0 {
         return 1.0;
@@ -58,7 +49,6 @@ fn bessel_i0(x: f64) -> f64 {
     }
     sum
 }
-
 const TORCH_2_8_KAISER_64_HALVES: [u32; 138] = [
     0x29daef1a, 0xb2e1ec5e, 0x3391d3a8, 0xb40b9767, 0x345eba5b, 0xb497de38, 0x34ac02a0, 0xb48a8308,
     0xad3e08f2, 0x351e5f2e, 0xb5e35413, 0x366d87b5, 0xb6d6aba4, 0x37314b7a, 0xb78934bb, 0x37c9b276,
@@ -79,7 +69,6 @@ const TORCH_2_8_KAISER_64_HALVES: [u32; 138] = [
     0xbb15680b, 0x3bff9c5a, 0xbc7387f2, 0x3cc41e66, 0xbd12cc32, 0x3d556895, 0xbd9bc7e9, 0x3dee8e41,
     0xbe528cc9, 0x3f226897,
 ];
-
 const TORCH_2_8_KAISER_128_HALVES: [u32; 272] = [
     0x29daef1a, 0xb24d2243, 0x32c7ead4, 0xb32b6eee, 0x3386963e, 0xb3c56988, 0x3408c8e1, 0xb43430de,
     0x34623f68, 0xb48750c9, 0x34998906, 0xb4a39775, 0x34a028f7, 0xb488ce7e, 0x342c4be0, 0x2d3e08f2,
@@ -116,7 +105,6 @@ const TORCH_2_8_KAISER_128_HALVES: [u32; 272] = [
     0x3c68bd7c, 0xbc570572, 0x3c3bdeac, 0xbc16232a, 0x3bc8ff3f, 0xbb1543e9, 0xbb2646f1, 0x3c0b3831,
     0xbc82244f, 0x3cce287e, 0xbd182298, 0x3d5a919d, 0xbd9e0c32, 0x3df051d7, 0xbe531bdd, 0x3f2274ce,
 ];
-
 fn pinned_torch_2_8_kaiser_kernel(width: usize) -> Option<Vec<f32>> {
     let words: &[u32] = match width {
         64 => &TORCH_2_8_KAISER_64_HALVES,
@@ -132,7 +120,6 @@ fn pinned_torch_2_8_kaiser_kernel(width: usize) -> Option<Vec<f32>> {
     kernel.extend(words[half + 1..].iter().rev().copied().map(f32::from_bits));
     Some(kernel)
 }
-
 impl Resampler {
     /// Resampler driven by a stored FIR kernel (the checkpoint's
     /// `resample.kernel`, a 41-tap 3:1 lowpass): `out[n] = Σ_k kernel[k]·x[n·3 + k − 19]`.
@@ -151,13 +138,11 @@ impl Resampler {
             stride: 0,
         })
     }
-
     /// Build a kaiser-windowed sinc resampler (torchaudio-style:
     /// lowpass_filter_width=64, rolloff=0.95, sinc_interp_kaiser).
     pub fn new(orig: u32, new: u32) -> Self {
         Self::with_width(orig, new, 64)
     }
-
     pub(crate) fn with_width(orig: u32, new: u32, lowpass_filter_width: usize) -> Self {
         assert!(orig > 0 && new > 0 && lowpass_filter_width > 0);
         let mut a = orig;
@@ -212,7 +197,6 @@ impl Resampler {
             stride,
         }
     }
-
     pub fn resample(&self, input: &[f32]) -> Vec<f32> {
         if self.phases != 0 {
             let out_len = input
@@ -253,11 +237,9 @@ impl Resampler {
         out
     }
 }
-
 #[cfg(test)]
 mod resampler_tests {
     use super::Resampler;
-
     #[test]
     fn stored_kernel_resampler_matches_torch_offset_and_fma_contract() {
         let mut kernel = vec![0.0; 41];
@@ -271,7 +253,6 @@ mod resampler_tests {
         let output = Resampler::from_kernel(&kernel).unwrap().resample(&input);
         assert_eq!(output[0].to_bits(), 0x2880_0000);
     }
-
     #[test]
     fn stored_kernel_resampler_keeps_torch_ceil_length_tail() {
         let mut kernel = vec![0.0; 41];
@@ -281,7 +262,6 @@ mod resampler_tests {
             .resample(&[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(output, vec![1.0, 4.0]);
     }
-
     #[test]
     fn torchaudio_24k_to_48k_matches_f32_kernel_and_fma_contract() {
         let input: Vec<f32> = (0..80)
@@ -338,14 +318,12 @@ mod resampler_tests {
         }
     }
 }
-
 #[cfg(test)]
 mod fbank_tests {
     use super::{
         kaldi_fbank, log::torch28_log, mel_matmul, melbank::torch28_mel_filterbank, povey_window,
         prepare_kaldi_frame, torch28_arm_mean_400, torch28_column_mean, torch28_rfft_power_512,
     };
-
     fn reduction_fixture() -> [f32; 400] {
         let mut state = 1u32;
         std::array::from_fn(|_| {
@@ -353,7 +331,6 @@ mod fbank_tests {
             f32::from_bits((state & 0x8000_0000) | 0x3f00_0000 | (state & 0x007f_ffff))
         })
     }
-
     #[test]
     fn torch28_arm_mean_matches_sumkernel_reduction_order() {
         let frame = reduction_fixture();
@@ -372,7 +349,6 @@ mod fbank_tests {
             ]
         );
     }
-
     #[test]
     fn kaldi_frame_removes_dc_before_replicated_left_preemphasis() {
         let frame = prepare_kaldi_frame(&reduction_fixture());
@@ -389,7 +365,6 @@ mod fbank_tests {
             ]
         );
     }
-
     #[test]
     fn povey_window_matches_torch28_float32_words() {
         let window = povey_window();
@@ -408,7 +383,6 @@ mod fbank_tests {
             ]
         );
     }
-
     #[test]
     fn torch28_rfft_matches_pocketfft_real_imag_and_power() {
         let mut input = [0.0f32; 512];
@@ -465,7 +439,6 @@ mod fbank_tests {
         assert_eq!(imag[256].to_bits(), 0x0000_0000);
         assert_eq!(power[256].to_bits(), 0x2e17_be00);
     }
-
     #[test]
     #[ignore = "requires DOTS_FBANK_INPUT sidecar"]
     fn real_input_mel_matmul_matches_pinned_oracle_bitwise() {
@@ -573,7 +546,6 @@ mod fbank_tests {
             expected
         );
     }
-
     #[test]
     #[ignore = "requires DOTS_FBANK_MATMUL, DOTS_FBANK_CLAMP, and DOTS_FBANK_LOG sidecars"]
     fn clamp_and_log_match_pinned_torch28_arm_words() {
@@ -605,7 +577,6 @@ mod fbank_tests {
             );
         }
     }
-
     #[test]
     #[ignore = "requires DOTS_FBANK_LOG, DOTS_FBANK_MEAN, and DOTS_FBANK_FINAL sidecars"]
     fn column_mean_and_centering_match_pinned_torch28_arm_words() {
@@ -633,7 +604,6 @@ mod fbank_tests {
             assert_eq!(actual.to_bits(), expected.to_bits(), "fbank[{index}]");
         }
     }
-
     #[test]
     #[ignore = "requires DOTS_FBANK_INPUT and DOTS_FBANK_ORACLE sidecars"]
     fn real_input_fbank_matches_pinned_oracle_bitwise() {
@@ -659,7 +629,6 @@ mod fbank_tests {
         }
     }
 }
-
 #[cfg(test)]
 mod campplus_tests {
     use super::{
@@ -668,7 +637,6 @@ mod campplus_tests {
         fcm_input_layout, fcm_output_layout, torch28_batch_norm_terms, torch28_contiguous_mean,
         transit_forward,
     };
-
     fn f32_weight(values: Vec<f32>, n_in: usize) -> crate::ops::kernel::Weight<'static> {
         let n_out = values.len() / n_in;
         let mut weight =
@@ -681,7 +649,6 @@ mod campplus_tests {
         weight.n_out = n_out;
         weight
     }
-
     #[test]
     fn fcm_layouts_bridge_public_time_major_and_internal_channel_major_buffers() {
         let public = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // [T=3, F=2]
@@ -689,7 +656,6 @@ mod campplus_tests {
             fcm_input_layout(&public, 3, 2),
             [1.0, 3.0, 5.0, 2.0, 4.0, 6.0]
         );
-
         // [C=2, H=2, T=3] -> [T=3, C*H=4]
         let internal = [
             0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 100.0, 101.0, 102.0, 110.0, 111.0, 112.0,
@@ -699,7 +665,6 @@ mod campplus_tests {
             [0.0, 10.0, 100.0, 110.0, 1.0, 11.0, 101.0, 111.0, 2.0, 12.0, 102.0, 112.0]
         );
     }
-
     fn fma_fixture() -> (Vec<f32>, Vec<f32>) {
         let pairs = [
             (0x3f1f_f38a, 0x3f5e_5b40),
@@ -717,7 +682,6 @@ mod campplus_tests {
         }
         (weight, input)
     }
-
     #[test]
     fn regular_and_stride_conv2d_match_scalar_convolution() {
         let (weight, input) = fma_fixture();
@@ -732,7 +696,6 @@ mod campplus_tests {
         assert!((regular[1] as f64 - expected).abs() < 1e-6);
         assert_eq!(regular, stride);
     }
-
     #[test]
     fn batch_norm_fuses_beta_but_not_final_affine() {
         let input = f32::from_bits(0x3e03_f690);
@@ -746,7 +709,6 @@ mod campplus_tests {
         assert_eq!((input * alpha + beta).to_bits(), 0x3eb1_8fce);
         assert_ne!(input.mul_add(alpha, beta).to_bits(), 0x3eb1_8fce);
     }
-
     #[test]
     fn tdnn_conv1d_matches_scalar_convolution() {
         let pairs = [
@@ -770,7 +732,6 @@ mod campplus_tests {
         let actual = conv1d_time_major(&weight, &input, 3, 1, 2, 1, 3, 1, 0, 1);
         assert!((actual[0] as f64 - expected).abs() < 1e-6);
     }
-
     #[test]
     fn q8_speaker_convolutions_preserve_channel_tap_order_and_strides() {
         use crate::core::tensor::GGMLType;
@@ -819,7 +780,6 @@ mod campplus_tests {
             }
         }
         assert_eq!(actual, expected);
-
         // The same 32-wide rows are [output=2, input=16, kernel=2].
         let input: Vec<f32> = (0..35 * 16)
             .map(|i| ((i * 5 % 3) as f32 - 1.0) * 127.0)
@@ -841,7 +801,6 @@ mod campplus_tests {
         }
         assert_eq!(actual, expected);
     }
-
     #[test]
     fn torch28_contiguous_mean_and_cam_segments_keep_reduction_order() {
         let mut state = 1u32;
@@ -855,7 +814,6 @@ mod campplus_tests {
         assert_eq!(context[100].to_bits(), 0xbc5c_6872);
         assert_eq!(context[200].to_bits(), 0xbd2d_a2b7);
     }
-
     #[test]
     #[ignore = "requires DOTS_CAMPLUS_OUT_NONLINEAR and DOTS_CAMPLUS_STATS sidecars"]
     fn real_input_stats_pooling_matches_pinned_oracle_bitwise() {
@@ -881,12 +839,10 @@ mod campplus_tests {
             );
         }
     }
-
     #[test]
     #[ignore = "requires DOTS_CAMPLUS_* model and dense checkpoint sidecars"]
     fn real_input_dense_projection_matches_pinned_oracle_bitwise() {
         use crate::{open_model_source, ComponentRole};
-
         let read = |name: &str| {
             std::fs::read(std::env::var_os(name).unwrap())
                 .unwrap()
@@ -911,12 +867,10 @@ mod campplus_tests {
             );
         }
     }
-
     #[test]
     #[ignore = "requires DOTS_CAMPLUS_* dense block checkpoint sidecars"]
     fn real_input_dense_blocks_and_transits_match_pinned_oracle_bitwise() {
         use crate::{open_model_source, ComponentRole};
-
         let read = |name: &str| {
             std::fs::read(std::env::var_os(name).unwrap())
                 .unwrap()
@@ -969,12 +923,10 @@ mod campplus_tests {
             x = next;
         }
     }
-
     #[test]
     #[ignore = "requires DOTS_CAMPLUS_* model and checkpoint sidecars"]
     fn real_input_fcm_and_tdnn_match_pinned_oracle_bitwise() {
         use crate::{open_model_source, ComponentRole};
-
         let read = |name: &str| {
             std::fs::read(std::env::var_os(name).unwrap())
                 .unwrap()
@@ -1063,11 +1015,9 @@ mod campplus_tests {
         }
     }
 }
-
 // ---------------------------------------------------------------------------
 // Kaldi-style fbank
 // ---------------------------------------------------------------------------
-
 fn mel_matmul(power: &[f32], filterbank: &[f32], frames: usize) -> Vec<f32> {
     const FFT_BINS: usize = FFT_SIZE / 2 + 1;
     debug_assert_eq!(power.len(), frames * FFT_BINS);
@@ -1086,7 +1036,6 @@ fn mel_matmul(power: &[f32], filterbank: &[f32], frames: usize) -> Vec<f32> {
     }
     output
 }
-
 fn torch28_column_mean(input: &[f32], rows: usize, columns: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), rows * columns);
     let mut means = vec![0.0f32; columns];
@@ -1115,12 +1064,10 @@ fn torch28_column_mean(input: &[f32], rows: usize, columns: usize) -> Vec<f32> {
     }
     means
 }
-
 fn torch28_contiguous_sum(input: &[f32]) -> f32 {
     const LANES: usize = 4;
     const ILP: usize = 4;
     const LEVELS: usize = 4;
-
     let vector_count = input.len() / LANES;
     let group_count = vector_count / ILP;
     let level_power = 4usize.max(
@@ -1186,11 +1133,9 @@ fn torch28_contiguous_sum(input: &[f32]) -> f32 {
     }
     sum
 }
-
 fn torch28_contiguous_mean(input: &[f32]) -> f32 {
     torch28_contiguous_sum(input) / input.len() as f32
 }
-
 fn cam_context(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), time * channels);
     let segment_count = time.div_ceil(100);
@@ -1221,7 +1166,6 @@ fn cam_context(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
     }
     context
 }
-
 /// In-place complex FFT over a `[re0, im0, re1, im1, ...]` buffer
 /// (radix-2, iterative Cooley-Tukey).
 pub fn fft_complex(re_im: &mut [f64]) {
@@ -1267,7 +1211,6 @@ pub fn fft_complex(re_im: &mut [f64]) {
         len <<= 1;
     }
 }
-
 const TORCH28_POVEY_WINDOW: [u32; FRAME_LEN] = [
     0x00000000, 0x398b01c2, 0x3a61d13c, 0x3ae0ed7f, 0x3b376219, 0x3b85f871, 0x3bb69cf0, 0x3bed450d,
     0x3c14d3ee, 0x3c35c461, 0x3c595962, 0x3c7f7c2a, 0x3c940c1c, 0x3ca98d87, 0x3cc039e2, 0x3cd8097f,
@@ -1320,11 +1263,9 @@ const TORCH28_POVEY_WINDOW: [u32; FRAME_LEN] = [
     0x3cd80999, 0x3cc039e2, 0x3ca98da2, 0x3c940c1c, 0x3c7f7c63, 0x3c595962, 0x3c35c49d, 0x3c14d42d,
     0x3bed458f, 0x3bb69d78, 0x3b85f900, 0x3b376219, 0x3ae0ed7f, 0x3a61d13c, 0x398b01c2, 0x00000000,
 ];
-
 fn povey_window() -> [f32; FRAME_LEN] {
     TORCH28_POVEY_WINDOW.map(f32::from_bits)
 }
-
 fn pocketfft_twiddle(index: usize) -> (f32, f32) {
     fn calculate(mut index: usize) -> (f64, f64) {
         const N: usize = FFT_SIZE;
@@ -1364,7 +1305,6 @@ fn pocketfft_twiddle(index: usize) -> (f32, f32) {
         let value = (2 * N - index) as f64 * angle;
         (-value.cos(), -value.sin())
     }
-
     const SHIFT: usize = 5;
     const MASK: usize = (1 << SHIFT) - 1;
     let mirrored = 2 * index > FFT_SIZE;
@@ -1384,7 +1324,6 @@ fn pocketfft_twiddle(index: usize) -> (f32, f32) {
     let imag = (x1r * x2i + x1i * x2r) as f32;
     (real, if mirrored { -imag } else { imag })
 }
-
 fn pocketfft_radf4(ido: usize, l1: usize, twiddle_stride: usize, cc: &[f32], ch: &mut [f32]) {
     let cc_index = |a: usize, b: usize, c: usize| a + ido * (b + l1 * c);
     let ch_index = |a: usize, b: usize, c: usize| a + ido * (b + 4 * c);
@@ -1447,7 +1386,6 @@ fn pocketfft_radf4(ido: usize, l1: usize, twiddle_stride: usize, cc: &[f32], ch:
         }
     }
 }
-
 fn pocketfft_radf2(ido: usize, l1: usize, twiddle_stride: usize, cc: &[f32], ch: &mut [f32]) {
     let cc_index = |a: usize, b: usize, c: usize| a + ido * (b + l1 * c);
     let ch_index = |a: usize, b: usize, c: usize| a + ido * (b + 2 * c);
@@ -1483,7 +1421,6 @@ fn pocketfft_radf2(ido: usize, l1: usize, twiddle_stride: usize, cc: &[f32], ch:
         }
     }
 }
-
 fn torch28_rfft_power_512(input: &[f32; FFT_SIZE]) -> ([f32; 257], [f32; 257], [f32; 257]) {
     let mut current = *input;
     let mut scratch = [0.0f32; FFT_SIZE];
@@ -1507,7 +1444,6 @@ fn torch28_rfft_power_512(input: &[f32; FFT_SIZE]) -> ([f32; 257], [f32; 257], [
     }
     (real, imag, power)
 }
-
 /// Torch 2.8 ARM64 `sum_out(...).div_(400)` reduction order for one Kaldi frame.
 fn torch28_arm_mean_400(frame: &[f32; FRAME_LEN]) -> f32 {
     let mut partial = [[0.0f32; 4]; 4];
@@ -1546,7 +1482,6 @@ fn torch28_arm_mean_400(frame: &[f32; FRAME_LEN]) -> f32 {
     }
     (((partial[0][0] + partial[0][1]) + partial[0][2]) + partial[0][3]) / FRAME_LEN as f32
 }
-
 fn prepare_kaldi_frame(frame: &[f32; FRAME_LEN]) -> [f32; FRAME_LEN] {
     let mean = torch28_arm_mean_400(frame);
     let mut centered = std::array::from_fn(|index| frame[index] - mean);
@@ -1556,7 +1491,6 @@ fn prepare_kaldi_frame(frame: &[f32; FRAME_LEN]) -> [f32; FRAME_LEN] {
     centered[0] -= PREEMPH * centered[0];
     centered
 }
-
 /// 16 kHz waveform → `[frames, 80]` log-mel (mean-normalized).
 pub fn kaldi_fbank(waveform: &[f32]) -> Vec<f32> {
     let n = waveform.len();
@@ -1591,18 +1525,15 @@ pub fn kaldi_fbank(waveform: &[f32]) -> Vec<f32> {
     }
     features
 }
-
 // ---------------------------------------------------------------------------
 // CAM++ x-vector
 // ---------------------------------------------------------------------------
-
 pub struct BatchNorm {
     pub weight: Vec<f32>,
     pub bias: Vec<f32>,
     pub running_mean: Vec<f32>,
     pub running_var: Vec<f32>,
 }
-
 impl BatchNorm {
     /// BatchNorm with affine=False (only normalization).
     fn apply_no_affine(&self, x: &mut [f32]) {
@@ -1612,7 +1543,6 @@ impl BatchNorm {
         }
     }
 }
-
 pub struct CamPlus<'a> {
     // FCM stem (fbank [80, T] → [320, T])
     pub head_conv1: Weight<'a>, // [32,1,3,3]
@@ -1633,7 +1563,6 @@ pub struct CamPlus<'a> {
     pub dense_w: Weight<'a>, // [512,1024,1]
     pub dense_bn: BatchNorm,
 }
-
 pub struct ResBlock2d<'a> {
     pub conv1: Weight<'a>,
     pub bn1: BatchNorm,
@@ -1642,11 +1571,9 @@ pub struct ResBlock2d<'a> {
     pub shortcut: Option<(Weight<'a>, BatchNorm)>, // stride != 1
     pub stride: usize,
 }
-
 pub struct DenseBlock<'a> {
     pub layers: Vec<DenseLayer<'a>>,
 }
-
 pub struct DenseLayer<'a> {
     pub nl1: BatchNorm,        // bn(in) + relu
     pub linear1: Weight<'a>,   // [128, in, 1]
@@ -1658,12 +1585,10 @@ pub struct DenseLayer<'a> {
     pub cam_lin2: Weight<'a>, // [32, 64, 1]
     pub cam_lin2_bias: Vec<f32>,
 }
-
 pub struct Transit<'a> {
     pub nl: BatchNorm,      // bn(in) + relu
     pub linear: Weight<'a>, // [out, in, 1]
 }
-
 impl<'a> CamPlus<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         let s = |name: &str, dims: &[u64]| -> Result<Vec<f32>, String> {
@@ -1718,7 +1643,6 @@ impl<'a> CamPlus<'a> {
             &[5, 320, 128],
         )?;
         let tdnn_bn = bn("dotstts.speaker.xvector.tdnn.nonlinear.batchnorm", 128)?;
-
         let mut blocks = Vec::new();
         let mut transits = Vec::new();
         let mut channels = 128usize;
@@ -1818,7 +1742,6 @@ impl<'a> CamPlus<'a> {
             dense_bn,
         })
     }
-
     /// Encode mel frames `[frames, 80]` → 512-dim x-vector.
     pub fn encode(&self, mel: &[f32]) -> Result<Vec<f32>, String> {
         let frames = mel.len() / MEL_BINS;
@@ -1868,12 +1791,10 @@ impl<'a> CamPlus<'a> {
         // dense: [1024, 1] → 512 + batchnorm_ (affine=False)
         Ok(self.dense_projection(&stats))
     }
-
     fn dense_projection(&self, stats: &[f32]) -> Vec<f32> {
         debug_assert_eq!(stats.len(), 1024);
         let mut dense = vec![0.0f32; 512];
         linear_forward(&self.dense_w, None, stats, 1024, 512, &mut dense);
-
         let mut final_output = vec![0.0f32; 512];
         for channel in 0..512 {
             let alpha = 1.0 / (self.dense_bn.running_var[channel] + BN_EPS).sqrt();
@@ -1882,7 +1803,6 @@ impl<'a> CamPlus<'a> {
         }
         final_output
     }
-
     fn fcm(&self, mel: &[f32], frames: usize) -> Vec<f32> {
         // conv2d [1→32] on [80, T]
         let input = fcm_input_layout(mel, frames, MEL_BINS);
@@ -1926,7 +1846,6 @@ impl<'a> CamPlus<'a> {
         // Natural FCM [32,10,T] storage -> Rust TDNN [T,320] storage.
         fcm_output_layout(&y, frames, 32, 10)
     }
-
     fn resblock(
         &self,
         block: &ResBlock2d,
@@ -1986,7 +1905,6 @@ impl<'a> CamPlus<'a> {
         relu_inplace(&mut out);
         out
     }
-
     fn apply_bn2d(&self, bn: &BatchNorm, x: &mut [f32], channels: usize, h: usize, t: usize) {
         for c in 0..channels {
             let (scale, bias) = torch28_batch_norm_terms(
@@ -2001,7 +1919,6 @@ impl<'a> CamPlus<'a> {
             }
         }
     }
-
     fn tdnn(&self, x: &[f32], t: usize, t2: usize) -> Vec<f32> {
         let mut out = conv1d_time_major(&self.tdnn_w, x, t, t2, 320, 128, 5, 2, 2, 1);
         for c in 0..128 {
@@ -2022,7 +1939,6 @@ impl<'a> CamPlus<'a> {
         out
     }
 }
-
 fn cam_stats_pooling(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), time * channels);
     let mut stats = vec![0.0f32; channels * 2];
@@ -2043,11 +1959,9 @@ fn cam_stats_pooling(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
     }
     stats
 }
-
 fn conv1d_length(t: usize, kernel: usize, stride: usize, pad: usize) -> usize {
     (t + 2 * pad).saturating_sub(kernel) / stride + 1
 }
-
 fn fcm_input_layout(input: &[f32], frames: usize, features: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), frames * features);
     let mut output = vec![0.0f32; input.len()];
@@ -2058,7 +1972,6 @@ fn fcm_input_layout(input: &[f32], frames: usize, features: usize) -> Vec<f32> {
     }
     output
 }
-
 fn fcm_output_layout(input: &[f32], frames: usize, channels: usize, height: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), frames * channels * height);
     let mut output = vec![0.0f32; input.len()];
@@ -2072,7 +1985,6 @@ fn fcm_output_layout(input: &[f32], frames: usize, channels: usize, height: usiz
     }
     output
 }
-
 fn torch28_batch_norm_terms(
     weight: f32,
     bias: f32,
@@ -2084,7 +1996,6 @@ fn torch28_batch_norm_terms(
     let beta = (-running_mean).mul_add(alpha, bias);
     (alpha, beta)
 }
-
 #[allow(clippy::too_many_arguments)]
 fn conv1d_time_major(
     weight: &Weight<'_>,
@@ -2132,7 +2043,6 @@ fn conv1d_time_major(
     }
     output
 }
-
 /// Conv2d over [channels, height, time], with symmetric one-cell padding.
 fn conv2d_forward(
     weight: &Weight<'_>,
@@ -2149,7 +2059,6 @@ fn conv2d_forward(
 ) -> Vec<f32> {
     conv2d_forward_stride(weight, bias, x, t, h, in_ch, out_ch, kw, kh, sh, sw, 1, 1)
 }
-
 /// GGUF dimensions are [kernel_width, kernel_height, input, output].
 fn conv2d_forward_stride(
     weight: &Weight<'_>,
@@ -2213,7 +2122,6 @@ fn conv2d_forward_stride(
     }
     output
 }
-
 /// One dense-layer step: [in, T] → [in+32, T] (concat), with the CAM
 /// attention gate (reference `CAMDenseTDNNLayer` + `CAMLayer`).
 struct DenseLayerFront {
@@ -2221,7 +2129,6 @@ struct DenseLayerFront {
     local: Vec<f32>,
     context: Vec<f32>,
 }
-
 struct CamGate {
     linear1: Vec<f32>,
     relu1: Vec<f32>,
@@ -2229,7 +2136,6 @@ struct CamGate {
     sigmoid: Vec<f32>,
     gated: Vec<f32>,
 }
-
 fn cam_gate(layer: &DenseLayer, local: &[f32], context: &[f32], time: usize) -> CamGate {
     let mut linear1 = cam_gate_linear(
         &layer.cam_lin1,
@@ -2252,7 +2158,7 @@ fn cam_gate(layer: &DenseLayer, local: &[f32], context: &[f32], time: usize) -> 
     );
     let mut sigmoid = linear2.clone();
     for value in &mut sigmoid {
-        *value = exp::torch28_sigmoid(*value);
+        *value = crate::ops::math::torch28_sigmoid(*value);
     }
     let mut gated = local.to_vec();
     for channel in 0..32 {
@@ -2268,7 +2174,6 @@ fn cam_gate(layer: &DenseLayer, local: &[f32], context: &[f32], time: usize) -> 
         gated,
     }
 }
-
 fn dense_layer_front(layer: &DenseLayer, x: &[f32], t: usize, in_ch: usize) -> DenseLayerFront {
     // nonlinear1 (bn(in) + relu)
     let mut h = vec![0.0f32; in_ch * t];
@@ -2310,7 +2215,6 @@ fn dense_layer_front(layer: &DenseLayer, x: &[f32], t: usize, in_ch: usize) -> D
         context,
     }
 }
-
 fn dense_layer_forward(layer: &DenseLayer, x: &[f32], t: usize, in_ch: usize) -> Vec<f32> {
     let front = dense_layer_front(layer, x, t, in_ch);
     let out = cam_gate(layer, &front.local, &front.context, t).gated;
@@ -2324,7 +2228,6 @@ fn dense_layer_forward(layer: &DenseLayer, x: &[f32], t: usize, in_ch: usize) ->
     }
     combined
 }
-
 fn channel_major_to_time_major(input: &[f32], time: usize, channels: usize) -> Vec<f32> {
     debug_assert_eq!(input.len(), time * channels);
     let mut output = vec![0.0f32; input.len()];
@@ -2335,7 +2238,6 @@ fn channel_major_to_time_major(input: &[f32], time: usize, channels: usize) -> V
     }
     output
 }
-
 /// Biased 1x1 convolutions from [time, input] to [output, time].
 fn cam_gate_linear(
     weight: &Weight<'_>,
@@ -2362,7 +2264,6 @@ fn cam_gate_linear(
     }
     output
 }
-
 fn transit_forward(transit: &Transit, x: &[f32], t: usize, in_ch: usize, out: &mut [f32]) {
     let out_ch = in_ch / 2;
     // bn + relu
@@ -2392,11 +2293,9 @@ fn transit_forward(transit: &Transit, x: &[f32], t: usize, in_ch: usize, out: &m
         1,
     ));
 }
-
 #[cfg(test)]
 mod tests {
     use super::Resampler;
-
     #[test]
     fn sinc_resampler_keeps_the_fractional_final_phase() {
         let output = Resampler::new(3, 2).resample(&[1.0, 0.0, 0.0, 0.0]);
