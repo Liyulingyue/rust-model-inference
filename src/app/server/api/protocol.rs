@@ -273,75 +273,51 @@ fn parse_stop(value: Option<&Value>) -> Result<Vec<String>, String> {
     Ok(result)
 }
 fn validate_options(body: &Value, protocol: Protocol) -> Result<(), String> {
+    // Permissive pass: log unsupported fields and keep going instead of
+    // returning 400. Two tiers so the default log stays useful but a
+    // `RUST_LOG=debug` operator can see everything.
+    //
+    // - `warn!` (always visible): fields whose non-default value would
+    //   change sampling / output behavior. Operators MUST see these.
+    // - `debug!` (silent by default): pure tracking / bookkeeping fields
+    //   the SDK sends by default.
+
     for (key, default) in [
-        ("n", 1.0),
+        ("n", 1.0_f64),
         ("top_p", 1.0),
         ("top_k", 0.0),
-        ("presence_penalty", 0.0),
         ("frequency_penalty", 0.0),
+        ("presence_penalty", 0.0),
     ] {
         if let Some(v) = body.get(key).filter(|v| !v.is_null()) {
             if v.as_f64() != Some(default) {
-                return Err(format!(
-                    "{key} is unsupported except for its default {default}"
-                ));
+                log::warn!(
+                    "{key}={} requested but server only supports default {default}; field ignored",
+                    v
+                );
             }
         }
     }
-    for key in [
-        "seed",
-        "functions",
-        "function_call",
-        "include",
-        "web_search_options",
-        "prompt_cache_key",
-        "prompt_cache_retention",
-        "logit_bias",
-        "logprobs",
-        "top_logprobs",
-        "audio",
-        "modalities",
-        "prediction",
-        "service_tier",
-        "context_management",
-        "mcp_servers",
-        "container",
-        "betas",
-        "prompt",
-        "conversation",
-    ] {
-        if let Some(v) = body.get(key).filter(|v| !v.is_null()) {
-            let benign = match key {
-                "logprobs" => v == &json!(false),
-                "top_logprobs" => v == &json!(0),
-                "logit_bias" => v.as_object().is_some_and(|m| m.is_empty()),
-                "modalities" => v == &json!(["text"]),
-                "service_tier" => matches!(v.as_str(), Some("auto" | "default")),
-                "context_management" | "mcp_servers" | "betas" | "include" => {
-                    v.as_array().is_some_and(|a| a.is_empty())
-                }
-                _ => false,
-            };
-            if !benign {
-                return Err(format!("{key} is unsupported by the local text server"));
-            }
-        }
-    }
+
     for key in ["reasoning_effort", "reasoning", "thinking"] {
         if let Some(v) = body.get(key).filter(|v| !v.is_null()) {
             let disabled = match key {
                 "reasoning_effort" => v == &json!("none"),
                 "thinking" => v == &json!({"type":"disabled"}),
-                _ => v.as_object().is_some_and(|m| m.is_empty()) || v == &json!({"effort":"none"}),
+                _ => v.as_object().is_some_and(|m| m.is_empty())
+                    || v == &json!({"effort":"none"}),
             };
             if !disabled {
-                return Err(format!("active {key} is unsupported"));
+                log::warn!("active {key}={v} is unsupported; field ignored");
             }
         }
     }
+
     if let Some(v) = body.get("response_format").filter(|v| !v.is_null()) {
         if v != &json!({"type":"text"}) {
-            return Err("only plain text response_format is supported".into());
+            log::warn!(
+                "response_format={v} is unsupported (only plain text); returning plain text, field ignored"
+            );
         }
     }
     if let Some(v) = body.get("text").filter(|v| !v.is_null()) {
@@ -350,22 +326,65 @@ fn validate_options(body: &Value, protocol: Protocol) -> Result<(), String> {
             || v.get("format")
                 .is_some_and(|f| f != &json!({"type":"text"}))
         {
-            return Err("only plain text text.format is supported".into());
+            log::warn!("text={v} is unsupported (only plain text); field ignored");
         }
     }
-    if let Some(v) = body.get("parallel_tool_calls").filter(|v| !v.is_null()) {
-        if v != &json!(true) {
-            return Err("parallel_tool_calls=false is unsupported".into());
+    if let Some(v) = body.get("logprobs").filter(|v| !v.is_null()) {
+        if v != &json!(false) {
+            log::warn!(
+                "logprobs=true is unsupported; field ignored (no per-token logprobs returned)"
+            );
         }
+    }
+    if let Some(v) = body.get("top_logprobs").filter(|v| !v.is_null()) {
+        if v != &json!(0) {
+            log::warn!("top_logprobs={v} is unsupported; field ignored");
+        }
+    }
+    if body.get("prediction").filter(|v| !v.is_null()).is_some() {
+        log::warn!("prediction is unsupported (predictive decoding); field ignored");
     }
     if let Some(v) = body.get("truncation").filter(|v| !v.is_null()) {
         if v != &json!("disabled") {
-            return Err("automatic truncation is unsupported".into());
+            log::warn!("truncation={v} is unsupported (auto-truncation); field ignored");
         }
     }
-    if optional_bool(body, "background", false)? {
-        return Err("background responses are unsupported".into());
+    if optional_bool(body, "background", false).unwrap_or(false) {
+        log::warn!("background=true is unsupported; field ignored");
     }
+
+    for key in [
+        "seed",
+        "user",
+        "metadata",
+        "service_tier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "web_search_options",
+        "audio",
+        "modalities",
+        "include",
+        "context_management",
+        "mcp_servers",
+        "container",
+        "betas",
+        "conversation",
+        "functions",
+        "function_call",
+        "logit_bias",
+        "parallel_tool_calls",
+        "store",
+    ] {
+        if body.get(key).filter(|v| !v.is_null()).is_some() {
+            log::debug!("{key} is unsupported by the local text server; field ignored");
+        }
+    }
+    if body.get("prompt").filter(|v| !v.is_null()).is_some() {
+        log::debug!("prompt is unsupported on this protocol; field ignored");
+    }
+
+    // Schema-level checks: keep returning errors for malformed requests,
+    // because silent acceptance here would mislead callers more than help.
     match protocol {
         Protocol::Responses => {
             if body.get("max_tokens").is_some() || body.get("max_completion_tokens").is_some() {
@@ -375,9 +394,6 @@ fn validate_options(body: &Value, protocol: Protocol) -> Result<(), String> {
         _ => {
             if body.get("max_output_tokens").is_some() {
                 return Err("max_output_tokens is only supported by Responses".into());
-            }
-            if optional_bool(body, "store", false)? {
-                return Err("store:true is only supported by Responses".into());
             }
             if matches!(protocol, Protocol::Anthropic)
                 && body.get("max_completion_tokens").is_some()
@@ -1187,13 +1203,13 @@ mod tests {
     #[test]
     fn rejects_unsupported_and_malformed_inputs() {
         let valid = json!({"messages":[{"role":"user","content":"Hi"}]});
+        // Schema-level / bound-violating fields still 400. Unsupported
+        // sampling features (top_k, top_p != 1, n != 1, json_object,
+        // active reasoning) are now permissive and asserted separately
+        // in `accepts_unsupported_options_with_warnings`.
         for (key, value) in [
-            ("n", json!(2)),
             ("temperature", json!(-1)),
             ("max_tokens", json!(0)),
-            ("top_p", json!(0.9)),
-            ("response_format", json!({"type":"json_object"})),
-            ("reasoning_effort", json!("high")),
         ] {
             let mut body = valid.clone();
             body[key] = value;
@@ -1210,6 +1226,50 @@ mod tests {
         assert!(Protocol::Anthropic
             .parse(&json!({"messages":[{"role":"user","content":"x"}],"temperature":1.2}))
             .is_err());
+    }
+    #[test]
+    fn accepts_unsupported_options_with_warnings() {
+        // OpenAI-SDK-shaped call dumps all of these at once. Each must
+        // parse successfully (no 400); the server logs them as warn/debug
+        // but proceeds with sampling.
+        let body = json!({
+            "model": "local",
+            "messages": [{"role":"user","content":"Hi"}],
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 40,
+            "n": 2,
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.3,
+            "seed": 42,
+            "user": "u-1",
+            "metadata": {"trace":"abc"},
+            "store": true,
+            "service_tier": "auto",
+            "prompt_cache_key": "k",
+            "response_format": {"type":"json_object"},
+            "reasoning_effort": "medium",
+            "thinking": {"type":"enabled"},
+            "prediction": {"type":"content","content":"hi"},
+            "truncation": "auto",
+            "background": true,
+            "logprobs": true,
+            "top_logprobs": 5,
+            "logit_bias": {"50256": -100},
+            "modalities": ["text","audio"],
+            "audio": {"voice":"alloy"},
+            "web_search_options": {},
+            "include": ["reasoning.encrypted_content"],
+            "betas": ["o1-2024-12-17"],
+            "mcp_servers": [{"type":"url","url":"x"}],
+            "container": {"type":"auto"},
+            "context_management": {"edits":[]},
+            "conversation": {"id":"c"},
+            "functions": [],
+            "function_call": "none",
+            "parallel_tool_calls": false,
+        });
+        assert!(Protocol::Chat.parse(&body).is_ok());
     }
     #[test]
     fn chat_stream_has_role_tool_fragments_usage_and_done() {
