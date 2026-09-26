@@ -381,10 +381,17 @@ impl BPETokenizer {
             _ => return Err("Missing or invalid tokenizer.ggml.model".into()),
         };
 
+        let mut forced_add_bos = false;
         let pre = if gemma4 {
             PreTokenizer::Gemma4
         } else {
-            match get_meta("tokenizer.ggml.pre") {
+            // llama.cpp forces `add_bos = true` for the llama3 pre family
+            // (llama3 / falcon3 / falcon-h1 / lfm2 / pixtral ...) even when
+            // the GGUF omits `tokenizer.ggml.add_bos_token`. Falcon-H1 is
+            // the one arch in this repo whose GGUF relies on that override,
+            // so mirror it explicitly (merged into `add_bos` below).
+            let mut force_add_bos = false;
+            let pre = match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
                 Some(MetaValue::String(value)) if value == "qwen35" => PreTokenizer::Qwen35,
                 Some(MetaValue::String(value)) if value == "spark2_5" => PreTokenizer::Spark2_5,
@@ -396,15 +403,21 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "falcon-h1" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, k2-horizon, or minicpm5"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, k2-horizon, or minicpm5"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
-            }
+            };
+            forced_add_bos = force_add_bos;
+            pre
         };
 
         let tokens = string_array(get_meta("tokenizer.ggml.tokens"), "tokenizer.ggml.tokens")?;
@@ -467,7 +480,7 @@ impl BPETokenizer {
         let add_bos = bool_meta(
             get_meta("tokenizer.ggml.add_bos_token"),
             "tokenizer.ggml.add_bos_token",
-        )?;
+        )? || forced_add_bos;
         let add_eos = bool_meta(
             get_meta("tokenizer.ggml.add_eos_token"),
             "tokenizer.ggml.add_eos_token",

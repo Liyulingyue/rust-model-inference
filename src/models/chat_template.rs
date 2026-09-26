@@ -97,9 +97,10 @@ impl ChatTemplate {
 pub fn default_template(arch: &str) -> Option<ChatTemplate> {
     Some(match arch {
         // Qwen family — ChatML is the standard format and matches the
-        // GGUF `tokenizer.chat_template` field for these archs.
+        // GGUF `tokenizer.chat_template` field for these archs. Falcon-H1
+        // ships a Qwen-style im_start/im_end template too.
         "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen3tts"
-        | "nemotron_h" => ChatTemplate::ChatML,
+        | "nemotron_h" | "falcon-h1" => ChatTemplate::ChatML,
 
         // Llama family.
         "llama" | "k2-horizon" | "granite" | "nanbeige" => ChatTemplate::Llama3,

@@ -2,6 +2,7 @@ pub mod breeze;
 pub mod chat_template;
 pub mod diffusion;
 pub mod dots;
+pub mod falcon_h1;
 pub mod funasr;
 pub mod gemma4;
 pub mod lfm2;
