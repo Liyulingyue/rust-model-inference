@@ -17,7 +17,7 @@
 | LFM2.5                        | 230M / 1.2B / 1.2B-Thinking / 2.6B / 8B-A1B    | 文本                 | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-1.2B-Instruct-GGUF             | √ |
 | LFM2.5-VL                     | 450M / 1.6B / 3B       | 文本、图像        | llama.cpp                             | https://www.modelscope.cn/models/unsloth/LFM2.5-VL-3B-GGUF             | √ |
 | MiniCPM5                      | 1B / 2B         | 文本                 |                                       | https://www.modelscope.cn/models/OpenBMB/MiniCPM5-1B-GGUF             | √ |
-| Nanbeige4.2                      | 3B           | 文本                 |                                       | https://www.modelscope.cn/models/Abiray/Nanbeige4.2-3B-GGUF             | 未成功适配 |
+| Nanbeige4.2-3B | 3B | 文本 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Abiray/Nanbeige4.2-3B-GGUF | √（Q8_0 标量/F32、NEON/F32/F16 KV；[验证范围](usage/llama.md#3-nanbeige42-3b)） |
 | NeoHorse-1                   | 4B / 9B        | 文本                 | llama.cpp @ `b96806d`                 | https://huggingface.co/TokenRhythm/NeoHorse-1-4B-GGUF | √ |
 | Ornith-1.5                    | 9B         | 文本                 |                                       |              | 待核验 |
 | Qwen2.5-Omni                  | 3B           | 文本、音频、视频、图像（文本、音频输出）               | llama.cpp                                      | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF             | √ |

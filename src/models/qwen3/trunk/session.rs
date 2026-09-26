@@ -403,7 +403,7 @@ impl<'model> Qwen3Session<'model> {
             parity_trace::report(parity_trace::checkpoint(
                 "asr.decoder_first_logits",
                 None,
-                &[config.vocab],
+                &[_config.vocab],
                 &self.scratch.logits,
             ));
         }

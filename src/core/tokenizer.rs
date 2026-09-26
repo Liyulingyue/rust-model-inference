@@ -1475,16 +1475,13 @@ impl PartialOrd for SpmBigram {
         Some(self.cmp(other))
     }
 }
-// Max-heap by (score desc, left asc). Note llama.cpp's comparator breaks
-// ties on `left desc`, but both produce equivalent merges for non-tied
-// scores; left-ascending is more intuitive and the algorithm tolerates it.
+// Max-heap by (score desc, left asc), matching llama.cpp's SPM queue.
 impl Ord for SpmBigram {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other
-            .score
-            .partial_cmp(&self.score)
+        self.score
+            .partial_cmp(&other.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(self.left.cmp(&other.left))
+            .then(other.left.cmp(&self.left))
     }
 }
 

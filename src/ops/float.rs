@@ -190,6 +190,9 @@ fn init_cpu_features() {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn has_avx2_fma() -> bool {
+    if scalar_mode() {
+        return false;
+    }
     if !INIT_DONE.load(Ordering::Relaxed) {
         init_cpu_features();
     }
@@ -219,8 +222,22 @@ pub const fn has_f16c() -> bool {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-pub const fn has_neon() -> bool {
-    true
+pub fn has_neon() -> bool {
+    !scalar_mode()
+}
+
+/// Opt-in scalar dispatch for bitwise Oracle comparisons; absent in normal builds.
+#[inline]
+pub fn scalar_mode() -> bool {
+    #[cfg(feature = "parity-trace")]
+    {
+        static SCALAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
+    }
+    #[cfg(not(feature = "parity-trace"))]
+    {
+        false
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]
