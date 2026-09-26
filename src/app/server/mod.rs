@@ -936,6 +936,10 @@ fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
 }
 
 pub fn run_server() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,rust_model_inference=info"),
+    )
+    .try_init();
     let raw_args: Vec<String> = std::env::args().collect();
     if raw_args
         .iter()

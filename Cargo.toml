@@ -21,6 +21,7 @@ raw-window-handle = { version = "0.6", optional = true }
 bytemuck = "1.0"
 wgpu = { version = "29", features = ["spirv"], optional = true }
 log = "0.4"
+env_logger = "0.11"
 futures = "0.3"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
