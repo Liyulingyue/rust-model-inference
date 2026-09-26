@@ -40,11 +40,12 @@ pub struct Lfm2MoeSession<'a> {
     pub kv_cache: KvCache,
     pub scratch: ExecutionScratchpad,
     pub pool: Arc<ComputePool>,
-    /// Vocabulary size for the LM head. Captured here so the
-    /// free-function path's internal `BPETokenizer` reconstruction
-    /// doesn't have to round-trip the GGUF metadata on every call.
     pub vocab: usize,
     pub seq_len: usize,
+    pub shortconv_states: Vec<Vec<f32>>,
+    pub accumulated_bx: Vec<Vec<Vec<f32>>>,
+    /// Clamped context length (min of config.n_ctx and caller's max_context).
+    pub max_ctx: usize,
 }
 
 pub struct Lfm2MoeWeights<'a> {
@@ -132,6 +133,21 @@ impl<'a> Lfm2MoeSession<'a> {
         );
         let pool = Arc::new(ComputePool::new(n_threads));
 
+        let layers: Vec<super::weights::Lfm2MoeLayerWeights<'a>> = load_layers(source, &config)
+            .map_err(|e| format!("Failed to load LFM2-MoE layers: {e}"))?;
+
+        let mut shortconv_states: Vec<Vec<f32>> = Vec::with_capacity(n_layer);
+        let mut accumulated_bx: Vec<Vec<Vec<f32>>> = Vec::with_capacity(n_layer);
+        for lw in &layers {
+            if lw.is_attn {
+                shortconv_states.push(Vec::new());
+                accumulated_bx.push(Vec::new());
+            } else {
+                shortconv_states.push(vec![0.0f32; config.n_embd * config.d_conv]);
+                accumulated_bx.push(Vec::new());
+            }
+        }
+
         Ok(Self {
             config,
             weights: Lfm2MoeWeights {
@@ -148,44 +164,164 @@ impl<'a> Lfm2MoeSession<'a> {
             pool,
             vocab,
             seq_len: 0,
+            shortconv_states,
+            accumulated_bx,
+            max_ctx,
         })
     }
 
-    /// Trait-driven entry point. Returns the final logits for
-    /// `prompt_tokens` after a chunked prefill at the requested
-    /// `batch_size`. Equivalent to the legacy per-token walk for
-    /// `batch_size == 1` (the [`DEFAULT_PREFILL_BATCH_SIZE`] walks
-    /// `rows = 1` so the SSM shortconv state and the MoE router
-    /// hidden state can step one token at a time).
-    /// `batch_size > 1` returns an error for now.
+    /// Feed a sequence of tokens through the model.
+    /// Returns the logits for the last token.
+    /// Note: this currently delegates to the free-function path which
+    /// re-creates internal state each call. For server use, the caller
+    /// should pass the full token history each time.
     pub fn forward_logits_chunked(
         &self,
-        prompt_tokens: &[u32],
-        batch_size: usize,
+        tokens: &[u32],
+        _batch_size: usize,
     ) -> Result<Vec<f32>, String> {
-        let batch_size = checked_prefill_batch_size(Some(batch_size))
-            .map_err(|e| format!("LFM2-MoE batch size: {e}"))?;
-        if batch_size > LFM2MOE_BATCH_LIMIT {
-            return Err(format!(
-                "LFM2-MoE batched prefill > {LFM2MOE_BATCH_LIMIT} is not yet implemented; \
-                 the MoE router state and the SSM shortconv state both step per-row"
-            ));
-        }
-        // Delegate to the legacy free-function path. The session
-        // holds a reference to the original `TensorSource`, so the
-        // free function can read every tensor it needs (token_embd,
-        // output, output_norm, blk.*, token_embd_norm.*, …) without
-        // re-loading anything. For B = 1 the dispatch is bit-exact
-        // to the pre-trait baseline.
-        let (logits, _duration) = run_forward_logits_lfm2moe_with_batch(
+        let (logits, _) = super::forward::run_forward_logits_lfm2moe_with_batch(
             self.source,
-            prompt_tokens,
+            tokens,
             self.pool.n_threads(),
-            KvFormat::F16,
+            crate::core::scratchpad::KvFormat::F16,
             self.config.n_ctx,
-            batch_size,
+            1,
         )?;
         Ok(logits)
+    }
+
+    /// Forward a single token through the model, reusing the session's
+    /// KV cache, scratch, shortconv state, and accumulated b*x history.
+    /// Returns the logits for the given token at position `seq_len`.
+    pub fn forward_token(&mut self, token_id: u32) -> Result<Vec<f32>, String> {
+        let cfg = &self.config;
+        let n_embd = cfg.n_embd;
+        let n_layer = cfg.n_layer;
+        let eps = cfg.norm_eps;
+        let freq_base = cfg.rope_freq_base;
+        let max_ctx = self.max_ctx;
+        let pos = self.seq_len;
+
+        let embd_weight = self.weights.embd_weight;
+        let embd_type = self.weights.embd_type;
+        let output_norm = &self.weights.output_norm;
+        let output_weight = self.weights.output_weight;
+        let output_type = self.weights.output_type;
+        let vocab = self.vocab;
+
+        // Embedding lookup.
+        crate::ops::embedding::embedding_lookup(
+            embd_weight,
+            token_id,
+            n_embd,
+            embd_type,
+            &mut self.scratch.x,
+        );
+
+        // Per-layer forward.
+        for layer in 0..n_layer {
+            let lw = &self.weights.layers[layer];
+            let is_prefill = true;
+            if !lw.is_attn && is_prefill {
+                let d_conv = cfg.d_conv;
+                let state = &mut self.shortconv_states[layer];
+                state.resize(d_conv * n_embd, 0.0);
+                let hist = &self.accumulated_bx[layer];
+                for k_p in 0..d_conv {
+                    let idx = k_p as isize - (d_conv - hist.len()) as isize;
+                    if idx >= 0 {
+                        let src = &hist[idx as usize];
+                        for ci in 0..n_embd {
+                            state[k_p * n_embd + ci] = src[ci];
+                        }
+                    }
+                }
+            }
+            super::forward::forward_layer(
+                &self.pool,
+                lw,
+                layer,
+                n_layer,
+                cfg,
+                &mut self.scratch,
+                &self.kv_cache,
+                max_ctx,
+                pos,
+                eps,
+                freq_base,
+                &mut self.shortconv_states[layer],
+                &mut self.accumulated_bx[layer],
+                is_prefill,
+                pos,
+            );
+        }
+
+        // Output norm + LM head.
+        let x = &mut self.scratch.x[..n_embd];
+        let normed = &mut self.scratch.normed[..n_embd];
+        crate::ops::rms_norm(x, output_norm, normed, eps);
+
+        let max_n_in = (cfg.n_embd * 3).max(cfg.n_head * cfg.n_embd_head_k).max(cfg.n_ff);
+        let q8 = &mut self.scratch.q8_buf[..max_n_in];
+        let scale = &mut self.scratch.scale_buf[..max_n_in / 32];
+        let q8k = &mut self.scratch.q8k_buf[..max_n_in / 256];
+        crate::ops::quantize_q8_0_into(normed, n_embd, &mut q8[..n_embd], &mut scale[..n_embd / 32]);
+        crate::ops::quantize_row_q8_k_into(normed, &mut q8k[..n_embd / 256]);
+
+        let output_pw = crate::ops::kernel::Weight::from_quantized(
+            crate::ops::kernel::QuantizedTensor::from_bytes(
+                output_weight,
+                output_type,
+                n_embd,
+                vocab,
+            ),
+        );
+
+        let logits = &mut self.scratch.logits;
+        logits.resize(vocab, 0.0);
+        let n_embd_val = n_embd;
+        let vocab_val = vocab;
+        let normed_ptr = normed.as_ptr();
+        let q8_ptr = q8.as_ptr();
+        let scale_ptr = scale.as_ptr();
+        let q8k_ptr = q8k.as_ptr();
+        let logits_ptr = logits.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            let input = unsafe { std::slice::from_raw_parts(normed_ptr, n_embd_val) };
+            let q8_slice = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_val) };
+            let sc_slice = unsafe { std::slice::from_raw_parts(scale_ptr, n_embd_val / 32) };
+            let q8k_slice = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_val / 256) };
+            let logits_slice =
+                unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab_val) };
+            output_pw.kernel.forward_prepared(
+                input,
+                q8_slice,
+                sc_slice,
+                Some(q8k_slice),
+                logits_slice,
+                n_embd_val,
+                vocab_val,
+                ith,
+                nth,
+            );
+        });
+
+        self.seq_len += 1;
+        Ok(logits.clone())
+    }
+
+    /// Reset the session for a new conversation (clears KV cache,
+    /// shortconv state, and seq_len).
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        self.kv_cache.clear();
+        for state in &mut self.shortconv_states {
+            state.fill(0.0);
+        }
+        for hist in &mut self.accumulated_bx {
+            hist.clear();
+        }
     }
 }
 
@@ -225,8 +361,11 @@ impl<'a> ChunkedPrefill for Lfm2MoeSession<'a> {
         if !project_logits {
             return Err("Lfm2MoeSession::forward_chunk requires project_logits = true".into());
         }
-        let logits = self.forward_logits_chunked(input, 1)?;
-        Ok(Some(logits))
+        let mut last_logits = None;
+        for &token_id in input {
+            last_logits = Some(self.forward_token(token_id)?);
+        }
+        Ok(last_logits)
     }
 
     fn prefill(
@@ -247,11 +386,7 @@ impl<'a> ChunkedPrefill for Lfm2MoeSession<'a> {
         }
         let mut last_logits: Option<Vec<f32>> = None;
         for chunk in prefill_chunks(total, batch_size) {
-            let rows = chunk.len();
-            let base = self.seq_len;
-            let is_last = chunk.end == total;
-            last_logits = self.forward_chunk(input, rows, base, is_last)?;
-            self.set_seq_len(base + rows);
+            last_logits = self.forward_chunk(input, chunk.len(), self.seq_len, chunk.end == total)?;
         }
         Ok(last_logits)
     }

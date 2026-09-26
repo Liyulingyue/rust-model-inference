@@ -92,6 +92,11 @@ enum TextInner {
         model: Mutex<Qwen35Model<'static>>,
         _source: Arc<dyn TensorSource>,
     },
+    Lfm2Moe {
+        // Lfm2MoeSession borrows from its source; we leak the lifetime to 'static.
+        session: Mutex<crate::models::lfm2moe::Lfm2MoeSession<'static>>,
+        _source: Arc<dyn TensorSource>,
+    },
     Fallback {
         arch: String,
     },
@@ -743,6 +748,22 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
                 _source: source.clone(),
             }
         }
+        "lfm2moe" => {
+            let session = crate::models::lfm2moe::Lfm2MoeSession::from_source(
+                source.as_ref(),
+                options.threads,
+                crate::core::scratchpad::KvFormat::F16,
+                options.effective_max_context(),
+            )?;
+            // SAFETY: same lifetime leak as Qwen35 — source is held by the
+            // backend for the full server lifetime.
+            let session: crate::models::lfm2moe::Lfm2MoeSession<'static> =
+                unsafe { std::mem::transmute(session) };
+            TextInner::Lfm2Moe {
+                session: Mutex::new(session),
+                _source: source.clone(),
+            }
+        }
         _ => TextInner::Fallback {
             arch: arch.to_string(),
         },
@@ -750,6 +771,7 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     let context_length = match &inner {
         TextInner::Qwen3 { model } => model.config().n_ctx,
         TextInner::Qwen35 { model, .. } => model.lock().map_err(|e| e.to_string())?.config.n_ctx,
+        TextInner::Lfm2Moe { session, .. } => session.lock().map_err(|e| e.to_string())?.config.n_ctx,
         TextInner::Fallback { .. } => 0,
     };
     Ok(TextBackend {

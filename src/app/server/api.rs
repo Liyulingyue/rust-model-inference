@@ -764,6 +764,47 @@ fn generate(
             }
             generated.len()
         }
+        TextInner::Lfm2Moe { session, .. } => {
+            let mut session = session.lock().map_err(|e| e.to_string())?;
+            session.reset();
+            if cancelled() {
+                return Err("Client disconnected".into());
+            }
+            let mut decoder = text.tokenizer.streaming_decoder(false);
+            let mut generated = Vec::new();
+            let eos = text.tokenizer.eos_id();
+
+            // Prefill: feed prompt tokens one by one, reusing KV cache.
+            let mut logits = Vec::new();
+            for &token_id in ids {
+                logits = session.forward_token(token_id)?;
+            }
+
+            // Decode: generate new tokens one by one, reusing KV cache.
+            for _step in 0..request.max_tokens {
+                if cancelled() {
+                    return Err("Client disconnected".into());
+                }
+                let id = u32::try_from(super::sample_token_from_logits(
+                    &logits,
+                    request.temperature,
+                ))
+                .map_err(|e| e.to_string())?;
+                if eos == Some(id) {
+                    break;
+                }
+                generated.push(id);
+                if !on_token(&decoder.push(id)) {
+                    break;
+                }
+                logits = session.forward_token(id)?;
+            }
+            let tail = decoder.finish();
+            if !tail.is_empty() {
+                on_token(&tail);
+            }
+            generated.len()
+        }
         TextInner::Fallback { arch } => {
             return Err(format!("Architecture {arch:?} is unsupported"))
         }

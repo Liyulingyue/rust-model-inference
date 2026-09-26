@@ -28,7 +28,7 @@ const QWEN35_CALL: &str = "\n</tools>\n\nIf you choose to call a function ONLY r
 
 fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
-        "qwen3" | "qwen3vl" => Ok(false),
+        "qwen3" | "qwen3vl" | "lfm2moe" => Ok(false),
         "qwen35" => Ok(true),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
