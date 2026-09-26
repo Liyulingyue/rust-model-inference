@@ -27,7 +27,7 @@ pub(crate) fn run_jev_decision_lfm25(
     if !output_json {
         eprintln!("compute pool: {} threads (LFM2.5)", n_threads);
     }
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// LFM2.5 JEV scorer — chat template + free-function forward path,
@@ -55,7 +55,7 @@ impl JevScorer for Lfm25JevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

@@ -6,6 +6,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Architectures `--jev --image` accepts. The HTTP `/v1/jev/image` endpoints
+/// dispatch on the same set via [`image_supported_arch`], so a model that can be
+/// scored over HTTP can also be scored from the CLI.
+const IMAGE_JEV_ARCHES: [&str; 4] = ["qwen35", "qwen3", "qwen3vl", "qwen3vlmoe"];
+
+pub fn image_supported_arch(arch: &str) -> bool {
+    IMAGE_JEV_ARCHES.contains(&arch)
+}
+
 /// Single forward-pass JEV scorer that returns the structured
 /// `Vec<JevResult>` instead of printing to stdout. The HTTP server
 /// (`POST /v1/jev/score`) uses this to wrap results in a JSON
@@ -48,18 +57,24 @@ fn run_jev_decision_data_with_image(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     eprintln!("JEV: arch = {:?}", arch);
-    if image_path.is_some() && arch != "qwen35" {
-        return Err("--jev --image currently supports only Qwen3.5".into());
+    if image_path.is_some() && !image_supported_arch(&arch) {
+        return Err(format!(
+            "--jev --image is not supported for architecture {arch:?} \
+             (supported: {})",
+            IMAGE_JEV_ARCHES.join(" / ")
+        ));
     }
 
     match &*arch {
-        "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
             source.clone(),
             context,
             &prepared,
             n_threads_arg,
             prefill_batch_size,
             false,
+            mmproj_path,
+            image_path,
         ),
         "qwen35" => qwen35::run_jev_decision_qwen35(
             source.clone(),
@@ -594,7 +609,7 @@ pub(crate) trait JevScorer {
     /// `payload_str` field is the rendered JSON (used by
     /// `print_jev_question` for debug output).
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String>;
@@ -618,7 +633,6 @@ pub(crate) trait JevScorer {
 /// `run_jev_decision_<arch>` functions below), not the
 /// per-question loop.
 pub(crate) fn run_jev_decision_core<S: JevScorer>(
-    _source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedQuestion],
     output_json: bool,

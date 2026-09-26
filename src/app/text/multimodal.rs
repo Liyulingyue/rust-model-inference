@@ -332,6 +332,7 @@ pub fn run_qwen3_family_multimodal(
 /// `/v1/jev/image_grouped` HTTP endpoints so callers can apply
 /// true JEV argmax-over-labels scoring on multimodal inputs
 /// without paying the cost of generation + parsing.
+#[allow(clippy::too_many_arguments)]
 pub fn run_qwen3_family_multimodal_logits(
     llm_source: &dyn TensorSource,
     model_source: Arc<dyn TensorSource>,
@@ -342,6 +343,10 @@ pub fn run_qwen3_family_multimodal_logits(
     prompt: &str,
     n_threads_arg: usize,
     prefill_batch_size: usize,
+    // Prepended as the chat-template system message when set. Callers that need
+    // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
+    // endpoints leave it `None` to keep Qwen's default system text.
+    system_prompt: Option<&str>,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::{frame_pairs, normalize_resized_image};
     use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
@@ -522,12 +527,9 @@ pub fn run_qwen3_family_multimodal_logits(
         },
     ));
     let mut token_ids = Vec::new();
-    if family == crate::app::media::ProjectorFamily::Qwen25Omni {
-        let system_text = if media_kind == crate::app::media::MediaKind::Audio {
-            "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
-        } else {
-            "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
-        };
+    if let Some(system_text) = system_prompt.filter(|_| {
+        family == crate::app::media::ProjectorFamily::Qwen25Omni
+    }) {
         append_qwen_message_tokens(
             &mut token_ids,
             &tokenizer,
@@ -582,6 +584,10 @@ pub fn run_qwen35_family_multimodal_logits(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     max_context: usize,
+    // Prepended as the chat-template system message when set. Callers that need
+    // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
+    // endpoints leave it `None` to keep Qwen's default system text.
+    system_prompt: Option<&str>,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::frame_pairs;
     use crate::models::qwen35::vision::{
@@ -680,6 +686,20 @@ pub fn run_qwen35_family_multimodal_logits(
         },
     ));
     let mut prompt_ids = Vec::new();
+    if let Some(system_text) = system_prompt {
+        append_qwen_message_tokens(
+            &mut prompt_ids,
+            &tokenizer,
+            "system",
+            &tokenizer.encode(
+                system_text,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ),
+        )?;
+    }
     append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
     append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
     let image_grids: Vec<VisionGrid> = vec![VisionGrid {
@@ -1289,8 +1309,10 @@ pub(super) fn run_multimodal_with_video_ref(
     };
     println!("\n--- End ---");
     #[cfg(feature = "vulkan")]
-    crate::vulkan::dump_submit_trace();
-    crate::vulkan::dump_dispatch_trace();
+    {
+        crate::vulkan::dump_submit_trace();
+        crate::vulkan::dump_dispatch_trace();
+    }
     eprintln!(
         "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
         per_second(prefill_evals, t_prompt),

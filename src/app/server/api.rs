@@ -1902,6 +1902,8 @@ async fn run_multimodal_text_only(
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
     tokio::task::spawn_blocking(move || match arch.as_str() {
+        // Same arch set the CLI `--jev --image` gate accepts; see
+        // `crate::app::jev::single::image_supported_arch`.
         "qwen3" | "qwen3vl" | "qwen3vlmoe" => crate::app::run_qwen3_family_multimodal_logits(
             source.as_ref(),
             source.clone(),
@@ -1912,6 +1914,8 @@ async fn run_multimodal_text_only(
             &prompt,
             threads,
             prefill_batch_size,
+            // The HTTP multimodal endpoints keep Qwen's default system text.
+            None,
         ),
         "qwen35" => {
             let max_context = match state_for_max_ctx(&state) {
@@ -1928,6 +1932,8 @@ async fn run_multimodal_text_only(
                 threads,
                 prefill_batch_size,
                 max_context,
+                // The HTTP multimodal endpoints keep Qwen's default system text.
+                None,
             )
         }
         other => Err(format!(

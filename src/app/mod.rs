@@ -24,9 +24,9 @@ pub use cli::{
 };
 pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
 pub use jev::{
-    build_jev_inputs, run_jev_decision, run_jev_decision_data, run_jev_grouped_decision,
-    run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
-    JevQuestionInput, JevResult,
+    build_jev_inputs, image_supported_arch, run_jev_decision, run_jev_decision_data,
+    run_jev_grouped_decision, run_jev_grouped_decision_data, JevGroupInput,
+    JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput, JevResult,
 };
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
