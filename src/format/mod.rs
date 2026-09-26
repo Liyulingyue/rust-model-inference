@@ -13,3 +13,4 @@
 
 pub mod ggufrs;
 pub mod load_plan;
+pub mod wav;

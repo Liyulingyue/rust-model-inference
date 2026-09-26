@@ -23,8 +23,9 @@ use crate::format::ggufrs::ComponentRole;
 use crate::models::qwen3::asr::model::{
     open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
 };
+use crate::format::wav::encode_wav_pcm16_channels;
 use crate::models::qwen3::tts::codec::{
-    encode_wav_pcm16, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
+    Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
 use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
@@ -603,8 +604,7 @@ async fn speech(
         let decoder = Code2WavDecoder::from_source(mmproj.as_ref())?;
         let frames = synthesize_tts_frames(&talker, &predictor, &prompt, max_tokens, temperature)?;
         let waveform = decoder.decode(&frames)?;
-        encode_wav_pcm16(&waveform, WAVEFORM_SAMPLE_RATE)
-            .map_err(|error| format!("WAV encode failed: {error}"))
+        encode_wav_pcm16_channels(&waveform, WAVEFORM_SAMPLE_RATE, 1)
     })
     .await
     {

@@ -178,8 +178,7 @@ pub fn run_dots_tts_cli(options: &CliOptions) -> Result<(), String> {
         )?
     };
     let sample_rate = model.config.sample_rate as u32;
-    crate::models::qwen3::tts::codec::write_wav_f32(out_path, &waveform, sample_rate)
-        .map_err(|error| format!("WAV write failed: {error}"))?;
+    crate::format::wav::write_wav_f32_channels(out_path, &waveform, sample_rate, 1)?;
     eprintln!(
         "dots.tts: {} samples ({} s @ {} Hz) written to {} in {:.2}s",
         waveform.len(),
