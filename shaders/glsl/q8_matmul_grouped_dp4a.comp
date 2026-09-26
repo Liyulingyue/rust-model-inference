@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint q8_word;
+    uint scales_word;
+    uint n_in;
+    uint blocks_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+
+shared uint input_words[4096];
+shared float reduction[64];
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 0x1fu);
+    uint mantissa = bits & 0x3ffu;
+    float value;
+    if (exponent == 0) {
+        value = (float(mantissa) / 1024.0) * exp2(-14.0);
+    } else if (exponent == 31) {
+        return 0.0;
+    } else {
+        value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
+    }
+    return sign == 0u ? value : -value;
+}
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
+    uint input_word_count = pc.blocks_per_row * 8u;
+    for (uint index = lane; index < input_word_count; index += 64u) {
+        input_words[index] = arena.data[pc.q8_word + token_row * pc.q8_stride + index];
+    }
+    barrier();
+
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    if (slot >= pc.group_count) return;
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (row >= rows) return;
+
+    // Partition the blocks of this row across the 64 invocations: each lane
+    // accumulates its own slice and the partial products are reduced through
+    // shared memory. Reducing everything on lane 0 left 63 of the 64 lanes
+    // idle and made every matmul a serial 1024-wide multiply, which is why the
+    // GPU ran ~10x slower than the 8-thread AVX2 CPU path.
+    uint blocks_per_row = pc.blocks_per_row;
+    uint blocks_per_lane = (blocks_per_row + 63u) / 64u;
+    uint row_offset = row * blocks_per_row * 34u;
+
+    precise float partial = 0.0;
+    for (uint n = 0u; n < blocks_per_lane; n++) {
+        uint block = lane * blocks_per_lane + n;
+        if (block >= blocks_per_row) break;
+        uint byte_offset = row_offset + block * 34u;
+        uint scale_word = weight_word(slot, byte_offset >> 2u);
+        uint scale_bits = (byte_offset & 3u) == 0u
+            ? scale_word & 0xffffu
+            : (scale_word >> 16u) & 0xffffu;
+        float weight_scale = f16_decode(scale_bits);
+        float input_scale = uintBitsToFloat(
+            arena.data[pc.scales_word + token_row * pc.scales_stride + block]
+        );
+        float block_scale = weight_scale * input_scale;
+        uint body = byte_offset + 2u;
+        for (uint group = 0u; group < 8u; group++) {
+            uint group_offset = body + group * 4u;
+            uint first = weight_word(slot, group_offset >> 2u);
+            uint second = weight_word(slot, (group_offset >> 2u) + 1u);
+            uint shift = (group_offset & 3u) * 8u;
+            uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
+            uint input_value = input_words[block * 8u + group];
+            int dot = dotPacked4x8EXT(int(packed), int(input_value));
+            partial = fma(float(dot), block_scale, partial);
+        }
+    }
+    reduction[lane] = partial;
+    barrier();
+
+    // Tree reduction: 64 lanes log2(64) = 6 steps, one lane active per pair.
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        barrier();
+    }
+    if (lane != 0u) return;
+
+    precise float sum = reduction[0];
+    uint output_word = slot == 0u
+        ? pc.output0_word
+        : (slot == 1u ? pc.output1_word : pc.output2_word);
+    arena.data[output_word + token_row * (slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride)) + row] = floatBitsToUint(sum);
+}

@@ -136,6 +136,9 @@ pub struct VulkanContext {
     idle_waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     device_name: String,
     shader_float16: bool,
+    /// Device reports `VK_KHR_shader_integer_dot_product`, so the packed 4x int8
+    /// matmul variant can use `dotPacked4x8EXT` instead of four scalar multiplies.
+    integer_dot_product: bool,
     limits: vk::PhysicalDeviceLimits,
     submission_count: std::sync::atomic::AtomicU64,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
@@ -282,7 +285,20 @@ impl VulkanContext {
             for candidate in rank_supported(candidates) {
                 match Self::create_candidate_resources(&instance, &candidate) {
                     Ok(resources) => {
-                        eprintln!("[GPU] Vulkan device: {}", candidate.name);
+                        eprintln!(
+                            "[GPU] Vulkan device: {} (int8 dot product: {}, shader f16: {})",
+                            candidate.name,
+                            if candidate.integer_dot_product {
+                                "supported"
+                            } else {
+                                "unavailable"
+                            },
+                            if candidate.shader_float16 {
+                                "supported"
+                            } else {
+                                "unavailable"
+                            },
+                        );
                         return Ok(Self {
                             entry: std::mem::ManuallyDrop::new(entry),
                             instance,
@@ -311,6 +327,7 @@ impl VulkanContext {
                             idle_waits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                             device_name: candidate.name,
                             shader_float16: candidate.shader_float16,
+                            integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
@@ -335,6 +352,11 @@ impl VulkanContext {
 
     pub(crate) fn supports_shader_float16(&self) -> bool {
         self.shader_float16
+    }
+
+    /// True when the device can run the packed int8 dot-product matmul variant.
+    pub(crate) fn supports_integer_dot_product(&self) -> bool {
+        self.integer_dot_product
     }
 
     pub fn submission_count(&self) -> u64 {
@@ -1036,7 +1058,11 @@ impl VulkanContext {
         if candidate.portability_subset {
             extension_names.push(vk::KhrPortabilitySubsetFn::name().as_ptr());
         }
-        if candidate.integer_dot_product && candidate.api_version < vk::API_VERSION_1_3 {
+        // `VK_KHR_shader_integer_dot_product` is never promoted to core in any
+        // Vulkan version, so the extension name must be requested whenever the
+        // feature is. Gating it on the API version left the feature silently
+        // ignored: the pipeline still built, but `OpSDot` returned zeros.
+        if candidate.integer_dot_product {
             extension_names.push(vk::KhrShaderIntegerDotProductFn::name().as_ptr());
         }
         if candidate.shader_float16 && candidate.api_version < vk::API_VERSION_1_2 {

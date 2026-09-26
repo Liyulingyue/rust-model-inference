@@ -9,6 +9,12 @@ use std::sync::MutexGuard;
 const QUANTIZE_Q8_0_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_0.spv");
 const QUANTIZE_Q8_K_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_k.spv");
 const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_matmul_grouped.spv");
+/// Packed 4x8 int8 dot-product variant of `Q8_MATMUL_GROUPED_SHADER`. Requires
+/// the device to report `shaderIntegerDotProduct`; selected in
+/// [`Qwen3Ops::new_with_size`] and kept at the same pipeline index so every
+/// caller keeps addressing it through `Q8_MATMUL_GROUPED`.
+const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
@@ -825,10 +831,39 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| u32::try_from(count).ok())
             .ok_or(VulkanError::OutOfMemory)?;
         let max_sets = u32::try_from(descriptor_capacity).map_err(|_| VulkanError::OutOfMemory)?;
+        // The dot-product variant is a drop-in for the scalar Q8_0 grouped
+        // matmul, so it takes over that pipeline index. `RUST_GPU_DP4A=0`
+        // forces the scalar variant for A/B measurement.
+        let force_dp4a = std::env::var("RUST_GPU_DP4A")
+            .map(|value| value != "0")
+            .unwrap_or(context.supports_integer_dot_product());
+        let operators: Vec<&[u8]> = OPERATOR_SHADERS
+            .iter()
+            .enumerate()
+            .map(|(index, shader)| {
+                if index == Q8_MATMUL_GROUPED && force_dp4a {
+                    Q8_MATMUL_GROUPED_DP4A_SHADER
+                } else {
+                    *shader
+                }
+            })
+            .collect();
         let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
-        for shader in OPERATOR_SHADERS {
+        for (index, shader) in operators.into_iter().enumerate() {
             match context.create_pipeline(context.pipeline_layout, shader) {
-                Ok(pipeline) => pipelines.push(pipeline),
+                Ok(pipeline) => {
+                    if index == Q8_MATMUL_GROUPED {
+                        eprintln!(
+                            "[GPU] Q8_0 matmul: {}",
+                            if force_dp4a {
+                                "packed int8 dot product"
+                            } else {
+                                "scalar int8 multiply"
+                            },
+                        );
+                    }
+                    pipelines.push(pipeline);
+                }
                 Err(error) => {
                     unsafe {
                         for pipeline in pipelines {
@@ -3700,9 +3735,12 @@ fn check_weight_matvec(
     }
     let mut q8 = vec![0; n_in];
     let mut scales = vec![0.0; n_in / 32];
+    let cpu_t = std::time::Instant::now();
     crate::ops::quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
     let expected = cpu_weight_matvec(format, &weight, &input, &q8, &scales, n_in, n_out);
+    let cpu_elapsed = cpu_t.elapsed().as_secs_f64();
     let buffer = unsafe { context.upload_static(&weight) }.map_err(|error| error.to_string())?;
+    let gpu_t = std::time::Instant::now();
     let result = (|| -> Result<(), String> {
         let mut ops = Qwen3Ops::new(context, layout, 2).map_err(|error| error.to_string())?;
         let bindings = ops
@@ -3728,20 +3766,27 @@ fn check_weight_matvec(
         commands
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
+        let gpu_elapsed = gpu_t.elapsed().as_secs_f64();
         let tolerance = match format {
             GpuWeightFormat::F32 => 0.0,
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K => 3e-3,
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
         };
-        check_close(
-            name,
-            ops.read_f32(layout.projection, n_out)
-                .map_err(|error| error.to_string())?,
-            &expected,
-            tolerance,
-            tolerance,
-        )
+        let got = ops.read_f32(layout.projection, n_out)
+            .map_err(|error| error.to_string())?;
+        // Same matmul on both sides, so the wall-clock ratio is the effective
+        // throughput ratio for this shape.
+        let macs = (n_in * n_out) as f64;
+        println!(
+            "operator={name} matvec gpu={:.3}ms ({:.2} GINTOP/s) cpu={:.3}ms ({:.2} GINTOP/s) ratio={:.1}x",
+            gpu_elapsed * 1e3,
+            macs / gpu_elapsed / 1e9,
+            cpu_elapsed * 1e3,
+            macs / cpu_elapsed / 1e9,
+            cpu_elapsed / gpu_elapsed,
+        );
+        check_close(name, got, &expected, tolerance, tolerance)
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     result.and(cleanup.map_err(|error| error.to_string()))
