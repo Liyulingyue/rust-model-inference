@@ -18,6 +18,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 shared uint input_words[4096];
+shared float reduction[64];
 
 float f16_decode(uint bits) {
     uint sign = (bits >> 15u) & 1u;
@@ -59,18 +60,30 @@ void main() {
     uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (row >= rows) return;
-    if (lane != 0u) return;
 
-    uint row_offset = row * pc.blocks_per_row * 34u;
-    precise float sums[8];
-    for (uint lane_index = 0u; lane_index < 8u; lane_index++) sums[lane_index] = 0.0;
-    for (uint block = 0u; block < pc.blocks_per_row; block++) {
+    // Partition the blocks of this row across the 64 invocations: each lane
+    // accumulates its own slice and the partial products are reduced through
+    // shared memory. Reducing everything on lane 0 left 63 of the 64 lanes
+    // idle and made every matmul a serial 1024-wide multiply, which is why the
+    // GPU ran ~10x slower than the 8-thread AVX2 CPU path.
+    uint blocks_per_row = pc.blocks_per_row;
+    uint blocks_per_lane = (blocks_per_row + 63u) / 64u;
+    uint row_offset = row * blocks_per_row * 34u;
+
+    precise float partial = 0.0;
+    for (uint n = 0u; n < blocks_per_lane; n++) {
+        uint block = lane * blocks_per_lane + n;
+        if (block >= blocks_per_row) break;
         uint byte_offset = row_offset + block * 34u;
         uint scale_word = weight_word(slot, byte_offset >> 2u);
         uint scale_bits = (byte_offset & 3u) == 0u
             ? scale_word & 0xffffu
             : (scale_word >> 16u) & 0xffffu;
         float weight_scale = f16_decode(scale_bits);
+        float input_scale = uintBitsToFloat(
+            arena.data[pc.scales_word + token_row * pc.scales_stride + block]
+        );
+        float block_scale = weight_scale * input_scale;
         uint body = byte_offset + 2u;
         for (uint group = 0u; group < 8u; group++) {
             uint group_offset = body + group * 4u;
@@ -83,15 +96,22 @@ void main() {
                 + i8_of(packed, 1u) * i8_of(input_value, 1u)
                 + i8_of(packed, 2u) * i8_of(input_value, 2u)
                 + i8_of(packed, 3u) * i8_of(input_value, 3u);
-            float input_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
-            float scale = weight_scale * input_scale;
-            sums[group] = fma(float(dot), scale, sums[group]);
+            partial = fma(float(dot), block_scale, partial);
         }
     }
+    reduction[lane] = partial;
+    barrier();
 
-    precise float sum01 = (sums[0] + sums[4]) + (sums[1] + sums[5]);
-    precise float sum23 = (sums[2] + sums[6]) + (sums[3] + sums[7]);
-    precise float sum = sum01 + sum23;
+    // Tree reduction: 64 lanes log2(64) = 6 steps, one lane active per pair.
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        barrier();
+    }
+    if (lane != 0u) return;
+
+    precise float sum = reduction[0];
     uint output_word = slot == 0u
         ? pc.output0_word
         : (slot == 1u ? pc.output1_word : pc.output2_word);

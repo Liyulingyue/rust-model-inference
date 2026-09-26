@@ -20,13 +20,15 @@ pub(crate) mod qwen3;
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
-pub use ops::{run_batched_matmul_check, run_qwen3_operator_check};
+pub use ops::{
+    dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check,
+};
 
 #[cfg(feature = "vulkan")]
 use ash::vk;
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
@@ -40,6 +42,55 @@ const Q8_SHARED_BYTES: u32 = (4096 + 64) * 4;
 /// CPU without retrying the broken path.
 #[cfg(feature = "vulkan")]
 static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// Cumulative submission-phase timings in microseconds, dumped on demand by
+/// `dump_submit_trace`. Only accumulated when `RUST_GPU_SUBMIT_TRACE` is set so
+/// the hot path stays branch-free for normal runs.
+#[cfg(feature = "vulkan")]
+struct SubmitTrace {
+    count: AtomicU64,
+    record: AtomicU64,
+    submit: AtomicU64,
+    wait: AtomicU64,
+    reset: AtomicU64,
+}
+
+#[cfg(feature = "vulkan")]
+static SUBMIT_TRACE: SubmitTrace = SubmitTrace {
+    count: AtomicU64::new(0),
+    record: AtomicU64::new(0),
+    submit: AtomicU64::new(0),
+    wait: AtomicU64::new(0),
+    reset: AtomicU64::new(0),
+};
+
+#[cfg(feature = "vulkan")]
+static SUBMIT_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Report where submission wall-clock goes: `end/reset_fences/queue_submit`,
+/// `wait_for_fences` (the GPU actually executing), `end+record` around it, and
+/// `reset/begin_command_buffer`. Printed to stderr from `get_vulkan_context`.
+#[cfg(feature = "vulkan")]
+pub fn dump_submit_trace() {
+    if !SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let count = SUBMIT_TRACE.count.load(Ordering::Relaxed);
+    let micros = |name: &str, value: u64| {
+        let ms = value as f64 / 1000.0;
+        let per = if count > 0 {
+            ms / count as f64
+        } else {
+            0.0
+        };
+        eprintln!("[GPU-TRACE] {name}: {ms:.1}ms total, {per:.3}ms/submission");
+    };
+    eprintln!("[GPU-TRACE] submissions={count}");
+    micros("record   (end+reset_fences+submit+wait)", SUBMIT_TRACE.record.load(Ordering::Relaxed));
+    micros("  queue_submit", SUBMIT_TRACE.submit.load(Ordering::Relaxed));
+    micros("  wait_for_fences (GPU executes)", SUBMIT_TRACE.wait.load(Ordering::Relaxed));
+    micros("reset+begin_command_buffer", SUBMIT_TRACE.reset.load(Ordering::Relaxed));
+}
 
 #[cfg(feature = "vulkan")]
 pub fn gpu_broken() -> bool {
@@ -200,6 +251,10 @@ struct DeviceResources {
 #[cfg(feature = "vulkan")]
 impl VulkanContext {
     pub fn new() -> Result<Self, VulkanError> {
+        SUBMIT_TRACE_ENABLED.store(
+            std::env::var("RUST_GPU_SUBMIT_TRACE").is_ok(),
+            Ordering::Relaxed,
+        );
         unsafe {
             let entry = load_entry()?;
             let (instance, instance_api_version, properties2_extension) =
@@ -300,9 +355,10 @@ impl VulkanContext {
         })
     }
 
-    /// Caller holds mutex, from recovery through recording and submission.
+    /// Caller holds mutex, from recovery through submission.
     fn begin_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
         self.recover_commands(submission)?;
+        let t = std::time::Instant::now();
         unsafe {
             self.device
                 .reset_command_buffer(
@@ -319,39 +375,76 @@ impl VulkanContext {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(|error| VulkanError::InitFailed(error.to_string()))
+        }?;
+        if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+            SUBMIT_TRACE
+                .reset
+                .fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     fn submit_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
-        unsafe {
-            self.device
-                .end_command_buffer(self.command_buffer)
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            self.device
-                .reset_fences(std::slice::from_ref(&self.fence))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            let submit = vk::SubmitInfo::builder()
-                .command_buffers(std::slice::from_ref(&self.command_buffer))
-                .build();
-            // queue_submit can fail without proving no work was accepted.
-            submission.submit(|| {
+        let t0 = std::time::Instant::now();
+        let result = (|| -> Result<(), VulkanError> {
+            unsafe {
                 self.device
-                    .queue_submit(self.queue, &[submit], self.fence)
+                    .end_command_buffer(self.command_buffer)
                     .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-                self.submission_count.fetch_add(1, Ordering::Relaxed);
-                // Allow driver JIT, preserving the existing 60-second timeout.
                 self.device
-                    .wait_for_fences(std::slice::from_ref(&self.fence), true, 60_000_000_000)
-                    .map_err(|_| VulkanError::Timeout)?;
-                // Inject ambiguity after real completion so RED tests can safely
-                // demonstrate a missing recovery/reset guard without hanging GPU work.
-                #[cfg(test)]
-                if self.fail_fence_wait.swap(false, Ordering::Relaxed) {
-                    return Err(VulkanError::Timeout);
-                }
-                Ok(())
-            })
+                    .reset_fences(std::slice::from_ref(&self.fence))
+                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                let submit = vk::SubmitInfo::builder()
+                    .command_buffers(std::slice::from_ref(&self.command_buffer))
+                    .build();
+                // queue_submit can fail without proving no work was accepted.
+                submission.submit(|| {
+                    let t1 = std::time::Instant::now();
+                    unsafe {
+                        self.device
+                            .queue_submit(self.queue, &[submit], self.fence)
+                            .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                    }
+                    self.submission_count.fetch_add(1, Ordering::Relaxed);
+                    let t2 = std::time::Instant::now();
+                    if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+                        SUBMIT_TRACE
+                            .submit
+                            .fetch_add(t2.duration_since(t1).as_micros() as u64, Ordering::Relaxed);
+                    }
+                    // Allow driver JIT, preserving the existing 60-second timeout.
+                    unsafe {
+                        self.device
+                            .wait_for_fences(
+                                std::slice::from_ref(&self.fence),
+                                true,
+                                60_000_000_000,
+                            )
+                            .map_err(|_| VulkanError::Timeout)?;
+                    }
+                    let t3 = std::time::Instant::now();
+                    if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+                        SUBMIT_TRACE
+                            .wait
+                            .fetch_add(t3.duration_since(t2).as_micros() as u64, Ordering::Relaxed);
+                    }
+                    // Inject ambiguity after real completion so RED tests can safely
+                    // demonstrate a missing recovery/reset guard without hanging GPU work.
+                    #[cfg(test)]
+                    if self.fail_fence_wait.swap(false, Ordering::Relaxed) {
+                        return Err(VulkanError::Timeout);
+                    }
+                    Ok(())
+                })
+            }
+        })();
+        if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+            SUBMIT_TRACE.count.fetch_add(1, Ordering::Relaxed);
+            SUBMIT_TRACE
+                .record
+                .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        result
     }
 
     /// Run one tiny matmul and wait for it. The driver JITs the compute
