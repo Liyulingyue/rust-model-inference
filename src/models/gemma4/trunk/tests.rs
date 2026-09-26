@@ -189,6 +189,9 @@ fn counting_output_weight(
 fn test_config() -> Gemma4Config {
     Gemma4Config {
         layers: TEST_LAYERS,
+        n_expert: 0,
+        n_expert_used: 0,
+        n_ff_exp: 0,
         embd: TEST_EMBD,
         n_heads: 8,
         kv_heads_per_layer: vec![1; TEST_LAYERS],
@@ -235,6 +238,7 @@ fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
         proj: Some(zero_weight(PER_LAYER, embd)),
         post_norm: Some(vec![1.0; embd]),
         output_scale: 1.0,
+        moe: None,
     }
 }
 
@@ -264,6 +268,9 @@ fn post_kv_failure_model() -> Gemma4Model {
 fn deterministic_config() -> Gemma4Config {
     Gemma4Config {
         layers: 3,
+        n_expert: 0,
+        n_expert_used: 0,
+        n_ff_exp: 0,
         embd: 32,
         n_heads: 8,
         kv_heads_per_layer: vec![1; 3],
@@ -326,6 +333,7 @@ fn deterministic_model_with_config(
                 proj: Some(deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9)),
                 post_norm: Some(vec![1.0; cfg.embd]),
                 output_scale: 0.75 + layer as f32 / 16.0,
+                moe: None,
             }
         })
         .collect();

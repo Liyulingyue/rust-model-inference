@@ -190,7 +190,7 @@ mod tests {
         stereo[32..34].copy_from_slice(&4u16.to_le_bytes());
         stereo[44..52].copy_from_slice(&[0, 64, 0, 192, 0, 32, 0, 96]);
         assert_eq!(reference_wav_to_24k(&stereo).unwrap(), vec![0.0, 0.5]);
-        let wav = encode_wav_pcm16(&[0.0; 16], 16_000).unwrap();
+        let wav = crate::format::wav::encode_wav_pcm16_channels(&[0.0; 16], 16_000, 1).unwrap();
         assert_eq!(reference_wav_to_24k(&wav).unwrap(), vec![0.0; 24]);
         assert!(reference_wav_to_24k(b"invalid WAV").is_err());
     }

@@ -966,6 +966,21 @@ mod http_tests {
         body::{to_bytes, Body},
         extract::FromRequest,
     };
+    /// Minimal stub `TensorSource` for tests that never exercise tensor
+    /// loading (the `Fallback` text backend answers with an error before
+    /// touching the source). Returns `None` for everything.
+    struct UnimplementedSource;
+    impl super::super::TensorSource for UnimplementedSource {
+        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
     fn state() -> AppState {
         AppState {
             model: std::sync::Arc::new(super::super::Backend::Text(super::super::TextBackend {
@@ -976,6 +991,10 @@ mod http_tests {
                 ),
                 prefill_batch_size: 1,
                 context_length: 1024,
+                source: std::sync::Arc::new(UnimplementedSource),
+                model_path: None,
+                mmproj: None,
+                mmproj_path: None,
                 inner: super::super::TextInner::Fallback {
                     arch: "unimplemented".into(),
                 },

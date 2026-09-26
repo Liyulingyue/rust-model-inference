@@ -11,6 +11,8 @@
 
 use super::session::Qwen35Session;
 use super::*;
+use crate::ops::kernel::PreparedRows;
+use super::session::required_token_count;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;

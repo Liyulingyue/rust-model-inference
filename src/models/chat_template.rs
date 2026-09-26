@@ -49,6 +49,8 @@ pub enum ChatTemplate {
     GemmaTurn,
     /// LFM2 / LFM2.5: `<|start_of_role|>role<|end_of_role|>...<|end_of_text|>`.
     Lfm2,
+    /// EXAONE 3.5 (LG AI Research): `[|user|]...query[|endofturn|]\n[|assistant|]`.
+    Exaone,
 }
 
 impl ChatTemplate {
@@ -75,6 +77,9 @@ impl ChatTemplate {
                 "<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\
                  <|start_of_role|>assistant<|end_of_role|>"
             ),
+            Self::Exaone => format!(
+                "[|user|]{user_msg}[|endofturn|]\n[|assistant|]"
+            ),
         }
     }
 
@@ -85,6 +90,7 @@ impl ChatTemplate {
             Self::Llama3 => "Llama-3 (<|start_header_id|>)",
             Self::GemmaTurn => "Gemma (<start_of_turn>)",
             Self::Lfm2 => "LFM2 (<|start_of_role|>)",
+            Self::Exaone => "EXAONE ([|user|]/[|endofturn|])",
         }
     }
 }
@@ -102,8 +108,9 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
         "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen3tts"
         | "nemotron_h" | "falcon-h1" => ChatTemplate::ChatML,
 
-        // Llama family.
+        // Llama family (incl. arch="exaone" which uses llama-style tokens).
         "llama" | "k2-horizon" | "granite" | "nanbeige" => ChatTemplate::Llama3,
+        "exaone" => ChatTemplate::Exaone,
 
         // Gemma — `<start_of_turn>...<end_of_turn>`.
         "gemma4" => ChatTemplate::GemmaTurn,
@@ -139,6 +146,7 @@ pub fn parse_preset(name: &str) -> Option<ChatTemplate> {
         "chatml" | "qwen" | "qwen3" => Some(ChatTemplate::ChatML),
         "nemotron" | "nemotron_h" => Some(ChatTemplate::ChatML),
         "llama3" | "llama" => Some(ChatTemplate::Llama3),
+        "exaone" => Some(ChatTemplate::Exaone),
         "gemma" | "gemma4" => Some(ChatTemplate::GemmaTurn),
         "lfm2" => Some(ChatTemplate::Lfm2),
         // "none" / "off" / "base" / "auto" all return None — the caller
