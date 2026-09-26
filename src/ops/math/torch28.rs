@@ -1,3 +1,15 @@
+//! PyTorch 2.8 bit-exact scalar reference for `exp`.
+//!
+//! This is deliberately a hand-written translation of ATen's kernel rather than
+//! [`super::exp_approx_inplace`]: the planner / vocoder trunks are validated
+//! bit-for-bit against a PyTorch 2.8 oracle
+//! (see `tests/qwen_drive_planner_reference.rs` and
+//! `tests/dots_tts_reference.rs`), so the reduction order has to match ATen's
+//! exactly. Substituting a faster approximation silently breaks those.
+//!
+//! Lives under `crate::ops::math` so any model trunk can use it without
+//! reaching into another model's internals.
+
 // Scalar translation of pinned SLEEF 5a1d179d `xexpf`. Torch 2.8's ARM
 // sigmoid kernel evaluates four independent F32 lanes with this polynomial;
 // explicit `mul_add` calls preserve the AdvSIMD CONFIG=1 FMA association.
@@ -161,7 +173,7 @@ fn torch28_exp_double(value: DoubleF32) -> DoubleF32 {
 }
 
 #[inline(always)]
-pub(crate) fn torch28_exp(value: f32) -> f32 {
+pub fn torch28_exp(value: f32) -> f32 {
     let exponent = (value * R_LN2).round_ties_even() as i32;
     let exponent_f32 = exponent as f32;
     let mut reduced = exponent_f32.mul_add(-L2_UPPER, value);
@@ -186,12 +198,12 @@ pub(crate) fn torch28_exp(value: f32) -> f32 {
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_sigmoid(value: f32) -> f32 {
+pub fn torch28_sigmoid(value: f32) -> f32 {
     1.0 / (1.0 + torch28_exp(-value))
 }
 
 #[inline(always)]
-pub(in crate::models::dots) fn torch28_tanh(value: f32) -> f32 {
+pub fn torch28_tanh(value: f32) -> f32 {
     let magnitude = value.abs();
     let exponential = torch28_exp_double(DoubleF32 {
         high: magnitude,

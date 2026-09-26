@@ -32,7 +32,7 @@ pub(crate) fn run_jev_decision_spark(
         eprintln!("compute pool: {} threads (Spark)", n_threads);
     }
     let _ = prefill_batch_size;
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// Spark 2.5 JEV scorer — uses the session API
@@ -64,7 +64,7 @@ impl JevScorer for SparkJevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

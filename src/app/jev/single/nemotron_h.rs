@@ -23,7 +23,7 @@ pub(crate) fn run_jev_decision_nemotron_h(
     let _ = prefill_batch_size;
     let mut scorer = NemotronHJevScorer::new(source.clone(), n_threads_arg)?;
     let _ = output_json;
-    run_jev_decision_core(source, context, per_question, false, &mut scorer)
+    run_jev_decision_core(context, per_question, false, &mut scorer)
 }
 
 /// Nemotron-H JEV scorer — base model (no chat template). Uses
@@ -57,7 +57,7 @@ impl JevScorer for NemotronHJevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

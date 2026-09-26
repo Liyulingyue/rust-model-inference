@@ -1,4 +1,106 @@
+use crate::app::cli::resolve_thread_count;
+use crate::app::media::{decode_image, normalize_resized_image};
+use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
+use crate::models::qwen35::vision::{
+    qwen_smart_resize, VisionEncoder, VisionGrid, VisionScratchpad,
+};
 use crate::models::qwen35::Qwen35Model;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
+
+pub(crate) fn encode_qwen35_image(
+    mmproj_source: &dyn TensorSource,
+    image_path: &Path,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>), String> {
+    let start = Instant::now();
+    let mut encoder = VisionEncoder::from_source(mmproj_source)
+        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    encoder.precompute();
+    eprintln!(
+        "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
+        encoder.config.n_layer,
+        encoder.config.n_embd,
+        encoder.config.image_size,
+        encoder.config.patch_size,
+        encoder.config.spatial_merge_size
+    );
+    let load_start = Instant::now();
+    let image = decode_image(image_path)?;
+    let load_time = load_start.elapsed();
+    let original_w =
+        usize::try_from(image.width()).map_err(|_| "Original image width does not fit usize")?;
+    let original_h =
+        usize::try_from(image.height()).map_err(|_| "Original image height does not fit usize")?;
+    let grid = qwen_smart_resize(original_w, original_h, &encoder.config)?;
+    let preprocess_start = Instant::now();
+    let pixels = normalize_resized_image(
+        &image,
+        grid.image_width(),
+        grid.image_height(),
+        &encoder.config.image_mean,
+        &encoder.config.image_std,
+    )?;
+    let preprocess_time = preprocess_start.elapsed();
+    eprintln!(
+        "Image resized to {}x{} ({} vision tokens)",
+        grid.image_width(),
+        grid.image_height(),
+        grid.token_count()
+    );
+    let n_threads = resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    );
+    let pool = Arc::new(ComputePool::new(n_threads));
+    let mut scratch = VisionScratchpad::new(&encoder.config);
+    eprintln!("Encoding image...");
+    let encode_start = Instant::now();
+    let encoded_grid = encoder.encode_image(
+        &pixels,
+        grid.image_width(),
+        grid.image_height(),
+        &mut scratch,
+        &pool,
+    )?;
+    let encode_time = encode_start.elapsed();
+    if encoded_grid != grid {
+        return Err(format!(
+            "Vision grid mismatch: preprocess={grid:?}, encoder={encoded_grid:?}"
+        ));
+    }
+    let projected_len = grid
+        .token_count()
+        .checked_mul(encoder.config.projection_dim)
+        .ok_or("Projected vision length overflow")?;
+    if scratch.projected.len() != projected_len {
+        return Err(format!(
+            "Projected vision length mismatch: expected {projected_len}, got {}",
+            scratch.projected.len()
+        ));
+    }
+    let total = start.elapsed();
+    eprintln!(
+        "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
+        total.as_secs_f64(),
+        load_time.as_secs_f64(),
+        load_time.as_secs_f64() / total.as_secs_f64() * 100.0,
+        preprocess_time.as_secs_f64(),
+        preprocess_time.as_secs_f64() / total.as_secs_f64() * 100.0,
+        encode_time.as_secs_f64(),
+        encode_time.as_secs_f64() / total.as_secs_f64() * 100.0,
+    );
+    eprintln!(
+        "Vision tokens: {} (dim={})",
+        grid.token_count(),
+        encoder.config.projection_dim
+    );
+    Ok((grid, scratch.projected))
+}
 
 pub fn inject_vision_embeddings(
     llm: &Qwen35Model,

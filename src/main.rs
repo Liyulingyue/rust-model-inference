@@ -230,6 +230,13 @@ fn main() {
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
 
+    if options.jev && (options.embedding || video.is_some() || audio.is_some()) {
+        app::run_or_exit(Err(
+            "--jev supports --image, not --video, --audio, or --embedding".into(),
+        ));
+        return;
+    }
+
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         app::run_or_exit(app::run_omni_embedding(
             source.as_ref(),
@@ -257,7 +264,7 @@ fn main() {
         }
     }
 
-    if arch == "gemma4" {
+    if arch == "gemma4" && !options.jev {
         app::run_or_exit(app::run_multimodal_with_video(
             Arc::clone(&source),
             model_path,
@@ -273,7 +280,9 @@ fn main() {
             options.effective_max_context(),
             options.effective_repetition_penalty(),
         ));
-    } else if explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some() {
+    } else if !options.jev
+        && (explicit_mmproj.is_some() || image.is_some() || video.is_some() || audio.is_some())
+    {
         // Omni → TTS post-processor pipeline: when both the multimodal
         // media path AND a TTS model + mmproj are present, route the
         // generated reply through Qwen3-TTS to produce a 24 kHz WAV
@@ -336,6 +345,12 @@ fn main() {
                 questions,
                 mode,
             })) => {
+                if image.is_some() {
+                    app::run_or_exit(Err(
+                        "--jev --image supports single-question mode only".into()
+                    ));
+                    return;
+                }
                 app::run_or_exit(app::run_jev_grouped_decision(
                     source.clone(),
                     &context,
@@ -359,6 +374,8 @@ fn main() {
                     n_threads,
                     prefill_batch_size,
                     options.jev_output_json,
+                    explicit_mmproj,
+                    image,
                 ));
             }
             Ok(None) => {}

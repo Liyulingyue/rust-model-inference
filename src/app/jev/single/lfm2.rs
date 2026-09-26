@@ -29,7 +29,7 @@ pub(crate) fn run_jev_decision_lfm2(
     if !output_json {
         eprintln!("compute pool: {} threads (LFM2)", n_threads);
     }
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// LFM2 JEV scorer: uses the free-function prefill path
@@ -67,7 +67,7 @@ impl JevScorer for Lfm2JevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

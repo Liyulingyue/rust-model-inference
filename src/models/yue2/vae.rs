@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::dots::speaker::exp::torch28_exp;
+use crate::ops::math::torch28_exp;
 
 use super::config::YuE2VaeConfig;
 

@@ -30,7 +30,7 @@ pub(crate) fn run_jev_decision_gemma4(
     if !output_json {
         eprintln!("compute pool: {} threads (Gemma4)", n_threads);
     }
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// Gemma4 JEV scorer — uses the session API. The session is
@@ -67,7 +67,7 @@ impl JevScorer for Gemma4JevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

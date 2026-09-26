@@ -2,8 +2,18 @@ use super::types::{JevMode, JevQuestionInput, JevResult};
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Architectures `--jev --image` accepts. The HTTP `/v1/jev/image` endpoints
+/// dispatch on the same set via [`image_supported_arch`], so a model that can be
+/// scored over HTTP can also be scored from the CLI.
+const IMAGE_JEV_ARCHES: [&str; 4] = ["qwen35", "qwen3", "qwen3vl", "qwen3vlmoe"];
+
+pub fn image_supported_arch(arch: &str) -> bool {
+    IMAGE_JEV_ARCHES.contains(&arch)
+}
 
 /// Single forward-pass JEV scorer that returns the structured
 /// `Vec<JevResult>` instead of printing to stdout. The HTTP server
@@ -18,6 +28,28 @@ pub fn run_jev_decision_data(
     n_threads_arg: usize,
     prefill_batch_size: usize,
 ) -> Result<Vec<JevResult>, String> {
+    run_jev_decision_data_with_image(
+        source,
+        context,
+        questions,
+        positive,
+        n_threads_arg,
+        prefill_batch_size,
+        None,
+        None,
+    )
+}
+
+fn run_jev_decision_data_with_image(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevQuestionInput],
+    positive: Option<&str>,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+) -> Result<Vec<JevResult>, String> {
     let prepared = prepare_jev_questions(questions, positive)?;
 
     let arch = source
@@ -25,15 +57,24 @@ pub fn run_jev_decision_data(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     eprintln!("JEV: arch = {:?}", arch);
+    if image_path.is_some() && !image_supported_arch(&arch) {
+        return Err(format!(
+            "--jev --image is not supported for architecture {arch:?} \
+             (supported: {})",
+            IMAGE_JEV_ARCHES.join(" / ")
+        ));
+    }
 
     match &*arch {
-        "qwen3" | "qwen3vl" => qwen3::run_jev_decision_qwen3(
+        "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
             source.clone(),
             context,
             &prepared,
             n_threads_arg,
             prefill_batch_size,
             false,
+            mmproj_path,
+            image_path,
         ),
         "qwen35" => qwen35::run_jev_decision_qwen35(
             source.clone(),
@@ -42,6 +83,8 @@ pub fn run_jev_decision_data(
             n_threads_arg,
             prefill_batch_size,
             false,
+            mmproj_path,
+            image_path,
         ),
         "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
             llama::run_jev_decision_llama(
@@ -127,15 +170,19 @@ pub fn run_jev_decision(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     output_json: bool,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
 ) -> Result<(), String> {
     let t0 = Instant::now();
-    let results = run_jev_decision_data(
+    let results = run_jev_decision_data_with_image(
         source.clone(),
         context,
         questions,
         positive,
         n_threads_arg,
         prefill_batch_size,
+        mmproj_path,
+        image_path,
     )?;
 
     if output_json {
@@ -228,7 +275,7 @@ pub fn run_jev_decision(
     Ok(())
 }
 
-fn prepare_jev_questions(
+pub fn prepare_jev_questions(
     questions: &[JevQuestionInput],
     positive: Option<&str>,
 ) -> Result<Vec<PreparedQuestion>, String> {
@@ -330,7 +377,7 @@ pub(crate) fn verify_label_tokens_single(tokenizer: &BPETokenizer) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn jev_system_prompt(mode: JevMode) -> &'static str {
+pub fn jev_system_prompt(mode: JevMode) -> &'static str {
     match mode {
         JevMode::Score => {
             "Score the situation using the supplied context and numeric candidates. \
@@ -363,7 +410,10 @@ pub(crate) fn jev_labels(q: &PreparedQuestion) -> Vec<char> {
 /// Renders the JEV JSON payload (context + question + candidates)
 /// for embedding in the per-arch chat template. Used by every
 /// per-arch `run_jev_decision_*` so the JSON shape stays in sync.
-pub(crate) fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
+pub fn jev_payload_json(context: &str, q: &PreparedQuestion) -> Result<String, String> {
+    // Kept public so the HTTP multimodal endpoints render the same bytes as
+    // the CLI scorer; `serde_json::json!` keys in a different order, which
+    // shifts the token ids and moves the label logits.
     let labels = jev_labels(q);
     let mut payload = String::from("{\"context\": ");
     payload.push_str(&serde_json::to_string(context).map_err(|e| format!("context json: {e}"))?);
@@ -423,16 +473,16 @@ pub(crate) fn build_jev_prompt(
 }
 
 pub(crate) fn print_jev_question(q: &PreparedQuestion, labels: &[char]) {
-    println!(
+    eprintln!(
         "\n--- JEV question ({} candidates) ---",
         q.descriptions.len()
     );
-    println!("Q: {}", q.text);
+    eprintln!("Q: {}", q.text);
     for (i, desc) in q.descriptions.iter().enumerate() {
         if q.mode == JevMode::Score {
-            println!("  {}: {} = {}", labels[i], desc, q.values[i]);
+            eprintln!("  {}: {} = {}", labels[i], desc, q.values[i]);
         } else {
-            println!("  {}: {}", labels[i], desc);
+            eprintln!("  {}: {}", labels[i], desc);
         }
     }
 }
@@ -530,12 +580,12 @@ pub(crate) fn compute_jev_result(
     }
 }
 
-pub(crate) struct PreparedQuestion {
-    pub(crate) mode: JevMode,
-    pub(crate) text: String,
-    pub(crate) descriptions: Vec<String>,
-    pub(crate) values: Vec<f32>,
-    pub(crate) positive_label: Option<char>,
+pub struct PreparedQuestion {
+    pub mode: JevMode,
+    pub text: String,
+    pub descriptions: Vec<String>,
+    pub values: Vec<f32>,
+    pub positive_label: Option<char>,
 }
 
 /// Per-architecture JEV scorer.
@@ -562,7 +612,7 @@ pub(crate) trait JevScorer {
     /// `payload_str` field is the rendered JSON (used by
     /// `print_jev_question` for debug output).
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String>;
@@ -586,7 +636,6 @@ pub(crate) trait JevScorer {
 /// `run_jev_decision_<arch>` functions below), not the
 /// per-question loop.
 pub(crate) fn run_jev_decision_core<S: JevScorer>(
-    _source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedQuestion],
     output_json: bool,

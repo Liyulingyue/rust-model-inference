@@ -29,7 +29,7 @@ pub(crate) fn run_jev_decision_llama(
     if !output_json {
         eprintln!("compute pool: {} threads (Llama-family)", n_threads);
     }
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// Llama-family JEV scorer — covers llama / k2-horizon / granite /
@@ -74,7 +74,7 @@ impl JevScorer for LlamaJevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {

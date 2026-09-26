@@ -31,7 +31,7 @@ pub(crate) fn run_jev_decision_hunyuan(
     if !output_json {
         eprintln!("compute pool: {} threads (Hunyuan)", n_threads);
     }
-    run_jev_decision_core(source, context, per_question, output_json, &mut scorer)
+    run_jev_decision_core(context, per_question, output_json, &mut scorer)
 }
 
 /// Hunyuan JEV scorer — wraps a `Qwen3Model` (Hunyuan reuses
@@ -74,7 +74,7 @@ impl JevScorer for HunyuanJevScorer {
     }
 
     fn build_prompt(
-        &self,
+        &mut self,
         context: &str,
         q: &PreparedQuestion,
     ) -> Result<(Vec<char>, Vec<u32>), String> {
