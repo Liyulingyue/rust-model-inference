@@ -14,3 +14,4 @@ pub mod qwen35;
 pub mod qwen_drive;
 pub mod spark;
 pub mod vibevoice_asr;
+pub mod yue2;

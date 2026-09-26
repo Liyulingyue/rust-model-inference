@@ -1,7 +1,167 @@
 use super::types::{
     CliOptions, DreamXCliOptions, DreamXOptions, DreamXRefinerOptions, EmbeddingOutput,
-    PlanningMode, QwenDriveCliOptions, QwenDriveHead, ZImageCliOptions,
+    PlanningMode, QwenDriveCliOptions, QwenDriveHead, YuE2CliOptions, ZImageCliOptions,
 };
+
+pub fn yue2_cli_options(options: &CliOptions) -> Result<Option<YuE2CliOptions>, String> {
+    if !options.yue2 {
+        return if options.lyrics.is_some() {
+            Err("--lyrics requires --yue2".into())
+        } else {
+            Ok(None)
+        };
+    }
+
+    let conflict = if options.tts {
+        Some("--tts")
+    } else if options.edit {
+        Some("--edit")
+    } else if options.audio.is_some() {
+        Some("--audio")
+    } else if options.ref_audio.is_some() {
+        Some("--ref-audio")
+    } else if options.image.is_some() {
+        Some("--image")
+    } else if options.video.is_some() {
+        Some("--video")
+    } else if options.mmproj.is_some() {
+        Some("--mmproj")
+    } else if options.text_encoder.is_some() {
+        Some("--text-encoder")
+    } else if options.embedding {
+        Some("--embedding")
+    } else if options.embedding_output != EmbeddingOutput::Summary {
+        Some("--embedding-output")
+    } else if options.jev
+        || options.jev_context.is_some()
+        || !options.jev_questions.is_empty()
+        || options.jev_positive.is_some()
+        || options.jev_output_json
+        || options.jev_multi
+        || !options.jev_blocks.is_empty()
+    {
+        Some("--jev")
+    } else if options.dreamx {
+        Some("--dreamx")
+    } else if options.planner.is_some()
+        || options.perception.is_some()
+        || options.scenes.is_some()
+        || options.image_root.is_some()
+        || options.frames.is_some()
+        || options.planning_mode.is_some()
+        || options.num_samples.is_some()
+        || options.num_steps.is_some()
+        || options.output.is_some()
+    {
+        Some("Qwen-Drive flags")
+    } else if options.negative_prompt.is_some()
+        || options.duration_seconds.is_some()
+        || options.fps.is_some()
+        || options.target_spatial_tokens.is_some()
+        || options.refine.is_some()
+        || options.refiner_kv_len.is_some()
+        || options.latent_upsample.is_some()
+        || options.refiner_decoder.is_some()
+        || options.dry_run
+        || options.overwrite
+        || options.allow_memory_overcommit
+    {
+        Some("DreamX flags")
+    } else if options.gpu {
+        Some("--gpu")
+    } else if options.bench {
+        Some("--bench")
+    } else if options.profile {
+        Some("--profile")
+    } else if options.dump_logits {
+        Some("--dump-logits")
+    } else if options.tts_model.is_some()
+        || options.tts_mmproj.is_some()
+        || options.ref_text.is_some()
+        || options.source_audio.is_some()
+        || options.source_text.is_some()
+        || options.target_text.is_some()
+        || options.instruction.is_some()
+        || options.use_xvector_supplied
+        || options.language.is_some()
+    {
+        Some("TTS reference/instruction flags")
+    } else if options.max_context.is_some() {
+        Some("--max-context")
+    } else if options.chat_template.is_some() {
+        Some("--chat-template")
+    } else if options.prefill_batch_size.is_some() {
+        Some("--prefill-batch-size")
+    } else if options.repetition_penalty.is_some() {
+        Some("--repetition-penalty")
+    } else if options.resolution.is_some() {
+        Some("--resolution")
+    } else if options.cfg_scale.is_some() {
+        Some("--cfg-scale")
+    } else if options.thinking {
+        Some("--thinking")
+    } else {
+        None
+    };
+    if let Some(conflict) = conflict {
+        return Err(format!("--yue2 cannot be used with {conflict}"));
+    }
+
+    let model = (!options.model.as_os_str().is_empty())
+        .then(|| options.model.clone())
+        .ok_or("--yue2 requires a non-empty --model")?;
+    let vae = options
+        .vae
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--yue2 requires --vae")?;
+    let style = options
+        .prompt
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("--yue2 requires a non-empty --prompt style")?;
+    let lyrics = options
+        .lyrics
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("--yue2 requires non-empty --lyrics")?;
+    let out = options
+        .out
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("--yue2 requires --out")?;
+    if !out
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("wav"))
+    {
+        return Err("--yue2 requires a .wav --out path".into());
+    }
+
+    let seed = options.seed.unwrap_or(831_001);
+    let seed = u64::try_from(seed).map_err(|_| "--yue2 requires a non-negative --seed")?;
+    let steps = options.steps.unwrap_or(32);
+    if steps == 0 {
+        return Err("--yue2 requires --steps greater than 0".into());
+    }
+    let mut semantic = crate::models::yue2::SamplingConfig::semantic();
+    semantic.max_tokens = options.max_tokens.unwrap_or(semantic.max_tokens);
+    semantic.temperature = options.temperature.unwrap_or(semantic.temperature);
+    semantic.top_k = options.top_k.unwrap_or(semantic.top_k);
+    semantic.top_p = options.top_p.unwrap_or(semantic.top_p);
+    semantic.validate()?;
+
+    Ok(Some(YuE2CliOptions {
+        model,
+        vae,
+        style,
+        lyrics,
+        out,
+        seed,
+        semantic,
+        steps,
+    }))
+}
 
 pub fn qwen_drive_cli_options(options: &CliOptions) -> Result<Option<QwenDriveCliOptions>, String> {
     let requested = options.planner.is_some()

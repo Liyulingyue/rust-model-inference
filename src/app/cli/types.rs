@@ -15,6 +15,7 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    pub yue2: bool,
     pub dreamx: bool,
     pub planner: Option<PathBuf>,
     pub perception: Option<PathBuf>,
@@ -35,6 +36,7 @@ pub struct CliOptions {
     pub vae: Option<PathBuf>,
     pub text_encoder: Option<PathBuf>,
     pub prompt: Option<String>,
+    pub lyrics: Option<String>,
     pub negative_prompt: Option<String>,
     pub chat_template: Option<String>,
     pub language: Option<String>,
@@ -135,6 +137,18 @@ pub struct ZImageCliOptions {
     pub resolution: usize,
     pub seed: i64,
     pub out: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct YuE2CliOptions {
+    pub model: PathBuf,
+    pub vae: PathBuf,
+    pub style: String,
+    pub lyrics: String,
+    pub out: PathBuf,
+    pub seed: u64,
+    pub semantic: crate::models::yue2::SamplingConfig,
+    pub steps: usize,
 }
 
 #[derive(Debug, PartialEq)]
