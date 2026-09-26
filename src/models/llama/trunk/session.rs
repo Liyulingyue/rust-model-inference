@@ -12,15 +12,10 @@
 //! dispatch ordering, which the existing parity tests already
 //! guard).
 //!
-//! The flash-attention math (per-head online softmax + rescale) is
-//! still written in per-query form; once the `B=1` chunked path is
-//! stable the next step is to lift that into a tiled
-//! `Q × Kᵀ → softmax → @V` that handles `rows × n_head` queries
-//! against the full cached K/V in one or two passes — see
-//! `docs/develop/PREFILL_ABSTRACTION.md`.
+//! Single-token and chunked attention share the same F16/F32 operations.
 
 use super::forward::{apply_rope, normalization_groups};
-use super::weights::{get_f32_tensor, load_layers, LlamaLayerWeights};
+use super::weights::{get_f32_tensor, layer_loop_config, load_layers, LlamaLayerWeights};
 use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::prefill::{checked_prefill_batch_size, prefill_chunks, ChunkedPrefill};
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
@@ -32,9 +27,9 @@ use crate::ops::kernel::{PreparedRows, QuantizedTensor, Weight};
 type DynTokenizer = Box<dyn Tokenizer>;
 use crate::core::tensor::GGMLType;
 use crate::ops::{
-    dot_f16_f32, dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into,
-    quantize_row_q8_k_into, rms_norm_grouped, silu_mul_approx_inplace, vec_add_into,
-    vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
+    dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into, quantize_row_q8_k_into,
+    rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace, softmax_approx_inplace,
+    vec_add_into, vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -59,6 +54,7 @@ pub struct LlamaSession<'a> {
     pub logit_scale: f32,
     pub norm_groups: usize,
     pub seq_len: usize,
+    pub loop_final_norm: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -128,7 +124,7 @@ impl<'a> LlamaSession<'a> {
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
         let max_ctx = config.n_ctx.min(max_context);
         let n_embd = config.n_embd;
-        let n_layer = config.n_layer;
+        let (n_layer, loop_final_norm) = layer_loop_config(source, &config)?;
         let n_head = config.n_head;
         let n_head_kv = config.n_head_kv;
         let n_embd_head = config.n_embd_head;
@@ -176,7 +172,7 @@ impl<'a> LlamaSession<'a> {
             .unwrap_or(embd_info)
             .ggml_type;
         let layers: Vec<LlamaLayerWeights<'a>> =
-            load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
+            load_layers(source, config.n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
         let kv_cache = match kv_format {
             KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
             KvFormat::F32 => KvCache::new_f32(n_layer, max_ctx, n_embd_gqa),
@@ -240,6 +236,7 @@ impl<'a> LlamaSession<'a> {
             logit_scale,
             norm_groups,
             seq_len: 0,
+            loop_final_norm,
         })
     }
 
@@ -433,7 +430,7 @@ impl<'a> LlamaSession<'a> {
         };
 
         for layer in 0..n_layer {
-            let lw = &weights.layers[layer];
+            let lw = &weights.layers[layer % weights.layers.len()];
             // ---- Per-row RMSNorm ----
             // RMSNorm is a per-row op (independent across rows in
             // the chunk) so we walk the rows here instead of
@@ -543,13 +540,7 @@ impl<'a> LlamaSession<'a> {
                 }
             }
 
-            // ---- Batched flash attention for `rows × n_head` queries ----
-            // Loads each K/V cache row once per head (instead of
-            // `rows × n_head × n_cached_total` loads for the
-            // per-row loop), accumulates the online softmax per
-            // row, and produces `[rows × n_embd_q]`. The result
-            // lives in `attn_out_local` for one chunk; the next
-            // layer's `wo` projection consumes it.
+            // Causal attention produces `[rows × n_embd_q]` for `wo`.
             let attn_out = &mut scratch.attn_out[..rows * n_embd_q];
             crate::models::llama::trunk::forward::run_attention_chunked(
                 pool,
@@ -641,6 +632,14 @@ impl<'a> LlamaSession<'a> {
                     vec_mad_f32(x_row, down_row, residual_scale);
                 } else {
                     vec_add_into(down_row, x_row);
+                }
+            }
+            if self.loop_final_norm
+                && (layer + 1) < n_layer
+                && (layer + 1) % weights.layers.len() == 0
+            {
+                for row in scratch.x[..rows * n_embd].chunks_exact_mut(n_embd) {
+                    rms_norm_inplace(row, &weights.output_norm, eps);
                 }
             }
         }
@@ -790,7 +789,7 @@ impl<'a> LlamaSession<'a> {
         let mut arch_buf = arch.clone();
 
         for layer in 0..n_layer {
-            let lw = &weights.layers[layer];
+            let lw = &weights.layers[layer % weights.layers.len()];
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
@@ -929,38 +928,15 @@ impl<'a> LlamaSession<'a> {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
                         let out_base = h * n_embd_head_v;
-                        let mut ms = 0.0f32;
-                        let mut s_sum = 0.0f32;
-                        attn_out_local[out_base..out_base + n_embd_head_v].fill(0.0);
-                        for t in 0..n_cached {
-                            let score = dot_f16_f32(
-                                &q[q_off..q_off + n_embd_head_k],
-                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                n_embd_head_k,
-                            ) * kq_scale;
-                            if score > ms {
-                                let rescale = (ms - score).exp();
-                                vec_scale_f32(
-                                    &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                                    rescale,
-                                );
-                                s_sum *= rescale;
-                                ms = score;
-                            }
-                            let vs = (score - ms).exp();
-                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                            vec_mad_f16_f32(
-                                &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                                &v_cache[v_base..v_base + n_embd_head_v],
-                                vs,
-                            );
-                            s_sum += vs;
-                        }
-                        let inv_sum = 1.0 / s_sum;
-                        vec_scale_f32(
+                        super::forward::attention_head_f16(
+                            &q[q_off..q_off + n_embd_head_k],
                             &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                            inv_sum,
+                            k_cache,
+                            v_cache,
+                            kb + kv_h * n_embd_head_v,
+                            n_embd_gqa,
+                            n_cached,
+                            kq_scale,
                         );
                     }
                 } else {
@@ -988,35 +964,14 @@ impl<'a> LlamaSession<'a> {
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        for t in n_cached..n_padded {
-                            scores[s_off + t] = f32::NEG_INFINITY;
-                        }
-                        // In-place softmax over the active range.
-                        let mut max_v = f32::NEG_INFINITY;
-                        for t in 0..n_cached {
-                            if scores[s_off + t] > max_v {
-                                max_v = scores[s_off + t];
-                            }
-                        }
-                        let mut sum = 0.0f32;
-                        for t in 0..n_cached {
-                            let e = (scores[s_off + t] - max_v).exp();
-                            scores[s_off + t] = e;
-                            sum += e;
-                        }
-                        for t in 0..n_cached {
-                            scores[s_off + t] /= sum;
-                        }
+                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
                         let mut values = vec![0.0f32; n_cached];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
                             }
-                            let mut acc = 0.0f32;
-                            for t in 0..n_cached {
-                                acc += values[t] * scores[s_off + t];
-                            }
-                            attn_out_local[out_base + d] = acc;
+                            attn_out_local[out_base + d] =
+                                dot_f32(&values, &scores[s_off..s_off + n_cached], n_cached);
                         }
                     }
                 }
@@ -1155,11 +1110,17 @@ impl<'a> LlamaSession<'a> {
             } else {
                 vec_add_into(down_buf, x);
             }
+            if self.loop_final_norm
+                && (layer + 1) < n_layer
+                && (layer + 1) % weights.layers.len() == 0
+            {
+                rms_norm_inplace(x, &weights.output_norm, eps);
+            }
         }
 
         // Output norm + LM-head projection.
-        let x = &mut scratch.x;
-        let normed = &mut scratch.normed;
+        let x = &mut scratch.x[..n_embd];
+        let normed = &mut scratch.normed[..n_embd];
         let logits_ptr = scratch.logits.as_mut_ptr();
         let q8_buf = &mut scratch.q8_buf;
         let scale_buf = &mut scratch.scale_buf;

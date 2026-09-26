@@ -17,9 +17,7 @@ use crate::ops::has_neon;
 #[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
 #[cfg(target_arch = "aarch64")]
-use super::neon::{
-    matmul_q8_0_vs_q8_0_dotprod_nrc4, matmul_q8_0_vs_q8_0_neon, matmul_q8_0_vs_q8_0_neon_nrc1,
-};
+use super::neon::matmul_q8_0_vs_q8_0_neon_nrc1;
 use super::scalar::matmul_q8_0_quantized_scalar_range;
 
 /// Per-row dispatch: GPU → AVX2 → NEON → scalar.
@@ -55,27 +53,17 @@ pub fn matmul_q8_0_quantized_range(
     #[cfg(target_arch = "aarch64")]
     if has_neon() {
         unsafe {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                matmul_q8_0_vs_q8_0_dotprod_nrc4(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    row_start,
-                    row_end,
-                );
-            } else {
-                matmul_q8_0_vs_q8_0_neon(
-                    weight,
-                    input_q8,
-                    input_scales,
-                    output,
-                    n_in,
-                    row_start,
-                    row_end,
-                );
-            }
+            // Keep ggml's two block accumulators and four integer dot lanes.
+            // Reducing a whole block before FMA changes the final F32 bits.
+            matmul_q8_0_vs_q8_0_neon_nrc1(
+                weight,
+                input_q8,
+                input_scales,
+                output,
+                n_in,
+                row_start,
+                row_end,
+            );
         }
         return;
     }

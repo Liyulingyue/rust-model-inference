@@ -10,8 +10,8 @@ use super::weights::load_weight;
 use crate::core::tensor::TensorSource;
 use crate::models::dots::config::DotsTtsConfig;
 use crate::models::dots::patch_encoder::{dots_rotary, linear_forward, load_f16_f32};
-use crate::ops::math::{torch28_exp, torch28_tanh};
 use crate::ops::kernel::Weight;
+use crate::ops::math::{torch28_exp, torch28_tanh};
 use crate::ops::{dot_f32, rope_sin_cos_sleef};
 
 #[cfg(feature = "parity-trace")]
@@ -203,7 +203,8 @@ impl<'a> DiT<'a> {
         embedding
     }
 
-    fn time_mlp_batch(&self, times: &[f32], _trace_internal: bool) -> Vec<f32> {
+    fn time_mlp_batch(&self, times: &[f32], trace_internal: bool) -> Vec<f32> {
+        let _ = trace_internal;
         let mut embeddings = Vec::with_capacity(times.len() * TIME_EMBED_DIM);
         for &time in times {
             embeddings.extend(Self::time_embedding(time));
@@ -327,8 +328,9 @@ impl<'a> DiT<'a> {
         mask: &[bool],
         positions: &[usize],
         out: &mut [f32],
-        _trace_internal: bool,
+        trace_internal: bool,
     ) {
+        let _ = trace_internal;
         let branch_len = positions.len();
         let rows = x_in.len() / DIT_HIDDEN;
         let mods_per_branch = self.fused_adaln_b.len();

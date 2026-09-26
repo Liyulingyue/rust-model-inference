@@ -61,7 +61,7 @@
 | NVIDIA Nemotron-3 Nano 4B | `nemotron_h` | 文本生成 | 无 | `NVIDIA-Nemotron-3-Nano-4B-Q8_0.gguf`：42 层 SSM/FFN/Attention、GPT-2 `pixtral` Tokenizer、状态续写 | `Verified`（Q8_0 标量路径） | GGUF SHA-256 `81d4c5931c42f34789267445139dbdb196073760b99e11fbc7067fa2d2d7d629`，4,233,679,008 bytes；Oracle：本地 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 的 CPU 标量 SiLU/SSM/softmax、F16 KV、flash-attn 关闭。`Hello` → IDs `[1, 22177]`；首步 131072 个 F32 logits 的 bit hash `2a8f5cd0499e563b`，42 层和最终归一化/输出检查点逐位一致；4 步 greedy `[1044, 4304, 1033, 3075]`；release CLI 输出 `, world! How`。默认 llama.cpp SIMD 指数/attention 路径与标量路径不逐位一致；其他量化格式和型号未验证。真实检查需设置 `RMI_NEMOTRON_Q8_MODEL` 运行 `cargo test --test nemotron_h_q8`。 |
 | 通用 Qwen2 文本 GGUF | `qwen2` | 文本生成 | 无 | 可进入 Qwen trunk；dots.tts 内部 LLM 已使用 | `Experimental` | 当前没有“任意 Qwen2 文本模型”保证，不能用 dots.tts 的内部成功替代通用验证。 |
 | Dense LFM2 v2 | `lfm2` | 文本生成 | 无 | 保留专用 trunk 分发 | `Experimental` | `docs/TODO.md` 明确记录当前模型库没有对应 GGUF。 |
-| Nanbeige | `nanbeige` | 文本生成 | 无 | SPM tokenizer 和 llama trunk 路由 | `Experimental` | 合入提交标题明确标注“未成功”，因此不能列为确定支持。 |
+| Nanbeige4.2-3B | `nanbeige` | 文本生成 | 无 | Q8_0；22 层共享权重、44 个独立 KV 层、轮间 RMSNorm、128-dim heads、SPM、ChatML | `Verified`（标量/F32、NEON/F32/F16 KV） | SHA-256 `76627e550979d8ea5746cb11922ad10352d91546aa540c0e8292522f8dd9c2b5`，4,434,787,248 bytes。固定 llama.cpp `b96806d`；`Hello` 的 1733 条检查点、完整 logits 和两步 greedy 逐位对齐；NEON/F16 中文四步的 4618 条记录也逐位一致。六组 Tokenizer IDs、F32/F16 单 token 与 4 线程 batch=2 prefill、中文 CLI 已验证。其他量化/型号、其他 CPU 架构、JEV 和 server 不在验证范围。详见 [llama.md](../usage/llama.md#3-nanbeige42-3b)。 |
 
 ## 明确不支持或受限
 

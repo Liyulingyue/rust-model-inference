@@ -57,19 +57,44 @@ Granite 用 Granite 原生 chat template（`forward.rs:192-195`）：
 - 文档 [OPTIMIZATION.md](../../OPTIMIZATION.md) 中 Apple Silicon 性能基准
   使用 `Qwen3-0.6B`，不覆盖 Granite
 
-## 3. Nanbeige
+## 3. Nanbeige4.2-3B
 
 ```bash
-cargo run --release --bin rust-model-inference -- \
-  --model models/nanbeige-XXXX.gguf \
-  --prompt "请继续。"
+cargo run --profile release-fast --bin rust-model-inference -- \
+  --model /Users/gouzi/Documents/git/rust-model-inference/models/Nanbeige4.2-3B-GGUF/Nanbeige4.2-3B-Q8_0.gguf \
+  --prompt "请只回答：北京是哪个国家的首都？" \
+  --max-tokens 32 --temp 0 --threads 4 --max-context 256
 ```
 
-- Nanbeige 是 base 模型，**没有 chat template**（`forward.rs:196-198`）：
-  prompt 直接喂进模型，由 BOS 标记生成起点。
-- `add_special = arch == "nanbeige"`（`forward.rs:206`）。
-- 状态：`Experimental`。对应 merge commit 标题明确写「未成功」。
-- Tokenizer：SPM，仓库通过 `llama` trunk 路由。
+- GGUF architecture 为 `nanbeige`，SPM tokenizer；22 层物理权重循环两次，44 个逻辑层各自保存 KV，第一轮末尾应用 `output_norm`。
+- Q/K/V head dimension 为 128，不能从 `3072 / 48` 推导；Q/output attention width 为 6144，KV width 为 1024。
+- 提供的聊天模型使用内嵌 ChatML 默认 system turn。默认关闭 thinking；`--thinking` 使用 `<think>\n` 后缀。没有聊天模板的旧 base GGUF 保留原始 prompt 输入。
+- 验证文件：`Nanbeige4.2-3B-Q8_0.gguf`，4,434,787,248 bytes，SHA-256 `76627e550979d8ea5746cb11922ad10352d91546aa540c0e8292522f8dd9c2b5`；201 tensors（156 Q8_0、45 F32）。
+- Oracle：llama.cpp `b96806d96061049a5b574269b049bf6241d63d46`，CPU、1 thread、flash attention 关闭；分别验证标量/F32 KV、ARM64 NEON/F32 KV 和默认 NEON/F16 KV。`Hello` 的 IDs 为 `[166100,23877]`，两步 greedy 为 `[152518,324]`；每种模式比较 1733 条记录，含 embedding、44 层各 13 个检查点、轮间归一化和每步 166144 个 F32 logits 的原始位模式，CLI 计算和 Session 输出均逐位一致。
+- NEON/F16 KV 另验证 `你好，世界！` 的五个输入 token 和四步 greedy，4618 条记录逐位一致。中文、Unicode、空白、特殊 token 和空输入的六组 Tokenizer IDs 固定在 `tests/nanbeige.rs`。
+- F32/F16 KV 下，Rust 单线程单 token 与 4 线程 batch=2 中文 prefill 的完整最终 logits，在标量和 NEON 两种模式分别逐位一致。普通 NEON/F16 CLI 中文聊天通过；其他量化、型号、CPU 架构、JEV 和 server 未纳入本次验证。共享 Q8_0 dispatch 改用现有 ggml NRC1 累加顺序；性能影响未测量。
+
+标量回归（Oracle 构建只操作临时副本）：
+
+```bash
+MODEL=/Users/gouzi/Documents/git/rust-model-inference/models/Nanbeige4.2-3B-GGUF/Nanbeige4.2-3B-Q8_0.gguf
+ORACLE=$(sh tools/oracle/nanbeige/build_oracle.sh /Users/gouzi/Documents/git/llama.cpp | tail -n 1)
+RMI_PARITY_TRACE=/tmp/nanbeige-oracle.jsonl "$ORACLE" -m "$MODEL" -p Hello -n 2
+RMI_NANBEIGE_MODEL="$MODEL" RMI_NANBEIGE_ORACLE_TRACE=/tmp/nanbeige-oracle.jsonl RMI_SCALAR=1 \
+  cargo test --profile release-fast --features parity-trace --test nanbeige -- --include-ignored --test-threads=1
+```
+
+NEON/F16 回归（F32 时删去两处 `RMI_NANBEIGE_F16=1`）：
+
+```bash
+ORACLE=$(RMI_ORACLE_SIMD=1 sh tools/oracle/nanbeige/build_oracle.sh /Users/gouzi/Documents/git/llama.cpp | tail -n 1)
+RMI_NANBEIGE_F16=1 RMI_PARITY_TRACE=/tmp/nanbeige-neon-f16.jsonl "$ORACLE" -m "$MODEL" -p '你好，世界！' -n 4
+RMI_NANBEIGE_F16=1 RMI_NANBEIGE_PROMPT='你好，世界！' \
+  RMI_NANBEIGE_MODEL="$MODEL" RMI_NANBEIGE_ORACLE_TRACE=/tmp/nanbeige-neon-f16.jsonl \
+  cargo test --profile release-fast --features parity-trace --test nanbeige nanbeige_matches_oracle_bit_for_bit -- --ignored
+```
+
+`RMI_SCALAR` 仅在 `parity-trace` 构建生效；普通构建继续使用现有 SIMD。检查保留首个分叉的 trace 文件，全部通过后清理 Rust trace。
 
 ## 4. CLI 路由速查
 
@@ -77,7 +102,7 @@ cargo run --release --bin rust-model-inference -- \
 |---|---|---|---|
 | `llama`（含 MiniCPM5、Granite 之外的 Llama 家族） | Qwen2 风格 | 视 `add_bos_token` | `Verified`（MiniCPM5）/ 默认 |
 | `granite` | Granite 风格 | 视 `add_bos_token` | `Supported` |
-| `nanbeige` | 无 | 强制 add_special | `Experimental` |
+| `nanbeige` | Nanbeige4.2 ChatML；无模板时 raw prompt | GGUF add_bos_token | `Verified`（Q8_0 标量/F32、NEON/F32/F16 KV） |
 
 ## 5. 与 llama.cpp 的对齐
 
@@ -89,8 +114,8 @@ tools/oracle/shared/build_llama_oracle.sh
 cargo test --test inference_parity
 ```
 
-Granite / Nanbeige **没有**专属 pinned commit 与 build 脚本，跑对齐只能
-临时挑一个 llama.cpp 提交。
+Nanbeige4.2 使用第 3 节中的独立固定版本和 Oracle 构建脚本。
+Granite 尚无专属固定版本与构建脚本。
 
 ## 6. 服务端模式
 
@@ -108,7 +133,7 @@ cargo run --release --bin server -- \
 | 范围 | 行为 |
 |---|---|
 | Granite 非 greedy 解码 | 未限制；但只保证 `add_special` 与模板正确 |
-| Nanbeige | Experimental；不保证端到端正确性 |
+| Nanbeige4.2-3B Q8_0 | 标量/F32、NEON/F32/F16 KV 逐位验证；其他量化、CPU 架构、JEV 和 server 未验证 |
 | Granite `attention.scale` 缺失 | 回退到 `1/sqrt(n_embd_head)` |
 
 ## 8. 相关源码索引
@@ -134,7 +159,7 @@ cargo run --release --bin server -- \
 |---|---|
 | `llama` / `qwen2_2` / `minicpm` | `app/jev/single/llama.rs::run_jev_decision_llama` → `llama::run_forward_logits_llama` |
 | `granite` / `k2-horizon` | 同上（chat template 不同） |
-| `nanbeige` | 同上（base model，无 chat template） |
+| `nanbeige` | 保留历史路由；本次 SPM 聊天 GGUF 的 JEV 未验证 |
 
 ### 9.2 Chat template 差异（per-arch）
 
@@ -143,7 +168,7 @@ cargo run --release --bin server -- \
 | `llama` / `qwen2_2` | `system\n{sys}\nuser\n{payload}\nassistant\n` |
 | `granite` | `<\|start_of_role\|>system<\|end_of_role\|>{sys}<\|end_of_text\|>\n<\|start_of_role\|>user<\|end_of_role\|>{payload}<\|end_of_text\|>\n<\|start_of_role\|>assistant<\|end_of_role\|>` |
 | `k2-horizon` | 同 granite |
-| `nanbeige` | 无 chat template，直接 `{sys}\n\n{payload}\n\nAnswer:` |
+| `nanbeige` | 历史 JEV 模板为 `{sys}\n\n{payload}\n\nAnswer:`；不等同于新版 ChatML |
 
 ### 9.3 示例
 
@@ -162,13 +187,6 @@ rust-model-inference --model models/granite-Q8_0.gguf \
   --jev-option "是的" --jev-option "没有" --jev-positive A \
   --threads 4
 
-# Nanbeige — Score mode（base model，准确率可能受限）
-rust-model-inference --model models/nanbeige-4.2-3B-Q8_0.gguf \
-  --jev --jev-context "今天股市整体上涨，科技板块表现强劲" \
-  --jev-question "市场情绪如何？" \
-  --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
-  --threads 4
 ```
 
-> ⚠️ 注意：Nanbeige 是 base model，JEV 输出概率分布但准确率
-> 有限。Granite 是 instruct-tuned，score mode 表现更可靠。
+> Nanbeige4.2 的 SPM 聊天模型尚未接入 JEV 的 BPE scorer，本次支持范围是文本 CLI 和 LlamaSession。

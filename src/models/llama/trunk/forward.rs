@@ -3,7 +3,7 @@
 //! LLaMA-family text generation, aligning with llama.cpp's forward pass and
 //! sample/decode path. Standard LLaMA has no Q/K per-head RMSNorm.
 
-use super::weights::{get_f32_tensor, load_layers, LlamaLayerWeights};
+use super::weights::{get_f32_tensor, layer_loop_config, load_layers, LlamaLayerWeights};
 use crate::app::cli::{inference_step_budget, resolve_thread_count, KvFormat};
 use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache};
@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped,
-    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_inplace, sum_sq_f32,
-    vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
+    dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rms_norm_inplace,
+    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_approx_inplace, sum_sq_f32,
+    vec_add_into, vec_mad_f32, vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
 
@@ -44,6 +44,36 @@ fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
 /// Triggered by the `RUST_LLAMA_DEBUG_TENSORS` env var (set to a layer
 /// count, e.g. `RUST_LLAMA_DEBUG_TENSORS=1`).
 fn dbg_tensor(step: usize, label: &'static str, il: usize, buf: &[f32]) {
+    #[cfg(feature = "parity-trace")]
+    {
+        let name = match label {
+            "embed_out" => Some("embedding"),
+            "attn_norm" | "q_proj" | "k_proj" | "v_proj" | "loop_norm" => Some(label),
+            "Qcur" => Some("q_rope"),
+            "Kcur" => Some("k_rope"),
+            "attn_out" => Some("attn_values"),
+            "attn_proj" => Some("attn_proj"),
+            "ffn_inp" => Some("post_attn_residual"),
+            "ffn_norm" => Some("ffn_norm"),
+            "ffn_gate_buf_raw" => Some("ffn_silu_gate"),
+            "down_buf" => Some("ffn_down"),
+            "l_out" => Some("post_ffn_residual"),
+            "output_norm" => Some("result_norm"),
+            "logits" => Some("result_output"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            let layer =
+                (!matches!(name, "embedding" | "result_norm" | "result_output")).then_some(il);
+            crate::parity_trace::report(crate::parity_trace::checkpoint_at(
+                name,
+                layer,
+                Some(step),
+                &[buf.len()],
+                buf,
+            ));
+        }
+    }
     static ON: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let limit = ON.get_or_init(|| {
         std::env::var("RUST_LLAMA_DEBUG_TENSORS")
@@ -206,8 +236,7 @@ pub fn run_inference(
         // {content}<|end_of_text|>` between turns and ends the user turn
         // with `<|end_of_text|>\n`. MiniCPM5 uses ChatML with non-thinking
         // mode (`🤔\n\n\web_search\n\n`). Other Llama models use Qwen2-style
-        // ChatML with thinking (`🤔\n`). Nanbeige is a base model with no
-        // chat template — feed the prompt as-is.
+        // ChatML with thinking (`🤔\n`). Nanbeige uses its embedded ChatML template.
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
         } else if arch == "granite" {
@@ -215,7 +244,15 @@ pub fn run_inference(
                 "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
             )
         } else if arch == "nanbeige" {
-            prompt.to_string()
+            if source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .is_some_and(|t| t.contains("<|im_start|>"))
+            {
+                crate::prompt::build_nanbeige_chat_prompt(prompt, thinking)
+            } else {
+                prompt.to_string()
+            }
         } else if is_minicpm5 {
             // MiniCPM5 uses ChatML (`<|im_start|>/{role}\n{content}<|im_end|>`)
             // per its GGUF `tokenizer.chat_template`. The template supports
@@ -281,6 +318,8 @@ pub fn run_inference_tokens(
     max_context: usize,
     repetition_penalty: f32,
 ) -> Result<(), String> {
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids("prompt_ids", &input_tokens));
     let t0 = Instant::now();
     let config = model_config_from_source(source)
         .map_err(|error| format!("Failed to parse model config: {error}"))?;
@@ -300,7 +339,7 @@ pub fn run_inference_tokens(
     // The CLI default (8K) and any user override are applied here.
     let max_ctx = config.n_ctx.min(max_context);
     let n_embd = config.n_embd;
-    let n_layer = config.n_layer;
+    let (n_layer, loop_final_norm) = layer_loop_config(source, &config)?;
     let n_head = config.n_head;
     let n_head_kv = config.n_head_kv;
     let n_embd_head = config.n_embd_head;
@@ -352,7 +391,7 @@ pub fn run_inference_tokens(
         .ggml_type;
 
     let layers: Vec<LlamaLayerWeights> =
-        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
+        load_layers(source, config.n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
 
     // DEBUG: dump first N bytes of L23's w_gate, w_up, w_down for comparison with llama.cpp.
     if std::env::var("RUST_LLAMA_DEBUG_L23_WEIGHTS").is_ok() {
@@ -450,6 +489,8 @@ pub fn run_inference_tokens(
         };
 
         let pos = step;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::token_ids("input_token", &[token_id]));
 
         embedding_lookup(embd_weight, token_id, n_embd, embd_type, &mut scratch.x);
         if embedding_scale != 0.0 {
@@ -459,7 +500,7 @@ pub fn run_inference_tokens(
         dbg_tensor(step, "embed_out", 0, &scratch.x);
 
         for layer in 0..n_layer {
-            let lw = &layers[layer];
+            let lw = &layers[layer % layers.len()];
 
             let x_ptr = scratch.x.as_mut_ptr();
             let normed_ptr = scratch.normed.as_mut_ptr();
@@ -556,6 +597,10 @@ pub fn run_inference_tokens(
                 let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
                 let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
 
+                dbg_tensor(step, "q_proj", layer, q);
+                dbg_tensor(step, "k_proj", layer, k_new);
+                dbg_tensor(step, "v_proj", layer, v_new);
+
                 // LLaMA does not have QK norm.
                 // The `llama` GGUF arch uses interleaved ("normal"-style)
                 // RoPE - the converter permutes HF rotate_half weights into
@@ -635,38 +680,17 @@ pub fn run_inference_tokens(
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
-                        let n_cached = pos + 1;
                         let out_base = h * n_embd_head_v;
-                        let mut ms = 0.0f32;
-                        let mut s_sum = 0.0f32;
-                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
-                        for t in 0..n_cached {
-                            let score = dot_f16_f32(
-                                &q[q_off..q_off + n_embd_head_k],
-                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                n_embd_head_k,
-                            ) * kq_scale;
-                            if score > ms {
-                                let rescale = (ms - score).exp();
-                                vec_scale_f32(
-                                    &mut attn_out[out_base..out_base + n_embd_head_v],
-                                    rescale,
-                                );
-                                s_sum *= rescale;
-                                ms = score;
-                            }
-                            let vs = (score - ms).exp();
-                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                            vec_mad_f16_f32(
-                                &mut attn_out[out_base..out_base + n_embd_head_v],
-                                &v_cache[v_base..v_base + n_embd_head_v],
-                                vs,
-                            );
-                            s_sum += vs;
-                        }
-                        let inv_sum = 1.0 / s_sum;
-                        vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
+                        attention_head_f16(
+                            &q[q_off..q_off + n_embd_head_k],
+                            &mut attn_out[out_base..out_base + n_embd_head_v],
+                            k_cache,
+                            v_cache,
+                            kb + kv_h * n_embd_head_v,
+                            n_embd_gqa,
+                            pos + 1,
+                            kq_scale,
+                        );
                     }
                 } else {
                     let k_cache =
@@ -692,7 +716,7 @@ pub fn run_inference_tokens(
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
+                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
                         // The values scratch is sized to the next multiple of
                         // 256 above max_ctx (n_padded_max). Heap-allocated so
                         // long contexts don't overflow.
@@ -950,6 +974,10 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "ffn_out", layer, x);
             dbg_tensor(step, "l_out", layer, x);
             dbg_full(step, "ffn_out", layer, x, n_embd);
+            if loop_final_norm && (layer + 1) < n_layer && (layer + 1) % layers.len() == 0 {
+                rms_norm_inplace(x, &output_norm, eps);
+                dbg_tensor(step, "loop_norm", layer, x);
+            }
         }
 
         {
@@ -1023,6 +1051,7 @@ pub fn run_inference_tokens(
             }
         }
 
+        dbg_tensor(step, "logits", 0, &scratch.logits);
         let eval_elapsed = eval_started.elapsed();
         if step < input_tokens.len() {
             prefill_evals += 1;
@@ -1097,6 +1126,11 @@ pub fn run_inference_tokens(
     }
 
     let tail = decoder.finish();
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "generated_ids",
+        &generated_tokens,
+    ));
     if !tail.is_empty() {
         print!("{}", tail);
         io::stdout().flush().unwrap();
@@ -1225,7 +1259,7 @@ pub fn run_forward_logits_llama_inner(
 
     let max_ctx = config.n_ctx.min(max_context);
     let n_embd = config.n_embd;
-    let n_layer = config.n_layer;
+    let (n_layer, loop_final_norm) = layer_loop_config(source, &config)?;
     let n_head = config.n_head;
     let n_head_kv = config.n_head_kv;
     let n_embd_head = config.n_embd_head;
@@ -1276,7 +1310,7 @@ pub fn run_forward_logits_llama_inner(
         .ggml_type;
 
     let layers: Vec<LlamaLayerWeights> =
-        load_layers(source, n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
+        load_layers(source, config.n_layer, n_embd, n_embd_q, n_embd_gqa, n_ff);
 
     let kv_cache = match kv_format {
         KvFormat::F16 => KvCache::new_f16(n_layer, max_ctx, n_embd_gqa),
@@ -1316,7 +1350,7 @@ pub fn run_forward_logits_llama_inner(
         }
 
         for layer in 0..n_layer {
-            let lw = &layers[layer];
+            let lw = &layers[layer % layers.len()];
 
             let x_ptr = scratch.x.as_mut_ptr();
             let normed_ptr = scratch.normed.as_mut_ptr();
@@ -1482,38 +1516,17 @@ pub fn run_forward_logits_llama_inner(
                     for h in h_start..h_end {
                         let kv_h = h / group_size;
                         let q_off = h * n_embd_head_k;
-                        let n_cached = pos + 1;
                         let out_base = h * n_embd_head_v;
-                        let mut ms = 0.0f32;
-                        let mut s_sum = 0.0f32;
-                        attn_out[out_base..out_base + n_embd_head_v].fill(0.0);
-                        for t in 0..n_cached {
-                            let score = dot_f16_f32(
-                                &q[q_off..q_off + n_embd_head_k],
-                                &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                                    ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                                n_embd_head_k,
-                            ) * kq_scale;
-                            if score > ms {
-                                let rescale = (ms - score).exp();
-                                vec_scale_f32(
-                                    &mut attn_out[out_base..out_base + n_embd_head_v],
-                                    rescale,
-                                );
-                                s_sum *= rescale;
-                                ms = score;
-                            }
-                            let vs = (score - ms).exp();
-                            let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                            vec_mad_f16_f32(
-                                &mut attn_out[out_base..out_base + n_embd_head_v],
-                                &v_cache[v_base..v_base + n_embd_head_v],
-                                vs,
-                            );
-                            s_sum += vs;
-                        }
-                        let inv_sum = 1.0 / s_sum;
-                        vec_scale_f32(&mut attn_out[out_base..out_base + n_embd_head_v], inv_sum);
+                        attention_head_f16(
+                            &q[q_off..q_off + n_embd_head_k],
+                            &mut attn_out[out_base..out_base + n_embd_head_v],
+                            k_cache,
+                            v_cache,
+                            kb + kv_h * n_embd_head_v,
+                            n_embd_gqa,
+                            pos + 1,
+                            kq_scale,
+                        );
                     }
                 } else {
                     let k_cache =
@@ -1539,7 +1552,7 @@ pub fn run_forward_logits_llama_inner(
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
+                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
                         let mut values = vec![0.0f32; n_padded];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
@@ -1692,6 +1705,9 @@ pub fn run_forward_logits_llama_inner(
             } else {
                 vec_add_into(down_buf, x);
             }
+            if loop_final_norm && (layer + 1) < n_layer && (layer + 1) % layers.len() == 0 {
+                rms_norm_inplace(x, &output_norm, eps);
+            }
         }
 
         // Output norm + logits.
@@ -1765,11 +1781,38 @@ pub fn run_forward_logits_llama_inner(
 //      to reuse the legacy per-token attention math and the per-thread
 //      silu_mul dispatch without duplicating the closure body.
 
-/// Compute the per-query flash-attention for one Llama token, writing
-/// `n_embd_q` floats into `attn_out`. Same math as the inline closure
-/// inside `run_forward_logits_llama`'s per-layer loop, but parameterised
-/// so the batched session can call it once per row in a chunked
-/// prefill step. See `forward_cpu_chunk` for the qwen3 equivalent.
+/// Non-flash F16 KV attention: ggml rounds Q and probabilities to F16.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attention_head_f16(
+    q: &[f32],
+    output: &mut [f32],
+    k: &[u16],
+    v: &[u16],
+    cache_offset: usize,
+    cache_stride: usize,
+    n_cached: usize,
+    scale: f32,
+) {
+    let n_padded = n_cached.div_ceil(256) * 256;
+    let mut query = vec![0u16; q.len()];
+    f32_slice_to_f16(q, &mut query);
+    let mut scores = vec![f32::NEG_INFINITY; n_padded];
+    for (t, score) in scores[..n_cached].iter_mut().enumerate() {
+        let offset = cache_offset + t * cache_stride;
+        *score = crate::ops::dot_f16(&query, &k[offset..offset + q.len()], q.len()) * scale;
+    }
+    softmax_approx_inplace(&mut scores);
+    let mut probabilities = vec![0u16; n_padded];
+    f32_slice_to_f16(&scores, &mut probabilities);
+    let mut values = vec![0u16; n_padded];
+    for (d, out) in output.iter_mut().enumerate() {
+        for t in 0..n_cached {
+            values[t] = v[cache_offset + t * cache_stride + d];
+        }
+        *out = crate::ops::dot_f16(&values, &probabilities, n_padded);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention_per_query(
     pool: &Arc<ComputePool>,
@@ -1792,8 +1835,8 @@ pub(crate) fn run_attention_per_query(
     let q_ptr = q.as_ptr();
     let n_embd_q = attn_out.len();
     let score_stride = max_ctx.div_ceil(256) * 256;
-    let scores_storage = std::cell::UnsafeCell::new(vec![0.0f32; n_threads * score_stride]);
-    let scores_ptr = scores_storage.get() as *mut f32;
+    let mut scores_storage = vec![0.0f32; n_threads * score_stride];
+    let scores_ptr = scores_storage.as_mut_ptr();
     let is_f16 = matches!(kv_cache, KvCache::F16(_));
     let k_cache_f16_ptr = match kv_cache {
         KvCache::F16(c) => c.k.as_ptr() as *const u16,
@@ -1825,38 +1868,15 @@ pub(crate) fn run_attention_per_query(
                 let kv_h = h / group_size;
                 let q_off = h * n_embd_head_k;
                 let out_base = h * n_embd_head_v;
-                let mut ms = 0.0f32;
-                let mut s_sum = 0.0f32;
-                attn_out_local[out_base..out_base + n_embd_head_v].fill(0.0);
-                for t in 0..n_cached {
-                    let score = dot_f16_f32(
-                        &q_local[q_off..q_off + n_embd_head_k],
-                        &k_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v
-                            ..kb + t * n_embd_gqa + kv_h * n_embd_head_v + n_embd_head_k],
-                        n_embd_head_k,
-                    ) * kq_scale;
-                    if score > ms {
-                        let rescale = (ms - score).exp();
-                        vec_scale_f32(
-                            &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                            rescale,
-                        );
-                        s_sum *= rescale;
-                        ms = score;
-                    }
-                    let vs = (score - ms).exp();
-                    let v_base = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                    vec_mad_f16_f32(
-                        &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                        &v_cache[v_base..v_base + n_embd_head_v],
-                        vs,
-                    );
-                    s_sum += vs;
-                }
-                let inv_sum = 1.0 / s_sum;
-                vec_scale_f32(
+                attention_head_f16(
+                    &q_local[q_off..q_off + n_embd_head_k],
                     &mut attn_out_local[out_base..out_base + n_embd_head_v],
-                    inv_sum,
+                    k_cache,
+                    v_cache,
+                    kb + kv_h * n_embd_head_v,
+                    n_embd_gqa,
+                    n_cached,
+                    kq_scale,
                 );
             }
         } else {
@@ -1883,7 +1903,7 @@ pub(crate) fn run_attention_per_query(
                     ) * kq_scale;
                 }
                 scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                softmax_inplace(&mut scores[s_off..s_off + n_padded]);
+                softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
                 let mut values = vec![0.0f32; n_padded];
                 for d in 0..n_embd_head_v {
                     for t in 0..n_cached {
@@ -1927,19 +1947,14 @@ pub(crate) fn silu_mul_rows(
                 );
                 let u =
                     std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
-                for (g, u) in g.iter_mut().zip(u.iter()) {
-                    let silu = *u / (1.0 + (-*u).exp());
-                    *g *= silu;
-                }
+                silu_mul_approx_inplace(u, g);
             }
         }
     });
 }
 
-/// Batched flash attention for a chunk of `rows` queries. Same
-/// online-softmax-with-rescale math as the legacy per-query loop,
-/// but with `Q × Kᵀ` and `@V` done as full row-major matmuls
-/// instead of `rows × n_cached` individual dot products.
+/// Causal attention for a chunk of `rows` queries, using the same
+/// F16/F32 dot and softmax operations as the single-token path.
 ///
 /// Layout assumptions:
 /// - `q` is `[rows × n_embd_q]` where
@@ -1959,18 +1974,7 @@ pub(crate) fn silu_mul_rows(
 ///   `S = softmax(S, row)`
 ///   `O[r, d] = Σ_t S[r, t] · V[t, kv_h(h), d]`
 ///
-/// `softmax_inplace` is reused from the existing scalar helper.
-/// Inside the `pool.compute` body we have:
-/// - `rows` per-query rows processed against the SAME cached K/V
-///   load (cache is loaded once per worker per head — `rows ×`
-///   amortisation)
-/// - per-row rescale / `ms` / `s_sum` (online softmax)
-/// - scalar fused `exp` (matches `forward_one_token`'s precision)
-///
-/// The vectorised case (F32 KV cache) uses `dot_f32` for the
-/// `Q·K` row products; `Vec<f32>` accumulators keep the SIMD
-/// register pressure bounded so the kernel scales linearly in
-/// `seq_len` instead of quadratically.
+/// Reuses the same SIMD/scalar softmax as the single-token path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention_chunked(
     pool: &Arc<ComputePool>,
@@ -2012,9 +2016,9 @@ pub(crate) fn run_attention_chunked(
         KvCache::F32(c) => c.v.as_ptr() as *const f32,
         _ => std::ptr::null(),
     };
-    let score_stride = n_padded_max;
-    let scores_storage = std::cell::UnsafeCell::new(vec![0.0f32; n_threads * score_stride]);
-    let scores_ptr = scores_storage.get() as *mut f32;
+    let score_stride = rows * n_padded_max;
+    let mut scores_storage = vec![0.0f32; n_threads * score_stride];
+    let scores_ptr = scores_storage.as_mut_ptr();
 
     pool.compute(move |ith, nth| {
         let h_start = ith * n_head / nth;
@@ -2030,55 +2034,19 @@ pub(crate) fn run_attention_chunked(
             for h in h_start..h_end {
                 let kv_h = h / group_size;
                 let q_off = h * n_embd_head_k;
-                let mut row_ms = vec![f32::NEG_INFINITY; rows];
-                let mut row_sum = vec![0.0f32; rows];
-                let mut row_out: Vec<f32> = vec![0.0; rows * n_embd_head_v];
-                for t in 0..n_cached_total {
-                    let cache_row = kb + t * n_embd_gqa + kv_h * n_embd_head_v;
-                    let score_base = &k_cache[cache_row..cache_row + n_embd_head_k];
-                    let v_base = v_cache.as_ptr().wrapping_add(cache_row) as *const u16;
-                    let v_row = unsafe { std::slice::from_raw_parts(v_base, n_embd_head_v) };
-                    for r in 0..rows {
-                        let abs_pos = base_position + r;
-                        let q_row =
-                            &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k];
-                        let raw_score = if t > abs_pos {
-                            f32::NEG_INFINITY
-                        } else {
-                            crate::ops::dot_f16_f32(q_row, score_base, n_embd_head_k) * kq_scale
-                        };
-                        let m_new = if raw_score > row_ms[r] {
-                            raw_score
-                        } else {
-                            row_ms[r]
-                        };
-                        let rescale = (row_ms[r] - m_new).exp();
-                        for d in 0..n_embd_head_v {
-                            row_out[r * n_embd_head_v + d] *= rescale;
-                        }
-                        row_sum[r] *= rescale;
-                        row_ms[r] = m_new;
-                        if t > abs_pos {
-                            continue;
-                        }
-                        let vs = (raw_score - m_new).exp();
-                        // `v_row` is a `&[u16]` of F16 bits;
-                        // `vec_mad_f16_f32` does the F16→F32 cast +
-                        // multiply-add with `vs` in one pass so
-                        // we don't materialise a float copy of
-                        // every cache row.
-                        let dst =
-                            &mut row_out[r * n_embd_head_v..r * n_embd_head_v + n_embd_head_v];
-                        crate::ops::vec_mad_f16_f32(dst, v_row, vs);
-                        row_sum[r] += vs;
-                    }
-                }
+                let out_base = h * n_embd_head_v;
                 for r in 0..rows {
-                    let inv = 1.0 / row_sum[r];
-                    for d in 0..n_embd_head_v {
-                        attn_out_local[r * n_embd_q + h * n_embd_head_v + d] =
-                            row_out[r * n_embd_head_v + d] * inv;
-                    }
+                    attention_head_f16(
+                        &q_local[r * n_embd_q + q_off..r * n_embd_q + q_off + n_embd_head_k],
+                        &mut attn_out_local
+                            [r * n_embd_q + out_base..r * n_embd_q + out_base + n_embd_head_v],
+                        k_cache,
+                        v_cache,
+                        kb + kv_h * n_embd_head_v,
+                        n_embd_gqa,
+                        base_position + r + 1,
+                        kq_scale,
+                    );
                 }
             }
         } else {
@@ -2120,31 +2088,17 @@ pub(crate) fn run_attention_chunked(
                     for t in n_cached_total..n_padded {
                         scores[r * n_padded + t] = f32::NEG_INFINITY;
                     }
-                    // In-place softmax over the active range.
                     let s = &mut scores[r * n_padded..(r + 1) * n_padded];
-                    let mut max_v = f32::NEG_INFINITY;
-                    for v in s.iter() {
-                        if *v > max_v {
-                            max_v = *v;
-                        }
-                    }
-                    let mut sum = 0.0f32;
-                    for v in s.iter_mut() {
-                        let e = (*v - max_v).exp();
-                        *v = e;
-                        sum += e;
-                    }
-                    for v in s.iter_mut() {
-                        *v /= sum;
-                    }
+                    softmax_approx_inplace(s);
                     // `O = S · V` row-major: per `d` of `n_embd_head_v`,
                     // gather V[t, kv_h, d] and dot with `S`.
+                    let mut values = vec![0.0; n_cached_total];
                     for d in 0..n_embd_head_v {
-                        let mut acc = 0.0f32;
                         for t in 0..n_cached_total {
-                            acc += v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d] * s[t];
+                            values[t] = v_cache[kb + t * n_embd_gqa + kv_h * n_embd_head_v + d];
                         }
-                        attn_out_local[r * n_embd_q + out_base + d] = acc;
+                        attn_out_local[r * n_embd_q + out_base + d] =
+                            dot_f32(&values, s, n_cached_total);
                     }
                 }
             }
