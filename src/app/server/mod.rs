@@ -1,4 +1,5 @@
 mod api;
+mod rerank;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -51,6 +52,17 @@ enum Backend {
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     Tts(TtsBackend),
+    Rerank(RerankBackend),
+}
+
+struct RerankBackend {
+    /// The Qwen3 model loaded with the optional `cls.output.weight`
+    /// rerank head. Leaked to `'static` so per-request `Qwen3Session`s
+    /// can borrow from it without re-loading.
+    model: Arc<&'static Qwen3Model>,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
 }
 
 unsafe impl Send for Backend {}
@@ -696,7 +708,68 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
             source: Arc::from(source),
         })));
     }
+    // Cross-encoder rerank detection: a GGUF that carries
+    // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
+    // rerank model. Detected by metadata peek BEFORE the full Text
+    // build (which would load unrelated multimodal state).
+    if is_rerank_gguf(&options.model) {
+        return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
+    }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
+}
+
+/// Returns `true` if the GGUF at `path` looks like a Qwen3 rerank
+/// model: `general.architecture = "qwen3"` AND
+/// `<arch>.pooling_type = 4` AND a `cls.output.weight` tensor is
+/// present. Done as a quick metadata probe without holding the file
+/// open.
+fn is_rerank_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let loader = match crate::GGUFLoader::from_file(path) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch != "qwen3" {
+        return false;
+    }
+    let pooling = loader
+        .metadata("qwen3.pooling_type")
+        .and_then(MetaValue::to_u64)
+        .unwrap_or(0);
+    if pooling != 4 {
+        return false;
+    }
+    loader.tensor_info("cls.output.weight").is_some()
+}
+
+fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(source, tokenizer.clone(), pool)?;
+    if !model.is_rerank() {
+        return Err(format!(
+            "GGUF looks like qwen3 with pooling_type=4 but has no cls.output.weight — not a rerank model"
+        ));
+    }
+    let context_length = model.config().n_ctx;
+    // Pin the model in a `Box::leak` so the `&'static` lifetime bound
+    // on `Qwen3Session` is satisfied for the server lifetime.
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(RerankBackend {
+        model: Arc::new(model),
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
 }
 
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
@@ -936,6 +1009,7 @@ pub fn run_server() {
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::Tts(_) => "tts",
+        Backend::Rerank(_) => "rerank",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -962,6 +1036,7 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

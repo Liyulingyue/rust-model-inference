@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 pub(super) struct Qwen3PrefillScratch {
     max_rows: usize,
     max_n_in: usize,
-    x: Vec<f32>,
+    pub(super) x: Vec<f32>,
     normed: Vec<f32>,
     q: Vec<f32>,
     k: Vec<f32>,
@@ -53,7 +53,7 @@ impl Qwen3PrefillScratch {
         }
     }
 
-    fn reset_for(&mut self, max_rows: usize, model: &Qwen3Model) {
+    pub(super) fn reset_for(&mut self, max_rows: usize, model: &Qwen3Model) {
         if self.max_rows != max_rows {
             *self = Self::new(max_rows, model);
         }
