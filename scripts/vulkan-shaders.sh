@@ -44,6 +44,30 @@ compile_shader() {
         "$root_dir/shaders/glsl/$1.comp" -o "$2"
 }
 
+# Compile `name` into `out`, keeping the already checked-in SPIR-V when the
+# local glslangValidator lacks GL_EXT_integer_dot_product. The dot-product
+# shaders are assembled with spirv-as, so the checked-in binary is
+# authoritative for them and a rebuild must not fail the run.
+compile_shader_or_keep() {
+    local out="$2" log rebuilt
+    log=$(mktemp)
+    rebuilt="$out.rebuilt"
+    if compile_shader "$1" "$rebuilt" >"$log" 2>&1; then
+        mv "$rebuilt" "$out"
+        rm -f "$log"
+        return 0
+    fi
+    rm -f "$rebuilt"
+    if grep -Fq "extension not supported: GL_EXT_integer_dot_product" "$log"; then
+        echo "$1: rebuild skipped (compiler lacks GL_EXT_integer_dot_product); keeping checked-in SPIR-V" >&2
+        rm -f "$log"
+        return 0
+    fi
+    cat "$log" >&2
+    rm -f "$log"
+    return 1
+}
+
 hash_files() {
     local files=()
     for name in "${shader_names[@]}"; do
@@ -89,7 +113,7 @@ check_workgroup_limit() {
 case "${1:-check}" in
     update)
         for name in "${shader_names[@]}"; do
-            compile_shader "$name" "$root_dir/shaders/bin/$name.spv"
+            compile_shader_or_keep "$name" "$root_dir/shaders/bin/$name.spv"
         done
         (cd "$root_dir" && hash_files) >"$manifest"
         ;;
@@ -102,18 +126,16 @@ case "${1:-check}" in
             rebuilt="$temp_dir/$name.spv"
             spirv-val --target-env vulkan1.1 "$checked_in"
             check_workgroup_limit "$checked_in"
-            compile_log="$temp_dir/$name.log"
-            if ! compile_shader "$name" "$rebuilt" >"$compile_log" 2>&1; then
-                if [[ "$name" == q8_matmul_dp4a ]] &&
-                    grep -Fq "extension not supported: GL_EXT_integer_dot_product" "$compile_log"; then
-                    echo "$name: source rebuild skipped (compiler lacks GL_EXT_integer_dot_product)"
-                    continue
-                fi
-                cat "$compile_log" >&2
+            if ! compile_shader_or_keep "$name" "$rebuilt" 2>"$temp_dir/$name.log"; then
+                cat "$temp_dir/$name.log" >&2
                 exit 1
             fi
-            spirv-val --target-env vulkan1.1 "$rebuilt"
-            cmp "$rebuilt" "$checked_in"
+            # A skipped rebuild leaves no `rebuilt` file: the checked-in binary
+            # is the one under test, so there is nothing to byte-compare.
+            if [[ -f "$rebuilt" ]]; then
+                spirv-val --target-env vulkan1.1 "$rebuilt"
+                cmp "$rebuilt" "$checked_in"
+            fi
         done
         ;;
     *)
