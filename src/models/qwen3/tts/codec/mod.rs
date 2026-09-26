@@ -23,15 +23,11 @@ pub mod predictor;
 pub mod rvq;
 pub mod snake;
 pub mod tfm;
-pub mod wav;
 
 pub use dac::DacDecoder;
 pub use predictor::CodePredictor;
 pub use rvq::RvqDecoder;
 pub use tfm::WaveformTransformer;
-pub use wav::{
-    encode_wav_pcm16, encode_wav_pcm16_channels, write_wav_f32, write_wav_f32_channels, WavError,
-};
 
 const CODE2WAV_WINDOW: usize = 72;
 const SAMPLES_PER_FRAME: usize = 1920;

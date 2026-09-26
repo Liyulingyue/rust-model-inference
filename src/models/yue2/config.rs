@@ -1,4 +1,4 @@
-use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource, MetaValueType};
 
 use super::protocol::{CONTEXT, PROTOCOL_VERSION, VOCAB_SIZE};
 
@@ -20,8 +20,8 @@ pub struct YuE2Config {
 
 impl YuE2Config {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
-        require_string(source, "general.architecture", "yue2")?;
-        require_string(source, "yue2.protocol_version", PROTOCOL_VERSION)?;
+        super::require_string(source, "general.architecture", "yue2")?;
+        super::require_string(source, "yue2.protocol_version", PROTOCOL_VERSION)?;
         for (key, expected) in [
             ("yue2.context_length", CONTEXT as u64),
             ("yue2.embedding_length", 2048),
@@ -34,11 +34,11 @@ impl YuE2Config {
             ("yue2.latent_channels", 64),
             ("yue2.tensor_count", 628),
         ] {
-            require_u64(source, key, expected)?;
+            super::require_u64(source, key, expected)?;
         }
-        require_f64(source, "yue2.rms_norm_eps", 0.000001)?;
-        require_f64(source, "yue2.rope.freq_base", 1_000_000.0)?;
-        require_f64(source, "yue2.timestep_shift", 1.0)?;
+        super::require_f64(source, "yue2.rms_norm_eps", 0.000001)?;
+        super::require_f64(source, "yue2.rope.freq_base", 1_000_000.0)?;
+        super::require_f64(source, "yue2.timestep_shift", 1.0)?;
         Ok(Self {
             hidden: 2048,
             layers: 28,
@@ -56,39 +56,6 @@ impl YuE2Config {
     }
 }
 
-fn require_string(source: &dyn TensorSource, key: &str, expected: &str) -> Result<(), String> {
-    match source.metadata(key) {
-        Some(MetaValue::String(value)) if value == expected => Ok(()),
-        Some(value) => Err(format!(
-            "Invalid {key}: expected {expected:?}, got {value:?}"
-        )),
-        None => Err(format!("Missing {key}: expected {expected:?}")),
-    }
-}
-
-fn require_u64(source: &dyn TensorSource, key: &str, expected: u64) -> Result<(), String> {
-    match source.metadata(key).and_then(MetaValue::to_u64) {
-        Some(value) if value == expected => Ok(()),
-        Some(value) => Err(format!("Invalid {key}: expected {expected}, got {value}")),
-        None => Err(format!("Missing or invalid {key}: expected {expected}")),
-    }
-}
-
-fn require_f64(source: &dyn TensorSource, key: &str, expected: f64) -> Result<(), String> {
-    let actual = match source.metadata(key) {
-        Some(MetaValue::Float32(value)) => Some(f64::from(*value)),
-        Some(MetaValue::Float64(value)) => Some(*value),
-        Some(MetaValue::Uint32(value)) => Some(f64::from(*value)),
-        Some(MetaValue::Uint64(value)) => Some(*value as f64),
-        _ => None,
-    };
-    match actual {
-        Some(value) if value == expected => Ok(()),
-        Some(value) => Err(format!("Invalid {key}: expected {expected}, got {value}")),
-        None => Err(format!("Missing or invalid {key}: expected {expected}")),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct YuE2VaeConfig {
     pub strides: [usize; 6],
@@ -102,8 +69,8 @@ pub struct YuE2VaeConfig {
 
 impl YuE2VaeConfig {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
-        require_string(source, "general.architecture", "yue2_vae")?;
-        require_string(source, "yue2_vae.release_variant", "standard")?;
+        super::require_string(source, "general.architecture", "yue2_vae")?;
+        super::require_string(source, "yue2_vae.release_variant", "standard")?;
         for (key, expected) in [
             ("yue2_vae.latent_channels", 64),
             ("yue2_vae.output_channels", 2),
@@ -113,7 +80,7 @@ impl YuE2VaeConfig {
             ("yue2_vae.decode_halo_frames", 16),
             ("yue2_vae.tensor_count", 217),
         ] {
-            require_u64(source, key, expected)?;
+            super::require_u64(source, key, expected)?;
         }
         let key = "yue2_vae.strides";
         match source.metadata(key) {

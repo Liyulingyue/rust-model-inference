@@ -10,6 +10,39 @@ pub use nar::{song_chunks, YuE2Chunk, YuE2NarSession};
 pub use protocol::{SamplingConfig, YuE2Protocol, YuE2Request};
 pub use vae::YuE2Vae;
 
+use crate::core::tensor::{MetaValue, TensorSource};
+
+pub(super) fn require_string(source: &dyn TensorSource, key: &str, expected: &str) -> Result<(), String> {
+    match source.metadata(key) {
+        Some(MetaValue::String(value)) if value == expected => Ok(()),
+        Some(value) => Err(format!("Invalid {key}: expected {expected:?}, got {value:?}")),
+        None => Err(format!("Missing {key}: expected {expected:?}")),
+    }
+}
+
+pub(super) fn require_u64(source: &dyn TensorSource, key: &str, expected: u64) -> Result<(), String> {
+    match source.metadata(key).and_then(MetaValue::to_u64) {
+        Some(value) if value == expected => Ok(()),
+        Some(value) => Err(format!("Invalid {key}: expected {expected}, got {value}")),
+        None => Err(format!("Missing or invalid {key}: expected {expected}")),
+    }
+}
+
+pub(super) fn require_f64(source: &dyn TensorSource, key: &str, expected: f64) -> Result<(), String> {
+    let actual = match source.metadata(key) {
+        Some(MetaValue::Float32(value)) => Some(f64::from(*value)),
+        Some(MetaValue::Float64(value)) => Some(*value),
+        Some(MetaValue::Uint32(value)) => Some(f64::from(*value)),
+        Some(MetaValue::Uint64(value)) => Some(*value as f64),
+        _ => None,
+    };
+    match actual {
+        Some(value) if value == expected => Ok(()),
+        Some(value) => Err(format!("Invalid {key}: expected {expected}, got {value}")),
+        None => Err(format!("Missing or invalid {key}: expected {expected}")),
+    }
+}
+
 use protocol::{CODEC_OFFSET, CODEC_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq)]

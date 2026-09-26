@@ -7,8 +7,9 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
+use crate::format::wav::{encode_wav_pcm16_channels, write_wav_f32_channels};
 use crate::models::qwen3::tts::codec::{
-    encode_wav_pcm16, write_wav_f32, Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
+    Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
 };
 use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TTS_DEFAULT_TEMP};
@@ -154,8 +155,7 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         &mut rng,
     )?;
     let waveform = decoder.decode(&frames)?;
-    write_wav_f32(out_path, &waveform, WAVEFORM_SAMPLE_RATE)
-        .map_err(|error| format!("WAV write failed: {error}"))?;
+    write_wav_f32_channels(out_path, &waveform, WAVEFORM_SAMPLE_RATE, 1)?;
     eprintln!(
         "TTS: {} prompt chars, {} frames, {} samples written to {} in {:.3}s",
         prompt_text.chars().count(),
@@ -218,8 +218,7 @@ pub fn synthesize_tts_to_wav(
         &mut rng,
     )?;
     let waveform = decoder.decode(&frames)?;
-    encode_wav_pcm16(&waveform, WAVEFORM_SAMPLE_RATE)
-        .map_err(|error| format!("WAV encode failed: {error}"))
+    encode_wav_pcm16_channels(&waveform, WAVEFORM_SAMPLE_RATE, 1)
 }
 
 fn drive_frames(
