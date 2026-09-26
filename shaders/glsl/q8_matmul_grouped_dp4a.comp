@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_integer_dot_product : require
 
 layout(local_size_x = 64) in;
 
@@ -33,11 +34,6 @@ float f16_decode(uint bits) {
         value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
     }
     return sign == 0u ? value : -value;
-}
-
-int i8_of(uint word, uint byte_index) {
-    uint byte_value = (word >> (byte_index * 8u)) & 0xffu;
-    return byte_value >= 128u ? int(byte_value) - 256 : int(byte_value);
 }
 
 uint weight_word(uint slot, uint index) {
@@ -92,10 +88,7 @@ void main() {
             uint shift = (group_offset & 3u) * 8u;
             uint packed = shift == 0u ? first : ((first >> shift) | (second << (32u - shift)));
             uint input_value = input_words[block * 8u + group];
-            int dot = i8_of(packed, 0u) * i8_of(input_value, 0u)
-                + i8_of(packed, 1u) * i8_of(input_value, 1u)
-                + i8_of(packed, 2u) * i8_of(input_value, 2u)
-                + i8_of(packed, 3u) * i8_of(input_value, 3u);
+            int dot = dotPacked4x8EXT(int(packed), int(input_value));
             partial = fma(float(dot), block_scale, partial);
         }
     }

@@ -31,10 +31,10 @@ fn main() -> ExitCode {
         eprintln!("Vulkan row operator check failed: {error}");
         return ExitCode::FAILURE;
     }
-    let legacy_formats = formats
-        .into_iter()
-        .filter(|format| *format != "q8_0")
-        .collect::<Vec<_>>();
+    // q8_0 is checked in both suites now that the matvec operator test
+    // covers it: `run_batched_matmul_check` exercises the row recorder and
+    // `run_qwen3_operator_check` exercises the legacy single-row matvec.
+    let legacy_formats = formats;
     match run_qwen3_operator_check(context, &legacy_formats) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
