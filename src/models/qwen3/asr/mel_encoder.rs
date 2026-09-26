@@ -13,7 +13,10 @@ use crate::ops::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use super::audio_processor::{MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES};
+use super::audio_processor::{
+    compute_log_mel, decode_pcm16_wav, log_mel_windows, periodic_hann_window, reflect_pad,
+    split_mel_windows, AsrAudioError, MelWindow, CHUNK_FRAMES, MEL_BINS, WINDOW_FRAMES,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Qwen3AudioConfig {

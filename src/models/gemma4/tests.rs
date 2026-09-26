@@ -421,6 +421,10 @@ fn gemma4_e2b_contract_is_exact() {
     assert_eq!(
         Gemma4Config::from_source(&valid_gemma4_source()).unwrap(),
         Gemma4Config {
+            n_expert: 0,
+            n_expert_used: 0,
+            n_ff_exp: 0,
+            
             layers: 35,
             embd: 1536,
             n_heads: 8,

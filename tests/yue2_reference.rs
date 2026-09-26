@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rust_model_inference::models::yue2::{
+#[cfg(feature = "parity-trace")]
+use rust_model_inference::parity_trace as parity_trace;
     song_chunks, SamplingConfig, YuE2Model, YuE2NarSession, YuE2Protocol, YuE2Request, YuE2Vae,
 };
 
@@ -78,7 +80,7 @@ fn yue2_vae_full_and_tiled_decode_match_oracle_bits() {
         .map(|index| (index % 11) as f32 * 0.01)
         .collect::<Vec<_>>();
     let full = vae.decode(&latents, frames).unwrap();
-    rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint_at(
+    parity_trace::report(parity_trace::checkpoint_at(
         "yue2.vae.full",
         None,
         None,
@@ -86,7 +88,7 @@ fn yue2_vae_full_and_tiled_decode_match_oracle_bits() {
         &full,
     ));
     let tiled = vae.decode_tiled(&latents, frames, 16, 16).unwrap();
-    rust_model_inference::parity_trace::report(rust_model_inference::parity_trace::checkpoint_at(
+    parity_trace::report(parity_trace::checkpoint_at(
         "yue2.vae.tiled",
         None,
         None,
@@ -859,7 +861,7 @@ fn compare_ar_fixture(
     let request = YuE2Request::new(style, lyrics, seed).unwrap();
     std::env::set_var("RMI_PARITY_TRACE", &rust_path);
     let abc_prefix = protocol.abc_prefix(&tokenizer, &request).unwrap();
-    rust_model_inference::parity_trace::token_ids("yue2.abc.prefix_ids", &abc_prefix).unwrap();
+    parity_trace::token_ids("yue2.abc.prefix_ids", &abc_prefix).unwrap();
     let abc_ids = model
         .generate_abc(
             &abc_prefix,
@@ -875,7 +877,7 @@ fn compare_ar_fixture(
     let semantic_prefix = protocol
         .semantic_prefix(&tokenizer, &request, &abc_ids)
         .unwrap();
-    rust_model_inference::parity_trace::token_ids("yue2.semantic.prefix_ids", &semantic_prefix)
+    parity_trace::token_ids("yue2.semantic.prefix_ids", &semantic_prefix)
         .unwrap();
     model
         .generate_semantic(

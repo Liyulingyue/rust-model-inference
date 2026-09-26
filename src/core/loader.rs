@@ -399,6 +399,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen35"
             | "qwen3tts"
             | "llama"
+            | "exaone"
             | "k2-horizon"
             | "granite"
             | "hunyuan-dense"

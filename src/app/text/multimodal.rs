@@ -1368,6 +1368,7 @@ pub(super) fn run_multimodal_with_video_ref(
     println!("\n--- End ---");
     #[cfg(feature = "vulkan")]
     crate::vulkan::dump_submit_trace();
+    #[cfg(feature = "vulkan")]
     crate::vulkan::dump_dispatch_trace();
     eprintln!(
         "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",

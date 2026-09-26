@@ -12,7 +12,7 @@ pub(super) fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Resul
 }
 
 pub(super) fn uses_llama_trunk(arch: &str) -> bool {
-    matches!(arch, "llama" | "k2-horizon" | "granite" | "nanbeige")
+    matches!(arch, "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige")
 }
 
 pub fn run_inference(
