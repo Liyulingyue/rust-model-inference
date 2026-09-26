@@ -145,6 +145,7 @@ pub(crate) fn test_model(tokenizer: Arc<BPETokenizer>, n_ctx: usize, n_embd: usi
         output_norm: vec![1.0; n_embd],
         token_embedding,
         output,
+        cls_score: None,
     }
 }
 
@@ -258,6 +259,7 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
         output_norm: vec![1.0; WIDTH],
         token_embedding: f32_weight(WIDTH, VOCAB, 8),
         output: f32_weight(WIDTH, VOCAB, 9),
+        cls_score: None,
     }
 }
 

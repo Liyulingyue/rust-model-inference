@@ -407,6 +407,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "lfm2moe"
             | "nanbeige"
             | "nemotron_h"
+            | "falcon-h1"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -463,6 +464,44 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             vocab_size,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
+        });
+    }
+    // Falcon-H1 declares key/value lengths (128) that differ from
+    // n_embd / n_head (which would give 256); the trunk re-reads the
+    // metadata via `models::falcon_h1::FalconH1Config`, but the generic
+    // ModelConfig must still carry the true head dims.
+    if arch == "falcon-h1" {
+        let meta_usize = |key: &str| -> usize {
+            source
+                .metadata(key)
+                .and_then(MetaValue::to_u64)
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(0)
+        };
+        let n_embd = meta_usize("falcon-h1.embedding_length");
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer: meta_usize("falcon-h1.block_count"),
+            n_head: meta_usize("falcon-h1.attention.head_count"),
+            n_head_kv: meta_usize("falcon-h1.attention.head_count_kv"),
+            n_embd_head: meta_usize("falcon-h1.attention.key_length"),
+            n_ff: meta_usize("falcon-h1.feed_forward_length"),
+            n_ctx: meta_usize("falcon-h1.context_length"),
+            vocab_size: source
+                .metadata("tokenizer.ggml.tokens")
+                .and_then(MetaValue::to_arr)
+                .map(Vec::len)
+                .unwrap_or(0),
+            rope_freq_base: source
+                .metadata("falcon-h1.rope.freq_base")
+                .and_then(MetaValue::to_f64)
+                .map(|v| v as f32)
+                .unwrap_or(10_000.0),
+            norm_eps: source
+                .metadata("falcon-h1.attention.layer_norm_rms_epsilon")
+                .and_then(MetaValue::to_f64)
+                .map(|v| v as f32)
+                .unwrap_or(1e-5),
         });
     }
     let get_u64 = |key: &str| -> Result<u64, String> {

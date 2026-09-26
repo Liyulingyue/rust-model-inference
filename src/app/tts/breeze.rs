@@ -147,7 +147,7 @@ pub(crate) fn run_breeze_tts_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::qwen3::tts::codec::encode_wav_pcm16;
+    use crate::format::wav::encode_wav_pcm16_channels;
 
     #[test]
     fn breeze_defaults_cfg_by_instruction_and_requires_complete_clone_prompt() {
@@ -180,11 +180,11 @@ mod tests {
 
     #[test]
     fn breeze_reference_wav_preserves_native_rate_and_resamples_other_rates() {
-        let mut wav = encode_wav_pcm16(&[0.0; 2], 24_000).unwrap();
+        let mut wav = encode_wav_pcm16_channels(&[0.0; 2], 24_000, 1).unwrap();
         wav[44..48].copy_from_slice(&[0, 32, 0, 192]);
         let audio = reference_wav_to_24k(&wav).unwrap();
         assert_eq!(audio, vec![0.25, -0.5]);
-        let mut stereo = encode_wav_pcm16(&[0.0; 4], 24_000).unwrap();
+        let mut stereo = encode_wav_pcm16_channels(&[0.0; 4], 24_000, 1).unwrap();
         stereo[22..24].copy_from_slice(&2u16.to_le_bytes());
         stereo[28..32].copy_from_slice(&96_000u32.to_le_bytes());
         stereo[32..34].copy_from_slice(&4u16.to_le_bytes());

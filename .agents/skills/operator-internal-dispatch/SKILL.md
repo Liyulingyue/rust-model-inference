@@ -123,6 +123,25 @@ pub fn my_op(input: &[f32], output: &mut [f32], n: usize) {
 - **target_arch 嗅探**：调用方写 `#[cfg(target_arch = "aarch64")] use helper_a; #[cfg(not(target_arch = "aarch64"))] use helper_b;`，每次加架构都要改。
 - **bit-level 兼容性伪装对齐**：用 `abs_diff <= 2` 当 parity oracle 的通过条件，但实际 oracle 期望 bit-exact——这是质量倒退，不是 dispatch 改进。
 - **kernel 不知道自己的精度**：把 F16×F16 严格语义放在 caller 的 `if ggml_type == F16` 而不是 kernel 自己 opt-in。
+- **重新发明标准库操作**：手写标量 polynomial exp、分层 multi-lane dot product、4-level sum-of-squares 等 PyTorch ATEN 翻译。这些闭包/手写版本无法被编译器向量化，且代码量是标准库入口的 10-50 倍。见下方专节。
+
+## 不要重新发明标准库操作
+
+禁止手写标量 polynomial/multi-lane 实现来替代已有的标准库方法或仓库算子。
+PyTorch ATEN kernel 的逐行翻译几乎总是错误的——它们是为特定 CPU 微架构
+写的 C++ 代码，在 Rust 中不会获得同样的编译器优化。
+
+| 禁止手写 | 替代方案 |
+|---------|---------|
+| polynomial exp 近似（magic constants） | `f32::exp()` 或 `value.exp()` |
+| 手写分层 sum-of-squares（4-lane x 4-ILP x 4-level） | `iter().map(|v| v * v).sum()` |
+| 手写 4-lane 标量 dot product | `crate::ops::dot_f32`（有 NEON/AVX2） |
+| 手写 bf16xf32 dot via 闭包 | `crate::ops::dot_bf16_f32`（有 NEON/AVX2） |
+| 闭包 `Fn(usize) -> f32` 做逐元素访问 | slice + 标量循环（编译器可自动向量化） |
+
+判断标准：如果你写了一个超过 10 行的标量函数，检查 `crate::ops::` 和
+Rust 标准库是否已有等价入口。PyTorch 的内部 kernel 不是"更快"的参考
+——Rust 编译器对标量循环的自动向量化通常优于手写多累加器。
 
 ## 检查清单（提交前）
 

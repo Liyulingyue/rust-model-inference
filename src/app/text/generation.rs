@@ -131,6 +131,17 @@ pub fn run_inference(
             repetition_penalty,
             chat_template,
         )
+    } else if arch == "falcon-h1" {
+        crate::models::falcon_h1::trunk::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            kv_format,
+            repetition_penalty,
+            chat_template,
+        )
     } else {
         crate::app::text::run_qwen3_inference(
             source.clone(),

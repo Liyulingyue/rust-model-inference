@@ -6,10 +6,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use image::RgbImage;
 
-use crate::models::qwen3::tts::codec::encode_wav_pcm16;
+use crate::format::wav::encode_wav_pcm16_channels;
 
 pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
-    encode_wav_pcm16(samples, sample_rate).map_err(|error| error.to_string())
+    encode_wav_pcm16_channels(samples, sample_rate, 1)
 }
 
 pub fn write_wav_atomic(

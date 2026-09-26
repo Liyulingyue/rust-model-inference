@@ -245,6 +245,57 @@ impl<'model> Qwen3Session<'model> {
         Ok((self.scratch.logits.clone(), duration))
     }
 
+    /// Single forward pass for rerank / cross-encoder models. Runs the
+    /// full prefill then returns the final-token post-RMSNorm hidden
+    /// state (length `n_embd`), which the caller feeds into
+    /// [`Qwen3Model::score_logits`].
+    ///
+    /// Errors if the model is not a rerank model (`cls.output.weight`
+    /// not present).
+    pub fn forward_rerank(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if !self.model.is_rerank() {
+            return Err("forward_rerank requires cls.output.weight".into());
+        }
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 rerank prompt must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Rerank forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let _duration = self.prefill(&input, prefill_batch_size)?;
+        // Ensure the prefill scratch holds at least one row per token
+        // so the post-prefill read of `prefill_scratch.x` below cannot
+        // index out of bounds even when `capacity == prefill_batch_size`.
+        self.prefill_scratch
+            .reset_for(input.token_ids.len(), self.model);
+        // The last prefill row's hidden state lives in `prefill_scratch.x`;
+        // apply final RMSNorm into `scratch.normed` and return a copy.
+        // Mirrors the projection step that runs inside `prefill` for the
+        // lm_head logits branch.
+        let n_embd = self.model.config.n_embd;
+        let last_row = input.token_ids.len() - 1;
+        let base = last_row * n_embd;
+        crate::ops::rms_norm(
+            &self.prefill_scratch.x[base..base + n_embd],
+            &self.model.output_norm,
+            &mut self.scratch.normed,
+            self.model.config.eps,
+        );
+        Ok(self.scratch.normed.clone())
+    }
+
     /// Return false from the callback to stop generation. Empty text callbacks
     /// still allow cancellation when a token has not completed a UTF-8 character.
     pub fn generate_streaming_until(

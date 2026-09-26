@@ -6,7 +6,7 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::qwen3::tts::codec::write_wav_f32_channels;
+use crate::format::wav::write_wav_f32_channels;
 use crate::models::yue2::{
     interleave_stereo, SamplingConfig, YuE2GenerateOptions, YuE2Model, YuE2Request, YuE2Vae,
 };

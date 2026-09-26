@@ -31,6 +31,13 @@ pub struct Qwen3Model {
     pub(crate) output_norm: Vec<f32>,
     pub(crate) token_embedding: Weight<'static>,
     pub(crate) output: Weight<'static>,
+    /// Optional classification / rerank head. Loaded when the GGUF carries a
+    /// `cls.output.weight` tensor (as produced by llama.cpp's rerank packer
+    /// — e.g. `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`). When `Some`,
+    /// the model is a rerank / cross-encoder; the caller is expected to
+    /// build a `[query, document]` prompt and read `score_logits(last_hidden)`
+    /// rather than sampling tokens from the lm_head.
+    pub(crate) cls_score: Option<Weight<'static>>,
 }
 
 // =============================================================================
@@ -540,6 +547,33 @@ impl Qwen3Model {
             config.vocab,
         ));
 
+        // Optional cross-encoder / classification head. GGUF tensors for
+        // these are typically named `cls.output.weight` (sometimes `.bias`)
+        // by llama.cpp's quantizer. We only require the weight tensor;
+        // absent means a plain generative model and `cls_score = None`.
+        let cls_score = match source.tensor_info("cls.output.weight") {
+            Some(info) => {
+                let bytes = source
+                    .tensor_slice("cls.output.weight")
+                    .ok_or_else(|| format!("cls.output.weight data missing"))?;
+                if info.dims.len() != 2 || info.dims[0] as usize != config.n_embd {
+                    return Err(format!(
+                        "cls.output.weight: shape {:?} does not match n_embd {}",
+                        info.dims, config.n_embd
+                    ));
+                }
+                let n_cls = info.dims[1] as usize;
+                let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+                Some(Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes_static,
+                    info.ggml_type,
+                    config.n_embd,
+                    n_cls,
+                )))
+            }
+            None => None,
+        };
+
         let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
             Arc::clone(&source),
             config.n_layer,
@@ -562,6 +596,7 @@ impl Qwen3Model {
             output_norm,
             token_embedding,
             output,
+            cls_score,
         })
     }
 
@@ -583,6 +618,53 @@ impl Qwen3Model {
 
     pub fn output_norm(&self) -> &Vec<f32> {
         &self.output_norm
+    }
+
+    /// Returns `true` when the GGUF carried a `cls.output.weight` head.
+    /// Callers should use [`Qwen3Session::forward_rerank`] instead of
+    /// `forward_logits` for such models.
+    pub fn is_rerank(&self) -> bool {
+        self.cls_score.is_some()
+    }
+
+    /// Classify `last_hidden` (length `n_embd`) with the rerank head,
+    /// returning one logit per class. Returns an error if the head
+    /// wasn't loaded.
+    pub fn score_logits(&self, last_hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let weight = self
+            .cls_score
+            .as_ref()
+            .ok_or_else(|| "model is not a rerank / cross-encoder".to_string())?;
+        if last_hidden.len() != self.config.n_embd {
+            return Err(format!(
+                "score_logits: hidden size {} does not match n_embd {}",
+                last_hidden.len(),
+                self.config.n_embd
+            ));
+        }
+        let n_in = self.config.n_embd;
+        let n_cls = weight.n_out;
+        let mut act_q8 = vec![0u8; n_in];
+        let mut act_scales = vec![0.0f32; n_in.div_ceil(32)];
+        crate::ops::quantize_q8_0_into(
+            last_hidden,
+            n_in,
+            &mut act_q8,
+            &mut act_scales,
+        );
+        let mut out = vec![0.0f32; n_cls];
+        weight.kernel.forward_prepared(
+            last_hidden,
+            &act_q8,
+            &act_scales,
+            None,
+            &mut out,
+            n_in,
+            n_cls,
+            0,
+            1,
+        );
+        Ok(out)
     }
 
     pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {

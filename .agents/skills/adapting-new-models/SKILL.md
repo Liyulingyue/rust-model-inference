@@ -45,7 +45,8 @@ description: Use when 用户要求在 rust-model-inference 中新增或扩展 GG
 ## 常见错误
 
 - 只看模型名称，不检查 GGUF metadata 和张量清单。
-- 选用了“附近”的 llama.cpp checkout，而不是实际支持该架构的固定版本。
+- 选用了"附近"的 llama.cpp checkout，而不是实际支持该架构的固定版本。
 - 只比较最终文本，遗漏 Tokenizer、prefill、KV 续写或中间层差异。
 - 为追求速度先接入 OpenBLAS 等外部库，改变浮点顺序并掩盖正确性问题。
 - 把仓库原有编译故障算作适配回归，或把未运行的真实模型检查写成已通过。
+- 手写 PyTorch ATEN kernel 的标量翻译版本（polynomial exp 近似、分层 multi-lane dot product、4-level sum-of-squares），而非复用 `crate::ops::` 已有 SIMD 算子。这些手写版本在 Rust 中无法被编译器向量化，性能和可维护性都更差。典型反例：82 行手写 sum-of-squares 替代 1 行 `iter().map().sum()`；49 行闭包 dot product 替代 `crate::ops::dot_f32`。

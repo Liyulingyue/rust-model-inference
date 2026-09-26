@@ -148,14 +148,7 @@ pub(super) fn torch_bf16_matmul_rows(
     for (offset_row, value) in output.iter_mut().enumerate() {
         let row = row_start + offset_row;
         let byte_start = row * n_in * 2;
-        let sum = torch_bf16_vector_dot(
-            n_in,
-            |column| input[column],
-            |column| {
-                let offset = byte_start + column * 2;
-                crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
-            },
-        );
+        let sum = crate::ops::dot_bf16_f32(input, &bytes[byte_start..byte_start + n_in * 2], n_in);
         let sum = bias.map_or(sum, |bias| sum + bias[row]);
         *value = half::bf16::from_f32(sum).to_f32();
     }
@@ -1183,97 +1176,13 @@ fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), String> {
 }
 
 pub(super) fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
-    let sum = torch_f32_sum_squares(input);
+    let sum = input.iter().map(|v| v * v).sum::<f32>();
     let scale = (sum / input.len() as f32 + eps).sqrt().recip();
     let scale = half::bf16::from_f32(scale).to_f32();
     for ((output, &input), &weight) in output.iter_mut().zip(input).zip(weight) {
         let scaled = half::bf16::from_f32(input * scale).to_f32();
         *output = half::bf16::from_f32(scaled * weight).to_f32();
     }
-}
-
-fn torch_f32_sum_squares(values: &[f32]) -> f32 {
-    const LANES: usize = 4;
-    const ILP: usize = 4;
-    const LEVELS: usize = 4;
-
-    let vector_count = values.len() / LANES;
-    let group_count = vector_count / ILP;
-    let mut levels = [[[0.0f32; LANES]; ILP]; LEVELS];
-    let mut group = 0;
-
-    if group_count != 0 {
-        let ceil_log2 = usize::BITS as usize - (group_count - 1).leading_zeros() as usize;
-        let level_power = 4usize.max(ceil_log2 / LEVELS);
-        let level_step = 1usize << level_power;
-        let level_mask = level_step - 1;
-        while group + level_step <= group_count {
-            for _ in 0..level_step {
-                for row in 0..ILP {
-                    let base = (group * ILP + row) * LANES;
-                    for lane in 0..LANES {
-                        let value = values[base + lane];
-                        let squared = value * value;
-                        levels[0][row][lane] += squared;
-                    }
-                }
-                group += 1;
-            }
-            for level in 1..LEVELS {
-                for row in 0..ILP {
-                    for lane in 0..LANES {
-                        levels[level][row][lane] += levels[level - 1][row][lane];
-                        levels[level - 1][row][lane] = 0.0;
-                    }
-                }
-                if group & (level_mask << (level * level_power)) != 0 {
-                    break;
-                }
-            }
-        }
-    }
-
-    while group < group_count {
-        for row in 0..ILP {
-            let base = (group * ILP + row) * LANES;
-            for lane in 0..LANES {
-                let value = values[base + lane];
-                let squared = value * value;
-                levels[0][row][lane] += squared;
-            }
-        }
-        group += 1;
-    }
-    for level in 1..LEVELS {
-        for row in 0..ILP {
-            for lane in 0..LANES {
-                levels[0][row][lane] += levels[level][row][lane];
-            }
-        }
-    }
-
-    for vector in group_count * ILP..vector_count {
-        let base = vector * LANES;
-        for lane in 0..LANES {
-            let value = values[base + lane];
-            let squared = value * value;
-            levels[0][0][lane] += squared;
-        }
-    }
-    for row in 1..ILP {
-        for lane in 0..LANES {
-            levels[0][0][lane] += levels[0][row][lane];
-        }
-    }
-
-    let mut sum = 0.0f32;
-    for &value in &values[vector_count * LANES..] {
-        sum += value * value;
-    }
-    for lane in 0..LANES {
-        sum += levels[0][0][lane];
-    }
-    sum
 }
 
 pub(super) fn rms_norm_heads(values: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
@@ -1294,7 +1203,7 @@ pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f
 }
 
 pub(super) fn dot(left: &[f32], right: &[f32]) -> f32 {
-    torch_bf16_gemm_dot(left.len(), |index| left[index], |index| right[index])
+    crate::ops::dot_f32(left, right, left.len())
 }
 
 pub(super) fn attention_head(
@@ -1314,11 +1223,11 @@ pub(super) fn attention_head(
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
         for (dimension, value) in output.iter_mut().enumerate() {
-            let sum = torch_bf16_gemm_dot(
-                scores.len(),
-                |cached_position| scores[cached_position],
-                |cached_position| value_cache[cached_position * kv_width + kv_start + dimension],
-            );
+            let mut sum = 0.0f32;
+            for cached_position in 0..scores.len() {
+                sum += scores[cached_position]
+                    * value_cache[cached_position * kv_width + kv_start + dimension];
+            }
             *value = half::bf16::from_f32(sum * inverse_sum).to_f32();
         }
         return;
@@ -1341,11 +1250,11 @@ pub(super) fn attention_head(
             }
         }
         for (dimension, value) in output.iter_mut().enumerate() {
-            let sum = torch_bf16_gemm_dot(
-                block.len(),
-                |offset| block[offset],
-                |offset| value_cache[(start + offset) * kv_width + kv_start + dimension],
-            );
+            let mut sum = 0.0f32;
+            for offset in 0..block.len() {
+                sum += block[offset]
+                    * value_cache[(start + offset) * kv_width + kv_start + dimension];
+            }
             *value += sum;
         }
         running_max = next_max;
@@ -1362,115 +1271,13 @@ pub(super) fn softmax(values: &mut [f32]) -> f32 {
 }
 
 fn softmax_exp_sum(values: &mut [f32], max: f32) -> f32 {
-    let vector_end = values.len() / 4 * 4;
-    let mut partial = [0.0f32; 4];
-    for base in (0..vector_end).step_by(4) {
-        for lane in 0..4 {
-            let value = torch_exp_u20(values[base + lane] - max);
-            partial[lane] += value;
-            values[base + lane] = half::bf16::from_f32(value).to_f32();
-        }
-    }
-    let mut sum = (partial[0] + partial[2]) + (partial[1] + partial[3]);
-    for value in &mut values[vector_end..] {
+    let mut sum = 0.0f32;
+    for value in values.iter_mut() {
         let exponential = (*value - max).exp();
         sum += exponential;
         *value = half::bf16::from_f32(exponential).to_f32();
     }
     sum
-}
-
-#[inline]
-fn torch_exp_u20(value: f32) -> f32 {
-    if value.abs() > f32::from_bits(0x42ae_af15) {
-        return value.exp();
-    }
-    let n = (value * f32::from_bits(0x3fb8_aa3b)).round();
-    let reduced = (-n).mul_add(f32::from_bits(0x3f31_7200), value);
-    let reduced = (-n).mul_add(f32::from_bits(0x35bf_be8e), reduced);
-    let exponent = (n as i32).wrapping_shl(23) as u32;
-    let scale = f32::from_bits(exponent.wrapping_add(0x3f80_0000));
-    let squared = reduced * reduced;
-    let low = reduced.mul_add(f32::from_bits(0x3c07_2010), f32::from_bits(0x3d2b_9f17));
-    let high = reduced.mul_add(f32::from_bits(0x3e2a_af33), f32::from_bits(0x3eff_fedb));
-    let high = low.mul_add(squared, high);
-    let linear = f32::from_bits(0x3f7f_fff6) * reduced;
-    high.mul_add(squared, linear).mul_add(scale, scale)
-}
-
-#[inline]
-fn torch_bf16_vector_dot(
-    len: usize,
-    mut left: impl FnMut(usize) -> f32,
-    mut right: impl FnMut(usize) -> f32,
-) -> f32 {
-    let mut accumulators = [[0.0f32; 4]; 8];
-    let mut column = 0;
-    while column + 32 <= len {
-        for group in 0..8 {
-            for lane in 0..4 {
-                let index = column + group * 4 + lane;
-                accumulators[group][lane] =
-                    left(index).mul_add(right(index), accumulators[group][lane]);
-            }
-        }
-        column += 32;
-    }
-    for group in 0..4 {
-        for lane in 0..4 {
-            accumulators[group][lane] += accumulators[group + 4][lane];
-        }
-    }
-    for group in 0..2 {
-        for lane in 0..4 {
-            accumulators[group][lane] += accumulators[group + 2][lane];
-        }
-    }
-    for lane in 0..4 {
-        accumulators[0][lane] += accumulators[1][lane];
-    }
-    let lanes = accumulators[0];
-    let mut sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
-    let mut tail = [0.0f32; 4];
-    while column + 8 <= len {
-        for lane in 0..4 {
-            for half in 0..2 {
-                let index = column + half * 4 + lane;
-                tail[lane] = left(index).mul_add(right(index), tail[lane]);
-            }
-        }
-        column += 8;
-    }
-    sum += (tail[0] + tail[1]) + (tail[2] + tail[3]);
-    while column < len {
-        sum = left(column).mul_add(right(column), sum);
-        column += 1;
-    }
-    sum
-}
-
-#[inline]
-pub(super) fn torch_bf16_gemm_dot(
-    len: usize,
-    mut left: impl FnMut(usize) -> f32,
-    mut right: impl FnMut(usize) -> f32,
-) -> f32 {
-    let mut partial = [0.0f32; 4];
-    let mut index = 0;
-    while index + 4 <= len {
-        for lane in 0..4 {
-            partial[lane] += left(index + lane) * right(index + lane);
-        }
-        index += 4;
-    }
-    while index < len {
-        partial[0] += left(index) * right(index);
-        index += 1;
-    }
-    for lane in 1..4 {
-        partial[0] += partial[lane];
-    }
-    partial[0]
 }
 
 pub(super) fn silu(value: f32) -> f32 {

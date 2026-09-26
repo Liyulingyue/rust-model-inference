@@ -1,7 +1,7 @@
 use crate::ops::quant::BlockQ8K;
 
 use super::ar::{
-    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax, torch_bf16_gemm_dot,
+    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax,
     YuE2AttentionWeights, YuE2MlpWeights, YuE2Weight,
 };
 use super::protocol::{CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END, VOCAB_SIZE};
@@ -583,11 +583,10 @@ fn causal_prefix_attention(
             if row < 512 {
                 let inverse_sum = flash_softmax(&mut scores);
                 for dimension in 0..config.head_dim {
-                    let sum = torch_bf16_gemm_dot(
-                        rows,
-                        |position| scores[position],
-                        |position| v[position * kv_width + kv_offset + dimension],
-                    );
+                    let mut sum = 0.0f32;
+                    for position in 0..rows {
+                        sum += scores[position] * v[position * kv_width + kv_offset + dimension];
+                    }
                     output[q_start + dimension] = bf16(sum * inverse_sum);
                 }
                 continue;
@@ -611,11 +610,10 @@ fn causal_prefix_attention(
                     }
                 }
                 for (dimension, value) in result.iter_mut().enumerate() {
-                    let sum = torch_bf16_gemm_dot(
-                        block.len(),
-                        |offset| block[offset],
-                        |offset| v[(start + offset) * kv_width + kv_offset + dimension],
-                    );
+                    let mut sum = 0.0f32;
+                    for offset in 0..block.len() {
+                        sum += block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                    }
                     *value += sum;
                 }
                 running_max = next_max;
@@ -920,11 +918,10 @@ fn hybrid_attention(
             if total_len <= 512 {
                 let inverse_sum = softmax(&mut scores);
                 for (dimension, value) in result.iter_mut().enumerate() {
-                    let sum = torch_bf16_gemm_dot(
-                        total_len,
-                        |position| scores[position],
-                        |position| value_at(position, dimension),
-                    );
+                    let mut sum = 0.0f32;
+                    for position in 0..total_len {
+                        sum += scores[position] * value_at(position, dimension);
+                    }
                     *value = bf16(sum * inverse_sum);
                 }
                 continue;
@@ -947,11 +944,10 @@ fn hybrid_attention(
                     }
                 }
                 for (dimension, value) in result.iter_mut().enumerate() {
-                    let sum = torch_bf16_gemm_dot(
-                        block.len(),
-                        |offset| block[offset],
-                        |offset| value_at(start + offset, dimension),
-                    );
+                    let mut sum = 0.0f32;
+                    for offset in 0..block.len() {
+                        sum += block[offset] * value_at(start + offset, dimension);
+                    }
                     *value += sum;
                 }
                 running_max = next_max;

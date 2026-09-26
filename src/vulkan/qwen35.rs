@@ -836,8 +836,10 @@ impl Qwen35VulkanSession {
         let value_heads = config.ssm_dt_rank;
         let recurrent_head_dim = config.head_v_dim();
 
-        // Hold the context submission guard before touching mapped arena bytes.
-        let commands = TokenCommands::begin(self.context)?;
+        // Hold the context submission guard before touching mapped arena bytes
+        // and keep it for the whole recording: `TokenCommands::flush` submits
+        // and re-opens the command buffer without dropping it.
+        let mut commands = TokenCommands::begin(self.context)?;
         self.ops.write_f32(self.layout.x, input)?;
         // Recurrent layers have no dense delta; active rows change its layer stride.
         for region in [self.layout.kv_delta_k, self.layout.kv_delta_v] {
@@ -870,7 +872,18 @@ impl Qwen35VulkanSession {
             &self.rope[..rows * config.rope_dimension_count],
         )?;
 
+        // Flush once a chunk reaches this many dispatches. Recording every layer
+        // of a chunk into one command buffer and submitting it as a single unit
+        // produces wrong logits on Meteor Lake: the LM head then reads a hidden
+        // state that never reflects the recorded layers. Chunking keeps each
+        // submission short enough for the drivers to honour every dispatch.
+        const MAX_DISPATCHES_PER_CHUNK: usize = 16;
+        let mut chunk_start = self.ops.recorded_dispatch_count();
         for (layer_index, bindings) in self.layers.iter().enumerate() {
+            if self.ops.recorded_dispatch_count() - chunk_start >= MAX_DISPATCHES_PER_CHUNK {
+                commands = commands.flush()?;
+                chunk_start = self.ops.recorded_dispatch_count();
+            }
             self.ops.record_rms_norm_rows(
                 &commands,
                 bindings.attention_norm,
@@ -1092,6 +1105,8 @@ impl Qwen35VulkanSession {
             config.n_embd,
             config.norm_eps,
         )?;
+        commands.submit_and_wait()?;
+        let commands = TokenCommands::begin(self.context)?;
         self.record_weights(
             &commands,
             self.output,
