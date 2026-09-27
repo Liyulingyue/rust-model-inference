@@ -1,9 +1,9 @@
 use super::protocol::{Delta, Message, Tool, ToolCall, ToolChoice};
+use crate::core::tensor::TensorSource;
 use crate::{
     prompt::{build_qwen_chat_prompt, QwenMessage},
     BPETokenizer,
 };
-use crate::core::tensor::TensorSource;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -91,9 +91,7 @@ pub fn build_prompt(
     );
     if llama_family {
         if !tools.is_empty() {
-            return Err(
-                "Function tools are unsupported for llama-family architectures".into(),
-            );
+            return Err("Function tools are unsupported for llama-family architectures".into());
         }
         // The llama trunk prompt builder takes the raw `prompt` string of
         // the single user turn. System turns are ignored (their chat
@@ -104,11 +102,7 @@ pub fn build_prompt(
             .rev()
             .find(|m| m.role == "user")
             .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
-        let ids = crate::models::llama::trunk::build_prompt_tokens(
-            source,
-            &last_user.text,
-            false,
-        )?;
+        let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
         return Ok(ids);
     }
     validate_tools(tools, choice)?;
@@ -962,10 +956,7 @@ mod tests {
         fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
             None
         }
-        fn tensor_info(
-            &self,
-            _name: &str,
-        ) -> Option<&crate::core::tensor::TensorInfo> {
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
             None
         }
         fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
@@ -975,7 +966,6 @@ mod tests {
     fn source() -> std::sync::Arc<dyn crate::core::tensor::TensorSource> {
         std::sync::Arc::new(TestSource)
     }
-
 
     #[test]
     fn native_prompts_preserve_tools_history_and_chatml_boundaries() {
@@ -1017,8 +1007,15 @@ mod tests {
             },
         ];
         for arch in ["qwen3", "qwen35"] {
-            let tokens =
-                build_prompt(source().as_ref(), &tokenizer, arch, &messages, &tools(), &ToolChoice::Auto).unwrap();
+            let tokens = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &tools(),
+                &ToolChoice::Auto,
+            )
+            .unwrap();
             assert_eq!(
                 tokens.iter().filter(|&&t| t == 257).count(),
                 4,
@@ -1054,7 +1051,15 @@ mod tests {
         )
         .unwrap_err()
         .contains("unsupported"));
-        assert!(build_prompt(source().as_ref(), &tokenizer, "llama", &messages, &tools(), &ToolChoice::Auto).is_err());
+        assert!(build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "llama",
+            &messages,
+            &tools(),
+            &ToolChoice::Auto
+        )
+        .is_err());
     }
 
     #[test]
@@ -1076,7 +1081,15 @@ mod tests {
         ];
         for arch in ["qwen3", "qwen3vl", "qwen35"] {
             let prompt = tokenizer.decode(
-                &build_prompt(source().as_ref(), &tokenizer, arch, &messages, &[], &ToolChoice::Auto).unwrap(),
+                &build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                )
+                .unwrap(),
                 true,
             );
             assert!(prompt.contains(
@@ -1119,8 +1132,15 @@ mod tests {
             });
             for arch in ["qwen3", "qwen35"] {
                 let prompt = tokenizer.decode(
-                    &build_prompt(source().as_ref(), &tokenizer, arch, &messages, &tools(), &ToolChoice::Auto)
-                        .unwrap(),
+                    &build_prompt(
+                        source().as_ref(),
+                        &tokenizer,
+                        arch,
+                        &messages,
+                        &tools(),
+                        &ToolChoice::Auto,
+                    )
+                    .unwrap(),
                     true,
                 );
                 assert_eq!(

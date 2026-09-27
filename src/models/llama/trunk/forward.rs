@@ -2142,7 +2142,6 @@ mod tests {
     }
 }
 
-
 /// Build the prompt token vector for any llama-family arch
 /// (llama / nanbeige / exaone / k2-horizon / granite / MiniCPM5).
 ///
@@ -2186,9 +2185,7 @@ pub fn build_prompt_tokens(
             prompt.to_string()
         }
     } else if is_minicpm5 {
-        format!(
-            "user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n"
-        )
+        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
     } else {
         format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
     };

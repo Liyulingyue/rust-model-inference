@@ -336,7 +336,6 @@ impl<'a> LlamaSession<'a> {
         self.kv_cache.clear();
     }
 
-
     /// B=1 fallback used by [`forward_chunk_rows`] when the chunk
     /// contains a single token. Runs the legacy per-token forward
     /// for the token at absolute position `base_position` without

@@ -132,8 +132,8 @@ impl ResponsesStore {
 }
 
 use super::{AppState, Backend};
-use crate::ops::generation_runtime::{Flow, GenerationRequest, SamplingParams, TokenSink};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::ops::generation_runtime::{Flow, GenerationRequest, SamplingParams, TokenSink};
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
     http::StatusCode,
@@ -695,10 +695,7 @@ fn generate(
         !stopped
     };
     let Some(handle) = &text.runtime else {
-        return Err(format!(
-            "Architecture {:?} is unsupported",
-            text.arch
-        ));
+        return Err(format!("Architecture {:?} is unsupported", text.arch));
     };
     let mut runtime = handle.lock().map_err(|e| e.to_string())?;
     // Bridge the runtime's `TokenSink` to the existing `on_token` closure so

@@ -21,10 +21,10 @@
 use crate::app::cli::KvFormat;
 use crate::core::tensor::TensorSource;
 use crate::models::llama::trunk::{build_prompt_tokens, LlamaSession};
-use crate::ops::generation_runtime::{
-    Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink,
-};
 use crate::ops::generation_runtime::StepAction;
+use crate::ops::generation_runtime::{
+    Finish, Flow, GeneratedText, GenerationRequest, TextRuntime, TokenSink,
+};
 use crate::ops::sampling::sample_greedy_or_temperature;
 use crate::ops::sampling::{Lfm2MoeSampler, LlamaSampler};
 use std::sync::{Arc, Mutex};
@@ -432,11 +432,8 @@ impl TextRuntime for Qwen35TextRuntime {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
-        let (positions, _) = crate::models::qwen35::build_qwen35_positions(
-            &request.token_ids,
-            None,
-            &[],
-        )?;
+        let (positions, _) =
+            crate::models::qwen35::build_qwen35_positions(&request.token_ids, None, &[])?;
         let mut session = crate::models::qwen35::Qwen35Session::new_with_prefill_batch_size(
             &mut model,
             request.token_ids.len() + request.max_new_tokens,
@@ -458,12 +455,7 @@ impl TextRuntime for Qwen35TextRuntime {
                 (&token_ids[token_ids.len() - 1..], &decode_positions[..])
             };
             let logits = session.step_with_tokens(tokens, pos_slice)?;
-            let Some(id) = sample_step(
-                &logits,
-                request.sampling.temperature,
-                eos_id,
-                im_end_id,
-            )?
+            let Some(id) = sample_step(&logits, request.sampling.temperature, eos_id, im_end_id)?
             else {
                 finish = Finish::Eos;
                 break;
@@ -664,8 +656,7 @@ mod tests {
     /// `capacity_for` is the single capacity rule adapters must use.
     #[test]
     fn capacity_for_is_the_cli_rule() {
-        let source: Arc<dyn crate::core::tensor::TensorSource> =
-            Arc::new(StubSource);
+        let source: Arc<dyn crate::core::tensor::TensorSource> = Arc::new(StubSource);
         let pool = Arc::new(crate::core::thread_pool::ComputePool::new(1));
         let tokenizer = Arc::new(stub_tokenizer());
         let options = RuntimeOptions::from_model(source, pool, tokenizer);

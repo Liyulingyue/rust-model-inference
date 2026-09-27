@@ -19,7 +19,9 @@
 
 use rust_model_inference::app::text::{build_text_runtime, RuntimeOptions};
 use rust_model_inference::core::tensor::TensorSource;
-use rust_model_inference::ops::generation_runtime::{CollectSink, GenerationRequest, SamplingParams};
+use rust_model_inference::ops::generation_runtime::{
+    CollectSink, GenerationRequest, SamplingParams,
+};
 use rust_model_inference::{BPETokenizer, GGUFLoader, MetaValue};
 use std::sync::Arc;
 
@@ -98,12 +100,9 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
     // Same constructor the server uses, plus the context cap; every other
     // field carries `RuntimeOptions::defaults` (which a unit test pins to the
     // CLI's resolution), so the sentinel cannot drift from either side.
-    let options = RuntimeOptions::from_model(
-        Arc::new(LeakedLoader(loader)),
-        pool,
-        tokenizer.clone(),
-    )
-    .with_max_context(CONTEXT);
+    let options =
+        RuntimeOptions::from_model(Arc::new(LeakedLoader(loader)), pool, tokenizer.clone())
+            .with_max_context(CONTEXT);
     let mut runtime = build_text_runtime(&arch, options)
         .unwrap_or_else(|e| panic!("no runtime for arch {arch}: {e}"));
     // Both front-ends must start from identical prompt ids. For llama-family
@@ -175,14 +174,7 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     // covered; other archs are gated on their own models elsewhere.
     let covered = matches!(
         arch.as_str(),
-        "llama"
-            | "nanbeige"
-            | "exaone"
-            | "k2-horizon"
-            | "granite"
-            | "lfm2moe"
-            | "qwen3"
-            | "qwen35"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "lfm2moe" | "qwen3" | "qwen35"
     );
     if !covered {
         eprintln!("skipping: arch {arch} is not in the agreement matrix yet");

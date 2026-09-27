@@ -431,8 +431,14 @@ mod sampler_unification_tests {
 
     #[test]
     fn greedy_rejects_empty_and_non_finite() {
-        assert!(greedy_checked(&[]).is_err(), "empty must be an error, not 0");
-        assert!(greedy_checked(&[1.0, f32::NAN]).is_err(), "NaN must error, not panic");
+        assert!(
+            greedy_checked(&[]).is_err(),
+            "empty must be an error, not 0"
+        );
+        assert!(
+            greedy_checked(&[1.0, f32::NAN]).is_err(),
+            "NaN must error, not panic"
+        );
         assert!(sample_greedy_or_temperature(&[1.0, f32::INFINITY], 0.0).is_err());
     }
 
