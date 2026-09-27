@@ -184,6 +184,24 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
             continue;
         };
         let http = http_text(loader, temperature);
+        if cli != http {
+            // Where the texts first differ. A split at char 0 means a
+            // forward-path divergence (wrong tokens from step one); a split
+            // tens of characters in is usually a 1-ULP greedy flip on two
+            // near-tied logits.
+            let common = cli
+                .chars()
+                .zip(http.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            panic!(
+                "CLI and HTTP disagree for arch={arch} temperature={temperature}\n\
+                 divergence at char {common}: CLI={:?} HTTP={:?}\n\
+                 CLI : {cli:?}\nHTTP: {http:?}",
+                &cli[common..cli.len().min(common + 40)],
+                &http[common..http.len().min(common + 40)]
+            );
+        }
         assert_eq!(
             cli, http,
             "CLI and HTTP disagree for arch={arch} temperature={temperature}\nCLI : {cli:?}\nHTTP: {http:?}"

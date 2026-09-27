@@ -42,6 +42,12 @@ pub struct Lfm2MoeSession<'a> {
     pub pool: Arc<ComputePool>,
     pub vocab: usize,
     pub seq_len: usize,
+    /// How many leading `seq_len` positions are prompt tokens. The shortconv
+    /// path uses it to decide prefill (`seq_len < prompt_len`) vs decode —
+    /// the same `step < input_tokens.len()` test the CLI's fused loop makes.
+    /// Decoding with the prefill branch replays the whole b*x history into
+    /// the conv window and produces different tokens.
+    pub prompt_len: usize,
     pub shortconv_states: Vec<Vec<f32>>,
     pub accumulated_bx: Vec<Vec<Vec<f32>>>,
     /// Clamped context length (min of config.n_ctx and caller's max_context).
@@ -164,6 +170,7 @@ impl<'a> Lfm2MoeSession<'a> {
             pool,
             vocab,
             seq_len: 0,
+            prompt_len: 0,
             shortconv_states,
             accumulated_bx,
             max_ctx,
@@ -219,10 +226,13 @@ impl<'a> Lfm2MoeSession<'a> {
             &mut self.scratch.x,
         );
 
-        // Per-layer forward.
+        // Per-layer forward. `is_prefill` must follow the CLI's fused loop
+        // (`step < input_tokens.len()`), otherwise decode steps rebuild the
+        // shortconv window from the accumulated b*x history instead of
+        // sliding it, and the two front-ends diverge.
         for layer in 0..n_layer {
             let lw = &self.weights.layers[layer];
-            let is_prefill = true;
+            let is_prefill = pos < self.prompt_len;
             if !lw.is_attn && is_prefill {
                 let d_conv = cfg.d_conv;
                 let state = &mut self.shortconv_states[layer];
@@ -321,6 +331,7 @@ impl<'a> Lfm2MoeSession<'a> {
     /// shortconv state, and seq_len).
     pub fn reset(&mut self) {
         self.seq_len = 0;
+        self.prompt_len = 0;
         self.kv_cache.clear();
         for state in &mut self.shortconv_states {
             state.fill(0.0);

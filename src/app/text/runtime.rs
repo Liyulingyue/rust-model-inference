@@ -474,6 +474,9 @@ impl TextRuntime for Lfm2MoeTextRuntime {
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
         // Prefill token by token (the session has no batched prefill entry).
+        // `prompt_len` tells the session which steps are prefill, matching the
+        // CLI's fused loop; without it decode steps take the prefill branch.
+        session.prompt_len = request.token_ids.len();
         let mut logits = Vec::new();
         for &token_id in &request.token_ids {
             logits = session.forward_token(token_id)?;
