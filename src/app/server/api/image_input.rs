@@ -238,7 +238,7 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::app::server::api::fixtures::{apple_png_b64, APPLE_PNG};
+    use crate::app::server::api::fixtures::{synthetic_png, synthetic_png_b64};
 
     /// The apple.png fixture the docs use, embedded so tests do not depend on
     /// the gitignored `references/` tree. 401x287 RGB.
@@ -246,7 +246,7 @@ pub(crate) mod tests {
 
     #[test]
     fn data_uri_decodes_to_png_bytes() {
-        let uri = format!("data:image/png;base64,{}", apple_png_b64());
+        let uri = format!("data:image/png;base64,{}", synthetic_png_b64());
         let image = decode_image_source(&uri, false).unwrap();
         // Assert on the decoded image, not a byte count: 1x1 transparent PNG.
         let decoded = decode_image_bytes(&image.bytes).unwrap();
@@ -255,7 +255,7 @@ pub(crate) mod tests {
 
     #[test]
     fn raw_base64_decodes_without_data_prefix() {
-        let b64 = apple_png_b64();
+        let b64 = synthetic_png_b64();
         let image = decode_image_source(&b64, false).unwrap();
         assert_eq!(decode_image_bytes(&image.bytes).unwrap().width(), 401);
     }
@@ -281,7 +281,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tiny.png");
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(apple_png_b64().as_str())
+            .decode(synthetic_png_b64().as_str())
             .unwrap();
         std::fs::write(&path, &bytes).unwrap();
 
@@ -324,7 +324,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod remote_tests {
     use super::*;
-    use crate::app::server::api::fixtures::apple_png_b64;
+    use crate::app::server::api::fixtures::{synthetic_png, synthetic_png_b64 as apple_png_b64};
 
     #[test]
     fn remote_flag_defaults_to_off_and_messages_the_flag() {
@@ -370,6 +370,6 @@ mod remote_tests {
         // as for the other sources.
         let payload = apple_png_b64();
         let image = decode_image_source(&payload, true).unwrap();
-        assert_eq!(image.bytes.len(), 103374);
+        assert_eq!(image.bytes, synthetic_png());
     }
 }

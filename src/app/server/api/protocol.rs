@@ -1253,7 +1253,7 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::server::api::fixtures::{apple_png_b64, APPLE_PNG};
+    use crate::app::server::api::fixtures::{synthetic_png, synthetic_png_b64 as apple_png_b64};
     fn generation() -> Generation {
         Generation {
             text: "Let me check.".into(),
@@ -1658,7 +1658,10 @@ mod tests {
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].text, "what is this?");
         assert_eq!(request.messages[0].images.len(), 1);
-        assert_eq!(request.messages[0].images[0].bytes.len(), APPLE_PNG.len());
+        assert_eq!(
+            request.messages[0].images[0].bytes.len(),
+            synthetic_png().len()
+        );
         // And it decodes as the real 401x287 image.
         assert_eq!(
             crate::app::server::api::image_input::decode_image_bytes(
@@ -1679,7 +1682,10 @@ mod tests {
         ]}]});
         let request = Protocol::Anthropic.parse(&body).unwrap();
         assert_eq!(request.messages[0].images.len(), 1);
-        assert_eq!(request.messages[0].images[0].bytes.len(), APPLE_PNG.len());
+        assert_eq!(
+            request.messages[0].images[0].bytes.len(),
+            synthetic_png().len()
+        );
     }
 
     #[test]

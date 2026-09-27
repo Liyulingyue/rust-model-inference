@@ -64,7 +64,22 @@ fn mmp() -> Option<std::sync::Arc<dyn rust_model_inference::core::tensor::Tensor
 
 /// The image both front-ends are shown: the same apple.png fixture the docs
 /// use (401x287), embedded so the test does not depend on `references/`.
-const AGREEMENT_IMAGE: &[u8] = include_bytes!("fixtures/apple.png");
+/// Deterministic 401x287 PNG, generated at test time (no binary fixture in
+/// the repo). Both front-ends receive identical bytes.
+fn agreement_image() -> Vec<u8> {
+    use image::{ImageFormat, Rgb, RgbImage};
+    use std::io::Cursor;
+
+    let mut image = RgbImage::new(401, 287);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        *pixel = Rgb([x as u8, y as u8, (x ^ y) as u8]);
+    }
+    let mut buffer = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut buffer, ImageFormat::Png)
+        .unwrap();
+    buffer.into_inner()
+}
 const IMAGE_PROMPT: &str = "Describe this image in a few words.";
 
 /// Run the CLI binary and return the generated text from its `Output: ` line.
@@ -274,7 +289,7 @@ fn cli_and_http_agree_on_image_input() {
 
     // CLI side: `--image` reads the fixture from disk.
     let fixture = std::env::temp_dir().join(format!("rmi-agree-apple-{}.png", std::process::id()));
-    std::fs::write(&fixture, AGREEMENT_IMAGE).unwrap();
+    std::fs::write(&fixture, agreement_image()).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
         .arg("--model")
         .arg(&path)
@@ -315,7 +330,7 @@ fn cli_and_http_agree_on_image_input() {
         panic!("CLI printed no recognisable output line; stdout was:\n{stdout}");
     };
 
-    let http = http_text(loader, 0.0, &[AGREEMENT_IMAGE.to_vec()], IMAGE_PROMPT);
+    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT);
     assert_eq!(
         cli, http,
         "CLI and HTTP disagree on image input\nCLI : {cli:?}\nHTTP: {http:?}"
