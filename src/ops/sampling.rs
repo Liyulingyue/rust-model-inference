@@ -229,3 +229,39 @@ pub fn sample_llama_cpp(
     }
     chosen
 }
+
+/// Temperature sampling with a greedy fast path: `temperature <= 0`
+/// argmaxes, otherwise softmax-then-random. No top-k / top-p / repetition
+/// penalty — those live in `sample_llama_cpp`.
+///
+/// Moved verbatim from the server (`app::server::sample_token_from_logits`) so
+/// the HTTP adapters and any other caller share one implementation.
+pub fn sample_temperature_greedy_or_random(logits: &[f32], temperature: f32) -> i32 {
+    if temperature <= 0.0 {
+        return logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i as i32)
+            .unwrap_or(0);
+    }
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f32;
+    let mut probs = vec![0.0f32; logits.len()];
+    for (i, l) in logits.iter().enumerate() {
+        probs[i] = ((l - max_logit) / temperature).exp();
+        sum += probs[i];
+    }
+    for p in probs.iter_mut() {
+        *p /= sum;
+    }
+    let r: f32 = rand::random();
+    let mut cumsum = 0.0f32;
+    for (i, p) in probs.iter().enumerate() {
+        cumsum += p;
+        if cumsum >= r {
+            return i as i32;
+        }
+    }
+    (logits.len() - 1) as i32
+}

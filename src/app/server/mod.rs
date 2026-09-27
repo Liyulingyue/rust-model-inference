@@ -16,7 +16,6 @@ use tower_http::cors::CorsLayer;
 use crate::app::cli::{
     normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
 };
-use crate::app::text::uses_llama_trunk;
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -28,10 +27,8 @@ use crate::models::qwen3::asr::model::{
 };
 use crate::models::qwen3::tts::codec::{Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE};
 use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
+use crate::models::qwen3::Qwen3Model;
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
-use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session};
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
-use crate::KvLifecycle;
 
 const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)]";
 
@@ -74,7 +71,9 @@ struct TextBackend {
     tokenizer: Arc<BPETokenizer>,
     prefill_batch_size: usize,
     context_length: usize,
-    inner: TextInner,
+    /// Per-arch generation adapter. `None` = arch has no adapter yet; those
+    /// models still load but `/v1/chat/completions` answers 501.
+    runtime: Option<crate::ops::TextRuntimeHandle>,
     /// `TensorSource` for the loaded LLM. Used by the JEV scoring
     /// endpoints (`/v1/jev/score`, `/v1/jev/grouped`) so they can
     /// run the existing CLI JEV pipeline without re-loading the model
@@ -94,36 +93,8 @@ struct TextBackend {
     pub(crate) mmproj_path: Option<std::path::PathBuf>,
 }
 
-enum TextInner {
-    Qwen3 {
-        model: Arc<Qwen3Model>,
-    },
-    Qwen35 {
-        // Qwen35Model borrows from its source; we leak the lifetime to 'static.
-        // `Mutex` is needed because forward now takes `&mut self` (Vulkan state).
-        model: Mutex<Qwen35Model<'static>>,
-        _source: Arc<dyn TensorSource>,
-    },
-    Lfm2Moe {
-        // Lfm2MoeSession borrows from its source; we leak the lifetime to 'static.
-        session: Mutex<crate::models::lfm2moe::Lfm2MoeSession<'static>>,
-        _source: Arc<dyn TensorSource>,
-    },
-    LlamaTrunk {
-        // LlamaSession borrows from its source; we leak the lifetime to
-        // 'static (same pattern as Qwen35 / Lfm2Moe).
-        session: Mutex<crate::models::llama::trunk::LlamaSession<'static>>,
-        _source: Arc<dyn TensorSource>,
-    },
-    Fallback {
-        arch: String,
-    },
-}
-
 unsafe impl Send for TextBackend {}
 unsafe impl Sync for TextBackend {}
-unsafe impl Send for TextInner {}
-unsafe impl Sync for TextInner {}
 
 struct EmbeddingBackend {
     source: Arc<dyn TensorSource>,
@@ -231,36 +202,6 @@ struct ErrorResponse {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-fn sample_token_from_logits(logits: &[f32], temperature: f32) -> i32 {
-    if temperature <= 0.0 {
-        return logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as i32)
-            .unwrap_or(0);
-    }
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    let mut probs = vec![0.0f32; logits.len()];
-    for (i, l) in logits.iter().enumerate() {
-        probs[i] = ((l - max_logit) / temperature).exp();
-        sum += probs[i];
-    }
-    for p in probs.iter_mut() {
-        *p /= sum;
-    }
-    let r: f32 = rand::random();
-    let mut cumsum = 0.0f32;
-    for (i, p) in probs.iter().enumerate() {
-        cumsum += p;
-        if cumsum >= r {
-            return i as i32;
-        }
-    }
-    (logits.len() - 1) as i32
-}
 
 // =============================================================================
 // Routes
@@ -807,79 +748,33 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
-    let inner = match &*arch {
-        "qwen3" | "qwen3vl" => {
-            let model = Qwen3Model::from_source(source.clone(), tokenizer.clone(), pool.clone())?;
-            TextInner::Qwen3 {
-                model: Arc::new(model),
-            }
-        }
-        "qwen35" => {
-            let model = Qwen35Model::from_source(source.as_ref())?;
-            // SAFETY: the model borrows from `source`, which is held by the
-            // backend for the full server lifetime; we leak the lifetime to
-            // satisfy the 'static bound on Arc storage.
-            let model: Qwen35Model<'static> = unsafe { std::mem::transmute(model) };
-            TextInner::Qwen35 {
-                model: Mutex::new(model),
-                _source: source.clone(),
-            }
-        }
-        "lfm2moe" => {
-            let session = crate::models::lfm2moe::Lfm2MoeSession::from_source(
-                source.as_ref(),
-                options.threads,
-                crate::core::scratchpad::KvFormat::F16,
-                options.effective_max_context(),
-            )?;
-            // SAFETY: same lifetime leak as Qwen35 — source is held by the
-            // backend for the full server lifetime.
-            let session: crate::models::lfm2moe::Lfm2MoeSession<'static> =
-                unsafe { std::mem::transmute(session) };
-            TextInner::Lfm2Moe {
-                session: Mutex::new(session),
-                _source: source.clone(),
-            }
-        }
-        arch if uses_llama_trunk(arch) => {
-            use crate::models::llama::trunk::LlamaSession;
-            let session = LlamaSession::from_source(
-                source.as_ref(),
-                options.threads,
-                crate::app::cli::KvFormat::F32,
-                options.effective_max_context(),
-            )?;
-            // SAFETY: source is held by the backend for the full server
-            // lifetime; we leak the lifetime to satisfy `Box<dyn ...>`.
-            let session: LlamaSession<'static> =
-                unsafe { std::mem::transmute(session) };
-            TextInner::LlamaTrunk {
-                session: Mutex::new(session),
-                _source: source.clone(),
-            }
-        }
-        _ => TextInner::Fallback {
-            arch: arch.to_string(),
-        },
+    // One dispatch point for every arch (CLI/HTTP unification,
+    // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
+    // without an adapter — those models load but answer 501 at request time.
+    let runtime_options = crate::app::text::RuntimeOptions {
+        threads: options.threads,
+        kv_format: crate::app::cli::KvFormat::F16,
+        max_context: options.effective_max_context(),
+        prefill_batch_size,
+        source: source.clone(),
+        pool: pool.clone(),
+        tokenizer: tokenizer.clone(),
     };
-    let context_length = match &inner {
-        TextInner::Qwen3 { model } => model.config().n_ctx,
-        TextInner::Qwen35 { model, .. } => model.lock().map_err(|e| e.to_string())?.config.n_ctx,
-        TextInner::Lfm2Moe { session, .. } => {
-            session.lock().map_err(|e| e.to_string())?.config.n_ctx
-        }
-        TextInner::LlamaTrunk { session, .. } => {
-            session.lock().map_err(|e| e.to_string())?.config.max_ctx
-        }
-        TextInner::Fallback { .. } => 0,
-    };
+    let (runtime, context_length) =
+        match crate::app::text::build_text_runtime(&arch, runtime_options) {
+            Ok(runtime) => {
+                let context = runtime.context_length();
+                (Some(std::sync::Mutex::new(runtime)), context)
+            }
+            Err(_) => (None, 0),
+        };
     Ok(TextBackend {
         arch: arch.to_string(),
         pool,
         tokenizer,
         prefill_batch_size,
         context_length,
-        inner,
+        runtime,
         source,
         model_path: Some(model_path),
         mmproj,
