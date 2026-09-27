@@ -646,12 +646,7 @@ impl Qwen3Model {
         let n_cls = weight.n_out;
         let mut act_q8 = vec![0u8; n_in];
         let mut act_scales = vec![0.0f32; n_in.div_ceil(32)];
-        crate::ops::quantize_q8_0_into(
-            last_hidden,
-            n_in,
-            &mut act_q8,
-            &mut act_scales,
-        );
+        crate::ops::quantize_q8_0_into(last_hidden, n_in, &mut act_q8, &mut act_scales);
         let mut out = vec![0.0f32; n_cls];
         weight.kernel.forward_prepared(
             last_hidden,

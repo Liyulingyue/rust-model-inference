@@ -194,7 +194,7 @@ pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
@@ -260,7 +260,7 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if has_neon() && prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
             (
                 f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,
@@ -616,6 +616,14 @@ unsafe fn vec_mad_f16_f32_avx2(y: &mut [f32], x_f16: &[u16], v: f32) {
 
 #[inline(always)]
 pub fn dot_f32(a: &[f32], b: &[f32], n: usize) -> f32 {
+    if crate::ops::scalar_mode() {
+        // ggml's scalar F32 dot rounds products to F32 and accumulates in F64.
+        return a[..n]
+            .iter()
+            .zip(&b[..n])
+            .map(|(&x, &y)| f64::from(x * y))
+            .sum::<f64>() as f32;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {

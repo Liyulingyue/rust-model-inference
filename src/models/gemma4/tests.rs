@@ -424,7 +424,7 @@ fn gemma4_e2b_contract_is_exact() {
             n_expert: 0,
             n_expert_used: 0,
             n_ff_exp: 0,
-            
+
             layers: 35,
             embd: 1536,
             n_heads: 8,

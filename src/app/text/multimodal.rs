@@ -527,9 +527,9 @@ pub fn run_qwen3_family_multimodal_logits(
         },
     ));
     let mut token_ids = Vec::new();
-    if let Some(system_text) = system_prompt.filter(|_| {
-        family == crate::app::media::ProjectorFamily::Qwen25Omni
-    }) {
+    if let Some(system_text) =
+        system_prompt.filter(|_| family == crate::app::media::ProjectorFamily::Qwen25Omni)
+    {
         append_qwen_message_tokens(
             &mut token_ids,
             &tokenizer,

@@ -1747,8 +1747,8 @@ async fn run_image_grouped_jev_blocking(
         // Reuse the CLI grouped scorer's preparation and payload builder so
         // both paths emit identical bytes; `serde_json::json!` here ordered the
         // candidates alphabetically, which shifted the token ids versus the CLI.
-        let prepared = crate::app::prepare_jev_grouped_questions(&[
-            crate::app::JevGroupedQuestionInput {
+        let prepared = crate::app::prepare_jev_grouped_questions(
+            &[crate::app::JevGroupedQuestionInput {
                 text: q.text.clone(),
                 groups: q
                     .groups
@@ -1758,11 +1758,12 @@ async fn run_image_grouped_jev_blocking(
                         options: g.options.clone(),
                     })
                     .collect(),
+            }],
+            match mode_label {
+                "multi_select" => crate::app::JevMode::MultiSelect,
+                _ => crate::app::JevMode::BlockChoice,
             },
-        ], match mode_label {
-            "multi_select" => crate::app::JevMode::MultiSelect,
-            _ => crate::app::JevMode::BlockChoice,
-        })?
+        )?
         .into_iter()
         .next()
         .ok_or("multimodal grouped JEV produced no prepared question")?;

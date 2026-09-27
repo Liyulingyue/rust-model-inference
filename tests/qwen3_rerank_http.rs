@@ -45,9 +45,7 @@ fn spawn_server(gguf: &std::path::Path) -> ServerGuard {
     let deadline = Instant::now() + Duration::from_secs(60);
     let health_url = format!("http://{addr}/v1/models");
     while Instant::now() < deadline {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200))
-            .is_ok()
-        {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
             // Give the model one more second to finish loading + write
             // its initial /v1/models response.
             std::thread::sleep(Duration::from_millis(500));
@@ -105,8 +103,7 @@ fn post_json<T: serde::de::DeserializeOwned>(addr: SocketAddr, path: &str, body:
         String::from_utf8_lossy(&out.stdout)
     );
     let text = std::str::from_utf8(&out.stdout).unwrap();
-    serde_json::from_str(text)
-        .unwrap_or_else(|e| panic!("parse JSON {text}: {e}"))
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("parse JSON {text}: {e}"))
 }
 
 #[test]
@@ -128,8 +125,7 @@ fn rerank_http_paris_top1() {
         max_tokens_per_doc: None,
     };
     let body = serde_json::to_string(&req).unwrap();
-    let resp: RerankResponse =
-        post_json(server.addr, "/v1/rerank", &body);
+    let resp: RerankResponse = post_json(server.addr, "/v1/rerank", &body);
 
     // Semantic: Paris > London > Photosynthesis.
     assert_eq!(resp.results.len(), 3);
@@ -175,8 +171,7 @@ fn rerank_http_top_n_truncates() {
         max_tokens_per_doc: None,
     };
     let body = serde_json::to_string(&req).unwrap();
-    let resp: RerankResponse =
-        post_json(server.addr, "/v1/rerank", &body);
+    let resp: RerankResponse = post_json(server.addr, "/v1/rerank", &body);
 
     // top_n=2 ⇒ only 2 results, with indices into the input docs.
     assert_eq!(resp.results.len(), 2);

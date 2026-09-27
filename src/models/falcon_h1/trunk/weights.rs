@@ -296,12 +296,8 @@ pub fn load_layers(
                 config.ssm_group_count,
             ));
         }
-        let ssm_norm = load_f32_tensor(
-            source,
-            &ssm_norm_name,
-            &ssm_norm_1d,
-        )
-        .map_err(|e| format!("ssm_norm: {e}"))?;
+        let ssm_norm = load_f32_tensor(source, &ssm_norm_name, &ssm_norm_1d)
+            .map_err(|e| format!("ssm_norm: {e}"))?;
         let ssm_out = super::weights::load_weight_and_bytes(
             source,
             &format!("{prefix}.ssm_out.weight"),

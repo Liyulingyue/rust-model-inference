@@ -49,7 +49,8 @@ impl FalconH1Config {
     /// Total width of the fused `ssm_in` projection:
     /// z + xBC + dt = d_inner + conv_cols + n_head.
     pub fn ssm_in_proj_dim(&self) -> usize {
-        2 * self.ssm_inner_size + 2 * self.ssm_group_count * self.ssm_state_size
+        2 * self.ssm_inner_size
+            + 2 * self.ssm_group_count * self.ssm_state_size
             + self.ssm_time_step_rank
     }
 }

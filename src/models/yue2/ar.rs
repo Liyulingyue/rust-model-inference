@@ -1252,8 +1252,8 @@ pub(super) fn attention_head(
         for (dimension, value) in output.iter_mut().enumerate() {
             let mut sum = 0.0f32;
             for offset in 0..block.len() {
-                sum += block[offset]
-                    * value_cache[(start + offset) * kv_width + kv_start + dimension];
+                sum +=
+                    block[offset] * value_cache[(start + offset) * kv_width + kv_start + dimension];
             }
             *value += sum;
         }

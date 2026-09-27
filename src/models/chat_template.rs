@@ -77,9 +77,7 @@ impl ChatTemplate {
                 "<|start_of_role|>user<|end_of_role|>{user_msg}<|end_of_text|>\
                  <|start_of_role|>assistant<|end_of_role|>"
             ),
-            Self::Exaone => format!(
-                "[|user|]{user_msg}[|endofturn|]\n[|assistant|]"
-            ),
+            Self::Exaone => format!("[|user|]{user_msg}[|endofturn|]\n[|assistant|]"),
         }
     }
 

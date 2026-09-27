@@ -8,10 +8,10 @@
 //!
 //! Learned operators use native Weight kernels; their reduction order may
 //! differ from the Torch bit fixtures retained below as diagnostics.
-use crate::ops::kernel::Weight;
 use super::weights::{linear_forward, load_weight};
 use crate::core::tensor::TensorSource;
 use crate::models::dots::patch_encoder::load_f16_f32;
+use crate::ops::kernel::Weight;
 use crate::ops::relu_inplace;
 mod log;
 mod melbank;

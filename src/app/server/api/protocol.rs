@@ -304,8 +304,7 @@ fn validate_options(body: &Value, protocol: Protocol) -> Result<(), String> {
             let disabled = match key {
                 "reasoning_effort" => v == &json!("none"),
                 "thinking" => v == &json!({"type":"disabled"}),
-                _ => v.as_object().is_some_and(|m| m.is_empty())
-                    || v == &json!({"effort":"none"}),
+                _ => v.as_object().is_some_and(|m| m.is_empty()) || v == &json!({"effort":"none"}),
             };
             if !disabled {
                 log::warn!("active {key}={v} is unsupported; field ignored");
@@ -1207,10 +1206,7 @@ mod tests {
         // sampling features (top_k, top_p != 1, n != 1, json_object,
         // active reasoning) are now permissive and asserted separately
         // in `accepts_unsupported_options_with_warnings`.
-        for (key, value) in [
-            ("temperature", json!(-1)),
-            ("max_tokens", json!(0)),
-        ] {
+        for (key, value) in [("temperature", json!(-1)), ("max_tokens", json!(0))] {
             let mut body = valid.clone();
             body[key] = value;
             assert!(Protocol::Chat.parse(&body).is_err(), "{key}");

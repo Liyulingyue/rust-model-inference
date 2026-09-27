@@ -16,22 +16,17 @@ fn image_jev_scores_the_binary_choice() {
     let model = root.join("models/qwen3.5-0.8B/Qwen3.5-0.8B-UD-Q8_K_XL.gguf");
     let mmproj = root.join("models/qwen3.5-0.8B/mmproj-F16.gguf");
     for path in [&model, &mmproj] {
-        assert!(
-            path.exists(),
-            "{} is required by this test",
-            path.display()
-        );
+        assert!(path.exists(), "{} is required by this test", path.display());
     }
     // Several images are tried in order until one exists, so the test does not
     // silently pass on a checkout that only has a subset of the assets.
-    let image = [
-        "models/YuE2-Vae/assets/logo.png",
-        "models/apple.png",
-    ]
-    .iter()
-    .map(|path| root.join(path))
-    .find(|path| path.exists())
-    .expect("no image fixture available (tried models/YuE2-Vae/assets/logo.png, models/apple.png)");
+    let image = ["models/YuE2-Vae/assets/logo.png", "models/apple.png"]
+        .iter()
+        .map(|path| root.join(path))
+        .find(|path| path.exists())
+        .expect(
+            "no image fixture available (tried models/YuE2-Vae/assets/logo.png, models/apple.png)",
+        );
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
     command
@@ -115,9 +110,7 @@ fn cli_and_http_jev_image_accept_the_same_architectures() {
     let mut accepted: Vec<&str> = expected
         .iter()
         .copied()
-        .filter(|arch| {
-            rust_model_inference::app::image_supported_arch(arch)
-        })
+        .filter(|arch| rust_model_inference::app::image_supported_arch(arch))
         .collect();
     accepted.sort_unstable();
     assert_eq!(accepted, {

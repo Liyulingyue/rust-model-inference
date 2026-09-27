@@ -261,27 +261,28 @@ fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
     let mut weight = vec![0u8; 18];
     weight[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
     for j in 0..16 {
-        weight[2 + j] = j as u8;
+        // Both nibbles of byte `j` hold `j`, so a single 32-element row
+        // covers the whole 16-entry non-linear LUT: element `j` decodes
+        // `LUT[j]` from the low nibble and element `j + 16` decodes
+        // `LUT[j]` from the high nibble. IQ4_NL packs the low half of a
+        // block in the low nibbles and the high half in the high nibbles
+        // (same convention as `dequantize_row_iq4_nl`).
+        weight[2 + j] = ((j as u8) << 4) | j as u8;
     }
 
     let kernel = IQ4NLKernel::new(&weight, 32, 1);
     let mut output = vec![0.0f32; 32];
-    assert_eq!(weight[2], 0, "weight[2] should be 0 but is {}", weight[2]);
     kernel.embedding_lookup(0, 32, &mut output);
 
     let expected_lut = [
         -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
     ];
     for (i, &val) in output.iter().enumerate() {
-        let j = i / 2;
-        let is_low = i % 2 == 0;
-        let nibble = if is_low { j } else { j + 8 };
-        let expected_val = expected_lut[nibble] as f32;
+        let expected_val = expected_lut[i % 16] as f32;
         assert!(
             (val - expected_val).abs() < 1e-6,
-            "output[{i}] = {} != LUT[{nibble}]={}",
-            val,
-            expected_val
+            "output[{i}] = {val} != LUT[{}]={expected_val}",
+            i % 16
         );
     }
 }

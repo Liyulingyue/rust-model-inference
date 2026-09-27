@@ -219,10 +219,7 @@ impl FalconH1Model {
             );
         }
         #[cfg(feature = "parity-trace")]
-        parity_log(
-            "embd",
-            &scratch.hidden[..n * self.config.n_embd],
-        );
+        parity_log("embd", &scratch.hidden[..n * self.config.n_embd]);
         // 2) Per-layer forward (layers outer, positions inner — the SSM
         // state and conv history must advance sequentially per layer, and
         // attention reads the progressively-filled KV cache).
@@ -298,8 +295,8 @@ impl FalconH1Model {
         // see `.agents/skills/adapting-new-models`). The macro and buffers
         // stay compiled in but expand to nothing without the feature so
         // there is no hot-path overhead.
-        let parity = cfg!(feature = "parity-trace")
-            && std::env::var_os("RMI_FALCON_PARITY").is_some();
+        let parity =
+            cfg!(feature = "parity-trace") && std::env::var_os("RMI_FALCON_PARITY").is_some();
         let mut acc: Vec<(&'static str, Vec<f32>)> = Vec::new();
         macro_rules! par_push {
             ($tag:expr, $buf:expr) => {
@@ -365,7 +362,12 @@ impl FalconH1Model {
             // so one rms_norm reuse is exact). `quantize_into` re-quantizes
             // the shared scratch buffer at each use site so the raw f32
             // input always drives the next branch.
-            fn quantize_into(normed: &[f32], q8_buf: &mut [u8], scale_buf: &mut [f32], n_in: usize) {
+            fn quantize_into(
+                normed: &[f32],
+                q8_buf: &mut [u8],
+                scale_buf: &mut [f32],
+                n_in: usize,
+            ) {
                 let blocks = (n_in + 31) / 32;
                 quantize_q8_0_into(normed, n_in, &mut q8_buf[..n_in], &mut scale_buf[..blocks]);
             }
@@ -380,11 +382,24 @@ impl FalconH1Model {
                 &mut scratch.k_buf[..n_attn_kv],
                 &mut scratch.v_buf[..n_attn_v],
             );
-            quantize_into(&scratch.normed, &mut scratch.q8_buf, &mut scratch.scale_buf, n_embd);
+            quantize_into(
+                &scratch.normed,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                n_embd,
+            );
             let q8 = &scratch.q8_buf[..n_embd];
             let sc = &scratch.scale_buf[..(n_embd + 31) / 32];
             self.run_matmul(&*lw.wq.kernel, &scratch.normed, q8, sc, q, n_embd, n_attn_q);
-            self.run_matmul(&*lw.wk.kernel, &scratch.normed, q8, sc, k, n_embd, n_attn_kv);
+            self.run_matmul(
+                &*lw.wk.kernel,
+                &scratch.normed,
+                q8,
+                sc,
+                k,
+                n_embd,
+                n_attn_kv,
+            );
             self.run_matmul(&*lw.wv.kernel, &scratch.normed, q8, sc, v, n_embd, n_attn_v);
             par_push!("Qcur", q);
             par_push!("Vcur", v);
@@ -400,11 +415,21 @@ impl FalconH1Model {
             }
             for h in 0..n_head {
                 let o = h * head_dim_k;
-                rope_norm(&mut q[o..o + head_dim_k], position, head_dim_k, cfg.rope_freq_base);
+                rope_norm(
+                    &mut q[o..o + head_dim_k],
+                    position,
+                    head_dim_k,
+                    cfg.rope_freq_base,
+                );
             }
             for h in 0..n_head_kv {
                 let o = h * head_dim_k;
-                rope_norm(&mut k[o..o + head_dim_k], position, head_dim_k, cfg.rope_freq_base);
+                rope_norm(
+                    &mut k[o..o + head_dim_k],
+                    position,
+                    head_dim_k,
+                    cfg.rope_freq_base,
+                );
             }
             par_push!("Qcur-post-rope", q);
             par_push!("Kcur-post-rope", k);
@@ -507,7 +532,12 @@ impl FalconH1Model {
             let conv_cols = cfg.ssm_conv_cols();
             let d_in_proj = cfg.ssm_in_proj_dim();
             let ssm_in_out = &mut scratch.ssm_in_out[..d_in_proj];
-            quantize_into(&scratch.normed, &mut scratch.q8_buf, &mut scratch.scale_buf, n_embd);
+            quantize_into(
+                &scratch.normed,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                n_embd,
+            );
             let ssm_q8 = &scratch.q8_buf[..n_embd];
             let ssm_sc = &scratch.scale_buf[..(n_embd + 31) / 32];
             self.run_matmul(
@@ -612,7 +642,14 @@ impl FalconH1Model {
                 &mut scratch.scale_buf[..blocks_out],
             );
             let ssm_proj = &mut scratch.ssm_proj[..];
-            mm_q8!(lw.ssm_out_bytes, lw.ssm_out.kernel, y_buf, ssm_proj, inner_size, n_embd);
+            mm_q8!(
+                lw.ssm_out_bytes,
+                lw.ssm_out.kernel,
+                y_buf,
+                ssm_proj,
+                inner_size,
+                n_embd
+            );
             par_push!("ssm_out-0", ssm_proj);
             for d in 0..n_embd {
                 row[d] += ssm_proj[d];
@@ -629,7 +666,12 @@ impl FalconH1Model {
             // ---- FFN branch (SwiGLU): inpL is now inpSA. ----
             rms_norm_ggml(row, &lw.ffn_norm, &mut scratch.normed, cfg.norm_eps);
             par_push!("ffn_norm-0", &scratch.normed);
-            quantize_into(&scratch.normed, &mut scratch.q8_buf, &mut scratch.scale_buf, n_embd);
+            quantize_into(
+                &scratch.normed,
+                &mut scratch.q8_buf,
+                &mut scratch.scale_buf,
+                n_embd,
+            );
             let q8f = &scratch.q8_buf[..n_embd];
             let scf = &scratch.scale_buf[..(n_embd + 31) / 32];
             let (gate_buf, up_buf) = (
@@ -723,11 +765,7 @@ unsafe fn hsum_float_8(x: std::arch::x86_64::__m256) -> f32 {
 /// `weight = [f16 scale | 32 int8 | f16 scale | 32 int8 | ...]`.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-unsafe fn vec_dot_q8_0_q8_0_row_ggml(
-    weight: &[u8],
-    q8: &[u8],
-    scales: &[f32],
-) -> f32 {
+unsafe fn vec_dot_q8_0_q8_0_row_ggml(weight: &[u8], q8: &[u8], scales: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
         use std::arch::x86_64::*;
@@ -739,8 +777,7 @@ unsafe fn vec_dot_q8_0_q8_0_row_ggml(
         for ib in 0..blocks_per_row {
             let qx = _mm256_loadu_si256(weight.as_ptr().add(ib * 34 + 2) as *const __m256i);
             let qy = _mm256_loadu_si256(q8.as_ptr().add(ib * 32) as *const __m256i);
-            let w_scale_bits =
-                std::ptr::read_unaligned(weight.as_ptr().add(ib * 34) as *const u16);
+            let w_scale_bits = std::ptr::read_unaligned(weight.as_ptr().add(ib * 34) as *const u16);
             let w_scale = f16::to_f32(f16::from_bits(w_scale_bits));
             let d = w_scale * scales[ib];
             let d_v = _mm256_set1_ps(d);
@@ -761,16 +798,11 @@ unsafe fn vec_dot_q8_0_q8_0_row_ggml(
 
 /// Scalar fallback for non-AVX2 targets.
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn vec_dot_q8_0_q8_0_row_ggml(
-    weight: &[u8],
-    q8: &[u8],
-    scales: &[f32],
-) -> f32 {
+unsafe fn vec_dot_q8_0_q8_0_row_ggml(weight: &[u8], q8: &[u8], scales: &[f32]) -> f32 {
     let blocks_per_row = q8.len() / 32;
     let mut acc = 0.0f32;
     for ib in 0..blocks_per_row {
-        let w_scale_bits =
-            std::ptr::read_unaligned(weight.as_ptr().add(ib * 34) as *const u16);
+        let w_scale_bits = std::ptr::read_unaligned(weight.as_ptr().add(ib * 34) as *const u16);
         let w_scale = f16::to_f32(f16::from_bits(w_scale_bits));
         let d = w_scale * scales[ib];
         let mut sum_i32 = 0i32;
@@ -809,7 +841,12 @@ pub(crate) fn q8_matmul_ggml(
     debug_assert!(q8_buf.len() >= n_in);
     let blocks = n_in.div_ceil(32);
     debug_assert!(scale_buf.len() >= blocks);
-    crate::ops::quantize_q8_0_into(activation, n_in, &mut q8_buf[..n_in], &mut scale_buf[..blocks]);
+    crate::ops::quantize_q8_0_into(
+        activation,
+        n_in,
+        &mut q8_buf[..n_in],
+        &mut scale_buf[..blocks],
+    );
     let q8 = &q8_buf[..n_in];
     let scales = &scale_buf[..blocks];
     let wb_ptr = weight_bytes.as_ptr();
@@ -822,12 +859,8 @@ pub(crate) fn q8_matmul_ggml(
         let row_start = ith * n_out / nth;
         let row_end = (ith + 1) * n_out / nth;
         for row_idx in row_start..row_end {
-            let weight = unsafe {
-                std::slice::from_raw_parts(
-                    wb_ptr.add(row_idx * row_stride),
-                    row_stride,
-                )
-            };
+            let weight =
+                unsafe { std::slice::from_raw_parts(wb_ptr.add(row_idx * row_stride), row_stride) };
             let out = unsafe { std::slice::from_raw_parts_mut(out_ptr.add(row_idx), 1) };
             let dot = unsafe { vec_dot_q8_0_q8_0_row_ggml(weight, my_q8, my_sc) };
             out[0] = dot;
@@ -874,8 +907,10 @@ unsafe fn dot_f16_ggml_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
                 (16, &mut acc2),
                 (24, &mut acc3),
             ] {
-                let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i + offset) as *const __m128i));
-                let vb = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i + offset) as *const __m128i));
+                let va =
+                    _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i + offset) as *const __m128i));
+                let vb =
+                    _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i + offset) as *const __m128i));
                 *acc = _mm256_fmadd_ps(va, vb, *acc);
             }
             i += 32;
@@ -972,7 +1007,10 @@ unsafe fn ssm_scan_row_ggml_avx2(
         acc[0] = _mm256_add_ps(acc[0], acc[2]);
         acc[1] = _mm256_add_ps(acc[1], acc[3]);
         acc[0] = _mm256_add_ps(acc[0], acc[1]);
-        let t0 = _mm_add_ps(_mm256_castps256_ps128(acc[0]), _mm256_extractf128_ps(acc[0], 1));
+        let t0 = _mm_add_ps(
+            _mm256_castps256_ps128(acc[0]),
+            _mm256_extractf128_ps(acc[0], 1),
+        );
         let t1 = _mm_hadd_ps(t0, t0);
         let mut sumf = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
         while i < n {
@@ -1061,12 +1099,7 @@ impl FalconH1Scratch {
             v: vec![0.0; config.n_layer * capacity * n_attn_v],
             q8_buf: vec![0u8; n_embd.max(config.ssm_inner_size).max(n_ff)],
             scale_buf: vec![0.0; n_embd.max(config.ssm_inner_size).max(n_ff).div_ceil(32)],
-            ssm_conv_hist: vec![
-                0.0;
-                config.n_layer
-                    * (config.ssm_conv_kernel - 1)
-                    * conv_cols
-            ],
+            ssm_conv_hist: vec![0.0; config.n_layer * (config.ssm_conv_kernel - 1) * conv_cols],
             // Per layer: n_head * headdim * d_state = d_inner * d_state.
             ssm_scan_state: vec![
                 0.0;

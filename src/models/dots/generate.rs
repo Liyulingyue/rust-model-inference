@@ -1080,7 +1080,7 @@ pub fn read_dots_wav_for_parity(
     edit: bool,
     samples_per_patch: usize,
 ) -> Result<Vec<f32>, String> {
-    crate::app::dots::read_dots_wav_for_parity(path, edit, samples_per_patch)
+    crate::app::tts::dots::read_dots_wav_for_parity(path, edit, samples_per_patch)
 }
 
 #[cfg(test)]

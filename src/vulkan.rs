@@ -20,9 +20,7 @@ pub(crate) mod qwen3;
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
 #[doc(hidden)]
-pub use ops::{
-    dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check,
-};
+pub use ops::{dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check};
 
 #[cfg(feature = "vulkan")]
 use ash::vk;
@@ -78,18 +76,26 @@ pub fn dump_submit_trace() {
     let count = SUBMIT_TRACE.count.load(Ordering::Relaxed);
     let micros = |name: &str, value: u64| {
         let ms = value as f64 / 1000.0;
-        let per = if count > 0 {
-            ms / count as f64
-        } else {
-            0.0
-        };
+        let per = if count > 0 { ms / count as f64 } else { 0.0 };
         eprintln!("[GPU-TRACE] {name}: {ms:.1}ms total, {per:.3}ms/submission");
     };
     eprintln!("[GPU-TRACE] submissions={count}");
-    micros("record   (end+reset_fences+submit+wait)", SUBMIT_TRACE.record.load(Ordering::Relaxed));
-    micros("  queue_submit", SUBMIT_TRACE.submit.load(Ordering::Relaxed));
-    micros("  wait_for_fences (GPU executes)", SUBMIT_TRACE.wait.load(Ordering::Relaxed));
-    micros("reset+begin_command_buffer", SUBMIT_TRACE.reset.load(Ordering::Relaxed));
+    micros(
+        "record   (end+reset_fences+submit+wait)",
+        SUBMIT_TRACE.record.load(Ordering::Relaxed),
+    );
+    micros(
+        "  queue_submit",
+        SUBMIT_TRACE.submit.load(Ordering::Relaxed),
+    );
+    micros(
+        "  wait_for_fences (GPU executes)",
+        SUBMIT_TRACE.wait.load(Ordering::Relaxed),
+    );
+    micros(
+        "reset+begin_command_buffer",
+        SUBMIT_TRACE.reset.load(Ordering::Relaxed),
+    );
 }
 
 #[cfg(feature = "vulkan")]

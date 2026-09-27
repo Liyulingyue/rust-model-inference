@@ -38,8 +38,13 @@ pub fn rope_norm(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
             let x1 = x[base + 2 * i + 1];
             let c = cos_table[i];
             let sn = sin_table[i];
-            x[base + 2 * i] = x0.mul_add(c, x1 * -sn);
-            x[base + 2 * i + 1] = x0.mul_add(sn, x1 * c);
+            if crate::ops::scalar_mode() {
+                x[base + 2 * i] = x0 * c - x1 * sn;
+                x[base + 2 * i + 1] = x0 * sn + x1 * c;
+            } else {
+                x[base + 2 * i] = x0.mul_add(c, x1 * -sn);
+                x[base + 2 * i + 1] = x0.mul_add(sn, x1 * c);
+            }
         }
     }
 }

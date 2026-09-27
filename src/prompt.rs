@@ -1,3 +1,13 @@
+/// Single-user Nanbeige4.2 chat template, including the embedded default system turn.
+pub fn build_nanbeige_chat_prompt(prompt: &str, thinking: bool) -> String {
+    let suffix = if thinking {
+        "<think>\n"
+    } else {
+        "<think>\n\n</think>\n\n"
+    };
+    format!("<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{suffix}")
+}
+
 use crate::{BPETokenizer, EncodeOptions};
 
 pub struct QwenMessage<'a> {

@@ -43,9 +43,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{AppState, Backend};
-use crate::models::qwen3::trunk::{
-    qwen_text_positions, Qwen3Input, Qwen3Model, Qwen3Session,
-};
+use crate::models::qwen3::trunk::{qwen_text_positions, Qwen3Input, Qwen3Model, Qwen3Session};
 
 #[derive(Deserialize)]
 pub struct RerankRequest {
@@ -154,8 +152,7 @@ fn score_one_doc(
     // Per-request session. KV cache is per-session and discarded
     // after the request; prefill_batch_size pushes the whole prompt
     // in one chunk (single-pass forward).
-    let mut session = Qwen3Session::new(raw, n + 4)
-        .map_err(|e| format!("rerank session: {e}"))?;
+    let mut session = Qwen3Session::new(raw, n + 4).map_err(|e| format!("rerank session: {e}"))?;
     let hidden = session
         .forward_rerank(
             Qwen3Input {

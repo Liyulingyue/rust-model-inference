@@ -25,8 +25,7 @@ fn model() -> Option<(&'static Qwen3Model, BPETokenizer)> {
     let source = model_source()?;
     let tok = Arc::new(tokenizer()?);
     let tok_for_model = Arc::clone(&tok);
-    let m = Qwen3Model::from_source(source, tok_for_model, Arc::new(ComputePool::new(4)))
-        .ok()?;
+    let m = Qwen3Model::from_source(source, tok_for_model, Arc::new(ComputePool::new(4))).ok()?;
     // Recover the (inner) tokenizer via Arc::try_unwrap when possible,
     // else dereference. For our tests, the Arc is uniquely owned here so
     // try_unwrap succeeds.
@@ -48,7 +47,10 @@ fn q8_rerank_contract_loads() {
     assert_eq!(m.config().architecture, "qwen3");
     assert_eq!(m.config().n_layer, 28);
     assert_eq!(m.config().n_embd, 1024);
-    assert!(m.is_rerank(), "rerank flag should be set when cls.output.weight is present");
+    assert!(
+        m.is_rerank(),
+        "rerank flag should be set when cls.output.weight is present"
+    );
 }
 
 #[test]
@@ -177,8 +179,12 @@ fn q8_rerank_chunked_and_incremental_match() {
 fn q8_rerank_rejects_non_rerank_model() {
     let Some(source) = model_source() else { return };
     let tok = Arc::new(tokenizer().unwrap());
-    let m = Qwen3Model::from_source(source, Arc::clone(&tok), Arc::new(ComputePool::new(4))).unwrap();
-    assert!(!m.is_rerank(), "model should not be flagged as rerank without cls head");
+    let m =
+        Qwen3Model::from_source(source, Arc::clone(&tok), Arc::new(ComputePool::new(4))).unwrap();
+    assert!(
+        !m.is_rerank(),
+        "model should not be flagged as rerank without cls head"
+    );
 }
 
 #[test]
@@ -186,7 +192,8 @@ fn q8_rerank_rejects_non_rerank_model() {
 fn q8_rerank_score_logits_works_without_head() {
     let Some(source) = model_source() else { return };
     let tok = Arc::new(tokenizer().unwrap());
-    let m = Qwen3Model::from_source(source, Arc::clone(&tok), Arc::new(ComputePool::new(4))).unwrap();
+    let m =
+        Qwen3Model::from_source(source, Arc::clone(&tok), Arc::new(ComputePool::new(4))).unwrap();
     let dummy_hidden = vec![0.0f32; m.config().n_embd];
     let err = m.score_logits(&dummy_hidden).unwrap_err();
     assert!(
