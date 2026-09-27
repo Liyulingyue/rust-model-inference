@@ -264,7 +264,7 @@ pub fn run_inference(
             } else {
                 prompt.to_string()
             }
-} else if is_minicpm5 {
+        } else if is_minicpm5 {
             format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
         } else if is_mistral {
             format!("[INST] {prompt} [/INST]")
