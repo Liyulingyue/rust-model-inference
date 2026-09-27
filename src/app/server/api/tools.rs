@@ -95,17 +95,36 @@ pub fn build_prompt(
         if !tools.is_empty() {
             return Err("Function tools are unsupported for llama-family architectures".into());
         }
-        // The llama trunk prompt builder takes the raw `prompt` string of
-        // the single user turn. System turns are ignored (their chat
-        // templates don't include a system turn). thinking=false for HTTP
-        // (no flag).
+        // Llama-family templates CAN express history (nanbeige ChatML,
+        // granite start_of_role, plain llama `{role}\n{content}\n`). Render
+        // the whole conversation instead of only the last user turn — the old
+        // behaviour dropped system/assistant/earlier-user turns, so the model
+        // forgot everything it had been told. k2-horizon's control tokens have
+        // no multi-turn shape and the builder rejects it explicitly.
         let last_user = messages
             .iter()
-            .rev()
-            .find(|m| m.role == "user")
+            .rposition(|m| m.role == "user")
             .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
-        let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
-        let images = last_user.images.iter().map(|i| i.bytes.clone()).collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::models::llama::trunk::build_prompt_tokens_from_turns(
+            source, &tokenizer, &turns, false,
+        )?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
         return Ok((ids, images));
     }
     validate_tools(tools, choice)?;
