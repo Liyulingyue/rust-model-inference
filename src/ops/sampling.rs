@@ -7,6 +7,8 @@
 //! encourage them. Callers must pass a count map that tracks each
 //! generated token.
 
+use crate::ops::vec_scale_f32;
+
 pub fn apply_repetition_penalty(
     logits: &mut [f32],
     token_counts: &std::collections::HashMap<u32, u32>,
@@ -319,5 +321,63 @@ impl LlamaSampler {
         *self.token_counts.entry(chosen).or_insert(0) += 1;
         self.all_tokens.push(chosen);
         chosen
+    }
+}
+
+/// Stateful lfm2moe-family sampler: repetition penalty, then greedy (when
+/// `temperature <= 0`) or top-40 + temperature-scaled softmax draw with an
+/// RNG seeded from the generated history.
+///
+/// Extracted verbatim from `lfm2moe::run_inference_with_batch` so the CLI and
+/// the HTTP `Lfm2MoeTextRuntime` adapter share one implementation (they used
+/// to diverge: the server used temperature-only sampling).
+#[derive(Default)]
+pub struct Lfm2MoeSampler {
+    all_tokens: Vec<u32>,
+    token_counts: std::collections::HashMap<u32, u32>,
+}
+
+impl Lfm2MoeSampler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed the history RNG with the prompt tokens before the first call.
+    pub fn prime(&mut self, prompt_tokens: &[u32]) {
+        self.all_tokens.extend_from_slice(prompt_tokens);
+    }
+
+    /// Sample the next token id from `logits` (mutated in place).
+    pub fn sample(&mut self, logits: &mut [f32], temperature: f32, repetition_penalty: f32) -> u32 {
+        apply_repetition_penalty(logits, &self.token_counts, repetition_penalty);
+        let chosen = if temperature <= 0.0 {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        } else {
+            vec_scale_f32(logits, 1.0 / temperature);
+            let top = sample_top_k(logits, 40);
+            let mut rng = 0u64;
+            for &t in &self.all_tokens {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
+            }
+            let r = ((rng >> 33) as f32) / (1u32 << 31) as f32;
+            let mut cum = 0.0f32;
+            let mut chosen = top[0].0;
+            for &(idx, prob) in &top {
+                cum += prob;
+                if cum >= r {
+                    chosen = idx;
+                    break;
+                }
+            }
+            chosen
+        };
+        *self.token_counts.entry(chosen as u32).or_insert(0) += 1;
+        self.all_tokens.push(chosen as u32);
+        chosen as u32
     }
 }

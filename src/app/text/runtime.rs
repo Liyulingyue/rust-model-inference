@@ -24,7 +24,7 @@ use crate::models::llama::trunk::{build_prompt_tokens, LlamaSession};
 use crate::ops::generation_runtime::{Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink};
 use crate::ops::generation_runtime::StepAction;
 use crate::ops::sampling::sample_temperature_greedy_or_random;
-use crate::ops::sampling::LlamaSampler;
+use crate::ops::sampling::{Lfm2MoeSampler, LlamaSampler};
 use std::sync::{Arc, Mutex};
 
 /// What the server needs to know to construct a runtime.
@@ -420,6 +420,8 @@ pub struct Lfm2MoeTextRuntime {
     _source: Arc<dyn TensorSource>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     arch: String,
+    /// Same sampler the CLI lfm2moe trunk uses, so both front-ends agree.
+    sampler: Lfm2MoeSampler,
 }
 
 impl Lfm2MoeTextRuntime {
@@ -439,6 +441,7 @@ impl Lfm2MoeTextRuntime {
             _source: source,
             tokenizer: options.tokenizer,
             arch: "lfm2moe".to_string(),
+            sampler: Lfm2MoeSampler::new(),
         })
     }
 }
@@ -463,7 +466,9 @@ impl TextRuntime for Lfm2MoeTextRuntime {
         let mut session = self.session.lock().map_err(|e| e.to_string())?;
         session.reset();
         let eos_id = self.tokenizer.eos_id();
-        let im_end_id = self.tokenizer.special_token_id("im_end");
+        // `im_end` is intentionally not a stop id here: lfm2moe's template has
+        // no ChatML assistant turn, so the model never emits it and treating
+        // it as a stop would truncate answers. Matches the CLI trunk.
         let mut decoder = self.tokenizer.streaming_decoder(false);
         let mut text = String::new();
         let mut token_ids = Vec::new();
@@ -473,16 +478,33 @@ impl TextRuntime for Lfm2MoeTextRuntime {
         for &token_id in &request.token_ids {
             logits = session.forward_token(token_id)?;
         }
+        self.sampler.prime(&request.token_ids);
         for _ in 0..request.max_new_tokens {
-            let Some(id) = sample_step(
-                &logits,
+            let mut logits_owned = logits;
+            let id = self.sampler.sample(
+                &mut logits_owned,
                 request.sampling.temperature,
+                request.sampling.repetition_penalty,
+            );
+            logits = logits_owned;
+            match crate::ops::generation_runtime::stop_after_sample(
+                id,
+                token_ids.len(),
+                request.max_new_tokens,
+                false,
                 eos_id,
-                im_end_id,
-            ) else {
-                finish = Finish::Eos;
-                break;
-            };
+                None,
+            ) {
+                StepAction::StopEos => {
+                    finish = Finish::Eos;
+                    break;
+                }
+                StepAction::StopLimit => {
+                    finish = Finish::Limit;
+                    break;
+                }
+                StepAction::Continue => {}
+            }
             token_ids.push(id);
             let chunk = decoder.push(id);
             if !chunk.is_empty() {
