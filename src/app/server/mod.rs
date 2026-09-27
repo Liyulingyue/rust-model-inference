@@ -30,7 +30,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
 
 // =============================================================================
 // Backend types
@@ -881,11 +881,21 @@ pub fn run_server() {
     // the main `rust-model-inference` binary.
     let mut host = "0.0.0.0".to_string();
     let mut port: u16 = 8080;
+    // Off by default: fetching remote URLs from an inference server is an SSRF
+    // surface (internal-network probing, request amplification). When enabled,
+    // the download still obeys size / timeout / redirect caps and refuses
+    // private addresses.
+    let mut allow_remote_images = false;
     let mut cli_args: Vec<String> = Vec::with_capacity(raw_args.len());
     let mut i = 0;
     while i < raw_args.len() {
         let arg = raw_args[i].clone();
         match arg.as_str() {
+            "--allow-remote-images" => {
+                allow_remote_images = true;
+                i += 1;
+                continue;
+            }
             "--host" => {
                 if i + 1 < raw_args.len() {
                     host = raw_args[i + 1].clone();
@@ -905,6 +915,9 @@ pub fn run_server() {
         cli_args.push(arg);
         i += 1;
     }
+
+    // Apply the parsed flag before any request can be decoded.
+    api::image_input::set_allow_remote(allow_remote_images);
 
     let options = match parse_cli_options(&cli_args) {
         Ok(value) => value,

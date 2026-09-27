@@ -52,6 +52,13 @@ pub mod defaults {
     pub const THREADS: usize = 0;
 }
 
+/// Upper bound on vision placeholder tokens per request.
+///
+/// A 2400x2400 photo expands to ~4096 vision tokens, and at that size the
+/// prefill dominates (on a small model it effectively stalls) the request.
+/// 2048 keeps normal images (the docs' apple.png is 117) working while making
+/// the failure explicit instead of a multi-minute hang.
+const MAX_VISION_TOKENS: usize = 2048;
 /// What a caller needs to construct a runtime.
 ///
 /// Build it with [`RuntimeOptions::from_model`] and override only what the
@@ -497,6 +504,12 @@ impl Qwen3TextRuntime {
         }
         if rows_total == 0 {
             return Err("Vision encoder produced zero image tokens".into());
+            if rows_total > MAX_VISION_TOKENS {
+                return Err(format!(
+                    "image(s) expand to {rows_total} vision tokens, over the {MAX_VISION_TOKENS} \
+            token budget; downscale the image before sending"
+                ));
+            }
         }
 
         // Qwen2.5-Omni requires the modality-aware system turn before the user
@@ -1032,6 +1045,12 @@ impl Qwen35TextRuntime {
         }
         if n_vis_total == 0 {
             return Err("Vision encoder produced zero image tokens".into());
+        }
+        if n_vis_total > MAX_VISION_TOKENS {
+            return Err(format!(
+                "image(s) expand to {n_vis_total} vision tokens, over the {MAX_VISION_TOKENS} \
+                 token budget; downscale the image before sending"
+            ));
         }
 
         // 2. Splice the placeholder run into the user turn, right after the

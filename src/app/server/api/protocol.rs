@@ -411,7 +411,11 @@ use crate::app::server::api::image_input::{decode_image_source, ImageRef};
 /// Gate for remote (`http(s)://`) image URLs. Currently always `false`:
 /// fetching remote URLs from an inference server is an SSRF surface, so it
 /// becomes an opt-in `--allow-remote-images` flag in a follow-up commit.
-const ALLOW_REMOTE_IMAGES: bool = false;
+/// Gate for remote (`http(s)://`) image URLs. Read from the process-global set
+/// by `--allow-remote-images` at startup; defaults to off.
+fn allow_remote_images() -> bool {
+    crate::app::server::api::image_input::allow_remote()
+}
 
 /// Split a message `content` value into its text and its images.
 ///
@@ -561,7 +565,7 @@ fn chat_messages(body: &Value) -> Result<Vec<Message>, String> {
         let (text, images) = content_parts(
             m.get("content").unwrap_or(&Value::Null),
             nullable,
-            ALLOW_REMOTE_IMAGES,
+            allow_remote_images(),
         )?;
         if !images.is_empty() && role != "user" {
             return Err(format!(
@@ -610,7 +614,7 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
         }
         let content = m.get("content").ok_or("message requires content")?;
         if !content.is_array() {
-            let (text, images) = content_parts(content, false, ALLOW_REMOTE_IMAGES)?;
+            let (text, images) = content_parts(content, false, allow_remote_images())?;
             if !images.is_empty() && role != "user" {
                 return Err(format!(
                     "images are only supported on user turns, not {role}"
@@ -657,7 +661,7 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
                         }
                     };
                     item.images
-                        .push(decode_image_source(raw, ALLOW_REMOTE_IMAGES)?);
+                        .push(decode_image_source(raw, allow_remote_images())?);
                 }
                 Some("tool_result") if role == "user" => {
                     if !item.text.is_empty() || !item.calls.is_empty() {
@@ -704,7 +708,7 @@ fn response_messages(body: &Value) -> Result<Vec<Message>, String> {
             "message"=>{
                 let role=required_string(item,"role")?;
                 if !matches!(role.as_str(),"user"|"assistant"|"system"|"developer"){return Err(format!("unsupported Responses message role {role}"));}
-                let (text,images)=content_parts(item.get("content").ok_or("message requires content")?,false,ALLOW_REMOTE_IMAGES)?;
+                let (text,images)=content_parts(item.get("content").ok_or("message requires content")?,false,allow_remote_images())?;
                 if !images.is_empty() && role!="user" {return Err(format!("images are only supported on user turns, not {role}"));}
                 if role=="assistant"&&result.last().is_some_and(|m|m.role=="assistant"&&m.call_id.is_none()) {result.last_mut().unwrap().text.push_str(&text);} else {result.push(message_with_images(&role,text,images));}
             }

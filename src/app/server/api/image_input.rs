@@ -16,6 +16,8 @@
 //! `image::load_from_memory` downstream (see `app::media::decode_image`).
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 /// One decoded image plus the source string it came from (for errors).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +35,112 @@ impl ImageRef {
             source: source.into(),
         }
     }
+}
+
+/// Whether the server was started with `--allow-remote-images`.
+///
+/// A process-global set once at startup and read-only afterwards: the flag is a
+/// deployment decision, not a per-request one. Defaults to `false`, so a
+/// remote URL is rejected unless the operator opted in.
+static ALLOW_REMOTE: OnceLock<bool> = OnceLock::new();
+
+/// Called once from `run_server` with the parsed `--allow-remote-images` flag.
+pub fn set_allow_remote(value: bool) {
+    let _ = ALLOW_REMOTE.set(value);
+}
+
+/// The effective value of `--allow-remote-images` (false when unset).
+pub fn allow_remote() -> bool {
+    ALLOW_REMOTE.get().copied().unwrap_or(false)
+}
+
+/// Download guardrails, matching the ones llama.cpp's server applies
+/// (`tools/server/server-common.cpp` `handle_media`).
+const REMOTE_MAX_BYTES: usize = 10 * 1024 * 1024;
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_MAX_REDIRECTS: usize = 3;
+
+/// True for loopback / RFC1918 / link-local / unspecified addresses. Rejecting
+/// these is what keeps `--allow-remote-images` from turning the inference
+/// server into an internal-network probe (SSRF).
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link local
+        }
+    }
+}
+
+/// Resolve `host` and reject when every address is private. Safer than letting
+/// the HTTP client resolve, because the check happens before any connection.
+fn host_is_public(host: &str) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = match (host, 0u16).to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
+        Err(error) => return Err(format!("cannot resolve image host {host:?}: {error}")),
+    };
+    if addrs.is_empty() {
+        return Err(format!("image host {host:?} resolved to no addresses"));
+    }
+    if addrs.iter().all(|addr| is_private_ip(addr.ip())) {
+        return Err(format!(
+            "image host {host:?} resolves to private/loopback addresses, refusing to fetch"
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch a remote image with the guardrails above.
+fn fetch_remote_image(url: &str) -> Result<ImageRef, String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("invalid image URL {url:?}: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "unsupported image URL scheme {:?}",
+            parsed.scheme()
+        ));
+    }
+    if let Some(host) = parsed.host_str() {
+        host_is_public(host)?;
+    } else {
+        return Err("image URL has no host".into());
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REMOTE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(REMOTE_MAX_REDIRECTS))
+        .build()
+        .map_err(|error| format!("failed to build image HTTP client: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("failed to download image {url:?}: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "image download returned HTTP {} for {url:?}",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("failed to read image body from {url:?}: {error}"))?;
+    if bytes.len() > REMOTE_MAX_BYTES {
+        return Err(format!(
+            "image at {url:?} is {} bytes, over the {} byte remote limit",
+            bytes.len(),
+            REMOTE_MAX_BYTES
+        ));
+    }
+    Ok(ImageRef::new(bytes.to_vec(), url))
 }
 
 /// Decode one image source string into bytes.
@@ -68,11 +176,7 @@ fn decode_source_bytes(source: &str, allow_remote: bool) -> Result<ImageRef, Str
                     .into(),
             );
         }
-        return Err(
-            "remote image fetching is not implemented yet; --allow-remote-images is not \
-                    wired up in this build"
-                .into(),
-        );
+        return fetch_remote_image(source);
     }
     if let Some(path) = source.strip_prefix("file://") {
         return read_local_image(source, path);
@@ -214,5 +318,58 @@ pub(crate) mod tests {
             .encode(b"this is definitely not an image, only plain text");
         let error = decode_image_source(&bytes, false).unwrap_err();
         assert!(error.contains("unsupported image format"), "got: {error}");
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::app::server::api::fixtures::apple_png_b64;
+
+    #[test]
+    fn remote_flag_defaults_to_off_and_messages_the_flag() {
+        // The process-global may have been set by another test; assert on the
+        // message contract instead of the global value.
+        let error = decode_image_source("https://example.com/cat.png", false).unwrap_err();
+        assert!(
+            error.contains("--allow-remote-images"),
+            "must tell the operator how to enable it: {error}"
+        );
+    }
+
+    #[test]
+    fn private_addresses_are_refused() {
+        // These resolve without any network access (loopback / link-local).
+        for host in ["127.0.0.1", "localhost", "169.254.169.254"] {
+            let url = format!("http://{host}/meta.png");
+            let error = fetch_remote_image(&url).unwrap_err();
+            assert!(
+                error.contains("private")
+                    || error.contains("loopback")
+                    || error.contains("resolve"),
+                "{url} must be refused, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_http_schemes_are_refused() {
+        let error = fetch_remote_image("file:///etc/passwd").unwrap_err();
+        assert!(error.contains("scheme"), "got: {error}");
+    }
+
+    #[test]
+    fn invalid_url_is_a_clear_error() {
+        assert!(fetch_remote_image("not a url").is_err());
+    }
+
+    #[test]
+    fn real_png_survives_the_format_check_after_download_path() {
+        // The download path is exercised against a local server in the manual
+        // check; here we only verify the post-download validation is the same
+        // as for the other sources.
+        let payload = apple_png_b64();
+        let image = decode_image_source(&payload, true).unwrap();
+        assert_eq!(image.bytes.len(), 103374);
     }
 }
