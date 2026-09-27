@@ -265,13 +265,19 @@ pub fn run_inference(
                 prompt.to_string()
             }
         } else if is_minicpm5 {
+            // MiniCPM5 uses ChatML (`<|im_start|>{role}\n{content}<|im_end|>`)
+            // per its GGUF `tokenizer.chat_template`. The template supports
+            // `enable_thinking`: when false, emits `<|think|>\n\n<|/think|>\n\n`
+            // (empty thinking block → direct answer). When true, emits `<|think|>\n`
+            // (thinking mode). Default: non-thinking for fast direct answers.
+            // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
             format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
         } else if is_mistral {
             format!("[INST] {prompt} [/INST]")
         } else if is_zephyr {
             format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
         } else {
-            format!("user\n{prompt}\nassistant\n\n")
+            format!("user\n{prompt}\nassistant\n<think>\n")
         };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
         // Mistral's `[INST]`/`[/INST]` and Zephyr's `<|user|>`/`<|assistant|>`
