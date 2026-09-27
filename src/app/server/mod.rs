@@ -724,7 +724,8 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
 
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
-    let raw_source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let raw_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let model_path: std::path::PathBuf = options.model.clone();
     // Snapshot the few metadata fields we need before moving `raw_source`
     // into the (optional) Phi3Source wrapper. Reading them through `&raw_source`
@@ -743,15 +744,18 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
             raw_source
                 .metadata("phi3.attention.head_count")
                 .and_then(|v| v.to_u64())
-                .ok_or_else(|| "missing phi3.attention.head_count".to_string())? as usize,
+                .ok_or_else(|| "missing phi3.attention.head_count".to_string())?
+                as usize,
             raw_source
                 .metadata("phi3.attention.head_count_kv")
                 .and_then(|v| v.to_u64())
-                .ok_or_else(|| "missing phi3.attention.head_count_kv".to_string())? as usize,
+                .ok_or_else(|| "missing phi3.attention.head_count_kv".to_string())?
+                as usize,
             raw_source
                 .metadata("phi3.feed_forward_length")
                 .and_then(|v| v.to_u64())
-                .ok_or_else(|| "missing phi3.feed_forward_length".to_string())? as usize,
+                .ok_or_else(|| "missing phi3.feed_forward_length".to_string())?
+                as usize,
         ))
     } else {
         None
