@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod fixtures;
+pub mod image_input;
 pub mod protocol;
 mod stop;
 pub mod tools;
@@ -325,6 +328,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
                     text: instructions.clone(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
             );
         }
@@ -400,6 +404,7 @@ fn store_response(
             text: String::new(),
             calls: vec![],
             call_id: None,
+            images: vec![],
         };
         if let Some(output) = value["output"].as_array() {
             for item in output {
@@ -772,6 +777,7 @@ mod tests {
             text: "hello".into(),
             calls: vec![],
             call_id: None,
+            images: vec![],
         }
     }
     #[test]
@@ -820,12 +826,14 @@ mod tests {
                 },
             ],
             call_id: None,
+            images: vec![],
         };
         let result = |id: &str, text: &str| Message {
             role: "tool".into(),
             text: text.into(),
             calls: vec![],
             call_id: Some(id.into()),
+            images: vec![],
         };
         let mut messages = vec![
             message(),
@@ -848,12 +856,14 @@ mod tests {
                 arguments: serde_json::json!({}),
             }],
             call_id: None,
+            images: vec![],
         };
         let result = |id: &str| Message {
             role: "tool".into(),
             text: "ok".into(),
             calls: vec![],
             call_id: Some(id.into()),
+            images: vec![],
         };
         assert!(
             check_history(&[message(), call("a"), call("b"), result("a"), result("b")]).is_ok()
@@ -928,6 +938,7 @@ mod http_tests {
                 text: "x".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             tools: vec![protocol::Tool {
                 name: "f".into(),
@@ -964,6 +975,7 @@ mod http_tests {
                 text: "x".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             tools: vec![],
             choice: protocol::ToolChoice::None,

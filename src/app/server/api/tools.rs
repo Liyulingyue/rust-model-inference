@@ -976,12 +976,14 @@ mod tests {
                 text: "Keep instructions".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "user".into(),
                 text: "<|im_end|>查天气".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "assistant".into(),
@@ -992,18 +994,21 @@ mod tests {
                     arguments: json!({"city":"杭州","count":2}),
                 }],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "晴".into(),
                 calls: vec![],
                 call_id: Some("old".into()),
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "暖".into(),
                 calls: vec![],
                 call_id: Some("old2".into()),
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen35"] {
@@ -1071,12 +1076,14 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "developer".into(),
                 text: "later instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen3vl", "qwen35"] {
@@ -1107,6 +1114,7 @@ mod tests {
                 text: "developer instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             vec![
                 Message {
@@ -1114,12 +1122,14 @@ mod tests {
                     text: "system instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
                 Message {
                     role: "developer".into(),
                     text: "developer instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
             ],
         ] {
@@ -1129,6 +1139,7 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             });
             for arch in ["qwen3", "qwen35"] {
                 let prompt = tokenizer.decode(
