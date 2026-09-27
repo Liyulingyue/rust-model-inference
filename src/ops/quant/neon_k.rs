@@ -103,17 +103,25 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
 
         // --- Min correction via NEON: sum(mins[j/2] * bsums[j]) ---
         // bsums is [i16; 16], mins is [u8; 8] -> each min applies to 2 bsums.
-        // Duplicate each min to pairs: [m0,m0, m1,m1, ... m7,m7]
-        let mins_dup = vzip1_u8(mins_v, mins_v); // [m0,m0,m1,m1,...,m7,m7] (8 bytes)
-        let mins_dup16 = vcombine_u8(mins_dup, mins_dup); // 16 bytes
+        // Build [m0,m0, m1,m1, ..., m7,m7] from [m0..m7]: vzip1 duplicates
+        // the low 4 elements, vzip2 the high 4.
+        let mins_dup_lo = vzip1_u8(mins_v, mins_v); // [m0,m0,m1,m1,m2,m2,m3,m3]
+        let mins_dup_hi = vzip2_u8(mins_v, mins_v); // [m4,m4,m5,m5,m6,m6,m7,m7]
+        let mins_dup16 = vcombine_u8(mins_dup_lo, mins_dup_hi); // 16 bytes
         let mins_i16 = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(mins_dup16))); // 8 x i16
         let mins_i16_hi = vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(mins_dup16))); // 8 x i16
         let bsums_v = vld1q_s16(q8k[i].bsums.as_ptr());
+        let bsums_v_hi = vld1q_s16(q8k[i].bsums.as_ptr().add(8));
         let min_prod = vmull_s16(vget_low_s16(mins_i16), vget_low_s16(bsums_v));
-        let min_prod2 = vmull_s16(vget_low_s16(mins_i16_hi), vget_high_s16(bsums_v));
+        let min_prod2 = vmull_s16(vget_high_s16(mins_i16), vget_high_s16(bsums_v));
+        let min_prod3 = vmull_s16(vget_low_s16(mins_i16_hi), vget_low_s16(bsums_v_hi));
+        let min_prod4 = vmull_s16(vget_high_s16(mins_i16_hi), vget_high_s16(bsums_v_hi));
         let min_sum_lo = vaddvq_s32(min_prod);
         let min_sum_hi = vaddvq_s32(min_prod2);
-        let min_correction = -dmin * (min_sum_lo + min_sum_hi) as f32;
+        let min_sum_lo2 = vaddvq_s32(min_prod3);
+        let min_sum_hi2 = vaddvq_s32(min_prod4);
+        let min_correction =
+            -dmin * (min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2) as f32;
 
         // --- Main dot product: 8 groups of 32 values ---
         let q4_ptr = q4k_data.as_ptr().add(boff + 16);
@@ -169,3 +177,84 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
 
     total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::quant::{vec_dot_q4k_q8k_scalar, BlockQ8K, BLOCK_Q4K_SIZE};
+
+    /// Deterministic Q4_K block fixture: random-ish but reproducible
+    /// weights with known scales/mins, so a NEON vs scalar mismatch
+    /// shows up as a non-zero relative diff.
+    fn make_block(seed: u8) -> Vec<u8> {
+        let mut v = vec![0u8; BLOCK_Q4K_SIZE];
+        // d=f16(0.7), dmin=f16(0.05)
+        v[0..2].copy_from_slice(&crate::ops::f32_to_f16(0.7).to_le_bytes());
+        v[2..4].copy_from_slice(&crate::ops::f32_to_f16(0.05).to_le_bytes());
+        // 12 bytes packed scales/mins: use a deterministic pattern that
+        // exercises the 6-bit unpacking.
+        for i in 0..12 {
+            v[4 + i] = (seed.wrapping_mul(7).wrapping_add(i as u8 * 3)) & 0x7f;
+        }
+        // 128 bytes of nibbles
+        for i in 0..128 {
+            v[16 + i] = (seed.wrapping_mul(13).wrapping_add(i as u8 * 5)) & 0xff;
+        }
+        v
+    }
+
+    fn make_q8k(seed: u8) -> BlockQ8K {
+        let d = 0.6 + seed as f32 * 0.01;
+        let mut qs = [0i8; 256];
+        for (i, q) in qs.iter_mut().enumerate() {
+            let raw = (seed as usize * 31 + i * 17) % 255;
+            *q = (raw as i16 - 127) as i8;
+        }
+        let mut bsums = [0i16; 16];
+        for (i, b) in bsums.iter_mut().enumerate() {
+            let raw = (seed as usize * 13 + i * 5) % 100;
+            *b = (raw as i16 - 50) as i16;
+        }
+        BlockQ8K { d, qs, bsums }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q4k_neon_matches_scalar_single_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        for seed in 0..8u8 {
+            let block = make_block(seed);
+            let q8k = [make_q8k(seed)];
+            let neon = unsafe { vec_dot_q4k_q8k_neon(&block, &q8k) };
+            let scalar = vec_dot_q4k_q8k_scalar(&block, &q8k);
+            let diff = (neon - scalar).abs();
+            let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+            assert!(
+                rel < 1e-3,
+                "seed={seed}: neon={neon} scalar={scalar} rel={rel}"
+            );
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q4k_neon_matches_scalar_multi_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut block = Vec::new();
+        let mut q8k = Vec::new();
+        for seed in 0..4u8 {
+            block.extend(make_block(seed));
+            q8k.push(make_q8k(seed));
+        }
+        let neon = unsafe { vec_dot_q4k_q8k_neon(&block, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&block, &q8k);
+        let diff = (neon - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+        assert!(rel < 1e-3, "multi-block: neon={neon} scalar={scalar} rel={rel}");
+    }
+}
+
