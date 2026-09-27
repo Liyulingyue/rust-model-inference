@@ -2348,7 +2348,7 @@ pub fn build_prompt_tokens(
         } else {
             prompt.to_string()
         }
-} else if is_minicpm5 {
+    } else if is_minicpm5 {
         format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
     } else if arch == "phi3" {
         // Phi-3 / Phi-4 single-turn chat template: `<|user|>…<|end|><|assistant|>`.
