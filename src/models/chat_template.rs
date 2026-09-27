@@ -81,9 +81,7 @@ impl ChatTemplate {
                  <|start_of_role|>assistant<|end_of_role|>"
             ),
             Self::Exaone => format!("[|user|]{user_msg}[|endofturn|]\n[|assistant|]"),
-            Self::Phi4 => format!(
-                "<|user|>\n{user_msg}<|end|>\n<|assistant|>"
-            ),
+            Self::Phi4 => format!("<|user|>{user_msg}<|end|><|assistant|>"),
         }
     }
 

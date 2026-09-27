@@ -24,6 +24,7 @@
 pub mod loader;
 pub mod memory;
 pub mod model;
+pub mod phi3_source;
 pub mod prefill;
 pub mod scratchpad;
 pub mod tensor;
