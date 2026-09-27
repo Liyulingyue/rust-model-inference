@@ -82,6 +82,7 @@ pub struct CliOptions {
     pub tts_model: Option<PathBuf>,
     pub tts_mmproj: Option<PathBuf>,
     pub jev: bool,
+    pub laya_request: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,

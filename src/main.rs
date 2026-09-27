@@ -17,6 +17,7 @@ enum DispatchMode {
     QwenDrive,
     Yue2,
     Tts,
+    Laya,
     Model,
 }
 
@@ -29,6 +30,8 @@ fn dispatch_mode(options: &app::CliOptions) -> DispatchMode {
         DispatchMode::Yue2
     } else if options.tts {
         DispatchMode::Tts
+    } else if options.laya_request.is_some() {
+        DispatchMode::Laya
     } else {
         DispatchMode::Model
     }
@@ -150,6 +153,34 @@ fn main() {
         }
         DispatchMode::Tts => {
             app::run_or_exit(app::run_tts_cli(&options));
+            return;
+        }
+        DispatchMode::Laya => {
+            let source: Arc<dyn TensorSource> =
+                Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+            let model = rust_model_inference::models::laya::LayaModel::from_source(source.as_ref())
+                .unwrap_or_else(|error| {
+                    eprintln!("Laya load error: {error}");
+                    std::process::exit(1);
+                });
+            let request_path = options
+                .laya_request
+                .as_ref()
+                .expect("validated Laya request");
+            let request: rust_model_inference::models::laya::request::Request =
+                serde_json::from_slice(&std::fs::read(request_path).unwrap_or_else(|error| {
+                    eprintln!("Laya request read error: {error}");
+                    std::process::exit(1);
+                }))
+                .unwrap_or_else(|error| {
+                    eprintln!("Laya request JSON error: {error}");
+                    std::process::exit(1);
+                });
+            let result = model.predict(&request).unwrap_or_else(|error| {
+                eprintln!("Laya inference error: {error}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
             return;
         }
         DispatchMode::QwenDrive => {
