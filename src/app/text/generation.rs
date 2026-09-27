@@ -11,7 +11,7 @@ pub(super) fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Resul
     Ok(())
 }
 
-pub(super) fn uses_llama_trunk(arch: &str) -> bool {
+pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
     matches!(
         arch,
         "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3"
@@ -332,33 +332,15 @@ pub fn run_shared_inference(
     )
 }
 
+/// Delegates to the canonical sampler in `ops::sampling`.
+///
+/// NOTE (behaviour change): this used to hardcode the draw threshold to
+/// `0.5` — i.e. always pick the token at the median of the distribution.
+/// That was a stub, not a design: it made `--temp > 0` deterministic and
+/// arbitrary. Greedy (`--temp 0`) is unaffected; temperature sampling is now
+/// a real random draw like every other front-end.
 pub fn sample_token(logits: &[f32], temperature: f32) -> i32 {
-    if temperature <= 0.0 {
-        return logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as i32)
-            .unwrap_or(0);
-    }
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    let mut probs = vec![0.0f32; logits.len()];
-    for (i, l) in logits.iter().enumerate() {
-        probs[i] = ((l - max_logit) / temperature).exp();
-        sum += probs[i];
-    }
-    for p in probs.iter_mut() {
-        *p /= sum;
-    }
-
-    let r = 0.5f32;
-    let mut cumsum = 0.0f32;
-    for (i, p) in probs.iter().enumerate() {
-        cumsum += p;
-        if cumsum >= r {
-            return i as i32;
-        }
-    }
-    (logits.len() - 1) as i32
+    crate::ops::sampling::sample_greedy_or_temperature(logits, temperature)
+        .map(|id| id as i32)
+        .unwrap_or(0)
 }

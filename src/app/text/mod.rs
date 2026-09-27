@@ -1,12 +1,14 @@
 mod generation;
 mod multimodal;
 mod qwen3;
+pub mod runtime;
 mod tts_bridge;
 mod vision;
 
 pub use generation::*;
 pub use multimodal::*;
 pub use qwen3::{run_hunyuan_inference, run_qwen3_inference};
+pub use runtime::{build_text_runtime, RuntimeOptions};
 pub use tts_bridge::*;
 pub use vision::*;
 

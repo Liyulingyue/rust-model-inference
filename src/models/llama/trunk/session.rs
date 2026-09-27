@@ -347,6 +347,15 @@ impl<'a> LlamaSession<'a> {
         }
     }
 
+    /// Clear KV cache and reset sequence length so the session is ready
+    /// for a fresh prefill. Mirrors `Lfm2MoeSession::reset` /
+    /// `Qwen35Session::reset` so HTTP can reuse a `LlamaSession` across
+    /// requests without leaking state between them.
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        self.kv_cache.clear();
+    }
+
     /// B=1 fallback used by [`forward_chunk_rows`] when the chunk
     /// contains a single token. Runs the legacy per-token forward
     /// for the token at absolute position `base_position` without
