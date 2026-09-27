@@ -189,7 +189,22 @@ pub(crate) fn apply_rope(
     pos: usize,
     head_dim: usize,
     freq_base: f32,
+    rope_dim: usize,
 ) {
+    // Phi-3 / Phi-4 only apply RoPE to the first `rope_dim` of `head_dim`;
+    // the remaining lanes pass through unchanged. Mirror that by splitting
+    // the slice and only rotating the head. (`rope_dim = head_dim` for
+    // non-phi architectures.)
+    let rope_dim = rope_dim.min(head_dim);
+    if rope_dim < head_dim {
+        let (rot, _pass) = values.split_at_mut(rope_dim);
+        if arch == "k2-horizon" {
+            rope_neox_inplace(rot, pos, rope_dim, freq_base);
+        } else {
+            rope_norm(rot, pos, rope_dim, freq_base);
+        }
+        return;
+    }
     if arch == "k2-horizon" {
         rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
@@ -360,6 +375,15 @@ pub fn run_inference_tokens(
     let n_ff = config.n_ff;
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
+    // Phi-3 / Phi-4 apply RoPE only to the first `rope.dimension_count`
+    // of `head_dim`; the rest pass through. Default to head_dim when the
+    // metadata is missing (other architectures always rope the full head).
+    let rope_dim = source
+        .metadata(&format!("{arch}.rope.dimension_count"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .filter(|v| *v > 0)
+        .unwrap_or(n_embd_head);
     let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     // Granite-specific scaling factors. Zero means "not used" (no-op).
@@ -612,6 +636,7 @@ pub fn run_inference_tokens(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -621,6 +646,7 @@ pub fn run_inference_tokens(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
                     );
                 }
                 dbg_tensor(step, "Qcur", layer, q);
@@ -1280,6 +1306,12 @@ pub fn run_forward_logits_llama_inner(
     let n_ff = config.n_ff;
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
+    let rope_dim = source
+        .metadata(&format!("{arch}.rope.dimension_count"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .filter(|v| *v > 0)
+        .unwrap_or(n_embd_head);
     let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     let arch_prefix = &arch;
@@ -1452,6 +1484,7 @@ pub fn run_forward_logits_llama_inner(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -1461,6 +1494,7 @@ pub fn run_forward_logits_llama_inner(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
                     );
                 }
 
@@ -2150,7 +2184,7 @@ mod tests {
 
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
-        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0);
+        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4);
         crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }

@@ -39,6 +39,11 @@ enum PreTokenizer {
     /// chunks numbers into 1-3 digit runs before the standard GPT-2
     /// split. Mirrors llama.cpp's `LLAMA_VOCAB_PRE_TYPE_MINICPM5`.
     Minicpm5,
+    /// GPT-4o / Phi-4 / tiktoken-cl100k style. Like LlamaBpe but the
+    /// word regex separates uppercase and lowercase runs (`iPhone` ->
+    /// `i` + `Phone`) and digits are chunked 1-3 at a time. Mirrors
+    /// llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GPT4O`.
+    Gpt4o,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,9 +415,10 @@ impl BPETokenizer {
                 }
                 Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
+                Some(MetaValue::String(value)) if value == "gpt-4o" => PreTokenizer::Gpt4o,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, or minicpm5"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, or gpt-4o"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -1702,6 +1708,71 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
                         .is_some_and(|value| is_word_char(value, pre))
             };
             if starts_word {
+                if pre == PreTokenizer::Gpt4o {
+                    // GPT-4O / tiktoken-cl100k: split word into
+                    // (0+ uppercase)(1+ lowercase) or
+                    // (1+ uppercase)(0+ lowercase), with an optional
+                    // leading non-letter/non-number character and an
+                    // optional apostrophe-contraction suffix (handled
+                    // above the loop).
+                    let mut p = pos;
+                    // Optional leading non-letter/non-number.
+                    if !current.is_whitespace()
+                        && !is_word_char(current, PreTokenizer::Gpt4o)
+                        && !is_number(current)
+                    {
+                        p += 1;
+                    }
+                    let first_is_lower = values
+                        .get(p)
+                        .copied()
+                        .is_some_and(|c| c.is_lowercase());
+                    if first_is_lower {
+                        // Alt 1: 0+ uppercase, 1+ lowercase.
+                        while values
+                            .get(p)
+                            .copied()
+                            .is_some_and(|c| c.is_uppercase())
+                        {
+                            p += 1;
+                        }
+                        while values
+                            .get(p)
+                            .copied()
+                            .is_some_and(|c| c.is_lowercase())
+                        {
+                            p += 1;
+                        }
+                    } else {
+                        // Alt 2: 1+ uppercase, 0+ lowercase.
+                        while values
+                            .get(p)
+                            .copied()
+                            .is_some_and(|c| c.is_uppercase())
+                        {
+                            p += 1;
+                        }
+                        while values
+                            .get(p)
+                            .copied()
+                            .is_some_and(|c| c.is_lowercase())
+                        {
+                            p += 1;
+                        }
+                    }
+                    if p == start || (p == start + 1 && start != pos) {
+                        // No letter consumed (e.g., lone punctuation
+                        // not handled by the lowercase/uppercase
+                        // branches). Fall through to the standard
+                        // single-char consume path.
+                        pos += 1;
+                        ranges.push(byte_at(start)..byte_at(pos));
+                    } else {
+                        pos = p;
+                        ranges.push(byte_at(start)..byte_at(pos));
+                    }
+                    continue;
+                }
                 pos += 1;
                 while values
                     .get(pos)
@@ -1717,11 +1788,15 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
 
         if is_number(current) {
             pos += 1;
-            // K2Horizon and Minicpm5 both chunk digit runs into 1-3 digit
-            // pieces. llama.cpp implements Minicpm5 by first running
-            // `\\p{N}{1,3}` over the text, then the standard GPT-2 split;
-            // the chunk-size cap is equivalent for the second pass.
-            if matches!(pre, PreTokenizer::K2Horizon | PreTokenizer::Minicpm5) {
+            // K2Horizon, Minicpm5, and Gpt4o all chunk digit runs into 1-3
+            // digit pieces. llama.cpp implements Minicpm5 by first
+            // running `\\p{N}{1,3}` over the text, then the standard
+            // GPT-2 split; the chunk-size cap is equivalent for the
+            // second pass. Gpt4o is `\\p{N}{1,3}` directly.
+            if matches!(
+                pre,
+                PreTokenizer::K2Horizon | PreTokenizer::Minicpm5 | PreTokenizer::Gpt4o
+            ) {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }

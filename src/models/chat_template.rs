@@ -51,6 +51,9 @@ pub enum ChatTemplate {
     Lfm2,
     /// EXAONE 3.5 (LG AI Research): `[|user|]...query[|endofturn|]\n[|assistant|]`.
     Exaone,
+    /// Microsoft Phi-4 (`<|role|>content<|end|>` per turn, `<|assistant|>` to
+    /// open the assistant turn).
+    Phi4,
 }
 
 impl ChatTemplate {
@@ -78,6 +81,9 @@ impl ChatTemplate {
                  <|start_of_role|>assistant<|end_of_role|>"
             ),
             Self::Exaone => format!("[|user|]{user_msg}[|endofturn|]\n[|assistant|]"),
+            Self::Phi4 => format!(
+                "<|user|>\n{user_msg}<|end|>\n<|assistant|>"
+            ),
         }
     }
 
@@ -89,6 +95,7 @@ impl ChatTemplate {
             Self::GemmaTurn => "Gemma (<start_of_turn>)",
             Self::Lfm2 => "LFM2 (<|start_of_role|>)",
             Self::Exaone => "EXAONE ([|user|]/[|endofturn|])",
+            Self::Phi4 => "Phi-4 (<|role|>/<|end|>)",
         }
     }
 }
@@ -109,6 +116,9 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
         // Llama family (incl. arch="exaone" which uses llama-style tokens).
         "llama" | "k2-horizon" | "granite" | "nanbeige" => ChatTemplate::Llama3,
         "exaone" => ChatTemplate::Exaone,
+
+        // Phi-4 (Microsoft) — `<|role|>...<|end|>` per turn.
+        "phi3" => ChatTemplate::Phi4,
 
         // Gemma — `<start_of_turn>...<end_of_turn>`.
         "gemma4" => ChatTemplate::GemmaTurn,
@@ -145,6 +155,7 @@ pub fn parse_preset(name: &str) -> Option<ChatTemplate> {
         "nemotron" | "nemotron_h" => Some(ChatTemplate::ChatML),
         "llama3" | "llama" => Some(ChatTemplate::Llama3),
         "exaone" => Some(ChatTemplate::Exaone),
+        "phi" | "phi3" | "phi4" => Some(ChatTemplate::Phi4),
         "gemma" | "gemma4" => Some(ChatTemplate::GemmaTurn),
         "lfm2" => Some(ChatTemplate::Lfm2),
         // "none" / "off" / "base" / "auto" all return None — the caller

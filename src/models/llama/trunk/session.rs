@@ -72,6 +72,10 @@ pub struct LlamaSessionConfig {
     pub n_ff: usize,
     pub eps: f32,
     pub freq_base: f32,
+    /// Phi-3 / Phi-4 apply RoPE only to the first `rope_dim` of
+    /// `n_embd_head`; the remaining lanes pass through. Other
+    /// architectures set this to `n_embd_head`.
+    pub rope_dim: usize,
     pub vocab: usize,
 }
 
@@ -145,6 +149,12 @@ impl<'a> LlamaSession<'a> {
         let n_ff = config.n_ff;
         let eps = config.norm_eps;
         let freq_base = config.rope_freq_base;
+        let rope_dim = source
+            .metadata(&format!("{arch}.rope.dimension_count"))
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .filter(|v| *v > 0)
+            .unwrap_or(n_embd_head);
         let norm_groups = normalization_groups(source, &arch, n_embd)?;
         let arch_prefix = arch.clone();
         let embedding_scale = source
@@ -214,6 +224,7 @@ impl<'a> LlamaSession<'a> {
                 n_ff,
                 eps,
                 freq_base,
+                rope_dim,
                 vocab,
             },
             tokenizer,
@@ -380,6 +391,7 @@ impl<'a> LlamaSession<'a> {
         let kq_scale = self.kq_scale;
         let eps = cfg.eps;
         let freq_base = cfg.freq_base;
+        let rope_dim = cfg.rope_dim;
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -483,8 +495,8 @@ impl<'a> LlamaSession<'a> {
                 let abs_pos = base_position + r;
                 let q_row = &mut q_out[r * n_embd_q..(r + 1) * n_embd_q];
                 let k_row = &mut k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa];
-                apply_rope(arch.as_str(), q_row, abs_pos, n_embd_head_k, freq_base);
-                apply_rope(arch.as_str(), k_row, abs_pos, n_embd_head_k, freq_base);
+                apply_rope(arch.as_str(), q_row, abs_pos, n_embd_head_k, freq_base, rope_dim);
+                apply_rope(arch.as_str(), k_row, abs_pos, n_embd_head_k, freq_base, rope_dim);
             }
 
             // ---- Per-row KV-cache append ----
@@ -737,6 +749,7 @@ impl<'a> LlamaSession<'a> {
         let kq_scale = self.kq_scale;
         let eps = cfg.eps;
         let freq_base = cfg.freq_base;
+        let rope_dim = cfg.rope_dim;
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -859,8 +872,8 @@ impl<'a> LlamaSession<'a> {
             // right rope schedule (neox vs grouped-norm).
             let _ = &mut arch_buf;
             let arch_for_rope: &str = arch.as_str();
-            apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base);
-            apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base);
+            apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base, cfg.rope_dim);
+            apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base, cfg.rope_dim);
 
             // KV cache append — same as legacy.
             let kb = layer * max_ctx * n_embd_gqa;
