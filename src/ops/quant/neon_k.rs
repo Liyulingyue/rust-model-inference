@@ -120,8 +120,7 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let min_sum_hi = vaddvq_s32(min_prod2);
         let min_sum_lo2 = vaddvq_s32(min_prod3);
         let min_sum_hi2 = vaddvq_s32(min_prod4);
-        let min_correction =
-            -dmin * (min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2) as f32;
+        let min_correction = -dmin * (min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2) as f32;
 
         // --- Main dot product: 8 groups of 32 values ---
         let q4_ptr = q4k_data.as_ptr().add(boff + 16);
@@ -230,7 +229,11 @@ mod tests {
             let neon = unsafe { vec_dot_q4k_q8k_neon(&block, &q8k) };
             let scalar = vec_dot_q4k_q8k_scalar(&block, &q8k);
             let diff = (neon - scalar).abs();
-            let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
+            let rel = if scalar.abs() > 1e-3 {
+                diff / scalar.abs()
+            } else {
+                diff
+            };
             assert!(
                 rel < 1e-3,
                 "seed={seed}: neon={neon} scalar={scalar} rel={rel}"
@@ -253,8 +256,14 @@ mod tests {
         let neon = unsafe { vec_dot_q4k_q8k_neon(&block, &q8k) };
         let scalar = vec_dot_q4k_q8k_scalar(&block, &q8k);
         let diff = (neon - scalar).abs();
-        let rel = if scalar.abs() > 1e-3 { diff / scalar.abs() } else { diff };
-        assert!(rel < 1e-3, "multi-block: neon={neon} scalar={scalar} rel={rel}");
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "multi-block: neon={neon} scalar={scalar} rel={rel}"
+        );
     }
 }
-

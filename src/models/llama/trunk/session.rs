@@ -252,8 +252,13 @@ impl<'a> LlamaSession<'a> {
             // every step (matches the legacy loop); capture the last.
             if std::env::var_os("RUST_LLAMA_DUMP").is_some() {
                 let top: Vec<(usize, f32)> = {
-                    let mut indexed: Vec<(usize, f32)> =
-                        self.scratch.logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+                    let mut indexed: Vec<(usize, f32)> = self
+                        .scratch
+                        .logits
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &v)| (i, v))
+                        .collect();
                     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
                     indexed.truncate(5);
                     indexed

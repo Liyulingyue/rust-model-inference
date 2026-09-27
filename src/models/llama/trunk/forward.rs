@@ -2210,9 +2210,7 @@ pub fn build_prompt_tokens(
             prompt.to_string()
         }
     } else if is_minicpm5 {
-        format!(
-            "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
-        )
+        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n")
     } else {
         format!("user\n{prompt}\nassistant\n<think>\n")
     };
