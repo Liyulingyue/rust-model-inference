@@ -34,8 +34,10 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
-        // when no tools are present.
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" => Ok(false),
+        // when no tools are present. `phi3` (Phi-3/Phi-4) joins this set:
+        // its chat template is built by `llama::trunk::build_prompt_tokens`
+        // and the trunk has no tool-call grammar.
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -87,7 +89,7 @@ pub fn build_prompt(
     }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3"
     );
     if llama_family {
         if !tools.is_empty() {

@@ -757,7 +757,6 @@ impl<'a> LlamaSession<'a> {
         if logit_scale != 0.0 {
             vec_scale_f32(logits, logit_scale);
         }
-
         self.seq_len = base_position + rows;
         Ok(())
     }

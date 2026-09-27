@@ -86,7 +86,7 @@ fn run_jev_decision_data_with_image(
             mmproj_path,
             image_path,
         ),
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" => {
             llama::run_jev_decision_llama(
                 source.clone(),
                 context,

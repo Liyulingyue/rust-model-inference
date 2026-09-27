@@ -2329,6 +2329,9 @@ pub fn build_prompt_tokens(
         format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    // Granite/MiniCPM5/Phi-3/Phi-4 all ship `add_bos_token=false`, so
+    // `encode()` does not emit BOS via `add_special=true`. Match the CLI
+    // path (run_inference_tokens below) by always prepending BOS manually.
     let add_special = arch == "nanbeige";
     let mut body = tokenizer.encode(
         &prompt_text,
