@@ -13,9 +13,9 @@ use crate::core::tokenizer::{load_tokenizer, EncodeOptions};
 use crate::ops::embedding_lookup;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rms_norm_inplace,
-    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, softmax_approx_inplace, sum_sq_f32,
-    vec_add_into, vec_mad_f32, vec_scale_f32,
+    dot_f16_f32, dot_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm_grouped, rms_norm_inplace,
+    rope_neox_inplace, rope_norm, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
+    sum_sq_f32, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_scale_f32,
 };
 use crate::prompt::format_k2_horizon_chat_prompt_with_thinking;
 
@@ -716,7 +716,7 @@ pub fn run_inference_tokens(
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
                         // The values scratch is sized to the next multiple of
                         // 256 above max_ctx (n_padded_max). Heap-allocated so
                         // long contexts don't overflow.
@@ -1552,7 +1552,7 @@ pub fn run_forward_logits_llama_inner(
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
                         let mut values = vec![0.0f32; n_padded];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
@@ -1781,7 +1781,11 @@ pub fn run_forward_logits_llama_inner(
 //      to reuse the legacy per-token attention math and the per-thread
 //      silu_mul dispatch without duplicating the closure body.
 
-/// Non-flash F16 KV attention: ggml rounds Q and probabilities to F16.
+/// Non-flash F16 KV attention: online softmax (running max + rescale) with
+/// f32 Q dotted against the f16 K cache (`dot_f16_f32`). This is the
+/// pre-existing shared-trunk math — it must stay exact (libm `exp`), not
+/// the approximate-exp variant, because every llama-family model shares
+/// this path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attention_head_f16(
     q: &[f32],
@@ -1793,24 +1797,24 @@ pub(crate) fn attention_head_f16(
     n_cached: usize,
     scale: f32,
 ) {
-    let n_padded = n_cached.div_ceil(256) * 256;
-    let mut query = vec![0u16; q.len()];
-    f32_slice_to_f16(q, &mut query);
-    let mut scores = vec![f32::NEG_INFINITY; n_padded];
-    for (t, score) in scores[..n_cached].iter_mut().enumerate() {
+    let mut ms = 0.0f32;
+    let mut s_sum = 0.0f32;
+    output.fill(0.0);
+    for t in 0..n_cached {
         let offset = cache_offset + t * cache_stride;
-        *score = crate::ops::dot_f16(&query, &k[offset..offset + q.len()], q.len()) * scale;
-    }
-    softmax_approx_inplace(&mut scores);
-    let mut probabilities = vec![0u16; n_padded];
-    f32_slice_to_f16(&scores, &mut probabilities);
-    let mut values = vec![0u16; n_padded];
-    for (d, out) in output.iter_mut().enumerate() {
-        for t in 0..n_cached {
-            values[t] = v[cache_offset + t * cache_stride + d];
+        let score = dot_f16_f32(q, &k[offset..offset + q.len()], q.len()) * scale;
+        if score > ms {
+            let rescale = (ms - score).exp();
+            vec_scale_f32(output, rescale);
+            s_sum *= rescale;
+            ms = score;
         }
-        *out = crate::ops::dot_f16(&values, &probabilities, n_padded);
+        let vs = (score - ms).exp();
+        vec_mad_f16_f32(output, &v[offset..offset + output.len()], vs);
+        s_sum += vs;
     }
+    let inv_sum = 1.0 / s_sum;
+    vec_scale_f32(output, inv_sum);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1903,7 +1907,7 @@ pub(crate) fn run_attention_per_query(
                     ) * kq_scale;
                 }
                 scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
+                softmax_inplace(&mut scores[s_off..s_off + n_padded]);
                 let mut values = vec![0.0f32; n_padded];
                 for d in 0..n_embd_head_v {
                     for t in 0..n_cached {
@@ -1947,7 +1951,10 @@ pub(crate) fn silu_mul_rows(
                 );
                 let u =
                     std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
-                silu_mul_approx_inplace(u, g);
+                // Exact SiLU via libm `exp` — matches llama.cpp. The
+                // approximate-exp variant is only used on the decode
+                // path where it was already the pre-existing convention.
+                silu_mul_inplace(u, g);
             }
         }
     });
@@ -2089,7 +2096,7 @@ pub(crate) fn run_attention_chunked(
                         scores[r * n_padded + t] = f32::NEG_INFINITY;
                     }
                     let s = &mut scores[r * n_padded..(r + 1) * n_padded];
-                    softmax_approx_inplace(s);
+                    softmax_inplace(s);
                     // `O = S · V` row-major: per `d` of `n_embd_head_v`,
                     // gather V[t, kv_h, d] and dot with `S`.
                     let mut values = vec![0.0; n_cached_total];

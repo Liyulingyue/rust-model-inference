@@ -228,6 +228,7 @@ fn oracle_builder_treats_input_checkout_as_read_only() {
 #[cfg(feature = "parity-trace")]
 mod parity_support {
     use rand::SeedableRng;
+    use rust_model_inference::format::wav::write_wav_f32_channels;
     use rust_model_inference::models::dots::generate::{
         read_dots_wav_for_parity, synthesize_request_with_noise, GenerateOptions, GenerationRequest,
     };
@@ -235,7 +236,6 @@ mod parity_support {
         build_edit_generation_schedule, build_generation_schedule,
     };
     use rust_model_inference::models::dots::DotsTtsModel;
-    use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
     use rust_model_inference::{
         open_model_source, BPETokenizer, ComponentRole, ComputePool, TensorSource,
     };
@@ -709,7 +709,7 @@ mod parity_support {
         .unwrap();
         std::env::remove_var("RMI_PARITY_TRACE");
         std::env::remove_var("RMI_PARITY_FILTER");
-        write_wav_f32(&rust_wav, &waveform, 48_000).unwrap();
+        write_wav_f32_channels(&rust_wav, &waveform, 48_000, 1).unwrap();
 
         let payload = compare_traces(&rust_trace, &oracle_trace);
         let pcm = pcm16(&rust_wav);

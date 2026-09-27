@@ -28,8 +28,8 @@ type DynTokenizer = Box<dyn Tokenizer>;
 use crate::core::tensor::GGMLType;
 use crate::ops::{
     dot_f32, embedding_lookup, gpu_matmul_active, quantize_q8_0_into, quantize_row_q8_k_into,
-    rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace, softmax_approx_inplace,
-    vec_add_into, vec_mad_f32, vec_scale_f32,
+    rms_norm_grouped, rms_norm_inplace, silu_mul_approx_inplace, softmax_inplace, vec_add_into,
+    vec_mad_f32, vec_scale_f32,
 };
 use std::sync::Arc;
 
@@ -964,7 +964,7 @@ impl<'a> LlamaSession<'a> {
                             ) * kq_scale;
                         }
                         scores[s_off + n_cached..s_off + n_padded].fill(f32::NEG_INFINITY);
-                        softmax_approx_inplace(&mut scores[s_off..s_off + n_padded]);
+                        softmax_inplace(&mut scores[s_off..s_off + n_padded]);
                         let mut values = vec![0.0f32; n_cached];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
