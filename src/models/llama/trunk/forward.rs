@@ -2325,6 +2325,12 @@ pub fn build_prompt_tokens(
         }
     } else if is_minicpm5 {
         format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
+    } else if arch == "phi3" {
+        // Phi-3 / Phi-4 single-turn chat template: `<|user|>…<|end|><|assistant|>`.
+        // No system role, no `<think>` block. Matches the CLI's `run_inference_tokens`
+        // inline template exactly so HTTP `/v1/chat/completions` produces the
+        // same prompt bytes as the CLI. (Note: chat-template bug — see below.)
+        format!("<|user|>{prompt}<|end|><|assistant|>")
     } else {
         format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
     };
