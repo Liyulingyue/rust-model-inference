@@ -13,6 +13,12 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **HTTP 文本运行时统一（TextRuntime）** — HTTP 层目前是与 CLI 平行的第二套 arch
+      dispatcher：`TextInner` 只有 Qwen3/Qwen35/Lfm2Moe 三个真变体，llama/nanbeige/exaone/
+      gemma4/hunyuan/lfm2-dense/spark/nemotron_h/falcon-h1/qwen2 加载后全部 501。
+      方案：抽 `TextRuntime` trait + `TokenSink`，`build_text_runtime(arch)` 成为唯一分发点，
+      CLI 与 HTTP 共用；每 arch 一个 commit，CLI 输出逐字节不变。设计与验收标准见
+      [`TEXT_RUNTIME_UNIFICATION.md`](TEXT_RUNTIME_UNIFICATION.md)。
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
 - [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
