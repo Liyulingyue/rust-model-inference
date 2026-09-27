@@ -1733,40 +1733,21 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
                     {
                         p += 1;
                     }
-                    let first_is_lower = values
-                        .get(p)
-                        .copied()
-                        .is_some_and(|c| c.is_lowercase());
+                    let first_is_lower = values.get(p).copied().is_some_and(|c| c.is_lowercase());
                     if first_is_lower {
                         // Alt 1: 0+ uppercase, 1+ lowercase.
-                        while values
-                            .get(p)
-                            .copied()
-                            .is_some_and(|c| c.is_uppercase())
-                        {
+                        while values.get(p).copied().is_some_and(|c| c.is_uppercase()) {
                             p += 1;
                         }
-                        while values
-                            .get(p)
-                            .copied()
-                            .is_some_and(|c| c.is_lowercase())
-                        {
+                        while values.get(p).copied().is_some_and(|c| c.is_lowercase()) {
                             p += 1;
                         }
                     } else {
                         // Alt 2: 1+ uppercase, 0+ lowercase.
-                        while values
-                            .get(p)
-                            .copied()
-                            .is_some_and(|c| c.is_uppercase())
-                        {
+                        while values.get(p).copied().is_some_and(|c| c.is_uppercase()) {
                             p += 1;
                         }
-                        while values
-                            .get(p)
-                            .copied()
-                            .is_some_and(|c| c.is_lowercase())
-                        {
+                        while values.get(p).copied().is_some_and(|c| c.is_lowercase()) {
                             p += 1;
                         }
                     }

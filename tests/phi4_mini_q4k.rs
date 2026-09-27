@@ -67,10 +67,7 @@ fn q4_tokenizer_matches_scalar_llama_cpp() {
     );
     assert!(ids.len() >= 4, "got ids = {:?}", ids);
     let decoded = tok.decode(&ids, false);
-    assert!(
-        decoded.contains("France"),
-        "decoded text was {decoded:?}"
-    );
+    assert!(decoded.contains("France"), "decoded text was {decoded:?}");
 }
 
 #[test]
@@ -81,7 +78,7 @@ fn q4_tensor_shapes_match_loader_contract() {
     let t0_attn_qkv = shape(&loader, "blk.0.attn_qkv.weight").expect("attn_qkv.weight");
     assert_eq!(t0_attn_qkv.dims.len(), 2);
     assert_eq!(t0_attn_qkv.dims[0] as usize, 3072); // n_in
-    // n_out = n_embd_q + 2 * n_embd_gqa = 3072 + 2*1024 = 5120
+                                                    // n_out = n_embd_q + 2 * n_embd_gqa = 3072 + 2*1024 = 5120
     assert_eq!(
         t0_attn_qkv.dims[1] as usize,
         3072 + 2 * 1024,

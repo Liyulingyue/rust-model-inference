@@ -46,7 +46,10 @@ fn q8_contract_loads() {
         .metadata("llama.rope.freq_base")
         .and_then(|v| v.to_f64())
         .unwrap_or(0.0);
-    assert!((rope_base - 500_000.0).abs() < 1.0, "rope_freq_base={rope_base}");
+    assert!(
+        (rope_base - 500_000.0).abs() < 1.0,
+        "rope_freq_base={rope_base}"
+    );
     let eps: f64 = loader
         .metadata("llama.attention.layer_norm_rms_epsilon")
         .and_then(|v| v.to_f64())
@@ -74,10 +77,7 @@ fn q8_tokenizer_matches_scalar_llama_cpp() {
     );
     assert!(ids.len() >= 4, "got ids = {:?}", ids);
     let decoded = tok.decode(&ids, false);
-    assert!(
-        decoded.contains("France"),
-        "decoded text was {decoded:?}"
-    );
+    assert!(decoded.contains("France"), "decoded text was {decoded:?}");
 }
 
 #[test]

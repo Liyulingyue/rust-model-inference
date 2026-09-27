@@ -80,8 +80,8 @@ pub(crate) fn layer_loop_config(
         }
         Ok(())
     };
-            check("token_embd.weight", &[embd, config.vocab_size as u64])?;
-            check("output_norm.weight", &[embd])?;
+    check("token_embd.weight", &[embd, config.vocab_size as u64])?;
+    check("output_norm.weight", &[embd])?;
     if source.tensor_info("output.weight").is_some() {
         check("output.weight", &[embd, config.vocab_size as u64])?;
     }
