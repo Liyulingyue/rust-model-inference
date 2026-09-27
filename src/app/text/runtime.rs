@@ -22,7 +22,9 @@ use crate::app::cli::KvFormat;
 use crate::core::tensor::TensorSource;
 use crate::models::llama::trunk::{build_prompt_tokens, LlamaSession};
 use crate::ops::generation_runtime::{Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink};
+use crate::ops::generation_runtime::StepAction;
 use crate::ops::sampling::sample_temperature_greedy_or_random;
+use crate::ops::sampling::LlamaSampler;
 use std::sync::{Arc, Mutex};
 
 /// What the server needs to know to construct a runtime.
@@ -93,6 +95,9 @@ pub struct LlamaTextRuntime {
     _source: Arc<dyn TensorSource>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     arch: String,
+    /// Same sampler the CLI llama trunk uses (rep-penalty + llama.cpp chain +
+    /// history-seeded RNG), so the two front-ends agree token for token.
+    sampler: LlamaSampler,
 }
 
 impl LlamaTextRuntime {
@@ -107,11 +112,15 @@ impl LlamaTextRuntime {
         // SAFETY: `source` is held by the runtime for its whole lifetime, so
         // borrowing session data from it for `'static` stays valid.
         let session: LlamaSession<'static> = unsafe { std::mem::transmute(session) };
+        // top_k / top_p from GGUF metadata, matching
+        // `llama::trunk::sample_defaults`.
+        let (top_k, top_p) = crate::models::llama::trunk::sample_defaults(source.as_ref());
         Ok(Self {
             session: Mutex::new(session),
             _source: source,
             tokenizer: options.tokenizer,
             arch: arch_of(&options.source),
+            sampler: LlamaSampler::new(top_k, top_p),
         })
     }
 }
@@ -142,18 +151,37 @@ impl TextRuntime for LlamaTextRuntime {
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
         // Prefill (the ids are the prompt the caller tokenized via
-        // `build_prompt_tokens`), then one token at a time.
+        // `build_prompt_tokens`), then one token at a time. The sampler and
+        // the stop rule are the CLI's, so the same prompt produces the same
+        // tokens from both front-ends.
+        // Seed the sampler's history RNG with the prompt so temperature
+        // sampling matches the CLI byte for byte.
+        self.sampler.prime(&request.token_ids);
         let mut logits = session.forward_logits_per_token(&request.token_ids)?;
         for _ in 0..request.max_new_tokens {
-            let Some(id) = sample_step(
-                &logits,
-                request.sampling.temperature,
+            let mut logits_owned = logits;
+            let id = self
+                .sampler
+                .sample(&mut logits_owned, request.sampling.temperature, 1.0);
+            logits = logits_owned;
+            match crate::ops::generation_runtime::stop_after_sample(
+                id,
+                token_ids.len(),
+                request.max_new_tokens,
+                false,
                 eos_id,
                 im_end_id,
-            ) else {
-                finish = Finish::Eos;
-                break;
-            };
+            ) {
+                StepAction::StopEos => {
+                    finish = Finish::Eos;
+                    break;
+                }
+                StepAction::StopLimit => {
+                    finish = Finish::Limit;
+                    break;
+                }
+                StepAction::Continue => {}
+            }
             token_ids.push(id);
             let chunk = decoder.push(id);
             if !chunk.is_empty() {

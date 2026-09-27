@@ -265,3 +265,59 @@ pub fn sample_temperature_greedy_or_random(logits: &[f32], temperature: f32) -> 
     }
     (logits.len() - 1) as i32
 }
+
+/// Stateful llama-family sampler: repetition penalty + llama.cpp chain
+/// (`top_k -> top_p -> temperature -> dist sample`) with an RNG seeded from
+/// the generated history so a prompt is reproducible.
+///
+/// Extracted verbatim from `llama::trunk::run_inference_tokens` so the CLI
+/// and the HTTP `LlamaTextRuntime` adapter cannot drift apart: one
+/// implementation, two front-ends.
+#[derive(Default)]
+pub struct LlamaSampler {
+    /// Every token seen so far (prompt + generated), used to seed the RNG.
+    all_tokens: Vec<u32>,
+    /// Per-token repeat counts, used by `apply_repetition_penalty`.
+    token_counts: std::collections::HashMap<u32, u32>,
+    top_k: usize,
+    top_p: f32,
+}
+
+impl LlamaSampler {
+    /// `top_k` / `top_p` usually come from the GGUF `general.sampling.*`
+    /// metadata (see `llama::trunk::sample_defaults`).
+    pub fn new(top_k: usize, top_p: f32) -> Self {
+        Self {
+            all_tokens: Vec::new(),
+            token_counts: std::collections::HashMap::new(),
+            top_k,
+            top_p,
+        }
+    }
+
+    /// Seed the history RNG with the prompt tokens before the first call, so
+    /// the CLI (which seeds from prompt + generated) and the HTTP adapter
+    /// (which seeds identically) agree.
+    pub fn prime(&mut self, prompt_tokens: &[u32]) {
+        self.all_tokens.extend_from_slice(prompt_tokens);
+    }
+
+    /// Sample the next token id from `logits`.
+    pub fn sample(&mut self, logits: &mut [f32], temperature: f32, repetition_penalty: f32) -> u32 {
+        apply_repetition_penalty(logits, &self.token_counts, repetition_penalty);
+        let rng_u64 = if temperature <= 0.0 {
+            0
+        } else {
+            // Deterministic per prompt: seed from the full token history.
+            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
+            for &t in &self.all_tokens {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
+            }
+            rng
+        };
+        let chosen = sample_llama_cpp(logits, self.top_k, self.top_p, temperature, rng_u64) as u32;
+        *self.token_counts.entry(chosen).or_insert(0) += 1;
+        self.all_tokens.push(chosen);
+        chosen
+    }
+}

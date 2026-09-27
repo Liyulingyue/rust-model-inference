@@ -85,6 +85,42 @@ pub trait TokenSink {
     fn push_text(&mut self, chunk: &str) -> Flow;
 }
 
+/// Shared "should generation stop after this token?" rule.
+///
+/// Extracted from the llama trunk so the CLI and every adapter agree on the
+/// eos / `im_end` / `max_new_tokens` / `bench` semantics instead of each
+/// re-deriving them (they used to differ: the old server loops checked
+/// `im_end` everywhere but `bench` nowhere).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepAction {
+    /// Keep generating.
+    Continue,
+    /// eos or `im_end` was sampled.
+    StopEos,
+    /// `max_new_tokens` reached.
+    StopLimit,
+}
+
+pub fn stop_after_sample(
+    chosen: u32,
+    generated: usize,
+    max_new_tokens: usize,
+    bench: bool,
+    eos_id: Option<u32>,
+    im_end_id: Option<u32>,
+) -> StepAction {
+    if !bench && (Some(chosen) == eos_id || Some(chosen) == im_end_id) {
+        return StepAction::StopEos;
+    }
+    // Pre-push semantics: the pending token still counts toward the budget,
+    // so stop only once `generated` already reached it. (The old llama loop
+    // checked `generated_tokens.len() >= max_tokens` before pushing.)
+    if generated >= max_new_tokens {
+        return StepAction::StopLimit;
+    }
+    StepAction::Continue
+}
+
 /// Per-arch generation adapter. The server builds one at startup and calls
 /// `generate` per request; the CLI keeps its arch `run_inference` functions.
 pub trait TextRuntime: Send {
@@ -180,6 +216,63 @@ mod tests {
             crate::ops::sampling::sample_temperature_greedy_or_random(&logits, 0.0),
             1
         );
+    }
+
+    #[test]
+    fn stop_after_sample_honours_eos_and_limit() {
+        // eos stops, even at generated == max - 1.
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(7, 3, 4, false, Some(7), None),
+            StepAction::StopEos
+        );
+        // im_end stops too (qwen chat template uses it instead of eos).
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(9, 0, 100, false, None, Some(9)),
+            StepAction::StopEos
+        );
+        // ordinary token keeps going below the limit.
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(1, 2, 10, false, Some(7), None),
+            StepAction::Continue
+        );
+        // Pre-push semantics: `generated == max` means the budget is spent and
+        // the pending token is not emitted; one below means it still is.
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(1, 10, 10, false, Some(7), None),
+            StepAction::StopLimit
+        );
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(1, 9, 10, false, Some(7), None),
+            StepAction::Continue
+        );
+        // bench disables the eos stop so throughput runs are not cut short.
+        assert_eq!(
+            crate::ops::generation_runtime::stop_after_sample(7, 0, 10, true, Some(7), None),
+            StepAction::Continue
+        );
+    }
+
+    #[test]
+    fn llama_sampler_is_reproducible_for_the_same_history() {
+        let mut a = crate::ops::sampling::LlamaSampler::new(40, 0.95);
+        let mut b = crate::ops::sampling::LlamaSampler::new(40, 0.95);
+        let logits: Vec<f32> = (0..16).map(|i| (i as f32) * 0.25).collect();
+        for _ in 0..4 {
+            let mut la = logits.clone();
+            let mut lb = logits.clone();
+            assert_eq!(
+                a.sample(&mut la, 0.7, 1.0),
+                b.sample(&mut lb, 0.7, 1.0),
+                "same history must sample the same token"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_sampler_greedy_matches_argmax() {
+        let mut sampler = crate::ops::sampling::LlamaSampler::new(40, 0.95);
+        let mut logits = vec![0.1f32, 9.0, 0.2];
+        assert_eq!(sampler.sample(&mut logits, 0.0, 1.0), 1);
     }
 
     #[test]

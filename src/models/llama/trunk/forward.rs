@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// Read sampling defaults from GGUF metadata (matching llama.cpp's
 /// behaviour). MiniCPM5 ships `general.sampling.{top_k,top_p,temp}` keys
 /// that override the C++ defaults (40, 0.95, 1.0).
-fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
+pub fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
     let top_k = source
         .metadata("general.sampling.top_k")
         .and_then(|v| v.to_u64())
@@ -443,12 +443,16 @@ pub fn run_inference_tokens(
     println!("Prompt: {} tokens", input_tokens.len());
 
     let eos_id = tokenizer.eos_id();
+    let im_end_id = tokenizer.special_token_id("im_end");
     let mut generated_tokens: Vec<u32> = Vec::new();
-    // Token counts for `apply_repetition_penalty`. We keep an explicit map so
-    // the penalty step is O(distinct tokens) instead of O(generated_tokens).
-    let mut generated_token_counts: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
+    // Shared llama-family sampler: owns the repetition-penalty counts and the
+    // history-seeded RNG (`ops::sampling::LlamaSampler`), and is primed with
+    // the prompt so the CLI and the HTTP adapter agree token for token.
+    let mut llama_sampler = crate::ops::sampling::LlamaSampler::new(
+        sample_defaults(source).0,
+        sample_defaults(source).1,
+    );
+    llama_sampler.prime(&input_tokens);
     let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
 
     let group_size = n_head / n_head_kv;
@@ -1079,42 +1083,24 @@ pub fn run_inference_tokens(
             let _ = io::stderr().write_all(line.as_bytes());
             let _ = io::stderr().flush();
         }
-        // Sample using llama.cpp's default sampler chain:
-        //   top_k=20 -> top_p=0.95 -> temperature=0.6 -> dist sample.
-        // The top_k / top_p values come from the GGUF metadata
-        // (`general.sampling.top_k` / `.top_p`) when available.
-        let (top_k, top_p) = sample_defaults(source);
-        let rng_u64 = if temperature <= 0.0 {
-            0
-        } else {
-            // Seed RNG from generated history (deterministic per prompt).
-            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
-            for &t in &all_tokens {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
-            }
-            rng
-        };
-        // Apply repetition penalty on logits for tokens already generated.
-        // `generated_token_counts` is built from `generated_tokens` below.
-        crate::ops::sampling::apply_repetition_penalty(
-            logits,
-            &generated_token_counts,
-            repetition_penalty,
-        );
-        let chosen = crate::ops::sample_llama_cpp(logits, top_k, top_p, temperature, rng_u64);
-
-        let chosen_id = chosen as u32;
-        let im_end_id = tokenizer.special_token_id("im_end");
-        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
-            break;
-        }
-        if generated_tokens.len() >= max_tokens {
+        // Sample using the shared llama-family sampler
+        // (`ops::sampling::LlamaSampler`): repetition penalty + llama.cpp's
+        // chain with a history-seeded RNG. The HTTP adapter uses the same
+        // type, so CLI and server cannot drift apart.
+        let chosen_id = llama_sampler.sample(logits, temperature, repetition_penalty);
+        if crate::ops::generation_runtime::stop_after_sample(
+            chosen_id,
+            generated_tokens.len(),
+            max_tokens,
+            bench,
+            eos_id,
+            im_end_id,
+        ) != crate::ops::generation_runtime::StepAction::Continue
+        {
             break;
         }
 
         generated_tokens.push(chosen_id);
-        all_tokens.push(chosen_id);
-        *generated_token_counts.entry(chosen_id).or_insert(0) += 1;
 
         let text = decoder.push(chosen_id);
         print!("{}", text);
