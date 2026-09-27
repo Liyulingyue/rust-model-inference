@@ -29,7 +29,9 @@ const QWEN35_CALL: &str = "\n</tools>\n\nIf you choose to call a function ONLY r
 
 fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
-        "qwen3" | "qwen3vl" | "lfm2moe" => Ok(false),
+        // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
+        // their projector differs, which the runtime's image path handles.
+        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
         "qwen35" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool

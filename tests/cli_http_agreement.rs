@@ -259,8 +259,16 @@ fn cli_and_http_agree_on_image_input() {
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_string())
         .unwrap_or_default();
-    if arch != "qwen35" {
-        eprintln!("skipping: image agreement is implemented for qwen35, got {arch}");
+    // Three projector families are wired up: qwen35 and qwen2vl share the
+    // Qwen2.5-Omni projector (plus a required system turn), qwen3vl /
+    // qwen3vlmoe use the Qwen3-VL merger with per-layer deepstack.
+    if !matches!(
+        arch.as_str(),
+        "qwen35" | "qwen3vl" | "qwen3vlmoe" | "qwen2vl"
+    ) {
+        eprintln!(
+            "skipping: image agreement is implemented for qwen35/qwen3vl/qwen2vl, got {arch}"
+        );
         return;
     }
 

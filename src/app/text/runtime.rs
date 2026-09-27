@@ -137,7 +137,10 @@ pub fn build_text_runtime(
 ) -> Result<Box<dyn TextRuntime>, String> {
     if crate::app::text::uses_llama_trunk(arch) {
         Ok(Box::new(LlamaTextRuntime::new(options)?))
-    } else if matches!(arch, "qwen3" | "qwen3vl") {
+    } else if matches!(arch, "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe") {
+        // qwen2vl / qwen3vlmoe share the Qwen3 model + session + Qwen3Input
+        // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
+        // only the projector family differs, which the image path handles.
         Ok(Box::new(Qwen3TextRuntime::new(options)?))
     } else if arch == "qwen35" {
         Ok(Box::new(Qwen35TextRuntime::new(options)?))
@@ -302,6 +305,9 @@ pub struct Qwen3TextRuntime {
     model: Arc<crate::models::qwen3::Qwen3Model>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     pool: Arc<crate::core::thread_pool::ComputePool>,
+    /// Vision projector for image input (`--mmproj`); None means text-only.
+    mmproj: Option<Arc<dyn TensorSource>>,
+    threads: usize,
     /// Held so capacity / batch come from the one place that owns them.
     options: RuntimeOptions,
     arch: String,
@@ -319,6 +325,8 @@ impl Qwen3TextRuntime {
             model: Arc::new(model),
             tokenizer: options.tokenizer.clone(),
             pool: options.pool.clone(),
+            mmproj: options.mmproj.clone(),
+            threads: options.threads,
             options,
             arch,
         })
@@ -346,12 +354,21 @@ impl TextRuntime for Qwen3TextRuntime {
             self.options.kv_format,
             crate::KvLifecycle::Ephemeral,
         )?;
-        let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
+        // Image path for qwen3vl: encode through the Qwen3-VL projector, splice
+        // the placeholder run into the user turn, then inject the projected
+        // embeddings AND the per-layer deepstack features. Mirrors
+        // `app::text::multimodal::run_qwen3_family_multimodal`.
+        let (token_ids, embeddings, deepstack, positions) = if request.images.is_empty() {
+            let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
+            (request.token_ids.clone(), None, None, positions)
+        } else {
+            self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
+        };
         let input = crate::models::qwen3::Qwen3Input {
-            token_ids: &request.token_ids,
+            token_ids: &token_ids,
             positions: &positions,
-            embeddings: None,
-            deepstack_embeddings: None,
+            embeddings: embeddings.as_deref(),
+            deepstack_embeddings: deepstack.as_deref(),
         };
         let options_qwen3 = crate::models::qwen3::Qwen3GenerateOptions {
             max_new_tokens: request.max_new_tokens,
@@ -387,6 +404,173 @@ impl TextRuntime for Qwen3TextRuntime {
             token_ids: generation.token_ids.clone(),
             finish,
         })
+    }
+}
+
+impl Qwen3TextRuntime {
+    /// Encode images for the Qwen3-VL projector and prepare the prefill.
+    ///
+    /// Returns `(token_ids, embeddings, deepstack, positions)`. The placeholder
+    /// run goes inside the user turn (right after `user\n`, before the text) —
+    /// the position the CLI's multimodal path uses. Getting it wrong returns
+    /// 200 but blinds the model, so the insert point is computed, not guessed.
+    fn prepare_qwen3vl_image_prefill(
+        &self,
+        prompt_ids: &[u32],
+        images: &[Vec<u8>],
+    ) -> Result<
+        (
+            Vec<u32>,
+            Option<Vec<f32>>,
+            Option<Vec<f32>>,
+            Vec<[usize; 4]>,
+        ),
+        String,
+    > {
+        let mmproj = self.mmproj.as_ref().ok_or_else(|| {
+            "image input requires a vision projector; start the server with --mmproj <path>"
+                .to_string()
+        })?;
+        let vision_start = self
+            .tokenizer
+            .special_token_id("vision_start")
+            .ok_or("Required token missing: <|vision_start|>")?;
+        let image_pad = self
+            .tokenizer
+            .special_token_id("image_pad")
+            .ok_or("Required token missing: <|image_pad|>")?;
+        let vision_end = self
+            .tokenizer
+            .special_token_id("vision_end")
+            .ok_or("Required token missing: <|vision_end|>")?;
+        let im_start = self
+            .tokenizer
+            .special_token_id("im_start")
+            .ok_or("Required token missing: ")?;
+
+        let n_embd = self.model.config().n_embd;
+        // Projector family decides the encoder AND whether a system turn is
+        // required. Qwen3-VL (merger) has per-layer deepstack; Qwen2.5-Omni
+        // (qwen2vl) uses the qwen35-style projector and needs the virtual-human
+        // system prompt.
+        let qwen3vl_family = matches!(self.arch(), "qwen3vl" | "qwen3vlmoe");
+        let mut media = Vec::new();
+        let mut deepstack_layers: Vec<Vec<f32>> = Vec::new();
+        let mut grid_shapes: Vec<(usize, usize)> = Vec::new();
+        let mut rows_total = 0usize;
+        for bytes in images {
+            let image = crate::app::media::decode_image_bytes(bytes)?;
+            let (encoded_media, encoded_deepstack, encoded_grids) = if qwen3vl_family {
+                let encoded = crate::app::text::vision::encode_qwen3vl_image_dynamic(
+                    mmproj.as_ref(),
+                    &image,
+                    self.threads,
+                )?;
+                (encoded.media, encoded.deepstack_layers, encoded.grid_shapes)
+            } else {
+                // Qwen2.5-Omni projector: same encoder type as qwen35, no
+                // deepstack. One grid shape per image.
+                let (grid, embedding) = crate::app::text::vision::encode_qwen35_image_dynamic(
+                    mmproj.as_ref(),
+                    &image,
+                    self.threads,
+                )?;
+                (embedding, Vec::new(), vec![(grid.grid_h, grid.grid_w)])
+            };
+            let rows = if n_embd == 0 {
+                0
+            } else {
+                encoded_media.len() / n_embd
+            };
+            if rows * n_embd != encoded_media.len() {
+                return Err("Vision projector width does not match model width".into());
+            }
+            rows_total += rows;
+            media.extend_from_slice(&encoded_media);
+            for (layer, output) in encoded_deepstack.into_iter().enumerate() {
+                if deepstack_layers.len() <= layer {
+                    deepstack_layers.resize_with(layer + 1, Vec::new);
+                }
+                deepstack_layers[layer].extend_from_slice(&output);
+            }
+            grid_shapes.extend(encoded_grids);
+        }
+        if rows_total == 0 {
+            return Err("Vision encoder produced zero image tokens".into());
+        }
+
+        // Qwen2.5-Omni requires the modality-aware system turn before the user
+        // turn (the CLI injects it for the same family); without it the
+        // assistant role drifts. Skip when one is already present.
+        let mut base_ids: Vec<u32> = Vec::new();
+        if !qwen3vl_family
+            && !prompt_ids
+                .iter()
+                .any(|&id| Some(id) == self.tokenizer.special_token_id("system"))
+        {
+            let system = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.";
+            let system_tokens = self.tokenizer.encode(
+                system,
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            );
+            crate::prompt::append_qwen_message_tokens(
+                &mut base_ids,
+                &self.tokenizer,
+                "system",
+                &system_tokens,
+            )?;
+        }
+        base_ids.extend_from_slice(prompt_ids);
+        let prompt_ids = &base_ids[..];
+
+        // Splice `[vision_start][image_pad x rows][vision_end]` right after the
+        // user turn's role tokens.
+        let role_len = self
+            .tokenizer
+            .encode(
+                "user\n",
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            )
+            .len();
+        let insert_at = prompt_ids
+            .iter()
+            .position(|&id| id == im_start)
+            .map(|first| first + 1 + role_len)
+            .unwrap_or(prompt_ids.len());
+        let mut token_ids = Vec::with_capacity(prompt_ids.len() + rows_total + 2);
+        token_ids.extend_from_slice(&prompt_ids[..insert_at]);
+        token_ids.push(vision_start);
+        token_ids.extend(std::iter::repeat(image_pad).take(rows_total));
+        token_ids.push(vision_end);
+        token_ids.extend_from_slice(&prompt_ids[insert_at..]);
+
+        // Embedding lookup + media injection + media positions, in that order.
+        let mut embeddings = self.model.embed_tokens(&token_ids)?;
+        let deepstack = crate::app::text::vision::inject_qwen_media_embeddings(
+            &token_ids,
+            image_pad,
+            &mut embeddings,
+            &media,
+            &deepstack_layers.concat(),
+            n_embd,
+        )?;
+        let positions = crate::app::text::vision::build_qwen3_media_positions(
+            &token_ids,
+            image_pad,
+            &grid_shapes,
+        )?;
+        Ok((
+            token_ids,
+            Some(embeddings),
+            (!deepstack.is_empty()).then_some(deepstack),
+            positions,
+        ))
     }
 }
 
