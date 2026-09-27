@@ -13,12 +13,22 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **HTTP 文本运行时统一（TextRuntime）** — HTTP 层目前是与 CLI 平行的第二套 arch
-      dispatcher：`TextInner` 只有 Qwen3/Qwen35/Lfm2Moe 三个真变体，llama/nanbeige/exaone/
-      gemma4/hunyuan/lfm2-dense/spark/nemotron_h/falcon-h1/qwen2 加载后全部 501。
-      方案：抽 `TextRuntime` trait + `TokenSink`，`build_text_runtime(arch)` 成为唯一分发点，
-      CLI 与 HTTP 共用；每 arch 一个 commit，CLI 输出逐字节不变。设计与验收标准见
-      [`TEXT_RUNTIME_UNIFICATION.md`](TEXT_RUNTIME_UNIFICATION.md)。
+- [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成 4/6 步：`build_text_runtime(arch)` 成为唯一
+      分发点，`TextInner` 四变体已删除，llama 家族 + lfm2moe 从 501 变为可用；CLI 与 HTTP 对
+      llama 家族已共用采样器 + 停止规则并经哨兵测试验证逐字节一致。设计与验收标准见
+      [`TEXT_RUNTIME_UNIFICATION.md`](TEXT_RUNTIME_UNIFICATION.md)。剩余：qwen3 / qwen35 的
+      sampling 尚未与各自 CLI 对齐（见下方哨兵测试矩阵）。
+- [ ] **lfm2moe CLI 与 HTTP forward 路径分裂（哨兵测试已确认）** — 同一 prompt、同一份 prompt ids、
+      同为 greedy，两条路径吐不同 token：CLI `models/lfm2moe/trunk/forward.rs:208` 的融合
+      prefill+decode 循环 vs HTTP adapter 驱动的 `session::forward_token`
+      （`models/lfm2moe/trunk/session.rs:197`，其中 `is_prefill` 硬编码为 `true`，且每次调用重建
+      shortconv 状态）。实测（LFM2.5-8B-A1B-Q8_0，temp=0）：
+      CLI `解析</think>\n<think>\nThe user says…`，
+      HTTP `解析</think>\nHello! How can I assist you today?`。
+      注意：HTTP 侧输出**更合理**（LFM2.5 的 assistant 回复），CLI 侧第二个 token 就
+      `解析`，怀疑才是错的那条。修复需对齐短卷积状态机与两条循环，并用 llama.cpp oracle
+      验证。**守卫已入库**：`tests/cli_http_agreement.rs`（`RMI_AGREEMENT_MODEL=<gguf>`
+      `cargo test --test cli_http_agreement`），K2-Horizon(llama trunk) 当前通过。
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
 - [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`

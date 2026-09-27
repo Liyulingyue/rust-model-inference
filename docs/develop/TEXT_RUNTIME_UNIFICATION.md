@@ -145,3 +145,40 @@ base 走共享 builder，`enable_thinking` 从请求带下来。
 | lfm2moe 需 `reset()`、各 trunk KV 生命周期不同 | adapter 内保留各自语义，`GenerationRequest` 不假设 |
 | HTTP 现有 F16 硬编码 vs CLI F32 | 迁移动作 = 原样搬进 `RuntimeOptions`，PR 点名，不改数值 |
 | hunyuan v1 依赖 `hy_*` semantic tokens（仅 `pre="hunyuan-dense"` 有） | Tier A 用合成 tokenizer 覆盖 v1/v2 两分支 |
+
+## 7. 实施进度与验证矩阵
+
+分支 `msi-new`，截至 2026-09-27：
+
+| commit | 内容 |
+| --- | --- |
+| `2e62e8a` | 本计划文档 + `TODO.md` 指针 |
+| `6b8d700` | llama 家族解封 501（`build_prompt_tokens` 抽出 + `TextInner::LlamaTrunk`） |
+| `f23a69b` | 删除 `TextInner` 四变体，改为 `build_text_runtime` + 四个 adapter；`ops::generation_runtime` 类型层 |
+| `491249e` | llama 家族 CLI/HTTP 共用 `LlamaSampler` + `stop_after_sample` |
+| `87c199c` | CLI/HTTP 一致性哨兵 `tests/cli_http_agreement.rs`；lfm2moe 共用 `Lfm2MoeSampler` + 停止规则 |
+
+### 一致性哨兵（永久守卫）
+
+```bash
+RMI_AGREEMENT_MODEL=models/K2-Horizon-GGUF/K2-Horizon-1B-BF16.gguf \
+  cargo test --test cli_http_agreement
+```
+
+跑同一 prompt 的 CLI 二进制与 `build_text_runtime` 产物，断言解码文本一致；
+按 arch 分流 prompt builder（llama trunk / lfm2moe / qwen ChatML）。
+无 `RMI_AGREEMENT_MODEL` 时自动跳过。
+
+| arch 家族 | 状态 | 证据 |
+| --- | --- | --- |
+| llama / nanbeige / exaone / k2-horizon / granite | ✅ 一致 | K2-Horizon-1B-BF16，temp=0 与 0.8 均逐字节一致 |
+| lfm2moe | ❌ **forward 路径分裂** | 见 `TODO.md` High Priority；CLI 融合循环 vs `forward_token`（`is_prefill` 硬编码 + 每次重建 shortconv 状态） |
+| qwen3 / qwen35 | ⬜ 未覆盖 | 本地有权重（`Qwen3-0.6B-GGUF`、`Qwen3.5-0.8B-GGUF`），待补哨兵矩阵 |
+
+### 仍未做（有意保留）
+
+- qwen3 / qwen35 的采样与各自 CLI 对齐（各自的 CLI 路径与 adapter 用的函数不同）。
+- CLI 全量委托 `TextRuntime`（llama trunk 的 600 行 forward + `RUST_LLAMA_DEBUG_*` hooks
+  内联在循环里，抽骨架风险高于收益）。
+- HTTP 侧 `top_k` / `top_p` / `repetition_penalty` 仍只 warn（决策 3）；注意 llama adapter
+  已因复用 `LlamaSampler` 而**开始读取** GGUF `general.sampling.*` 默认值。
