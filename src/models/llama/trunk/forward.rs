@@ -2155,3 +2155,74 @@ mod tests {
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 }
+
+
+/// Build the prompt token vector for any llama-family arch
+/// (llama / nanbeige / exaone / k2-horizon / granite / MiniCPM5).
+///
+/// Extracted from the inline logic in `run_inference` so the HTTP layer can
+/// construct the same prompt bytes the CLI uses (without forking the
+/// chat-template selection). Behaviour is identical to the inline block —
+/// see `run_inference` for the rationale on MiniCPM5 / nanbeige detection.
+pub fn build_prompt_tokens(
+    source: &dyn TensorSource,
+    prompt: &str,
+    thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+
+    let is_minicpm5 = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("minicpm"))
+        .unwrap_or(false);
+
+    let prompt_text = if arch == "k2-horizon" {
+        format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
+    } else if arch == "granite" {
+        format!(
+            "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+        )
+    } else if arch == "nanbeige" {
+        if source
+            .metadata("tokenizer.chat_template")
+            .and_then(|v| v.to_string_val())
+            .is_some_and(|t| t.contains(THINK_MARK))
+        {
+            crate::prompt::build_nanbeige_chat_prompt(prompt, thinking)
+        } else {
+            prompt.to_string()
+        }
+    } else if is_minicpm5 {
+        format!(
+            "user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n"
+        )
+    } else {
+        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
+    };
+    eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    let add_special = arch == "nanbeige";
+    let mut body = tokenizer.encode(
+        &prompt_text,
+        EncodeOptions {
+            add_special,
+            parse_special: true,
+        },
+    );
+    if !add_special {
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
+        }
+    }
+    eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+    Ok(body)
+}
+
+const THINK_MARK: &str = concat!("<", "|think", "|", ">");
+const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");

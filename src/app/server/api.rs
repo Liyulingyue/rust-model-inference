@@ -312,6 +312,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
     let tokenizer = text.tokenizer.clone();
     let arch = text.arch.clone();
     let context = text.context_length;
+    let source = text.source.clone();
     let request = request.clone();
     tokio::task::spawn_blocking(move || {
         let mut messages = request.messages.clone();
@@ -327,6 +328,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
             );
         }
         let ids = tools::build_prompt(
+            &*source,
             &tokenizer,
             &arch,
             &messages,
@@ -798,6 +800,44 @@ fn generate(
                     break;
                 }
                 logits = session.forward_token(id)?;
+            }
+            let tail = decoder.finish();
+            if !tail.is_empty() {
+                on_token(&tail);
+            }
+            generated.len()
+        }
+        TextInner::LlamaTrunk { session, .. } => {
+            let mut session = session.lock().map_err(|e| e.to_string())?;
+            session.reset();
+            if cancelled() {
+                return Err("Client disconnected".into());
+            }
+            let im_end_id = text.tokenizer.special_token_id("im_end");
+            let mut decoder = text.tokenizer.streaming_decoder(false);
+            let mut generated = Vec::new();
+            // Prefill the prompt, then decode one token at a time. The
+            // llama trunk exposes `forward_logits_per_token(&[id])` for the
+            // single-token decode path (same loop shape as the Qwen35 arm
+            // above).
+            let mut logits = session.forward_logits_per_token(ids)?;
+            for _step in 0..request.max_tokens {
+                if cancelled() {
+                    return Err("Client disconnected".into());
+                }
+                let id = u32::try_from(super::sample_token_from_logits(
+                    &logits,
+                    request.temperature,
+                ))
+                .map_err(|e| e.to_string())?;
+                if text.tokenizer.eos_id() == Some(id) || im_end_id == Some(id) {
+                    break;
+                }
+                generated.push(id);
+                if !on_token(&decoder.push(id)) {
+                    break;
+                }
+                logits = session.forward_logits_per_token(&[id])?;
             }
             let tail = decoder.finish();
             if !tail.is_empty() {

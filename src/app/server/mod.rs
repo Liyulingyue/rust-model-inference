@@ -16,6 +16,7 @@ use tower_http::cors::CorsLayer;
 use crate::app::cli::{
     normalize_tts_language, parse_cli_options, validate_cli_options, CliOptions, KvFormat,
 };
+use crate::app::text::uses_llama_trunk;
 use crate::app::{compute_embedding, open_or_exit};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
@@ -106,6 +107,12 @@ enum TextInner {
     Lfm2Moe {
         // Lfm2MoeSession borrows from its source; we leak the lifetime to 'static.
         session: Mutex<crate::models::lfm2moe::Lfm2MoeSession<'static>>,
+        _source: Arc<dyn TensorSource>,
+    },
+    LlamaTrunk {
+        // LlamaSession borrows from its source; we leak the lifetime to
+        // 'static (same pattern as Qwen35 / Lfm2Moe).
+        session: Mutex<crate::models::llama::trunk::LlamaSession<'static>>,
         _source: Arc<dyn TensorSource>,
     },
     Fallback {
@@ -834,6 +841,23 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
                 _source: source.clone(),
             }
         }
+        arch if uses_llama_trunk(arch) => {
+            use crate::models::llama::trunk::LlamaSession;
+            let session = LlamaSession::from_source(
+                source.as_ref(),
+                options.threads,
+                crate::app::cli::KvFormat::F32,
+                options.effective_max_context(),
+            )?;
+            // SAFETY: source is held by the backend for the full server
+            // lifetime; we leak the lifetime to satisfy `Box<dyn ...>`.
+            let session: LlamaSession<'static> =
+                unsafe { std::mem::transmute(session) };
+            TextInner::LlamaTrunk {
+                session: Mutex::new(session),
+                _source: source.clone(),
+            }
+        }
         _ => TextInner::Fallback {
             arch: arch.to_string(),
         },
@@ -843,6 +867,9 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
         TextInner::Qwen35 { model, .. } => model.lock().map_err(|e| e.to_string())?.config.n_ctx,
         TextInner::Lfm2Moe { session, .. } => {
             session.lock().map_err(|e| e.to_string())?.config.n_ctx
+        }
+        TextInner::LlamaTrunk { session, .. } => {
+            session.lock().map_err(|e| e.to_string())?.config.max_ctx
         }
         TextInner::Fallback { .. } => 0,
     };
