@@ -143,6 +143,7 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
             temperature,
             ..SamplingParams::default()
         },
+        images: Vec::new(),
     };
     let mut sink = CollectSink::new();
     runtime

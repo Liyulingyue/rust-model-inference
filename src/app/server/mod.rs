@@ -743,11 +743,14 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     // qwen3vl-merge / Qwen2.5-Omni / gemma4 and the multimodal
     // dispatch in `app::text::multimodal` already does the
     // arch-specific opening for us.
-    let mmproj: Option<Arc<dyn TensorSource>> = options
+    // Load the vision projector before the runtime options so image input can
+    // be wired in (the same handle the multimodal JEV endpoints use).
+    let mmp: Option<Arc<dyn TensorSource>> = options
         .mmproj
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
+    let mmproj = mmp.clone();
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -761,7 +764,8 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     )
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
-    .with_prefill_batch_size(prefill_batch_size);
+    .with_prefill_batch_size(prefill_batch_size)
+    .with_mmproj(mmp);
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
             Ok(runtime) => {

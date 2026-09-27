@@ -300,7 +300,14 @@ fn resolve(
     Ok(())
 }
 
-async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, String)> {
+/// What `prompt()` produces: the tokenized prompt plus any images attached to
+/// the (last) user turn.
+struct PromptResult {
+    ids: Vec<u32>,
+    images: Vec<Vec<u8>>,
+}
+
+async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u16, String)> {
     let Backend::Text(text) = state.model.as_ref() else {
         return Err((400, "Server is not running a text model".into()));
     };
@@ -332,7 +339,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
                 },
             );
         }
-        let ids = tools::build_prompt(
+        let (ids, images) = tools::build_prompt(
             &*source,
             &tokenizer,
             &arch,
@@ -355,7 +362,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
                 ),
             ));
         }
-        Ok(ids)
+        Ok(PromptResult { ids, images })
     })
     .await
     .map_err(|e| (500, format!("Prompt worker failed: {e}")))?
@@ -505,8 +512,8 @@ async fn handle(
             )
         }
     };
-    let ids = match prompt(&state, &request).await {
-        Ok(ids) => ids,
+    let PromptResult { ids, images } = match prompt(&state, &request).await {
+        Ok(prompt) => prompt,
         Err((status, e)) => return error(protocol, status, e),
     };
     let prefix = match protocol {
@@ -531,6 +538,7 @@ async fn handle(
                 &state,
                 &request,
                 &ids,
+                &images,
                 |delta| send(&tx, encoder.delta(&delta)),
                 || tx.is_closed(),
             );
@@ -586,6 +594,7 @@ async fn handle(
             &state,
             &request,
             &ids,
+            &images,
             |_| true,
             || cancelled.load(Ordering::Relaxed),
         )?;
@@ -621,7 +630,7 @@ async fn count_tokens(
         return error(Protocol::Anthropic, status, e);
     }
     match prompt(&state, &request).await {
-        Ok(ids) => Json(serde_json::json!({"input_tokens":ids.len()})).into_response(),
+        Ok(prompt) => Json(serde_json::json!({"input_tokens":prompt.ids.len()})).into_response(),
         Err((status, e)) => error(Protocol::Anthropic, status, e),
     }
 }
@@ -657,10 +666,12 @@ async fn delete_response(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate(
     state: &AppState,
     request: &Request,
     ids: &[u32],
+    images: &[Vec<u8>],
     mut emit: impl FnMut(Delta) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
@@ -728,6 +739,7 @@ fn generate(
             repetition_penalty: 1.0,
             ..SamplingParams::default()
         },
+        images: images.to_vec(),
     };
     let generation = runtime.generate(&generation_request, &mut sink)?;
     let completion_tokens = generation.token_ids.len();

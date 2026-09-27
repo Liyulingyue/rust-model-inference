@@ -15,6 +15,18 @@ pub(crate) fn encode_qwen35_image(
     image_path: &Path,
     n_threads_arg: usize,
 ) -> Result<(VisionGrid, Vec<f32>), String> {
+    let image = crate::app::media::decode_image(image_path)?;
+    encode_qwen35_image_dynamic(mmproj_source, &image, n_threads_arg)
+}
+
+/// Encode an already-decoded image. Split out of [`encode_qwen35_image`] so
+/// callers that hold bytes (the HTTP image-content blocks: base64 / data URI /
+/// in-memory uploads) do not have to round-trip through a temp file.
+pub(crate) fn encode_qwen35_image_dynamic(
+    mmproj_source: &dyn TensorSource,
+    image: &image::DynamicImage,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>), String> {
     let start = Instant::now();
     let mut encoder = VisionEncoder::from_source(mmproj_source)
         .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
@@ -27,9 +39,6 @@ pub(crate) fn encode_qwen35_image(
         encoder.config.patch_size,
         encoder.config.spatial_merge_size
     );
-    let load_start = Instant::now();
-    let image = decode_image(image_path)?;
-    let load_time = load_start.elapsed();
     let original_w =
         usize::try_from(image.width()).map_err(|_| "Original image width does not fit usize")?;
     let original_h =
@@ -85,10 +94,8 @@ pub(crate) fn encode_qwen35_image(
     }
     let total = start.elapsed();
     eprintln!(
-        "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
+        "[pipeline-timing] image_total={:.3}s  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
         total.as_secs_f64(),
-        load_time.as_secs_f64(),
-        load_time.as_secs_f64() / total.as_secs_f64() * 100.0,
         preprocess_time.as_secs_f64(),
         preprocess_time.as_secs_f64() / total.as_secs_f64() * 100.0,
         encode_time.as_secs_f64(),

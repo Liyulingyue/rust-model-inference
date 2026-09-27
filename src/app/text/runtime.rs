@@ -68,6 +68,10 @@ pub struct RuntimeOptions {
     pub pool: Arc<crate::core::thread_pool::ComputePool>,
     /// The tokenizer the server built for this model.
     pub tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
+    /// Optional multimodal projector (the server's `--mmproj`). Required for
+    /// image input; without it an image-bearing request fails with a clear
+    /// error instead of silently dropping the images.
+    pub mmproj: Option<Arc<dyn TensorSource>>,
 }
 
 impl RuntimeOptions {
@@ -85,7 +89,13 @@ impl RuntimeOptions {
             source,
             pool,
             tokenizer,
+            mmproj: None,
         }
+    }
+
+    pub fn with_mmproj(mut self, mmproj: Option<Arc<dyn TensorSource>>) -> Self {
+        self.mmproj = mmproj;
+        self
     }
 
     pub fn with_threads(mut self, threads: usize) -> Self {
@@ -393,6 +403,9 @@ pub struct Qwen35TextRuntime {
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     pool: Arc<crate::core::thread_pool::ComputePool>,
     prefill_batch_size: usize,
+    /// Vision projector for image input (`--mmproj`); None means text-only.
+    mmproj: Option<Arc<dyn TensorSource>>,
+    threads: usize,
     arch: String,
 }
 
@@ -409,6 +422,8 @@ impl Qwen35TextRuntime {
             tokenizer: options.tokenizer,
             pool: options.pool,
             prefill_batch_size: options.prefill_batch_size,
+            mmproj: options.mmproj.clone(),
+            threads: options.threads,
             arch: "qwen35".to_string(),
         })
     }
@@ -431,12 +446,26 @@ impl TextRuntime for Qwen35TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        // Image path: expand the prompt with vision placeholders, inject the
+        // projected embeddings, and prefill through `session.step` (which takes
+        // embeddings rather than token ids). Mirrors the CLI multimodal path.
+        //
+        // NOTE: the embedding injection needs `&Qwen35Model`, but
+        // `Qwen35Session` needs `&mut Qwen35Model`, and the mutex is not
+        // reentrant — so the image preparation runs BEFORE the session borrow.
+        let (prefill_ids, prefill_embeddings, prefill_positions) = if request.images.is_empty() {
+            (
+                request.token_ids.clone(),
+                None,
+                crate::models::qwen35::build_qwen35_positions(&request.token_ids, None, &[])?.0,
+            )
+        } else {
+            self.prepare_image_prefill(&request.token_ids, &request.images)?
+        };
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
-        let (positions, _) =
-            crate::models::qwen35::build_qwen35_positions(&request.token_ids, None, &[])?;
         let mut session = crate::models::qwen35::Qwen35Session::new_with_prefill_batch_size(
             &mut model,
-            request.token_ids.len() + request.max_new_tokens,
+            prefill_ids.len() + request.max_new_tokens,
             self.prefill_batch_size,
             self.pool.clone(),
         )?;
@@ -449,12 +478,16 @@ impl TextRuntime for Qwen35TextRuntime {
         for step in 0..request.max_new_tokens {
             let pos = session.next_position();
             let decode_positions = [[pos, pos, pos, 0]];
-            let (tokens, pos_slice) = if step == 0 {
-                (request.token_ids.as_slice(), &positions[..])
+            let logits = if step == 0 {
+                match &prefill_embeddings {
+                    Some(embeddings) => {
+                        session.step(embeddings, prefill_ids.len(), &prefill_positions)?
+                    }
+                    None => session.step_with_tokens(&prefill_ids, &prefill_positions)?,
+                }
             } else {
-                (&token_ids[token_ids.len() - 1..], &decode_positions[..])
+                session.step_with_tokens(&token_ids[token_ids.len() - 1..], &decode_positions)?
             };
-            let logits = session.step_with_tokens(tokens, pos_slice)?;
             let Some(id) = sample_step(&logits, request.sampling.temperature, eos_id, im_end_id)?
             else {
                 finish = Finish::Eos;
@@ -746,5 +779,127 @@ mod tests {
             ),
         ]);
         BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
+    }
+}
+
+impl Qwen35TextRuntime {
+    /// Encode the request's images and expand the prompt for vision prefill.
+    ///
+    /// Returns `(ids, embeddings, positions)`: `ids` is the prompt with
+    /// `[vision_start][image_pad x n_vis][vision_end]` spliced in at the start
+    /// of the last user turn (before the assistant prefix), `embeddings` is the
+    /// full prompt embedding row with the vision projections written over the
+    /// placeholders, and `positions` is the m-rope position list for the
+    /// expanded ids.
+    ///
+    /// Mirrors the CLI's qwen3.5 multimodal path (`app/text/multimodal.rs`),
+    /// including where the placeholder run goes and the
+    /// `inject_vision_embeddings` call.
+    fn prepare_image_prefill(
+        &self,
+        prompt_ids: &[u32],
+        images: &[Vec<u8>],
+    ) -> Result<(Vec<u32>, Option<Vec<f32>>, Vec<[usize; 4]>), String> {
+        // The caller must NOT hold the model lock: we take it here for the
+        // embedding injection and the mutex is not reentrant.
+        let mmproj = self.mmproj.as_ref().ok_or_else(|| {
+            "image input requires a vision projector; start the server with --mmproj <path>"
+                .to_string()
+        })?;
+        let n_embd = self
+            .model
+            .lock()
+            .map(|model| model.config.n_embd)
+            .unwrap_or(0);
+        if n_embd == 0 {
+            return Err("Qwen3.5 config has n_embd = 0".into());
+        }
+        let image_pad = self
+            .tokenizer
+            .special_token_id("image_pad")
+            .ok_or("Required token missing: <|image_pad|>")?;
+        let vision_start = self
+            .tokenizer
+            .special_token_id("vision_start")
+            .ok_or("Required token missing: <|vision_start|>")?;
+        let vision_end = self
+            .tokenizer
+            .special_token_id("vision_end")
+            .ok_or("Required token missing: <|vision_end|>")?;
+        let im_start = self
+            .tokenizer
+            .special_token_id("im_start")
+            .ok_or("Required token missing: <|im_start|>")?;
+
+        // 1. Encode every image, collecting grids and projected embeddings.
+        let mut grids = Vec::with_capacity(images.len());
+        let mut projected: Vec<f32> = Vec::new();
+        let mut n_vis_total = 0usize;
+        for bytes in images {
+            let image = crate::app::media::decode_image_bytes(bytes)?;
+            let (grid, embedding) = crate::app::text::vision::encode_qwen35_image_dynamic(
+                mmproj.as_ref(),
+                &image,
+                self.threads,
+            )?;
+            n_vis_total += grid.token_count();
+            grids.push(grid);
+            projected.extend_from_slice(&embedding);
+        }
+        if n_vis_total == 0 {
+            return Err("Vision encoder produced zero image tokens".into());
+        }
+
+        // 2. Splice the placeholder run into the user turn, right after the
+        //    `user\n` role tokens and BEFORE the user's text — exactly where
+        //    the CLI's multimodal path puts them
+        //    (`append_qwen_message_tokens(..., "user", [vision][pad…][vision][text])`).
+        //    Getting this position wrong silently blinds the model: it answered
+        //    "black" for a solid-blue image when the run sat outside the turn.
+        //    `tools.rs` builds the turn as `` `user\n` <text> ``,
+        //    so the insert point is (first ``) + 1 + len(encode("user\n")).
+        let role_len = self
+            .tokenizer
+            .encode(
+                "user\n",
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            )
+            .len();
+        let insert_at = prompt_ids
+            .iter()
+            .position(|&id| id == im_start)
+            .map(|first| first + 1 + role_len)
+            .unwrap_or(prompt_ids.len());
+        let mut ids = Vec::with_capacity(prompt_ids.len() + n_vis_total + 2);
+        ids.extend_from_slice(&prompt_ids[..insert_at]);
+        ids.push(vision_start);
+        ids.extend(std::iter::repeat(image_pad).take(n_vis_total));
+        ids.push(vision_end);
+        ids.extend_from_slice(&prompt_ids[insert_at..]);
+
+        // 3. m-rope positions over the expanded ids.
+        let (positions, _next) =
+            crate::models::qwen35::build_qwen35_positions(&ids, Some(image_pad), &grids)?;
+
+        // 4. Inject the vision projections over the placeholders.
+        let prompt_i32: Vec<i32> = ids
+            .iter()
+            .copied()
+            .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
+            .collect::<Result<_, _>>()?;
+        let model = self.model.lock().map_err(|e| e.to_string())?;
+        let embeddings = crate::app::text::vision::inject_vision_embeddings(
+            &model,
+            &prompt_i32,
+            Some(i32::try_from(image_pad).map_err(|_| "image_pad exceeds i32")?),
+            &projected,
+            n_vis_total,
+            n_embd,
+        )?;
+        drop(model);
+        Ok((ids, Some(embeddings), positions))
     }
 }

@@ -112,10 +112,11 @@ fn read_local_image(source: &str, path: &str) -> Result<ImageRef, String> {
     Ok(ImageRef::new(bytes, source))
 }
 
-/// Decode bytes into a `DynamicImage`, mirroring `app::media::decode_image`
-/// but for already-in-memory bytes (base64 / uploads).
+/// Decode bytes into a `DynamicImage`. Thin re-export of
+/// `app::media::decode_image_bytes` so protocol-level callers do not have to
+/// reach across modules.
 pub fn decode_image_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
-    image::load_from_memory(bytes).map_err(|error| format!("failed to decode image: {error}"))
+    crate::app::media::decode_image_bytes(bytes)
 }
 
 #[cfg(test)]
