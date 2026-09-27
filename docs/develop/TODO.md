@@ -13,22 +13,47 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成 4/6 步：`build_text_runtime(arch)` 成为唯一
-      分发点，`TextInner` 四变体已删除，llama 家族 + lfm2moe 从 501 变为可用；CLI 与 HTTP 对
-      llama 家族已共用采样器 + 停止规则并经哨兵测试验证逐字节一致。设计与验收标准见
-      [`TEXT_RUNTIME_UNIFICATION.md`](TEXT_RUNTIME_UNIFICATION.md)。剩余：qwen3 / qwen35 的
-      sampling 尚未与各自 CLI 对齐（见下方哨兵测试矩阵）。
-- [ ] **lfm2moe CLI 与 HTTP forward 路径分裂（哨兵测试已确认）** — 同一 prompt、同一份 prompt ids、
-      同为 greedy，两条路径吐不同 token：CLI `models/lfm2moe/trunk/forward.rs:208` 的融合
-      prefill+decode 循环 vs HTTP adapter 驱动的 `session::forward_token`
-      （`models/lfm2moe/trunk/session.rs:197`，其中 `is_prefill` 硬编码为 `true`，且每次调用重建
-      shortconv 状态）。实测（LFM2.5-8B-A1B-Q8_0，temp=0）：
-      CLI `解析</think>\n<think>\nThe user says…`，
-      HTTP `解析</think>\nHello! How can I assist you today?`。
-      注意：HTTP 侧输出**更合理**（LFM2.5 的 assistant 回复），CLI 侧第二个 token 就
-      `解析`，怀疑才是错的那条。修复需对齐短卷积状态机与两条循环，并用 llama.cpp oracle
-      验证。**守卫已入库**：`tests/cli_http_agreement.rs`（`RMI_AGREEMENT_MODEL=<gguf>`
-      `cargo test --test cli_http_agreement`），K2-Horizon(llama trunk) 当前通过。
+- [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成：`build_text_runtime(arch)` 是唯一
+      arch 分发点，`TextInner` 四变体与 server 内手写 decode 循环全部删除；prompt 构造、greedy/
+      温度采样、llama 家族的 rep-penalty+停止规则均单一来源（CLI/HTTP 共用）；
+      `tests/cli_http_agreement.rs` 哨兵对 llama/qwen3/qwen35 三家族 greedy 输出逐字节一致
+      （本地有权重时可复跑）。设计、验证矩阵与 8 条**有意冻结的剩余差异**（KV format、temp>0 RNG、
+      多轮消息、CLI 诊断、请求字段 warn 等）见
+      [`TEXT_RUNTIME_UNIFICATION.md`](TEXT_RUNTIME_UNIFICATION.md) §7。
+- [ ] **lfm2moe 残余 1-ULP 贪心翻转** — forward 路径分裂**已修**
+      （`Lfm2MoeSession::prompt_len` + `is_prefill = pos < prompt_len`；原先硬编码 `true`，
+      decode 阶段把整段 b*x 历史塞回短卷积窗口）。修复后两侧首 token 与前 ~30 字符一致，
+      剩余差异为第 ~30 字符处 `says "` vs `says: "` — greedy 下 top-2 logits 极接近时的
+      1-ULP 翻转（同类现象见 `tests/quantized_inference.rs` 的 q4_k/q6_k 预存失败）。
+      精确定位需逐层 logits 对比 llama.cpp oracle（`RUST_LFM2MOE_DEBUG_LOGITS` 已有），
+      属独立任务。守卫：`tests/cli_http_agreement.rs`。
+- [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
+      `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
+      返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
+      multimodal.rs` + `inject_vision_embeddings`），HTTP 侧 `--mmproj` 只为 `/v1/jev/image*`
+      决策打分端点加载，**没有通用带图对话端点**。
+      对齐目标（已查证 `references/llama.cpp/tools/server/server-common.cpp:1060` 的 `handle_media`）
+      接受四种形式：`http(s)://`（真下载，10MB 上限 + 10s 超时）、`file://`（llama.cpp 要求
+      `--media-path` 白名单）、`data:image/...;base64,...`、裸 base64。OpenAI 官方 API 同样
+      支持 URL 与 base64 两种，故 URL 不是可选装饰而是兼容性的一部分。
+      建议实现（暂缓，等维护者启动）：
+      1. `protocol.rs` 接三种 block：Chat `{"type":"image_url","image_url":{"url":...}}`、
+         Responses `{"type":"input_image","image_url":"..."}`、Anthropic
+         `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`（**裸 base64，
+         字段名不同，别漏**）。
+      2. base64 → `image::DynamicImage`：复用 TTS 的 data-URI 解析与 base64 报错模式
+         （`server/mod.rs:447,522-540`）+ `media.rs:261` 的 `image::load_from_memory`（吃的就是
+         `&[u8]`）。
+      3. **`api.rs:164` 的 chat 路由 `DefaultBodyLimit` 是 4MB**，一张 3MB PNG base64 后必 413；
+         需抬到 32~64MB（ASR 端点已是 64MB，`server/mod.rs:987`）。
+      4. `RuntimeOptions` 加 `images` 字段，`Qwen3TextRuntime` / `Qwen35TextRuntime` 建 vision
+         encoder 并在首步注入 embedding（复用 CLI 已验证路径）；`build_text_runtime` 已是为此
+         留好的扩展点，server 结构无需再改。
+      5. 哨兵扩一档：带图 prompt 的 CLI vs HTTP 对比。
+      安全决策（建议）：远程 URL 需要新增 HTTP client 依赖（仓库现无 reqwest），且给推理服务开
+       SSRF 面（内网探测 / 超时消耗）。建议加 `--allow-remote-images`，**默认关闭**（只允许
+      data URI / 裸 base64 / 本地 `file://`），开启时带 10MB + 10s + 重定向上限护栏。
+      `file://` 是否限制目录需明示：本服务与本机同用户（模型文件即本地路径），但应文档化该姿态。
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
 - [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
