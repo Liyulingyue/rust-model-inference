@@ -26,7 +26,7 @@ futures = "0.3"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["cors"] }
 rand = "0.8"

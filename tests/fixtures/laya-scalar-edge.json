@@ -1,0 +1,49 @@
+{
+  "state": [
+    {
+      "role": "user",
+      "content": "旧消息"
+    },
+    {
+      "role": "user",
+      "content": "退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t 退款 retry <mask> 中文\n tab\t"
+    }
+  ],
+  "max_len": 160,
+  "head_max_len": 48,
+  "questions": {
+    "single": {
+      "type": "choice",
+      "instructions": {
+        "问题": "测试单候选",
+        "flags": [
+          1,
+          false
+        ]
+      },
+      "criteria": {
+        "only": {
+          "desc": "唯一选项",
+          "weights": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    "boundary": {
+      "type": "noul",
+      "instructions": "检测退款意图",
+      "labels": {
+        "false": "否",
+        "true": "是"
+      },
+      "criteria": {
+        "false": false,
+        "true": {
+          "说明": "要求退钱"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "state": "我三月份被重复扣费了，请退还多扣的钱，否则我就取消订阅。",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "应该由哪个部门处理这条请求？",
+      "criteria": {
+        "billing": "账单、扣费和退款",
+        "technical": "软件故障和系统错误",
+        "other": "其他问题"
+      }
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "这条请求有多紧急？",
+      "criteria": ["不紧急", "需要尽快处理", "非常紧急"]
+    },
+    "churn_risk": {
+      "type": "noul",
+      "instructions": "用户是否表示要取消订阅？"
+    }
+  }
+}
