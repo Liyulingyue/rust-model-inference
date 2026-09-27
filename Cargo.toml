@@ -79,3 +79,24 @@ path = "src/bin/dump_emb.rs"
 [[bin]]
 name = "ggufrs"
 path = "src/bin/ggufrs.rs"
+
+# Vulkan example binaries are feature-gated: each starts with
+# `#![cfg(feature = "vulkan")]`, so without the feature the file is
+# empty and `cargo test --examples` complains "main function not found".
+# Mark them `required-features` so `cargo build` / `cargo test` skip them
+# by default and they only build when the user explicitly opts in via
+# `--features vulkan`.
+[[example]]
+name = "vk_bench"
+path = "examples/vk_bench.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "vk_check"
+path = "examples/vk_check.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "vk_ops_check"
+path = "examples/vk_ops_check.rs"
+required-features = ["vulkan"]
