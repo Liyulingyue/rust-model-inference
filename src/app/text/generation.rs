@@ -70,7 +70,7 @@ pub fn run_inference(
         let head_dim = if n_head > 0 { n_embd / n_head } else { 0 };
         let n_embd_q = n_head * head_dim;
         let n_embd_gqa = n_head_kv * head_dim;
-        Arc::new(crate::core::phi3_source::Phi3Source::new(
+        Arc::new(crate::models::phi3::Phi3Source::new(
             source.clone(),
             n_embd_q,
             n_embd_gqa,
