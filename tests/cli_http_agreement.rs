@@ -95,15 +95,15 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
         BPETokenizer::from_gguf_metadata(|k| loader.metadata(k).cloned())
             .expect("tokenizer must build"),
     );
-    let options = RuntimeOptions {
-        threads: 0,
-        kv_format: rust_model_inference::app::cli::KvFormat::F16,
-        max_context: CONTEXT,
-        prefill_batch_size: rust_model_inference::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
-        source: Arc::new(LeakedLoader(loader)),
+    // Same constructor the server uses, plus the context cap; every other
+    // field carries `RuntimeOptions::defaults` (which a unit test pins to the
+    // CLI's resolution), so the sentinel cannot drift from either side.
+    let options = RuntimeOptions::from_model(
+        Arc::new(LeakedLoader(loader)),
         pool,
-        tokenizer: tokenizer.clone(),
-    };
+        tokenizer.clone(),
+    )
+    .with_max_context(CONTEXT);
     let mut runtime = build_text_runtime(&arch, options)
         .unwrap_or_else(|e| panic!("no runtime for arch {arch}: {e}"));
     // Both front-ends must start from identical prompt ids. For llama-family

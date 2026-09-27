@@ -751,15 +751,17 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
-    let runtime_options = crate::app::text::RuntimeOptions {
-        threads: options.threads,
-        kv_format: crate::app::cli::KvFormat::F16,
-        max_context: options.effective_max_context(),
-        prefill_batch_size,
-        source: source.clone(),
-        pool: pool.clone(),
-        tokenizer: tokenizer.clone(),
-    };
+    // Canonical constructor + explicit overrides. Defaults (batch 64, KV F16,
+    // context 8K) come from `RuntimeOptions::defaults`, which a unit test pins
+    // to the CLI's own resolution — so this line cannot drift again.
+    let runtime_options = crate::app::text::RuntimeOptions::from_model(
+        source.clone(),
+        pool.clone(),
+        tokenizer.clone(),
+    )
+    .with_threads(options.threads)
+    .with_max_context(options.effective_max_context())
+    .with_prefill_batch_size(prefill_batch_size);
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
             Ok(runtime) => {

@@ -21,13 +21,42 @@
 use crate::app::cli::KvFormat;
 use crate::core::tensor::TensorSource;
 use crate::models::llama::trunk::{build_prompt_tokens, LlamaSession};
-use crate::ops::generation_runtime::{Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink};
+use crate::ops::generation_runtime::{
+    Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink,
+};
 use crate::ops::generation_runtime::StepAction;
 use crate::ops::sampling::sample_temperature_greedy_or_random;
 use crate::ops::sampling::{Lfm2MoeSampler, LlamaSampler};
 use std::sync::{Arc, Mutex};
 
-/// What the server needs to know to construct a runtime.
+/// Runtime-level defaults, kept in ONE place.
+///
+/// Every value here must stay in lockstep with the CLI's own resolution
+/// (`app::cli::validate::resolve_cli_generation_options`,
+/// `CliOptions::effective_prefill_batch_size` / `effective_max_context`);
+/// `runtime_options_match_cli_defaults` in the test module fails if they
+/// drift. Adapters must never re-derive these.
+pub mod defaults {
+    use crate::app::cli::KvFormat;
+
+    /// Same as `core::prefill::DEFAULT_PREFILL_BATCH_SIZE` (64).
+    pub const PREFILL_BATCH_SIZE: usize = 64;
+    /// Same as `CliOptions::DEFAULT_MAX_CONTEXT` (8192).
+    pub const MAX_CONTEXT: usize = 8192;
+    /// KV format the HTTP layer has always used, and which the adapters were
+    /// verified against. Deliberately *not* the CLI default (F32): changing it
+    /// would shift HTTP numerics, which is outside the unification's
+    /// byte-compatibility guarantee.
+    pub const KV_FORMAT: KvFormat = KvFormat::F16;
+    /// 0 means "let the pool decide", matching `resolve_thread_count(0, _)`.
+    pub const THREADS: usize = 0;
+}
+
+/// What a caller needs to construct a runtime.
+///
+/// Build it with [`RuntimeOptions::from_model`] and override only what the
+/// caller actually wants to change; the remaining fields carry the defaults
+/// above, so the server, tests, and any future front-end cannot disagree.
 pub struct RuntimeOptions {
     pub threads: usize,
     pub kv_format: KvFormat,
@@ -39,6 +68,55 @@ pub struct RuntimeOptions {
     pub pool: Arc<crate::core::thread_pool::ComputePool>,
     /// The tokenizer the server built for this model.
     pub tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
+}
+
+impl RuntimeOptions {
+    /// Canonical constructor: every field starts at `defaults::*`.
+    pub fn from_model(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<crate::core::thread_pool::ComputePool>,
+        tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
+    ) -> Self {
+        Self {
+            threads: defaults::THREADS,
+            kv_format: defaults::KV_FORMAT,
+            max_context: defaults::MAX_CONTEXT,
+            prefill_batch_size: defaults::PREFILL_BATCH_SIZE,
+            source,
+            pool,
+            tokenizer,
+        }
+    }
+
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    pub fn with_max_context(mut self, max_context: usize) -> Self {
+        self.max_context = max_context;
+        self
+    }
+
+    pub fn with_kv_format(mut self, kv_format: KvFormat) -> Self {
+        self.kv_format = kv_format;
+        self
+    }
+
+    pub fn with_prefill_batch_size(mut self, prefill_batch_size: usize) -> Self {
+        self.prefill_batch_size = prefill_batch_size;
+        self
+    }
+
+    /// Session capacity for a model whose GGUF declares `model_n_ctx`.
+    ///
+    /// `min(model_n_ctx, max_context).max(1)` — the CLI's rule. Adapters must
+    /// use this instead of sizing to `prompt + max_new_tokens`: capacity lays
+    /// out the KV cache and the chunked-prefill grouping, and a different
+    /// value changes the numerics (the qwen3 `Hi!` vs `Hello!` split).
+    pub fn capacity_for(&self, model_n_ctx: usize) -> usize {
+        model_n_ctx.min(self.max_context).max(1)
+    }
 }
 
 /// Build the per-arch runtime. Returns `None` for archs this pass does not
@@ -214,27 +292,25 @@ pub struct Qwen3TextRuntime {
     model: Arc<crate::models::qwen3::Qwen3Model>,
     tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
     pool: Arc<crate::core::thread_pool::ComputePool>,
-    prefill_batch_size: usize,
-    kv_format: KvFormat,
-    max_context: usize,
+    /// Held so capacity / batch come from the one place that owns them.
+    options: RuntimeOptions,
     arch: String,
 }
 
 impl Qwen3TextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
+        let arch = arch_of(&options.source);
         let model = crate::models::qwen3::Qwen3Model::from_source(
             options.source.clone(),
             options.tokenizer.clone(),
             options.pool.clone(),
         )?;
         Ok(Self {
-            kv_format: KvFormat::F16,
             model: Arc::new(model),
-            tokenizer: options.tokenizer,
-            pool: options.pool,
-            prefill_batch_size: options.prefill_batch_size,
-            max_context: options.max_context,
-            arch: arch_of(&options.source),
+            tokenizer: options.tokenizer.clone(),
+            pool: options.pool.clone(),
+            options,
+            arch,
         })
     }
 }
@@ -253,20 +329,11 @@ impl TextRuntime for Qwen3TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
-        // Capacity matches the CLI: `min(max_context, model n_ctx)`. Sizing it
-        // to `prompt + max_new_tokens` instead changes the KV layout and, with
-        // it, the chunked-prefill reduction grouping (the sentinel caught a
-        // first-token divergence that way).
-        let capacity = self
-            .model
-            .config()
-            .n_ctx
-            .min(self.max_context)
-            .max(1);
+        let capacity = self.options.capacity_for(self.model.config().n_ctx);
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
             capacity,
-            self.kv_format,
+            self.options.kv_format,
             crate::KvLifecycle::Ephemeral,
         )?;
         let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, 0, 0, 0]).collect();
@@ -279,7 +346,7 @@ impl TextRuntime for Qwen3TextRuntime {
         let options_qwen3 = crate::models::qwen3::Qwen3GenerateOptions {
             max_new_tokens: request.max_new_tokens,
             temperature: request.sampling.temperature,
-            prefill_batch_size: self.prefill_batch_size,
+            prefill_batch_size: self.options.prefill_batch_size,
         };
         let mut text = String::new();
         let mut finish = Finish::Limit;
@@ -552,4 +619,140 @@ pub fn llama_prompt_tokens(
     thinking: bool,
 ) -> Result<Vec<u32>, String> {
     build_prompt_tokens(source, prompt, thinking)
+}
+#[cfg(test)]
+mod tests {
+    use super::defaults;
+    use super::RuntimeOptions;
+    use crate::app::cli::{validate_cli_options, CliOptions};
+    use std::sync::Arc;
+
+    fn cli_defaults() -> CliOptions {
+        // `--model x` is the minimum the validator needs to reach the
+        // generation-option resolution.
+        CliOptions {
+            model: std::path::PathBuf::from("x.gguf").into(),
+            ..CliOptions::default()
+        }
+    }
+
+    /// The whole point of `RuntimeOptions::defaults`: they must equal what the
+    /// CLI resolves for the same (absent) flags. If the CLI changes a default,
+    /// this test fails and forces both to move together.
+    #[test]
+    fn runtime_options_match_cli_defaults() {
+        let options = cli_defaults();
+        validate_cli_options(&options).expect("minimal CliOptions must validate");
+        assert_eq!(
+            defaults::PREFILL_BATCH_SIZE,
+            options.effective_prefill_batch_size().unwrap(),
+            "prefill batch size drifted from the CLI"
+        );
+        assert_eq!(
+            defaults::MAX_CONTEXT,
+            options.effective_max_context(),
+            "max context drifted from the CLI"
+        );
+        assert_eq!(
+            defaults::PREFILL_BATCH_SIZE,
+            crate::core::prefill::DEFAULT_PREFILL_BATCH_SIZE,
+            "prefill default must mirror core::prefill"
+        );
+    }
+
+    /// `capacity_for` is the single capacity rule adapters must use.
+    #[test]
+    fn capacity_for_is_the_cli_rule() {
+        let source: Arc<dyn crate::core::tensor::TensorSource> =
+            Arc::new(StubSource);
+        let pool = Arc::new(crate::core::thread_pool::ComputePool::new(1));
+        let tokenizer = Arc::new(stub_tokenizer());
+        let options = RuntimeOptions::from_model(source, pool, tokenizer);
+
+        // Default max_context (8192) caps models with a bigger n_ctx …
+        assert_eq!(options.capacity_for(1_000_000), defaults::MAX_CONTEXT);
+        // … and a smaller n_ctx wins when the model is smaller.
+        assert_eq!(options.capacity_for(512), 512);
+        // Never zero, even for absurd metadata.
+        assert_eq!(options.capacity_for(0), 1);
+
+        // An override must take effect (server passes --max-context through).
+        let capped = RuntimeOptions::from_model(
+            Arc::new(StubSource),
+            Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+            Arc::new(stub_tokenizer()),
+        )
+        .with_max_context(256);
+        assert_eq!(capped.capacity_for(4096), 256);
+        assert_eq!(capped.capacity_for(128), 128);
+    }
+
+    /// Every field starts at `defaults::*` — a caller that constructs via
+    /// `from_model` and changes nothing must get the documented behaviour.
+    #[test]
+    fn from_model_fills_every_default() {
+        let options = RuntimeOptions::from_model(
+            Arc::new(StubSource),
+            Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+            Arc::new(stub_tokenizer()),
+        );
+        assert_eq!(options.threads, defaults::THREADS);
+        assert_eq!(options.max_context, defaults::MAX_CONTEXT);
+        assert_eq!(options.prefill_batch_size, defaults::PREFILL_BATCH_SIZE);
+        assert!(matches!(options.kv_format, crate::app::cli::KvFormat::F16));
+    }
+
+    struct StubSource;
+    impl crate::core::tensor::TensorSource for StubSource {
+        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    fn stub_tokenizer() -> crate::core::tokenizer::BPETokenizer {
+        use crate::core::tokenizer::BPETokenizer;
+        use std::collections::HashMap;
+        let metadata: HashMap<String, crate::core::tensor::MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".to_string(),
+                crate::core::tensor::MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".to_string(),
+                crate::core::tensor::MetaValue::String("qwen2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                crate::core::tensor::MetaValue::Array(
+                    crate::core::tensor::MetaValueType::String,
+                    ["u", "s", "e", "r", "\u{010a}", "H", "i"]
+                        .map(|v| crate::core::tensor::MetaValue::String(v.into()))
+                        .to_vec(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".to_string(),
+                crate::core::tensor::MetaValue::Array(
+                    crate::core::tensor::MetaValueType::Uint32,
+                    [1u32, 1, 1, 1, 1, 1, 1]
+                        .map(crate::core::tensor::MetaValue::Uint32)
+                        .to_vec(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".to_string(),
+                crate::core::tensor::MetaValue::Array(
+                    crate::core::tensor::MetaValueType::String,
+                    vec![],
+                ),
+            ),
+        ]);
+        BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
+    }
 }
