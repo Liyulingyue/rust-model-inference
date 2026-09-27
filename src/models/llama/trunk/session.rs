@@ -250,6 +250,21 @@ impl<'a> LlamaSession<'a> {
             self.forward_one_token(token_id)?;
             // `forward_one_token` writes `scratch.logits` only on
             // every step (matches the legacy loop); capture the last.
+            if std::env::var_os("RUST_LLAMA_DUMP").is_some() {
+                let top: Vec<(usize, f32)> = {
+                    let mut indexed: Vec<(usize, f32)> = self
+                        .scratch
+                        .logits
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &v)| (i, v))
+                        .collect();
+                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    indexed.truncate(5);
+                    indexed
+                };
+                eprintln!("[rust_llama] step={token_id} top5={top:?}");
+            }
             last_logits = Some(self.scratch.logits.clone());
         }
         Ok(last_logits.unwrap_or_default())
@@ -273,9 +288,14 @@ impl<'a> LlamaSession<'a> {
         prompt_tokens: &[u32],
         batch_size: usize,
     ) -> Result<Vec<f32>, String> {
-        let owned: Vec<u32> = prompt_tokens.to_vec();
-        let last = ChunkedPrefill::prefill(self, &owned, batch_size)?;
-        Ok(last.unwrap_or_default())
+        // `forward_logits_chunked_chunk` is the chunked-prefill body
+        // and only writes `scratch.logits` on the final projected step
+        // — only `forward_logits_per_token`/`forward_one_token` do.
+        // For correctness on the per-token (B = 1) path used by
+        // chat/REST callers we always run the legacy loop and let
+        // it advance `seq_len` exactly like the chunked body.
+        let _ = batch_size;
+        self.forward_logits_per_token(prompt_tokens)
     }
 
     /// Multi-row chunked forward. `rows` tokens at consecutive
