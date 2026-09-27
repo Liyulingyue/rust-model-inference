@@ -171,7 +171,7 @@ RMI_AGREEMENT_MODEL=models/K2-Horizon-GGUF/K2-Horizon-1B-BF16.gguf \
 
 | arch 家族 | 状态 | 证据 |
 | --- | --- | --- |
-| llama / nanbeige / exaone / k2-horizon / granite | ✅ 一致 | K2-Horizon-1B-BF16，temp=0 与 0.8 均逐字节一致 |
+| llama / nanbeige / exaone / k2-horizon / granite | ✅ greedy 一致 | K2-Horizon-1B-BF16 |
 | lfm2moe | 🟡 forward 分裂**已修**，余 1-ULP 贪心翻转 | 修复：`Lfm2MoeSession::prompt_len` + `is_prefill = pos < prompt_len`（原先硬编码 `true`，decode 阶段把整段 b*x 历史塞回短卷积窗口）。剩余差异：第 ~30 字符处 `says "` vs `says: "`，greedy 下 top-2 logits 极接近时的 1-ULP 翻转，两侧首 token 与前 30 字符完全一致；精确定位需逐层 logits 对比（独立任务） |
 | qwen3 | ✅ greedy 一致 | `Qwen3-0.6B-Q8_0`。两处真实因素：session capacity 须为 `min(n_ctx, max_context)`（原先 `prompt+max_new`，改变 KV 布局与 chunked prefill 归约），prefill batch 须为默认 64 |
 | qwen35 | ✅ greedy 一致 | `Qwen3.5-0.8B-Q8_0`，同 capacity/batch 口径 |
@@ -191,9 +191,24 @@ RMI_AGREEMENT_MODEL=models/K2-Horizon-GGUF/K2-Horizon-1B-BF16.gguf \
 | `ops::sampling`（源自旧 server） | `max_by(partial_cmp)` 平局取**末个**；NaN 会 panic；空 logits 静默返回 0 | 删除 |
 | `spark::trunk::forward` | 用 `softmax_approx_inplace`（近似 exp），与 arch 的既有精度路线一致 | 保留不动 |
 
+### 剩余差异（有意冻结，改动前先读这里）
+
+统一后仍然存在的差异。每一条都是**决定保留**而非遗漏；动任何一条都属于
+行为变更，需要单独评估与哨兵复验。
+
+| # | 差异 | 现状 | 为什么冻结 |
+| --- | --- | --- | --- |
+| 1 | **KV format** | HTTP/adapters `F16`；CLI 默认 `F32` | `RuntimeOptions::defaults::KV_FORMAT` 显式固定为 F16 并有注释。HTTP 一直用 F16 且哨兵按 F16 验证；切 F32 会改变 HTTP 的数值输出，超出本次"字节兼容"保证 |
+| 2 | **temp>0 的随机源** | CLI 与 adapter 各自 `rand::random()`，无共享种子 | 字节一致原理上不可达（要共享种子是独立工程）。哨兵因此只断言 greedy——而 greedy 正是 forward 路径/采样器分裂会暴露的地方 |
+| 3 | **HTTP 的 llama-family 请求只用最后一条 user turn** | `tools.rs` 的 llama 分支取 `messages.iter().rev().find(user)`，system/assistant 历史被忽略；qwen 系走完整 `tools::build_prompt`（含 tools/多轮/instructions） | llama 家族的 chat 模板本就无 system turn、也无 tool 语法；CLI 侧同样只接受单轮 `--prompt`。要支持多轮需先给这些模板定义历史格式 |
+| 4 | **CLI 独有的诊断能力** | `--bench` / `--profile` / `--dump-logits` / `--chat-template` / `--kv-cache` / `--repetition-penalty` / `RUST_LLAMA_DEBUG_*` / `RUST_LFM2MOE_DEBUG_LOGITS` / `RMI_PARITY_TRACE` | 这些是**终端/调试**关注点，HTTP 无对应且不应有。属于应保留的分层差异 |
+| 5 | **HTTP 请求字段仍被 warn-ignore** | `top_k` / `top_p` / `seed` / `frequency_penalty` / `presence_penalty` / `logprobs` 等仍只记录不使用（决策 3） | 注意这与 #6 是两层：请求字段被忽略，adapter 内部仍会读 GGUF 默认值 |
+| 6 | **llama adapter 读 GGUF 采样默认值** | `LlamaSampler` 从 `general.sampling.{top_k,top_p}` 取默认（40/0.95），请求里没传也用 | 这是与 CLI 对齐的**修复**（修 bug），但意味着 HTTP 对 llama 家族的采样行为不再是"只有 temperature" |
+| 7 | **spark 的采样器独立** | `spark::trunk::forward` 自持 `softmax_approx_inplace`（近似 exp） | 与该 arch 既定的近似精度路线一致；统一它会改变 spark 的数值行为 |
+| 8 | **lfm2moe 的 1-ULP** | greedy 下第 ~30 字符 `says "` vs `says: "` | top-2 logits 极接近时的贪心翻转；定位需逐层 logits 对比 llama.cpp oracle（独立任务，见 `TODO.md`） |
+
 ### 仍未做（有意保留）
 
-- qwen3 / qwen35 的采样与各自 CLI 对齐（各自的 CLI 路径与 adapter 用的函数不同）。
 - CLI 全量委托 `TextRuntime`（llama trunk 的 600 行 forward + `RUST_LLAMA_DEBUG_*` hooks
   内联在循环里，抽骨架风险高于收益）。
 - HTTP 侧 `top_k` / `top_p` / `repetition_penalty` 仍只 warn（决策 3）；注意 llama adapter
