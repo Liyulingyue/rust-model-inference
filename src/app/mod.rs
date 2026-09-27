@@ -7,7 +7,7 @@ pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
 pub mod server;
-pub(crate) mod text;
+pub mod text;
 pub(crate) mod tts;
 pub(crate) mod yue2;
 

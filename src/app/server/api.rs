@@ -131,8 +131,9 @@ impl ResponsesStore {
     }
 }
 
-use super::{AppState, Backend, TextInner};
+use super::{AppState, Backend};
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::ops::generation_runtime::{Flow, GenerationRequest, SamplingParams, TokenSink};
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
     http::StatusCode,
@@ -300,7 +301,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
     let Backend::Text(text) = state.model.as_ref() else {
         return Err((400, "Server is not running a text model".into()));
     };
-    if matches!(text.inner, TextInner::Fallback { .. }) {
+    if text.runtime.is_none() {
         return Err((
             501,
             format!(
@@ -312,6 +313,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
     let tokenizer = text.tokenizer.clone();
     let arch = text.arch.clone();
     let context = text.context_length;
+    let source = text.source.clone();
     let request = request.clone();
     tokio::task::spawn_blocking(move || {
         let mut messages = request.messages.clone();
@@ -327,6 +329,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
             );
         }
         let ids = tools::build_prompt(
+            &*source,
             &tokenizer,
             &arch,
             &messages,
@@ -691,124 +694,38 @@ fn generate(
         stopped = stop.hit.is_some();
         !stopped
     };
-    let completion_tokens = match &text.inner {
-        TextInner::Qwen3 { model } => {
-            let mut session = super::Qwen3Session::new_with_kv_state(
-                model,
-                ids.len() + request.max_tokens,
-                super::KvFormat::F16,
-                super::KvLifecycle::Ephemeral,
-            )?;
-            let positions: Vec<_> = (0..ids.len()).map(|i| [i, 0, 0, 0]).collect();
-            let generation = session.generate_streaming_until(
-                super::Qwen3Input {
-                    token_ids: ids,
-                    positions: &positions,
-                    embeddings: None,
-                    deepstack_embeddings: None,
-                },
-                super::Qwen3GenerateOptions {
-                    max_new_tokens: request.max_tokens,
-                    temperature: request.temperature,
-                    prefill_batch_size: text.prefill_batch_size,
-                },
-                1.0,
-                &mut on_token,
-            )?;
-            generation.token_ids.len()
-        }
-        TextInner::Qwen35 { model, .. } => {
-            let mut model = model.lock().map_err(|e| e.to_string())?;
-            if cancelled() {
-                return Err("Client disconnected".into());
-            }
-            let (positions, _) = super::build_qwen35_positions(ids, None, &[])?;
-            let mut session = super::Qwen35Session::new_with_prefill_batch_size(
-                &mut model,
-                ids.len() + request.max_tokens,
-                text.prefill_batch_size,
-                text.pool.clone(),
-            )?;
-            let mut decoder = text.tokenizer.streaming_decoder(false);
-            let mut generated = Vec::new();
-            for step in 0..request.max_tokens {
-                if cancelled() {
-                    return Err("Client disconnected".into());
-                }
-                let pos = session.next_position();
-                let decode_positions = [[pos, pos, pos, 0]];
-                let (tokens, positions) = if step == 0 {
-                    (ids, &positions[..])
-                } else {
-                    (&generated[generated.len() - 1..], &decode_positions[..])
-                };
-                let logits = session.step_with_tokens(tokens, positions)?;
-                let id = u32::try_from(super::sample_token_from_logits(
-                    &logits,
-                    request.temperature,
-                ))
-                .map_err(|e| e.to_string())?;
-                if text.tokenizer.eos_id() == Some(id)
-                    || text.tokenizer.special_token_id("im_end") == Some(id)
-                {
-                    break;
-                }
-                generated.push(id);
-                if !on_token(&decoder.push(id)) {
-                    break;
-                }
-            }
-            let tail = decoder.finish();
-            if !tail.is_empty() {
-                on_token(&tail);
-            }
-            generated.len()
-        }
-        TextInner::Lfm2Moe { session, .. } => {
-            let mut session = session.lock().map_err(|e| e.to_string())?;
-            session.reset();
-            if cancelled() {
-                return Err("Client disconnected".into());
-            }
-            let mut decoder = text.tokenizer.streaming_decoder(false);
-            let mut generated = Vec::new();
-            let eos = text.tokenizer.eos_id();
-
-            // Prefill: feed prompt tokens one by one, reusing KV cache.
-            let mut logits = Vec::new();
-            for &token_id in ids {
-                logits = session.forward_token(token_id)?;
-            }
-
-            // Decode: generate new tokens one by one, reusing KV cache.
-            for _step in 0..request.max_tokens {
-                if cancelled() {
-                    return Err("Client disconnected".into());
-                }
-                let id = u32::try_from(super::sample_token_from_logits(
-                    &logits,
-                    request.temperature,
-                ))
-                .map_err(|e| e.to_string())?;
-                if eos == Some(id) {
-                    break;
-                }
-                generated.push(id);
-                if !on_token(&decoder.push(id)) {
-                    break;
-                }
-                logits = session.forward_token(id)?;
-            }
-            let tail = decoder.finish();
-            if !tail.is_empty() {
-                on_token(&tail);
-            }
-            generated.len()
-        }
-        TextInner::Fallback { arch } => {
-            return Err(format!("Architecture {arch:?} is unsupported"))
-        }
+    let Some(handle) = &text.runtime else {
+        return Err(format!("Architecture {:?} is unsupported", text.arch));
     };
+    let mut runtime = handle.lock().map_err(|e| e.to_string())?;
+    // Bridge the runtime's `TokenSink` to the existing `on_token` closure so
+    // the StopFilter / tool-call parser plumbing above is untouched.
+    struct SinkBridge<'a> {
+        on_token: &'a mut dyn FnMut(&str) -> bool,
+    }
+    impl TokenSink for SinkBridge<'_> {
+        fn push_text(&mut self, chunk: &str) -> Flow {
+            if (self.on_token)(chunk) {
+                Flow::Continue
+            } else {
+                Flow::Stop
+            }
+        }
+    }
+    let mut sink = SinkBridge {
+        on_token: &mut on_token,
+    };
+    let generation_request = GenerationRequest {
+        token_ids: ids.to_vec(),
+        max_new_tokens: request.max_tokens,
+        sampling: SamplingParams {
+            temperature: request.temperature,
+            repetition_penalty: 1.0,
+            ..SamplingParams::default()
+        },
+    };
+    let generation = runtime.generate(&generation_request, &mut sink)?;
+    let completion_tokens = generation.token_ids.len();
     if let Some(error) = callback_error {
         return Err(error);
     }
@@ -995,9 +912,7 @@ mod http_tests {
                 model_path: None,
                 mmproj: None,
                 mmproj_path: None,
-                inner: super::super::TextInner::Fallback {
-                    arch: "unimplemented".into(),
-                },
+                runtime: None,
             })),
             model_name: "local".into(),
             responses: std::sync::Arc::new(std::sync::Mutex::new(ResponsesStore::default())),

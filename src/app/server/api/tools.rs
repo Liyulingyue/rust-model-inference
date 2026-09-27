@@ -1,4 +1,5 @@
 use super::protocol::{Delta, Message, Tool, ToolCall, ToolChoice};
+use crate::core::tensor::TensorSource;
 use crate::{
     prompt::{build_qwen_chat_prompt, QwenMessage},
     BPETokenizer,
@@ -30,6 +31,11 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
         "qwen3" | "qwen3vl" | "lfm2moe" => Ok(false),
         "qwen35" => Ok(true),
+        // Llama-family archs go through the CLI prompt builder
+        // (`llama::trunk::build_prompt_tokens`) and don't support tool
+        // prompting. They are accepted here so `build_prompt` returns Ok
+        // when no tools are present.
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -68,6 +74,7 @@ fn validate_tools(tools: &[Tool], choice: &ToolChoice) -> Result<(), String> {
 }
 
 pub fn build_prompt(
+    source: &dyn TensorSource,
     tokenizer: &BPETokenizer,
     arch: &str,
     messages: &[Message],
@@ -77,6 +84,26 @@ pub fn build_prompt(
     let qwen35 = is_qwen35(arch)?;
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
+    }
+    let llama_family = matches!(
+        arch,
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite"
+    );
+    if llama_family {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for llama-family architectures".into());
+        }
+        // The llama trunk prompt builder takes the raw `prompt` string of
+        // the single user turn. System turns are ignored (their chat
+        // templates don't include a system turn). thinking=false for HTTP
+        // (no flag).
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
+        let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
+        return Ok(ids);
     }
     validate_tools(tools, choice)?;
     if messages.is_empty() {
@@ -924,6 +951,22 @@ mod tests {
         BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
     }
 
+    struct TestSource;
+    impl crate::core::tensor::TensorSource for TestSource {
+        fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+    fn source() -> std::sync::Arc<dyn crate::core::tensor::TensorSource> {
+        std::sync::Arc::new(TestSource)
+    }
+
     #[test]
     fn native_prompts_preserve_tools_history_and_chatml_boundaries() {
         let tokenizer = tokenizer();
@@ -964,8 +1007,15 @@ mod tests {
             },
         ];
         for arch in ["qwen3", "qwen35"] {
-            let tokens =
-                build_prompt(&tokenizer, arch, &messages, &tools(), &ToolChoice::Auto).unwrap();
+            let tokens = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &tools(),
+                &ToolChoice::Auto,
+            )
+            .unwrap();
             assert_eq!(
                 tokens.iter().filter(|&&t| t == 257).count(),
                 4,
@@ -992,6 +1042,7 @@ mod tests {
             }
         }
         assert!(build_prompt(
+            source().as_ref(),
             &tokenizer,
             "qwen3vl",
             &messages,
@@ -1000,7 +1051,15 @@ mod tests {
         )
         .unwrap_err()
         .contains("unsupported"));
-        assert!(build_prompt(&tokenizer, "llama", &messages, &tools(), &ToolChoice::Auto).is_err());
+        assert!(build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "llama",
+            &messages,
+            &tools(),
+            &ToolChoice::Auto
+        )
+        .is_err());
     }
 
     #[test]
@@ -1022,7 +1081,15 @@ mod tests {
         ];
         for arch in ["qwen3", "qwen3vl", "qwen35"] {
             let prompt = tokenizer.decode(
-                &build_prompt(&tokenizer, arch, &messages, &[], &ToolChoice::Auto).unwrap(),
+                &build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                )
+                .unwrap(),
                 true,
             );
             assert!(prompt.contains(
@@ -1065,8 +1132,15 @@ mod tests {
             });
             for arch in ["qwen3", "qwen35"] {
                 let prompt = tokenizer.decode(
-                    &build_prompt(&tokenizer, arch, &messages, &tools(), &ToolChoice::Auto)
-                        .unwrap(),
+                    &build_prompt(
+                        source().as_ref(),
+                        &tokenizer,
+                        arch,
+                        &messages,
+                        &tools(),
+                        &ToolChoice::Auto,
+                    )
+                    .unwrap(),
                     true,
                 );
                 assert_eq!(

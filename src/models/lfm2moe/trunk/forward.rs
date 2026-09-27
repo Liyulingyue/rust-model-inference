@@ -185,9 +185,8 @@ pub fn run_inference_with_batch(
 
     let eos_id = tokenizer.eos_id();
     let mut generated_tokens: Vec<u32> = Vec::new();
-    let generated_token_counts: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
+    let mut lfm2moe_sampler = crate::ops::sampling::Lfm2MoeSampler::new();
+    lfm2moe_sampler.prime(&input_tokens);
     let mut decoder = tokenizer.streaming_decoder(false);
 
     let total_steps = input_tokens.len() + max_tokens;
@@ -352,48 +351,28 @@ pub fn run_inference_with_batch(
             let _ = io::stderr().write_all(line.as_bytes());
             let _ = io::stderr().flush();
         }
-        crate::ops::sampling::apply_repetition_penalty(
-            logits,
-            &generated_token_counts,
-            repetition_penalty,
-        );
-        let chosen = if temperature <= 0.0 {
-            logits
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        } else {
-            vec_scale_f32(logits, 1.0 / temperature);
-            let top = sample_top_k(logits, 40);
-            let mut rng = 0u64;
-            for &t in &all_tokens {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
-            }
-            let r = ((rng >> 33) as f32) / (1u32 << 31) as f32;
-            let mut cum = 0.0f32;
-            let mut chosen = top[0].0;
-            for &(idx, prob) in &top {
-                cum += prob;
-                if cum >= r {
-                    chosen = idx;
-                    break;
-                }
-            }
-            chosen
-        };
-
-        let chosen_id = chosen as u32;
-        if eos_id == Some(chosen_id) {
-            break;
-        }
-        if generated_tokens.len() >= max_tokens {
+        // Shared lfm2moe sampler (rep-penalty + greedy / top-40 draw with a
+        // history-seeded RNG). The HTTP adapter uses the same type, so the
+        // two front-ends emit identical token ids.
+        let chosen_id = lfm2moe_sampler.sample(logits, temperature, repetition_penalty);
+        // Shared stop rule. `im_end` is deliberately NOT a stop id for
+        // lfm2moe: its chat template has no ChatML assistant turn, so the
+        // model never emits <|im_end|>; treating it as a stop would truncate
+        // answers at the first special token. (The llama trunk, whose template
+        // does use ChatML, does treat it as a stop.)
+        if crate::ops::generation_runtime::stop_after_sample(
+            chosen_id,
+            generated_tokens.len(),
+            max_tokens,
+            false,
+            eos_id,
+            None,
+        ) != crate::ops::generation_runtime::StepAction::Continue
+        {
             break;
         }
 
         generated_tokens.push(chosen_id);
-        all_tokens.push(chosen_id);
 
         let text = decoder.push(chosen_id);
         print!("{}", text);
