@@ -7,6 +7,8 @@
 //! encourage them. Callers must pass a count map that tracks each
 //! generated token.
 
+use crate::ops::vec_scale_f32;
+
 pub fn apply_repetition_penalty(
     logits: &mut [f32],
     token_counts: &std::collections::HashMap<u32, u32>,
@@ -228,4 +230,240 @@ pub fn sample_llama_cpp(
         }
     }
     chosen
+}
+
+/// Canonical greedy / temperature sampler for the text front-ends.
+///
+/// This is the implementation the qwen3 trunk has always used, moved here so
+/// the CLI (qwen3 + qwen35 paths) and every HTTP adapter share one sampler.
+/// It validates its input instead of panicking or silently returning 0:
+///
+/// * empty logits      -> `Err`
+/// * non-finite logits -> `Err`
+/// * exact logit ties  -> the FIRST index wins (strict `>`), which is what
+///   `max_by(partial_cmp)` did *not* guarantee (it keeps the last maximum).
+///
+/// `temperature <= 0` is greedy; above that it softmaxes with max subtraction
+/// and draws against `rand::random()`.
+pub fn sample_greedy_or_temperature(logits: &[f32], temperature: f32) -> Result<u32, String> {
+    if temperature <= 0.0 {
+        return greedy_checked(logits);
+    }
+    let (&first, rest) = logits
+        .split_first()
+        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
+    if !first.is_finite() {
+        return Err("Cannot sample non-finite logits".into());
+    }
+    let mut max_logit = first;
+    for &logit in rest {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        max_logit = max_logit.max(logit);
+    }
+    let sum: f32 = logits
+        .iter()
+        .map(|logit| ((logit - max_logit) / temperature).exp())
+        .sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("Sampling probability sum is not finite and positive".into());
+    }
+    let target = rand::random::<f32>() * sum;
+    let mut cumulative = 0.0f32;
+    for (index, &logit) in logits.iter().enumerate() {
+        cumulative += ((logit - max_logit) / temperature).exp();
+        if cumulative >= target {
+            return u32::try_from(index).map_err(|_| "Token ID does not fit u32".into());
+        }
+    }
+    u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
+}
+
+/// Greedy argmax with the same validation as [`sample_greedy_or_temperature`].
+/// First index wins on exact ties (strict `>`).
+pub fn greedy_checked(logits: &[f32]) -> Result<u32, String> {
+    let (&first, rest) = logits
+        .split_first()
+        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
+    if !first.is_finite() {
+        return Err("Cannot sample non-finite logits".into());
+    }
+    let mut best_id = 0usize;
+    let mut best = first;
+    for (index, &logit) in rest.iter().enumerate() {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        if logit > best {
+            best = logit;
+            best_id = index + 1;
+        }
+    }
+    u32::try_from(best_id).map_err(|_| "Token ID does not fit u32".into())
+}
+
+/// Stateful llama-family sampler: repetition penalty + llama.cpp chain
+/// (`top_k -> top_p -> temperature -> dist sample`) with an RNG seeded from
+/// the generated history so a prompt is reproducible.
+///
+/// Extracted verbatim from `llama::trunk::run_inference_tokens` so the CLI
+/// and the HTTP `LlamaTextRuntime` adapter cannot drift apart: one
+/// implementation, two front-ends.
+#[derive(Default)]
+pub struct LlamaSampler {
+    /// Every token seen so far (prompt + generated), used to seed the RNG.
+    all_tokens: Vec<u32>,
+    /// Per-token repeat counts, used by `apply_repetition_penalty`.
+    token_counts: std::collections::HashMap<u32, u32>,
+    top_k: usize,
+    top_p: f32,
+}
+
+impl LlamaSampler {
+    /// `top_k` / `top_p` usually come from the GGUF `general.sampling.*`
+    /// metadata (see `llama::trunk::sample_defaults`).
+    pub fn new(top_k: usize, top_p: f32) -> Self {
+        Self {
+            all_tokens: Vec::new(),
+            token_counts: std::collections::HashMap::new(),
+            top_k,
+            top_p,
+        }
+    }
+
+    /// Seed the history RNG with the prompt tokens before the first call, so
+    /// the CLI (which seeds from prompt + generated) and the HTTP adapter
+    /// (which seeds identically) agree.
+    pub fn prime(&mut self, prompt_tokens: &[u32]) {
+        self.all_tokens.extend_from_slice(prompt_tokens);
+    }
+
+    /// Sample the next token id from `logits`.
+    pub fn sample(&mut self, logits: &mut [f32], temperature: f32, repetition_penalty: f32) -> u32 {
+        apply_repetition_penalty(logits, &self.token_counts, repetition_penalty);
+        let rng_u64 = if temperature <= 0.0 {
+            0
+        } else {
+            // Deterministic per prompt: seed from the full token history.
+            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
+            for &t in &self.all_tokens {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
+            }
+            rng
+        };
+        let chosen = sample_llama_cpp(logits, self.top_k, self.top_p, temperature, rng_u64) as u32;
+        *self.token_counts.entry(chosen).or_insert(0) += 1;
+        self.all_tokens.push(chosen);
+        chosen
+    }
+}
+
+/// Stateful lfm2moe-family sampler: repetition penalty, then greedy (when
+/// `temperature <= 0`) or top-40 + temperature-scaled softmax draw with an
+/// RNG seeded from the generated history.
+///
+/// Extracted verbatim from `lfm2moe::run_inference_with_batch` so the CLI and
+/// the HTTP `Lfm2MoeTextRuntime` adapter share one implementation (they used
+/// to diverge: the server used temperature-only sampling).
+#[derive(Default)]
+pub struct Lfm2MoeSampler {
+    all_tokens: Vec<u32>,
+    token_counts: std::collections::HashMap<u32, u32>,
+}
+
+impl Lfm2MoeSampler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed the history RNG with the prompt tokens before the first call.
+    pub fn prime(&mut self, prompt_tokens: &[u32]) {
+        self.all_tokens.extend_from_slice(prompt_tokens);
+    }
+
+    /// Sample the next token id from `logits` (mutated in place).
+    pub fn sample(&mut self, logits: &mut [f32], temperature: f32, repetition_penalty: f32) -> u32 {
+        apply_repetition_penalty(logits, &self.token_counts, repetition_penalty);
+        let chosen = if temperature <= 0.0 {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        } else {
+            vec_scale_f32(logits, 1.0 / temperature);
+            let top = sample_top_k(logits, 40);
+            let mut rng = 0u64;
+            for &t in &self.all_tokens {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
+            }
+            let r = ((rng >> 33) as f32) / (1u32 << 31) as f32;
+            let mut cum = 0.0f32;
+            let mut chosen = top[0].0;
+            for &(idx, prob) in &top {
+                cum += prob;
+                if cum >= r {
+                    chosen = idx;
+                    break;
+                }
+            }
+            chosen
+        };
+        *self.token_counts.entry(chosen as u32).or_insert(0) += 1;
+        self.all_tokens.push(chosen as u32);
+        chosen as u32
+    }
+}
+
+#[cfg(test)]
+mod sampler_unification_tests {
+    use super::{greedy_checked, sample_greedy_or_temperature};
+
+    #[test]
+    fn greedy_picks_first_index_on_exact_ties() {
+        // The old server-derived sampler used `max_by(partial_cmp)`, which keeps
+        // the LAST maximum; the canonical one keeps the FIRST. Pin it.
+        let logits = [1.0f32, 5.0, 5.0, 0.0];
+        assert_eq!(greedy_checked(&logits).unwrap(), 1);
+    }
+
+    #[test]
+    fn greedy_rejects_empty_and_non_finite() {
+        assert!(
+            greedy_checked(&[]).is_err(),
+            "empty must be an error, not 0"
+        );
+        assert!(
+            greedy_checked(&[1.0, f32::NAN]).is_err(),
+            "NaN must error, not panic"
+        );
+        assert!(sample_greedy_or_temperature(&[1.0, f32::INFINITY], 0.0).is_err());
+    }
+
+    #[test]
+    fn temperature_zero_is_greedy_everywhere() {
+        let logits = [0.25f32, 9.0, 0.5];
+        assert_eq!(sample_greedy_or_temperature(&logits, 0.0).unwrap(), 1);
+        assert_eq!(sample_greedy_or_temperature(&logits, -1.0).unwrap(), 1);
+    }
+
+    #[test]
+    fn temperature_negative_is_treated_as_greedy() {
+        // The old copies disagreed here: one used `== 0.0`, another `<= 0.0`.
+        let logits = [0.25f32, 9.0, 0.5];
+        assert_eq!(sample_greedy_or_temperature(&logits, -0.5).unwrap(), 1);
+    }
+
+    #[test]
+    fn temperature_draw_stays_in_range() {
+        // Smoke: the draw must return a valid index for a normal distribution
+        // (the exact token depends on RNG, so only bounds are asserted).
+        let logits: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
+        for _ in 0..32 {
+            let id = sample_greedy_or_temperature(&logits, 0.8).unwrap();
+            assert!(id < 64, "id {id} out of range");
+        }
+    }
 }

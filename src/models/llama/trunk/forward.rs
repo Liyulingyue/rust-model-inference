@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// Read sampling defaults from GGUF metadata (matching llama.cpp's
 /// behaviour). MiniCPM5 ships `general.sampling.{top_k,top_p,temp}` keys
 /// that override the C++ defaults (40, 0.95, 1.0).
-fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
+pub fn sample_defaults(source: &dyn TensorSource) -> (usize, f32) {
     let top_k = source
         .metadata("general.sampling.top_k")
         .and_then(|v| v.to_u64())
@@ -237,6 +237,17 @@ pub fn run_inference(
         // with `<|end_of_text|>\n`. MiniCPM5 uses ChatML with non-thinking
         // mode (`🤔\n\n\web_search\n\n`). Other Llama models use Qwen2-style
         // ChatML with thinking (`🤔\n`). Nanbeige uses its embedded ChatML template.
+        let is_mistral = source
+            .metadata("general.name")
+            .and_then(|v| v.to_string_val())
+            .map(|s| s.to_ascii_lowercase().contains("mistral"))
+            .unwrap_or(false);
+        let is_zephyr = source
+            .metadata("general.name")
+            .and_then(|v| v.to_string_val())
+            .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+            .unwrap_or(false);
+
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
         } else if arch == "granite" {
@@ -254,7 +265,7 @@ pub fn run_inference(
                 prompt.to_string()
             }
         } else if is_minicpm5 {
-            // MiniCPM5 uses ChatML (`<|im_start|>/{role}\n{content}<|im_end|>`)
+            // MiniCPM5 uses ChatML (`<|im_start|>{role}\n{content}<|im_end|>`)
             // per its GGUF `tokenizer.chat_template`. The template supports
             // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
             // (empty thinking block → direct answer). When true, emits `🤔\n`
@@ -263,20 +274,34 @@ pub fn run_inference(
             format!(
                 "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
             )
+        } else if is_mistral {
+            format!("[INST] {prompt} [/INST]")
+        } else if is_zephyr {
+            format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
         } else {
             format!("user\n{prompt}\nassistant\n<think>\n")
         };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+        // Mistral's `[INST]`/`[/INST]` and Zephyr's `<|user|>`/`<|assistant|>`
+        // are tokenizer special tokens (`tokenizer.ggml.add_bos_token=true`).
+        // Use the tokenizer's own chat-template handling: `add_special=true`
+        // emits BOS automatically, `parse_special=true` recognizes the
+        // literal `[INST]`/`[/INST]` in the template as single special tokens.
         // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
         // expects no BOS since add_bos_token=false), so add_special=false
         // and we manually prepend BOS. For Nanbeige (base model), let the
         // tokenizer's add_bos setting handle BOS via add_special=true.
-        let add_special = arch == "nanbeige";
+        let (add_special, parse_special) = match arch {
+            "nanbeige" => (true, true),
+            "k2-horizon" | "granite" | "exaone" => (false, true),
+            _ if is_mistral || is_zephyr => (true, true),
+            _ => (false, true),
+        };
         let mut body = tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special,
-                parse_special: true,
+                parse_special,
             },
         );
         // The chat template starts with `{{- bos_token }}`, but MiniCPM5
@@ -443,12 +468,16 @@ pub fn run_inference_tokens(
     println!("Prompt: {} tokens", input_tokens.len());
 
     let eos_id = tokenizer.eos_id();
+    let im_end_id = tokenizer.special_token_id("im_end");
     let mut generated_tokens: Vec<u32> = Vec::new();
-    // Token counts for `apply_repetition_penalty`. We keep an explicit map so
-    // the penalty step is O(distinct tokens) instead of O(generated_tokens).
-    let mut generated_token_counts: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::new();
-    let mut all_tokens: Vec<u32> = input_tokens.clone();
+    // Shared llama-family sampler: owns the repetition-penalty counts and the
+    // history-seeded RNG (`ops::sampling::LlamaSampler`), and is primed with
+    // the prompt so the CLI and the HTTP adapter agree token for token.
+    let mut llama_sampler = crate::ops::sampling::LlamaSampler::new(
+        sample_defaults(source).0,
+        sample_defaults(source).1,
+    );
+    llama_sampler.prime(&input_tokens);
     let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
 
     let group_size = n_head / n_head_kv;
@@ -1079,42 +1108,24 @@ pub fn run_inference_tokens(
             let _ = io::stderr().write_all(line.as_bytes());
             let _ = io::stderr().flush();
         }
-        // Sample using llama.cpp's default sampler chain:
-        //   top_k=20 -> top_p=0.95 -> temperature=0.6 -> dist sample.
-        // The top_k / top_p values come from the GGUF metadata
-        // (`general.sampling.top_k` / `.top_p`) when available.
-        let (top_k, top_p) = sample_defaults(source);
-        let rng_u64 = if temperature <= 0.0 {
-            0
-        } else {
-            // Seed RNG from generated history (deterministic per prompt).
-            let mut rng = 0u64.wrapping_add(0x9E3779B97F4A7C15);
-            for &t in &all_tokens {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(t as u64);
-            }
-            rng
-        };
-        // Apply repetition penalty on logits for tokens already generated.
-        // `generated_token_counts` is built from `generated_tokens` below.
-        crate::ops::sampling::apply_repetition_penalty(
-            logits,
-            &generated_token_counts,
-            repetition_penalty,
-        );
-        let chosen = crate::ops::sample_llama_cpp(logits, top_k, top_p, temperature, rng_u64);
-
-        let chosen_id = chosen as u32;
-        let im_end_id = tokenizer.special_token_id("im_end");
-        if !bench && (eos_id == Some(chosen_id) || im_end_id == Some(chosen_id)) {
-            break;
-        }
-        if generated_tokens.len() >= max_tokens {
+        // Sample using the shared llama-family sampler
+        // (`ops::sampling::LlamaSampler`): repetition penalty + llama.cpp's
+        // chain with a history-seeded RNG. The HTTP adapter uses the same
+        // type, so CLI and server cannot drift apart.
+        let chosen_id = llama_sampler.sample(logits, temperature, repetition_penalty);
+        if crate::ops::generation_runtime::stop_after_sample(
+            chosen_id,
+            generated_tokens.len(),
+            max_tokens,
+            bench,
+            eos_id,
+            im_end_id,
+        ) != crate::ops::generation_runtime::StepAction::Continue
+        {
             break;
         }
 
         generated_tokens.push(chosen_id);
-        all_tokens.push(chosen_id);
-        *generated_token_counts.entry(chosen_id).or_insert(0) += 1;
 
         let text = decoder.push(chosen_id);
         print!("{}", text);
@@ -2155,3 +2166,71 @@ mod tests {
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
 }
+
+/// Build the prompt token vector for any llama-family arch
+/// (llama / nanbeige / exaone / k2-horizon / granite / MiniCPM5).
+///
+/// Extracted from the inline logic in `run_inference` so the HTTP layer can
+/// construct the same prompt bytes the CLI uses (without forking the
+/// chat-template selection). Behaviour is identical to the inline block —
+/// see `run_inference` for the rationale on MiniCPM5 / nanbeige detection.
+pub fn build_prompt_tokens(
+    source: &dyn TensorSource,
+    prompt: &str,
+    thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let tokenizer = load_tokenizer(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+
+    let is_minicpm5 = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("minicpm"))
+        .unwrap_or(false);
+
+    let prompt_text = if arch == "k2-horizon" {
+        format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
+    } else if arch == "granite" {
+        format!(
+            "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
+        )
+    } else if arch == "nanbeige" {
+        if source
+            .metadata("tokenizer.chat_template")
+            .and_then(|v| v.to_string_val())
+            .is_some_and(|t| t.contains(THINK_MARK))
+        {
+            crate::prompt::build_nanbeige_chat_prompt(prompt, thinking)
+        } else {
+            prompt.to_string()
+        }
+    } else if is_minicpm5 {
+        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n")
+    } else {
+        format!("user\n{prompt}\nassistant\n<think>\n")
+    };
+    eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    let add_special = arch == "nanbeige";
+    let mut body = tokenizer.encode(
+        &prompt_text,
+        EncodeOptions {
+            add_special,
+            parse_special: true,
+        },
+    );
+    if !add_special {
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
+        }
+    }
+    eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+    Ok(body)
+}
+
+const THINK_MARK: &str = concat!("<", "|think", "|", ">");
+const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");

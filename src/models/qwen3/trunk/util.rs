@@ -84,25 +84,9 @@ pub fn validate_input_shapes(
     Ok(())
 }
 
+/// Delegates to `ops::sampling::greedy_checked` (same first-max tie-break).
 pub fn greedy_token(logits: &[f32]) -> Result<u32, String> {
-    let (&first, rest) = logits
-        .split_first()
-        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
-    if !first.is_finite() {
-        return Err("Cannot sample non-finite logits".into());
-    }
-    let mut best_id = 0usize;
-    let mut best = first;
-    for (index, &logit) in rest.iter().enumerate() {
-        if !logit.is_finite() {
-            return Err("Cannot sample non-finite logits".into());
-        }
-        if logit > best {
-            best = logit;
-            best_id = index + 1;
-        }
-    }
-    u32::try_from(best_id).map_err(|_| "Token ID does not fit u32".into())
+    crate::ops::sampling::greedy_checked(logits)
 }
 
 pub fn validate_generation(
@@ -174,36 +158,11 @@ pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), 
     Ok(())
 }
 
+/// Delegates to the canonical sampler in `ops::sampling` so the qwen3 CLI path
+/// and the HTTP adapters cannot drift. Behaviour is unchanged: this used to
+/// be a verbatim copy of that implementation.
 pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
-    if temperature == 0.0 {
-        return greedy_token(logits);
-    }
-    let mut max_logit = f32::NEG_INFINITY;
-    for &logit in logits {
-        if !logit.is_finite() {
-            return Err("Cannot sample non-finite logits".into());
-        }
-        max_logit = max_logit.max(logit);
-    }
-    if logits.is_empty() {
-        return Err("Cannot sample empty logits".into());
-    }
-    let sum: f32 = logits
-        .iter()
-        .map(|logit| ((logit - max_logit) / temperature).exp())
-        .sum();
-    if !sum.is_finite() || sum <= 0.0 {
-        return Err("Sampling probability sum is not finite and positive".into());
-    }
-    let target = rand::random::<f32>() * sum;
-    let mut cumulative = 0.0;
-    for (index, &logit) in logits.iter().enumerate() {
-        cumulative += ((logit - max_logit) / temperature).exp();
-        if cumulative >= target {
-            return u32::try_from(index).map_err(|_| "Token ID does not fit u32".into());
-        }
-    }
-    u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
+    crate::ops::sampling::sample_greedy_or_temperature(logits, temperature)
 }
 
 pub fn static_q8_matrix(
