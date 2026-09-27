@@ -177,6 +177,20 @@ RMI_AGREEMENT_MODEL=models/K2-Horizon-GGUF/K2-Horizon-1B-BF16.gguf \
 | qwen35 | ✅ greedy 一致 | `Qwen3.5-0.8B-Q8_0`，同 capacity/batch 口径 |
 | 任意 arch，temp>0 | ⛔ 不适用 | 两端 RNG 独立且 CLI 侧无种子，字节一致不可达；哨兵只断言 greedy |
 
+### 采样器统一状态
+
+`ops::sampling::sample_greedy_or_temperature` 是唯一的 greedy/temperature
+采样器，qwen3 CLI（`trunk::util::sample_token`）、qwen35 CLI
+（`app::text::generation::sample_token`）与四个 HTTP adapter 全部委托它。
+替换掉的三个副本语义并不相同，统一时按"已验证那份"裁决：
+
+| 曾存在的副本 | 差异 | 处置 |
+| --- | --- | --- |
+| `qwen3::trunk::util` | 校验空/非有限 logits；严格 `>`（平局取**首个**） | 作为规范实现 |
+| `app::text::generation` | **硬编码 `r = 0.5`**（永远取分布中位数），无校验 | 委托规范实现；**qwen35 CLI 在 `--temp > 0` 下行为改变**（stub → 真随机），greedy 不变 |
+| `ops::sampling`（源自旧 server） | `max_by(partial_cmp)` 平局取**末个**；NaN 会 panic；空 logits 静默返回 0 | 删除 |
+| `spark::trunk::forward` | 用 `softmax_approx_inplace`（近似 exp），与 arch 的既有精度路线一致 | 保留不动 |
+
 ### 仍未做（有意保留）
 
 - qwen3 / qwen35 的采样与各自 CLI 对齐（各自的 CLI 路径与 adapter 用的函数不同）。

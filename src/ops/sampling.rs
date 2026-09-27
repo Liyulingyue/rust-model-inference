@@ -232,40 +232,75 @@ pub fn sample_llama_cpp(
     chosen
 }
 
-/// Temperature sampling with a greedy fast path: `temperature <= 0`
-/// argmaxes, otherwise softmax-then-random. No top-k / top-p / repetition
-/// penalty — those live in `sample_llama_cpp`.
+/// Canonical greedy / temperature sampler for the text front-ends.
 ///
-/// Moved verbatim from the server (`app::server::sample_token_from_logits`) so
-/// the HTTP adapters and any other caller share one implementation.
-pub fn sample_temperature_greedy_or_random(logits: &[f32], temperature: f32) -> i32 {
+/// This is the implementation the qwen3 trunk has always used, moved here so
+/// the CLI (qwen3 + qwen35 paths) and every HTTP adapter share one sampler.
+/// It validates its input instead of panicking or silently returning 0:
+///
+/// * empty logits      -> `Err`
+/// * non-finite logits -> `Err`
+/// * exact logit ties  -> the FIRST index wins (strict `>`), which is what
+///   `max_by(partial_cmp)` did *not* guarantee (it keeps the last maximum).
+///
+/// `temperature <= 0` is greedy; above that it softmaxes with max subtraction
+/// and draws against `rand::random()`.
+pub fn sample_greedy_or_temperature(logits: &[f32], temperature: f32) -> Result<u32, String> {
     if temperature <= 0.0 {
-        return logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(i, _)| i as i32)
-            .unwrap_or(0);
+        return greedy_checked(logits);
     }
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
-    let mut probs = vec![0.0f32; logits.len()];
-    for (i, l) in logits.iter().enumerate() {
-        probs[i] = ((l - max_logit) / temperature).exp();
-        sum += probs[i];
+    let (&first, rest) = logits
+        .split_first()
+        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
+    if !first.is_finite() {
+        return Err("Cannot sample non-finite logits".into());
     }
-    for p in probs.iter_mut() {
-        *p /= sum;
+    let mut max_logit = first;
+    for &logit in rest {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        max_logit = max_logit.max(logit);
     }
-    let r: f32 = rand::random();
-    let mut cumsum = 0.0f32;
-    for (i, p) in probs.iter().enumerate() {
-        cumsum += p;
-        if cumsum >= r {
-            return i as i32;
+    let sum: f32 = logits
+        .iter()
+        .map(|logit| ((logit - max_logit) / temperature).exp())
+        .sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("Sampling probability sum is not finite and positive".into());
+    }
+    let target = rand::random::<f32>() * sum;
+    let mut cumulative = 0.0f32;
+    for (index, &logit) in logits.iter().enumerate() {
+        cumulative += ((logit - max_logit) / temperature).exp();
+        if cumulative >= target {
+            return u32::try_from(index).map_err(|_| "Token ID does not fit u32".into());
         }
     }
-    (logits.len() - 1) as i32
+    u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
+}
+
+/// Greedy argmax with the same validation as [`sample_greedy_or_temperature`].
+/// First index wins on exact ties (strict `>`).
+pub fn greedy_checked(logits: &[f32]) -> Result<u32, String> {
+    let (&first, rest) = logits
+        .split_first()
+        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
+    if !first.is_finite() {
+        return Err("Cannot sample non-finite logits".into());
+    }
+    let mut best_id = 0usize;
+    let mut best = first;
+    for (index, &logit) in rest.iter().enumerate() {
+        if !logit.is_finite() {
+            return Err("Cannot sample non-finite logits".into());
+        }
+        if logit > best {
+            best = logit;
+            best_id = index + 1;
+        }
+    }
+    u32::try_from(best_id).map_err(|_| "Token ID does not fit u32".into())
 }
 
 /// Stateful llama-family sampler: repetition penalty + llama.cpp chain
@@ -379,5 +414,50 @@ impl Lfm2MoeSampler {
         *self.token_counts.entry(chosen as u32).or_insert(0) += 1;
         self.all_tokens.push(chosen as u32);
         chosen as u32
+    }
+}
+
+#[cfg(test)]
+mod sampler_unification_tests {
+    use super::{greedy_checked, sample_greedy_or_temperature};
+
+    #[test]
+    fn greedy_picks_first_index_on_exact_ties() {
+        // The old server-derived sampler used `max_by(partial_cmp)`, which keeps
+        // the LAST maximum; the canonical one keeps the FIRST. Pin it.
+        let logits = [1.0f32, 5.0, 5.0, 0.0];
+        assert_eq!(greedy_checked(&logits).unwrap(), 1);
+    }
+
+    #[test]
+    fn greedy_rejects_empty_and_non_finite() {
+        assert!(greedy_checked(&[]).is_err(), "empty must be an error, not 0");
+        assert!(greedy_checked(&[1.0, f32::NAN]).is_err(), "NaN must error, not panic");
+        assert!(sample_greedy_or_temperature(&[1.0, f32::INFINITY], 0.0).is_err());
+    }
+
+    #[test]
+    fn temperature_zero_is_greedy_everywhere() {
+        let logits = [0.25f32, 9.0, 0.5];
+        assert_eq!(sample_greedy_or_temperature(&logits, 0.0).unwrap(), 1);
+        assert_eq!(sample_greedy_or_temperature(&logits, -1.0).unwrap(), 1);
+    }
+
+    #[test]
+    fn temperature_negative_is_treated_as_greedy() {
+        // The old copies disagreed here: one used `== 0.0`, another `<= 0.0`.
+        let logits = [0.25f32, 9.0, 0.5];
+        assert_eq!(sample_greedy_or_temperature(&logits, -0.5).unwrap(), 1);
+    }
+
+    #[test]
+    fn temperature_draw_stays_in_range() {
+        // Smoke: the draw must return a valid index for a normal distribution
+        // (the exact token depends on RNG, so only bounds are asserted).
+        let logits: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
+        for _ in 0..32 {
+            let id = sample_greedy_or_temperature(&logits, 0.8).unwrap();
+            assert!(id < 64, "id {id} out of range");
+        }
     }
 }

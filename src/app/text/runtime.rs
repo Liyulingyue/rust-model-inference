@@ -25,7 +25,7 @@ use crate::ops::generation_runtime::{
     Flow, GeneratedText, GenerationRequest, Finish, TextRuntime, TokenSink,
 };
 use crate::ops::generation_runtime::StepAction;
-use crate::ops::sampling::sample_temperature_greedy_or_random;
+use crate::ops::sampling::sample_greedy_or_temperature;
 use crate::ops::sampling::{Lfm2MoeSampler, LlamaSampler};
 use std::sync::{Arc, Mutex};
 
@@ -156,12 +156,12 @@ fn sample_step(
     temperature: f32,
     eos_id: Option<u32>,
     im_end_id: Option<u32>,
-) -> Option<u32> {
-    let id = u32::try_from(sample_temperature_greedy_or_random(logits, temperature)).ok()?;
+) -> Result<Option<u32>, String> {
+    let id = sample_greedy_or_temperature(logits, temperature)?;
     if Some(id) == eos_id || Some(id) == im_end_id {
-        return None;
+        return Ok(None);
     }
-    Some(id)
+    Ok(Some(id))
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +463,8 @@ impl TextRuntime for Qwen35TextRuntime {
                 request.sampling.temperature,
                 eos_id,
                 im_end_id,
-            ) else {
+            )?
+            else {
                 finish = Finish::Eos;
                 break;
             };

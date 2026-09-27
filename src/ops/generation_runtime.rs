@@ -213,7 +213,7 @@ mod tests {
     fn temperature_sampler_greedy_matches_argmax() {
         let logits = [0.1f32, 5.0, 0.2, -1.0];
         assert_eq!(
-            crate::ops::sampling::sample_temperature_greedy_or_random(&logits, 0.0),
+            crate::ops::sampling::sample_greedy_or_temperature(&logits, 0.0).unwrap(),
             1
         );
     }
@@ -279,7 +279,7 @@ mod tests {
     fn temperature_sampler_single_candidate_is_deterministic() {
         // With one candidate every temperature returns it.
         assert_eq!(
-            crate::ops::sampling::sample_temperature_greedy_or_random(&[3.0], 0.7),
+            crate::ops::sampling::sample_greedy_or_temperature(&[3.0], 0.7).unwrap(),
             0
         );
     }
