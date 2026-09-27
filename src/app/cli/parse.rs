@@ -46,6 +46,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--laya-request" => {
+                options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
+            }
             "--prompt" => {
                 if i + 1 < args.len() {
                     options.prompt = Some(args[i + 1].clone());

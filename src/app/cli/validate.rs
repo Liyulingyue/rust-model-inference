@@ -4,6 +4,20 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.laya_request.is_some() {
+        if options.model.as_os_str().is_empty() {
+            return Err("--laya-request requires --model".into());
+        }
+        if options.jev
+            || options.prompt.is_some()
+            || options.embedding
+            || options.tts
+            || options.yue2
+        {
+            return Err("--laya-request cannot be combined with generation, --jev, --embedding, --tts, or --yue2".into());
+        }
+        return Ok(());
+    }
     if yue2_cli_options(options)?.is_some() {
         return Ok(());
     }

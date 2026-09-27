@@ -38,6 +38,7 @@
 | Fun-ASR-Nano | `funasr-sensevoice-encoder` + `qwen3` | 语音识别 | FunASR encoder mmproj、WAV | F16 encoder + Q8_0 LLM | `Verified` | 真实 GGUF 端到端转写通过（6s sample.wav → "我想问我在滨海新区有房"，与 golden file 一致）；[`docs/usage/funasr.md`](../usage/funasr.md)。 |
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0 | `Verified` | 真实 GGUF 可完整生成；与 llama.cpp 前 6 个生成 token 一致，随后在 MoE 近平局处可能分叉。 |
+| Laya multilingual | `laya` | 多语言 choice / score / noul 决策 | 内嵌 tokenizer 与决策头；请求 JSON | F32 GGUF | `Verified` | 固定 HF revision `e4e9ddf21a7b1903b7acffd8814ad4307bf63a67`、官方 Laya `4066d5d5fbf08b66c6757ddeedbd797bd7655bc0`；官方计算图使用独立 C 标量算子，与禁用自动向量化/FMA 的 Rust CLI 对齐。5 个请求、195 个 checkpoint 的 token IDs、marker、shape 及全部中间/最终 logits F32 原始位一致，覆盖三种任务、单候选、结构化输入、160-token 局部注意力边界；未验证加速或量化路径。入口 `--laya-request <json>`；[复现说明](../../tools/oracle/laya/README.md)。 |
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
@@ -77,7 +78,7 @@
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 

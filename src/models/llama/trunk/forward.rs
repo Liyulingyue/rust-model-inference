@@ -330,6 +330,17 @@ pub fn run_inference(
         // with `<|end_of_text|>\n`. MiniCPM5 uses ChatML with non-thinking
         // mode (`🤔\n\n\web_search\n\n`). Other Llama models use Qwen2-style
         // ChatML with thinking (`🤔\n`). Nanbeige uses its embedded ChatML template.
+        let is_mistral = source
+            .metadata("general.name")
+            .and_then(|v| v.to_string_val())
+            .map(|s| s.to_ascii_lowercase().contains("mistral"))
+            .unwrap_or(false);
+        let is_zephyr = source
+            .metadata("general.name")
+            .and_then(|v| v.to_string_val())
+            .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+            .unwrap_or(false);
+
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
         } else if arch == "granite" {
@@ -353,7 +364,7 @@ pub fn run_inference(
                 prompt.to_string()
             }
         } else if is_minicpm5 {
-            // MiniCPM5 uses ChatML (`<|im_start|>/{role}\n{content}<|im_end|>`)
+            // MiniCPM5 uses ChatML (`<|im_start|>{role}\n{content}<|im_end|>`)
             // per its GGUF `tokenizer.chat_template`. The template supports
             // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
             // (empty thinking block → direct answer). When true, emits `🤔\n`
@@ -362,20 +373,34 @@ pub fn run_inference(
             format!(
                 "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
             )
+        } else if is_mistral {
+            format!("[INST] {prompt} [/INST]")
+        } else if is_zephyr {
+            format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
         } else {
             format!("user\n{prompt}\nassistant\n<think>\n")
         };
         eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+        // Mistral's `[INST]`/`[/INST]` and Zephyr's `<|user|>`/`<|assistant|>`
+        // are tokenizer special tokens (`tokenizer.ggml.add_bos_token=true`).
+        // Use the tokenizer's own chat-template handling: `add_special=true`
+        // emits BOS automatically, `parse_special=true` recognizes the
+        // literal `[INST]`/`[/INST]` in the template as single special tokens.
         // For Granite/MiniCPM5/Llama the chat template emits `<s>` (or
         // expects no BOS since add_bos_token=false), so add_special=false
         // and we manually prepend BOS. For Nanbeige (base model), let the
         // tokenizer's add_bos setting handle BOS via add_special=true.
-        let add_special = arch == "nanbeige";
+        let (add_special, parse_special) = match arch {
+            "nanbeige" => (true, true),
+            "k2-horizon" | "granite" | "exaone" => (false, true),
+            _ if is_mistral || is_zephyr => (true, true),
+            _ => (false, true),
+        };
         let mut body = tokenizer.encode(
             &prompt_text,
             EncodeOptions {
                 add_special,
-                parse_special: true,
+                parse_special,
             },
         );
         // The chat template starts with `{{- bos_token }}`, but MiniCPM5
@@ -2323,16 +2348,16 @@ pub fn build_prompt_tokens(
         } else {
             prompt.to_string()
         }
-    } else if is_minicpm5 {
-        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
+} else if is_minicpm5 {
+        format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
     } else if arch == "phi3" {
         // Phi-3 / Phi-4 single-turn chat template: `<|user|>…<|end|><|assistant|>`.
         // No system role, no `<think>` block. Matches the CLI's `run_inference_tokens`
         // inline template exactly so HTTP `/v1/chat/completions` produces the
-        // same prompt bytes as the CLI. (Note: chat-template bug — see below.)
+        // same prompt bytes as the CLI.
         format!("<|user|>{prompt}<|end|><|assistant|>")
     } else {
-        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
+        format!("user\n{prompt}\nassistant\n<think>\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
     // Granite/MiniCPM5/Phi-3/Phi-4 all ship `add_bos_token=false`, so
