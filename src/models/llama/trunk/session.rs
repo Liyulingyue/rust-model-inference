@@ -308,13 +308,24 @@ impl<'a> LlamaSession<'a> {
         prompt_tokens: &[u32],
         batch_size: usize,
     ) -> Result<Vec<f32>, String> {
-        // `forward_logits_chunked_chunk` is the chunked-prefill body
-        // and only writes `scratch.logits` on the final projected step
-        // — only `forward_logits_per_token`/`forward_one_token` do.
-        // For correctness on the per-token (B = 1) path used by
-        // chat/REST callers we always run the legacy loop and let
-        // it advance `seq_len` exactly like the chunked body.
-        let _ = batch_size;
+        // Real batched prefill via the [`ChunkedPrefill`] trait's
+        // default `prefill()` driver. This walks the input in
+        // `batch_size`-sized chunks and calls
+        // [`forward_chunk_batched_real`](Self::forward_chunk_batched_real)
+        // — single Q8_0 + Q8_K quantise pass per layer, Q/K/V / wo /
+        // gate / up / down projections through
+        // [`PreparedRows::matmul_group`], and an LM-head projection
+        // only on the last chunk's last row.
+        //
+        // Falls back to the legacy per-token path when the session
+        // was built with `max_rows == 1` (no batched scratchpad
+        // reserved) so the `from_source` legacy constructor still
+        // works for callers that didn't opt in.
+        if self.prepared_rows.max_rows() > 1 {
+            let owned = prompt_tokens.to_vec();
+            return <Self as ChunkedPrefill>::prefill(self, &owned, batch_size)
+                .map(|opt| opt.unwrap_or_default());
+        }
         self.forward_logits_per_token(prompt_tokens)
     }
 

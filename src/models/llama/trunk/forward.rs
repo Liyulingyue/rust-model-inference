@@ -282,11 +282,14 @@ fn apply_partial_rope(
 /// Phi-3 / Phi-4 weight every RoPE output by `attn_factor`. We do the
 /// multiply in-place on the freshly rotated values so the change is
 /// invisible to callers that pass `attn_factor = 1.0` (the llama default).
+///
+/// Forwarded to [`crate::ops::vec_scale_f32`] which dispatches to AVX2 /
+/// NEON under the hood. Phi-4 calls this `n_layer * n_head * (prompt +
+/// generation)` times, so the per-call savings compound across the
+/// whole sequence.
 fn apply_attn_factor(values: &mut [f32], head_dim: usize, attn_factor: f32) {
     if attn_factor != 1.0 && head_dim > 0 {
-        for v in &mut values[..head_dim] {
-            *v *= attn_factor;
-        }
+        crate::ops::vec_scale_f32(&mut values[..head_dim], attn_factor);
     }
 }
 
