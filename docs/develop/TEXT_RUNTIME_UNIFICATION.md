@@ -173,7 +173,9 @@ RMI_AGREEMENT_MODEL=models/K2-Horizon-GGUF/K2-Horizon-1B-BF16.gguf \
 | --- | --- | --- |
 | llama / nanbeige / exaone / k2-horizon / granite | ✅ 一致 | K2-Horizon-1B-BF16，temp=0 与 0.8 均逐字节一致 |
 | lfm2moe | 🟡 forward 分裂**已修**，余 1-ULP 贪心翻转 | 修复：`Lfm2MoeSession::prompt_len` + `is_prefill = pos < prompt_len`（原先硬编码 `true`，decode 阶段把整段 b*x 历史塞回短卷积窗口）。剩余差异：第 ~30 字符处 `says "` vs `says: "`，greedy 下 top-2 logits 极接近时的 1-ULP 翻转，两侧首 token 与前 30 字符完全一致；精确定位需逐层 logits 对比（独立任务） |
-| qwen3 / qwen35 | ⬜ 未覆盖 | 本地有权重（`Qwen3-0.6B-GGUF`、`Qwen3.5-0.8B-GGUF`），待补哨兵矩阵 |
+| qwen3 | ✅ greedy 一致 | `Qwen3-0.6B-Q8_0`。两处真实因素：session capacity 须为 `min(n_ctx, max_context)`（原先 `prompt+max_new`，改变 KV 布局与 chunked prefill 归约），prefill batch 须为默认 64 |
+| qwen35 | ✅ greedy 一致 | `Qwen3.5-0.8B-Q8_0`，同 capacity/batch 口径 |
+| 任意 arch，temp>0 | ⛔ 不适用 | 两端 RNG 独立且 CLI 侧无种子，字节一致不可达；哨兵只断言 greedy |
 
 ### 仍未做（有意保留）
 

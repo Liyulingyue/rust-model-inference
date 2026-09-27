@@ -216,6 +216,7 @@ pub struct Qwen3TextRuntime {
     pool: Arc<crate::core::thread_pool::ComputePool>,
     prefill_batch_size: usize,
     kv_format: KvFormat,
+    max_context: usize,
     arch: String,
 }
 
@@ -232,6 +233,7 @@ impl Qwen3TextRuntime {
             tokenizer: options.tokenizer,
             pool: options.pool,
             prefill_batch_size: options.prefill_batch_size,
+            max_context: options.max_context,
             arch: arch_of(&options.source),
         })
     }
@@ -251,9 +253,19 @@ impl TextRuntime for Qwen3TextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        // Capacity matches the CLI: `min(max_context, model n_ctx)`. Sizing it
+        // to `prompt + max_new_tokens` instead changes the KV layout and, with
+        // it, the chunked-prefill reduction grouping (the sentinel caught a
+        // first-token divergence that way).
+        let capacity = self
+            .model
+            .config()
+            .n_ctx
+            .min(self.max_context)
+            .max(1);
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
-            request.token_ids.len() + request.max_new_tokens,
+            capacity,
             self.kv_format,
             crate::KvLifecycle::Ephemeral,
         )?;
