@@ -346,6 +346,23 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--srt" => options.srt = true,
+            "--qwen-context-file" => {
+                options.qwen_context_file =
+                    Some(required_path_value(args, &mut i, "--qwen-context-file")?);
+            }
+            "--qwen-latent-file" => {
+                options.qwen_latent_file =
+                    Some(required_path_value(args, &mut i, "--qwen-latent-file")?);
+            }
+            "--qwen-timestep" => {
+                let value = args.get(i + 1).ok_or("Missing value for --qwen-timestep")?;
+                options.qwen_timestep = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --qwen-timestep value: {error}"))?,
+                );
+                i += 1;
+            }
             "--vad" => {
                 options.vad = Some(required_path_value(args, &mut i, "--vad")?);
             }

@@ -5,6 +5,7 @@ pub(crate) mod jev;
 pub(crate) mod media;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
+pub(crate) mod qwen_image_2_1;
 pub(crate) mod selftest;
 pub mod server;
 pub mod text;
@@ -33,6 +34,10 @@ pub use jev::{
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
+pub use qwen_image_2_1::{
+    qwen_image_2_1_signature, read_f32_file, run_qwen_image_2_1, QwenImage21Request,
+    QWEN_IMAGE_2_1_DEFAULT_TIMESTEP,
+};
 pub use selftest::run_self_test;
 pub use text::{
     run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
