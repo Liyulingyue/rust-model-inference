@@ -47,7 +47,11 @@ pub fn matmul_q4_0_scalar_range(
                 let y1 = input_q8[base_y + 16 + l] as i8 as i32;
                 dot += x0 * y0 + x1 * y1;
             }
-            sum += dot as f32 * d * scale;
+            // llama.cpp scalar order: `acc += d * d8 * sumi`, i.e. the two
+            // scales are multiplied together first and the integer dot is
+            // applied last. `dot * d * scale` rounds one ULP differently
+            // and drifts from the AVX2 path and the llama.cpp oracle.
+            sum += d * scale * dot as f32;
         }
         output[out_idx] = sum;
     }

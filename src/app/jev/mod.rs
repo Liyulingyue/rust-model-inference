@@ -26,7 +26,7 @@ pub use grouped::{
 };
 pub use single::{
     image_supported_arch, jev_payload_json, jev_system_prompt, prepare_jev_questions,
-    run_jev_decision, run_jev_decision_data
+    run_jev_decision, run_jev_decision_data,
 };
 pub use types::{JevGroupInput, JevGroupedQuestionInput, JevMode, JevQuestionInput, JevResult};
 

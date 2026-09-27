@@ -64,10 +64,7 @@ fn q8_tokenizer_matches_scalar_llama_cpp() {
     assert!(bos.is_some(), "EXAONE GGUF should carry a BOS token id");
     assert!(eos.is_some(), "EXAONE GGUF should carry an EOS token id");
     let decoded = tok.decode(&ids, false);
-    assert!(
-        decoded.contains("France"),
-        "decoded text was {decoded:?}"
-    );
+    assert!(decoded.contains("France"), "decoded text was {decoded:?}");
 }
 
 #[test]

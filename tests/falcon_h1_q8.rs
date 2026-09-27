@@ -86,7 +86,9 @@ impl TensorSource for MissingTensor {
 
 #[test]
 fn q8_contract_loads_3b() {
-    let Some(source) = model_source_3b() else { return };
+    let Some(source) = model_source_3b() else {
+        return;
+    };
     let config = FalconH1Config::from_source(source.as_ref()).unwrap();
     assert_eq!(config.n_embd, 2560);
     assert_eq!(config.n_layer, 32);
@@ -120,7 +122,9 @@ fn q8_contract_loads_3b() {
 
 #[test]
 fn q8_single_token_forward_is_finite_3b() {
-    let Some(source) = model_source_3b() else { return };
+    let Some(source) = model_source_3b() else {
+        return;
+    };
     let model = FalconH1Model::from_source(source, 4).unwrap();
     let mut scratch = FalconH1Scratch::new(&model.config, 2);
     let logits = model.prefill(&[17], &mut scratch).unwrap();
@@ -134,7 +138,9 @@ fn q8_single_token_forward_is_finite_3b() {
 
 #[test]
 fn q8_chunked_and_incremental_logits_match_3b() {
-    let Some(source) = model_source_3b() else { return };
+    let Some(source) = model_source_3b() else {
+        return;
+    };
     let model = FalconH1Model::from_source(source, 4).unwrap();
     let mut chunked = FalconH1Scratch::new(&model.config, 2);
     let mut incremental = FalconH1Scratch::new(&model.config, 2);
@@ -151,7 +157,9 @@ fn q8_chunked_and_incremental_logits_match_3b() {
 
 #[test]
 fn q8_rejects_foreign_architecture_3b() {
-    let Some(path) = std::env::var_os("RMI_FALCON_H1_3B_Q8_MODEL") else { return };
+    let Some(path) = std::env::var_os("RMI_FALCON_H1_3B_Q8_MODEL") else {
+        return;
+    };
     let source: Arc<dyn TensorSource> = Arc::new(ArchOverride {
         inner: GGUFLoader::from_file(path).unwrap(),
         arch: "qwen3",
@@ -167,7 +175,9 @@ fn q8_rejects_foreign_architecture_3b() {
 
 #[test]
 fn q8_rejects_missing_attention_projection_3b() {
-    let Some(path) = std::env::var_os("RMI_FALCON_H1_3B_Q8_MODEL") else { return };
+    let Some(path) = std::env::var_os("RMI_FALCON_H1_3B_Q8_MODEL") else {
+        return;
+    };
     let source: Arc<dyn TensorSource> = Arc::new(MissingTensor {
         inner: GGUFLoader::from_file(path).unwrap(),
         missing: "blk.16.attn_output.weight",
@@ -180,7 +190,9 @@ fn q8_rejects_missing_attention_projection_3b() {
 
 #[test]
 fn q8_tokenizer_matches_scalar_llama_cpp_3b() {
-    let Some(tokenizer) = falcon_tokenizer_3b() else { return };
+    let Some(tokenizer) = falcon_tokenizer_3b() else {
+        return;
+    };
     assert_eq!(tokenizer.bos_id(), Some(17));
     assert_eq!(tokenizer.eos_id(), Some(228));
     let ids = tokenizer.encode(
@@ -195,7 +207,9 @@ fn q8_tokenizer_matches_scalar_llama_cpp_3b() {
 
 #[test]
 fn q8_hello_greedy_3b() {
-    let Some(source) = model_source_3b() else { return };
+    let Some(source) = model_source_3b() else {
+        return;
+    };
     let model = FalconH1Model::from_source(source, 4).unwrap();
     let mut scratch = FalconH1Scratch::new(&model.config, 8);
     let mut logits = model.prefill(&[17, 22177], &mut scratch).unwrap();
@@ -257,7 +271,9 @@ fn q8_contract_loads() {
 
 #[test]
 fn q8_rejects_foreign_architecture() {
-    let Some(path) = std::env::var_os("RMI_FALCON_H1_Q8_MODEL") else { return };
+    let Some(path) = std::env::var_os("RMI_FALCON_H1_Q8_MODEL") else {
+        return;
+    };
     let source: Arc<dyn TensorSource> = Arc::new(ArchOverride {
         inner: GGUFLoader::from_file(path).unwrap(),
         arch: "qwen3",
@@ -265,7 +281,10 @@ fn q8_rejects_foreign_architecture() {
     let error = FalconH1Config::from_source(source.as_ref())
         .err()
         .expect("foreign architecture must fail");
-    assert!(error.contains("Unsupported architecture for FalconH1Config"), "{error}");
+    assert!(
+        error.contains("Unsupported architecture for FalconH1Config"),
+        "{error}"
+    );
     let error = model_config_from_source(source.as_ref())
         .err()
         .expect("foreign architecture must fail the generic loader too");
@@ -274,7 +293,9 @@ fn q8_rejects_foreign_architecture() {
 
 #[test]
 fn q8_rejects_missing_attention_projection() {
-    let Some(path) = std::env::var_os("RMI_FALCON_H1_Q8_MODEL") else { return };
+    let Some(path) = std::env::var_os("RMI_FALCON_H1_Q8_MODEL") else {
+        return;
+    };
     let source: Arc<dyn TensorSource> = Arc::new(MissingTensor {
         inner: GGUFLoader::from_file(path).unwrap(),
         missing: "blk.12.attn_output.weight",
@@ -301,7 +322,9 @@ fn q8_single_token_forward_is_finite() {
 
 #[test]
 fn q8_tokenizer_matches_scalar_llama_cpp() {
-    let Some(tokenizer) = falcon_tokenizer() else { return };
+    let Some(tokenizer) = falcon_tokenizer() else {
+        return;
+    };
     assert_eq!(tokenizer.bos_id(), Some(17));
     assert_eq!(tokenizer.eos_id(), Some(228));
     // llama-tokenize @ 171e8846b on the same GGUF:

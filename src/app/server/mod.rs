@@ -21,13 +21,11 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
+use crate::format::wav::encode_wav_pcm16_channels;
 use crate::models::qwen3::asr::model::{
     open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
 };
-use crate::format::wav::encode_wav_pcm16_channels;
-use crate::models::qwen3::tts::codec::{
-    Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE,
-};
+use crate::models::qwen3::tts::codec::{Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE};
 use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model, Qwen3Session};
@@ -753,8 +751,7 @@ fn is_rerank_gguf(path: &std::path::Path) -> bool {
 
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
-    let source: Arc<dyn TensorSource> =
-        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
         source.metadata(k).cloned()
     })?);
@@ -844,7 +841,9 @@ fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     let context_length = match &inner {
         TextInner::Qwen3 { model } => model.config().n_ctx,
         TextInner::Qwen35 { model, .. } => model.lock().map_err(|e| e.to_string())?.config.n_ctx,
-        TextInner::Lfm2Moe { session, .. } => session.lock().map_err(|e| e.to_string())?.config.n_ctx,
+        TextInner::Lfm2Moe { session, .. } => {
+            session.lock().map_err(|e| e.to_string())?.config.n_ctx
+        }
         TextInner::Fallback { .. } => 0,
     };
     Ok(TextBackend {

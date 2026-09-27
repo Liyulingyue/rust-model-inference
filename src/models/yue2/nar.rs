@@ -1,8 +1,8 @@
 use crate::ops::quant::BlockQ8K;
 
 use super::ar::{
-    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax,
-    YuE2AttentionWeights, YuE2MlpWeights, YuE2Weight,
+    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax, YuE2AttentionWeights,
+    YuE2MlpWeights, YuE2Weight,
 };
 use super::protocol::{CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END, VOCAB_SIZE};
 use super::YuE2Model;
@@ -612,7 +612,8 @@ fn causal_prefix_attention(
                 for (dimension, value) in result.iter_mut().enumerate() {
                     let mut sum = 0.0f32;
                     for offset in 0..block.len() {
-                        sum += block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                        sum +=
+                            block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
                     }
                     *value += sum;
                 }

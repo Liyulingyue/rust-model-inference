@@ -2108,7 +2108,10 @@ impl<'a> Qwen3Ops<'a> {
             // the SIMD reduction order does not change as the sequence grows.
             // The shader must use the same width or its prompt logits drift
             // with the generation limit.
-            as_u32(sequence_length.div_ceil(256) * 256, "Qwen3.5 attention padded length")?,
+            as_u32(
+                sequence_length.div_ceil(256) * 256,
+                "Qwen3.5 attention padded length",
+            )?,
         ];
         if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
             || rows > self.context.limits.max_compute_work_group_count[1] as usize
@@ -3773,7 +3776,8 @@ fn check_weight_matvec(
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
         };
-        let got = ops.read_f32(layout.projection, n_out)
+        let got = ops
+            .read_f32(layout.projection, n_out)
             .map_err(|error| error.to_string())?;
         // Same matmul on both sides, so the wall-clock ratio is the effective
         // throughput ratio for this shape.

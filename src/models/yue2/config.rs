@@ -1,4 +1,4 @@
-use crate::core::tensor::{MetaValue, TensorSource, MetaValueType};
+use crate::core::tensor::{MetaValue, MetaValueType, TensorSource};
 
 use super::protocol::{CONTEXT, PROTOCOL_VERSION, VOCAB_SIZE};
 

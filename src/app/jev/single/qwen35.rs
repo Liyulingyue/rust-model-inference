@@ -68,7 +68,6 @@ pub(crate) struct Qwen35JevScorer {
     pending: Option<(String, String)>,
 }
 
-
 impl Qwen35JevScorer {
     pub(crate) fn new(
         source: Arc<dyn TensorSource>,
@@ -93,7 +92,6 @@ impl Qwen35JevScorer {
             pending: None,
         })
     }
-
 }
 
 impl JevScorer for Qwen35JevScorer {

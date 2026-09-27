@@ -262,11 +262,18 @@ impl<'a> Lfm2MoeSession<'a> {
         let normed = &mut self.scratch.normed[..n_embd];
         crate::ops::rms_norm(x, output_norm, normed, eps);
 
-        let max_n_in = (cfg.n_embd * 3).max(cfg.n_head * cfg.n_embd_head_k).max(cfg.n_ff);
+        let max_n_in = (cfg.n_embd * 3)
+            .max(cfg.n_head * cfg.n_embd_head_k)
+            .max(cfg.n_ff);
         let q8 = &mut self.scratch.q8_buf[..max_n_in];
         let scale = &mut self.scratch.scale_buf[..max_n_in / 32];
         let q8k = &mut self.scratch.q8k_buf[..max_n_in / 256];
-        crate::ops::quantize_q8_0_into(normed, n_embd, &mut q8[..n_embd], &mut scale[..n_embd / 32]);
+        crate::ops::quantize_q8_0_into(
+            normed,
+            n_embd,
+            &mut q8[..n_embd],
+            &mut scale[..n_embd / 32],
+        );
         crate::ops::quantize_row_q8_k_into(normed, &mut q8k[..n_embd / 256]);
 
         let output_pw = crate::ops::kernel::Weight::from_quantized(
@@ -292,8 +299,7 @@ impl<'a> Lfm2MoeSession<'a> {
             let q8_slice = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_val) };
             let sc_slice = unsafe { std::slice::from_raw_parts(scale_ptr, n_embd_val / 32) };
             let q8k_slice = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_val / 256) };
-            let logits_slice =
-                unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab_val) };
+            let logits_slice = unsafe { std::slice::from_raw_parts_mut(logits_ptr, vocab_val) };
             output_pw.kernel.forward_prepared(
                 input,
                 q8_slice,
@@ -386,7 +392,8 @@ impl<'a> ChunkedPrefill for Lfm2MoeSession<'a> {
         }
         let mut last_logits: Option<Vec<f32>> = None;
         for chunk in prefill_chunks(total, batch_size) {
-            last_logits = self.forward_chunk(input, chunk.len(), self.seq_len, chunk.end == total)?;
+            last_logits =
+                self.forward_chunk(input, chunk.len(), self.seq_len, chunk.end == total)?;
         }
         Ok(last_logits)
     }

@@ -69,9 +69,8 @@ fn parse_args() -> Result<Opts, String> {
             "--query" => opts.query = Some(v(&mut args, "--query")?),
             "--documents" => {
                 let path = PathBuf::from(v(&mut args, "--documents")?);
-                let text = fs::read_to_string(&path).map_err(|e| {
-                    format!("read documents file {}: {e}", path.display())
-                })?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|e| format!("read documents file {}: {e}", path.display()))?;
                 for chunk in text.split('\n') {
                     if !chunk.is_empty() {
                         opts.docs.push(chunk.to_string());
@@ -79,12 +78,16 @@ fn parse_args() -> Result<Opts, String> {
                 }
             }
             "--doc" => opts.docs.push(v(&mut args, "--doc")?),
-            "--threads" => opts.threads = v(&mut args, "--threads")?.parse().map_err(|e| {
-                format!("invalid --threads value: {e}")
-            })?,
-            "--max-tokens" => opts.max_tokens = v(&mut args, "--max-tokens")?
-                .parse()
-                .map_err(|e| format!("invalid --max-tokens: {e}"))?,
+            "--threads" => {
+                opts.threads = v(&mut args, "--threads")?
+                    .parse()
+                    .map_err(|e| format!("invalid --threads value: {e}"))?
+            }
+            "--max-tokens" => {
+                opts.max_tokens = v(&mut args, "--max-tokens")?
+                    .parse()
+                    .map_err(|e| format!("invalid --max-tokens: {e}"))?
+            }
             "--instruction" => opts.instruction = Some(v(&mut args, "--instruction")?),
             "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
@@ -227,7 +230,8 @@ fn run() -> Result<(), String> {
                 parse_special: false,
             },
         );
-        let positions = rust_model_inference::models::qwen3::trunk::qwen_text_positions(token_ids.len());
+        let positions =
+            rust_model_inference::models::qwen3::trunk::qwen_text_positions(token_ids.len());
         let session_capacity = token_ids.len() + 4;
         let mut session = Qwen3Session::new(&model, session_capacity)
             .map_err(|e| format!("session {idx}: {e}"))?;
@@ -265,7 +269,8 @@ fn run() -> Result<(), String> {
             let _ = writeln!(
                 stderr,
                 "[{}] yes_logit={:.4} no_logit={:.4} yes_prob={:.4}",
-                idx, relevance,
+                idx,
+                relevance,
                 cls_logits.get(1).copied().unwrap_or(0.0),
                 yes_prob
             );
@@ -291,7 +296,11 @@ fn run() -> Result<(), String> {
         let _ = writeln!(
             stdout,
             "[rank={rank} idx={idx} score={relevance:.3} yes={yes_prob:.3}] {snippet}{}",
-            if docs[*idx].chars().count() > 120 { "..." } else { "" }
+            if docs[*idx].chars().count() > 120 {
+                "..."
+            } else {
+                ""
+            }
         );
     }
     Ok(())
