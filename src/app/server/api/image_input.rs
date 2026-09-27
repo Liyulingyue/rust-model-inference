@@ -44,11 +44,23 @@ pub fn decode_image_source(source: &str, allow_remote: bool) -> Result<ImageRef,
     if trimmed.is_empty() {
         return Err("image source is empty".into());
     }
-    if let Some(rest) = strip_data_uri(trimmed) {
+    let image = decode_source_bytes(trimmed, allow_remote)?;
+    // Reject non-images HERE, while the failure is still a parse error (400 at
+    // the HTTP layer) instead of a mid-generation 500. Only the header is
+    // sniffed, so this is cheap; the full decode still happens in the encoder.
+    image::guess_format(&image.bytes)
+        .map_err(|_| format!("unsupported image format in {trimmed:?}; expected PNG or JPEG"))?;
+    Ok(image)
+}
+
+/// Decode a source string into bytes without validating that they are an
+/// image (that check lives in [`decode_image_source`]).
+fn decode_source_bytes(source: &str, allow_remote: bool) -> Result<ImageRef, String> {
+    if let Some(rest) = strip_data_uri(source) {
         let bytes = decode_base64(rest, "image data URI")?;
-        return Ok(ImageRef::new(bytes, trimmed));
+        return Ok(ImageRef::new(bytes, source));
     }
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    if source.starts_with("http://") || source.starts_with("https://") {
         if !allow_remote {
             return Err(
                 "remote image URLs are disabled; start the server with --allow-remote-images \
@@ -62,17 +74,17 @@ pub fn decode_image_source(source: &str, allow_remote: bool) -> Result<ImageRef,
                 .into(),
         );
     }
-    if let Some(path) = trimmed.strip_prefix("file://") {
-        return read_local_image(trimmed, path);
+    if let Some(path) = source.strip_prefix("file://") {
+        return read_local_image(source, path);
     }
     // Anything else: try raw base64 first (the Anthropic Messages shape sends
     // bare base64 with no data: prefix), then fall back to a local path.
-    if looks_like_base64(trimmed) {
-        if let Ok(bytes) = decode_base64(trimmed, "image") {
-            return Ok(ImageRef::new(bytes, trimmed));
+    if looks_like_base64(source) {
+        if let Ok(bytes) = decode_base64(source, "image") {
+            return Ok(ImageRef::new(bytes, source));
         }
     }
-    read_local_image(trimmed, trimmed)
+    read_local_image(source, source)
 }
 
 /// Pull the payload out of a `data:<mediatype>;base64,<payload>` URI.
@@ -193,13 +205,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn non_image_base64_fails_at_decode_not_at_parse() {
-        // Valid base64, not an image: parsing succeeds, image decoding fails.
-        // Long enough to clear the base64 pre-check's length floor (32), so
-        // this exercises the base64 branch rather than the file branch.
+    fn non_image_base64_is_rejected_at_parse_time() {
+        // Valid base64, not an image. Rejected HERE (a 400 at the HTTP
+        // layer) rather than inside generation (which would surface as a
+        // 500). Long enough to clear the base64 pre-check's length floor
+        // (32), so this exercises the base64 branch, not the file branch.
         let bytes = base64::engine::general_purpose::STANDARD
             .encode(b"this is definitely not an image, only plain text");
-        let image = decode_image_source(&bytes, false).unwrap();
-        assert!(decode_image_bytes(&image.bytes).is_err(), "not an image");
+        let error = decode_image_source(&bytes, false).unwrap_err();
+        assert!(error.contains("unsupported image format"), "got: {error}");
     }
 }

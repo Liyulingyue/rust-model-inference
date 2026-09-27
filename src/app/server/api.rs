@@ -164,7 +164,12 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jev/grouped", post(jev_grouped))
         .route("/v1/jev/image", post(jev_image_score))
         .route("/v1/jev/image_grouped", post(jev_image_grouped))
-        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
+        // 32 MB, not 4 MB: an image-bearing request carries base64, which
+        // inflates the payload by ~33%, so a 4 MB limit rejected a ~3 MB PNG
+        // with 413 before the handler ever saw it. Matches the ceiling the
+        // audio transcription route already uses (64 MB) within the same
+        // order of magnitude.
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
 }
 
 async fn chat(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
