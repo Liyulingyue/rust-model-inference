@@ -267,11 +267,13 @@ pub fn run_inference(
         } else if is_minicpm5 {
             // MiniCPM5 uses ChatML (`<|im_start|>{role}\n{content}<|im_end|>`)
             // per its GGUF `tokenizer.chat_template`. The template supports
-            // `enable_thinking`: when false, emits `<|think|>\n\n<|/think|>\n\n`
-            // (empty thinking block → direct answer). When true, emits `<|think|>\n`
+            // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
+            // (empty thinking block → direct answer). When true, emits `🤔\n`
             // (thinking mode). Default: non-thinking for fast direct answers.
             // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
-            format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
+            format!(
+                "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
+            )
         } else if is_mistral {
             format!("[INST] {prompt} [/INST]")
         } else if is_zephyr {
@@ -2208,9 +2210,11 @@ pub fn build_prompt_tokens(
             prompt.to_string()
         }
     } else if is_minicpm5 {
-        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n")
+        format!(
+            "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
+        )
     } else {
-        format!("user\n{prompt}\nassistant\n{THINK_MARK}\n")
+        format!("user\n{prompt}\nassistant\n<think>\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
     let add_special = arch == "nanbeige";
