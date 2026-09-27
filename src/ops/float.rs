@@ -2,6 +2,9 @@
 
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "parity-trace")]
+use std::sync::OnceLock;
+
 #[cfg(target_arch = "x86_64")]
 use std::sync::atomic::AtomicBool;
 
@@ -227,11 +230,30 @@ pub fn has_neon() -> bool {
 }
 
 /// Opt-in scalar dispatch for bitwise Oracle comparisons; absent in normal builds.
+///
+/// Two gates must both be satisfied:
+/// 1. the `parity-trace` cargo feature (without it this compiles to a
+///    constant `false`), and
+/// 2. the `RMI_SCALAR` environment variable, which forces the scalar
+///    reference path for llama.cpp bitwise comparisons.
+///
+/// The effect is *implicit*: `has_avx2_fma()` / `has_neon()` report
+/// `false` while this returns `true`, so every `if has_avx2_fma()`
+/// dispatch site (Q8_0 quantizer, silu_mul, softmax, dot, matmuls, …)
+/// transparently falls back to its scalar branch. No kernel is changed
+/// and no dispatch site needs to know about this function directly.
+///
+/// The environment variable is read **once, on first call**, and cached
+/// for the lifetime of the process. Set it before the process starts
+/// (`RMI_SCALAR=1 ./binary …`); flipping it later has no effect. Because
+/// std environment variables are process-global and Rust tests run in
+/// parallel threads inside one process, tests cannot expect to toggle
+/// this per-test — the first caller wins.
 #[inline]
 pub fn scalar_mode() -> bool {
     #[cfg(feature = "parity-trace")]
     {
-        static SCALAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static SCALAR: std::sync::OnceLock<bool> = OnceLock::new();
         *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
     }
     #[cfg(not(feature = "parity-trace"))]
