@@ -264,6 +264,11 @@ pub fn decode_image(path: &Path) -> Result<image::DynamicImage, String> {
     image::load_from_memory(&bytes)
         .map_err(|error| format!("Failed to decode image {}: {error}", path.display()))
 }
+/// Decode an image from bytes (base64 / uploads), mirroring [`decode_image`]
+/// for callers that already hold the encoded data instead of a path.
+pub fn decode_image_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    image::load_from_memory(bytes).map_err(|error| format!("Failed to decode image: {error}"))
+}
 
 pub fn normalize_resized_image(
     image: &image::DynamicImage,

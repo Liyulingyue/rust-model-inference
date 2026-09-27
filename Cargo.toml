@@ -22,6 +22,9 @@ bytemuck = "1.0"
 wgpu = { version = "29", features = ["spirv"], optional = true }
 log = "0.4"
 env_logger = "0.11"
+# Blocking client: image URLs are fetched inside the request handler's
+# `spawn_blocking` closure, so an async client would buy nothing.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 futures = "0.3"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }

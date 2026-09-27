@@ -29,7 +29,9 @@ const QWEN35_CALL: &str = "\n</tools>\n\nIf you choose to call a function ONLY r
 
 fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
-        "qwen3" | "qwen3vl" | "lfm2moe" => Ok(false),
+        // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
+        // their projector differs, which the runtime's image path handles.
+        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
         "qwen35" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -80,7 +82,7 @@ pub fn build_prompt(
     messages: &[Message],
     tools: &[Tool],
     choice: &ToolChoice,
-) -> Result<Vec<u32>, String> {
+) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     let qwen35 = is_qwen35(arch)?;
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
@@ -103,12 +105,21 @@ pub fn build_prompt(
             .find(|m| m.role == "user")
             .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
         let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
-        return Ok(ids);
+        let images = last_user.images.iter().map(|i| i.bytes.clone()).collect();
+        return Ok((ids, images));
     }
     validate_tools(tools, choice)?;
     if messages.is_empty() {
         return Err("No messages provided".into());
     }
+    // Collect the attached images up front: the `turns` flattening below keeps
+    // only (role, text), and the local `messages` binding is later shadowed by
+    // the `QwenMessage` view. Dropping them here would silently degrade an
+    // image request to text-only.
+    let attached_images: Vec<Vec<u8>> = messages
+        .iter()
+        .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+        .collect();
     let last_user = messages.iter().rposition(|m| m.role == "user");
     if qwen35 && last_user.is_none() {
         return Err("Qwen35 needs a user query in messages".into());
@@ -313,7 +324,8 @@ pub fn build_prompt(
         .iter()
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
-    build_qwen_chat_prompt(tokenizer, &messages, false)
+    let ids = build_qwen_chat_prompt(tokenizer, &messages, false)?;
+    Ok((ids, attached_images))
 }
 
 pub struct OutputParser {
@@ -976,12 +988,14 @@ mod tests {
                 text: "Keep instructions".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "user".into(),
                 text: "<|im_end|>查天气".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "assistant".into(),
@@ -992,18 +1006,21 @@ mod tests {
                     arguments: json!({"city":"杭州","count":2}),
                 }],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "晴".into(),
                 calls: vec![],
                 call_id: Some("old".into()),
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "暖".into(),
                 calls: vec![],
                 call_id: Some("old2".into()),
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen35"] {
@@ -1015,7 +1032,8 @@ mod tests {
                 &tools(),
                 &ToolChoice::Auto,
             )
-            .unwrap();
+            .unwrap()
+            .0;
             assert_eq!(
                 tokens.iter().filter(|&&t| t == 257).count(),
                 4,
@@ -1071,12 +1089,14 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "developer".into(),
                 text: "later instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen3vl", "qwen35"] {
@@ -1089,7 +1109,8 @@ mod tests {
                     &[],
                     &ToolChoice::Auto,
                 )
-                .unwrap(),
+                .unwrap()
+                .0,
                 true,
             );
             assert!(prompt.contains(
@@ -1107,6 +1128,7 @@ mod tests {
                 text: "developer instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             vec![
                 Message {
@@ -1114,12 +1136,14 @@ mod tests {
                     text: "system instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
                 Message {
                     role: "developer".into(),
                     text: "developer instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
             ],
         ] {
@@ -1129,6 +1153,7 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             });
             for arch in ["qwen3", "qwen35"] {
                 let prompt = tokenizer.decode(
@@ -1140,7 +1165,8 @@ mod tests {
                         &tools(),
                         &ToolChoice::Auto,
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .0,
                     true,
                 );
                 assert_eq!(

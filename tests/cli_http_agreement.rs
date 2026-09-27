@@ -51,6 +51,37 @@ fn model_path() -> Option<std::path::PathBuf> {
     std::env::var_os("RMI_AGREEMENT_MODEL").map(std::path::PathBuf::from)
 }
 
+/// `RMI_AGREEMENT_MMPROJ` — required for the image comparison.
+fn mmproj_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("RMI_AGREEMENT_MMPROJ").map(std::path::PathBuf::from)
+}
+
+fn mmp() -> Option<std::sync::Arc<dyn rust_model_inference::core::tensor::TensorSource>> {
+    let path = mmproj_path()?;
+    let loader = GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MMPROJ must point at a GGUF");
+    Some(std::sync::Arc::from(loader))
+}
+
+/// The image both front-ends are shown: the same apple.png fixture the docs
+/// use (401x287), embedded so the test does not depend on `references/`.
+/// Deterministic 401x287 PNG, generated at test time (no binary fixture in
+/// the repo). Both front-ends receive identical bytes.
+fn agreement_image() -> Vec<u8> {
+    use image::{ImageFormat, Rgb, RgbImage};
+    use std::io::Cursor;
+
+    let mut image = RgbImage::new(401, 287);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        *pixel = Rgb([x as u8, y as u8, (x ^ y) as u8]);
+    }
+    let mut buffer = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut buffer, ImageFormat::Png)
+        .unwrap();
+    buffer.into_inner()
+}
+const IMAGE_PROMPT: &str = "Describe this image in a few words.";
+
 /// Run the CLI binary and return the generated text from its `Output: ` line.
 fn cli_text(path: &std::path::Path, max_tokens: usize, temperature: f32) -> Option<String> {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
@@ -81,7 +112,12 @@ fn cli_text(path: &std::path::Path, max_tokens: usize, temperature: f32) -> Opti
 }
 
 /// Drive the same runtime the server builds, and return the decoded text.
-fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
+fn http_text(
+    loader: &'static GGUFLoader,
+    temperature: f32,
+    images: &[Vec<u8>],
+    prompt: &str,
+) -> String {
     let arch = loader
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
@@ -102,7 +138,8 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
     // CLI's resolution), so the sentinel cannot drift from either side.
     let options =
         RuntimeOptions::from_model(Arc::new(LeakedLoader(loader)), pool, tokenizer.clone())
-            .with_max_context(CONTEXT);
+            .with_max_context(CONTEXT)
+            .with_mmproj(mmp());
     let mut runtime = build_text_runtime(&arch, options)
         .unwrap_or_else(|e| panic!("no runtime for arch {arch}: {e}"));
     // Both front-ends must start from identical prompt ids. For llama-family
@@ -121,7 +158,7 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
             &tokenizer,
             &[rust_model_inference::prompt::Lfm2Message {
                 role: "user",
-                content: PROMPT,
+                content: prompt,
             }],
         )
         .expect("lfm2 prompt build")
@@ -130,7 +167,7 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
             &tokenizer,
             &[rust_model_inference::prompt::QwenMessage {
                 role: "user",
-                content: PROMPT,
+                content: prompt,
             }],
             false,
         )
@@ -143,6 +180,7 @@ fn http_text(loader: &'static GGUFLoader, temperature: f32) -> String {
             temperature,
             ..SamplingParams::default()
         },
+        images: images.to_vec(),
     };
     let mut sink = CollectSink::new();
     runtime
@@ -191,7 +229,7 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
             eprintln!("skipping temperature={temperature}: CLI run failed");
             continue;
         };
-        let http = http_text(loader, temperature);
+        let http = http_text(loader, temperature, &[], PROMPT);
         if cli != http {
             // Where the texts first differ. A split at char 0 means a
             // forward-path divergence (wrong tokens from step one); a split
@@ -215,4 +253,86 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
             "CLI and HTTP disagree for arch={arch} temperature={temperature}\nCLI : {cli:?}\nHTTP: {http:?}"
         );
     }
+}
+
+#[test]
+fn cli_and_http_agree_on_image_input() {
+    // Image comparison: the CLI takes `--mmproj --image <file>`, the runtime
+    // takes the decoded bytes through `GenerationRequest.images`. Greedy only,
+    // for the same RNG reason as above — and greedy is where a mis-spliced
+    // vision placeholder shows up (see Qwen35TextRuntime::prepare_image_prefill).
+    let Some(path) = model_path() else { return };
+    let Some(mmproj) = mmproj_path() else {
+        eprintln!("skipping: set RMI_AGREEMENT_MMPROJ to run the image comparison");
+        return;
+    };
+    let loader: &'static GGUFLoader = Box::leak(Box::new(
+        GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MODEL must point at a GGUF"),
+    ));
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    // Three projector families are wired up: qwen35 and qwen2vl share the
+    // Qwen2.5-Omni projector (plus a required system turn), qwen3vl /
+    // qwen3vlmoe use the Qwen3-VL merger with per-layer deepstack.
+    if !matches!(
+        arch.as_str(),
+        "qwen35" | "qwen3vl" | "qwen3vlmoe" | "qwen2vl"
+    ) {
+        eprintln!(
+            "skipping: image agreement is implemented for qwen35/qwen3vl/qwen2vl, got {arch}"
+        );
+        return;
+    }
+
+    // CLI side: `--image` reads the fixture from disk.
+    let fixture = std::env::temp_dir().join(format!("rmi-agree-apple-{}.png", std::process::id()));
+    std::fs::write(&fixture, agreement_image()).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
+        .arg("--model")
+        .arg(&path)
+        .arg("--mmproj")
+        .arg(&mmproj)
+        .arg("--image")
+        .arg(&fixture)
+        .arg("--prompt")
+        .arg(IMAGE_PROMPT)
+        .arg("--n-gen")
+        .arg(MAX_TOKENS.to_string())
+        .arg("--temp")
+        .arg("0")
+        .arg("--max-context")
+        .arg(CONTEXT.to_string())
+        .output()
+        .expect("CLI run");
+    let _ = std::fs::remove_file(&fixture);
+    if !output.status.success() {
+        eprintln!(
+            "skipping: CLI image run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Two CLI output formats: the text path prints `Output: <tokens…>`, the
+    // multimodal path prints `--- Generation ---\n <text>`. Take whichever is
+    // present, up to the following `\n[` / end of string.
+    let cli = if let Some(at) = stdout.find("Output: ") {
+        let rest = &stdout[at + "Output: ".len()..];
+        rest[..rest.find('\n').unwrap_or(rest.len())].to_string()
+    } else if let Some(at) = stdout.find("--- Generation ---") {
+        let rest = &stdout[at + "--- Generation ---".len()..];
+        let rest = rest.strip_prefix('\n').unwrap_or(rest);
+        rest[..rest.find("\n--- End ---").unwrap_or(rest.len())].to_string()
+    } else {
+        panic!("CLI printed no recognisable output line; stdout was:\n{stdout}");
+    };
+
+    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT);
+    assert_eq!(
+        cli, http,
+        "CLI and HTTP disagree on image input\nCLI : {cli:?}\nHTTP: {http:?}"
+    );
 }
