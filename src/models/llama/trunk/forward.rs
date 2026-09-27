@@ -191,7 +191,6 @@ pub(crate) fn apply_rope(
     freq_base: f32,
     rope_dim: usize,
     attn_factor: f32,
-    rope_freq_head_dim: usize,
 ) {
     // Phi-3 / Phi-4 only apply RoPE to the first `rope_dim` of `head_dim`;
     // the remaining lanes pass through unchanged. Mirror that by splitting
@@ -203,27 +202,35 @@ pub(crate) fn apply_rope(
     // baked into the model's weights during training and missing it
     // shifts the qk inner products enough to break greedy decoding.
     //
-    // `rope_freq_head_dim` is the dim used to compute the rotation
-    // frequency table. For partial RoPE this is the FULL head_dim
-    // (the cos/sin table is per-dim and using `rope_dim` here would
-    // shift the frequencies).
+    // `rope_dim` is also the dim used to build the cos/sin table (i.e.
+    // `theta_scale = freq_base^(-2/rope_dim)`). llama.cpp's ggml_rope_ext
+    // uses `n_dims` as the rotation count for both the slice AND the
+    // frequency table — i.e. partial RoPE uses rope_dim frequencies, not
+    // head_dim frequencies.
+    //
+    // Phi-3 / Phi-4 / Phi-2 / Phi-MoE / Gemma-2 / Gemma-3 / GPT-NeoX /
+    // Exaone / OpenELM / StableLM all use the "neox" (half-rotation) rope
+    // layout in llama.cpp: `out[i] = x[i]*cos - x[i + half]*sin`, with
+    // `half = rope_dim / 2`. The "normal" (interleaved) layout is used
+    // by llama / qwen / granite / k2-horizon.
+    let neox_layout = arch == "phi3"
+        || arch == "phi2"
+        || arch == "phimoe"
+        || arch == "gemma"
+        || arch == "gemma2"
+        || arch == "gemma3"
+        || arch == "gptneox"
+        || arch == "exaone"
+        || arch == "exaone4"
+        || arch == "openelm"
+        || arch == "stablelm";
     let rope_dim = rope_dim.min(head_dim);
-    let rope_freq_head_dim = if rope_freq_head_dim == 0 {
-        head_dim
-    } else {
-        rope_freq_head_dim
-    };
     if rope_dim < head_dim {
-        // Partial RoPE path: rotate first `rope_dim` of the head using
-        // a cos/sin table built for `rope_freq_head_dim` (not `rope_dim`).
-        // `apply_partial_rope` builds its own cos/sin and applies it
-        // element-by-element; the standard `rope_norm` would early-return
-        // because `slice_len / head_dim_in = 0`.
-        apply_partial_rope(values, pos, rope_dim, rope_freq_head_dim, freq_base, arch == "k2-horizon");
+        apply_partial_rope(values, pos, rope_dim, freq_base, neox_layout);
         apply_attn_factor(values, rope_dim, attn_factor);
         return;
     }
-    if arch == "k2-horizon" {
+    if neox_layout || arch == "k2-horizon" {
         rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
         rope_norm(values, pos, head_dim, freq_base);
@@ -231,35 +238,40 @@ pub(crate) fn apply_rope(
     apply_attn_factor(values, head_dim, attn_factor);
 }
 
-/// Apply "normal" (interleaved-pair) RoPE to the first `rope_dim` of
-/// `values`, building the cos/sin table against `rope_freq_head_dim`
-/// (which can be larger than `rope_dim` for Phi-3 partial RoPE).
+/// Apply RoPE to the first `rope_dim` of `values`. `neox_layout=true`
+/// uses the half-rotation pattern (`x[i]` paired with `x[i + half]`),
+/// which is what Phi-3 / Phi-4 / Gemma / GPT-NeoX use in llama.cpp.
+/// `neox_layout=false` uses the interleaved-pair pattern
+/// (`x[2i]` paired with `x[2i + 1]`).
+///
+/// The cos/sin table is built against `rope_dim` itself (not `head_dim`),
+/// matching llama.cpp's `n_dims` semantics.
 fn apply_partial_rope(
     values: &mut [f32],
     pos: usize,
     rope_dim: usize,
-    rope_freq_head_dim: usize,
     freq_base: f32,
-    neox: bool,
+    neox_layout: bool,
 ) {
     use crate::ops::rope::neox::rope_sin_cos;
-    let half = rope_freq_head_dim / 2;
-    if half == 0 || rope_dim < 2 {
+    if rope_dim < 2 {
         return;
     }
-    let pairs = rope_dim / 2;
-    let theta_scale = freq_base.powf(-2.0f32 / rope_freq_head_dim as f32);
+    let half = rope_dim / 2;
+    let theta_scale = freq_base.powf(-2.0f32 / rope_dim as f32);
     let mut theta = pos as f32;
-    for i in 0..pairs {
+    for i in 0..half {
         let (c, s) = rope_sin_cos(theta);
-        let x0 = values[2 * i];
-        let x1 = values[2 * i + 1];
-        if neox {
-            // neox: pairs are (x[2i], x[2i + half])
-            // Skip the +half rotation since partial RoPE doesn't touch it.
-            values[2 * i] = x0 * c - x1 * s;
-            values[2 * i + 1] = x0 * s + x1 * c;
+        if neox_layout {
+            // Half-rotation: x[i] paired with x[i + half].
+            let x0 = values[i];
+            let x1 = values[i + half];
+            values[i] = x0 * c - x1 * s;
+            values[i + half] = x0 * s + x1 * c;
         } else {
+            // Interleaved: x[2i] paired with x[2i + 1].
+            let x0 = values[2 * i];
+            let x1 = values[2 * i + 1];
             values[2 * i] = x0 * c - x1 * s;
             values[2 * i + 1] = x0 * s + x1 * c;
         }
@@ -456,11 +468,9 @@ pub fn run_inference_tokens(
         .map(|v| v as usize)
         .filter(|v| *v > 0)
         .unwrap_or(n_embd_head);
-    // Phi-3 partial RoPE rotates only the first `rope_dim` elements of
-    // the head, but the rotation *frequency* uses the full head_dim
-    // (i.e. `theta_scale = freq_base^(-2/head_dim)` rather than
-    // `freq_base^(-2/rope_dim)`). We thread both through to apply_rope
-    // so the cos/sin table is computed against the correct head_dim.
+    // Phi-3 / Phi-4 use partial RoPE: rotate the first `rope_dim` of the
+    // head (e.g. 96 of 128), leave the rest untouched. The cos/sin
+    // table is built against `rope_dim` itself, not the full head_dim.
     let rope_dim = rope_dim.min(n_embd_head_k);
     // Phi-3 / Phi-4 scale RoPE outputs by `rope.scaling.attn_factor`; the
     // default of 1.0 means "no rescaling" (standard llama behaviour).
@@ -653,6 +663,7 @@ pub fn run_inference_tokens(
                 &mut scale_buf[..n_embd / 32],
             );
             let q8 = q8_buf[..n_embd].as_ptr();
+
             let sc = scale_buf[..n_embd / 32].as_ptr();
             crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
@@ -723,7 +734,6 @@ pub fn run_inference_tokens(
                         freq_base,
                         rope_dim,
                         attn_factor,
-                        n_embd_head_k,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -735,7 +745,6 @@ pub fn run_inference_tokens(
                         freq_base,
                         rope_dim,
                         attn_factor,
-                        n_embd_head_k,
                     );
                 }
                 dbg_tensor(step, "Qcur", layer, q);
@@ -1580,7 +1589,6 @@ pub fn run_forward_logits_llama_inner(
                         freq_base,
                         rope_dim,
                         attn_factor,
-                        n_embd_head_k,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -1592,7 +1600,6 @@ pub fn run_forward_logits_llama_inner(
                         freq_base,
                         rope_dim,
                         attn_factor,
-                        n_embd_head_k,
                     );
                 }
 
@@ -2282,7 +2289,7 @@ mod tests {
 
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
-        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0, 4);
+        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0);
         crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }

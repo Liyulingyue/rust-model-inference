@@ -505,8 +505,8 @@ impl<'a> LlamaSession<'a> {
                 let abs_pos = base_position + r;
                 let q_row = &mut q_out[r * n_embd_q..(r + 1) * n_embd_q];
                 let k_row = &mut k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa];
-                apply_rope(arch.as_str(), q_row, abs_pos, n_embd_head_k, freq_base, rope_dim, attn_factor, n_embd_head_k);
-                apply_rope(arch.as_str(), k_row, abs_pos, n_embd_head_k, freq_base, rope_dim, attn_factor, n_embd_head_k);
+                apply_rope(arch.as_str(), q_row, abs_pos, n_embd_head_k, freq_base, rope_dim, attn_factor);
+                apply_rope(arch.as_str(), k_row, abs_pos, n_embd_head_k, freq_base, rope_dim, attn_factor);
             }
 
             // ---- Per-row KV-cache append ----
@@ -883,8 +883,8 @@ impl<'a> LlamaSession<'a> {
             // right rope schedule (neox vs grouped-norm).
             let _ = &mut arch_buf;
             let arch_for_rope: &str = arch.as_str();
-            apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base, cfg.rope_dim, cfg.attn_factor, n_embd_head_k);
-            apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base, cfg.rope_dim, cfg.attn_factor, n_embd_head_k);
+            apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base, cfg.rope_dim, cfg.attn_factor);
+            apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base, cfg.rope_dim, cfg.attn_factor);
 
             // KV cache append — same as legacy.
             let kb = layer * max_ctx * n_embd_gqa;

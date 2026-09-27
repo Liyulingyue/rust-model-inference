@@ -1709,15 +1709,25 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
             };
             if starts_word {
                 if pre == PreTokenizer::Gpt4o {
-                    // GPT-4O / tiktoken-cl100k: split word into
-                    // (0+ uppercase)(1+ lowercase) or
-                    // (1+ uppercase)(0+ lowercase), with an optional
-                    // leading non-letter/non-number character and an
-                    // optional apostrophe-contraction suffix (handled
-                    // above the loop).
+                    // GPT-4O / tiktoken-cl100k regex (simplified):
+                    //   [^\r\n\p{L}\p{N}]?\p{L}+
+                    // i.e. an OPTIONAL single non-letter/non-number/non-newline
+                    // char (typically a leading space, but also tabs,
+                    // commas, etc.) followed by 1+ letters. The leading
+                    // space MUST be folded into the same pre-token as
+                    // the word, otherwise the BPE merges a separate
+                    // `" "` (or `"Ġ"`) token between every word and
+                    // every model trained on cl100k_base vocab (Phi-4,
+                    // GPT-4o, etc.) sees a doubled-length input and
+                    // produces degenerate output.
                     let mut p = pos;
-                    // Optional leading non-letter/non-number.
-                    if !current.is_whitespace()
+                    // Optional leading single non-letter/non-number
+                    // char. The regex matches one char in
+                    // `[^\r\n\p{L}\p{N}]` — that includes whitespace,
+                    // punctuation, and similar, but NOT `\r`, `\n`,
+                    // letters, or numbers. Skip at most ONE char.
+                    if current != '\r'
+                        && current != '\n'
                         && !is_word_char(current, PreTokenizer::Gpt4o)
                         && !is_number(current)
                     {
