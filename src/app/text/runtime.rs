@@ -296,6 +296,9 @@ impl TextRuntime for LlamaTextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,
@@ -705,6 +708,9 @@ impl TextRuntime for Qwen35TextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,
@@ -826,6 +832,9 @@ impl TextRuntime for Lfm2MoeTextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,

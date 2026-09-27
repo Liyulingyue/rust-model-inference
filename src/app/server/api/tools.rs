@@ -84,6 +84,33 @@ pub fn build_prompt(
     choice: &ToolChoice,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     let qwen35 = is_qwen35(arch)?;
+    // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
+    // them with qwen ChatML happens to work (the model copes) but diverges
+    // from the CLI and from the official Jinja template — and it is the
+    // reason lfm2moe answers carried a stray `<think>` opener. Route them to
+    // the LFM2 builder, which is also what the CLI uses.
+    if matches!(arch, "lfm2moe" | "lfm2") {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for LFM2 architectures".into());
+        }
+        let lfm_messages: Vec<crate::prompt::Lfm2Message<'_>> = messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "system" | "user" | "assistant"))
+            .map(|m| crate::prompt::Lfm2Message {
+                role: m.role.as_str(),
+                content: m.text.as_str(),
+            })
+            .collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let ids =
+            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, false)?;
+        let images: Vec<Vec<u8>> = messages
+            .iter()
+            .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+            .collect();
+        return Ok((ids, images));
+    }
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
     }

@@ -3,6 +3,7 @@ mod fixtures;
 pub mod image_input;
 pub mod protocol;
 mod stop;
+mod think;
 pub mod tools;
 
 use protocol::{Message, Request};
@@ -688,6 +689,9 @@ fn generate(
     }
     let mut parser = tools::OutputParser::new(&text.arch, &request.tools, &request.choice);
     let mut stop = stop::StopFilter::new(request.stop.clone());
+    // Strip a leading reasoning block first: a stop sequence inside the block
+    // must not cut generation short, and the parser should never see it.
+    let mut think = think::ThinkFilter::new();
     let mut callback_error = None;
     let mut stopped = false;
     let mut on_token = |chunk: &str| -> bool {
@@ -695,7 +699,7 @@ fn generate(
             stopped = true;
             return false;
         }
-        let output = stop.push(chunk);
+        let output = stop.push(&think.push(chunk));
         match parser.push(&output) {
             Ok(deltas) => {
                 for delta in deltas {
@@ -753,6 +757,11 @@ fn generate(
     }
     if cancelled() {
         return Err("Client disconnected".into());
+    }
+    for delta in parser.push(&stop.push(&think.finish()))? {
+        if !emit(delta) {
+            return Err("Client disconnected".into());
+        }
     }
     for delta in parser.push(&stop.finish())? {
         if !emit(delta) {
