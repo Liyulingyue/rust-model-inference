@@ -408,46 +408,47 @@ Qwen3、Qwen3.5、Gemma4 仍分别维护自己的 chunk loop、CPU/Vulkan fallba
 
 ---
 
-### TODO-011: GLM-4 commit `65f8c8b` follow-up cleanups (non-urgent)
+### TODO-011: GLM-4 commit `65f8c8b` follow-up cleanups — ✅ 已完成 (2026-09-29)
 
 来源：merge `origin/main` (62ab751) → `msi-new2` (daed1ec) 后评审 6 个非 PR commit 时记录。
 GLM-4 (`arch="glm4"`) 在 llama trunk 上跑通（Paris、中文 ML 题本地 IQ4_NL 验证通过），
-所以这些都是 cosmetic / dead-code，**不阻塞 main**。留作下次触碰 GLM-4 / llama trunk /
-scratchpad 时顺手处理。
+这些都是 cosmetic / dead-code。在 `msi-new3`（PR #120 合并后的新起点）上**全部处理完毕**。
 
-1. **删除 dead scratchpad 字段 `x_after_attn` / `x_after_mlp`** —
-   `src/core/scratchpad.rs` 的 `Default::default` / `new_batched` +
-   `src/models/qwen3/trunk/session.rs` 三处分配，但 forward.rs 无任何读取。每
-   batch row 多 ~8KB（n_embd × 2 × 4B）。GLM-4 的 post-norm 用 `attn_proj` 自身
-   作缓冲，不依赖这两个字段。
-2. **清理 `quantize_row_q8_k_scalar_into` 死代码** — `src/ops/quant/mod.rs` 改写后
+1. ~~**删除 dead scratchpad 字段 `x_after_attn` / `x_after_mlp`**~~ ✅ 已删。
+   原 `src/core/scratchpad.rs` 的 `Default::default` / `new_batched` +
+   `src/models/qwen3/trunk/session.rs` 共 6 处分配，forward.rs 无任何读取。每
+   batch row 多 ~8KB（n_embd × 2 × 4B）释放。
+2. ~~**清理 `quantize_row_q8_k_scalar_into` 死代码**~~ ✅ 已清理，**并发现一个真 bug**：
    `max_val` 的累加器 + `sum_q` 都已丢弃（`let _ = max_val; let _ = sum_q;`），
-   fold 是 dead code。新版只用 `amax = max(|x|)`，scale 改无符号（`d = amax/127`），
-   删掉这两行即可。
-3. **`tools.rs` 让 glm4 + tools 显式 Err** — `src/app/server/api/tools.rs`
-   `llama_family` 白名单加了 `"glm4"`，但 GLM-4 chat template
-   (`[gMASK]<sop><|user|>...<|assistant|>`) 不理解 llama 的 `<|python_tag|>` tool
-   格式。带 tools 的请求会静默通过、走 llama prompt 渲染、GLM-4 输出垃圾。建议在
-   `build_prompt` 里加：`arch == "glm4" && !tools.is_empty() => Err("GLM-4 不支持
-   tool calls")`。
-4. **修复 `docs/MODEL_LIST.md` 孤行 `| `** — commit `d4a2559` (cix3: document
-   GLM-4-9B-0414 row) 在 GLM-4 行后多了一个半行 `| `，Markdown 表格解析会丢整
-   行。删掉。
-5. **squash 掉 cix3 docs stash dance** — `af0aa5d` (stash docs) +
-   `b3ede68` (restore docs detail) 在 docs/MODEL_LIST.md 上是 no-op，但在 commit
-   graph 上产生两次执行 /revert。merge 进 main 前应 `git rebase -i` 丢掉。
-6. **补 Q8_K zero-pad 单元测试** — 当前 `q4k_avx2_matches_scalar_real_model` /
-   `valid_q8_weights` 被编译器标 `is never used`，GLM-4 n_ff=13696 走 zero-pad
-   路径无单元测试覆盖（仅本地 2 题 smoke）。建议加 `quantize_roundtrip_padded_q8k`：
-   对 13696-wide f32 slice 做 quantize + dequantize，断言 `|roundtrip - x| < 1e-2`。
+   dead code 已删。**但清理过程中发现 `padded` buffer 尾部未清零** —
+   GLM-4 n_ff=13696 = 54 blocks（53×256 + 1×128），最后 partial block 的
+   `padded[128..256]` 保留前一个 full block 的脏值并参与量化，quantize 结果错。
+   修复：`padded[len..].fill(0.0)`。由新增的 4 个单元测试验证（删掉 fix 后 2 个
+   测试立即 FAILED，确认测试能抓住 bug）。
+3. **`tools.rs` 让 glm4 + tools 显式 Err — 误报，无需修**。
+   当前 `tools.rs` 的 `llama_family` 分支在 `if !tools.is_empty()` 时已经统一
+   `return Err("Function tools are unsupported for llama-family architectures")`
+   （由 PR `b018708` #112 "HTTP CLI 公共逻辑抽取" 引入），glm4 + tools 已被拒。
+   **修 TODO 说明此条为误报**，不是真实 bug。
+4. ~~**修复 `docs/MODEL_LIST.md` 孤行 `| `**~~ ✅ 已删。GLM-4 row 末尾原本
+   缺失闭合 `）`，一并补上。
+5. ~~**squash 掉 cix3 docs stash dance**~~ ✅ 已由 PR #120 的 squash merge 处理，
+   main 历史已干净（无需单独 rebase）。
+6. ~~**补 Q8_K zero-pad 单元测试**~~ ✅ 已加。
+   `src/ops/quant/mod.rs::q8k_padding_tests` 4 个测试：
+   - `partial_block_tail_roundtrips_to_zero`：GLM-4 n_ff=13696 partial block
+     尾部 roundtrip 到 0
+   - `partial_block_valid_values_roundtrip_within_quantum`：有效值误夽
+     ≤ 半个 quantum（`d/2`）
+   - `partial_block_tail_is_independent_of_previous_block`：直接验证字段 2 的
+     脏 buffer bug — 删掉 fix 后 FAILED
+   - `undersized_buffer_panics`：buf 长度合约 `len.div_ceil(QK_K)` 强制执行
 
 关联文件：
-- `src/core/scratchpad.rs` — 字段 1
-- `src/ops/quant/mod.rs:103-156` — 字段 2
-- `src/app/server/api/tools.rs:95` — 字段 3
-- `docs/MODEL_LIST.md` — 字段 4
-- `docs/MODEL_LIST.md` (history) — 字段 5
-- `src/ops/quant/mod.rs` (新增测试) — 字段 6
+- `src/core/scratchpad.rs` — 字段 1（已删）
+- `src/models/qwen3/trunk/session.rs` — 字段 1（已删）
+- `src/ops/quant/mod.rs:104-155` + `q8k_padding_tests` — 字段 2 + 6（已修 + 已测）
+- `docs/MODEL_LIST.md` — 字段 4（已删孤行 + 补 `）`）
 
 ---
 

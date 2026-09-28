@@ -980,7 +980,7 @@ mod http_tests {
             stop: vec![],
             store: false,
             previous_response_id: Some("prev".into()),
-            instructions: None,
+            instructions: Some("system".into()),
             enable_thinking: None,
         };
         let mut value = serde_json::json!({"object":"response"});

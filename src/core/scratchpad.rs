@@ -11,8 +11,6 @@ pub enum KvFormat {
 
 pub struct ExecutionScratchpad {
     pub x: Vec<f32>,
-    pub x_after_attn: Vec<f32>,
-    pub x_after_mlp: Vec<f32>,
     pub normed: Vec<f32>,
     pub q: Vec<f32>,
     pub k_new: Vec<f32>,
@@ -54,8 +52,6 @@ impl Default for ExecutionScratchpad {
         // `new_batched`.
         Self {
             x: Vec::new(),
-            x_after_attn: Vec::new(),
-            x_after_mlp: Vec::new(),
             normed: Vec::new(),
             q: Vec::new(),
             k_new: Vec::new(),
@@ -162,8 +158,6 @@ impl ExecutionScratchpad {
         let row_scale = max_rows;
         Self {
             x: vec![0.0f32; n_embd * row_scale],
-            x_after_attn: vec![0.0f32; n_embd * row_scale],
-            x_after_mlp: vec![0.0f32; n_embd * row_scale],
             normed: vec![0.0f32; n_embd * row_scale],
             q: vec![0.0f32; n_embd_q * row_scale],
             k_new: vec![0.0f32; n_embd_gqa * row_scale],
