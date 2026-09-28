@@ -1687,18 +1687,39 @@ mod tests {
     fn tool_errors_survive_normalization_and_behavior_is_not_ignored() {
         let r=Protocol::Anthropic.parse(&json!({"messages":[{"role":"user","content":"go"},{"role":"assistant","content":[{"type":"tool_use","id":"c","name":"f","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","is_error":true,"content":"failed"}]}]})).unwrap();
         assert!(r.messages.last().unwrap().text.contains("error"));
+        // Unsupported *semantic* fields are warned-and-ignored rather than
+        // 400'd: `validate_options` takes a permissive pass (see its doc
+        // comment) so a client sending OpenAI-flavour extras still gets a
+        // usable response. Only *schema-level* mistakes — a field that is
+        // well-formed but belongs to another protocol — still hard-fail.
+        //
+        // These four used to be rejected; the behaviour change is
+        // deliberate (commit 208f65e, "改进协议验证函数以记录不支持的选项").
         let valid = json!({"messages":[{"role":"user","content":"Hi"}]});
         for (key, value) in [
             ("functions", json!([{ "name":"f" }])),
             ("function_call", json!("auto")),
             ("include", json!(["message.output_text.logprobs"])),
-            ("max_output_tokens", json!(1)),
             ("store", json!(true)),
         ] {
             let mut body = valid.clone();
             body[key] = value;
-            assert!(Protocol::Chat.parse(&body).is_err(), "{key}");
+            let parsed = Protocol::Chat
+                .parse(&body)
+                .unwrap_or_else(|e| panic!("{key} should be ignored, not rejected: {e}"));
+            // None of them changed tool resolution: no tools were supplied,
+            // so the request resolves to "no tools" regardless of the extra.
+            assert!(parsed.tools.is_empty(), "{key} must not populate tools");
+            assert!(
+                matches!(parsed.choice, ToolChoice::None | ToolChoice::Auto),
+                "{key} must not override tool_choice"
+            );
         }
+        // Schema-level: `max_output_tokens` is Responses-only, so sending it
+        // to Chat is a protocol mix-up rather than an unsupported extra.
+        let mut body = valid;
+        body["max_output_tokens"] = json!(1);
+        assert!(Protocol::Chat.parse(&body).is_err());
         assert!(Protocol::Responses
             .parse(&json!({"input":"Hi","max_tokens":1}))
             .is_err());
