@@ -358,6 +358,9 @@ fn text_encode_inner(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(q_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             q_slice,
@@ -377,6 +380,9 @@ fn text_encode_inner(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(k_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             k_slice,
@@ -392,6 +398,7 @@ fn text_encode_inner(
         }
 
         let mut attn_out = vec![0.0; n_tokens * n_attn];
+        let scalar_qwen2vl = cfg.architecture == "qwen2vl" && crate::ops::scalar_mode();
         for head in 0..cfg.n_head {
             let kv_head = head / group_size;
             let q_off = head * cfg.n_embd_head_k;
@@ -416,30 +423,54 @@ fn text_encode_inner(
                     }
                 }
                 let mut exp_sum = 0.0f32;
+                let mut exp_sum_exact = 0.0f64;
                 for j in 0..=i {
                     if key_mask.is_some_and(|mask| !mask[j]) {
                         continue;
                     }
                     scores[j] = (scores[j] - max_val).exp();
-                    exp_sum += scores[j];
+                    if scalar_qwen2vl {
+                        exp_sum_exact += scores[j] as f64;
+                    } else {
+                        exp_sum += scores[j];
+                    }
                 }
+                let inv_sum = if scalar_qwen2vl {
+                    (1.0f64 / exp_sum_exact) as f32
+                } else {
+                    0.0
+                };
                 for j in 0..=i {
                     if key_mask.is_some_and(|mask| !mask[j]) {
                         continue;
                     }
-                    scores[j] /= exp_sum;
+                    if scalar_qwen2vl {
+                        scores[j] *= inv_sum;
+                    } else {
+                        scores[j] /= exp_sum;
+                    }
                 }
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
+                    let mut sum_exact = 0.0f64;
                     for j in 0..=i {
                         if key_mask.is_some_and(|mask| !mask[j]) {
                             continue;
                         }
                         let v_row =
                             &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
-                        sum += scores[j] * v_row[dim];
+                        let product = scores[j] * v_row[dim];
+                        if scalar_qwen2vl {
+                            sum_exact += product as f64;
+                        } else {
+                            sum += product;
+                        }
                     }
-                    attn_out[i * n_attn + attn_off + dim] = sum;
+                    attn_out[i * n_attn + attn_off + dim] = if scalar_qwen2vl {
+                        sum_exact as f32
+                    } else {
+                        sum
+                    };
                 }
             }
         }

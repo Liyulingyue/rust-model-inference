@@ -574,7 +574,7 @@ impl Qwen3Model {
             None => None,
         };
 
-        let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
+        let mut layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
             Arc::clone(&source),
             config.n_layer,
             config.n_embd,
@@ -586,6 +586,27 @@ impl Qwen3Model {
             config.has_qkv_bias,
             config.moe,
         )?;
+        if config.architecture == "qwen2vl" && crate::ops::scalar_mode() {
+            for (index, layer) in layers.iter_mut().enumerate() {
+                for (weight, name) in [
+                    (&mut layer.wq, "attn_q"),
+                    (&mut layer.wk, "attn_k"),
+                    (&mut layer.wv, "attn_v"),
+                    (&mut layer.wo, "attn_output"),
+                    (&mut layer.w_gate, "ffn_gate"),
+                    (&mut layer.w_up, "ffn_up"),
+                    (&mut layer.w_down, "ffn_down"),
+                ] {
+                    if weight.ggml_type == crate::core::tensor::GGMLType::BF16 {
+                        let name = format!("blk.{index}.{name}.weight");
+                        let bytes = source.tensor_slice(&name).ok_or(name)?;
+                        let bytes: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+                        weight.kernel =
+                            Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(bytes));
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             source,

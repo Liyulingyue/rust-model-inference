@@ -754,7 +754,7 @@ impl FluxVae {
             &attention.norm.bias,
             &mut scratch.first,
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
             &attention.q,
@@ -762,7 +762,7 @@ impl FluxVae {
             side,
             &mut scratch.q,
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
             &attention.k,
@@ -770,7 +770,7 @@ impl FluxVae {
             side,
             &mut scratch.k,
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
             &attention.v,
@@ -787,7 +787,7 @@ impl FluxVae {
             &mut scratch.first,
             &mut scratch.scores,
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
             &attention.proj_out,
@@ -892,9 +892,41 @@ fn run_conv(
             &conv.bias,
             output,
             pool,
+            false,
         ),
         other => Err(format!("Unsupported VAE convolution dtype: {other:?}")),
     }
+}
+
+fn run_attention_projection(
+    source: &dyn TensorSource,
+    pool: &Arc<ComputePool>,
+    conv: &VaeConv,
+    input: &[f32],
+    side: usize,
+    output: &mut [f32],
+) -> Result<(), String> {
+    if conv.kernel != 1 {
+        return Err("Invalid VAE attention projection kernel".into());
+    }
+    if source.tensor_info(&conv.weight).map(|info| info.ggml_type) != Some(GGMLType::BF16) {
+        return run_conv(source, pool, conv, input, side, output);
+    }
+    let weights = source
+        .tensor_slice(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
+    conv_bf16_parallel_into(
+        input,
+        conv.input_channels,
+        side,
+        weights,
+        conv.output_channels,
+        1,
+        &conv.bias,
+        output,
+        pool,
+        true,
+    )
 }
 
 fn run_bf16_downsample(
@@ -954,8 +986,8 @@ fn run_bf16_downsample(
             for channel in 0..conv.input_channels {
                 for ky in 0..3 {
                     for kx in 0..3 {
-                        let iy = 2 * y as isize + ky as isize - 1;
-                        let ix = 2 * x as isize + kx as isize - 1;
+                        let iy = 2 * y as isize + ky as isize;
+                        let ix = 2 * x as isize + kx as isize;
                         if iy >= 0 && ix >= 0 && iy < side as isize && ix < side as isize {
                             patch[(channel * 3 + ky) * 3 + kx] =
                                 input[channel * input_spatial + iy as usize * side + ix as usize];
@@ -963,15 +995,23 @@ fn run_bf16_downsample(
                     }
                 }
             }
+            if crate::ops::scalar_mode() {
+                // The Oracle loads BF16 VAE weights as F16 and builds F16 im2col patches.
+                for value in &mut patch {
+                    *value = crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value));
+                }
+            }
             for channel in 0..conv.output_channels {
                 let start = channel * patch_len * 2;
                 // Workers own disjoint pixels, including across channels.
                 unsafe {
-                    *output.add(channel * output_spatial + pixel) = crate::ops::dot_bf16_f32(
-                        &patch,
-                        &weights[start..start + patch_len * 2],
-                        patch_len,
-                    ) + bias[channel];
+                    let weight = &weights[start..start + patch_len * 2];
+                    let value = if crate::ops::scalar_mode() {
+                        dot_vae_f16_scalar(&patch, weight)
+                    } else {
+                        crate::ops::dot_bf16_f32(&patch, weight, patch_len)
+                    };
+                    *output.add(channel * output_spatial + pixel) = value + bias[channel];
                 }
             }
         }
@@ -992,6 +1032,7 @@ fn conv_bf16_parallel_into(
     bias: &[f32],
     output: &mut [f32],
     pool: &Arc<ComputePool>,
+    bf16_matmul: bool,
 ) -> Result<(), String> {
     if side == 0 || !matches!(kernel, 1 | 3) || bias.len() != output_channels {
         return Err("Invalid BF16 VAE convolution shape".into());
@@ -1035,15 +1076,31 @@ fn conv_bf16_parallel_into(
                     }
                 }
             }
+            if crate::ops::scalar_mode() {
+                // Convolutions use F16 im2col; the VAE attention linears use BF16.
+                for value in &mut patch {
+                    *value = if bf16_matmul {
+                        crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(*value))
+                    } else {
+                        crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value))
+                    };
+                }
+            }
             for channel in 0..output_channels {
                 let start = channel * patch_len * 2;
                 // Workers own disjoint pixels, including across channels.
                 unsafe {
-                    *output.add(channel * spatial + pixel) = crate::ops::dot_bf16_f32(
-                        &patch,
-                        &weights[start..start + patch_len * 2],
-                        patch_len,
-                    ) + bias[channel];
+                    let weight = &weights[start..start + patch_len * 2];
+                    let value = if crate::ops::scalar_mode() {
+                        if bf16_matmul {
+                            dot_vae_bf16_scalar(&patch, weight)
+                        } else {
+                            dot_vae_f16_scalar(&patch, weight)
+                        }
+                    } else {
+                        crate::ops::dot_bf16_f32(&patch, weight, patch_len)
+                    };
+                    *output.add(channel * spatial + pixel) = value + bias[channel];
                 }
             }
         }
@@ -1052,6 +1109,27 @@ fn conv_bf16_parallel_into(
         return Err("Non-finite BF16 VAE convolution output".into());
     }
     Ok(())
+}
+
+// The Oracle's scalar ggml_vec_dot_f16 sums F32 products in double precision.
+fn dot_vae_f16_scalar(patch: &[f32], weights: &[u8]) -> f32 {
+    let mut sum = 0.0f64;
+    for (&input, bytes) in patch.iter().zip(weights.chunks_exact(2)) {
+        let bf16 = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let weight = crate::ops::bf16_to_f32(bf16);
+        let weight = crate::ops::f16_to_f32(crate::ops::f32_to_f16(weight));
+        sum += (weight * input) as f64;
+    }
+    sum as f32
+}
+
+fn dot_vae_bf16_scalar(patch: &[f32], weights: &[u8]) -> f32 {
+    let mut sum = 0.0f64;
+    for (&input, bytes) in patch.iter().zip(weights.chunks_exact(2)) {
+        let weight = crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+        sum += (weight * input) as f64;
+    }
+    sum as f32
 }
 
 /// Per-pixel F16 dot convolution, parallelized by output pixel.
@@ -1360,14 +1438,24 @@ fn one_head_spatial_attention_into(
     }
     output.fill(0.0);
     let scale = 1.0 / (channels as f32).sqrt();
+    let scalar = crate::ops::scalar_mode();
     for query_position in 0..spatial {
         for key_position in 0..spatial {
-            let mut score = 0.0f32;
-            for channel in 0..channels {
-                score +=
-                    q[channel * spatial + query_position] * k[channel * spatial + key_position];
-            }
-            score *= scale;
+            let score = if scalar {
+                let mut sum = 0.0f64;
+                for channel in 0..channels {
+                    sum += (q[channel * spatial + query_position]
+                        * k[channel * spatial + key_position]) as f64;
+                }
+                sum as f32 * scale
+            } else {
+                let mut sum = 0.0f32;
+                for channel in 0..channels {
+                    sum +=
+                        q[channel * spatial + query_position] * k[channel * spatial + key_position];
+                }
+                sum * scale
+            };
             if !score.is_finite() {
                 return Err("Non-finite VAE attention score".into());
             }
@@ -1378,10 +1466,19 @@ fn one_head_spatial_attention_into(
             return Err("Non-finite VAE attention probability".into());
         }
         for channel in 0..channels {
-            let mut value = 0.0f32;
-            for key_position in 0..spatial {
-                value += scores[key_position] * v[channel * spatial + key_position];
-            }
+            let value = if scalar {
+                let mut sum = 0.0f64;
+                for key_position in 0..spatial {
+                    sum += (scores[key_position] * v[channel * spatial + key_position]) as f64;
+                }
+                sum as f32
+            } else {
+                let mut sum = 0.0f32;
+                for key_position in 0..spatial {
+                    sum += scores[key_position] * v[channel * spatial + key_position];
+                }
+                sum
+            };
             if !value.is_finite() {
                 return Err("Non-finite VAE attention output".into());
             }
@@ -1488,6 +1585,39 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn vae_f16_dot_uses_double_accumulator() {
+        let weights: Vec<u8> = [1.0, 2.0f32.powi(-24), 2.0f32.powi(-24)]
+            .into_iter()
+            .flat_map(|value| crate::ops::f32_to_bf16(value).to_le_bytes())
+            .collect();
+        assert_eq!(
+            dot_vae_f16_scalar(&[1.0; 3], &weights).to_bits(),
+            (1.0f32 + 2.0f32.powi(-23)).to_bits()
+        );
+        assert_eq!(
+            dot_vae_bf16_scalar(&[1.0; 3], &weights).to_bits(),
+            (1.0f32 + 2.0f32.powi(-23)).to_bits()
+        );
+        if crate::ops::scalar_mode() {
+            let mut output = [0.0];
+            conv_bf16_parallel_into(
+                &[1.0 + 1.0 / 256.0],
+                1,
+                1,
+                &weights[..2],
+                1,
+                1,
+                &[0.0],
+                &mut output,
+                &Arc::new(ComputePool::new(1)),
+                true,
+            )
+            .unwrap();
+            assert_eq!(output[0], 1.0);
+        }
+    }
+
+    #[test]
     fn bf16_downsample_uses_asymmetric_right_bottom_padding() {
         struct OneConv {
             info: TensorInfo,
@@ -1534,6 +1664,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+        if crate::ops::scalar_mode() {
+            run_bf16_downsample(
+                &source,
+                &Arc::new(ComputePool::new(1)),
+                &conv,
+                &[1.0 + 1.0 / 4096.0; 16],
+                4,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+            let mut full = [0.0; 16];
+            conv_bf16_parallel_into(
+                &[1.0 + 1.0 / 4096.0; 16],
+                1,
+                4,
+                &source.weights,
+                1,
+                3,
+                &[0.0],
+                &mut full,
+                &Arc::new(ComputePool::new(1)),
+                false,
+            )
+            .unwrap();
+            assert_eq!(full[0], 4.0);
+            assert_eq!(full[5], 9.0);
+        }
     }
 
     struct DecoderSource {

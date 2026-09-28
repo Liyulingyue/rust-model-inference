@@ -107,6 +107,16 @@ pub fn sigmas(kind: LongCatKind, image_tokens: usize, steps: usize) -> Result<Ve
     Ok(schedule)
 }
 
+fn euler_flow_step(target: &mut [f32], velocity: &[f32], sigma: f32, next_sigma: f32) {
+    let dt = next_sigma - sigma;
+    for (value, &prediction) in target.iter_mut().zip(velocity) {
+        // sd.cpp converts velocity to denoised x0, then back to a derivative.
+        let denoised = prediction * -sigma + *value;
+        let derivative = (*value - denoised) / sigma;
+        *value += derivative * dt;
+    }
+}
+
 /// Denoise pre-encoded target noise against a fixed reference latent.
 /// The caller owns Qwen2.5-VL encoding, VAE encoding/decoding and noise creation.
 pub fn denoise(
@@ -162,10 +172,7 @@ pub fn denoise(
         } else {
             conditional[..expected].to_vec()
         };
-        let dt = schedule[step + 1] - schedule[step];
-        for (value, velocity) in target.iter_mut().zip(prediction) {
-            *value += dt * velocity;
-        }
+        euler_flow_step(&mut target, &prediction, schedule[step], schedule[step + 1]);
     }
     Ok(target)
 }
@@ -196,5 +203,17 @@ mod tests {
         assert_eq!(turbo[1].to_bits(), 0x3f74ebd8);
         assert_eq!(turbo[7].to_bits(), 0x3e9f2e6d);
         assert_eq!(edit[50], 0.0);
+    }
+
+    #[test]
+    fn euler_step_keeps_oracle_rounding_order() {
+        let mut target = [1.2199279069900513f32];
+        euler_flow_step(
+            &mut target,
+            &[-4.37460470199585f32],
+            f32::from_bits(0x3f426f4f),
+            0.0,
+        );
+        assert_eq!(target[0].to_bits(), 0x40915c11);
     }
 }

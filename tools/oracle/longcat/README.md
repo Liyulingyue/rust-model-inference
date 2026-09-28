@@ -8,8 +8,8 @@
 本机已经补齐 Edit 的 Qwen2.5-VL-7B 文本/视觉权重、Tokenizer/processor 和 Flux VAE；Turbo 目录只含配置，按官方发布契约复用 Edit 的这些组件。
 两个版本共用 Transformer 架构，使用各自权重；另有实验性 Rust CLI 串接图文编码、采样、VAE 和最终 PNG。
 
-**Transformer 的逐位证据不覆盖完整图片编辑入口**。实验 CLI 读取 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE safetensors；本轮已把同一真实 Edit 输入的 Qwen2.5-VL 视觉编码输出与官方 Oracle 逐位对齐（196×3584，702,464 个 F32 words）。文本 hidden state、VAE、采样过程及最终 PNG 尚未通过完整官方 Oracle 数值对齐。
-Tokenizer、图像预处理、latent packing/unpacking、scheduler、最终图片不在本次 Transformer 对齐范围。
+**Transformer 与完整图片入口分别验证**。实验 CLI 读取 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE safetensors。固定 32×32 输入、`edit the image`、seed 42、CFG 1 下，Edit 单步及 Turbo 两步的图文条件、reference latent、初始噪声、去噪 latent 全部与 Oracle 原始 F32 位一致；两版最终 RGB 各 3,072 字节也完全相同。Turbo 使用自己的 GGUF 与 `base_shift=max_shift=1.15` 的 Flux scheduler。
+默认分辨率与默认 Edit 50 步 / Turbo 8 步尚未运行完整逐位检查，因此 CLI 仍标记为 `Experimental`。非方形输入未支持，非标量加速路径不在对齐范围。
 已有 Qwen2.5-VL-3B 或 YuE2 VAE 不能替代这些组件。通用 `--image` 入口不会把任意 `flux` 权重当作 LongCat。
 
 ## 模型契约
@@ -88,6 +88,18 @@ macOS ARM64，以上两个完整模型 SHA256，Rust `release-fast` + 禁止自�
 另外，从干净临时 clone 使用 `build.sh` 构建的 Oracle 重放普通版 fixture 也通过 44 条记录的逐位检查。
 比较器实测能拒绝首 checkpoint 的单 bit 修改；测试入口拒绝非法型号。
 
+固定 32×32 实际图片入口（prompt `edit the image`、seed 42、CFG 1、8 threads）也已与同一固定 sd.cpp 的标量 CPU 路径比较。Edit 为 1 步；Turbo 为 2 步，并显式指定 Flux scheduler 的两个 shift 都是 1.15。两边均禁用自动向量化、SIMD、FMA、BLAS、Accelerate 和其他外部加速库，比较 little-endian F32 原始位：
+
+| 检查点 | Edit | Turbo |
+|---|---:|---:|
+| 输入 RGB / VLM 输出 | 3,072 bytes / 702,464 F32 完全相同 | 3,072 bytes / 702,464 F32 完全相同 |
+| Tokenizer IDs / mask | 各 579 项完全相同 | 各 579 项完全相同 |
+| 完整文本条件 `cond` | 1,835,008 F32 完全相同 | 1,835,008 F32 完全相同 |
+| VAE reference latent / 初始噪声 / 去噪 latent | 各 256 F32 完全相同 | 各 256 F32 完全相同 |
+| 最终图片解码 RGB | 3,072 bytes 完全相同 | 3,072 bytes 完全相同 |
+
+Edit 的完整文本层输入（2,075,136 F32）、第 0 层 attention score 与输出、完整第 0 层输出也逐位一致。输入 PPM SHA256 为 `c077b55e9044a504c6589b6fc30d87da4ef0b380f4f3deb7f6f1fcd52e19cc6c`；逐项输出哈希见 [verification.json](verification.json)。PNG 文件编码和 metadata 不同，最终图片比较的是解码后的 RGB 字节。临时逐层截断入口已从 Rust 源码移除。
+
 工程检查通过：带 `parity-trace` 的 `longcat_reference` 集成测试构建及上述四组 Oracle 用例、LongCat 契约单测、默认跳过该集成测试的检查、rustfmt、`git diff --check`、Python 和 shell 语法检查。
 未运行全仓测试；编译产生仓库既存 warnings，不将其视为本次精度回归。
 
@@ -106,14 +118,15 @@ macOS ARM64，以上两个完整模型 SHA256，Rust `release-fast` + 禁止自�
 - VAE 必须含 encoder 和 decoder：16 latent channels，`scale=0.3611`、`shift=0.1159`，无 quant/post-quant conv。原始 VAE 文件在 Hub 标记为 167,666,902 bytes。
 - **scheduler 两版不同**：Edit 动态 shifting 从 `base_shift=0.5` 到 `max_shift=1.15`；Turbo 两者均为 `1.15`。不能只换 Transformer 权重并复用同一份 schedule。官方推荐 Edit 为 50 步 / CFG 4.5，Turbo 为 8 步 / CFG 1。
 
-组件文件已到位并接入实验 CLI。Tokenizer token ID、图像预处理、视觉编码和 packing/scheduler 位模式已做局部检查；文本 hidden state、VAE encoder/decoder 中间值、采样及最终图片仍需与官方 Oracle 逐位核对。当前完整链路的首个未对齐检查点是 VAE reference latent，故入口仍为实验状态。
+组件文件已到位并接入实验 CLI。上述固定小图检查已覆盖 VAE 编解码、完整 Qwen2.5-VL 文本条件、采样和最终 RGB；入口继续保持实验状态，以免将这两个小图用例推广到默认分辨率、默认步数或加速路径。
 
 ## 实验图片编辑入口
 
 入口要求方形输入，并缩放为 `--side` 指定的方形画布，尺寸须为 16 的倍数。Edit 与 Turbo 共用 `--components` 目录中的 Qwen2.5-VL-7B、Tokenizer 和 Flux VAE；`--model` 使用各自的 GGUF。默认 Edit 为 50 步 / CFG 4.5，Turbo 为 8 步 / CFG 1。
 
 ```bash
-RMI_SCALAR=1 cargo run --profile release-fast --features parity-trace --bin longcat-image-edit -- \
+RUSTFLAGS='-C no-vectorize-loops -C no-vectorize-slp' RMI_SCALAR=1 \
+  cargo run --profile release-fast --features parity-trace --bin longcat-image-edit -- \
   --kind turbo \
   --model /Users/gouzi/Documents/git/rust-model-inference/models/LongCat-Image-Edit-Turbo-GGUF/LongCat-Image-Edit-Turbo-Q8_0.gguf \
   --components /Users/gouzi/Documents/git/rust-model-inference/models/LongCat-Image-Edit \
@@ -121,4 +134,4 @@ RMI_SCALAR=1 cargo run --profile release-fast --features parity-trace --bin long
   --instruction 'Change the blue area to green.' --side 1024 --seed 42 --threads 8
 ```
 
-这个入口当前标记为 `Experimental`。`--side` 缩放与官方按原图宽高比生成画布的规则不同；完整链路的数值和生成质量尚未核验。视觉编码和 Transformer 的对齐只针对标量路径，不把 SIMD、FMA、BLAS、Accelerate 等影响浮点顺序的加速实现纳入结论。
+这个入口当前标记为 `Experimental`。`--side` 缩放与官方按原图宽高比生成画布的规则不同；已核验的完整链路只覆盖上述 32×32 固定输入和指定步数，生成质量与默认尺寸尚未核验。全部逐位结论只针对标量路径，不把 SIMD、FMA、BLAS、Accelerate 等影响浮点顺序的加速实现纳入结论。

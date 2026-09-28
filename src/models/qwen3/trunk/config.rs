@@ -9,6 +9,7 @@ use crate::core::tensor::TensorSource;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen3Rope {
     Neox,
+    Mrope { sections: [i32; 4] },
     Interleaved { sections: [i32; 4], n_dims: usize },
 }
 
@@ -56,6 +57,7 @@ impl Qwen3Config {
         }
 
         let rope = match knobs.rope_sections {
+            Some(sections) if knobs.arch == "qwen2vl" => Qwen3Rope::Mrope { sections },
             Some(sections) => Qwen3Rope::Interleaved {
                 sections,
                 n_dims: n_embd_head_k,

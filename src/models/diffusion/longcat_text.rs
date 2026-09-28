@@ -19,6 +19,7 @@ const VISION_FF: u64 = 3420;
 const VISION_LAYERS: usize = 32;
 const IMAGE_TOKEN: u32 = 151655;
 const PAD_TOKEN: u32 = 151643;
+const IMAGE_EMBED_START: usize = 42;
 const PREFIX: &str = "<|im_start|>system\nAs an image editing expert, first analyze the content and attributes of the input image(s). Then, based on the user's editing instructions, clearly and precisely determine how to modify the given image(s), ensuring that only the specified parts are altered and all other aspects remain consistent with the original(s).<|im_end|>\n<|im_start|>user\n<|vision_start|>";
 const SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
 
@@ -99,6 +100,19 @@ fn prepare_prompt(
     Ok(PromptInput { ids, mask })
 }
 
+fn splice_image_embeddings(embeddings: &mut [f32], visual: &[f32]) -> Result<(), String> {
+    // sd.cpp splices the visual tensor at token 42 for this one-image preset.
+    let begin = IMAGE_EMBED_START * HIDDEN as usize;
+    let end = begin
+        .checked_add(visual.len())
+        .ok_or("LongCat image size overflow")?;
+    if end > embeddings.len() {
+        return Err("LongCat image embeddings exceed prompt length".into());
+    }
+    embeddings[begin..end].copy_from_slice(visual);
+    Ok(())
+}
+
 pub fn encode_prompt(
     model: &Qwen3Model,
     tokenizer: &BPETokenizer,
@@ -110,18 +124,7 @@ pub fn encode_prompt(
     }
     let input = prepare_prompt(tokenizer, prompt, vision_embeddings.len() / HIDDEN as usize)?;
     let mut embeddings = model.embed_tokens(&input.ids)?;
-    let mut image_row = 0;
-    for (token, row) in input
-        .ids
-        .iter()
-        .zip(embeddings.chunks_exact_mut(HIDDEN as usize))
-    {
-        if *token == IMAGE_TOKEN {
-            let start = image_row * HIDDEN as usize;
-            row.copy_from_slice(&vision_embeddings[start..start + HIDDEN as usize]);
-            image_row += 1;
-        }
-    }
+    splice_image_embeddings(&mut embeddings, vision_embeddings)?;
     let positions: Vec<_> = (0..input.ids.len()).map(|i| [i, i, i, 0]).collect();
     let hidden = model.text_encode_embeddings(embeddings, &positions, &input.mask)?;
     let begin = 67 * HIDDEN as usize;
@@ -527,6 +530,18 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn visual_splice_uses_oracle_token_offset() {
+        let width = HIDDEN as usize;
+        let mut embeddings = vec![0.0; 44 * width];
+        let visual = vec![1.0; width];
+        splice_image_embeddings(&mut embeddings, &visual).unwrap();
+        assert_eq!(embeddings[41 * width], 0.0);
+        assert_eq!(embeddings[42 * width], 1.0);
+        assert_eq!(embeddings[43 * width], 0.0);
+        assert!(splice_image_embeddings(&mut embeddings[..42 * width], &visual).is_err());
+    }
+
+    #[test]
     #[ignore = "requires RMI_LONGCAT_COMPONENT_ROOT and local LongCat weights"]
     fn opens_encoder_and_matches_hf_tokenizer() {
         let root = std::path::PathBuf::from(std::env::var("RMI_LONGCAT_COMPONENT_ROOT").unwrap());
@@ -602,6 +617,10 @@ mod tests {
         .unwrap();
         assert_eq!(model.config().n_embd, HIDDEN as usize);
         assert_eq!(model.config().n_layer, LAYERS);
+        assert!(matches!(
+            model.config().rope,
+            crate::models::qwen3::trunk::Qwen3Rope::Mrope { .. }
+        ));
         let vision = VisionEncoder::from_source(source.as_ref()).unwrap();
         assert_eq!(vision.config.n_layer, VISION_LAYERS);
     }
