@@ -22,6 +22,95 @@ const EXPECTED_HEAD_DIM: usize = 128;
 const EXPECTED_INTERMEDIATE_SIZE: usize = 12288;
 const EXPECTED_NUM_LAYERS: usize = 32;
 
+pub const DEFAULT_LATENT_SIDE: usize = 16;
+pub const DEFAULT_TIMESTEP: f32 = 500.0;
+const DEFAULT_CONTEXT_LEN: usize = 128;
+const DEFAULT_SEED: u32 = 1_234_567;
+
+/// Prepare the DiT-only inputs, matching the oracle's latent-then-context LCG.
+pub(crate) fn prepare_dit_inputs(
+    config: &QwenImage21Config,
+    latent: Option<Vec<f32>>,
+    context: Option<Vec<f32>>,
+    width: usize,
+    height: usize,
+    timestep: f32,
+) -> Result<(Vec<f32>, Vec<f32>, usize), String> {
+    if width == 0 || height == 0 {
+        return Err("Qwen-Image-2.1 latent width and height must be positive".into());
+    }
+    if !timestep.is_finite() {
+        return Err("Qwen-Image-2.1 timestep must be finite".into());
+    }
+    let image_tokens = width
+        .checked_mul(height)
+        .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
+    let expected_latent = config
+        .in_channels
+        .checked_mul(image_tokens)
+        .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
+    let default_context = config
+        .context_dim
+        .checked_mul(DEFAULT_CONTEXT_LEN)
+        .ok_or("Qwen-Image-2.1 context dimensions overflow")?;
+    let mut state = DEFAULT_SEED;
+    let mut next_default = |count: usize| -> Vec<f32> {
+        (0..count)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) & 0xffff) as f32 / 32_768.0 - 1.0
+            })
+            .collect()
+    };
+    let latent = latent.unwrap_or_else(|| next_default(expected_latent));
+    let context = context.unwrap_or_else(|| next_default(default_context));
+    if latent.len() != expected_latent {
+        return Err(format!(
+            "Qwen-Image-2.1 latent must hold {}x{width}x{height} values, got {}",
+            config.in_channels,
+            latent.len()
+        ));
+    }
+    if context.is_empty() || context.len() % config.context_dim != 0 {
+        return Err(format!(
+            "Qwen-Image-2.1 context must be rows of {} values, got {}",
+            config.context_dim,
+            context.len()
+        ));
+    }
+    if !latent.iter().all(|value| value.is_finite())
+        || !context.iter().all(|value| value.is_finite())
+    {
+        return Err("Qwen-Image-2.1 latent and context must contain only finite values".into());
+    }
+    let context_len = context.len() / config.context_dim;
+    Ok((latent, context, context_len))
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn default_inputs_follow_oracle_order_and_reject_invalid_dimensions() {
+        let config = QwenImage21Config {
+            in_channels: 1,
+            out_channels: 1,
+            hidden_size: 2,
+            context_dim: 2,
+            head_dim: 1,
+            intermediate_size: 1,
+            num_layers: 1,
+        };
+        let (latent, context, context_len) =
+            prepare_dit_inputs(&config, None, None, 1, 1, DEFAULT_TIMESTEP).unwrap();
+        assert_eq!(latent[0].to_bits(), 0xbf66_bc00);
+        assert_eq!(context[0].to_bits(), 0xbe7d_a000);
+        assert_eq!(context_len, DEFAULT_CONTEXT_LEN);
+        assert!(prepare_dit_inputs(&config, None, None, 0, 1, DEFAULT_TIMESTEP).is_err());
+    }
+}
+
 /// Recognizes this no-metadata DiT family; `validate_dit` then checks the
 /// complete contract and reports a useful error for damaged GGUFs.
 pub fn matches_signature(source: &dyn TensorSource) -> bool {

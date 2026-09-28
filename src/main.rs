@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use rust_model_inference::app;
 use rust_model_inference::format::ggufrs::ComponentRole;
+use rust_model_inference::models::diffusion::qwen_image_2_1::{
+    matches_signature, DEFAULT_LATENT_SIDE, DEFAULT_TIMESTEP,
+};
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
 use rust_model_inference::DreamXConfig;
@@ -222,7 +225,7 @@ fn main() {
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
     // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
     // chosen by tensor-name signature before the metadata-driven LLM path.
-    if app::qwen_image_2_1_signature(source.as_ref()) {
+    if matches_signature(source.as_ref()) {
         let out = match options
             .out
             .clone()
@@ -257,15 +260,9 @@ fn main() {
             app::QwenImage21Request {
                 latent,
                 context,
-                latent_width: options
-                    .qwen_latent_width
-                    .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_LATENT),
-                latent_height: options
-                    .qwen_latent_height
-                    .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_LATENT),
-                timestep: options
-                    .qwen_timestep
-                    .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_TIMESTEP),
+                latent_width: options.qwen_latent_width.unwrap_or(DEFAULT_LATENT_SIDE),
+                latent_height: options.qwen_latent_height.unwrap_or(DEFAULT_LATENT_SIDE),
+                timestep: options.qwen_timestep.unwrap_or(DEFAULT_TIMESTEP),
                 out,
             },
             n_threads,

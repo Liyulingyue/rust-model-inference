@@ -3,6 +3,9 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::models::diffusion::pig;
+use crate::models::diffusion::qwen_image_2_1::{
+    config_from_source, prepare_dit_inputs, validate_dit, QwenImage21Dit,
+};
 use crate::models::diffusion::z_image::{ZImageOptions, ZImagePipeline, ZImageRgb};
 use crate::models::qwen3::Qwen3Model;
 use image::ImageEncoder;
@@ -150,6 +153,99 @@ pub fn run_z_image_cli(
     Ok(())
 }
 
+pub struct QwenImage21Request {
+    pub latent: Option<Vec<f32>>,
+    pub context: Option<Vec<f32>>,
+    pub latent_width: usize,
+    pub latent_height: usize,
+    pub timestep: f32,
+    pub out: PathBuf,
+}
+
+/// Reads a file of raw little-endian f32 values for a diffusion model input.
+pub fn read_f32_file(path: &Path) -> Result<Vec<f32>, String> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|error| format!("Resolve {}: {error}", path.display()))?;
+    if !resolved.is_file() {
+        return Err(format!("{} is not a file", resolved.display()));
+    }
+    let bytes = std::fs::read(&resolved)
+        .map_err(|error| format!("Read {}: {error}", resolved.display()))?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!(
+            "{} must hold whole f32 values ({} bytes)",
+            resolved.display(),
+            bytes.len()
+        ));
+    }
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(values)
+    } else {
+        Err(format!("{} contains NaN or infinity", resolved.display()))
+    }
+}
+
+pub fn run_qwen_image_2_1(
+    source: Arc<dyn TensorSource>,
+    request: QwenImage21Request,
+    n_threads: usize,
+) -> Result<(), String> {
+    validate_dit(source.as_ref())?;
+    let config = config_from_source(source.as_ref())?;
+    let pool = Arc::new(ComputePool::new(n_threads.max(1)));
+    let dit = QwenImage21Dit::load(Arc::clone(&source), pool)?;
+    let synthetic_input = request.latent.is_none() || request.context.is_none();
+    let (latent, context, context_len) = prepare_dit_inputs(
+        &config,
+        request.latent,
+        request.context,
+        request.latent_width,
+        request.latent_height,
+        request.timestep,
+    )?;
+    if synthetic_input {
+        eprintln!(
+            "Qwen-Image-2.1: using deterministic synthetic input for missing files; this is DiT-only and does not generate an image"
+        );
+    }
+    let velocity = dit.forward(
+        &latent,
+        request.latent_width,
+        request.latent_height,
+        &context,
+        context_len,
+        request.timestep,
+    )?;
+    if !velocity.iter().all(|value| value.is_finite()) {
+        return Err("Qwen-Image-2.1 produced NaN or infinity".into());
+    }
+    let mut bytes = Vec::with_capacity(velocity.len() * 4);
+    for value in &velocity {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    if let Some(parent) = request
+        .out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Create output directory {}: {error}", parent.display()))?;
+    }
+    write_sibling_temp_then_rename(&request.out, &bytes)?;
+    println!(
+        "Qwen-Image-2.1 velocity written to {} ({} values, context {context_len}, timestep {})",
+        request.out.display(),
+        velocity.len(),
+        request.timestep,
+    );
+    Ok(())
+}
+
 pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb) -> Result<(), String> {
     let expected = usize::try_from(rgb.width)
         .ok()
@@ -182,7 +278,7 @@ fn write_sibling_temp_then_rename(path: &Path, bytes: &[u8]) -> Result<(), Strin
     let file_name = path
         .file_name()
         .filter(|name| !name.is_empty())
-        .ok_or("Z-Image output path requires a file name")?;
+        .ok_or("Output path requires a file name")?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -202,7 +298,7 @@ fn write_sibling_temp_then_rename(path: &Path, bytes: &[u8]) -> Result<(), Strin
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(format!(
-                    "Create Z-Image temporary output {}: {error}",
+                    "Create temporary output {}: {error}",
                     temp_path.display()
                 ));
             }
@@ -215,14 +311,11 @@ fn write_sibling_temp_then_rename(path: &Path, bytes: &[u8]) -> Result<(), Strin
         })();
         if let Err(error) = result {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(format!(
-                "Publish Z-Image PNG to {}: {error}",
-                path.display()
-            ));
+            return Err(format!("Publish output to {}: {error}", path.display()));
         }
         return Ok(());
     }
-    Err("Could not create a unique Z-Image temporary output".into())
+    Err("Could not create a unique temporary output".into())
 }
 
 // ======================= DreamX =======================

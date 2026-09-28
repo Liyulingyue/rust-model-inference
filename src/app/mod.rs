@@ -5,7 +5,6 @@ pub(crate) mod jev;
 pub(crate) mod media;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
-pub(crate) mod qwen_image_2_1;
 pub(crate) mod selftest;
 pub mod server;
 pub mod text;
@@ -23,7 +22,10 @@ pub use cli::{
     KvFormat, LatentUpsampleKind, PlanningMode, QwenDriveCliOptions, QwenDriveHead,
     RefinerDecoderKind, YuE2CliOptions, ZImageCliOptions, DEFAULT_THREAD_CAP,
 };
-pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_atomically};
+pub use diffusion::{
+    read_f32_file, run_dreamx_cli, run_pig_image, run_qwen_image_2_1, run_z_image_cli,
+    write_png_atomically, QwenImage21Request,
+};
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, image_supported_arch,
     jev_payload_json, jev_system_prompt, prepare_jev_grouped_questions, prepare_jev_questions,
@@ -34,10 +36,6 @@ pub use jev::{
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
-pub use qwen_image_2_1::{
-    qwen_image_2_1_signature, read_f32_file, run_qwen_image_2_1, QwenImage21Request,
-    QWEN_IMAGE_2_1_DEFAULT_LATENT, QWEN_IMAGE_2_1_DEFAULT_TIMESTEP,
-};
 pub use selftest::run_self_test;
 pub use text::{
     run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
