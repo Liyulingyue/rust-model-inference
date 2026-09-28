@@ -144,6 +144,14 @@ fn run_jev_decision_data_with_image(
             prefill_batch_size,
             false,
         ),
+        "falcon-h1" => falcon_h1::run_jev_decision_falcon_h1(
+            source.clone(),
+            context,
+            &prepared,
+            n_threads_arg,
+            prefill_batch_size,
+            false,
+        ),
         "hunyuan-dense" => hunyuan::run_jev_decision_hunyuan(
             source.clone(),
             context,
@@ -346,6 +354,7 @@ pub fn prepare_jev_questions(
     Ok(per_question)
 }
 
+pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod hunyuan;
 pub(crate) mod lfm2;

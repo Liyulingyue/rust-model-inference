@@ -1239,7 +1239,7 @@ pub fn run_inference(
     let decode_started = std::time::Instant::now();
     for step in 0..max_tokens {
         crate::ops::apply_repetition_penalty(&mut logits, &token_counts, repetition_penalty);
-        let next_token = sample_argmax(&logits, temperature);
+        let next_token = sample_falcon_h1(&logits, temperature);
         if Some(next_token) == tokenizer.eos_id() {
             break;
         }
@@ -1270,7 +1270,10 @@ pub fn run_inference(
 
 /// Greedy decode if `temperature <= 0.0`; otherwise sample with
 /// llama.cpp's chain (temperature + top-k 0 + top-p 1.0).
-fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
+///
+/// Public(`crate`) so the HTTP `TextRuntime` adapter samples identically
+/// to the CLI instead of re-deriving a second sampler that would drift.
+pub(crate) fn sample_falcon_h1(logits: &[f32], temperature: f32) -> u32 {
     if temperature <= 0.0 {
         let mut best = f32::NEG_INFINITY;
         let mut idx = 0u32;
