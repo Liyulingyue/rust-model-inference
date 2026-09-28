@@ -6,33 +6,6 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use std::sync::Arc;
 
-/// macOS libm's combined cos+sin. The oracle binary evaluates the paired
-/// cos/sin of one angle through this call (clang merges adjacent cosf/sinf at
-/// -O2), whose shared intermediate rounding differs from separate calls; using
-/// it keeps the RoPE and timestep tables bit-identical to the oracle.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SinCosF32 {
-    sin: f32,
-    cos: f32,
-}
-
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn __sincosf_stret(x: f32) -> SinCosF32;
-}
-
-#[cfg(target_os = "macos")]
-fn sincos_f32(angle: f32) -> (f32, f32) {
-    let result = unsafe { __sincosf_stret(angle) };
-    (result.sin, result.cos)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sincos_f32(angle: f32) -> (f32, f32) {
-    (angle.sin(), angle.cos())
-}
-
 const RMS_EPS: f32 = 1e-6;
 const LAYER_NORM_EPS: f32 = 1e-6;
 const ATTENTION_OUT_SCALE: f32 = 1.0 / 32.0;
@@ -107,7 +80,7 @@ fn timestep_embedding_row(timestep: f32, output: &mut [f32]) {
     for j in 0..half {
         let freq = (neg_log_period * j as f32 / half as f32).exp();
         let arg = timestep * freq;
-        let (sin_value, cos_value) = sincos_f32(arg);
+        let (sin_value, cos_value) = arg.sin_cos();
         output[j] = cos_value;
         output[j + half] = sin_value;
     }
@@ -128,7 +101,7 @@ fn rope_axis_block(position: f32, omega: &[f32]) -> Vec<f32> {
     let mut block = Vec::with_capacity(omega.len() * 4);
     for frequency in omega {
         let angle = position * frequency;
-        let (sin_value, cos_value) = sincos_f32(angle);
+        let (sin_value, cos_value) = angle.sin_cos();
         block.push(cos_value);
         block.push(-sin_value);
         block.push(sin_value);
