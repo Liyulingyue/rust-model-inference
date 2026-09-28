@@ -1,0 +1,76 @@
+{
+  "sd_cpp_commit": "3f8527a46c54ecf4cb4ed6003da8e8982283c73c",
+  "ggml_commit": "89c4413f5da6fb20cc796f16033d37f129be81fd",
+  "scope": "Transformer only; CPU scalar; F32 GELU; no external acceleration",
+  "cases": [
+    {
+      "kind": "edit",
+      "case": 0,
+      "image_tokens": 2,
+      "text_tokens": 2,
+      "timestep": 0.375,
+      "checkpoints": 44,
+      "f32_words": 384128,
+      "inputs_sha256": {
+        "img.f32": "b98a7824ed13f7f80b6b3eda6bf742101a6ff3e7e0b39466f0bfc0c7f3a4b6ff",
+        "positions.f32": "e198b0cbae02565635e8fb53b5d29d451e2b1d2deb724424d5ee02b2f8a307d8",
+        "txt.f32": "3a4749af1a5bebe340b15086669f06ba6678fb3d238100c7cb1e492853cde7e6"
+      },
+      "output_sha256": "124259b48efa4ee9dc0d8be7422d6f44e068b125b05eb19aedb738a3577b5b30"
+    },
+    {
+      "kind": "edit",
+      "case": 1,
+      "image_tokens": 3,
+      "text_tokens": 1,
+      "timestep": 0.875,
+      "checkpoints": 44,
+      "f32_words": 384192,
+      "inputs_sha256": {
+        "img.f32": "562d2b1d21513e259bf94ab8930b038f03ac5d8e029dd376ad721e7d6608bcdc",
+        "positions.f32": "6ee67ca6ace8f4c812afe20f2482101cb9c79641ac72cca8c8c353f60cc46b60",
+        "txt.f32": "15fc5c1c28b39e62397a514a15255faedf8b0ad6cba223d8baaea5d71e75a6ac"
+      },
+      "output_sha256": "d65cdccf9840d30d58b1d286dd782acafb97448aab9d67655b3023ea203ad217"
+    },
+    {
+      "kind": "turbo",
+      "case": 0,
+      "image_tokens": 2,
+      "text_tokens": 2,
+      "timestep": 0.375,
+      "checkpoints": 44,
+      "f32_words": 384128,
+      "inputs_sha256": {
+        "img.f32": "b98a7824ed13f7f80b6b3eda6bf742101a6ff3e7e0b39466f0bfc0c7f3a4b6ff",
+        "positions.f32": "e198b0cbae02565635e8fb53b5d29d451e2b1d2deb724424d5ee02b2f8a307d8",
+        "txt.f32": "3a4749af1a5bebe340b15086669f06ba6678fb3d238100c7cb1e492853cde7e6"
+      },
+      "output_sha256": "bc98cced50bd952cb3cf9abba4793ed291ded29d5987de20da027f65b4c90e16"
+    },
+    {
+      "kind": "turbo",
+      "case": 1,
+      "image_tokens": 3,
+      "text_tokens": 1,
+      "timestep": 0.875,
+      "checkpoints": 44,
+      "f32_words": 384192,
+      "inputs_sha256": {
+        "img.f32": "562d2b1d21513e259bf94ab8930b038f03ac5d8e029dd376ad721e7d6608bcdc",
+        "positions.f32": "6ee67ca6ace8f4c812afe20f2482101cb9c79641ac72cca8c8c353f60cc46b60",
+        "txt.f32": "15fc5c1c28b39e62397a514a15255faedf8b0ad6cba223d8baaea5d71e75a6ac"
+      },
+      "output_sha256": "2ba85d3ffc2c0163d443fcc5107738de2b6aa58b93349bb948b5c82c02ae8060"
+    }
+  ],
+  "platform": "macOS ARM64",
+  "rust_profile": "release-fast",
+  "rust_flags": "-C no-vectorize-loops -C no-vectorize-slp",
+  "model_sha256": {
+    "edit": "a998d17d51943ab15bf3ba3ca1a509be3792987395c3bcb8d6bcbfafa7030a42",
+    "turbo": "ac4ae6172eea6dc892ba8c1cb63ec5b1232a294d0c430299ec26006f956e437b"
+  },
+  "total_checkpoints": 176,
+  "total_f32_words": 1536640
+}

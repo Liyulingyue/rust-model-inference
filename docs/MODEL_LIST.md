@@ -46,5 +46,6 @@
 | Qwen-Image-2.1               | 7B         | DiT 速度场前向计算     | stable-diffusion.cpp @ `2f886889` |              | 本地 Q8_0 GGUF 的 16×16 latent、128 行 context、timestep 500 CPU 前向逐位对齐；CLI 可用 `--qwen-latent-width/--qwen-latent-height` 指定尺寸；当前入口输出原始 F32 速度场，不含文本编码、采样器或 VAE 解码。 |
 | Spark-X2.5                    | 1.7B / 4B  | 文本                 | XHToken/llama.cpp                     | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF             | √ |
 | VibeVoice-ASR                 | 7B         | ASR                  |                                       |              | 待核验 |
+| LongCat-Image-Edit / Edit-Turbo | Q8_0 | 图像编辑 Transformer | leejet/stable-diffusion.cpp @ `3f8527a` | 用户提供的两个 GGUF；Edit 另有本地 Qwen2.5-VL/VAE 组件 | `flux`，CPU 标量 packed-input；两个模型各两组用例的 44 条 checkpoint 全量逐位对齐。完整图片编辑 Rust 入口尚未接入；[范围与复现](../tools/oracle/longcat/README.md) |
 | Z-Image                       | Turbo      | 文生图               | leejet/stable-diffusion.cpp @ `97d2990` |            | 待核验 |
 | NVIDIA-Nemotron-3-Nano        | 4B         | 文本                 | llama.cpp @ `b96806d`               | https://www.modelscope.cn/models/unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF             | √ |
