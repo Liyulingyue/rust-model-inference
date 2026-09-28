@@ -36,14 +36,13 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
-        // when no tools are present.
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" => Ok(false),
-        // GLM-4 (THUDM) lives on the llama trunk with its own
-        // `[gMASK]<sop><|user|>...<|assistant|>` chat template. It
-        // additionally does post-attention / post-FFN RMSNorm
-        // (`attn_post_norm` / `ffn_post_norm`), wired in the llama
-        // forward. Last user turn only here; multi-turn lives in qwen3.
-        "glm4" => Ok(false),
+        // when no tools are present. `phi3` (Phi-3/Phi-4) joins this set:
+        // its chat template is built by `llama::trunk::build_prompt_tokens`
+        // and the trunk has no tool-call grammar. GLM-4 (THUDM) lives on the
+        // llama trunk with its own `[gMASK]<sop><|user|>...<|assistant|>`
+        // chat template and additionally does post-attention / post-FFN
+        // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -126,7 +125,7 @@ pub fn build_prompt(
     }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "glm4"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
     );
     if llama_family {
         if !tools.is_empty() {

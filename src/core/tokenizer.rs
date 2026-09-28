@@ -39,6 +39,11 @@ enum PreTokenizer {
     /// chunks numbers into 1-3 digit runs before the standard GPT-2
     /// split. Mirrors llama.cpp's `LLAMA_VOCAB_PRE_TYPE_MINICPM5`.
     Minicpm5,
+    /// GPT-4o / Phi-4 / tiktoken-cl100k style. Like LlamaBpe but the
+    /// word regex separates uppercase and lowercase runs (`iPhone` ->
+    /// `i` + `Phone`) and digits are chunked 1-3 at a time. Mirrors
+    /// llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GPT4O`.
+    Gpt4o,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +415,7 @@ impl BPETokenizer {
                 }
                 Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
+                Some(MetaValue::String(value)) if value == "gpt-4o" => PreTokenizer::Gpt4o,
                 // GLM-4 (THUDM) uses standard GPT-2 byte-level BPE
                 // (`tokenizer.ggml.model = "gpt2"`). The chunked-digit
                 // regex from Minicpm5 happens to be a superset, so
@@ -419,7 +425,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "glm4" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, or glm4"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, gpt-4o, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),
@@ -1709,6 +1715,62 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
                         .is_some_and(|value| is_word_char(value, pre))
             };
             if starts_word {
+                if pre == PreTokenizer::Gpt4o {
+                    // GPT-4O / tiktoken-cl100k regex (simplified):
+                    //   [^\r\n\p{L}\p{N}]?\p{L}+
+                    // i.e. an OPTIONAL single non-letter/non-number/non-newline
+                    // char (typically a leading space, but also tabs,
+                    // commas, etc.) followed by 1+ letters. The leading
+                    // space MUST be folded into the same pre-token as
+                    // the word, otherwise the BPE merges a separate
+                    // `" "` (or `"Ġ"`) token between every word and
+                    // every model trained on cl100k_base vocab (Phi-4,
+                    // GPT-4o, etc.) sees a doubled-length input and
+                    // produces degenerate output.
+                    let mut p = pos;
+                    // Optional leading single non-letter/non-number
+                    // char. The regex matches one char in
+                    // `[^\r\n\p{L}\p{N}]` — that includes whitespace,
+                    // punctuation, and similar, but NOT `\r`, `\n`,
+                    // letters, or numbers. Skip at most ONE char.
+                    if current != '\r'
+                        && current != '\n'
+                        && !is_word_char(current, PreTokenizer::Gpt4o)
+                        && !is_number(current)
+                    {
+                        p += 1;
+                    }
+                    let first_is_lower = values.get(p).copied().is_some_and(|c| c.is_lowercase());
+                    if first_is_lower {
+                        // Alt 1: 0+ uppercase, 1+ lowercase.
+                        while values.get(p).copied().is_some_and(|c| c.is_uppercase()) {
+                            p += 1;
+                        }
+                        while values.get(p).copied().is_some_and(|c| c.is_lowercase()) {
+                            p += 1;
+                        }
+                    } else {
+                        // Alt 2: 1+ uppercase, 0+ lowercase.
+                        while values.get(p).copied().is_some_and(|c| c.is_uppercase()) {
+                            p += 1;
+                        }
+                        while values.get(p).copied().is_some_and(|c| c.is_lowercase()) {
+                            p += 1;
+                        }
+                    }
+                    if p == start || (p == start + 1 && start != pos) {
+                        // No letter consumed (e.g., lone punctuation
+                        // not handled by the lowercase/uppercase
+                        // branches). Fall through to the standard
+                        // single-char consume path.
+                        pos += 1;
+                        ranges.push(byte_at(start)..byte_at(pos));
+                    } else {
+                        pos = p;
+                        ranges.push(byte_at(start)..byte_at(pos));
+                    }
+                    continue;
+                }
                 pos += 1;
                 while values
                     .get(pos)
@@ -1724,11 +1786,15 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
 
         if is_number(current) {
             pos += 1;
-            // K2Horizon and Minicpm5 both chunk digit runs into 1-3 digit
-            // pieces. llama.cpp implements Minicpm5 by first running
-            // `\\p{N}{1,3}` over the text, then the standard GPT-2 split;
-            // the chunk-size cap is equivalent for the second pass.
-            if matches!(pre, PreTokenizer::K2Horizon | PreTokenizer::Minicpm5) {
+            // K2Horizon, Minicpm5, and Gpt4o all chunk digit runs into 1-3
+            // digit pieces. llama.cpp implements Minicpm5 by first
+            // running `\\p{N}{1,3}` over the text, then the standard
+            // GPT-2 split; the chunk-size cap is equivalent for the
+            // second pass. Gpt4o is `\\p{N}{1,3}` directly.
+            if matches!(
+                pre,
+                PreTokenizer::K2Horizon | PreTokenizer::Minicpm5 | PreTokenizer::Gpt4o
+            ) {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }
@@ -2449,4 +2515,296 @@ mod tests {
         assert_eq!(decoder.push(252), "𝄞");
         assert_eq!(decoder.finish(), "");
     }
+}
+
+// ============================================================================
+// WordPiece tokenizer (tokenizer.ggml.model = "bert")
+//
+// Port of llama.cpp's `llm_tokenizer_wpm` from `src/llama-vocab.cpp`.
+//
+// Algorithm (per llama.cpp):
+//   1. Normalize: Unicode NFD, drop combining marks when strip_accents,
+//      lowercase when `lowercase`, then split on whitespace into words
+//      (dropping NUL / U+FFFD / control code points).
+//   2. Prepend the phantom space U+2581 ("▁") to each word.
+//   3. Greedy longest-match left-to-right against the vocab, advancing one
+//      character per failed position. A word that matches nothing at all
+//      emits `unk`.
+//   4. BOS/EOS are appended from `add_bos_token` / `add_eos_token`; for the
+//      BERT family llama.cpp has no bos/eos ids, so `add_sep` supplies the
+//      [CLS]/[SEP] pair the caller expects.
+//
+// Unlike a HF BERT loader this never emits `##` continuation pieces: the
+// converted GGUF vocab uses the `▁`-prefixed SentencePiece-style spelling
+// (verified: 23 701 of 30 528 tokens in embeddinggemma/jina-v2 start with
+// `▁`, zero start with `##`).
+// ============================================================================
+
+/// WordPiece tokenizer for `tokenizer.ggml.model = "bert"` GGUFs.
+pub struct WPMTokenizer {
+    tokens: Vec<String>,
+    token_to_id: std::collections::HashMap<String, u32>,
+    /// Longest token length in bytes, used to bound the match loop.
+    max_token_len: usize,
+    bos_id: Option<u32>,
+    unk_id: Option<u32>,
+    cls_id: Option<u32>,
+    sep_id: Option<u32>,
+    add_bos: bool,
+    add_eos: bool,
+    add_sep: bool,
+    lowercase: bool,
+    strip_accents: bool,
+}
+
+impl WPMTokenizer {
+    pub fn from_gguf_metadata(
+        get_meta: impl Fn(&str) -> Option<MetaValue>,
+    ) -> Result<Self, String> {
+        match get_meta("tokenizer.ggml.model") {
+            Some(MetaValue::String(value)) if value == "bert" => {}
+            Some(MetaValue::String(value)) => {
+                return Err(format!(
+                    "Unsupported WPM tokenizer.ggml.model {value:?}; expected bert"
+                ));
+            }
+            _ => return Err("Missing or invalid tokenizer.ggml.model".into()),
+        }
+
+        let tokens = string_array(get_meta("tokenizer.ggml.tokens"), "tokenizer.ggml.tokens")?;
+        let n_tokens = tokens.len();
+        let token_to_id: std::collections::HashMap<String, u32> = tokens
+            .iter()
+            .enumerate()
+            .map(|(id, text)| (text.clone(), id as u32))
+            .collect();
+        let max_token_len = tokens
+            .iter()
+            .map(|token| token.chars().count())
+            .max()
+            .unwrap_or(0);
+
+        // Defaults come from llama.cpp's `bert` vocabulary branch
+        // (`llama-vocab.cpp:1982-1996`): bos=[CLS]=101, sep=[SEP]=102,
+        // unk=100, and `add_sep = true`. The GGUF's `cls_token_id` happens to
+        // agree (101) but is NOT read into `special_bos_id` — the WPM branch
+        // uses the model-type default, so it must not be used as the turn-on.
+        let bos_id = optional_token_id(
+            get_meta("tokenizer.ggml.bos_token_id"),
+            "tokenizer.ggml.bos_token_id",
+        )?
+        .or(Some(101));
+        let unk_id = optional_token_id(
+            get_meta("tokenizer.ggml.unknown_token_id"),
+            "tokenizer.ggml.unknown_token_id",
+        )?
+        .or(Some(100));
+        let sep_id = optional_token_id(
+            get_meta("tokenizer.ggml.sep_token_id"),
+            "tokenizer.ggml.sep_token_id",
+        )?
+        .or(Some(102));
+        let cls_id = optional_token_id(
+            get_meta("tokenizer.ggml.cls_token_id"),
+            "tokenizer.ggml.cls_token_id",
+        )?;
+        validate_token_id(bos_id, n_tokens, "tokenizer.ggml.bos_token_id")?;
+        validate_token_id(unk_id, n_tokens, "tokenizer.ggml.unknown_token_id")?;
+        validate_token_id(sep_id, n_tokens, "tokenizer.ggml.sep_token_id")?;
+        validate_token_id(cls_id, n_tokens, "tokenizer.ggml.cls_token_id")?;
+
+        let add_sep = match get_meta("tokenizer.ggml.add_sep_token") {
+            Some(MetaValue::Bool(v)) => v,
+            _ => true,
+        };
+        let _ = add_sep;
+        // The BERT WPM path ignores `add_bos`/`add_eos` when wrapping specials
+        // (`llama-vocab.cpp:3521-3543`), but keep them for introspection.
+        let add_bos = match get_meta("tokenizer.ggml.add_bos_token") {
+            Some(MetaValue::Bool(v)) => v,
+            _ => false,
+        };
+        let add_eos = bool_meta(
+            get_meta("tokenizer.ggml.add_eos_token"),
+            "tokenizer.ggml.add_eos_token",
+        )?;
+
+        // `normalizer_lowercase` defaults to true in llama.cpp and drives
+        // `strip_accents` unless the latter is set explicitly.
+        let lowercase = match get_meta("tokenizer.ggml.normalizer_lowercase") {
+            Some(MetaValue::Bool(v)) => v,
+            _ => true,
+        };
+        let strip_accents = match get_meta("tokenizer.ggml.normalizer_strip_accents") {
+            Some(MetaValue::Bool(v)) => v,
+            _ => lowercase,
+        };
+
+        Ok(Self {
+            tokens,
+            token_to_id,
+            max_token_len,
+            bos_id,
+            unk_id,
+            cls_id,
+            sep_id,
+            add_bos,
+            add_eos,
+            add_sep,
+            lowercase,
+            strip_accents,
+        })
+    }
+
+    /// Leading special: `special_bos_id`, which for the bert family is
+    /// `[CLS]` (`llama-vocab.cpp:1982-1996`).
+    pub fn bos_id(&self) -> Option<u32> {
+        self.bos_id
+    }
+
+    pub fn unk_id(&self) -> Option<u32> {
+        self.unk_id
+    }
+
+    pub fn cls_id(&self) -> Option<u32> {
+        self.cls_id
+    }
+
+    pub fn sep_id(&self) -> Option<u32> {
+        self.sep_id
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Encode `text`, applying the [CLS]…[SEP] wrapper the encoder expects.
+    /// `llama-vocab.cpp:3521-3543` gates both the leading `special_bos_id`
+    /// (=[CLS]) and the trailing `special_sep_id` (=[SEP]) on `add_special`
+    /// alone — not on `add_bos` / `add_eos`, which the BERT family never sets.
+    pub fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        let mut output = Vec::new();
+        if options.add_special {
+            if let Some(bos) = self.bos_id {
+                output.push(bos);
+            }
+        }
+        for word in self.preprocess(text) {
+            self.encode_word(&word, &mut output);
+        }
+        if options.add_special {
+            if let Some(sep) = self.sep_id {
+                output.push(sep);
+            }
+        }
+        output
+    }
+
+    /// Decode back to text, dropping the phantom-space prefix.
+    pub fn decode(&self, ids: &[u32], render_special: bool) -> String {
+        let mut text = String::new();
+        for &id in ids {
+            let token = match self.tokens.get(id as usize) {
+                Some(token) => token.as_str(),
+                None => continue,
+            };
+            if !render_special
+                && (Some(id) == self.cls_id || Some(id) == self.sep_id || Some(id) == self.unk_id)
+            {
+                continue;
+            }
+            match token.strip_prefix('\u{2581}') {
+                Some(rest) => {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(rest);
+                }
+                None => text.push_str(token),
+            }
+        }
+        text
+    }
+
+    /// Split `text` into normalized, whitespace-delimited words.
+    fn preprocess(&self, text: &str) -> Vec<String> {
+        let mut words: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for value in text.chars() {
+            let mapped = if self.lowercase {
+                value.to_lowercase().to_string()
+            } else {
+                value.to_string()
+            };
+            for mapped_value in mapped.chars() {
+                if self.strip_accents && is_combining_mark(mapped_value) {
+                    continue;
+                }
+                if mapped_value.is_whitespace() {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
+                if mapped_value == '\0' || mapped_value == '\u{FFFD}' || mapped_value.is_control() {
+                    continue;
+                }
+                current.push(mapped_value);
+            }
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+        words
+    }
+
+    /// Greedy longest-match one word, prefixed with the phantom space.
+    fn encode_word(&self, word: &str, output: &mut Vec<u32>) {
+        if word.is_empty() {
+            return;
+        }
+        let pieces: Vec<char> = std::iter::once('\u{2581}').chain(word.chars()).collect();
+        let n = pieces.len();
+        let before = output.len();
+        let mut i = 0usize;
+        while i < n {
+            let mut matched = None;
+            let limit = (i + self.max_token_len + 1).min(n);
+            for j in (i + 1..=limit).rev() {
+                let candidate: String = pieces[i..j].iter().collect();
+                if let Some(&id) = self.token_to_id.get(&candidate) {
+                    matched = Some((id, j));
+                    break;
+                }
+            }
+            match matched {
+                Some((id, next)) => {
+                    output.push(id);
+                    i = next;
+                }
+                None => {
+                    // llama.cpp discards the whole word on the first missed
+                    // position; mirror that instead of falling back to UNK.
+                    output.truncate(before);
+                    return;
+                }
+            }
+        }
+        if output.len() == before {
+            if let Some(unk) = self.unk_id {
+                output.push(unk);
+            }
+        }
+    }
+}
+
+/// Combining-mark test used by the NFD accent strip step.
+///
+/// llama.cpp classifies code points with its own unicode tables
+/// (`unicode_cpt_flags_from_cpt().is_accent_mark`); this covers the standard
+/// `Mn`/`Me` general categories, which is what NFD decomposition of Latin
+/// letters produces.
+fn is_combining_mark(value: char) -> bool {
+    use unicode_categories::UnicodeCategories;
+    value.is_mark_nonspacing() || value.is_mark_enclosing()
 }

@@ -72,6 +72,13 @@ pub struct LlamaSessionConfig {
     pub n_ff: usize,
     pub eps: f32,
     pub freq_base: f32,
+    /// Phi-3 / Phi-4 apply RoPE only to the first `rope_dim` of
+    /// `n_embd_head`; the remaining lanes pass through. Other
+    /// architectures set this to `n_embd_head`.
+    pub rope_dim: usize,
+    /// Phi-3 / Phi-4 multiply RoPE outputs by this factor; 1.0 means
+    /// "no rescaling" (standard llama behaviour).
+    pub attn_factor: f32,
     pub vocab: usize,
 }
 
@@ -145,6 +152,17 @@ impl<'a> LlamaSession<'a> {
         let n_ff = config.n_ff;
         let eps = config.norm_eps;
         let freq_base = config.rope_freq_base;
+        let rope_dim = source
+            .metadata(&format!("{arch}.rope.dimension_count"))
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .filter(|v| *v > 0)
+            .unwrap_or(n_embd_head);
+        let attn_factor: f32 = source
+            .metadata(&format!("{arch}.rope.scaling.attn_factor"))
+            .and_then(|v| v.to_f64())
+            .map(|v| v as f32)
+            .unwrap_or(1.0);
         let norm_groups = normalization_groups(source, &arch, n_embd)?;
         let arch_prefix = arch.clone();
         let embedding_scale = source
@@ -214,6 +232,8 @@ impl<'a> LlamaSession<'a> {
                 n_ff,
                 eps,
                 freq_base,
+                rope_dim,
+                attn_factor,
                 vocab,
             },
             tokenizer,
@@ -288,13 +308,24 @@ impl<'a> LlamaSession<'a> {
         prompt_tokens: &[u32],
         batch_size: usize,
     ) -> Result<Vec<f32>, String> {
-        // `forward_logits_chunked_chunk` is the chunked-prefill body
-        // and only writes `scratch.logits` on the final projected step
-        // — only `forward_logits_per_token`/`forward_one_token` do.
-        // For correctness on the per-token (B = 1) path used by
-        // chat/REST callers we always run the legacy loop and let
-        // it advance `seq_len` exactly like the chunked body.
-        let _ = batch_size;
+        // Real batched prefill via the [`ChunkedPrefill`] trait's
+        // default `prefill()` driver. This walks the input in
+        // `batch_size`-sized chunks and calls
+        // [`forward_chunk_batched_real`](Self::forward_chunk_batched_real)
+        // — single Q8_0 + Q8_K quantise pass per layer, Q/K/V / wo /
+        // gate / up / down projections through
+        // [`PreparedRows::matmul_group`], and an LM-head projection
+        // only on the last chunk's last row.
+        //
+        // Falls back to the legacy per-token path when the session
+        // was built with `max_rows == 1` (no batched scratchpad
+        // reserved) so the `from_source` legacy constructor still
+        // works for callers that didn't opt in.
+        if self.prepared_rows.max_rows() > 1 {
+            let owned = prompt_tokens.to_vec();
+            return <Self as ChunkedPrefill>::prefill(self, &owned, batch_size)
+                .map(|opt| opt.unwrap_or_default());
+        }
         self.forward_logits_per_token(prompt_tokens)
     }
 
@@ -409,6 +440,8 @@ impl<'a> LlamaSession<'a> {
         let kq_scale = self.kq_scale;
         let eps = cfg.eps;
         let freq_base = cfg.freq_base;
+        let rope_dim = cfg.rope_dim;
+        let attn_factor = cfg.attn_factor;
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -512,8 +545,24 @@ impl<'a> LlamaSession<'a> {
                 let abs_pos = base_position + r;
                 let q_row = &mut q_out[r * n_embd_q..(r + 1) * n_embd_q];
                 let k_row = &mut k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa];
-                apply_rope(arch.as_str(), q_row, abs_pos, n_embd_head_k, freq_base);
-                apply_rope(arch.as_str(), k_row, abs_pos, n_embd_head_k, freq_base);
+                apply_rope(
+                    arch.as_str(),
+                    q_row,
+                    abs_pos,
+                    n_embd_head_k,
+                    freq_base,
+                    rope_dim,
+                    attn_factor,
+                );
+                apply_rope(
+                    arch.as_str(),
+                    k_row,
+                    abs_pos,
+                    n_embd_head_k,
+                    freq_base,
+                    rope_dim,
+                    attn_factor,
+                );
             }
 
             // ---- Per-row KV-cache append ----
@@ -739,7 +788,6 @@ impl<'a> LlamaSession<'a> {
         if logit_scale != 0.0 {
             vec_scale_f32(logits, logit_scale);
         }
-
         self.seq_len = base_position + rows;
         Ok(())
     }
@@ -766,6 +814,8 @@ impl<'a> LlamaSession<'a> {
         let kq_scale = self.kq_scale;
         let eps = cfg.eps;
         let freq_base = cfg.freq_base;
+        let rope_dim = cfg.rope_dim;
+        let attn_factor = cfg.attn_factor;
         let arch = &self.arch;
         let embedding_scale = self.embedding_scale;
         let residual_scale = self.residual_scale;
@@ -888,8 +938,34 @@ impl<'a> LlamaSession<'a> {
             // right rope schedule (neox vs grouped-norm).
             let _ = &mut arch_buf;
             let arch_for_rope: &str = arch.as_str();
-            apply_rope(arch_for_rope, q, pos, n_embd_head_k, freq_base);
-            apply_rope(arch_for_rope, k_new, pos, n_embd_head_k, freq_base);
+            // Apply RoPE per head. The llama CLI path passes `q[h*head_dim..(h+1)*head_dim]`
+            // so `apply_rope`'s `head_dim`/`rope_dim` limits are scoped to a single
+            // head's lane. Calling it on the whole buffer would only rotate the first
+            // `rope_dim` elements of the buffer (head 0's lanes) and skip every
+            // other head — which is what caused Phi-4's session path to diverge
+            // from the CLI path (top token was EOS instead of "2").
+            for h in 0..cfg.n_head {
+                apply_rope(
+                    arch_for_rope,
+                    &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                    pos,
+                    n_embd_head_k,
+                    freq_base,
+                    cfg.rope_dim,
+                    cfg.attn_factor,
+                );
+            }
+            for h in 0..cfg.n_head_kv {
+                apply_rope(
+                    arch_for_rope,
+                    &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                    pos,
+                    n_embd_head_k,
+                    freq_base,
+                    cfg.rope_dim,
+                    cfg.attn_factor,
+                );
+            }
 
             // KV cache append — same as legacy.
             let kb = layer * max_ctx * n_embd_gqa;

@@ -96,10 +96,15 @@ impl JevScorer for LlamaJevScorer {
             )
         } else if self.arch == "nanbeige" {
             format!("{system}\n\n{payload}\n\nAnswer:")
+        } else if self.arch == "phi3" {
+            // Phi-3 / Phi-4: single-turn `<|user|>…<|end|><|assistant|>`
+            // with no system role. `payload` already folds system +
+            // question into the user message.
+            format!("<|user|>{payload}<|end|><|assistant|>")
         } else {
             format!("system\n{system}\nuser\n{payload}\nassistant\n")
         };
-        let add_special = self.arch == "nanbeige";
+        let add_special = self.arch == "nanbeige" || self.arch == "phi3";
         let mut token_ids = self.tokenizer.encode(
             &prompt_text,
             EncodeOptions {

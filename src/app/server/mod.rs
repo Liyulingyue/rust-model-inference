@@ -724,13 +724,60 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
 
 fn build_text(options: &CliOptions) -> Result<TextBackend, String> {
     let prefill_batch_size = options.effective_prefill_batch_size()?;
-    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let raw_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let model_path: std::path::PathBuf = options.model.clone();
-    let arch = source
+    // Snapshot the few metadata fields we need before moving `raw_source`
+    // into the (optional) Phi3Source wrapper. Reading them through `&raw_source`
+    // creates borrows that would otherwise block the move.
+    let arch: String = raw_source
         .metadata("general.architecture")
         .and_then(crate::MetaValue::to_string_val)
+        .map(str::to_string)
         .unwrap_or_default();
+    let phi3_dims = if arch == "phi3" {
+        Some((
+            raw_source
+                .metadata("phi3.embedding_length")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.embedding_length".to_string())? as usize,
+            raw_source
+                .metadata("phi3.attention.head_count")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.attention.head_count".to_string())?
+                as usize,
+            raw_source
+                .metadata("phi3.attention.head_count_kv")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.attention.head_count_kv".to_string())?
+                as usize,
+            raw_source
+                .metadata("phi3.feed_forward_length")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.feed_forward_length".to_string())?
+                as usize,
+        ))
+    } else {
+        None
+    };
     crate::app::reject_incomplete_z_image_architecture(&arch)?;
+    // Phi-3 / Phi-4 ships fused `attn_qkv` and `ffn_up` tensors; the llama
+    // trunk reads them as separate `attn_q/k/v` and `ffn_gate/up`. Wrap
+    // the source here once so the runtime AND every JEV endpoint
+    // (`/v1/jev/score`, `/v1/jev/grouped`) see the per-projection views —
+    // mirrors what the CLI does in `app::text::generation`. The wrap must
+    // happen BEFORE building the tokenizer, since `BPETokenizer::from_gguf_metadata`
+    // captures `&source` for the lifetime of the tokenizer.
+    let source: Arc<dyn TensorSource> = if let Some((n_embd, n_head, n_head_kv, n_ff)) = phi3_dims {
+        let head_dim = n_embd / n_head;
+        let n_embd_q = head_dim * n_head;
+        let n_embd_gqa = head_dim * n_head_kv;
+        Arc::new(crate::models::phi3::Phi3Source::new(
+            raw_source, n_embd_q, n_embd_gqa, n_ff,
+        ))
+    } else {
+        raw_source
+    };
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
         source.metadata(k).cloned()
     })?);
