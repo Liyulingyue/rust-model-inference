@@ -33,9 +33,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('oracle', type=pathlib.Path)
     parser.add_argument('model_root', type=pathlib.Path)
-    parser.add_argument('--rust', type=pathlib.Path, default=pathlib.Path('target/release-fast/longcat-transformer'))
     args = parser.parse_args()
-    root = pathlib.Path(tempfile.mkdtemp(prefix='longcat-parity-', dir='target')).resolve()
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    root = pathlib.Path(tempfile.mkdtemp(prefix='longcat-parity-', dir=repo / 'target')).resolve()
     print(f'Artifacts: {root}', flush=True)
     for kind, (name, expected) in MODELS.items():
         model = args.model_root / name
@@ -51,8 +51,23 @@ def main():
             oracle.mkdir()
             run([args.oracle, model, inputs, oracle, ni, nt, timestep, kind], work / 'oracle.log')
             trace = work / 'rust.jsonl'
-            env = {**os.environ, 'RMI_SCALAR': '1', 'RAYON_NUM_THREADS': '1', 'RMI_PARITY_TRACE': str(trace)}
-            run([args.rust, kind, model, inputs, work / 'output.f32', timestep], work / 'rust.log', env)
+            env = {
+                **os.environ,
+                'RUSTFLAGS': '-C no-vectorize-loops -C no-vectorize-slp',
+                'RMI_SCALAR': '1',
+                'RAYON_NUM_THREADS': '1',
+                'RMI_PARITY_TRACE': str(trace),
+                'RMI_LONGCAT_KIND': kind,
+                'RMI_LONGCAT_MODEL': str(model.resolve()),
+                'RMI_LONGCAT_INPUT': str(inputs.resolve()),
+                'RMI_LONGCAT_OUTPUT': str(work / 'output.f32'),
+                'RMI_LONGCAT_TIMESTEP': str(timestep),
+            }
+            run([
+                'cargo', 'test', '--profile', 'release-fast', '--features', 'parity-trace',
+                '--manifest-path', repo / 'Cargo.toml', '--test', 'longcat_reference',
+                '--', '--ignored', '--exact', 'longcat_transformer_case', '--nocapture',
+            ], work / 'rust.log', env)
             print(f'{kind}, case {case}, timestep {timestep}: ', end='', flush=True)
             compare(oracle / 'trace.jsonl', trace)
     print('Both real checkpoints passed both input/position/timestep fixtures.')

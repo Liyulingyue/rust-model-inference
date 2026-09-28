@@ -2,13 +2,13 @@
 
 ## 范围
 
-新增 `LongCatTransformer` 和独立 `longcat-transformer` CLI，读取用户提供的两个 GGUF。
+新增 `LongCatTransformer`，由测试专用的 `tests/longcat_reference.rs` 读取用户提供的两个 GGUF 并对照 Oracle。
 只支持 **batch=1、CPU 标量、Q8_0 主干 + BF16 输入/时间/输出投影**。
 输入是已经编码的文本特征和已经打包的 latent，可包含目标图和多个参考图。
 本机已经补齐 Edit 的 Qwen2.5-VL-7B 文本/视觉权重、Tokenizer/processor 和 Flux VAE；Turbo 目录只含配置，按官方发布契约复用 Edit 的这些组件。
-两个版本共用 Transformer 架构，使用各自权重；采样、编码、VAE 和最终图片仍未接入 Rust 入口。
+两个版本共用 Transformer 架构，使用各自权重；采样、编码、VAE 和最终图片仍未接入 Rust 推理入口。
 
-**这不是完整图片编辑入口**。组件目录已经提供 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE 编码/解码权重，但 Rust 尚未加载 safetensors 或把这些组件串进 LongCat CLI。
+**这不是完整图片编辑入口**。组件目录已经提供 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE 编码/解码权重，但 Rust 尚未加载 safetensors 或把这些组件串进图片编辑入口。
 Tokenizer、图像预处理、latent packing/unpacking、scheduler、最终图片不在本次 Transformer 对齐范围。
 已有 Qwen2.5-VL-3B 或 YuE2 VAE 不能替代这些组件。通用 `--image` 入口不会把任意 `flux` 权重当作 LongCat。
 
@@ -20,7 +20,7 @@ Tokenizer、图像预处理、latent packing/unpacking、scheduler、最终图�
 | Edit Turbo | `LongCat-Image-Edit-Turbo-GGUF/LongCat-Image-Edit-Turbo-Q8_0.gguf` | 6,725,439,840 bytes | `ac4ae6172eea6dc892ba8c1cb63ec5b1232a294d0c430299ec26006f956e437b` |
 
 两者均为 414 个同名、同 shape、同 dtype 张量，metadata 仅含 `general.architecture=flux`、`general.quantization_version=2`、`general.file_type=7`，没有 Tokenizer 或架构维度 metadata。
-显式 `edit` / `turbo` 入口验证完整必要张量的名称、shape、dtype、字节数，并拒绝其他 Flux 的 vector/guidance embedding 和额外层。
+`LongCatTransformer::load` 验证完整必要张量的名称、shape、dtype、字节数，并拒绝其他 Flux 的 vector/guidance embedding 和额外层；测试按 `edit` / `turbo` 显式选用对应 GGUF。
 
 - hidden=3072，24 heads × 128，text=3584，packed image=64。
 - 10 double blocks，20 single blocks，MLP=12288。
@@ -46,14 +46,12 @@ Rust 复用本仓库 BF16/Q8_0 scalar kernel、RMSNorm、exact softmax、F32 dot
 在仓库根目录，macOS ARM64 / Clang：
 
 ```bash
-RUSTFLAGS='-C no-vectorize-loops -C no-vectorize-slp' \
-  cargo build --profile release-fast --features parity-trace --bin longcat-transformer
 oracle=$(bash tools/oracle/longcat/build.sh /tmp/stable-diffusion.cpp-longcat)
 python3 tools/oracle/longcat/check.py "$oracle" \
   /Users/gouzi/Documents/git/rust-model-inference/models
 ```
 
-`check.py` 检查两份完整 SHA256，给每个模型运行两个不同输入/位置/timestep fixture（`Ni=2,Nt=2,t=0.375`；`Ni=3,Nt=1,t=0.875`），保存到独立 `target/longcat-parity-*`。
+`check.py` 检查两份完整 SHA256，给每个模型运行两个不同输入/位置/timestep fixture（`Ni=2,Nt=2,t=0.375`；`Ni=3,Nt=1,t=0.875`），保存到独立 `target/longcat-parity-*`。脚本用禁用自动向量化的 `RUSTFLAGS`、`RMI_SCALAR=1` 调用被忽略的集成测试，不生成正式 LongCat 可执行文件。
 每次严格比较 44 条 checkpoint 名称、顺序、shape 和全部 little-endian F32 原始位；任一差异立即失败并报告首个位置，未提供 tolerance 选项。
 可以独立重放已有 trace：
 
@@ -61,16 +59,7 @@ python3 tools/oracle/longcat/check.py "$oracle" \
 python3 tools/oracle/longcat/compare.py ORACLE_DIR/trace.jsonl RUST_TRACE.jsonl
 ```
 
-普通推理（不需要 `parity-trace` 功能）：
-
-```bash
-target/release-fast/longcat-transformer --fixture target/longcat-input
-RMI_SCALAR=1 RAYON_NUM_THREADS=1 target/release-fast/longcat-transformer edit \
-  /Users/gouzi/Documents/git/rust-model-inference/models/LongCat-Image-Edit-GGUF/LongCat-Image-Edit-Q8_0.gguf \
-  target/longcat-input target/longcat-output.f32 0.375
-```
-
-Turbo 使用 `turbo` 和对应 GGUF。`RMI_SCALAR=1` 必须在进程启动前设置；非标量路径明确拒绝。
+`RMI_SCALAR=1` 必须在测试进程启动前设置；非标量路径明确拒绝。
 `parity-trace` 编译时可设置 `RMI_PARITY_TRACE=/absolute/trace.jsonl` 输出 checkpoint。
 
 输入目录中的原始文件为 little-endian、row-major、F32：
@@ -97,9 +86,9 @@ macOS ARM64，以上两个完整模型 SHA256，Rust `release-fast` + 禁止自�
 
 合计 176 条记录、1,536,640 个 F32 words；模型、输入和输出哈希见 [verification.json](verification.json)。
 另外，从干净临时 clone 使用 `build.sh` 构建的 Oracle 重放普通版 fixture 也通过 44 条记录的逐位检查。
-比较器实测能拒绝首 checkpoint 的单 bit 修改；非法 CLI 型号在模型加载前报错。
+比较器实测能拒绝首 checkpoint 的单 bit 修改；测试入口拒绝非法型号。
 
-工程检查通过：`cargo check --profile release-fast --lib`，带 `parity-trace` 的实际 binary 构建，LongCat 契约单测（带/不带 trace 功能各 1 passed），改动 Rust 文件 rustfmt、`git diff --check`、Python 语法和 shell 语法。
+工程检查通过：带 `parity-trace` 的 `longcat_reference` 集成测试构建及上述四组 Oracle 用例、LongCat 契约单测、默认跳过该集成测试的检查、rustfmt、`git diff --check`、Python 和 shell 语法检查。
 未运行全仓测试；编译产生仓库既存 warnings，不将其视为本次精度回归。
 
 ## 本机组件审计
