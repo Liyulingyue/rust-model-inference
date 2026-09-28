@@ -2,12 +2,25 @@ use crate::app::cli::ZImageCliOptions;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::models::diffusion::longcat::{LongCatKind, LongCatTransformer};
+use crate::models::diffusion::longcat_pipeline::{
+    denoise as denoise_longcat, pack_latents, unpack_latents,
+};
+use crate::models::diffusion::longcat_text::{
+    encode_prompt as encode_longcat_prompt, load_tokenizer as load_longcat_tokenizer,
+    LongCatTextSource,
+};
+use crate::models::diffusion::longcat_vae::LongCatVaeSource;
 use crate::models::diffusion::pig;
 use crate::models::diffusion::qwen_image_2_1::{
     config_from_source, prepare_dit_inputs, validate_dit, QwenImage21Dit,
 };
+use crate::models::diffusion::z_image::dit::TorchMt19937;
+use crate::models::diffusion::z_image::vae::FluxVae;
 use crate::models::diffusion::z_image::{ZImageOptions, ZImagePipeline, ZImageRgb};
 use crate::models::qwen3::Qwen3Model;
+use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use image::ImageEncoder;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -15,6 +28,166 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+fn trace_longcat(name: &str, values: &[f32], shape: &[usize]) -> Result<(), String> {
+    let Some(dir) = std::env::var_os("RMI_LONGCAT_TRACE_DIR") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(dir).join(name);
+    let mut data = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path.with_extension("f32"), data).map_err(|error| error.to_string())?;
+    std::fs::write(
+        path.with_extension("shape"),
+        shape
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+            + "\n",
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn run_longcat_image_edit(
+    model_path: &Path,
+    component_root: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    instruction: &str,
+    kind: LongCatKind,
+    side: usize,
+    steps: usize,
+    guidance: f32,
+    seed: u64,
+    threads: usize,
+) -> Result<(), String> {
+    if instruction.is_empty()
+        || side == 0
+        || side % 16 != 0
+        || steps == 0
+        || !guidance.is_finite()
+        || threads == 0
+    {
+        return Err("Invalid LongCat image edit options".into());
+    }
+    let source = open_model_source(model_path, ComponentRole::Llm)
+        .map_err(|error| format!("Open LongCat Transformer: {error}"))?;
+    let transformer = LongCatTransformer::load(source.as_ref(), kind)?;
+    let vision_pool = Arc::new(ComputePool::new(threads));
+    let input = crate::app::media::decode_image(input_path)?;
+    if input.width() != input.height() {
+        return Err("LongCat image edit currently requires a square input image".into());
+    }
+    let rgb = input.to_rgb8();
+    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
+        rgb.as_raw(),
+        rgb.width() as usize,
+        rgb.height() as usize,
+        side,
+        side,
+    )?;
+    let side_u32 = u32::try_from(side).map_err(|_| "LongCat image side exceeds u32")?;
+    let resized_image = image::RgbImage::from_raw(side_u32, side_u32, resized.clone())
+        .ok_or("Invalid resized LongCat RGB image")?;
+    if std::env::var_os("RMI_LONGCAT_TRACE_DIR").is_some() {
+        let mut planar = Vec::with_capacity(resized.len());
+        for channel in 0..3 {
+            for pixel in 0..side * side {
+                planar.push(resized[pixel * 3 + channel] as f32 / 255.0);
+            }
+        }
+        trace_longcat("ref_image", &planar, &[side, side, 3, 1])?;
+    }
+    let text_source: Arc<dyn TensorSource> = Arc::new(LongCatTextSource::open(component_root)?);
+    let mut vision = VisionEncoder::from_source(text_source.as_ref())?;
+    // LongCat's reference-image preset uses 384^2..560^2 pixels for the VLM.
+    vision.config.image_min_pixels = 384 * 384;
+    vision.config.image_max_pixels = 560 * 560;
+    let grid = qwen_smart_resize(side, side, &vision.config)?;
+    // sd.cpp's clip_preprocess uses nearest interpolation on F32 RGB values.
+    let mut pixels = Vec::with_capacity(grid.image_width() * grid.image_height() * 3);
+    for y in 0..grid.image_height() {
+        for x in 0..grid.image_width() {
+            let source =
+                ((y * side / grid.image_height()) * side + x * side / grid.image_width()) * 3;
+            for channel in 0..3 {
+                pixels.push(
+                    (resized_image.as_raw()[source + channel] as f32 / 255.0
+                        - vision.config.image_mean[channel])
+                        / vision.config.image_std[channel],
+                );
+            }
+        }
+    }
+    let mut vision_scratch = VisionScratchpad::new(&vision.config);
+    vision.encode_image(
+        &pixels,
+        grid.image_width(),
+        grid.image_height(),
+        &mut vision_scratch,
+        &vision_pool,
+    )?;
+    drop(vision_pool);
+    let visual = std::mem::take(&mut vision_scratch.projected);
+    trace_longcat("visual", &visual, &[3584, visual.len() / 3584])?;
+    eprintln!("[longcat] vision encoded: {} tokens", grid.token_count());
+    drop(vision_scratch);
+    drop(vision);
+    let tokenizer = Arc::new(load_longcat_tokenizer(component_root)?);
+    let text = Qwen3Model::from_source(
+        text_source,
+        Arc::clone(&tokenizer),
+        Arc::new(ComputePool::new(1)),
+    )?;
+    let positive = encode_longcat_prompt(&text, &tokenizer, instruction, &visual)?;
+    trace_longcat("cond", &positive, &[3584, positive.len() / 3584])?;
+    let negative = if guidance > 1.0 {
+        Some(encode_longcat_prompt(&text, &tokenizer, "", &visual)?)
+    } else {
+        None
+    };
+    if let Some(negative) = &negative {
+        trace_longcat("uncond", negative, &[3584, negative.len() / 3584])?;
+    }
+    eprintln!("[longcat] text encoded: {} tokens", positive.len() / 3584);
+    drop(text);
+    let vae_source: Arc<dyn TensorSource> = Arc::new(LongCatVaeSource::open(component_root)?);
+    let vae = FluxVae::load_longcat(vae_source, Arc::new(ComputePool::new(threads)))?;
+    let reference_latent = vae.encode_rgb(&resized, side, seed)?;
+    trace_longcat(
+        "ref_latent",
+        &reference_latent,
+        &[side / 8, side / 8, 16, 1],
+    )?;
+    let reference = pack_latents(&reference_latent, side / 8, side / 8)?;
+    eprintln!("[longcat] reference image encoded");
+    let target_len = (side / 8)
+        .checked_mul(side / 8)
+        .and_then(|value| value.checked_mul(16))
+        .ok_or("LongCat noise size overflow")?;
+    let mut target = vec![0.0; target_len];
+    TorchMt19937::new(seed).fill_normal(&mut target);
+    trace_longcat("noise", &target, &[side / 8, side / 8, 16, 1])?;
+    let target = pack_latents(&target, side / 8, side / 8)?;
+    let latent = denoise_longcat(
+        &transformer,
+        target,
+        &reference,
+        &positive,
+        negative.as_deref(),
+        side / 16,
+        side / 16,
+        steps,
+        guidance,
+    )?;
+    eprintln!("[longcat] denoising complete");
+    let latent = unpack_latents(&latent, side / 8, side / 8)?;
+    trace_longcat("denoised", &latent, &[side / 8, side / 8, 16, 1])?;
+    write_png_atomically(output_path, &vae.decode_rgb(&latent, side / 8)?)
+}
 
 pub fn run_pig_image(
     source: std::sync::Arc<dyn TensorSource>,

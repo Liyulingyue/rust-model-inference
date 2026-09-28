@@ -3,12 +3,12 @@
 ## 范围
 
 新增 `LongCatTransformer`，由测试专用的 `tests/longcat_reference.rs` 读取用户提供的两个 GGUF 并对照 Oracle。
-只支持 **batch=1、CPU 标量、Q8_0 主干 + BF16 输入/时间/输出投影**。
+此处的逐位对齐只支持 **batch=1、CPU 标量、Q8_0 主干 + BF16 输入/时间/输出投影**。
 输入是已经编码的文本特征和已经打包的 latent，可包含目标图和多个参考图。
 本机已经补齐 Edit 的 Qwen2.5-VL-7B 文本/视觉权重、Tokenizer/processor 和 Flux VAE；Turbo 目录只含配置，按官方发布契约复用 Edit 的这些组件。
-两个版本共用 Transformer 架构，使用各自权重；采样、编码、VAE 和最终图片仍未接入 Rust 推理入口。
+两个版本共用 Transformer 架构，使用各自权重；另有实验性 Rust CLI 串接图文编码、采样、VAE 和最终 PNG。
 
-**这不是完整图片编辑入口**。组件目录已经提供 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE 编码/解码权重，但 Rust 尚未加载 safetensors 或把这些组件串进图片编辑入口。
+**Transformer 的逐位证据不覆盖完整图片编辑入口**。实验 CLI 读取 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE safetensors；本轮已把同一真实 Edit 输入的 Qwen2.5-VL 视觉编码输出与官方 Oracle 逐位对齐（196×3584，702,464 个 F32 words）。文本 hidden state、VAE、采样过程及最终 PNG 尚未通过完整官方 Oracle 数值对齐。
 Tokenizer、图像预处理、latent packing/unpacking、scheduler、最终图片不在本次 Transformer 对齐范围。
 已有 Qwen2.5-VL-3B 或 YuE2 VAE 不能替代这些组件。通用 `--image` 入口不会把任意 `flux` 权重当作 LongCat。
 
@@ -106,4 +106,19 @@ macOS ARM64，以上两个完整模型 SHA256，Rust `release-fast` + 禁止自�
 - VAE 必须含 encoder 和 decoder：16 latent channels，`scale=0.3611`、`shift=0.1159`，无 quant/post-quant conv。原始 VAE 文件在 Hub 标记为 167,666,902 bytes。
 - **scheduler 两版不同**：Edit 动态 shifting 从 `base_shift=0.5` 到 `max_shift=1.15`；Turbo 两者均为 `1.15`。不能只换 Transformer 权重并复用同一份 schedule。官方推荐 Edit 为 50 步 / CFG 4.5，Turbo 为 8 步 / CFG 1。
 
-组件文件已到位，但仍需在 Rust 中接入并逐位验证 Tokenizer/视觉特征、VAE encoder/decoder、packing、scheduler 与完整编辑入口；现有 Transformer parity 不证明这些环节完成。
+组件文件已到位并接入实验 CLI。Tokenizer token ID、图像预处理、视觉编码和 packing/scheduler 位模式已做局部检查；文本 hidden state、VAE encoder/decoder 中间值、采样及最终图片仍需与官方 Oracle 逐位核对。当前完整链路的首个未对齐检查点是 VAE reference latent，故入口仍为实验状态。
+
+## 实验图片编辑入口
+
+入口要求方形输入，并缩放为 `--side` 指定的方形画布，尺寸须为 16 的倍数。Edit 与 Turbo 共用 `--components` 目录中的 Qwen2.5-VL-7B、Tokenizer 和 Flux VAE；`--model` 使用各自的 GGUF。默认 Edit 为 50 步 / CFG 4.5，Turbo 为 8 步 / CFG 1。
+
+```bash
+RMI_SCALAR=1 cargo run --profile release-fast --features parity-trace --bin longcat-image-edit -- \
+  --kind turbo \
+  --model /Users/gouzi/Documents/git/rust-model-inference/models/LongCat-Image-Edit-Turbo-GGUF/LongCat-Image-Edit-Turbo-Q8_0.gguf \
+  --components /Users/gouzi/Documents/git/rust-model-inference/models/LongCat-Image-Edit \
+  --input input.png --output edited.png \
+  --instruction 'Change the blue area to green.' --side 1024 --seed 42 --threads 8
+```
+
+这个入口当前标记为 `Experimental`。`--side` 缩放与官方按原图宽高比生成画布的规则不同；完整链路的数值和生成质量尚未核验。视觉编码和 Transformer 的对齐只针对标量路径，不把 SIMD、FMA、BLAS、Accelerate 等影响浮点顺序的加速实现纳入结论。

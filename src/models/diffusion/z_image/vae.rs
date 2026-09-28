@@ -1,5 +1,6 @@
+use super::dit::TorchMt19937;
 use super::{validate_component, Component, ZImageRgb};
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
 use std::sync::Arc;
@@ -126,6 +127,63 @@ struct DecoderStage {
     upsample: Option<VaeConv>,
 }
 
+struct EncoderStage {
+    blocks: Vec<VaeResidualBlock>,
+    downsample: Option<VaeConv>,
+    output_channels: usize,
+}
+
+struct FluxVaeEncoder {
+    conv_in: VaeConv,
+    stages: Vec<EncoderStage>,
+    mid_block_1: VaeResidualBlock,
+    mid_attention: VaeAttention,
+    mid_block_2: VaeResidualBlock,
+    norm_out: VaeNorm,
+    conv_out: VaeConv,
+}
+
+impl FluxVaeEncoder {
+    fn load(source: &dyn TensorSource) -> Result<Self, String> {
+        let mut stages = Vec::with_capacity(4);
+        for (stage, input, output) in [(0, 128, 128), (1, 128, 256), (2, 256, 512), (3, 512, 512)] {
+            let mut blocks = Vec::with_capacity(2);
+            for block in 0..2 {
+                blocks.push(VaeResidualBlock::load(
+                    source,
+                    &format!("encoder.down.{stage}.block.{block}"),
+                    if block == 0 { input } else { output },
+                    output,
+                )?);
+            }
+            stages.push(EncoderStage {
+                blocks,
+                downsample: (stage != 3)
+                    .then(|| {
+                        VaeConv::load(
+                            source,
+                            &format!("encoder.down.{stage}.downsample.conv"),
+                            output,
+                            output,
+                            3,
+                        )
+                    })
+                    .transpose()?,
+                output_channels: output,
+            });
+        }
+        Ok(Self {
+            conv_in: VaeConv::load(source, "encoder.conv_in", 3, 128, 3)?,
+            stages,
+            mid_block_1: VaeResidualBlock::load(source, "encoder.mid.block_1", 512, 512)?,
+            mid_attention: VaeAttention::load(source, "encoder.mid.attn_1", 512)?,
+            mid_block_2: VaeResidualBlock::load(source, "encoder.mid.block_2", 512, 512)?,
+            norm_out: VaeNorm::load(source, "encoder.norm_out", 512)?,
+            conv_out: VaeConv::load(source, "encoder.conv_out", 512, 32, 3)?,
+        })
+    }
+}
+
 struct VaeScratch {
     first: Vec<f32>,
     second: Vec<f32>,
@@ -170,6 +228,7 @@ pub(crate) struct FluxVae {
     stages: Vec<DecoderStage>,
     norm_out: VaeNorm,
     conv_out: VaeConv,
+    encoder: Option<FluxVaeEncoder>,
 }
 
 impl FluxVae {
@@ -178,6 +237,20 @@ impl FluxVae {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Vae)?;
+        Self::load_decoder(source, pool)
+    }
+
+    pub(crate) fn load_longcat(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let encoder = FluxVaeEncoder::load(source.as_ref())?;
+        let mut vae = Self::load_decoder(source, pool)?;
+        vae.encoder = Some(encoder);
+        Ok(vae)
+    }
+
+    fn load_decoder(source: Arc<dyn TensorSource>, pool: Arc<ComputePool>) -> Result<Self, String> {
         let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", 16, 512, 3)?;
         let mid_block_1 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_1", 512, 512)?;
         let mid_attention = VaeAttention::load(source.as_ref(), "decoder.mid.attn_1", 512)?;
@@ -228,7 +301,125 @@ impl FluxVae {
             stages,
             norm_out,
             conv_out,
+            encoder: None,
         })
+    }
+
+    pub(crate) fn encode_rgb(
+        &self,
+        rgb: &[u8],
+        side: usize,
+        seed: u64,
+    ) -> Result<Vec<f32>, String> {
+        let encoder = self
+            .encoder
+            .as_ref()
+            .ok_or("This VAE has no image encoder")?;
+        if side == 0 || side % 16 != 0 {
+            return Err("LongCat VAE image side must be a positive multiple of 16".into());
+        }
+        let spatial = checked_spatial(side, "LongCat VAE image")?;
+        if rgb.len() != checked_feature_len(3, spatial, "LongCat RGB input")? {
+            return Err("Invalid LongCat RGB image length".into());
+        }
+        let mut current = reserve_f32("LongCat VAE RGB input", rgb.len())?;
+        for pixel in 0..spatial {
+            for channel in 0..3 {
+                current[channel * spatial + pixel] = rgb[pixel * 3 + channel] as f32 / 127.5 - 1.0;
+            }
+        }
+        let mut scratch = VaeScratch::new();
+        resize_f32(&mut scratch.first, "LongCat VAE conv input", 128 * spatial)?;
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &encoder.conv_in,
+            &current,
+            side,
+            &mut scratch.first,
+        )?;
+        std::mem::swap(&mut current, &mut scratch.first);
+        let mut feature_side = side;
+        for stage in &encoder.stages {
+            for block in &stage.blocks {
+                self.run_residual_block(block, &mut current, feature_side, &mut scratch)?;
+            }
+            if let Some(downsample) = &stage.downsample {
+                let next_side = feature_side / 2;
+                let next_len = checked_feature_len(
+                    stage.output_channels,
+                    checked_spatial(next_side, "LongCat VAE downsample")?,
+                    "LongCat VAE downsample",
+                )?;
+                resize_f32(&mut scratch.first, "LongCat VAE downsample", next_len)?;
+                run_bf16_downsample(
+                    self.source.as_ref(),
+                    &self.pool,
+                    downsample,
+                    &current,
+                    feature_side,
+                    &mut scratch.first,
+                )?;
+                std::mem::swap(&mut current, &mut scratch.first);
+                feature_side = next_side;
+            }
+        }
+        let mid_len = checked_feature_len(
+            512,
+            checked_spatial(feature_side, "LongCat VAE mid")?,
+            "LongCat VAE mid",
+        )?;
+        scratch.prepare_features(mid_len)?;
+        self.run_residual_block(
+            &encoder.mid_block_1,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        scratch.prepare_attention(mid_len, feature_side * feature_side)?;
+        self.run_attention(
+            &encoder.mid_attention,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        self.run_residual_block(
+            &encoder.mid_block_2,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        resize_f32(&mut scratch.first, "LongCat VAE output norm", mid_len)?;
+        group_norm_32_into(
+            &current,
+            512,
+            feature_side,
+            &encoder.norm_out.weight,
+            &encoder.norm_out.bias,
+            &mut scratch.first,
+        )?;
+        silu_inplace_checked(&mut scratch.first)?;
+        let latent_spatial = checked_spatial(feature_side, "LongCat VAE latent")?;
+        let mut moments = reserve_f32("LongCat VAE moments", 32 * latent_spatial)?;
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &encoder.conv_out,
+            &scratch.first,
+            feature_side,
+            &mut moments,
+        )?;
+        let mut noise = vec![0.0; 16 * latent_spatial];
+        TorchMt19937::new(seed).fill_normal(&mut noise);
+        let latent = (0..noise.len())
+            .map(|index| {
+                let mean = moments[index];
+                let logvar = moments[index + noise.len()].clamp(-30.0, 20.0);
+                let sampled = mean + (0.5 * logvar).exp() * noise[index];
+                (sampled - 0.1159) * 0.3611
+            })
+            .collect();
+        Ok(latent)
     }
 
     pub(crate) fn decode_rgb(
@@ -307,7 +498,7 @@ impl FluxVae {
             &current,
         ));
         scratch.prepare_attention(mid_len, latent_spatial)?;
-        self.run_attention(&mut current, latent_side, &mut scratch)?;
+        self.run_attention(&self.mid_attention, &mut current, latent_side, &mut scratch)?;
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.vae.mid.attention",
@@ -490,21 +681,43 @@ impl FluxVae {
 
         if let Some(shortcut) = &block.shortcut {
             resize_f32(&mut scratch.first, "VAE projected shortcut", output_len)?;
-            let weights = self
+            if self
                 .source
-                .tensor_slice(&shortcut.weight)
-                .ok_or_else(|| format!("Missing tensor data: {}", shortcut.weight))?;
-            add_shortcut_residual_into(
-                current,
-                &scratch.second,
-                block.input_channels,
-                block.output_channels,
-                side,
-                weights,
-                Some(&shortcut.bias),
-                &mut scratch.first,
-                &self.pool,
-            )?;
+                .tensor_info(&shortcut.weight)
+                .map(|info| info.ggml_type)
+                == Some(GGMLType::BF16)
+            {
+                run_conv(
+                    self.source.as_ref(),
+                    &self.pool,
+                    shortcut,
+                    current,
+                    side,
+                    &mut scratch.first,
+                )?;
+                for (output, branch) in scratch.first.iter_mut().zip(&scratch.second) {
+                    *output += branch;
+                    if !output.is_finite() {
+                        return Err("Non-finite VAE shortcut residual".into());
+                    }
+                }
+            } else {
+                let weights = self
+                    .source
+                    .tensor_slice(&shortcut.weight)
+                    .ok_or_else(|| format!("Missing tensor data: {}", shortcut.weight))?;
+                add_shortcut_residual_into(
+                    current,
+                    &scratch.second,
+                    block.input_channels,
+                    block.output_channels,
+                    side,
+                    weights,
+                    Some(&shortcut.bias),
+                    &mut scratch.first,
+                    &self.pool,
+                )?;
+            }
             std::mem::swap(current, &mut scratch.first);
         } else {
             if current.len() != scratch.second.len() {
@@ -523,6 +736,7 @@ impl FluxVae {
 
     fn run_attention(
         &self,
+        attention: &VaeAttention,
         current: &mut Vec<f32>,
         side: usize,
         scratch: &mut VaeScratch,
@@ -536,14 +750,14 @@ impl FluxVae {
             current,
             512,
             side,
-            &self.mid_attention.norm.weight,
-            &self.mid_attention.norm.bias,
+            &attention.norm.weight,
+            &attention.norm.bias,
             &mut scratch.first,
         )?;
         run_conv(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.q,
+            &attention.q,
             &scratch.first,
             side,
             &mut scratch.q,
@@ -551,7 +765,7 @@ impl FluxVae {
         run_conv(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.k,
+            &attention.k,
             &scratch.first,
             side,
             &mut scratch.k,
@@ -559,7 +773,7 @@ impl FluxVae {
         run_conv(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.v,
+            &attention.v,
             &scratch.first,
             side,
             &mut scratch.v,
@@ -576,7 +790,7 @@ impl FluxVae {
         run_conv(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.proj_out,
+            &attention.proj_out,
             &scratch.first,
             side,
             &mut scratch.second,
@@ -634,20 +848,7 @@ fn resize_f32(values: &mut Vec<f32>, name: &str, len: usize) -> Result<(), Strin
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len()
-        != len
-            .checked_mul(4)
-            .ok_or_else(|| format!("Invalid {name} byte size"))?
-    {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    let mut values = reserve_f32(name, len)?;
-    for (output, bytes) in values.iter_mut().zip(bytes.chunks_exact(4)) {
-        *output = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
-    }
+    let values = crate::core::tensor::load_f32_tensor(source, name, &[len as u64])?;
     if values.iter().any(|value| !value.is_finite()) {
         return Err(format!("Non-finite tensor: {name}"));
     }
@@ -665,17 +866,192 @@ fn run_conv(
     let weights = source
         .tensor_slice(&conv.weight)
         .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
-    conv_f16_parallel_into(
-        input,
-        conv.input_channels,
-        side,
-        weights,
+    let dtype = source
+        .tensor_info(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor info: {}", conv.weight))?
+        .ggml_type;
+    match dtype {
+        GGMLType::F16 => conv_f16_parallel_into(
+            input,
+            conv.input_channels,
+            side,
+            weights,
+            conv.output_channels,
+            conv.kernel,
+            Some(&conv.bias),
+            output,
+            pool,
+        ),
+        GGMLType::BF16 => conv_bf16_parallel_into(
+            input,
+            conv.input_channels,
+            side,
+            weights,
+            conv.output_channels,
+            conv.kernel,
+            &conv.bias,
+            output,
+            pool,
+        ),
+        other => Err(format!("Unsupported VAE convolution dtype: {other:?}")),
+    }
+}
+
+fn run_bf16_downsample(
+    source: &dyn TensorSource,
+    pool: &Arc<ComputePool>,
+    conv: &VaeConv,
+    input: &[f32],
+    side: usize,
+    output: &mut [f32],
+) -> Result<(), String> {
+    if side == 0 || side % 2 != 0 || conv.kernel != 3 || conv.input_channels != conv.output_channels
+    {
+        return Err("Invalid BF16 VAE downsample shape".into());
+    }
+    let input_spatial = checked_spatial(side, "VAE downsample input")?;
+    let output_side = side / 2;
+    let output_spatial = checked_spatial(output_side, "VAE downsample output")?;
+    let patch_len = checked_feature_len(conv.input_channels, 9, "VAE downsample patch")?;
+    let input_len =
+        checked_feature_len(conv.input_channels, input_spatial, "VAE downsample input")?;
+    let output_len = checked_feature_len(
         conv.output_channels,
-        conv.kernel,
-        Some(&conv.bias),
-        output,
-        pool,
-    )
+        output_spatial,
+        "VAE downsample output",
+    )?;
+    let weight_len =
+        checked_feature_len(conv.output_channels, patch_len * 2, "VAE downsample weight")?;
+    let info = source
+        .tensor_info(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor info: {}", conv.weight))?;
+    let weights = source
+        .tensor_slice(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
+    if info.ggml_type != GGMLType::BF16
+        || weights.len() != weight_len
+        || input.len() != input_len
+        || output.len() != output_len
+        || input.iter().any(|value| !value.is_finite())
+    {
+        return Err("Invalid BF16 VAE downsample buffer".into());
+    }
+    let input_ptr = input.as_ptr() as usize;
+    let weights_ptr = weights.as_ptr() as usize;
+    let bias_ptr = conv.bias.as_ptr() as usize;
+    let output_ptr = output.as_mut_ptr() as usize;
+    pool.compute(move |thread, threads| {
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
+        let weights = unsafe { std::slice::from_raw_parts(weights_ptr as *const u8, weight_len) };
+        let bias =
+            unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, conv.output_channels) };
+        let output = output_ptr as *mut f32;
+        let mut patch = vec![0.0f32; patch_len];
+        for pixel in (thread..output_spatial).step_by(threads) {
+            patch.fill(0.0);
+            let y = pixel / output_side;
+            let x = pixel % output_side;
+            for channel in 0..conv.input_channels {
+                for ky in 0..3 {
+                    for kx in 0..3 {
+                        let iy = 2 * y as isize + ky as isize - 1;
+                        let ix = 2 * x as isize + kx as isize - 1;
+                        if iy >= 0 && ix >= 0 && iy < side as isize && ix < side as isize {
+                            patch[(channel * 3 + ky) * 3 + kx] =
+                                input[channel * input_spatial + iy as usize * side + ix as usize];
+                        }
+                    }
+                }
+            }
+            for channel in 0..conv.output_channels {
+                let start = channel * patch_len * 2;
+                // Workers own disjoint pixels, including across channels.
+                unsafe {
+                    *output.add(channel * output_spatial + pixel) = crate::ops::dot_bf16_f32(
+                        &patch,
+                        &weights[start..start + patch_len * 2],
+                        patch_len,
+                    ) + bias[channel];
+                }
+            }
+        }
+    });
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite BF16 VAE downsample output".into());
+    }
+    Ok(())
+}
+
+fn conv_bf16_parallel_into(
+    input: &[f32],
+    input_channels: usize,
+    side: usize,
+    weights: &[u8],
+    output_channels: usize,
+    kernel: usize,
+    bias: &[f32],
+    output: &mut [f32],
+    pool: &Arc<ComputePool>,
+) -> Result<(), String> {
+    if side == 0 || !matches!(kernel, 1 | 3) || bias.len() != output_channels {
+        return Err("Invalid BF16 VAE convolution shape".into());
+    }
+    let spatial = checked_spatial(side, "BF16 VAE convolution")?;
+    let patch_len = checked_feature_len(input_channels, kernel * kernel, "VAE patch")?;
+    let expected_input = checked_feature_len(input_channels, spatial, "VAE input")?;
+    let expected_output = checked_feature_len(output_channels, spatial, "VAE output")?;
+    let expected_weight = checked_feature_len(output_channels, patch_len * 2, "VAE weight")?;
+    if input.len() != expected_input
+        || output.len() != expected_output
+        || weights.len() != expected_weight
+        || input.iter().chain(bias).any(|value| !value.is_finite())
+    {
+        return Err("Invalid BF16 VAE convolution buffer".into());
+    }
+    let input_ptr = input.as_ptr() as usize;
+    let weights_ptr = weights.as_ptr() as usize;
+    let bias_ptr = bias.as_ptr() as usize;
+    let output_ptr = output.as_mut_ptr() as usize;
+    pool.compute(move |thread, threads| {
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, expected_input) };
+        let weights =
+            unsafe { std::slice::from_raw_parts(weights_ptr as *const u8, expected_weight) };
+        let bias = unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, output_channels) };
+        let output = output_ptr as *mut f32;
+        let mut patch = vec![0.0f32; patch_len];
+        for pixel in (thread..spatial).step_by(threads) {
+            patch.fill(0.0);
+            let y = pixel / side;
+            let x = pixel % side;
+            for channel in 0..input_channels {
+                for ky in 0..kernel {
+                    for kx in 0..kernel {
+                        let iy = y as isize + ky as isize - (kernel / 2) as isize;
+                        let ix = x as isize + kx as isize - (kernel / 2) as isize;
+                        if iy >= 0 && ix >= 0 && iy < side as isize && ix < side as isize {
+                            patch[(channel * kernel + ky) * kernel + kx] =
+                                input[channel * spatial + iy as usize * side + ix as usize];
+                        }
+                    }
+                }
+            }
+            for channel in 0..output_channels {
+                let start = channel * patch_len * 2;
+                // Workers own disjoint pixels, including across channels.
+                unsafe {
+                    *output.add(channel * spatial + pixel) = crate::ops::dot_bf16_f32(
+                        &patch,
+                        &weights[start..start + patch_len * 2],
+                        patch_len,
+                    ) + bias[channel];
+                }
+            }
+        }
+    });
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite BF16 VAE convolution output".into());
+    }
+    Ok(())
 }
 
 /// Per-pixel F16 dot convolution, parallelized by output pixel.
@@ -1110,6 +1486,55 @@ mod tests {
     use half::f16;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn bf16_downsample_uses_asymmetric_right_bottom_padding() {
+        struct OneConv {
+            info: TensorInfo,
+            weights: Vec<u8>,
+        }
+        impl TensorSource for OneConv {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+                (name == "weight").then_some(&self.info)
+            }
+            fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+                (name == "weight").then_some(&self.weights)
+            }
+        }
+        let source = OneConv {
+            info: TensorInfo {
+                name: "weight".into(),
+                dims: vec![3, 3, 1, 1],
+                ggml_type: GGMLType::BF16,
+                offset: 0,
+            },
+            weights: [1.0f32; 9]
+                .iter()
+                .flat_map(|value| crate::ops::f32_to_bf16(*value).to_le_bytes())
+                .collect(),
+        };
+        let conv = VaeConv {
+            weight: "weight".into(),
+            bias: vec![0.0],
+            input_channels: 1,
+            output_channels: 1,
+            kernel: 3,
+        };
+        let mut output = [0.0; 4];
+        run_bf16_downsample(
+            &source,
+            &Arc::new(ComputePool::new(1)),
+            &conv,
+            &[1.0; 16],
+            4,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+    }
 
     struct DecoderSource {
         tensors: HashMap<String, TensorInfo>,

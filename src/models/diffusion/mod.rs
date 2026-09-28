@@ -1,5 +1,8 @@
 pub mod dreamx;
 pub mod longcat;
+pub mod longcat_pipeline;
+pub mod longcat_text;
+pub mod longcat_vae;
 pub mod pig;
 pub mod qwen_image_2_1;
 pub(crate) mod z_image;

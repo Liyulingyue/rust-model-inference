@@ -46,6 +46,7 @@
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
 | Gemma 4 12B | `gemma4` | 文本、音频 | 音频需要 F16 `gemma4ua` mmproj | Q8_0 LLM + F32 KV；F16 `gemma4ua` | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖三步文本 raw-bit parity，并在 AVX2+FMA+F16C x86_64 CPU 上与 llama.cpp `b96806d` 逐位比较音频 RMSNorm 和 3840 维投影；音频严格要求 16 kHz mono PCM16 WAV。 |
 | LongCat Image Edit / Edit Turbo（Transformer） | `flux`，显式 LongCat 张量契约 | packed latent + 3584 维上下文前向（测试专用） | 当前仅使用各自 Transformer GGUF；输入特征由测试提供 | Q8_0 主干 + BF16 投影，10 double + 20 single blocks | `Verified`（Transformer 标量） | 两个真实 414-tensor 模型各两组输入/位置/timestep；共 176 条 checkpoint / 1,536,640 个 F32 words 与固定 sd.cpp `3f8527a` 完全相同。测试入口 `tests/longcat_reference.rs`，`RMI_SCALAR=1`；关闭 SIMD/FMA/FP16 GELU 查表与外部加速库。[复现与边界](../../tools/oracle/longcat/README.md)。 |
+| LongCat Image Edit / Edit Turbo（完整编辑入口） | `flux`，显式指定 Edit/Turbo | 方形原图 + 指令 → PNG | 两个 GGUF 共用 Edit 的 Qwen2.5-VL-7B、Tokenizer 和 BF16 Flux VAE；scheduler 分别配置 | Q8_0 Transformer + BF16 编码器/VAE | `Experimental` | `longcat-image-edit` 已接入图文编码、VAE、FlowMatch Euler 与输出；仅组件加载、Tokenizer token ID、latent packing/schedule 和小图 VAE 编解码有局部验证。完整图片链路尚未与官方 Oracle 逐位核对，不能继承 Transformer 的 `Verified` 状态。[运行与限制](../../tools/oracle/longcat/README.md)。 |
 | Z-Image Turbo | `pig` | 文生图 | DiT、Qwen3 文本编码器、Flux VAE | Q8_0 DiT + Q8_0 文本编码器 + F16 VAE | `Verified` | [`tests/z_image_reference.rs`](tests/z_image_reference.rs) 覆盖 pinned Oracle 和 prompt 敏感性；当前范围是 CPU、512×512。 |
 | Qwen-Image-2.1 7B DiT | 无 metadata；完整 Qwen-Image-2.1 张量契约 | 给定 latent、context、timestep 计算 F32 速度场 | Qwen-Image-2.1 DiT GGUF | Q8_0 矩阵、BF16/F32 混合 GGUF | `Verified`（仅 DiT 前向） | 本地文件 SHA-256 `c0ed4b2ffd56cbe9c3df1e4a4098045256484ebe94ba5a7e4338d35ec046baa5`（7,640,860,384 bytes）；固定 stable-diffusion.cpp `2f886889e6e8b78738d6b87f7191f6018557c551` 与 ggml `4bf5f6000653b7881d00963cd6ddb665ccd62a8d`；16×16 latent、128 行 context、timestep 500 的输入、32 层和最终 16,384 个 F32 速度场值逐位对照，复现入口为 [`parity.sh`](../../tools/oracle/qwen_image_2_1/parity.sh)。主 CLI 使用 `--model ... --out velocity.bin`，尺寸可用 `--qwen-latent-width/--qwen-latent-height` 指定；未提供 latent/context 文件时使用明确标注的确定性 synthetic 输入。无文本编码器、采样器和 VAE 解码，不提供文生图图片。 |
 
@@ -77,7 +78,7 @@
 | 带 shared experts 的 `qwen3vlmoe` | `Unsupported` | 权重加载明确返回 shared experts not supported。 |
 | Qwen3-ASR + 图像，或非零 temperature | `Unsupported` | CLI 在推理前拒绝。 |
 | Gemma 4 视频输入 | `Unsupported` | 多模态入口明确拒绝 `--video`。 |
-| LongCat 完整图片编辑、Tokenizer/视觉编码、VAE、scheduler、最终图像、非标量路径 | `Unsupported` | 本机已具备 Edit 的 Qwen2.5-VL-7B、Tokenizer/processor、Flux VAE 和两版 scheduler；Turbo 按官方契约复用 Edit 组件。Rust 仍只接入 Transformer，完整链路不继承 Transformer 的逐位对齐状态。 |
+| LongCat 完整链路逐位对齐、非方形编辑图、非标量数值对齐 | `Unsupported` | 实验入口只处理方形画布；图文编码、VAE、采样和最终图片还缺官方 Oracle 的逐位检查。SIMD/FMA/BLAS/Accelerate 等路径不纳入对齐。 |
 | Z-Image Base、img2img、GPU 路径 | `Unsupported` | 当前仅实现 Z-Image Turbo 的原生 Rust CPU 文生图。 |
 | DreamX-Creator GPU、未匹配 GGUF pair | `Unsupported` | DreamX 当前只走原生 CPU；pair ID、组件清单、版本或精度 metadata 不匹配会在加载阶段拒绝。 |
 

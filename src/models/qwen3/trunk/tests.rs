@@ -263,6 +263,24 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
     }
 }
 
+#[test]
+fn text_embeddings_mask_hides_middle_padding_from_later_tokens() {
+    let model = deterministic_session_model(16);
+    let positions = [[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]];
+    let mask = [true, true, false, true];
+    let baseline = model.embed_tokens(&[0, 1, 2, 3]).unwrap();
+    let expected = model
+        .text_encode_embeddings(baseline.clone(), &positions, &mask)
+        .unwrap();
+    let mut changed = baseline;
+    changed[64..96].fill(10.0);
+    let actual = model
+        .text_encode_embeddings(changed, &positions, &mask)
+        .unwrap();
+    assert_eq!(&actual[96..128], &expected[96..128]);
+    assert_ne!(&actual[64..96], &expected[64..96]);
+}
+
 fn snapshot_qwen3_kv(state: &KvState) -> KvSnapshot {
     let stride = state.arch.n_head_kv * state.arch.n_embd_head_k.max(state.arch.n_embd_head_v);
     let mut words = Vec::new();
