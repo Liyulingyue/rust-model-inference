@@ -409,6 +409,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "nanbeige"
             | "nemotron_h"
             | "falcon-h1"
+            | "glm4"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }

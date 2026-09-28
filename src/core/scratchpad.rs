@@ -11,6 +11,8 @@ pub enum KvFormat {
 
 pub struct ExecutionScratchpad {
     pub x: Vec<f32>,
+    pub x_after_attn: Vec<f32>,
+    pub x_after_mlp: Vec<f32>,
     pub normed: Vec<f32>,
     pub q: Vec<f32>,
     pub k_new: Vec<f32>,
@@ -20,6 +22,12 @@ pub struct ExecutionScratchpad {
     pub down_buf: Vec<f32>,
     pub gate_buf: Vec<f32>,
     pub up_buf: Vec<f32>,
+    /// Fused gate+up buffer for archs whose FFN ships a single
+    /// `[n_embd, 2*n_ff]` `ffn_up.weight` (e.g. GLM-4). Splits in half
+    /// after the matmul: `ffn_fused[..n_ff]` is the gate projection,
+    /// `ffn_fused[n_ff..]` is the up projection. Sized to `2 * n_ff`
+    /// (no head-dim overflow possible).
+    pub ffn_fused: Vec<f32>,
     pub logits: Vec<f32>,
     pub q8_buf: Vec<u8>,
     pub scale_buf: Vec<f32>,
@@ -46,6 +54,8 @@ impl Default for ExecutionScratchpad {
         // `new_batched`.
         Self {
             x: Vec::new(),
+            x_after_attn: Vec::new(),
+            x_after_mlp: Vec::new(),
             normed: Vec::new(),
             q: Vec::new(),
             k_new: Vec::new(),
@@ -55,6 +65,7 @@ impl Default for ExecutionScratchpad {
             down_buf: Vec::new(),
             gate_buf: Vec::new(),
             up_buf: Vec::new(),
+            ffn_fused: Vec::new(),
             logits: Vec::new(),
             q8_buf: Vec::new(),
             scale_buf: Vec::new(),
@@ -151,6 +162,8 @@ impl ExecutionScratchpad {
         let row_scale = max_rows;
         Self {
             x: vec![0.0f32; n_embd * row_scale],
+            x_after_attn: vec![0.0f32; n_embd * row_scale],
+            x_after_mlp: vec![0.0f32; n_embd * row_scale],
             normed: vec![0.0f32; n_embd * row_scale],
             q: vec![0.0f32; n_embd_q * row_scale],
             k_new: vec![0.0f32; n_embd_gqa * row_scale],
@@ -160,6 +173,7 @@ impl ExecutionScratchpad {
             down_buf: vec![0.0f32; n_embd * row_scale],
             gate_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
             up_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
+            ffn_fused: vec![0.0f32; 2 * n_ff.max(n_embd * 3) * row_scale],
             logits: vec![0.0f32; vocab],
             q8_buf: vec![0u8; max_n_in * row_scale],
             scale_buf: vec![0.0f32; max_n_in / 32 * row_scale],
@@ -169,7 +183,7 @@ impl ExecutionScratchpad {
                     qs: [0; 256],
                     bsums: [0; 16],
                 };
-                max_n_in / 256 * row_scale
+                (max_n_in + 255) / 256 * row_scale
             ],
             score_stride,
             scores: vec![0.0f32; n_threads * score_stride],

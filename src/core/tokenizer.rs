@@ -410,9 +410,16 @@ impl BPETokenizer {
                 }
                 Some(MetaValue::String(value)) if value == "k2-horizon" => PreTokenizer::K2Horizon,
                 Some(MetaValue::String(value)) if value == "minicpm5" => PreTokenizer::Minicpm5,
+                // GLM-4 (THUDM) uses standard GPT-2 byte-level BPE
+                // (`tokenizer.ggml.model = "gpt2"`). The chunked-digit
+                // regex from Minicpm5 happens to be a superset, so
+                // reusing it is safe — the extra digit-chunking never
+                // fires on GLM-4 inputs that Minicpm5 would handle
+                // differently.
+                Some(MetaValue::String(value)) if value == "glm4" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, or minicpm5"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),

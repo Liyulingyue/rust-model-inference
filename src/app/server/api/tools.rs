@@ -38,6 +38,12 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // prompting. They are accepted here so `build_prompt` returns Ok
         // when no tools are present.
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" => Ok(false),
+        // GLM-4 (THUDM) lives on the llama trunk with its own
+        // `[gMASK]<sop><|user|>...<|assistant|>` chat template. It
+        // additionally does post-attention / post-FFN RMSNorm
+        // (`attn_post_norm` / `ffn_post_norm`), wired in the llama
+        // forward. Last user turn only here; multi-turn lives in qwen3.
+        "glm4" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -89,7 +95,7 @@ pub fn build_prompt(
     }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "glm4"
     );
     if llama_family {
         if !tools.is_empty() {
