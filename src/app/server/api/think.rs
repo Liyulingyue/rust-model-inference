@@ -7,6 +7,14 @@
 /// while the block is still at the very start of the output, so a body that
 /// merely mentions ` reasoning` later is untouched.
 ///
+/// **Out-of-order variants.** LFM2.5-8B-A1B and similar reasoning models
+/// sometimes emit `</think>` *before* `<think>` — there is no opening tag
+/// at all, the close is just an orphan (e.g. an over-eager early stop in
+/// the model's own prompt conditioning), and the actual reasoning block
+/// follows. The state machine recognises this as `State::OrphanClose` so
+/// the orphan close + opening tag are stripped as a unit and the body
+/// resumes after the matching closer.
+///
 /// Latency notes: text is only buffered while it could still turn into the
 /// opener. Anything that cannot be an opener prefix is flushed immediately,
 /// so the common case (model answers directly) adds no first-token delay.
@@ -14,9 +22,23 @@
 /// ran to the end of generation without producing an answer.
 pub struct ThinkFilter {
     pending: String,
-    /// None until the opener has been confirmed; Some(true) inside a block,
-    /// Some(false) once no block is coming and we are in passthrough.
-    state: Option<bool>,
+    state: State,
+}
+
+/// Current mode of the filter. `Open` is the leading-only think-block path;
+/// `OrphanClose` tracks the pathological case where the model emits ``
+/// without a preceding `<think>` and we are waiting for the actual opener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    /// No decision yet — `pending` may still grow into the opener.
+    Unknown,
+    /// Inside a `<think>...` block, waiting for ``.
+    Open,
+    /// Saw `` without a preceding opener. Will drop it together with the
+    /// next `<think>` block (and its closer) and resume passthrough.
+    OrphanClose,
+    /// Past the leading reasoning: any further text is the real answer.
+    Passthrough,
 }
 
 const THINK_OPEN: &str = "<think>";
@@ -26,55 +48,147 @@ impl ThinkFilter {
     pub fn new() -> Self {
         Self {
             pending: String::new(),
-            state: None,
+            state: State::Unknown,
         }
     }
 
     pub fn push(&mut self, text: &str) -> String {
-        // Passthrough: no leading reasoning block.
-        if self.state == Some(false) {
+        // Passthrough: emit verbatim, no state work needed.
+        if self.state == State::Passthrough {
             return text.to_string();
         }
         self.pending.push_str(text);
-        // State still unknown: decide as soon as we can.
-        if self.state.is_none() {
-            if let Some(rest) = self.pending.strip_prefix(THINK_OPEN) {
-                self.pending = rest.to_string();
-                self.state = Some(true);
-            } else if THINK_OPEN.starts_with(&self.pending) {
-                // Could still become the opener once more text arrives.
-                return String::new();
-            } else {
-                // Cannot be an opener: never will strip anything.
-                self.state = Some(false);
-                return std::mem::take(&mut self.pending);
-            }
+
+        // State machine: try to make progress on the leading-prefix problem.
+        match self.state {
+            State::Unknown => self.advance_unknown(),
+            State::Open => self.advance_open(),
+            State::OrphanClose => self.advance_orphan_close(),
+            State::Passthrough => unreachable!(),
         }
-        // Inside a block: wait for the closer, emit what follows it.
-        if self.state == Some(true) {
-            if let Some(offset) = self.pending.find(THINK_CLOSE) {
-                let output = self.pending[offset + THINK_CLOSE.len()..].to_string();
-                self.pending.clear();
-                self.state = Some(false);
-                return output;
-            }
-            // Keep only a possible suffix of the closer; drop reasoning text.
-            let keep = closer_prefix_keep(&self.pending);
-            self.pending = self.pending.split_off(self.pending.len() - keep);
+    }
+
+    /// `Unknown` -> either `Open` (saw `<think>`), `OrphanClose` (saw
+    /// ``), or `Passthrough` (any leading text that isn't either).
+    fn advance_unknown(&mut self) -> String {
+        // Fast paths: full tag at the very start.
+        if let Some(rest) = self.pending.strip_prefix(THINK_OPEN) {
+            self.pending = rest.to_string();
+            self.state = State::Open;
+            return self.advance_open();
+        }
+        if self.pending.starts_with(THINK_CLOSE) {
+            // Pathological: model emitted a `` with no matching opener.
+            // Eat the close and wait for the real `<think>`.
+            self.pending.clear();
+            self.state = State::OrphanClose;
             return String::new();
         }
+
+        // The model often emits `...` as a single unit,
+        // possibly split across chunks. Trim leading whitespace
+        // and see whether the trimmed start still has a chance of becoming
+        // either tag once more text arrives.
+        let leading_ws = self.pending.len() - self.pending.trim_start().len();
+        let trimmed = &self.pending[leading_ws..];
+
+        if trimmed.is_empty() {
+            // All whitespace so far. Buffer; could still become
+            // `<think>` or `` after the whitespace.
+            return String::new();
+        }
+        if THINK_OPEN.starts_with(trimmed) || THINK_CLOSE.starts_with(trimmed) {
+            // Still building toward a tag — wait.
+            return String::new();
+        }
+        if trimmed.starts_with('<') {
+            // First non-WS char is `<` but no prefix match yet.
+            // Look for an embedded orphan close → open pair within the
+            // pending buffer (model emits "...</think>\n<think>" as
+            // a unit). If we find one, the whole leading sequence
+            // including the orphan close and the following opener are
+            // junk we should eat before the real answer.
+            if let Some(close_idx) = trimmed.find(THINK_CLOSE) {
+                let after_close = &trimmed[close_idx + THINK_CLOSE.len()..];
+                if let Some(rest) = after_close.strip_prefix(THINK_OPEN) {
+                    self.pending = rest.to_string();
+                    self.state = State::Open;
+                    return self.advance_open();
+                }
+                // The orphan close is there but the opener hasn't shown
+                // up yet — switch to OrphanClose mode and let the
+                // orphan-close handler wait for `<think>`.
+                if THINK_OPEN.starts_with(after_close.trim_start()) {
+                    self.pending.clear();
+                    self.state = State::OrphanClose;
+                    return String::new();
+                }
+            }
+            // No complete orphan close yet — keep buffering in case the
+            // next chunk brings more of the tag.
+            return String::new();
+        }
+        // First non-WS char is plain text. This is the real answer;
+        // whatever leading whitespace is here belongs to it.
+        self.state = State::Passthrough;
+        std::mem::take(&mut self.pending)
+    }
+
+    /// `Open` -> emit text after ``, switch to `Passthrough`.
+    fn advance_open(&mut self) -> String {
+        if let Some(offset) = self.pending.find(THINK_CLOSE) {
+            let output = self.pending[offset + THINK_CLOSE.len()..].to_string();
+            self.pending.clear();
+            self.state = State::Passthrough;
+            return output;
+        }
+        // Keep only a possible suffix of the closer; drop reasoning text.
+        let keep = closer_prefix_keep(&self.pending);
+        self.pending = self.pending.split_off(self.pending.len() - keep);
         String::new()
+    }
+
+    /// `OrphanClose` -> if we now see `<think>`, drop it and the matching
+    /// closer; otherwise accumulate until we can decide.
+    fn advance_orphan_close(&mut self) -> String {
+        // Need to skip any whitespace/newlines between the orphan ``
+        // and the actual opener. Check whether the pending buffer starts
+        // with the opener (possibly preceded by whitespace).
+        let trimmed = self.pending.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(THINK_OPEN) {
+            // Found the real opener. Drop everything up to and including it,
+            // then walk forward to find the matching closer.
+            self.pending = rest.to_string();
+            self.state = State::Open;
+            return self.advance_open();
+        }
+        if THINK_OPEN.starts_with(trimmed) {
+            // Still could become the opener once more text arrives.
+            return String::new();
+        }
+        // No opener ever came. The orphan `` is meaningless on its own;
+        // whatever we have buffered is just leading text and should pass
+        // through. (In practice this only fires if the model never thinks
+        // at all and we saw `` early — typically as part of the template
+        // boilerplate echo.)
+        self.state = State::Passthrough;
+        std::mem::take(&mut self.pending)
     }
 
     /// Flush at end of generation. Returns anything still worth emitting;
     /// an unterminated reasoning block is discarded.
     pub fn finish(&mut self) -> String {
-        if self.state == Some(true) {
-            self.state = Some(false);
-            self.pending.clear();
-            return String::new();
+        // An `Open` block that never closes: discard (model went straight
+        // to thinking with no answer). An `OrphanClose` that never met its
+        // opener: passthrough whatever was buffered.
+        match self.state {
+            State::Open => {
+                self.state = State::Passthrough;
+                self.pending.clear();
+                String::new()
+            }
+            _ => std::mem::take(&mut self.pending),
         }
-        std::mem::take(&mut self.pending)
     }
 }
 
@@ -223,6 +337,72 @@ mod tests {
         // Now feed half of `` so the filter must keep the suffix
         // while inside the block.
         for chunk in ["</", "thin", "k>answer"] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "answer");
+    }
+
+    /// LFM2.5-8B-A1B emits an orphan `` *before* `<think>` (its own
+    /// training-data quirk). The filter must eat the orphan close, then
+    /// also strip the leading `<think>` block that follows, and only emit
+    /// the trailing real answer.
+    #[test]
+    fn orphan_close_then_open_is_stripped() {
+        let open = THINK_OPEN;
+        let close = THINK_CLOSE;
+        let mut filter = ThinkFilter::new();
+        let mut out = String::new();
+        for chunk in [close, "\n", open, "secret reasoning\n", close, "Paris"] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "Paris");
+    }
+
+    /// Same path, but the orphan close and the opener are split across
+    /// streaming chunks. The leading whitespace between them must not be
+    /// emitted prematurely.
+    #[test]
+    fn orphan_close_then_open_split_across_chunks() {
+        let open = THINK_OPEN;
+        let close = THINK_CLOSE;
+        let mut filter = ThinkFilter::new();
+        let mut out = String::new();
+        // ``close``, then 1 char of opener, then rest of opener + think content.
+        for chunk in [close, "\n", &open[..1], &open[1..], "think body\n", close, "answer"] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "answer");
+    }
+
+    /// An orphan `` with no `<think>` ever appearing must NOT swallow the
+    /// leading answer text — the filter should fall through to passthrough.
+    #[test]
+    fn orphan_close_without_open_passes_through() {
+        let close = THINK_CLOSE;
+        let mut filter = ThinkFilter::new();
+        let mut out = String::new();
+        for chunk in [close, "\n", "just plain text"] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "\njust plain text");
+    }
+
+    /// LFM2.5-8B-A1B emits the entire `...` unit as the
+    /// very first chunk(s). The leading whitespace must not leak through
+    /// before we can confirm the close+open pair — we hold it back until
+    /// the leading tag becomes unambiguous.
+    #[test]
+    fn newline_before_close_then_open_strips_whitespace() {
+        let open = THINK_OPEN;
+        let close = THINK_CLOSE;
+        let mut filter = ThinkFilter::new();
+        let mut out = String::new();
+        // Feed `` as one chunk, `` followed by opener.
+        for chunk in ["\n", close, "\n", open, "think\n", close, "answer"] {
             out.push_str(&filter.push(chunk));
         }
         out.push_str(&filter.finish());
