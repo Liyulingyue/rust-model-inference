@@ -288,14 +288,14 @@ impl<'a> Xing4Runtime<'a> {
         let (sp, sq, sr) = (scale[0], scale[1], scale[2]);
         let eps = c.hc_eps;
         for i in 0..hc {
-            pre[i] = sigmoid(mixes[i] * sp + base[i]) + eps;
+            pre[i] = sigmoid(mixes[i] * sp + base[i]);
         }
         for i in 0..hc {
             post[i] = sigmoid(mixes[hc + i] * sq + base[hc + i]) * 2.0;
         }
         let off = 2 * hc;
         for i in 0..hc * hc {
-            comb[i] = mixes[off + i] * sr + base[off + i];
+            comb[i] = (mixes[off + i] * sr + base[off + i]).clamp(-30.0, 30.0);
         }
         sinkhorn(comb, hc, eps, c.hc_sinkhorn_iters);
     }
@@ -351,7 +351,15 @@ impl<'a> Xing4Runtime<'a> {
         let cache_w = c.kv_cache_width();
         let q_lat_w = kv_lora + rope_dim;
         let attn_out_w = c.n_head * v_dim;
-        let kq_scale = 1.0f32 / (head_k as f32).sqrt();
+        // mscale compensates for the absored-attention scale change vs
+        // the full-head K/V layout: `q_lat · k_lat` has the same magnitude
+        // as `q · k` only when kq_scale = mscale² / sqrt(head_k). xing4_0
+        // ships `attn_factor=1` and `rope_yarn_log_multiplier=0.1`, so
+        // `mscale = 1 + 0.1 * 0.1 * ln(1/freq_scale) = 1.0416` here.
+        let mscale = 1.0f32
+            * (1.0f32
+                + 0.1f32 * c.rope_yarn_log_mult * (1.0f32 / (c.rope_yarn_factor as f32)).ln());
+        let kq_scale = mscale * mscale / (head_k as f32).sqrt();
         let n_cached = pos + 1;
 
         for il in 0..c.n_layer {
