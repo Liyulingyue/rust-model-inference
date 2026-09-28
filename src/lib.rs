@@ -23,6 +23,7 @@ pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSou
 pub use core::thread_pool::ComputePool;
 pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
 pub use core::traits::{ExecContext, Layer, ModelConfig};
+pub use core::ugm::{UgmError, UgmTokenizer};
 pub use format::ggufrs::{
     export_ggufrs, open_model_source, ComponentInfo, ComponentRole, ExportOptions, GgufrsError,
     GgufrsFile, LoadedComponent, SegmentKind, GGUFRS_SEGMENT_ALIGNMENT, GGUFRS_VERSION,

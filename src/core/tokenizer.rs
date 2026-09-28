@@ -1609,9 +1609,17 @@ impl Tokenizer for SPMTokenizer {
     }
 }
 
-/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to either the
-/// BPE (`gpt2`, `gemma4`) or SentencePiece (`llama`) implementation. Returns
-/// a trait object so callers can stay agnostic.
+/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to the
+/// right implementation. Returns a trait object so callers can stay
+/// agnostic. The set of supported model strings:
+///
+///   * `gpt2` / `gemma4`        — BPE
+///   * `llama`                  — SentencePiece (SPM)
+///   * `bert`                   — WordPiece (separate construction
+///                                function, `WPMTokenizer`)
+///   * `t5`                     — SentencePiece unigram with a
+///                                precompiled XCDA normalization map
+///                                (`UgmTokenizer`)
 pub fn load_tokenizer(
     get_meta: impl Fn(&str) -> Option<MetaValue>,
 ) -> Result<Box<dyn Tokenizer>, String> {
@@ -1619,6 +1627,10 @@ pub fn load_tokenizer(
         Some(MetaValue::String(value)) if value == "llama" => {
             Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
         }
+        Some(MetaValue::String(value)) if value == "t5" => Ok(Box::new(
+            crate::core::ugm::UgmTokenizer::from_gguf_metadata(get_meta)
+                .map_err(|e| e.to_string())?,
+        )),
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
 }
