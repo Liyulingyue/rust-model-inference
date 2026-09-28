@@ -95,6 +95,7 @@ fn qwen_image_2_1_matches_pinned_oracle_bit_for_bit() {
 
     let mut names: Vec<String> = CHECKPOINTS.iter().map(|name| name.to_string()).collect();
     names.extend((0..32).map(|layer| format!("qwen.block.{layer}")));
+    names.sort();
     let selected = |records: &[Value]| -> Vec<String> {
         records
             .iter()
@@ -105,12 +106,15 @@ fn qwen_image_2_1_matches_pinned_oracle_bit_for_bit() {
     };
     let oracle_order = selected(&oracle_records);
     assert_eq!(oracle_order.len(), names.len(), "oracle checkpoint count");
+    let mut actual_names = oracle_order.clone();
+    actual_names.sort();
+    assert_eq!(actual_names, names, "oracle checkpoint names");
     assert_eq!(
         selected(&rust_records),
         oracle_order,
         "checkpoint order and count"
     );
-    for name in names {
+    for name in oracle_order {
         assert_eq!(
             named(&oracle_records, &name)["shape"],
             named(&rust_records, &name)["shape"],

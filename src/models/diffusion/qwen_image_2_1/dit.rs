@@ -4,7 +4,6 @@
 use super::{QwenImage21Config, PREFIX};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::models::diffusion::z_image::Q8Scratch;
 use std::sync::Arc;
 
 /// macOS libm's combined cos+sin. The oracle binary evaluates the paired
@@ -34,74 +33,12 @@ fn sincos_f32(angle: f32) -> (f32, f32) {
     (angle.sin(), angle.cos())
 }
 
-// ggml NEON expf approximation constants (ggml-cpu/vec.h ggml_v_expf).
-const EXPF_R: u32 = 0x4b40_0000; // 0x1.8p23
-const EXPF_LOG2E: u32 = 0x3fb8_aa3b; // 0x1.715476p+0
-const EXPF_LN2: u32 = 0x3f31_7200; // 0x1.62e4p-1
-const EXPF_C1: u32 = 0x35bf_be8e; // 0x1.7f7d1cp-20
-const EXPF_P0: u32 = 0x3f7f_fff6; // 0x1.ffffecp-1
-const EXPF_P1: u32 = 0x3eff_fedb; // 0x1.fffdb6p-2
-const EXPF_P2: u32 = 0x3e2a_af33; // 0x1.555e66p-3
-const EXPF_P3: u32 = 0x3d2b_9f17; // 0x1.573e2ep-5
-const EXPF_P4: u32 = 0x3c07_2010; // 0x1.0e4020p-7
-
-const GELU_COEF_A: f32 = 0.044715;
-const GELU_SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
 const RMS_EPS: f32 = 1e-6;
 const LAYER_NORM_EPS: f32 = 1e-6;
 const ATTENTION_OUT_SCALE: f32 = 1.0 / 32.0;
 
-/// One ggml `ggml_vec_dot_f32` call (nrc=1, NEON+FMA build): four FMA
-/// accumulators over 16-element steps, tree-reduced, then a pairwise
-/// horizontal add.
-pub fn vec_dot_f32_ggml(x: &[f32], x_stride: usize, y: &[f32], y_stride: usize, n: usize) -> f32 {
-    let mut acc = [[0.0f32; 4]; 4];
-    let np = n & !15;
-    let mut i = 0;
-    while i < np {
-        for j in 0..4 {
-            for lane in 0..4 {
-                let index = i + j * 4 + lane;
-                acc[j][lane] = x[index * x_stride].mul_add(y[index * y_stride], acc[j][lane]);
-            }
-        }
-        i += 16;
-    }
-    for lane in 0..4 {
-        acc[0][lane] += acc[2][lane];
-        acc[1][lane] += acc[3][lane];
-    }
-    for lane in 0..4 {
-        acc[0][lane] += acc[1][lane];
-    }
-    let mut sumf = (acc[0][0] + acc[0][1]) + (acc[0][2] + acc[0][3]);
-    for i in np..n {
-        sumf += x[i * x_stride] * y[i * y_stride];
-    }
-    sumf
-}
-
-/// Per-element equivalent of ggml's nrc=2 i8mm vec_dot: one fused
-/// multiply-add of the exact per-block i32 dot against the f16-rounded scale
-/// product, accumulated block by block.
-fn q8_dot_nrc2(weight_row: &[u8], act_q8: &[u8], act_scales: &[f32], blocks: usize) -> f32 {
-    let mut acc = 0.0f32;
-    for b in 0..blocks {
-        let base = b * 34;
-        let w_scale =
-            crate::ops::f16_to_f32(u16::from_le_bytes([weight_row[base], weight_row[base + 1]]));
-        let scale = w_scale * act_scales[b];
-        let mut dot: i32 = 0;
-        for i in 0..32 {
-            dot += (weight_row[base + 2 + i] as i8 as i32) * (act_q8[b * 32 + i] as i8 as i32);
-        }
-        acc = (dot as f32).mul_add(scale, acc);
-    }
-    acc
-}
-
 /// ggml `ggml_compute_fp32_to_bf16`: round-to-nearest-even with carry.
-pub fn fp32_to_bf16(value: f32) -> u16 {
+fn fp32_to_bf16(value: f32) -> u16 {
     let bits = value.to_bits();
     if bits & 0x7fff_ffff > 0x7f80_0000 {
         return ((bits >> 16) | 64) as u16;
@@ -110,119 +47,21 @@ pub fn fp32_to_bf16(value: f32) -> u16 {
     (bits.wrapping_add(rounding_bias) >> 16) as u16
 }
 
-fn bf16_to_f32(bits: u16) -> f32 {
-    f32::from_bits((bits as u32) << 16)
-}
-
 /// ggml `ggml_vec_dot_bf16` on aarch64: no NEON branch, scalar f64
 /// accumulation of single-precision products. Both operands are BF16; the
 /// activation row is rounded once by the mul_mat `from_float` step.
 fn bf16_dot(w_bf16: &[u16], act_bf16: &[u16], n: usize) -> f32 {
     let mut sumf = 0.0f64;
     for i in 0..n {
-        let product = bf16_to_f32(w_bf16[i]) * bf16_to_f32(act_bf16[i]);
+        let product = crate::ops::bf16_to_f32(w_bf16[i]) * crate::ops::bf16_to_f32(act_bf16[i]);
         sumf += f64::from(product);
     }
     sumf as f32
 }
 
 /// Lane-wise replica of ggml's NEON `ggml_v_expf` polynomial approximation.
-pub fn expf_v(x: f32) -> f32 {
-    let r = f32::from_bits(EXPF_R);
-    let log2e = f32::from_bits(EXPF_LOG2E);
-    let z = x.mul_add(log2e, r);
-    let n = z - r;
-    let t1 = n.mul_add(-f32::from_bits(EXPF_LN2), x);
-    let b = n.mul_add(-f32::from_bits(EXPF_C1), t1);
-    let e = z.to_bits() << 23;
-    let k = f32::from_bits(e.wrapping_add(1.0f32.to_bits()));
-    let large = n.abs() > 126.0;
-    let u = b * b;
-    let inner1 = f32::from_bits(EXPF_P2).mul_add(b, f32::from_bits(EXPF_P1));
-    let inner2 = f32::from_bits(EXPF_P4).mul_add(b, f32::from_bits(EXPF_P3));
-    let mid = inner2.mul_add(u, inner1);
-    let j = mid.mul_add(u, f32::from_bits(EXPF_P0) * b);
-    if !large {
-        return j.mul_add(k, k);
-    }
-    let d: u32 = if n <= 0.0 { 0x8200_0000 } else { 0 };
-    let s1 = f32::from_bits(d.wrapping_add(0x7f00_0000));
-    let s2 = f32::from_bits(e.wrapping_sub(d));
-    if n.abs() > 192.0 {
-        s1 * s1
-    } else {
-        j.mul_add(s2, s2) * s1
-    }
-}
-
-/// ggml `ggml_vec_silu_f32` (NEON quad path; every call site here has a
-/// multiple-of-4 length). Elementwise, so in-place application is safe.
-pub fn silu_inplace(values: &mut [f32]) {
-    for value in values.iter_mut() {
-        *value = *value / (1.0f32 + expf_v(-*value));
-    }
-}
-
-/// ggml `ggml_vec_gelu_f32` with `GGML_GELU_FP16` (defined unconditionally in
-/// the pinned ggml): values within ±10 go through the precomputed F16 table —
-/// the tanh formula evaluated at the F16-rounded input, rounded back to F16.
-pub fn gelu(value: f32) -> f32 {
-    if value <= -10.0 {
-        0.0
-    } else if value >= 10.0 {
-        value
-    } else {
-        let f16_bits = crate::ops::f32_to_f16(value);
-        let input = crate::ops::f16_to_f32(f16_bits);
-        let inner = GELU_SQRT_2_OVER_PI * input * (1.0f32 + (GELU_COEF_A * input) * input);
-        let result = 0.5f32 * input * (1.0f32 + inner.tanh());
-        crate::ops::f16_to_f32(crate::ops::f32_to_f16(result))
-    }
-}
-
-/// The soft_max op body for one row: the mask add has already been applied by
-/// the graph, max is subtracted, `ggml_v_expf` runs per quad with the quad sum
-/// accumulated pairwise into f64, and the result is scaled by 1/sum.
-pub fn softmax_row(scores: &mut [f32]) {
-    let mut max = f32::NEG_INFINITY;
-    for score in scores.iter() {
-        max = max.max(*score);
-    }
-    let mut sum = 0.0f64;
-    let mut quad = [0.0f32; 4];
-    let mut i = 0;
-    while i + 4 <= scores.len() {
-        for lane in 0..4 {
-            quad[lane] = expf_v(scores[i + lane] - max);
-            scores[i + lane] = quad[lane];
-        }
-        sum += f64::from((quad[0] + quad[1]) + (quad[2] + quad[3]));
-        i += 4;
-    }
-    while i < scores.len() {
-        let value = expf_v(scores[i] - max);
-        scores[i] = value;
-        sum += f64::from(value);
-        i += 1;
-    }
-    let scale = (1.0 / sum) as f32;
-    for score in scores.iter_mut() {
-        *score *= scale;
-    }
-}
-
-/// ggml `ggml_compute_forward_rms_norm_f32` fused with the following mul:
-/// `y[i] = x[i] * scale * w[i]`, `scale = 1/sqrtf(mean + eps)`. In-place safe.
 fn rms_norm_mul_inplace(x: &mut [f32], w: &[f32]) {
-    let mut sum = 0.0f64;
-    for value in x.iter() {
-        sum += f64::from(*value * *value);
-    }
-    let mean = (sum / x.len() as f64) as f32;
-    let scale = 1.0f32 / (mean + RMS_EPS).sqrt();
-    for (value, weight) in x.iter_mut().zip(w) {
-        *value = *value * scale * weight;
-    }
+    crate::ops::rms_norm_inplace(x, w, RMS_EPS);
 }
 
 /// ggml `ggml_compute_forward_norm_f32` (LayerNorm, no affine): f64 mean,
@@ -262,7 +101,7 @@ fn layer_norm_row(x: &[f32], y: &mut [f32]) {
 }
 
 /// ggml `ggml_compute_forward_timestep_embedding_f32` with dim 256.
-pub fn timestep_embedding_row(timestep: f32, output: &mut [f32]) {
+fn timestep_embedding_row(timestep: f32, output: &mut [f32]) {
     let half = output.len() / 2;
     let neg_log_period = -(10_000.0f32).ln();
     for j in 0..half {
@@ -275,7 +114,7 @@ pub fn timestep_embedding_row(timestep: f32, output: &mut [f32]) {
 }
 
 /// `Rope::rope_frequencies(dim, theta)` including its linspace rounding.
-pub fn rope_frequencies(dim: usize, theta: f32) -> Vec<f32> {
+fn rope_frequencies(dim: usize, theta: f32) -> Vec<f32> {
     let half_dim = dim / 2;
     let end = (dim as f32 - 2.0) / dim as f32;
     let step = end / (half_dim as f32 - 1.0);
@@ -301,7 +140,7 @@ fn rope_axis_block(position: f32, omega: &[f32]) -> Vec<f32> {
 /// `Rope::apply_rope` interleaved, standard rotation per frequency pair:
 /// out = [a*cos - b*sin, a*sin + b*cos], evaluated as elementwise mul nodes
 /// and one add, with the pe quad [cos, -sin, sin, cos].
-pub fn apply_rope_row(values: &mut [f32], pe: &[f32]) {
+fn apply_rope_row(values: &mut [f32], pe: &[f32]) {
     for pair_index in 0..values.len() / 2 {
         let a = values[2 * pair_index];
         let b = values[2 * pair_index + 1];
@@ -350,12 +189,7 @@ impl QwenImage21Dit {
         n_out: usize,
         input: &[f32],
         output: &mut [f32],
-        _q8: &mut Q8Scratch,
     ) -> Result<(), String> {
-        // The oracle's mul_mat runs ggml's nrc=2 i8mm kernel on this machine:
-        // per output element it accumulates one fused multiply-add per 32-value
-        // block, using the exact i32 dot of the whole block. The lane partition
-        // inside the block is irrelevant because the i32 sums are exact.
         let weight = self.weight_bytes(name)?;
         let tokens = input.len() / n_in;
         if tokens * n_in != input.len() {
@@ -379,25 +213,25 @@ impl QwenImage21Dit {
         }
         let pool = &self.pool;
         // The pool closure is Fn, so raw pointers carry the mutable output in.
-        let weight_ptr = weight.as_ptr();
         let output_ptr = output.as_mut_ptr();
-        let rows_ptr = rows.as_ptr();
         let row_chunk = n_out.div_ceil(pool.n_threads().max(1));
-        pool.compute(move |ith, nth| {
+        pool.compute(move |ith, _nth| {
             let row_start = ith * row_chunk;
             let row_end = (row_start + row_chunk).min(n_out);
-            let _ = nth;
-            for o in row_start..row_end {
-                let weight_row = unsafe {
-                    std::slice::from_raw_parts(weight_ptr.add(o * blocks * 34), blocks * 34)
+            if row_start >= row_end {
+                return;
+            }
+            for token in 0..tokens {
+                let (q, scales) = &rows[token];
+                let out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(token * n_out + row_start),
+                        row_end - row_start,
+                    )
                 };
-                for token in 0..tokens {
-                    let (q, scales) = unsafe { &*rows_ptr.add(token) };
-                    let value = q8_dot_nrc2(weight_row, q, scales, blocks);
-                    unsafe {
-                        *output_ptr.add(token * n_out + o) = value;
-                    }
-                }
+                crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                    weight, q, scales, out, n_in, row_start, row_end,
+                );
             }
         });
         Ok(())
@@ -464,7 +298,7 @@ impl QwenImage21Dit {
             let row = &input[token * n_in..(token + 1) * n_in];
             for o in 0..n_out {
                 output[token * n_out + o] =
-                    vec_dot_f32_ggml(&weight[o * n_in..(o + 1) * n_in], 1, row, 1, n_in);
+                    crate::ops::dot_f32(&weight[o * n_in..(o + 1) * n_in], row, n_in);
             }
         }
         Ok(())
@@ -488,7 +322,7 @@ impl QwenImage21Dit {
         }
         Ok(bytes
             .chunks_exact(2)
-            .map(|pair| bf16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
+            .map(|pair| crate::ops::bf16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
             .collect())
     }
 
@@ -561,43 +395,37 @@ impl QwenImage21Dit {
         timestep_embedding_row(0.0, &mut time[256..]);
         report("qwen.debug.time", &[256, 2], &time);
         let mut time_embed = vec![0.0f32; hidden * 2];
-        let mut q8 = Q8Scratch::new(256);
         self.q8_linear(
             &format!("{PREFIX}.time_text_embed.timestep_embedder.linear_1.weight"),
             256,
             hidden,
             &time,
             &mut time_embed,
-            &mut q8,
         )?;
         report("qwen.debug.temb_linear1", &[hidden, 2], &time_embed);
-        silu_inplace(&mut time_embed);
+        crate::ops::silu_approx_inplace(&mut time_embed);
         report("qwen.debug.temb_silu", &[hidden, 2], &time_embed);
         let mut time_hidden = vec![0.0f32; hidden * 2];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{PREFIX}.time_text_embed.timestep_embedder.linear_2.weight"),
             hidden,
             hidden,
             &time_embed,
             &mut time_hidden,
-            &mut q8,
         )?;
         time_embed = time_hidden;
         report("qwen.time_embed", &[hidden, 2], &time_embed);
         // The model forward applies a second silu to the embedding; both the
         // modulation projection and the final scale consume the silu'd values.
-        silu_inplace(&mut time_embed);
+        crate::ops::silu_approx_inplace(&mut time_embed);
 
         let mut modulation = vec![0.0f32; 4 * hidden * 2];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{PREFIX}.modulation.1.weight"),
             hidden,
             4 * hidden,
             &time_embed,
             &mut modulation,
-            &mut q8,
         )?;
         report("qwen.modulation", &[4 * hidden, 2], &modulation);
 
@@ -648,9 +476,9 @@ impl QwenImage21Dit {
         }
 
         // --- final layer over the image rows only. ---
-        let joint_final: Vec<f32> = joint[hidden * context_len..].to_vec();
+        let joint_final = &joint[hidden * context_len..];
         let image_rows = seq - context_len;
-        report("qwen.joint_final", &[hidden, image_rows], &joint_final);
+        report("qwen.joint_final", &[hidden, image_rows], joint_final);
 
         let mut scale = vec![0.0f32; hidden];
         self.f32_linear(
@@ -675,14 +503,12 @@ impl QwenImage21Dit {
         report("qwen.norm_out", &[hidden, image_rows], &normed);
 
         let mut out = vec![0.0f32; config.out_channels * image_rows];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{PREFIX}.proj_out.weight"),
             hidden,
             config.out_channels,
             &normed,
             &mut out,
-            &mut q8,
         )?;
         report("qwen.out", &[config.out_channels, image_rows], &out);
         // Keep input records adjacent to the oracle's post-graph input trace.
@@ -744,7 +570,7 @@ impl QwenImage21Dit {
         )?;
         report("qwen.debug.txt_in_layer", &[hidden, tokens], &projected);
         for value in projected.iter_mut() {
-            *value = gelu(*value);
+            *value = crate::ops::gelu_ggml_f16(*value);
         }
         report("qwen.debug.txt_gelu", &[hidden, tokens], &projected);
         self.bf16_linear(
@@ -837,14 +663,12 @@ impl QwenImage21Dit {
         let mut q = vec![0.0f32; hidden * seq];
         let mut k = vec![0.0f32; hidden * seq];
         let mut v = vec![0.0f32; hidden * seq];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{prefix}.attn.to_q.weight"),
             hidden,
             hidden,
             &h,
             &mut q,
-            &mut q8,
         )?;
         self.q8_linear(
             &format!("{prefix}.attn.to_k.weight"),
@@ -852,7 +676,6 @@ impl QwenImage21Dit {
             hidden,
             &h,
             &mut k,
-            &mut q8,
         )?;
         self.q8_linear(
             &format!("{prefix}.attn.to_v.weight"),
@@ -860,7 +683,6 @@ impl QwenImage21Dit {
             hidden,
             &h,
             &mut v,
-            &mut q8,
         )?;
 
         let norm_q = self.f32_vector(&format!("{prefix}.attn.norm_q.weight"), head_dim)?;
@@ -882,6 +704,12 @@ impl QwenImage21Dit {
         }
 
         let scale = (1.0f64 / (head_dim as f64).sqrt()) as f32;
+        let mut v_transposed = vec![0.0f32; hidden * seq];
+        for channel in 0..hidden {
+            for token in 0..seq {
+                v_transposed[channel * seq + token] = v[token * hidden + channel];
+            }
+        }
         let mut attn_out = vec![0.0f32; hidden * seq];
         let mut scores = vec![0.0f32; seq];
         let mut probs = vec![0.0f32; seq];
@@ -889,12 +717,11 @@ impl QwenImage21Dit {
         report("qwen.debug.attn.k", &k);
         // Text queries attend causally to the text keys; image queries attend
         // to the whole sequence.
-        for (segment_index, (query_start, query_end, key_end, causal)) in [
+        for (query_start, query_end, key_end, causal) in [
             (0usize, prefix_length, prefix_length, true),
             (prefix_length, seq, seq, false),
         ]
         .into_iter()
-        .enumerate()
         {
             for token in query_start..query_end {
                 for head in 0..heads {
@@ -902,7 +729,7 @@ impl QwenImage21Dit {
                     for key in 0..key_end {
                         let k_base = key * hidden + head * head_dim;
                         scores[key] =
-                            vec_dot_f32_ggml(&q[q_base..], 1, &k[k_base..], 1, head_dim) * scale;
+                            crate::ops::dot_f32(&q[q_base..], &k[k_base..], head_dim) * scale;
                     }
                     if causal {
                         for (key, score) in scores[..key_end].iter_mut().enumerate() {
@@ -912,15 +739,14 @@ impl QwenImage21Dit {
                         }
                     }
                     probs[..key_end].copy_from_slice(&scores[..key_end]);
-                    softmax_row(&mut probs[..key_end]);
-                    report(
-                        &format!("qwen.debug.attn.seg{segment_index}"),
-                        &attn_out[query_start * hidden..query_end * hidden].to_vec(),
-                    );
+                    crate::ops::softmax_approx_inplace(&mut probs[..key_end]);
                     let out_base = token * hidden + head * head_dim;
                     for d in 0..head_dim {
-                        attn_out[out_base + d] =
-                            vec_dot_f32_ggml(&v[d + head * head_dim..], hidden, &probs, 1, key_end);
+                        attn_out[out_base + d] = crate::ops::dot_f32(
+                            &v_transposed[(head * head_dim + d) * seq..],
+                            &probs,
+                            key_end,
+                        );
                     }
                 }
             }
@@ -933,14 +759,12 @@ impl QwenImage21Dit {
             *target = value * ATTENTION_OUT_SCALE;
         }
         let mut attn_projected = vec![0.0f32; hidden * seq];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{prefix}.attn.to_out.0.weight"),
             hidden,
             hidden,
             &scaled,
             &mut attn_projected,
-            &mut q8,
         )?;
         for value in attn_projected.iter_mut() {
             *value *= 32.0f32;
@@ -970,35 +794,30 @@ impl QwenImage21Dit {
             }
         }
         let mut gate_up = vec![0.0f32; 2 * config.intermediate_size * seq];
-        let mut q8 = Q8Scratch::new(hidden);
         self.q8_linear(
             &format!("{prefix}.img_mlp.gate_up.weight"),
             hidden,
             2 * config.intermediate_size,
             &h,
             &mut gate_up,
-            &mut q8,
         )?;
         let mut mlp_hidden = vec![0.0f32; config.intermediate_size * seq];
         for token in 0..seq {
             let base = token * 2 * config.intermediate_size;
-            let gate = &gate_up[base..base + config.intermediate_size];
-            let up = &gate_up[base + config.intermediate_size..base + 2 * config.intermediate_size];
-            let mut gate = gate.to_vec();
-            silu_inplace(&mut gate);
+            let (gate, up) = gate_up[base..base + 2 * config.intermediate_size]
+                .split_at_mut(config.intermediate_size);
+            crate::ops::silu_approx_inplace(gate);
             for i in 0..config.intermediate_size {
                 mlp_hidden[token * config.intermediate_size + i] = up[i] * gate[i];
             }
         }
         let mut mlp_out = vec![0.0f32; hidden * seq];
-        let mut q8 = Q8Scratch::new(config.intermediate_size);
         self.q8_linear(
             &format!("{prefix}.img_mlp.out.weight"),
             config.intermediate_size,
             hidden,
             &mlp_hidden,
             &mut mlp_out,
-            &mut q8,
         )?;
         for token in 0..seq {
             let row = modulation_row(modulation, 3, token < prefix_length, hidden);
@@ -1022,14 +841,4 @@ fn modulation_row<'a>(
     let total = 4 * hidden;
     let row = if zero_row { 1 } else { 0 };
     &modulation[row * total + part * hidden..row * total + (part + 1) * hidden]
-}
-
-/// Numeric kernels exposed for the public parity self-tests
-/// (tests/qwen_image_2_1_unit.rs); callers normally go through
-/// [`QwenImage21Dit::forward`].
-pub mod kernels {
-    pub use super::{
-        apply_rope_row, expf_v, fp32_to_bf16, gelu, rope_frequencies, silu_inplace, softmax_row,
-        timestep_embedding_row, vec_dot_f32_ggml,
-    };
 }

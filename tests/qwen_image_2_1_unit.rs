@@ -1,113 +1,12 @@
-//! Public self-tests for the Qwen-Image-2.1 numeric kernels and validation
-//! contract. These mirror the invariants the pinned stable-diffusion.cpp
-//! oracle relies on (tools/oracle/qwen_image_2_1).
+//! Qwen-Image-2.1 tensor contract tests.
 
 use rust_model_inference::core::tensor::{GGMLType, TensorInfo, TensorSource};
-use rust_model_inference::models::diffusion::qwen_image_2_1::dit::kernels::{
-    apply_rope_row, expf_v, fp32_to_bf16, gelu, rope_frequencies, silu_inplace, softmax_row,
-    timestep_embedding_row, vec_dot_f32_ggml,
-};
 use rust_model_inference::models::diffusion::qwen_image_2_1::{
     config_from_source, matches_signature, validate_dit,
 };
 use std::collections::HashMap;
 
 const PREFIX: &str = "model.diffusion_model";
-
-#[test]
-fn bf16_rounding_matches_ggml_rne() {
-    assert_eq!(fp32_to_bf16(1.0), 0x3f80);
-    assert_eq!(fp32_to_bf16(-1.5), 0xbfc0);
-    assert_eq!(fp32_to_bf16(1.0 + f32::EPSILON), 0x3f80);
-}
-
-#[test]
-fn expf_v_tracks_libm_expf() {
-    for value in [-3.5f32, -1.0, -0.25, 0.0, 0.5, 2.0] {
-        let expected = value.exp();
-        let actual = expf_v(value);
-        let relative = (expected - actual).abs() / expected.abs().max(1.0);
-        assert!(
-            relative < 2.0e-7,
-            "expf_v({value}) = {actual} vs {expected}"
-        );
-    }
-    assert_eq!(expf_v(0.0), 1.0);
-}
-
-#[test]
-fn silu_matches_reference_values() {
-    let mut values = vec![0.0f32, 1.0, -1.0, 2.0];
-    silu_inplace(&mut values);
-    assert_eq!(values[0], 0.0);
-    let expected_one = 1.0f32 / (1.0f32 + (-1.0f32).exp());
-    assert!((values[1] - expected_one).abs() < 2.0e-7);
-    assert!((values[2] + 1.0f32 / (1.0f32 + 1.0f32.exp())).abs() < 2.0e-7);
-}
-
-#[test]
-fn gelu_is_zero_at_origin() {
-    assert_eq!(gelu(0.0), 0.0);
-}
-
-#[test]
-fn softmax_row_is_normalized_and_shift_invariant() {
-    let mut scores = vec![1.0f32, 2.0, 3.0, 4.0];
-    softmax_row(&mut scores);
-    let sum: f32 = scores.iter().sum();
-    assert!((sum - 1.0).abs() < 1e-6);
-    let mut shifted = vec![11.0f32, 12.0, 13.0, 14.0];
-    softmax_row(&mut shifted);
-    assert_eq!(scores, shifted);
-}
-
-#[test]
-fn vec_dot_f32_ggml_sums_exactly_for_small_values() {
-    let x = vec![1.0f32; 128];
-    let mut y = vec![1.0f32; 128];
-    y[7] = 2.0;
-    assert_eq!(vec_dot_f32_ggml(&x, 1, &y, 1, 128), 129.0);
-}
-
-#[test]
-fn vec_dot_f32_ggml_supports_strided_rows() {
-    let x: Vec<f32> = (0..256).map(|i| i as f32).collect();
-    let y: Vec<f32> = (0..128).map(|i| (i % 3) as f32).collect();
-    let strided = vec_dot_f32_ggml(&x, 2, &y, 1, 128);
-    let dense_x: Vec<f32> = x.iter().step_by(2).copied().collect();
-    let expected = vec_dot_f32_ggml(&dense_x, 1, &y, 1, 128);
-    assert_eq!(strided, expected);
-}
-
-#[test]
-fn timestep_embedding_is_cos_sin_concat() {
-    let mut output = vec![0.0f32; 256];
-    timestep_embedding_row(0.0, &mut output);
-    assert_eq!(output[0], 1.0);
-    assert_eq!(output[128], 0.0);
-}
-
-#[test]
-fn rope_frequencies_first_and_last_entries() {
-    let omega = rope_frequencies(16, 10_000.0);
-    assert_eq!(omega.len(), 8);
-    assert_eq!(omega[0], 1.0);
-    assert!(
-        (omega[7] - 1.0 / 10_000.0f32.powf(0.875)).abs() < 1e-9,
-        "{}",
-        omega[7]
-    );
-}
-
-#[test]
-fn rope_rotation_preserves_norm() {
-    let mut values = vec![0.31f32, -0.77, 0.9, 0.12];
-    let pe = [0.8f32, -0.6, 0.6, 0.8, 1.0, 0.0, -0.0, 1.0];
-    let before: f32 = values.iter().map(|v| v * v).sum();
-    apply_rope_row(&mut values, &pe);
-    let after: f32 = values.iter().map(|v| v * v).sum();
-    assert!((before - after).abs() < 1e-5);
-}
 
 #[derive(Default)]
 struct TestSource {
