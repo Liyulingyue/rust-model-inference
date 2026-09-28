@@ -83,8 +83,21 @@ fn agreement_image() -> Vec<u8> {
 const IMAGE_PROMPT: &str = "Describe this image in a few words.";
 
 /// Run the CLI binary and return the generated text from its `Output: ` line.
-fn cli_text(path: &std::path::Path, max_tokens: usize, temperature: f32) -> Option<String> {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
+fn cli_text(
+    path: &std::path::Path,
+    max_tokens: usize,
+    temperature: f32,
+    thinking: bool,
+) -> Option<String> {
+    // The CLI's `--thinking` flag and the server's `enable_thinking` field
+    // must be set explicitly: the two fronts default differently
+    // (CLI `options.thinking` is `false` unless `--thinking` is passed;
+    // `build_prompt`'s `enable_thinking = None` resolves to `true` for
+    // thinking-tuned archs like lfm2moe/lfm2). Relying on the defaults
+    // here would compare different prompt tails and report a spurious
+    // disagreement.
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
+    command
         .arg("--model")
         .arg(path)
         .arg("--prompt")
@@ -94,9 +107,13 @@ fn cli_text(path: &std::path::Path, max_tokens: usize, temperature: f32) -> Opti
         .arg("--temp")
         .arg(temperature.to_string())
         .arg("--max-context")
-        .arg(CONTEXT.to_string())
-        .output()
-        .ok()?;
+        .arg(CONTEXT.to_string());
+    command.arg(if thinking {
+        "--thinking"
+    } else {
+        "--no-thinking"
+    });
+    let output = command.output().ok()?;
     if !output.status.success() {
         eprintln!("CLI failed: {}", String::from_utf8_lossy(&output.stderr));
         return None;
@@ -117,6 +134,7 @@ fn http_text(
     temperature: f32,
     images: &[Vec<u8>],
     prompt: &str,
+    thinking: Option<bool>,
 ) -> String {
     let arch = loader
         .metadata("general.architecture")
@@ -162,6 +180,7 @@ fn http_text(
         }],
         &[],
         &rust_model_inference::app::server::api::protocol::ToolChoice::Auto,
+        thinking,
     )
     .expect("prompt build");
     let request = GenerationRequest {
@@ -215,34 +234,43 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     // without threading a shared seed — out of scope for this guard. Greedy
     // is where forward-path and sampler splits show up, which is what this
     // test exists to catch.
-    for temperature in [0.0f32] {
-        let Some(cli) = cli_text(&path, MAX_TOKENS, temperature) else {
-            eprintln!("skipping temperature={temperature}: CLI run failed");
-            continue;
-        };
-        let http = http_text(loader, temperature, &[], PROMPT);
-        if cli != http {
-            // Where the texts first differ. A split at char 0 means a
-            // forward-path divergence (wrong tokens from step one); a split
-            // tens of characters in is usually a 1-ULP greedy flip on two
-            // near-tied logits.
-            let common = cli
-                .chars()
-                .zip(http.chars())
-                .take_while(|(a, b)| a == b)
-                .count();
-            panic!(
-                "CLI and HTTP disagree for arch={arch} temperature={temperature}\n\
-                 divergence at char {common}: CLI={:?} HTTP={:?}\n\
-                 CLI : {cli:?}\nHTTP: {http:?}",
-                &cli[common..cli.len().min(common + 40)],
-                &http[common..http.len().min(common + 40)]
+    //
+    // `thinking` is swept so the sentinel covers both prompt tails: the
+    // CLI accepts `--thinking` / `--no-thinking`; `build_prompt` accepts the
+    // same toggle through `enable_thinking`. Testing only one mode would
+    // leave the other tail unprotected (and, pre-PR-#120, the two fronts
+    // disagreed on the *default* — the CLI passed `thinking=false` while
+    // `build_prompt` had no such field at all).
+    for thinking in [false, true] {
+        for temperature in [0.0f32] {
+            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking) else {
+                eprintln!("skipping thinking={thinking} temperature={temperature}: CLI run failed");
+                continue;
+            };
+            let http = http_text(loader, temperature, &[], PROMPT, Some(thinking));
+            if cli != http {
+                // Where the texts first differ. A split at char 0 means a
+                // forward-path divergence (wrong tokens from step one); a split
+                // tens of characters in is usually a 1-ULP greedy flip on two
+                // near-tied logits.
+                let common = cli
+                    .chars()
+                    .zip(http.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                panic!(
+                    "CLI and HTTP disagree for arch={arch} thinking={thinking} temperature={temperature}\n\
+                     divergence at char {common}: CLI={:?} HTTP={:?}\n\
+                     CLI : {cli:?}\nHTTP: {http:?}",
+                    &cli[common..cli.len().min(common + 40)],
+                    &http[common..http.len().min(common + 40)]
+                );
+            }
+            assert_eq!(
+                cli, http,
+                "CLI and HTTP disagree for arch={arch} thinking={thinking} temperature={temperature}\nCLI : {cli:?}\nHTTP: {http:?}"
             );
         }
-        assert_eq!(
-            cli, http,
-            "CLI and HTTP disagree for arch={arch} temperature={temperature}\nCLI : {cli:?}\nHTTP: {http:?}"
-        );
     }
 }
 
@@ -321,7 +349,11 @@ fn cli_and_http_agree_on_image_input() {
         panic!("CLI printed no recognisable output line; stdout was:\n{stdout}");
     };
 
-    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT);
+    // Vision paths: `None` keeps the legacy behaviour — every arch with a
+    // vision-compatible `build_prompt` treats the missing toggle the same
+    // way on both fronts (the CLI's `--thinking` does not reach the
+    // multimodal path, and the vision builders ignore the flag entirely).
+    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT, None);
     assert_eq!(
         cli, http,
         "CLI and HTTP disagree on image input\nCLI : {cli:?}\nHTTP: {http:?}"

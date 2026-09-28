@@ -352,6 +352,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
             &messages,
             &request.tools,
             &request.choice,
+            request.enable_thinking,
         )
         .map_err(|e| (400, e))?;
         if ids
@@ -980,6 +981,7 @@ mod http_tests {
             store: false,
             previous_response_id: Some("prev".into()),
             instructions: Some("system".into()),
+            enable_thinking: None,
         };
         let mut value = serde_json::json!({"object":"response"});
         apply_response_request(&mut value, &request);
@@ -1013,6 +1015,7 @@ mod http_tests {
             store: true,
             previous_response_id: None,
             instructions: None,
+            enable_thinking: None,
         };
         let value = serde_json::json!({"id":"resp_order","object":"response","output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"message","content":[]}]});
         let stored = store_response(&state, "resp_order", &request, value).unwrap();

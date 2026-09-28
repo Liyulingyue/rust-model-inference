@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-010) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-011…TODO-012…TODO-013) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -405,6 +405,238 @@ Qwen3、Qwen3.5、Gemma4 仍分别维护自己的 chunk loop、CPU/Vulkan fallba
 
 - llama.cpp：`src/llama-batch.h`、`src/llama-memory.h`、`src/llama-context.cpp`、`src/llama-graph.h`
 - 当前 Rust：`src/core/prefill.rs`、`src/ops/kernel/mod.rs::PreparedRows`、`src/models/qwen3/trunk/prefill.rs`、`src/models/qwen35/trunk/session.rs`、`src/models/gemma4/trunk/forward.rs`
+
+---
+
+### TODO-011: GLM-4 commit `65f8c8b` follow-up cleanups — ✅ 已完成 (2026-09-29)
+
+来源：merge `origin/main` (62ab751) → `msi-new2` (daed1ec) 后评审 6 个非 PR commit 时记录。
+GLM-4 (`arch="glm4"`) 在 llama trunk 上跑通（Paris、中文 ML 题本地 IQ4_NL 验证通过），
+这些都是 cosmetic / dead-code。在 `msi-new3`（PR #120 合并后的新起点）上**全部处理完毕**。
+
+1. ~~**删除 dead scratchpad 字段 `x_after_attn` / `x_after_mlp`**~~ ✅ 已删。
+   原 `src/core/scratchpad.rs` 的 `Default::default` / `new_batched` +
+   `src/models/qwen3/trunk/session.rs` 共 6 处分配，forward.rs 无任何读取。每
+   batch row 多 ~8KB（n_embd × 2 × 4B）释放。
+2. ~~**清理 `quantize_row_q8_k_scalar_into` 死代码**~~ ✅ 已清理，**并发现一个真 bug**：
+   `max_val` 的累加器 + `sum_q` 都已丢弃（`let _ = max_val; let _ = sum_q;`），
+   dead code 已删。**但清理过程中发现 `padded` buffer 尾部未清零** —
+   GLM-4 n_ff=13696 = 54 blocks（53×256 + 1×128），最后 partial block 的
+   `padded[128..256]` 保留前一个 full block 的脏值并参与量化，quantize 结果错。
+   修复：`padded[len..].fill(0.0)`。由新增的 4 个单元测试验证（删掉 fix 后 2 个
+   测试立即 FAILED，确认测试能抓住 bug）。
+3. **`tools.rs` 让 glm4 + tools 显式 Err — 误报，无需修**。
+   当前 `tools.rs` 的 `llama_family` 分支在 `if !tools.is_empty()` 时已经统一
+   `return Err("Function tools are unsupported for llama-family architectures")`
+   （由 PR `b018708` #112 "HTTP CLI 公共逻辑抽取" 引入），glm4 + tools 已被拒。
+   **修 TODO 说明此条为误报**，不是真实 bug。
+4. ~~**修复 `docs/MODEL_LIST.md` 孤行 `| `**~~ ✅ 已删。GLM-4 row 末尾原本
+   缺失闭合 `）`，一并补上。
+5. ~~**squash 掉 cix3 docs stash dance**~~ ✅ 已由 PR #120 的 squash merge 处理，
+   main 历史已干净（无需单独 rebase）。
+6. ~~**补 Q8_K zero-pad 单元测试**~~ ✅ 已加。
+   `src/ops/quant/mod.rs::q8k_padding_tests` 4 个测试：
+   - `partial_block_tail_roundtrips_to_zero`：GLM-4 n_ff=13696 partial block
+     尾部 roundtrip 到 0
+   - `partial_block_valid_values_roundtrip_within_quantum`：有效值误夽
+     ≤ 半个 quantum（`d/2`）
+   - `partial_block_tail_is_independent_of_previous_block`：直接验证字段 2 的
+     脏 buffer bug — 删掉 fix 后 FAILED
+   - `undersized_buffer_panics`：buf 长度合约 `len.div_ceil(QK_K)` 强制执行
+
+关联文件：
+- `src/core/scratchpad.rs` — 字段 1（已删）
+- `src/models/qwen3/trunk/session.rs` — 字段 1（已删）
+- `src/ops/quant/mod.rs:104-155` + `q8k_padding_tests` — 字段 2 + 6（已修 + 已测）
+- `docs/MODEL_LIST.md` — 字段 4（已删孤行 + 补 `）`）
+
+---
+
+### TODO-012: minijinja-based user-GGUF chat_template support
+
+#### 动机
+
+当前 prompt builder 在 `src/prompt.rs` 和 `src/models/llama/trunk/forward.rs::llama_turn_text`
+里 hardcoded 一组已知 arch 的模板（`lfm2`/`lfm2moe`/`qwen3`/`qwen35`/llama/nanbeige/
+granite/glm4/minicpm5/phi3/exaone/k2-horizon）。当用户用 HF 微调了一个模型
+（典型场景：微调 Qwen3-0.6B Instruct 改 chat_template），GGUF 里
+`tokenizer.chat_template` 会变 — 我们的 hardcoded path 渲染错，模型输出
+退化，但代码完全无感。要支持这个场景，必须把 chat template render 委托
+给 GGUF 自带的 Jinja。
+
+#### 设计：共存，不是替代
+
+minijinja 与现有 hardcoded builder **共存**，通过 `build_prompt` dispatch
+**选择**走哪条：
+
+```
+build_prompt() dispatch
+ ├─ 优先级 1: 用户显式 chat_template override（HTTP field / CLI flag / env var）
+ ├─ 优先级 2: 已知 arch fast path（hardcoded builder，零 runtime 开销）
+ ├─ 优先级 3: GGUF 自带 chat_template（minijinja render）
+ └─ 优先级 4: 兜底（raw prompt）
+```
+
+理由：
+- 手写 builder 是 **fast path**：编译期已知、0 开销、当前所有 model list
+  都 byte-aligned 过官方模板（PR #118 + da6bbcb + 后续实测验证）。
+  **不删**。
+- minijinja 是 **fallback / escape hatch**：用户传任意 HF GGUF / 微调模型
+  / 自定义 jinja 时自动走通。**不动现有 fast path**。
+- 两条 path 产物等价 — 都是 `Vec<u32>` tokens，下游 runtime 完全无感。
+- 跨验证：用 minijinja render 一个等价 jinja（展开我们手写 builder 的逻辑），
+  验证 byte-equal — 这给我们一个 regression net，防 hardcoded 漂移。
+
+#### 触发入口（用户可控的 4 种）
+
+| 入口 | 用例 |
+|---|---|
+| GGUF 自带 `tokenizer.chat_template` + 未知 arch | 用户上传任意 HF 模型，自动 render |
+| GGUF 自带 `tokenizer.chat_template` + 已知 arch 但与 hardcoded 不一致 | 检测 diff，触发 jinja 兜底 |
+| HTTP `/v1/chat/completions` 的 `chat_template` 字段 | 想精确控制的 OpenAI 兼容客户端 |
+| CLI `--chat-template-file path.j2` 或 env `RMI_CHAT_TEMPLATE_FILE` | 本地测试 / 容器化部署 |
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| 加 `minijinja = "2"` 依赖 + json/macros features | 1 | 编译时间 +5s |
+| 实现 `{% generation %}` block（minja 兼容） | ~50 | 中：custom parser extension via `unstable_machinery` |
+| 实现 `raise` statement（minja 兼容） | ~30 | 低：minijinja 自带 syntax hook |
+| `JinjaChatTemplate::new()` + cache | ~30 | 低 |
+| `build_prompt` 集成 + 分发 | ~50 | 低（向后兼容 fallback） |
+| HTTP `chat_template` 字段 | ~20 | 低 |
+| CLI `--chat-template-file` flag + env var | ~30 | 低 |
+| 测试（minja `tests_files/` 借用为 golden） | ~100 | 中（要选几个真实 GGUF 跑 byte-equal） |
+| 跨验证（jinja-rendered == hardcoded for 已知 arch） | ~50 | 低 |
+| **总计** | **~360 LOC + 1 dep** | **新功能 PR，不动现有 fast path** |
+
+#### 验证策略
+
+1. **已知 arch 不变**：跑现有 `tests/cli_http_agreement.rs` + `prompt.rs::tests`
+   byte-equal 测试，确认 jinja 引入后 hardcoded path 行为零漂移。
+2. **minja `tests_files/`**：借用其 ~80 个真实模型的 `tokenizer.chat_template`
+   + 期望输出，做 golden test（不需要权重，只需 template + 合成 messages）。
+3. **LFM2.5-8B-A1B 真实 GGUF**：用 `RUST_LFM2MOE_DEBUG_LOGITS` 验证 jinja render
+   vs hardcoded render 输出的 token 序列一致。
+
+#### ROI 时间线
+
+- 现在：**0%** — 项目当前 model list 完备，plain text 全部对齐官方 jinja 输出
+  （已 byte-equal 验证），用户微调场景没出现。
+- 3-6 个月：**30%** — 如果项目推"通用 GGUF 推理"产品定位。
+- 12+ 个月：**100%** — 任何 HF 推理产品最终都要支持任意 jinja 模板，这是行业
+  标准做法（llama.cpp / vLLM / TGI 都已支持）。
+
+#### 不立即实施的核心理由
+
+1. **零增量价值**：当前所有 model list 的 plain text 输出已 byte-equal 官方 jinja。
+2. **不解决"thinking-tuned 模型仍 emit think block"问题** — 这是模型训练特性，
+   jinja 也救不了（已经验证）。
+3. **不解决 byte-slice panic 等已修 bug**（这些是 hardcoded path 内部的 bug，
+   跟 jinja 正交）。
+4. **避免 scope creep — TODO-011 的 6 条死代码提醒我们**：不必要的代码会带来
+   维护负担。jinja 是 ~360 LOC + 1 dep，没用户报"prompt 不对"前不值。
+
+#### 触发条件（何时启用）
+
+满足下列**任一**条件即应启动实施：
+
+- 用户公开 issue / Discord 报告"我的微调模型 prompt 渲染错"（≥3 次报告后启动）
+- 项目决定支持"用户上传任意 HF GGUF"产品定位（一次性启动）
+- 仓库添加 ≥5 个新 arch 而其中 ≥2 个 GGUF 带非标准 chat_template（渐进启动）
+
+#### 关联文件（实施时）
+
+- `Cargo.toml` — 加 `minijinja = "2"` 依赖
+- `src/prompt/jinja.rs` (新) — JinjaChatTemplate 封装
+- `src/app/server/api/tools.rs::build_prompt` — 加 dispatch 分支（不删 fast path）
+- `src/app/server/api/protocol.rs::Request` — 加 `chat_template` 字段
+- `src/app/cli/parse.rs` — 加 `--chat-template-file` flag
+- `src/prompt.rs` (现有) — 不动，保留 hardcoded builder 作为 fast path
+- `docs/usage/*.md` — 加新章节解释"用户微调模型怎么用"
+
+---
+
+### TODO-013: CLI interactive mode — multi-turn history + slash commands
+
+#### 现状
+
+CLI interactive mode **已存在**（`src/app/text/generation.rs:218` 的
+`run_interactive` 和 `:267` 的 `run_interactive_qwen35`），触发条件是
+`options.prompt.is_empty()`（`src/main.rs:495` 的 else 分支）。REPL
+loop 完整，从 stdin 读行、Ctrl+C / EOF 退出。
+
+但**核心功能缺失**：
+
+| 功能 | 状态 |
+|---|---|
+| REPL loop（stdin → stdout） | ✅ |
+| Ctrl+C / EOF 退出 | ✅ |
+| 每次 input 独立生成 reply | ✅ |
+| **multi-turn history** | ❌ 每行独立，模型看不到前文 |
+| **system turn（CLI 配置）** | ❌ 无 CLI 接口；模型不知道角色 |
+| **`/clear` / `/system "..."` / `/exit` 命令** | ❌ |
+| **streaming token-by-token 输出** | ❌ 整段生成完才 print |
+| **`--thinking` / `--no-thinking` 生效** | ❌ `run_inference` 在 interactive 路径 hardcode `thinking=false` |
+| **KV cache 增量（不重 prefill）** | ❌ 每轮从 0 开始 |
+
+**最大痛点**：
+```bash
+> Hi, I'm Alice.
+Hello Alice!
+
+> What is my name?
+I don't know your name.  # ← 不记得 "Alice"
+```
+
+根因：`lfm2::run_inference` 和 `lfm25::run_inference` 都签名是
+`(..., prompt: &str, ...)`，内部 `build_lfm2_chat_prompt_with_thinking`
+的 `&[Lfm2Message]` 被 hardcode 为 `[Lfm2Message { role: "user",
+content: prompt }]`，没有 history / system 概念。
+
+HTTP 路径**已经完整**（PR #118 + `da6bbcb` + 后续）—— 缺的是 CLI。
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| `lfm2::run_inference` 加 `turns: &[Lfm2Message]` 替代 `prompt: &str` | ~15 | 低（纯重命名 + 调整） |
+| `lfm25::run_inference` 同上 | ~15 | 低 |
+| `run_interactive` 重写：维护 `Vec<(role, content)>` history + system + slash commands | ~80 | 低 |
+| `run_interactive_qwen35` 同上（multimodal path） | ~80 | 低 |
+| Streaming token 输出（可选） | ~50 | 中（要 token sink 接口） |
+| 思考 flag 透传 | ~5 | 低 |
+| 测试（stdin mock + 历史一致性） | ~80 | 中 |
+| **总计** | **~325 LOC** | **触及多个 model forward 入口；可能影响 Oracle 测试 baseline** |
+
+#### 为什么不立即实施
+
+1. **interactive mode 是 partial feature，不是 bug**。当前 1-shot-per-line
+   满足 smoke test / benchmark / debug 三大主要 CLI 场景。
+2. **HTTP 路径已完整**（multi-turn, system, thinking, streaming）。
+   真正需要 multi-turn 对话的用户走 HTTP。
+3. **改 `lfm2::run_inference` 签名**会触动 CLI / benchmark / Oracle
+   test 的多个调用点，需要回归测试全套 llm 模型的 greedy baseline。
+4. **ROI 偏低**：LFM2.5-8B-A1B 等思考模型在 CLI 上调试时确实希望有 history，
+   但生产场景主要是 HTTP API 调用方。
+
+#### 触发条件
+
+满足下列**任一**条件即应启动：
+
+- 用户公开 issue / Discord 报告"interactive mode 不支持 multi-turn"（≥3 次）
+- LFM2.5-Thinking 系列在 CLI 上成为常见调试 / 微调工作流
+- 决定给仓库加一个"开发者本地 chat loop"功能，作为测试 / 微调工具
+
+#### 关联文件（实施时）
+
+- `src/models/lfm2/trunk/forward.rs` — `run_inference` 接受 turns
+- `src/models/lfm25/trunk/forward.rs` — 同上
+- `src/app/text/generation.rs` — `run_interactive` 重写 + 加 streaming 接口
+- `src/app/cli/parse.rs` — 加 `--system` CLI flag
+- `src/main.rs` — interactive dispatch 把 `options.thinking` 透传
+- `tests/cli_history.rs`（新）— 多轮 history 一致性测试
 
 ---
 

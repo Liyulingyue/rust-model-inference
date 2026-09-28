@@ -948,6 +948,13 @@ fn asr_cli_rejects_conflicting_modes_before_model_load() {
 
 #[test]
 fn gemma4_media_requires_mmproj() {
+    // `--audio` WITHOUT `--mmproj` is legal here since standalone ASR support
+    // landed (sensevoice-small / paraformer take --audio directly). This
+    // validate layer has no access to the arch string, so it cannot tell
+    // "gemma4 + audio" (encoder+LLM split, needs --mmproj) from
+    // "sensevoice + audio" (standalone ASR, must NOT have --mmproj). The
+    // mmproj requirement for the gemma4 path is enforced by the dispatcher
+    // in `app::asr`, where the arch is known — see validate.rs:198-201.
     let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
     assert!(validate_cli_options(&parse(&[
         "rmi",
@@ -958,7 +965,7 @@ fn gemma4_media_requires_mmproj() {
         "--prompt",
         "x",
     ]))
-    .is_err());
+    .is_ok());
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",
@@ -973,6 +980,26 @@ fn gemma4_media_requires_mmproj() {
         "x",
     ]))
     .is_ok());
+    // What IS enforced at validate time: --image under --embedding without
+    // --mmproj, and --video without --mmproj. Those paths have no
+    // standalone variant to disambiguate against.
+    assert!(validate_cli_options(&parse(&[
+        "rmi",
+        "--model",
+        "gemma.gguf",
+        "--embedding",
+        "--image",
+        "a.png",
+    ]))
+    .is_err());
+    assert!(validate_cli_options(&parse(&[
+        "rmi",
+        "--model",
+        "gemma.gguf",
+        "--video",
+        "a.mp4",
+    ]))
+    .is_err());
 }
 
 #[test]
