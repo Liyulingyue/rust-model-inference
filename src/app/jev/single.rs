@@ -86,7 +86,11 @@ fn run_jev_decision_data_with_image(
             mmproj_path,
             image_path,
         ),
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" => {
+        // exaone rides the llama trunk (uses_llama_trunk covers it for
+        // CLI + HTTP); it was missing here, so `--jev` on an
+        // EXAONE GGUF errored out. LlamaJevScorer renders its
+        // `[|user|]` template (see llama.rs).
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" | "exaone" => {
             llama::run_jev_decision_llama(
                 source.clone(),
                 context,
