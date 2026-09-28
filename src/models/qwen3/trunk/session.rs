@@ -299,6 +299,48 @@ impl<'model> Qwen3Session<'model> {
         Ok(self.scratch.normed.clone())
     }
 
+    /// Prefill `input` and return the final-token post-RMSNorm hidden
+    /// state (length `n_embd`) for ANY Qwen3 checkpoint, not just rerank
+    /// ones.  Identical to [`Self::forward_rerank`] except that it does
+    /// not require `cls.output.weight`.
+    ///
+    /// Used by the CLM projection heads, whose encoder is a plain
+    /// Qwen3-8B: they consume the last-token pooled embedding, so they
+    /// need the hidden state from a base/generative checkpoint.
+    pub fn forward_last_hidden(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 forward must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let _duration = self.prefill(&input, prefill_batch_size)?;
+        self.prefill_scratch
+            .reset_for(input.token_ids.len(), self.model);
+        let n_embd = self.model.config.n_embd;
+        let last_row = input.token_ids.len() - 1;
+        let base = last_row * n_embd;
+        crate::ops::rms_norm(
+            &self.prefill_scratch.x[base..base + n_embd],
+            &self.model.output_norm,
+            &mut self.scratch.normed,
+            self.model.config.eps,
+        );
+        Ok(self.scratch.normed.clone())
+    }
+
     /// Return false from the callback to stop generation. Empty text callbacks
     /// still allow cancellation when a token has not completed a UTF-8 character.
     pub fn generate_streaming_until(
