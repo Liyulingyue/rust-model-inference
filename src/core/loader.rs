@@ -406,6 +406,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
             | "falcon-h1"

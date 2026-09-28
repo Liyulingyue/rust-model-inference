@@ -153,6 +153,20 @@ pub fn run_inference(
             repetition_penalty,
             thinking,
         )
+    } else if arch == "xing4_0" {
+        crate::models::xing4_0::trunk::run::run_inference(
+            source.as_ref(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            profile,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            thinking,
+        )
     } else if arch == "spark2_5" {
         crate::models::spark::run_inference(
             source.as_ref(),
