@@ -264,16 +264,14 @@ pub fn run_inference(
             } else {
                 prompt.to_string()
             }
-} else if is_minicpm5 {
+        } else if is_minicpm5 {
             // MiniCPM5 uses ChatML (`{role}\n{content}`)
             // per its GGUF `tokenizer.chat_template`. The template supports
             // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
             // (empty thinking block → direct answer). When true, emits `🤔\n`
             // (thinking mode). Default: non-thinking for fast direct answers.
             // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
-            format!(
-                "user\n{prompt}\nassistant\n🤔\n\n</think>\n\n"
-            )
+            format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
         } else if arch == "glm4" {
             // GLM-4 chat template: `[gMASK]<sop>` prefix, then
             // `<|user|>\n{prompt}<|assistant|>\n`. `[gMASK]` is the
@@ -569,7 +567,8 @@ pub fn run_inference_tokens(
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
 
             let t0 = Instant::now();
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
@@ -789,7 +788,8 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "attn_out", layer, attn_out);
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
             let t0 = Instant::now();
             quantize_q8_0_into(
                 attn_out,
@@ -1000,7 +1000,10 @@ pub fn run_inference_tokens(
                         let per_thread = (n_ff + nth - 1) / nth;
                         let r_start = ith * per_thread;
                         let r_end = (r_start + per_thread).min(n_ff);
-                        silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                        silu_mul_approx_inplace(
+                            &up_buf[r_start..r_end],
+                            &mut gate_buf[r_start..r_end],
+                        );
                     }
                 }
             });
@@ -1476,7 +1479,8 @@ pub fn run_forward_logits_llama_inner(
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
 
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             quantize_q8_0_into(
@@ -2292,7 +2296,7 @@ pub fn build_prompt_tokens(
         } else {
             prompt.to_string()
         }
-} else if is_minicpm5 {
+    } else if is_minicpm5 {
         format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
     } else if arch == "glm4" {
         // GLM-4 chat template: `[gMASK]<sop>` prefix, then

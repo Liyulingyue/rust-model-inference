@@ -190,110 +190,114 @@ pub fn load_layers<'a>(
             let (attn_post_norm, ffn_post_norm) =
                 try_load_post_norms(source, l, n_embd).expect("post-norm load");
             LlamaLayerWeights {
-            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
-            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            attn_post_norm,
-            ffn_post_norm,
-            wq: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.attn_q.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.attn_q.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_embd,
-                n_embd_q,
-            )),
-            wk: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.attn_k.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.attn_k.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_embd,
-                n_embd_gqa,
-            )),
-            wv: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.attn_v.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.attn_v.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_embd,
-                n_embd_gqa,
-            )),
-            bq: try_load_f32_tensor(source, &format!("blk.{}.attn_q.bias", l), n_embd_q),
-            bk: try_load_f32_tensor(source, &format!("blk.{}.attn_k.bias", l), n_embd_gqa),
-            bv: try_load_f32_tensor(source, &format!("blk.{}.attn_v.bias", l), n_embd_gqa),
-            wo: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.attn_output.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.attn_output.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_embd_q,
-                n_embd,
-            )),
-            w_gate: if source.tensor_info(&format!("blk.{l}.ffn_gate.weight")).is_some() {
-                Weight::from_quantized(QuantizedTensor::from_bytes(
+                attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
+                ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
+                attn_post_norm,
+                ffn_post_norm,
+                wq: Weight::from_quantized(QuantizedTensor::from_bytes(
                     source
-                        .tensor_slice(&format!("blk.{l}.ffn_gate.weight"))
+                        .tensor_slice(&format!("blk.{}.attn_q.weight", l))
                         .unwrap(),
                     source
-                        .tensor_info(&format!("blk.{l}.ffn_gate.weight"))
+                        .tensor_info(&format!("blk.{}.attn_q.weight", l))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd,
+                    n_embd_q,
+                )),
+                wk: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_k.weight", l))
+                        .unwrap(),
+                    source
+                        .tensor_info(&format!("blk.{}.attn_k.weight", l))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )),
+                wv: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_v.weight", l))
+                        .unwrap(),
+                    source
+                        .tensor_info(&format!("blk.{}.attn_v.weight", l))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd,
+                    n_embd_gqa,
+                )),
+                bq: try_load_f32_tensor(source, &format!("blk.{}.attn_q.bias", l), n_embd_q),
+                bk: try_load_f32_tensor(source, &format!("blk.{}.attn_k.bias", l), n_embd_gqa),
+                bv: try_load_f32_tensor(source, &format!("blk.{}.attn_v.bias", l), n_embd_gqa),
+                wo: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    source
+                        .tensor_slice(&format!("blk.{}.attn_output.weight", l))
+                        .unwrap(),
+                    source
+                        .tensor_info(&format!("blk.{}.attn_output.weight", l))
+                        .unwrap()
+                        .ggml_type,
+                    n_embd_q,
+                    n_embd,
+                )),
+                w_gate: if source
+                    .tensor_info(&format!("blk.{l}.ffn_gate.weight"))
+                    .is_some()
+                {
+                    Weight::from_quantized(QuantizedTensor::from_bytes(
+                        source
+                            .tensor_slice(&format!("blk.{l}.ffn_gate.weight"))
+                            .unwrap(),
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_gate.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        n_ff,
+                    ))
+                } else {
+                    // GLM-4 ships a single fused `[n_embd, 2*n_ff]`
+                    // `ffn_up.weight`; no separate `ffn_gate` exists.
+                    // Substitute `w_up`'s Weight data so `w_gate` stays
+                    // initialised; the GLM-4 forward path invokes
+                    // `w_up.kernel` (n_out=2*n_ff) and never `w_gate.kernel`.
+                    Weight::from_quantized(QuantizedTensor::from_bytes(
+                        source
+                            .tensor_slice(&format!("blk.{l}.ffn_up.weight"))
+                            .unwrap(),
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_up.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        2 * n_ff,
+                    ))
+                },
+                w_up: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    source
+                        .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
+                        .unwrap(),
+                    source
+                        .tensor_info(&format!("blk.{}.ffn_up.weight", l))
                         .unwrap()
                         .ggml_type,
                     n_embd,
                     n_ff,
-                ))
-            } else {
-                // GLM-4 ships a single fused `[n_embd, 2*n_ff]`
-                // `ffn_up.weight`; no separate `ffn_gate` exists.
-                // Substitute `w_up`'s Weight data so `w_gate` stays
-                // initialised; the GLM-4 forward path invokes
-                // `w_up.kernel` (n_out=2*n_ff) and never `w_gate.kernel`.
-                Weight::from_quantized(QuantizedTensor::from_bytes(
+                )),
+                w_down: Weight::from_quantized(QuantizedTensor::from_bytes(
                     source
-                        .tensor_slice(&format!("blk.{l}.ffn_up.weight"))
+                        .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
                         .unwrap(),
                     source
-                        .tensor_info(&format!("blk.{l}.ffn_up.weight"))
+                        .tensor_info(&format!("blk.{}.ffn_down.weight", l))
                         .unwrap()
                         .ggml_type,
+                    n_ff,
                     n_embd,
-                    2 * n_ff,
-                ))
-            },
-            w_up: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.ffn_up.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.ffn_up.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_embd,
-                n_ff,
-            )),
-            w_down: Weight::from_quantized(QuantizedTensor::from_bytes(
-                source
-                    .tensor_slice(&format!("blk.{}.ffn_down.weight", l))
-                    .unwrap(),
-                source
-                    .tensor_info(&format!("blk.{}.ffn_down.weight", l))
-                    .unwrap()
-                    .ggml_type,
-                n_ff,
-                n_embd,
-            )),
-        }})
+                )),
+            }
+        })
         .collect()
 }
 
@@ -312,55 +316,56 @@ pub fn load_layers_static(
             let (attn_post_norm, ffn_post_norm) =
                 try_load_post_norms(source, l, n_embd).expect("post-norm load");
             LlamaLayerWeights {
-            attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
-            ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            attn_post_norm,
-            ffn_post_norm,
-            wq: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.attn_q.weight", l),
-                n_embd,
-                n_embd_q,
-            ),
-            wk: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.attn_k.weight", l),
-                n_embd,
-                n_embd_gqa,
-            ),
-            wv: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.attn_v.weight", l),
-                n_embd,
-                n_embd_gqa,
-            ),
-            bq: try_load_f32_tensor(source, &format!("blk.{}.attn_q.bias", l), n_embd_q),
-            bk: try_load_f32_tensor(source, &format!("blk.{}.attn_k.bias", l), n_embd_gqa),
-            bv: try_load_f32_tensor(source, &format!("blk.{}.attn_v.bias", l), n_embd_gqa),
-            wo: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.attn_output.weight", l),
-                n_embd_q,
-                n_embd,
-            ),
-            w_gate: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.ffn_gate.weight", l),
-                n_embd,
-                n_ff,
-            ),
-            w_up: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.ffn_up.weight", l),
-                n_embd,
-                n_ff,
-            ),
-            w_down: crate::core::loader::load_static_weight(
-                source,
-                &format!("blk.{}.ffn_down.weight", l),
-                n_ff,
-                n_embd,
-            ),
-        }})
+                attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
+                ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
+                attn_post_norm,
+                ffn_post_norm,
+                wq: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.attn_q.weight", l),
+                    n_embd,
+                    n_embd_q,
+                ),
+                wk: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.attn_k.weight", l),
+                    n_embd,
+                    n_embd_gqa,
+                ),
+                wv: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.attn_v.weight", l),
+                    n_embd,
+                    n_embd_gqa,
+                ),
+                bq: try_load_f32_tensor(source, &format!("blk.{}.attn_q.bias", l), n_embd_q),
+                bk: try_load_f32_tensor(source, &format!("blk.{}.attn_k.bias", l), n_embd_gqa),
+                bv: try_load_f32_tensor(source, &format!("blk.{}.attn_v.bias", l), n_embd_gqa),
+                wo: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.attn_output.weight", l),
+                    n_embd_q,
+                    n_embd,
+                ),
+                w_gate: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.ffn_gate.weight", l),
+                    n_embd,
+                    n_ff,
+                ),
+                w_up: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.ffn_up.weight", l),
+                    n_embd,
+                    n_ff,
+                ),
+                w_down: crate::core::loader::load_static_weight(
+                    source,
+                    &format!("blk.{}.ffn_down.weight", l),
+                    n_ff,
+                    n_embd,
+                ),
+            }
+        })
         .collect()
 }
