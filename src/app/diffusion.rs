@@ -197,8 +197,7 @@ pub fn run_qwen_image_2_1(
 ) -> Result<(), String> {
     validate_dit(source.as_ref())?;
     let config = config_from_source(source.as_ref())?;
-    let pool = Arc::new(ComputePool::new(n_threads.max(1)));
-    let dit = QwenImage21Dit::load(Arc::clone(&source), pool)?;
+    let mut dit = QwenImage21Dit::load(Arc::clone(&source), n_threads)?;
     let synthetic_input = request.latent.is_none() || request.context.is_none();
     let (latent, context, context_len) = prepare_dit_inputs(
         &config,

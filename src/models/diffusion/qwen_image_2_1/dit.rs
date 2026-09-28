@@ -3,7 +3,7 @@
 
 use super::{QwenImage21Config, PREFIX};
 use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 const RMS_EPS: f32 = 1e-6;
@@ -133,19 +133,24 @@ fn apply_rope_row(values: &mut [f32], pe: &[f32]) {
 pub(crate) struct QwenImage21Dit {
     pub(crate) config: QwenImage21Config,
     source: Arc<dyn TensorSource>,
-    pool: Arc<ComputePool>,
+    q8_values: Vec<u8>,
+    q8_scales: Vec<f32>,
+    thread_pool: rayon::ThreadPool,
 }
 
 impl QwenImage21Dit {
-    pub(crate) fn load(
-        source: Arc<dyn TensorSource>,
-        pool: Arc<ComputePool>,
-    ) -> Result<Self, String> {
+    pub(crate) fn load(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let config = QwenImage21Config::detect_from_source(source.as_ref())?;
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads.max(1))
+            .build()
+            .map_err(|error| format!("Create Qwen-Image-2.1 thread pool: {error}"))?;
         Ok(Self {
             config,
             source,
-            pool,
+            q8_values: Vec::new(),
+            q8_scales: Vec::new(),
+            thread_pool,
         })
     }
 
@@ -156,56 +161,67 @@ impl QwenImage21Dit {
     }
 
     fn q8_linear(
-        &self,
+        &mut self,
         name: &str,
         n_in: usize,
         n_out: usize,
         input: &[f32],
         output: &mut [f32],
     ) -> Result<(), String> {
-        let weight = self.weight_bytes(name)?;
+        if n_in == 0 || n_in % 32 != 0 || n_out == 0 {
+            return Err(format!("Invalid {name} input dimensions"));
+        }
         let tokens = input.len() / n_in;
-        if tokens * n_in != input.len() {
+        if tokens.checked_mul(n_in) != Some(input.len()) {
             return Err(format!("Invalid {name} input length"));
         }
-        if tokens * n_out != output.len() {
+        if tokens.checked_mul(n_out) != Some(output.len()) {
             return Err(format!("Invalid {name} output length"));
         }
-        if weight.len() != n_out * n_in * 34 / 32 {
+        let weight_bytes = n_out
+            .checked_mul(n_in)
+            .and_then(|elements| elements.checked_mul(34))
+            .and_then(|bytes| bytes.checked_div(32))
+            .ok_or_else(|| format!("Invalid {name} dimensions"))?;
+        let source = Arc::clone(&self.source);
+        let weight = source
+            .tensor_slice(name)
+            .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+        if weight.len() != weight_bytes {
             return Err(format!("Invalid {name} weight length"));
         }
         let blocks = n_in / 32;
-        // Quantize every token row once (bit-identical to ggml's from_float).
-        let mut rows: Vec<(Vec<u8>, Vec<f32>)> = Vec::with_capacity(tokens);
+        let q8_len = tokens
+            .checked_mul(n_in)
+            .ok_or_else(|| format!("Invalid {name} dimensions"))?;
+        let scales_len = tokens
+            .checked_mul(blocks)
+            .ok_or_else(|| format!("Invalid {name} dimensions"))?;
+        self.q8_values.resize(q8_len, 0);
+        self.q8_scales.resize(scales_len, 0.0);
         for token in 0..tokens {
             let row = &input[token * n_in..(token + 1) * n_in];
-            let mut q = vec![0u8; n_in];
-            let mut scales = vec![0f32; blocks];
-            crate::ops::quantize_q8_0_into(row, n_in, &mut q, &mut scales);
-            rows.push((q, scales));
+            let q_start = token * n_in;
+            let scale_start = token * blocks;
+            crate::ops::quantize_q8_0_into(
+                row,
+                n_in,
+                &mut self.q8_values[q_start..q_start + n_in],
+                &mut self.q8_scales[scale_start..scale_start + blocks],
+            );
         }
-        let pool = &self.pool;
-        // The pool closure is Fn, so raw pointers carry the mutable output in.
-        let output_ptr = output.as_mut_ptr();
-        let row_chunk = n_out.div_ceil(pool.n_threads().max(1));
-        pool.compute(move |ith, _nth| {
-            let row_start = ith * row_chunk;
-            let row_end = (row_start + row_chunk).min(n_out);
-            if row_start >= row_end {
-                return;
-            }
-            for token in 0..tokens {
-                let (q, scales) = &rows[token];
-                let out = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        output_ptr.add(token * n_out + row_start),
-                        row_end - row_start,
-                    )
-                };
-                crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
-                    weight, q, scales, out, n_in, row_start, row_end,
-                );
-            }
+        let q8_values = &self.q8_values;
+        let q8_scales = &self.q8_scales;
+        self.thread_pool.install(|| {
+            output
+                .par_chunks_mut(n_out)
+                .zip(q8_values.par_chunks_exact(n_in))
+                .zip(q8_scales.par_chunks_exact(blocks))
+                .for_each(|((out, q8), scales)| {
+                    crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                        weight, q8, scales, out, n_in, 0, n_out,
+                    );
+                });
         });
         Ok(())
     }
@@ -302,7 +318,7 @@ impl QwenImage21Dit {
     /// Single forward: velocity prediction for one latent, traced at the same
     /// checkpoints as the oracle harness.
     pub(crate) fn forward(
-        &self,
+        &mut self,
         latent: &[f32],
         width: usize,
         height: usize,
@@ -310,7 +326,7 @@ impl QwenImage21Dit {
         context_len: usize,
         timestep: f32,
     ) -> Result<Vec<f32>, String> {
-        let config = &self.config;
+        let config = self.config.clone();
         let hidden = config.hidden_size;
         let heads = hidden / config.head_dim;
         if width == 0 || height == 0 {
@@ -512,7 +528,7 @@ impl QwenImage21Dit {
         Ok(output)
     }
 
-    fn txt_in(&self, context: &[f32], output: &mut [f32]) -> Result<(), String> {
+    fn txt_in(&mut self, context: &[f32], output: &mut [f32]) -> Result<(), String> {
         let report = |name: &str, shape: &[usize], values: &[f32]| {
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(name, None, shape, values));
@@ -592,7 +608,7 @@ impl QwenImage21Dit {
 
     #[allow(clippy::too_many_arguments)]
     fn block(
-        &self,
+        &mut self,
         prefix: &str,
         joint: &mut [f32],
         modulation: &[f32],
@@ -603,7 +619,7 @@ impl QwenImage21Dit {
         seq: usize,
         prefix_length: usize,
     ) -> Result<(), String> {
-        let config = &self.config;
+        let config = self.config.clone();
 
         // img_norm1 (no affine) then modulate: image rows use the timestep row
         // (column 0), text rows the zero-timestep row (column 1).

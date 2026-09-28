@@ -242,13 +242,14 @@
 +target_compile_features(${TARGET} PUBLIC c_std_11 cxx_std_17)
 --- a/examples/qwen_image_2_1_trace/main.cpp
 +++ b/examples/qwen_image_2_1_trace/main.cpp
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,409 @@
 +// Standalone Qwen-Image-2.1 DiT oracle harness: loads the diffusion GGUF,
 +// runs a single model forward on deterministic synthetic inputs, and traces
 +// intermediate checkpoints when QWEN_IMAGE_2_1_ORACLE_TRACE is set.
 +#include <cstdint>
 +#include <cstdio>
 +#include <cstring>
++#include <limits>
 +#include <map>
 +#include <memory>
 +#include <string>
@@ -315,12 +316,13 @@
 +
 +bool read_string(const uint8_t* data, size_t size, size_t& pos, std::string& out) {
 +    uint64_t length = 0;
-+    if (pos + sizeof(length) > size) return false;
++    if (pos > size || size - pos < sizeof(length)) return false;
 +    std::memcpy(&length, data + pos, sizeof(length));
 +    pos += sizeof(length);
-+    if (pos + length > size) return false;
-+    out.assign(reinterpret_cast<const char*>(data) + pos, length);
-+    pos += length;
++    if (length > size - pos) return false;
++    const size_t string_length = static_cast<size_t>(length);
++    out.assign(reinterpret_cast<const char*>(data) + pos, string_length);
++    pos += string_length;
 +    return true;
 +}
 +
@@ -342,10 +344,11 @@
 +    size_t pos = 0;
 +    uint32_t magic = 0, version = 0;
 +    uint64_t tensor_count = 0, kv_count = 0;
-+    if (pos + 4 > gguf.size) return false;
++    if (pos > gguf.size || gguf.size - pos < 4) return false;
 +    std::memcpy(&magic, data + pos, 4);
 +    pos += 4;
 +    if (magic != 0x46554747u) return false;  // "GGUF" little endian
++    if (gguf.size - pos < 4 + sizeof(uint64_t) + sizeof(uint64_t)) return false;
 +    std::memcpy(&version, data + pos, 4);
 +    pos += 4;
 +    if (version < 2 || version > 3) return false;
@@ -353,6 +356,36 @@
 +    pos += 8;
 +    std::memcpy(&kv_count, data + pos, 8);
 +    pos += 8;
++
++    auto skip_scalar = [&](uint32_t type) -> bool {
++        size_t width = 0;
++        switch (type) {
++            case 0:  // UINT8
++            case 1:  // INT8
++            case 7:  // BOOL
++                width = 1;
++                break;
++            case 2:  // UINT16
++            case 3:  // INT16
++                width = 2;
++                break;
++            case 4:  // UINT32
++            case 5:  // INT32
++            case 6:  // FLOAT32
++                width = 4;
++                break;
++            case 10:  // UINT64
++            case 11:  // INT64
++            case 12:  // FLOAT64
++                width = 8;
++                break;
++            default:
++                return false;
++        }
++        if (width > gguf.size - pos) return false;
++        pos += width;
++        return true;
++    };
 +
 +    // Skip key/value pairs (untagged GGUFs from this pipeline have none, but
 +    // tolerate them to stay format-correct).
@@ -379,14 +412,14 @@
 +                if (element_type == 8) {
 +                    std::string unused;
 +                    if (!read_string(data, gguf.size, pos, unused)) return false;
-+                } else {
-+                    ggml_type type = static_cast<ggml_type>(element_type);
-+                    pos += ggml_type_size(type) / ggml_blck_size(type);
++                } else if (!skip_scalar(element_type)) {
++                    return false;
 +                }
 +            }
++        } else if (value_type != 8 && value_type != 9) {
++            if (!skip_scalar(value_type)) return false;
 +        } else {
-+            ggml_type type = static_cast<ggml_type>(value_type);
-+            pos += ggml_type_size(type) / ggml_blck_size(type);
++            return false;
 +        }
 +    }
 +
@@ -403,6 +436,7 @@
 +        uint32_t n_dims = 0;
 +        std::memcpy(&n_dims, data + pos, 4);
 +        pos += 4;
++        if (n_dims > 4) return false;
 +        Entry entry{};
 +        entry.ne[0] = entry.ne[1] = entry.ne[2] = entry.ne[3] = 1;
 +        for (uint32_t d = 0; d < n_dims; ++d) {
@@ -410,6 +444,7 @@
 +            if (pos + 8 > gguf.size) return false;
 +            std::memcpy(&dim, data + pos, 8);
 +            pos += 8;
++            if (dim > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
 +            entry.ne[d] = static_cast<int64_t>(dim);
 +        }
 +        uint32_t type = 0;
@@ -423,11 +458,28 @@
 +        entries.emplace(name, entry);
 +    }
 +
++    if (pos > std::numeric_limits<size_t>::max() - 31) return false;
 +    size_t data_section = (pos + 31) & ~static_cast<size_t>(31);
 +    for (const auto& [name, entry] : entries) {
-+        int64_t elements = entry.ne[0] * entry.ne[1] * entry.ne[2] * entry.ne[3];
-+        size_t bytes = static_cast<size_t>(elements * ggml_type_size(entry.type) / ggml_blck_size(entry.type));
-+        if (data_section + entry.offset + bytes > gguf.size) return false;
++        if (static_cast<uint32_t>(entry.type) >= GGML_TYPE_COUNT) return false;
++        size_t elements = 1;
++        for (int d = 0; d < 4; ++d) {
++            if (entry.ne[d] < 0) return false;
++            const uint64_t dimension = static_cast<uint64_t>(entry.ne[d]);
++            if (dimension > std::numeric_limits<size_t>::max()) return false;
++            const size_t dim = static_cast<size_t>(dimension);
++            if (dim != 0 && elements > std::numeric_limits<size_t>::max() / dim) return false;
++            elements *= dim;
++        }
++        const size_t block_size = ggml_blck_size(entry.type);
++        const size_t type_size = ggml_type_size(entry.type);
++        if (block_size == 0 || elements % block_size != 0) return false;
++        const size_t block_count = elements / block_size;
++        if (type_size != 0 && block_count > std::numeric_limits<size_t>::max() / type_size) return false;
++        const size_t bytes = block_count * type_size;
++        if (data_section > gguf.size || entry.offset > std::numeric_limits<size_t>::max() - data_section) return false;
++        const size_t tensor_start = data_section + static_cast<size_t>(entry.offset);
++        if (tensor_start > gguf.size || bytes > gguf.size - tensor_start) return false;
 +        RawGguf::TensorBytes tensor_bytes;
 +        tensor_bytes.data = gguf.base + data_section + entry.offset;
 +        tensor_bytes.bytes = bytes;
