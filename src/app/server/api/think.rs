@@ -86,10 +86,32 @@ impl Default for ThinkFilter {
 
 /// Longest suffix of `pending` that is also a non-empty prefix of the closer,
 /// so a closer split across chunks is still matched.
+///
+/// `pending` is a `String` of arbitrary UTF-8 text — the closer ``
+/// itself is ASCII, but the surrounding text may carry multi-byte code
+/// points (e.g. Chinese). `THINK_CLOSE.len()` is a byte length, so we
+/// must step through `pending`'s *chars* and snap each candidate offset
+/// to the nearest char boundary; otherwise `pending[..len]` panics when
+/// the byte index lands inside a multi-byte sequence (e.g. ``用``,
+/// bytes 0..3 — the suffix ``len=1`` would slice bytes [2..3]).
 fn closer_prefix_keep(pending: &str) -> usize {
-    (1..=THINK_CLOSE.len())
-        .filter(|&len| pending.len() >= len)
-        .filter(|&len| THINK_CLOSE.starts_with(&pending[pending.len() - len..]))
+    let close_chars = THINK_CLOSE.chars().count();
+    (1..=close_chars)
+        .map(|n| {
+            // The last `n` chars of `pending`, in bytes.
+            let mut byte_len = 0usize;
+            let mut char_count = 0usize;
+            for ch in pending.chars().rev() {
+                if char_count == n {
+                    break;
+                }
+                byte_len += ch.len_utf8();
+                char_count += 1;
+            }
+            byte_len
+        })
+        .filter(|&byte_len| byte_len <= pending.len())
+        .filter(|&byte_len| THINK_CLOSE.starts_with(&pending[pending.len() - byte_len..]))
         .max()
         .unwrap_or(0)
 }
@@ -158,5 +180,52 @@ mod tests {
         }
         out.push_str(&filter.finish());
         assert_eq!(out, "Sure! You said \"reasoning\" earlier.");
+    }
+
+    /// Regression: a `pending` whose tail is a multi-byte UTF-8 code point
+    /// used to panic at `closer_prefix_keep` because the old code indexed
+    /// `pending` by raw `len()` (byte offset) inside the closer loop. With
+    /// Chinese / emoji in the reasoning text, the suffix `<` of an in-flight
+    /// `` opener would never appear, but `pending.len() - 1` could land on
+    /// the 2nd/3rd byte of a 3-byte CJK char and trigger
+    /// `start byte index N is not a char boundary`.
+    #[test]
+    fn multibyte_suffix_does_not_panic() {
+        let open = THINK_OPEN;
+        let mut filter = ThinkFilter::new();
+        // Open a block and feed multi-byte text; never close.
+        let mut out = String::new();
+        for chunk in [open, "用中文推理: ", "巴黎是", "法国的首都"] {
+            out.push_str(&filter.push(chunk));
+        }
+        // The unterminated reasoning block is dropped.
+        let tail = filter.finish();
+        out.push_str(&tail);
+        assert!(
+            out.is_empty(),
+            "unterminated multi-byte reasoning must not leak: {out:?}"
+        );
+    }
+
+    /// Same regression at a finer grain: a 3-byte CJK char that *ends* the
+    /// pending buffer (so the byte-1-of-3 offset is the boundary) plus
+    /// a partially-formed closer byte after it. The old code sliced
+    /// `pending[len-1..]` and tripped the boundary check.
+    #[test]
+    fn cjk_then_partial_closer_does_not_panic() {
+        let open = THINK_OPEN;
+        let mut filter = ThinkFilter::new();
+        // Build pending = "<think>x用" — 3-byte CJK at the tail.
+        let mut out = String::new();
+        for chunk in [open, "x用"] {
+            out.push_str(&filter.push(chunk));
+        }
+        // Now feed half of `` so the filter must keep the suffix
+        // while inside the block.
+        for chunk in ["</", "thin", "k>answer"] {
+            out.push_str(&filter.push(chunk));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "answer");
     }
 }
