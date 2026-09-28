@@ -49,7 +49,7 @@ use crate::ops::{
     rms_norm_inplace, rope_neox_inplace, sample_top_k, sigmoid_inplace, silu_mul_inplace,
     softmax_inplace, vec_add_into, vec_mad_f16_f32, vec_mad_f32, vec_mul_inplace, vec_scale_f32,
 };
-use crate::prompt::{build_lfm2_chat_prompt, Lfm2Message};
+use crate::prompt::{build_lfm2_chat_prompt_with_thinking, Lfm2Message};
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -76,6 +76,7 @@ pub fn run_inference_with_batch(
     kv_format: KvFormat,
     max_context: usize,
     repetition_penalty: f32,
+    thinking: bool,
     batch_size: usize,
 ) -> Result<(), String> {
     let _ = batch_size;
@@ -117,12 +118,13 @@ pub fn run_inference_with_batch(
         cfg.n_ff_exp, cfg.n_layer_dense_lead, cfg.d_conv, load_ms
     );
 
-    let input_tokens = build_lfm2_chat_prompt(
+    let input_tokens = build_lfm2_chat_prompt_with_thinking(
         &tokenizer,
         &[Lfm2Message {
             role: "user",
             content: prompt,
         }],
+        thinking,
     )?;
     eprintln!(
         "[RUST_TOKENS] n={} ids={:?}",

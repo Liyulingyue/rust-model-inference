@@ -60,14 +60,17 @@ cargo run --release --bin rust-model-inference -- \
 - 文本生成：~28 t/s（短 prompt）
 - 完整 reasoning + 答案：约 5–10 秒（typical reasoning 长度 50–150 tokens）
 
-CLI 当前**未实现** `--thinking` / `--no-thinking` 切换标志。HTTP 端通过
-`enable_thinking` 字段控制（详见 [§7.1](#71-enable_thinking-服务端开关)）：
-- `enable_thinking: true`（默认）— 与训练时一致，模型输出 ``…`` reasoning 段
-- `enable_thinking: false` — prompt 尾部追加 `\n\n`，让模型跳过 thinking 直接答
-- 模型是 thinking-trained 时，`enable_thinking: false` 只是 hint（prompt 层的
-  提示），不一定能完全阻止模型 emit think block；当前实现仍会发出一个短的
-  ``…`` 段。ThinkFilter (`src/app/server/api/think.rs`) 会自动
-  剥掉 leading `` 块再透传真正的答案。
+CLI / HTTP 端都已经支持 thinking 切换。CLI 通过 `--thinking` / `--no-thinking`
+控制，HTTP 通过 `enable_thinking` 字段控制（详见
+[§7.1](#71-enable_thinking-服务端开关)）：
+- 默认（`--thinking` / `enable_thinking: true`）— 与训练时一致，模型输出
+  ``…`` reasoning 段
+- `--no-thinking` / `enable_thinking: false` — prompt 尾部追加 `\n\n`，
+  让模型跳过 thinking 直接答
+- 模型是 thinking-trained 时，`--no-thinking` 只是 hint（prompt 层的提示），
+  不一定能完全阻止模型 emit think block；当前实现仍会发出一个短的 ``…``
+  段。HTTP 路径下 `ThinkFilter`（`src/app/server/api/think.rs`）会自动
+  剥掉 leading `` 块再透传真正的答案。CLI 路径下 think 段直接流到 stdout。
 
 ## 3. LFM2-MoE
 
@@ -161,8 +164,8 @@ tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（V
 `LFM2.5-Thinking` 区别于 `LFM2.5-Instruct`：Thinking 模型默认在 `<think>...</think>`
 内输出 reasoning；本仓库代码会用同一个 `lfm25` trunk，但**思考文本会直接流
 到 stdout / 客户端**。HTTP 端可以通过 `enable_thinking: false` 字段抑制
-（详见 §7.1），CLI 端当前**未实现** `--no-thinking` 标志 — 想关掉 CLI
-上的 thinking，请走 HTTP `enable_thinking` 路径。
+（详见 §7.1），CLI 端通过 `--no-thinking` 标志抑制 — 两者都让 prompt
+尾部追加 `\n\n` 让模型尝试跳过 thinking。
 
 ## 6. 与 llama.cpp 的对齐
 
