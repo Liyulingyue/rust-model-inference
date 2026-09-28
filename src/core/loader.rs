@@ -411,6 +411,8 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "falcon-h1"
             | "phi3"
             | "gemma-embedding"
+            | "bert"
+            | "jina-bert-v2"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -577,6 +579,12 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                     None => 0,
                 },
             }
+        } else if arch == "bert" || arch == "jina-bert-v2" {
+            // Standard BERT is plain multi-head attention with no GQA, so the
+            // converted GGUF omits `attention.head_count_kv` entirely
+            // (`references/llama.cpp/src/models/bert.cpp` reads n_embd_gqa as
+            // n_embd). Fall back to head_count when the key is absent.
+            as_usize(format!("{prefix}.attention.head_count_kv")).unwrap_or_else(|_| n_head)
         } else {
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
@@ -593,7 +601,9 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .unwrap_or(0),
         },
         rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
-        norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon"))? as f32,
+        norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))
+            .or_else(|_| get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon")))
+            .unwrap_or(1e-12) as f32,
     })
 }
 
