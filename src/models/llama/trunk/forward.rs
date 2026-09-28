@@ -472,6 +472,22 @@ fn llama_turn_text(
         }
         return format!("{role}\n{content}\n");
     }
+    if arch == "exaone" {
+        // EXAONE-3.5 instruct control tokens. A system turn is not
+        // expressible in the single-turn CLI shape (which only ever
+        // passes one user message), so it maps to the user turn here;
+        // multi-turn history renders as repeated
+        // `[|user|]...[|endofturn|]` blocks plus a final `[|assistant|]`.
+        // Same markers `ChatTemplate::Exaone` uses.
+        if role == "assistant" {
+            if content.is_empty() {
+                // Generation prompt: bare marker, no end-of-turn.
+                return "[|assistant|]".to_string();
+            }
+            return format!("[|assistant|]{content}[|endofturn|]\n");
+        }
+        return format!("[|user|]{content}[|endofturn|]\n");
+    }
     if is_minicpm5 {
         // MiniCPM5 ChatML; thinking=false emits an empty reasoning block.
         if thinking {
