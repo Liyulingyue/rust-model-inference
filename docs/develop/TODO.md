@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-011) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-011…TODO-012) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -448,6 +448,112 @@ scratchpad 时顺手处理。
 - `docs/MODEL_LIST.md` — 字段 4
 - `docs/MODEL_LIST.md` (history) — 字段 5
 - `src/ops/quant/mod.rs` (新增测试) — 字段 6
+
+---
+
+### TODO-012: minijinja-based user-GGUF chat_template support
+
+#### 动机
+
+当前 prompt builder 在 `src/prompt.rs` 和 `src/models/llama/trunk/forward.rs::llama_turn_text`
+里 hardcoded 一组已知 arch 的模板（`lfm2`/`lfm2moe`/`qwen3`/`qwen35`/llama/nanbeige/
+granite/glm4/minicpm5/phi3/exaone/k2-horizon）。当用户用 HF 微调了一个模型
+（典型场景：微调 Qwen3-0.6B Instruct 改 chat_template），GGUF 里
+`tokenizer.chat_template` 会变 — 我们的 hardcoded path 渲染错，模型输出
+退化，但代码完全无感。要支持这个场景，必须把 chat template render 委托
+给 GGUF 自带的 Jinja。
+
+#### 设计：共存，不是替代
+
+minijinja 与现有 hardcoded builder **共存**，通过 `build_prompt` dispatch
+**选择**走哪条：
+
+```
+build_prompt() dispatch
+ ├─ 优先级 1: 用户显式 chat_template override（HTTP field / CLI flag / env var）
+ ├─ 优先级 2: 已知 arch fast path（hardcoded builder，零 runtime 开销）
+ ├─ 优先级 3: GGUF 自带 chat_template（minijinja render）
+ └─ 优先级 4: 兜底（raw prompt）
+```
+
+理由：
+- 手写 builder 是 **fast path**：编译期已知、0 开销、当前所有 model list
+  都 byte-aligned 过官方模板（PR #118 + da6bbcb + 后续实测验证）。
+  **不删**。
+- minijinja 是 **fallback / escape hatch**：用户传任意 HF GGUF / 微调模型
+  / 自定义 jinja 时自动走通。**不动现有 fast path**。
+- 两条 path 产物等价 — 都是 `Vec<u32>` tokens，下游 runtime 完全无感。
+- 跨验证：用 minijinja render 一个等价 jinja（展开我们手写 builder 的逻辑），
+  验证 byte-equal — 这给我们一个 regression net，防 hardcoded 漂移。
+
+#### 触发入口（用户可控的 4 种）
+
+| 入口 | 用例 |
+|---|---|
+| GGUF 自带 `tokenizer.chat_template` + 未知 arch | 用户上传任意 HF 模型，自动 render |
+| GGUF 自带 `tokenizer.chat_template` + 已知 arch 但与 hardcoded 不一致 | 检测 diff，触发 jinja 兜底 |
+| HTTP `/v1/chat/completions` 的 `chat_template` 字段 | 想精确控制的 OpenAI 兼容客户端 |
+| CLI `--chat-template-file path.j2` 或 env `RMI_CHAT_TEMPLATE_FILE` | 本地测试 / 容器化部署 |
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| 加 `minijinja = "2"` 依赖 + json/macros features | 1 | 编译时间 +5s |
+| 实现 `{% generation %}` block（minja 兼容） | ~50 | 中：custom parser extension via `unstable_machinery` |
+| 实现 `raise` statement（minja 兼容） | ~30 | 低：minijinja 自带 syntax hook |
+| `JinjaChatTemplate::new()` + cache | ~30 | 低 |
+| `build_prompt` 集成 + 分发 | ~50 | 低（向后兼容 fallback） |
+| HTTP `chat_template` 字段 | ~20 | 低 |
+| CLI `--chat-template-file` flag + env var | ~30 | 低 |
+| 测试（minja `tests_files/` 借用为 golden） | ~100 | 中（要选几个真实 GGUF 跑 byte-equal） |
+| 跨验证（jinja-rendered == hardcoded for 已知 arch） | ~50 | 低 |
+| **总计** | **~360 LOC + 1 dep** | **新功能 PR，不动现有 fast path** |
+
+#### 验证策略
+
+1. **已知 arch 不变**：跑现有 `tests/cli_http_agreement.rs` + `prompt.rs::tests`
+   byte-equal 测试，确认 jinja 引入后 hardcoded path 行为零漂移。
+2. **minja `tests_files/`**：借用其 ~80 个真实模型的 `tokenizer.chat_template`
+   + 期望输出，做 golden test（不需要权重，只需 template + 合成 messages）。
+3. **LFM2.5-8B-A1B 真实 GGUF**：用 `RUST_LFM2MOE_DEBUG_LOGITS` 验证 jinja render
+   vs hardcoded render 输出的 token 序列一致。
+
+#### ROI 时间线
+
+- 现在：**0%** — 项目当前 model list 完备，plain text 全部对齐官方 jinja 输出
+  （已 byte-equal 验证），用户微调场景没出现。
+- 3-6 个月：**30%** — 如果项目推"通用 GGUF 推理"产品定位。
+- 12+ 个月：**100%** — 任何 HF 推理产品最终都要支持任意 jinja 模板，这是行业
+  标准做法（llama.cpp / vLLM / TGI 都已支持）。
+
+#### 不立即实施的核心理由
+
+1. **零增量价值**：当前所有 model list 的 plain text 输出已 byte-equal 官方 jinja。
+2. **不解决"thinking-tuned 模型仍 emit think block"问题** — 这是模型训练特性，
+   jinja 也救不了（已经验证）。
+3. **不解决 byte-slice panic 等已修 bug**（这些是 hardcoded path 内部的 bug，
+   跟 jinja 正交）。
+4. **避免 scope creep — TODO-011 的 6 条死代码提醒我们**：不必要的代码会带来
+   维护负担。jinja 是 ~360 LOC + 1 dep，没用户报"prompt 不对"前不值。
+
+#### 触发条件（何时启用）
+
+满足下列**任一**条件即应启动实施：
+
+- 用户公开 issue / Discord 报告"我的微调模型 prompt 渲染错"（≥3 次报告后启动）
+- 项目决定支持"用户上传任意 HF GGUF"产品定位（一次性启动）
+- 仓库添加 ≥5 个新 arch 而其中 ≥2 个 GGUF 带非标准 chat_template（渐进启动）
+
+#### 关联文件（实施时）
+
+- `Cargo.toml` — 加 `minijinja = "2"` 依赖
+- `src/prompt/jinja.rs` (新) — JinjaChatTemplate 封装
+- `src/app/server/api/tools.rs::build_prompt` — 加 dispatch 分支（不删 fast path）
+- `src/app/server/api/protocol.rs::Request` — 加 `chat_template` 字段
+- `src/app/cli/parse.rs` — 加 `--chat-template-file` flag
+- `src/prompt.rs` (现有) — 不动，保留 hardcoded builder 作为 fast path
+- `docs/usage/*.md` — 加新章节解释"用户微调模型怎么用"
 
 ---
 
