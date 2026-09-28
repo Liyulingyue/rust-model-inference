@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-011…TODO-012) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-011…TODO-012…TODO-013) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -554,6 +554,88 @@ build_prompt() dispatch
 - `src/app/cli/parse.rs` — 加 `--chat-template-file` flag
 - `src/prompt.rs` (现有) — 不动，保留 hardcoded builder 作为 fast path
 - `docs/usage/*.md` — 加新章节解释"用户微调模型怎么用"
+
+---
+
+### TODO-013: CLI interactive mode — multi-turn history + slash commands
+
+#### 现状
+
+CLI interactive mode **已存在**（`src/app/text/generation.rs:218` 的
+`run_interactive` 和 `:267` 的 `run_interactive_qwen35`），触发条件是
+`options.prompt.is_empty()`（`src/main.rs:495` 的 else 分支）。REPL
+loop 完整，从 stdin 读行、Ctrl+C / EOF 退出。
+
+但**核心功能缺失**：
+
+| 功能 | 状态 |
+|---|---|
+| REPL loop（stdin → stdout） | ✅ |
+| Ctrl+C / EOF 退出 | ✅ |
+| 每次 input 独立生成 reply | ✅ |
+| **multi-turn history** | ❌ 每行独立，模型看不到前文 |
+| **system turn（CLI 配置）** | ❌ 无 CLI 接口；模型不知道角色 |
+| **`/clear` / `/system "..."` / `/exit` 命令** | ❌ |
+| **streaming token-by-token 输出** | ❌ 整段生成完才 print |
+| **`--thinking` / `--no-thinking` 生效** | ❌ `run_inference` 在 interactive 路径 hardcode `thinking=false` |
+| **KV cache 增量（不重 prefill）** | ❌ 每轮从 0 开始 |
+
+**最大痛点**：
+```bash
+> Hi, I'm Alice.
+Hello Alice!
+
+> What is my name?
+I don't know your name.  # ← 不记得 "Alice"
+```
+
+根因：`lfm2::run_inference` 和 `lfm25::run_inference` 都签名是
+`(..., prompt: &str, ...)`，内部 `build_lfm2_chat_prompt_with_thinking`
+的 `&[Lfm2Message]` 被 hardcode 为 `[Lfm2Message { role: "user",
+content: prompt }]`，没有 history / system 概念。
+
+HTTP 路径**已经完整**（PR #118 + `da6bbcb` + 后续）—— 缺的是 CLI。
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| `lfm2::run_inference` 加 `turns: &[Lfm2Message]` 替代 `prompt: &str` | ~15 | 低（纯重命名 + 调整） |
+| `lfm25::run_inference` 同上 | ~15 | 低 |
+| `run_interactive` 重写：维护 `Vec<(role, content)>` history + system + slash commands | ~80 | 低 |
+| `run_interactive_qwen35` 同上（multimodal path） | ~80 | 低 |
+| Streaming token 输出（可选） | ~50 | 中（要 token sink 接口） |
+| 思考 flag 透传 | ~5 | 低 |
+| 测试（stdin mock + 历史一致性） | ~80 | 中 |
+| **总计** | **~325 LOC** | **触及多个 model forward 入口；可能影响 Oracle 测试 baseline** |
+
+#### 为什么不立即实施
+
+1. **interactive mode 是 partial feature，不是 bug**。当前 1-shot-per-line
+   满足 smoke test / benchmark / debug 三大主要 CLI 场景。
+2. **HTTP 路径已完整**（multi-turn, system, thinking, streaming）。
+   真正需要 multi-turn 对话的用户走 HTTP。
+3. **改 `lfm2::run_inference` 签名**会触动 CLI / benchmark / Oracle
+   test 的多个调用点，需要回归测试全套 llm 模型的 greedy baseline。
+4. **ROI 偏低**：LFM2.5-8B-A1B 等思考模型在 CLI 上调试时确实希望有 history，
+   但生产场景主要是 HTTP API 调用方。
+
+#### 触发条件
+
+满足下列**任一**条件即应启动：
+
+- 用户公开 issue / Discord 报告"interactive mode 不支持 multi-turn"（≥3 次）
+- LFM2.5-Thinking 系列在 CLI 上成为常见调试 / 微调工作流
+- 决定给仓库加一个"开发者本地 chat loop"功能，作为测试 / 微调工具
+
+#### 关联文件（实施时）
+
+- `src/models/lfm2/trunk/forward.rs` — `run_inference` 接受 turns
+- `src/models/lfm25/trunk/forward.rs` — 同上
+- `src/app/text/generation.rs` — `run_interactive` 重写 + 加 streaming 接口
+- `src/app/cli/parse.rs` — 加 `--system` CLI flag
+- `src/main.rs` — interactive dispatch 把 `options.thinking` 透传
+- `tests/cli_history.rs`（新）— 多轮 history 一致性测试
 
 ---
 
