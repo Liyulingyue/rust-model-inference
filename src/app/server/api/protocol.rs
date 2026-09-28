@@ -49,6 +49,13 @@ pub struct Request {
     pub store: bool,
     pub previous_response_id: Option<String>,
     pub instructions: Option<String>,
+    /// `enable_thinking` toggle for reasoning models (LFM2.5-Thinking,
+    /// k2-horizon, Qwen3-Thinking, MiniCPM5-thinking). `None` means
+    /// "use the model's training default" (typically enabled for
+    /// thinking-tuned variants). `Some(false)` injects a non-thinking
+    /// tail into the prompt and is the right answer for direct-answer
+    /// workflows where the reasoning block is unwanted client-side.
+    pub enable_thinking: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Usage {
@@ -150,6 +157,28 @@ impl Protocol {
             _ => return Err("stream_options must be an object".into()),
         };
         let store = optional_bool(body, "store", matches!(self, Self::Responses))?;
+        // `enable_thinking` is the OpenAI / Anthropic convention for
+        // reasoning models — `chat_template_kwargs` is the upstream
+        // jinja hook but we don't run jinja here. Accept both:
+        //   - top-level `"enable_thinking": false`
+        //   - nested `"chat_template_kwargs": {"enable_thinking": false}`
+        // The top-level wins when both are present.
+        let enable_thinking = match body.get("enable_thinking").filter(|v| !v.is_null()) {
+            Some(v) => Some(
+                v.as_bool()
+                    .ok_or_else(|| "enable_thinking must be a boolean".to_string())?,
+            ),
+            None => match body.get("chat_template_kwargs").filter(|v| !v.is_null()) {
+                Some(v) => match v.get("enable_thinking").filter(|v| !v.is_null()) {
+                    Some(v) => Some(v.as_bool().ok_or_else(|| {
+                        "chat_template_kwargs.enable_thinking must be a boolean".to_string()
+                    })?),
+                    None => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
         // System instructions are already messages for Anthropic; Responses instructions
         // remain separate so the continuation layer can apply the current instruction.
         messages.shrink_to_fit();
@@ -166,6 +195,7 @@ impl Protocol {
             store,
             previous_response_id,
             instructions,
+            enable_thinking,
         })
     }
 
@@ -1306,6 +1336,34 @@ mod tests {
         assert_eq!(r.max_tokens, 20);
         assert!(r.include_usage);
         assert!(matches!(r.choice, ToolChoice::Auto));
+    }
+    #[test]
+    fn enable_thinking_parses_top_level_and_chat_template_kwargs() {
+        // Top-level bool wins.
+        let r = Protocol::Chat
+            .parse(&json!({"messages":[{"role":"user","content":"q"}],"enable_thinking":false}))
+            .unwrap();
+        assert_eq!(r.enable_thinking, Some(false));
+
+        // Nested form (the jinja hook).
+        let r = Protocol::Chat
+            .parse(&json!({"messages":[{"role":"user","content":"q"}],
+                "chat_template_kwargs":{"enable_thinking":true}}))
+            .unwrap();
+        assert_eq!(r.enable_thinking, Some(true));
+
+        // Absent -> None (use the model's training default).
+        let r = Protocol::Chat
+            .parse(&json!({"messages":[{"role":"user","content":"q"}]}))
+            .unwrap();
+        assert_eq!(r.enable_thinking, None);
+
+        // Type errors surface as 400.
+        let err = Protocol::Chat
+            .parse(&json!({"messages":[{"role":"user","content":"q"}],
+                "enable_thinking":"yes"}))
+            .unwrap_err();
+        assert!(err.contains("enable_thinking must be a boolean"), "{err}");
     }
     #[test]
     fn anthropic_keeps_system_and_interleaved_tool_blocks() {
