@@ -2607,7 +2607,14 @@ impl WPMTokenizer {
         let cls_id = optional_token_id(
             get_meta("tokenizer.ggml.cls_token_id"),
             "tokenizer.ggml.cls_token_id",
-        )?;
+        )?
+        // `tokenizer.ggml.cls_token_id` is deprecated — current llama.cpp no
+        // longer reads it at all. For the bert family the `[CLS]` id lives in
+        // `special_bos_id`, whose model-type default is 101
+        // (`llama-vocab.cpp:1982-1996`), so that is the fallback. Without it a
+        // GGUF that omits the key (nomic-embed-text-v1.5 does) leaves
+        // `cls_id = None` and `[CLS]` leaks back out of `decode`.
+        .or(bos_id);
         validate_token_id(bos_id, n_tokens, "tokenizer.ggml.bos_token_id")?;
         validate_token_id(unk_id, n_tokens, "tokenizer.ggml.unknown_token_id")?;
         validate_token_id(sep_id, n_tokens, "tokenizer.ggml.sep_token_id")?;

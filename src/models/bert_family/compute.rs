@@ -9,7 +9,7 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{EncodeOptions, WPMTokenizer};
-use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, layer_norm, softmax_inplace};
+use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm, softmax_inplace};
 use std::sync::Arc;
 
 use super::weights::{load_weights, BertVariant, BertWeights, MAX_ALIBI_BIAS_JINA_V2};
@@ -26,6 +26,9 @@ struct BertConfig {
     n_embd_head_v: usize,
     n_ff: usize,
     eps: f32,
+    /// `rope.freq_base`. Only meaningful for `nomic-bert` (the one variant that
+    /// ropes): it trains at 1000 Hz, not the 10 000 Hz llama default.
+    rope_freq_base: f32,
 }
 
 fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
@@ -87,6 +90,10 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
         n_ff: uint("feed_forward_length").ok_or("missing feed_forward_length")?,
         // BERT uses `attention.layer_norm_epsilon`; jina-bert-v2 ships 1e-12.
         eps: float("attention.layer_norm_epsilon").unwrap_or(1e-12),
+        // `llama-model.cpp:1410` defaults to 10 000 Hz; nomic-bert overrides it
+        // with 1000 via `nomic-bert.rope.freq_base`. Only the roped variant
+        // reads this, but loading it unconditionally keeps the config honest.
+        rope_freq_base: float("rope.freq_base").unwrap_or(10_000.0),
     })
 }
 
@@ -123,6 +130,15 @@ fn alibi_slopes(n_head: usize, max_bias: f32) -> Vec<f32> {
 /// `soft_max_ext` multiplies it by the per-head slope).
 fn alibi_bias(slope: f32, query: usize, key: usize) -> f32 {
     slope * -((query as i64 - key as i64).unsigned_abs() as f32)
+}
+
+/// SiLU in place, matching `ggml_silu_f32` exactly (`ggml-cpu/vec.h:1046`):
+/// `x / (1.0f + expf(-x))`. `crate::ops::silu` is the identical scalar helper,
+/// so no new operator is introduced here.
+fn silu_inplace(values: &mut [f32]) {
+    for value in values.iter_mut() {
+        *value = crate::ops::silu(*value);
+    }
 }
 
 fn l2_normalize(values: &mut [f32]) -> Result<(), String> {
@@ -227,10 +243,14 @@ pub fn run_embedding_tokens(
     }
     if let Some((bytes, _)) = weights.pos_embd {
         // `bert.cpp:87-89` — absolute learned position embeddings, `bert` only.
+        // `ggml_get_rows(pos_embd, inp_pos)` indexes the table by **position**,
+        // so token `t` reads row `t`, not row 0. The row offset must account
+        // for the element width, so it is done in the weights helper rather
+        // than here. Not covered by a test: no `bert`-arch GGUF is available
+        // locally to verify against.
         for (t, row) in hidden.chunks_exact_mut(n_embd).enumerate() {
-            let position = super::weights::decode_f32_row_public(bytes, n_embd)
+            let position = super::weights::decode_f32_row_at_public(bytes, t, n_embd)
                 .ok_or("pos_embd.weight is not decodable as f32")?;
-            let _ = t;
             for (slot, value) in row.iter_mut().zip(&position) {
                 *slot += *value;
             }
@@ -250,9 +270,9 @@ pub fn run_embedding_tokens(
         row.copy_from_slice(&normed);
     }
 
-    let mut q_buf = vec![0.0f32; n_tokens * n_embd_q];
-    let mut k_buf = vec![0.0f32; n_tokens * n_embd_gqa];
-    let mut v_buf = vec![0.0f32; n_tokens * n_embd_gqa];
+    let mut qkv_buf = vec![0.0f32; n_tokens * (n_embd_q + 2 * n_embd_gqa)];
+    // Fused QKV width: Q + K + V concatenated along the output dim.
+    let qkv_width = n_embd_q + 2 * n_embd_gqa;
     let mut attn_out = vec![0.0f32; n_tokens * n_embd_q];
     let mut attn_proj = vec![0.0f32; n_tokens * n_embd];
     let mut gate_buf = vec![0.0f32; n_ff];
@@ -276,40 +296,75 @@ pub fn run_embedding_tokens(
         // again after the FFN (residual re-add, not a pre-norm sandwich).
         let residual: Vec<f32> = hidden.clone();
 
-        // 1. Q / K / V with biases. No RoPE for either variant implemented
-        //    here (`bert.cpp:120-126` ropes only NOMIC_BERT / JINA_BERT_V3).
-        for t in 0..n_tokens {
-            let x = &hidden[t * n_embd..(t + 1) * n_embd];
-            let q = &mut q_buf[t * n_embd_q..(t + 1) * n_embd_q];
-            let k = &mut k_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
-            let v = &mut v_buf[t * n_embd_gqa..(t + 1) * n_embd_gqa];
-            lw.wq.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                q,
-                &pool,
-            );
-            lw.wq_bias.add_to(q);
-            lw.wk.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                k,
-                &pool,
-            );
-            lw.wk_bias.add_to(k);
-            lw.wv.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                v,
-                &pool,
-            );
-            lw.wv_bias.add_to(v);
+        // 1. Q / K / V with biases. Fused `attn_qkv` for nomic-bert, three
+        //    separate projections for the others. `bert.cpp:120-133` ropes Q
+        //    and K only for NOMIC_BERT (and its MoE sibling / jina-bert-v3);
+        //    BERT and jina-bert-v2 fall through unroped.
+        if let Some(wqkv) = lw.wqkv.as_ref() {
+            for t in 0..n_tokens {
+                let x = &hidden[t * n_embd..(t + 1) * n_embd];
+                let out = &mut qkv_buf[t * qkv_width..(t + 1) * qkv_width];
+                wqkv.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    out,
+                    &pool,
+                );
+            }
+        } else {
+            for t in 0..n_tokens {
+                let x = &hidden[t * n_embd..(t + 1) * n_embd];
+                let out = &mut qkv_buf[t * qkv_width..(t + 1) * qkv_width];
+                let (q, rest) = out.split_at_mut(n_embd_q);
+                let (k, v) = rest.split_at_mut(n_embd_gqa);
+                let wq = lw.wq.as_ref().ok_or("bert-family layer is missing wq")?;
+                let wk = lw.wk.as_ref().ok_or("bert-family layer is missing wk")?;
+                let wv = lw.wv.as_ref().ok_or("bert-family layer is missing wv")?;
+                wq.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    q,
+                    &pool,
+                );
+                lw.wq_bias.add_to(q);
+                wk.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    k,
+                    &pool,
+                );
+                lw.wk_bias.add_to(k);
+                wv.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    v,
+                    &pool,
+                );
+                lw.wv_bias.add_to(v);
+            }
+        }
+
+        // RoPE for nomic-bert only, applied per head on the Q and K halves.
+        // `n_rot` is `n_embd/n_head` (the GGUF carries no
+        // `rope.dimension_count`), which equals `head_dim` here, so every lane
+        // rotates. The rope variant is `LLAMA_ROPE_TYPE_NORM`
+        // (`llama-model.cpp:3055`), i.e. interleaved pairs, not NEOX.
+        if cfg.variant.uses_rope() {
+            for t in 0..n_tokens {
+                let row = &mut qkv_buf[t * qkv_width..(t + 1) * qkv_width];
+                let (q, rest) = row.split_at_mut(n_embd_q);
+                let (k, _) = rest.split_at_mut(n_embd_gqa);
+                rope_norm(q, t, head_k, cfg.rope_freq_base);
+                rope_norm(k, t, head_k, cfg.rope_freq_base);
+            }
         }
 
         // 2. bidirectional attention with the ALiBi / zero bias. The ggml
@@ -323,8 +378,8 @@ pub fn run_embedding_tokens(
                 let out_base = h * head_v;
                 let mut scores = vec![0.0f32; n_tokens];
                 for s in 0..n_tokens {
-                    let q_row = &q_buf[t * n_embd_q..(t + 1) * n_embd_q];
-                    let k_row = &k_buf[s * n_embd_gqa..(s + 1) * n_embd_gqa];
+                    let q_row = &qkv_buf[t * qkv_width..t * qkv_width + n_embd_q];
+                    let k_row = &qkv_buf[s * qkv_width + n_embd_q..s * qkv_width + qkv_width];
                     let dot: f32 = q_row[q_off..q_off + head_k]
                         .iter()
                         .zip(&k_row[kv_h * head_v..kv_h * head_v + head_k])
@@ -341,8 +396,8 @@ pub fn run_embedding_tokens(
                 for d in 0..head_v {
                     let mut acc = 0.0f32;
                     for s in 0..n_tokens {
-                        let v_row = &v_buf[s * n_embd_gqa..(s + 1) * n_embd_gqa];
-                        acc += v_row[kv_h * head_v + d] * scores[s];
+                        let v_off = n_embd_q + n_embd_gqa + kv_h * head_v + d;
+                        acc += qkv_buf[s * qkv_width + v_off] * scores[s];
                     }
                     attn_row[out_base + d] = acc;
                 }
@@ -416,6 +471,31 @@ pub fn run_embedding_tokens(
                 );
                 lw.ffn_gate_bias.add_to(&mut gate_buf);
                 gelu_ggml_f16_inplace(&mut gate_buf);
+                for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
+                    *slot *= *up;
+                }
+                &gate_buf[..]
+            } else if cfg.variant.uses_silu_gate() {
+                // `bert.cpp:196-203` — the `bert.cpp` fall-through arm, which
+                // nomic-bert reaches because it is in neither the GELU arm
+                // (`bert.cpp:179`) nor the GEGLU arm (`bert.cpp:187`).
+                // `build_ffn(up, gate, ...)` with SILU + FFN_PAR gives
+                // `ggml_swiglu_split(cur = gate, tmp = up)` =
+                // `silu(gate) * up`, so again the gate is the activated side.
+                let gate = lw
+                    .ffn_gate
+                    .as_ref()
+                    .expect("swiglu variant requires ffn_gate");
+                gate.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    &mut gate_buf,
+                    &pool,
+                );
+                lw.ffn_gate_bias.add_to(&mut gate_buf);
+                silu_inplace(&mut gate_buf);
                 for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
                     *slot *= *up;
                 }

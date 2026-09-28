@@ -13,6 +13,8 @@ pub enum BertVariant {
     Bert,
     /// `arch = "jina-bert-v2"` — ALiBi, required `token_types`, GEGLU FFN.
     JinaBertV2,
+    /// `arch = "nomic-bert"` — RoPE, fused QKV, SwiGLU FFN, no projection bias.
+    NomicBert,
 }
 
 impl BertVariant {
@@ -20,6 +22,7 @@ impl BertVariant {
         match self {
             BertVariant::Bert => "bert",
             BertVariant::JinaBertV2 => "jina-bert-v2",
+            BertVariant::NomicBert => "nomic-bert",
         }
     }
 
@@ -33,10 +36,25 @@ impl BertVariant {
         matches!(self, BertVariant::JinaBertV2)
     }
 
+    /// SwiGLU (`ffn_gate` + `ffn_up`, `silu`), `nomic-bert.cpp:196-203` — the
+    /// `bert.cpp` fall-through branch, which NOMIC_BERT reaches because it is
+    /// listed in neither the `BERT || NOMIC_BERT_MOE || JINA_BERT_V3` GELU arm
+    /// (`bert.cpp:179`) nor the `JINA_BERT_V2` GEGLU arm (`bert.cpp:187`).
+    pub fn uses_silu_gate(self) -> bool {
+        matches!(self, BertVariant::NomicBert)
+    }
+
+    /// RoPE applied to Q and K. `bert.cpp:120-133` ropes only NOMIC_BERT /
+    /// NOMIC_BERT_MOE / JINA_BERT_V3; BERT and jina-bert-v2 fall through.
+    pub fn uses_rope(self) -> bool {
+        matches!(self, BertVariant::NomicBert)
+    }
+
     pub fn from_arch(arch: &str) -> Option<Self> {
         match arch {
             "bert" => Some(BertVariant::Bert),
             "jina-bert-v2" => Some(BertVariant::JinaBertV2),
+            "nomic-bert" => Some(BertVariant::NomicBert),
             _ => None,
         }
     }
@@ -46,12 +64,16 @@ impl BertVariant {
 pub const MAX_ALIBI_BIAS_JINA_V2: f32 = 8.0;
 
 pub struct BertLayerWeights<'a> {
-    pub wq: Weight<'a>,
+    pub wq: Option<Weight<'a>>,
     pub wq_bias: Bias,
-    pub wk: Weight<'a>,
+    pub wk: Option<Weight<'a>>,
     pub wk_bias: Bias,
-    pub wv: Weight<'a>,
+    pub wv: Option<Weight<'a>>,
     pub wv_bias: Bias,
+    /// Fused `attn_qkv.weight` [n_embd, n_embd_q + n_embd_kv + n_embd_kv], the
+    /// packing nomic-bert ships. Rows are `[Q | K | V]`, the llama.cpp fused
+    /// QKV order. `None` when the GGUF splits q/k/v.
+    pub wqkv: Option<Weight<'a>>,
     pub wo: Weight<'a>,
     pub wo_bias: Bias,
     pub attn_out_norm: NormWithBias,
@@ -113,39 +135,45 @@ pub fn decode_f32_row_public(bytes: &[u8], expected_len: usize) -> Option<Vec<f3
     decode_f32_row(GGMLType::F32, bytes, expected_len)
 }
 
+/// Decode F32 row `row` from a plain (non-quantized) `[width, rows]` table.
+///
+/// `token_types` and `pos_embd` are F32 tables that are indexed per element
+/// position (`bert.cpp:83-89` reads `token_types` row 0 and `pos_embd` row
+/// `pos`), so both go through here. `token_types` passes row 0.
+pub fn decode_f32_row_at_public(bytes: &[u8], row: usize, expected_len: usize) -> Option<Vec<f32>> {
+    decode_f32_row_at(GGMLType::F32, bytes, row, expected_len)
+}
+
 fn decode_f32_row(ggml_type: GGMLType, bytes: &[u8], expected_len: usize) -> Option<Vec<f32>> {
-    match ggml_type {
-        GGMLType::F32 => {
-            if bytes.len() / 4 < expected_len {
-                return None;
-            }
-            Some(
-                (0..expected_len)
-                    .map(|i| {
-                        f32::from_bits(u32::from_le_bytes([
-                            bytes[i * 4],
-                            bytes[i * 4 + 1],
-                            bytes[i * 4 + 2],
-                            bytes[i * 4 + 3],
-                        ]))
-                    })
-                    .collect(),
-            )
-        }
-        GGMLType::F16 => {
-            if bytes.len() / 2 < expected_len {
-                return None;
-            }
-            Some(
-                (0..expected_len)
-                    .map(|i| {
-                        crate::ops::f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
-                    })
-                    .collect(),
-            )
-        }
-        _ => None,
-    }
+    decode_f32_row_at(ggml_type, bytes, 0, expected_len)
+}
+
+fn decode_f32_row_at(
+    ggml_type: GGMLType,
+    bytes: &[u8],
+    row: usize,
+    expected_len: usize,
+) -> Option<Vec<f32>> {
+    let stride: usize = match ggml_type {
+        GGMLType::F32 => 4,
+        GGMLType::F16 => 2,
+        _ => return None,
+    };
+    let start = row.checked_mul(stride.checked_mul(expected_len)?)?;
+    let bytes = bytes.get(start..start + stride * expected_len)?;
+    Some(
+        (0..expected_len)
+            .map(|i| match ggml_type {
+                GGMLType::F32 => f32::from_bits(u32::from_le_bytes([
+                    bytes[i * 4],
+                    bytes[i * 4 + 1],
+                    bytes[i * 4 + 2],
+                    bytes[i * 4 + 3],
+                ])),
+                _ => crate::ops::f16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])),
+            })
+            .collect(),
+    )
 }
 
 fn f32_tensor<S: TensorSource + ?Sized>(source: &S, name: &str, expected_len: usize) -> Vec<f32> {
@@ -277,19 +305,58 @@ pub fn load_weights<S: TensorSource + ?Sized>(
             let bias_of = |suffix: &str| Bias {
                 values: optional_f32_tensor(source, &name_of(suffix), n_embd),
             };
+            // nomic-bert ships one fused [n_embd, n_embd_q + 2*n_embd_gqa]
+            // projection (`create_tensor_qkv` accepts a fused tensor first).
+            // The others split q/k/v.
+            let wqkv = source.tensor_info(&name_of("attn_qkv.weight")).map(|_| {
+                load_sized_weight(
+                    source,
+                    &name_of("attn_qkv.weight"),
+                    n_embd,
+                    n_embd_q + 2 * n_embd_gqa,
+                )
+            });
+            let wq = match wqkv {
+                Some(_) => None,
+                None => Some(load_sized_weight(
+                    source,
+                    &name_of("attn_q.weight"),
+                    n_embd,
+                    n_embd_q,
+                )),
+            };
+            let wk = match wqkv {
+                Some(_) => None,
+                None => Some(load_sized_weight(
+                    source,
+                    &name_of("attn_k.weight"),
+                    n_embd,
+                    n_embd_gqa,
+                )),
+            };
+            let wv = match wqkv {
+                Some(_) => None,
+                None => Some(load_sized_weight(
+                    source,
+                    &name_of("attn_v.weight"),
+                    n_embd,
+                    n_embd_gqa,
+                )),
+            };
             BertLayerWeights {
-                wq: load_sized_weight(source, &name_of("attn_q.weight"), n_embd, n_embd_q),
+                wq,
                 wq_bias: Bias {
                     values: optional_f32_tensor(source, &name_of("attn_q.bias"), n_embd_q),
                 },
-                wk: load_sized_weight(source, &name_of("attn_k.weight"), n_embd, n_embd_gqa),
+                wk,
                 wk_bias: Bias {
                     values: optional_f32_tensor(source, &name_of("attn_k.bias"), n_embd_gqa),
                 },
-                wv: load_sized_weight(source, &name_of("attn_v.weight"), n_embd, n_embd_gqa),
+                wv,
                 wv_bias: Bias {
                     values: optional_f32_tensor(source, &name_of("attn_v.bias"), n_embd_gqa),
                 },
+                wqkv,
                 wo: load_sized_weight(source, &name_of("attn_output.weight"), n_embd_q, n_embd),
                 wo_bias: Bias {
                     values: optional_f32_tensor(source, &name_of("attn_output.bias"), n_embd),
@@ -303,7 +370,7 @@ pub fn load_weights<S: TensorSource + ?Sized>(
                     bias: f32_tensor(source, &name_of("layer_output_norm.bias"), n_embd),
                 },
                 ffn_up: load_sized_weight(source, &name_of("ffn_up.weight"), n_embd, n_ff),
-                ffn_gate: match variant.uses_gelu_gate() {
+                ffn_gate: match variant.uses_gelu_gate() || variant.uses_silu_gate() {
                     true => Some(load_sized_weight(
                         source,
                         &name_of("ffn_gate.weight"),

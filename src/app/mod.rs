@@ -72,7 +72,7 @@ pub fn compute_embedding(
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
         }
-        "bert" | "jina-bert-v2" => {
+        "bert" | "jina-bert-v2" | "nomic-bert" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }
         _ => qwen3_compute_embedding(source, prompt, n_threads_arg),
@@ -95,7 +95,7 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
-        "bert" | "jina-bert-v2" => crate::models::bert_family::run_embedding(
+        "bert" | "jina-bert-v2" | "nomic-bert" => crate::models::bert_family::run_embedding(
             source,
             prompt,
             n_threads_arg,
