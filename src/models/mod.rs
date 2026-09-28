@@ -1,5 +1,6 @@
 pub mod bert_family;
 pub mod breeze;
+pub mod clm;
 pub mod chat_template;
 pub mod diffusion;
 pub mod dots;
