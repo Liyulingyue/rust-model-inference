@@ -708,7 +708,10 @@ Falcon-H1 的 attention 是 **GQA**，三个维度的 head 数不同：
   目前只 gate 在 Q8_0 模型上；Q4_K_M 若要纳入 sentinel，需要新增
   `RMI_FALCON_H1_Q4K_M_MODEL` env 并记录 golden。
 - Q4_K_M 的 `ffn_down` 也是 Q6_K，已随本次修复一同跑通。
-- 3B 变体同型（仅 n_embd/n_layer/n_head/n_ff/ssm_* 不同），未实测。
+- **3B 变体已实测**（2026-09-29，`Falcon-H1-3B-Instruct-Q4_K_M.gguf`）：config
+  `n_embd=2560 / n_head=10 / n_head_kv=2 / head_dim=128` → `group_size=5`
+  （1.5B 是 4），`attn_v`/`ffn_down` 同为 Q6_K。同一修复代码零改动跑通，
+  Paris / 4 / red / 中文 ML 四例全对，13-14 t/s @ 8 线程。
 
 ---
 
