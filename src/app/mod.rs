@@ -11,7 +11,9 @@ pub mod text;
 pub(crate) mod tts;
 pub(crate) mod yue2;
 
-pub use crate::models::qwen3::embedding::{compute_embedding, run_embedding};
+pub use crate::models::qwen3::embedding::{
+    compute_embedding as qwen3_compute_embedding, run_embedding as qwen3_run_embedding,
+};
 pub use asr::run_asr_cli;
 pub use cli::{
     dreamx_cli_options, inference_step_budget, init_rayon_global_pool, normalize_tts_language,
@@ -46,6 +48,53 @@ pub use yue2::run_yue2_cli;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use std::path::Path;
+
+/// `general.architecture` of an already-open source.
+pub fn arch_of(source: &dyn TensorSource) -> String {
+    source
+        .metadata("general.architecture")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Embedding entry point dispatched on `general.architecture`.
+///
+/// Only archs with a dedicated, byte-level verified implementation are routed;
+/// an unknown arch is an error rather than a silent fallback (per
+/// `.agents/skills/adapting-new-models`).
+pub fn compute_embedding(
+    source: &dyn TensorSource,
+    prompt: &str,
+    n_threads_arg: usize,
+) -> Result<Vec<f32>, String> {
+    match arch_of(source).as_str() {
+        "gemma-embedding" => {
+            crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
+        }
+        _ => qwen3_compute_embedding(source, prompt, n_threads_arg),
+    }
+}
+
+/// CLI-facing embedding entry point, same dispatch rule as [`compute_embedding`].
+pub fn run_embedding(
+    source: &dyn TensorSource,
+    prompt: &str,
+    n_threads_arg: usize,
+    kv_format: KvFormat,
+    output: EmbeddingOutput,
+) {
+    match arch_of(source).as_str() {
+        "gemma-embedding" => crate::models::gemma_embedding::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
+        _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
+    }
+}
 
 pub fn reject_incomplete_z_image_architecture(arch: &str) -> Result<(), String> {
     if arch == "pig" {
