@@ -29,6 +29,9 @@ struct BertConfig {
     /// `rope.freq_base`. Only meaningful for `nomic-bert` (the one variant that
     /// ropes): it trains at 1000 Hz, not the 10 000 Hz llama default.
     rope_freq_base: f32,
+    /// `pooling_type` (`llama.h:177-182`): 0 none, 1 mean, 2 CLS, 3 last.
+    /// `bert` ships 2, while jina-bert-v2 and nomic-bert ship 1.
+    pooling_type: u64,
 }
 
 fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
@@ -46,6 +49,7 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
             .and_then(MetaValue::to_u64)
             .map(|value| value as usize)
     };
+    let uint64 = |suffix: &str| source.metadata(&key(suffix)).and_then(MetaValue::to_u64);
     let float = |suffix: &str| {
         source
             .metadata(&key(suffix))
@@ -94,6 +98,15 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
         // with 1000 via `nomic-bert.rope.freq_base`. Only the roped variant
         // reads this, but loading it unconditionally keeps the config honest.
         rope_freq_base: float("rope.freq_base").unwrap_or(10_000.0),
+        // 1 (mean) is the safe default: every variant verified before bge-small
+        // used it, and `bert` is the one that passes 2 explicitly.
+        pooling_type: uint64("pooling_type").unwrap_or(1),
+    })
+    .and_then(|cfg| {
+        if cfg.pooling_type > 3 {
+            return Err(format!("unsupported pooling_type {}", cfg.pooling_type));
+        }
+        Ok(cfg)
     })
 }
 
@@ -420,8 +433,13 @@ pub fn run_embedding_tokens(
         }
         for t in 0..n_tokens {
             let x = &mut hidden[t * n_embd..(t + 1) * n_embd];
+            // `bert.cpp:151` — `cur = ggml_add(cur, inpL)` where `cur` is the
+            // attention *output projection* and `inpL` the layer input. The
+            // projected value has to be part of the sum; adding only the
+            // residual makes every layer an identity map through `inpL`, which
+            // silently drops the attention from the stack.
             for i in 0..n_embd {
-                x[i] += residual[t * n_embd + i];
+                x[i] += attn_proj[t * n_embd + i] + residual[t * n_embd + i];
             }
             // `bert.cpp:154` — attention output LayerNorm. `x` is reborrowed
             // as `&[f32]` for the read; the write goes to `normed`.
@@ -532,16 +550,43 @@ pub fn run_embedding_tokens(
         }
     }
 
-    // ---- mean pool over tokens (`llama-graph.cpp:3717`), then L2 (`common.cpp:1893`)
+    // ---- pooling, then L2 (`common.cpp:1893`, `embd_normalize = 2`)
     let mut pooled = vec![0.0f32; n_embd];
-    for row in hidden.chunks_exact(n_embd) {
-        for (slot, value) in pooled.iter_mut().zip(row) {
-            *slot += *value;
+    match cfg.pooling_type {
+        1 => {
+            // Mean over every token, specials included.
+            // `llm_graph_input_mean::set_input` (`llama-graph.cpp:250-278`)
+            // gives each token weight 1/n_tokens.
+            for row in hidden.chunks_exact(n_embd) {
+                for (slot, value) in pooled.iter_mut().zip(row) {
+                    *slot += *value;
+                }
+            }
+            let inv_tokens = 1.0f32 / n_tokens as f32;
+            for value in pooled.iter_mut() {
+                *value *= inv_tokens;
+            }
         }
-    }
-    let inv_tokens = 1.0f32 / n_tokens as f32;
-    for value in pooled.iter_mut() {
-        *value *= inv_tokens;
+        2 => {
+            // CLS: the row of the lowest-position token. `set_input`
+            // (`llama-graph.cpp:303-319`) takes `pos < target_pos`, so for a
+            // single fresh sequence that is row 0, which the WPM tokenizer has
+            // already filled with [CLS].
+            let cls = hidden
+                .chunks_exact(n_embd)
+                .next()
+                .ok_or("CLS pooling found no tokens")?;
+            pooled.copy_from_slice(cls);
+        }
+        3 => {
+            // Last token row, equivalent to row `n_tokens - 1` here.
+            let last = hidden
+                .chunks_exact(n_embd)
+                .nth(n_tokens - 1)
+                .ok_or("LAST pooling found no tokens")?;
+            pooled.copy_from_slice(last);
+        }
+        other => return Err(format!("unsupported pooling_type {other}")),
     }
     l2_normalize(&mut pooled)?;
     Ok(pooled)

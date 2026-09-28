@@ -9,7 +9,7 @@ use crate::ops::kernel::{QuantizedTensor, Weight};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BertVariant {
-    /// `arch = "bert"` — absolute `pos_embd`, GELU FFN over a single `ffn_up`.
+    /// `arch = "bert"` — absolute `position_embd`, GELU FFN over `ffn_up`.
     Bert,
     /// `arch = "jina-bert-v2"` — ALiBi, required `token_types`, GEGLU FFN.
     JinaBertV2,
@@ -121,14 +121,16 @@ pub struct BertWeights<'a> {
     /// is added to the embeddings. Present for jina-bert-v2, absent for some
     /// `bert` packers (`bert.cpp:28` marks it NOT_REQUIRED).
     pub token_types: Option<(&'a [u8], GGMLType)>,
-    /// `pos_embd.weight` [n_embd, n_ctx_train] — `bert` only.
+    /// `position_embd.weight` [n_embd, n_ctx_train] — `bert` only.
+    /// The GGUF spells it `position_embd`, not `pos_embd`
+    /// (`llama-arch.cpp:480`); the shorter form does not exist in any GGUF.
     pub pos_embd: Option<(&'a [u8], GGMLType)>,
     pub layers: Vec<BertLayerWeights<'a>>,
 }
 
 /// Decode an F32 row at `index` from a plain (non-quantized) tensor.
 ///
-/// `token_types` and `pos_embd` are F32 `[n_embd, n]` tables rather than
+/// `token_types` and `position_embd` are F32 `[n_embd, n]` tables rather than
 /// quantized embedding matrices, so they bypass the `embedding_lookup`
 /// dispatch entirely.
 pub fn decode_f32_row_public(bytes: &[u8], expected_len: usize) -> Option<Vec<f32>> {
@@ -137,8 +139,8 @@ pub fn decode_f32_row_public(bytes: &[u8], expected_len: usize) -> Option<Vec<f3
 
 /// Decode F32 row `row` from a plain (non-quantized) `[width, rows]` table.
 ///
-/// `token_types` and `pos_embd` are F32 tables that are indexed per element
-/// position (`bert.cpp:83-89` reads `token_types` row 0 and `pos_embd` row
+/// `token_types` and `position_embd` are F32 tables indexed per element
+/// position (`bert.cpp:83-89` reads `token_types` row 0 and `position_embd` row
 /// `pos`), so both go through here. `token_types` passes row 0.
 pub fn decode_f32_row_at_public(bytes: &[u8], row: usize, expected_len: usize) -> Option<Vec<f32>> {
     decode_f32_row_at(GGMLType::F32, bytes, row, expected_len)
@@ -287,16 +289,22 @@ pub fn load_weights<S: TensorSource + ?Sized>(
         );
     }
 
-    let pos_embd = source.tensor_info("pos_embd.weight").map(|info| {
+    // `llama-arch.cpp:480` spells this `position_embd`, and it is a
+    // `LLM_TENSOR_LAYER_INPUT` tensor, so it carries no `blk.{l}.` prefix.
+    // `bert.cpp:32` creates it with flag 0, i.e. required for `bert` only.
+    let pos_embd = source.tensor_info("position_embd.weight").map(|info| {
         (
             source
-                .tensor_slice("pos_embd.weight")
-                .expect("missing pos_embd.weight data"),
+                .tensor_slice("position_embd.weight")
+                .expect("missing position_embd.weight data"),
             info.ggml_type,
         )
     });
     if variant == BertVariant::Bert {
-        assert!(pos_embd.is_some(), "bert requires pos_embd.weight");
+        assert!(
+            pos_embd.is_some(),
+            "bert requires position_embd.weight (llama-arch.cpp:480, bert.cpp:32)"
+        );
     }
 
     let layers = (0..n_layer)
