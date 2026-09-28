@@ -28,6 +28,31 @@ fn f32_test_weight(data: Vec<f32>, n_in: usize, n_out: usize) -> Weight<'static>
 }
 
 #[test]
+fn qwen35_model_rejects_edge0_architecture() {
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+
+    struct Edge0Source(MetaValue);
+    impl TensorSource for Edge0Source {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            (key == "general.architecture").then_some(&self.0)
+        }
+        fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    let source = Edge0Source(MetaValue::String("edge0".into()));
+    let error = match Qwen35Model::from_source(&source) {
+        Ok(_) => panic!("Edge0 must not construct Qwen35Model"),
+        Err(error) => error,
+    };
+    assert!(error.contains("Edge0Model"), "{error}");
+}
+
+#[test]
 fn qwen35_bf16_matmul_rounds_activations_before_dot() {
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     struct Source(TensorInfo, Vec<u8>);
@@ -143,7 +168,6 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
-        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
@@ -499,7 +523,6 @@ fn tiny_dense_session_model_with_embedding(
         output_norm: vec![1.0; n_embd],
         output_weight: mk_weight(vocab_size),
         layers: vec![layer],
-        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
@@ -601,7 +624,6 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         output_norm: vec![1.0; 256],
         output_weight: q8_weight(32),
         layers: vec![layer],
-        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }

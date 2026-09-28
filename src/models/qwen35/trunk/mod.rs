@@ -2,9 +2,9 @@
 //!
 //! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
 //! - `config.rs` — `Qwen35Config`
-//! - `weights.rs` — `Qwen35Model` + `Qwen35LayerWeights` + load helpers
+//! - `weights.rs` — shared `HybridTrunk`, `Qwen35Model` alias, and load helpers
 //! - `forward.rs` — `forward` / `_dense_attn_layer` / `_recurrent_layer` / `_ffn_parallel`
-//! - `session.rs` — `Qwen35Session`
+//! - `session.rs` — shared `HybridSession` and `Qwen35Session` alias
 //! - `scratch.rs` — `Qwen35Scratchpad` + KV cache helpers
 //! - `util.rs` — f16 decode + scalar Mamba helpers
 //! - `positions.rs` — `build_qwen35_positions` for mRoPE-aware VL inputs
@@ -23,5 +23,5 @@ pub use config::Qwen35Config;
 pub use forward::run_forward_logits_qwen35_with_batch;
 pub use positions::build_qwen35_positions;
 pub use scratch::Qwen35Scratchpad;
-pub use session::{Qwen35DenseKvSnapshot, Qwen35Session};
-pub use weights::{Qwen35LayerWeights, Qwen35Model};
+pub use session::{HybridSession, HybridTrunkModel, Qwen35DenseKvSnapshot, Qwen35Session};
+pub use weights::{HybridTrunk, Qwen35LayerWeights, Qwen35Model};

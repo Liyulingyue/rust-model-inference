@@ -2,6 +2,8 @@
 
 输入是原始 4 个 safetensors shard、`lora_edge0_35b.safetensors` 和 tokenizer；参考代码固定为 Edge0 `fb4cd2c49ebe22bb230e1451ecb8fb4957ca62e6`。`prerouter_edge0_35b.safetensors` 服务于官方预测路径，Rust 使用模型的实际 router。原始文件含视觉配置但没有视觉权重，因此当前仅支持文本。
 
+Rust 的 `Edge0Model` 独立持有 MoE 权重，与 Qwen3.5 共用 attention/SSM 的 `HybridTrunk` 和 session 实现；`Qwen35Model::from_source` 拒绝 `edge0` 架构。
+
 转换器保留全部 2377 个张量的原始字节（19,551,119,616 字节 payload），将 U32 packed words 放进 `general.architecture=edge0` 的 GGUF I32 张量；这是本仓库专用格式。已生成文件 `Edge0-35B-A3B-preview-lossless.gguf` 的 SHA-256 是 `50c6c1ce5faef36d5e72d565fa4a27a04801aa243a0d4a5c3f5c4337a408ec7d`。
 
 ```sh

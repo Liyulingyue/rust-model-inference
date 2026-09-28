@@ -103,16 +103,14 @@ fn recurrent_layer_mask(
 impl Qwen35Config {
     /// Build a `Qwen35Config` from a GGUF tensor source.
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
+        Self::from_source_for_arch(source, "qwen35")
+    }
+
+    pub(crate) fn from_source_for_arch<S: TensorSource + ?Sized>(
+        source: &S,
+        prefix: &str,
+    ) -> Result<Self, String> {
         let base = crate::core::loader::model_config_from_source(source)?;
-        let prefix = if source
-            .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val)
-            == Some("edge0")
-        {
-            "edge0"
-        } else {
-            "qwen35"
-        };
 
         let get_u32 = |key: &str| -> Result<u32, String> {
             source

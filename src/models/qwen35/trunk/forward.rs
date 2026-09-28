@@ -1,4 +1,4 @@
-//! Forward-pass implementations for `Qwen35Model`.
+//! Forward-pass implementations for the shared hybrid trunk.
 //!
 //! Layer dispatch:
 //!   `forward` → `forward_dense_attn_layer` (attention) | `forward_recurrent_layer` (Mamba SSM)
@@ -12,11 +12,13 @@
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
 use super::util::{l2_norm, softplus_f32};
-use super::weights::{Edge0MoeWeights, Qwen35LayerWeights, Qwen35Model};
+use super::weights::{Qwen35LayerWeights, Qwen35Model};
 use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
+use crate::models::edge0::forward::forward_edge0_moe_token;
+use crate::models::edge0::weights::Edge0MoeWeights;
 use crate::ops::{
     dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu, silu_approx_inplace,
     silu_mul_approx_inplace, softmax_inplace,
@@ -36,7 +38,7 @@ pub(super) fn set_cpu_scan_failure(row: Option<usize>) {
     CPU_SCAN_FAILURE.set(row);
 }
 
-impl<'a> super::weights::Qwen35Model<'a> {
+impl<'a> super::weights::HybridTrunk<'a> {
     pub fn forward(
         &mut self,
         n_tokens: usize,
@@ -45,7 +47,15 @@ impl<'a> super::weights::Qwen35Model<'a> {
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
-        self.forward_impl(n_tokens, None, kv_cache, scratch, pool, mrope_positions)
+        self.forward_impl(
+            n_tokens,
+            None,
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+            None,
+        )
     }
 
     pub(crate) fn forward_at(
@@ -64,49 +74,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
             scratch,
             pool,
             mrope_positions,
+            None,
         )
     }
 
-    pub(crate) fn forward_chunk(
-        &mut self,
-        n_tokens: usize,
-        base_position: usize,
-        kv_cache: &mut KvCache,
-        scratch: &mut super::scratch::Qwen35Scratchpad,
-        conv_states: &mut [Vec<f32>],
-        ssm_states: &mut [Vec<f32>],
-        pool: &ComputePool,
-        mrope_positions: &[[usize; 4]],
-    ) -> Result<Vec<f32>, String> {
-        if conv_states.len() != scratch.conv_states.len()
-            || ssm_states.len() != scratch.ssm_states.len()
-        {
-            return Err("Qwen3.5 recurrent state layer count mismatch".into());
-        }
-        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
-            std::mem::swap(persistent, working);
-        }
-        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
-            std::mem::swap(persistent, working);
-        }
-        let result = self.forward_at(
-            n_tokens,
-            base_position,
-            kv_cache,
-            scratch,
-            pool,
-            mrope_positions,
-        );
-        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
-            std::mem::swap(persistent, working);
-        }
-        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
-            std::mem::swap(persistent, working);
-        }
-        result
-    }
-
-    fn forward_impl(
+    pub(crate) fn forward_impl(
         &mut self,
         n_tokens: usize,
         base_position: Option<usize>,
@@ -114,7 +86,9 @@ impl<'a> super::weights::Qwen35Model<'a> {
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
+        edge0_moe: Option<&[Edge0MoeWeights<'_>]>,
     ) -> Result<Vec<f32>, String> {
+        let edge0 = edge0_moe.is_some();
         if mrope_positions.len() != n_tokens {
             return Err(format!(
                 "Qwen3.5 position count mismatch: tokens={n_tokens}, positions={}",
@@ -127,7 +101,8 @@ impl<'a> super::weights::Qwen35Model<'a> {
         // call is the prefill (n_tokens > 1), subsequent calls decode
         // (n_tokens == 1). We lazily build the session on the first decode.
         #[cfg(feature = "vulkan")]
-        let gpu_allowed = base_position.is_none()
+        let gpu_allowed = !edge0
+            && base_position.is_none()
             && n_tokens == 1
             && !crate::core::thread_pool::gpu_matmul_disabled();
         #[cfg(feature = "vulkan")]
@@ -240,7 +215,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             |layer: usize| layer == 0 || first_dense_layer == Some(layer) || layer + 1 == n_layer;
 
         #[cfg(feature = "parity-trace")]
-        if self.edge0_moe.is_some() {
+        if edge0 {
             parity_trace::report(parity_trace::checkpoint_rows(
                 "edge0.embedding",
                 None,
@@ -264,7 +239,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 );
             }
             #[cfg(feature = "parity-trace")]
-            if self.edge0_moe.is_some() && trace_layer(il) {
+            if edge0 && trace_layer(il) {
                 parity_trace::report(parity_trace::checkpoint_rows(
                     &format!("edge0.norm-{il}"),
                     Some(il),
@@ -295,12 +270,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                         n_tokens,
                         scratch,
                         pool,
+                        edge0,
                         trace_layer(il),
                     )?
                 }
                 #[cfg(not(feature = "parity-trace"))]
                 {
-                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool)?
+                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool, edge0)?
                 }
             } else {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
@@ -356,9 +332,9 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let buf_ptr = scratch.buf.as_ptr();
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
-            let edge0_input = self.edge0_moe.as_ref().map(|_| ffn_input.to_vec());
-            self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool);
-            if let Some(moe) = self.edge0_moe.as_ref().map(|layers| &layers[il]) {
+            let edge0_input = edge0_moe.map(|_| ffn_input.to_vec());
+            self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool, edge0);
+            if let Some(moe) = edge0_moe.map(|layers| &layers[il]) {
                 let ffn_input = edge0_input.as_ref().unwrap();
                 for token in 0..n_tokens {
                     let offset = token * n_embd;
@@ -733,6 +709,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         n_tokens: usize,
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
+        edge0: bool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Result<Vec<f32>, String> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -784,7 +761,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 recurrent projection shape");
         #[cfg(feature = "parity-trace")]
-        if self.edge0_moe.is_some() && trace_layer {
+        if edge0 && trace_layer {
             parity_trace::report(parity_trace::checkpoint_rows(
                 &format!("edge0.qkv-{il}"),
                 Some(il),
@@ -830,7 +807,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 }
                 scratch.qkv_buf[qkv_off + c] = conv_val;
             }
-            if self.edge0_moe.is_some() {
+            if edge0 {
                 for value in &mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim] {
                     *value = silu(*value);
                 }
@@ -916,7 +893,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let gate_val = scratch.alpha_buf[t * num_v_heads + v_h];
                 let beta_val = scratch.beta_buf[t * num_v_heads + v_h];
                 let state_off = v_h * head_v_dim * head_v_dim;
-                let k_h = if self.edge0_moe.is_some() {
+                let k_h = if edge0 {
                     v_h / (num_v_heads / num_k_heads)
                 } else {
                     v_h % num_k_heads
@@ -987,7 +964,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 );
             }
             let z_off = t * value_dim;
-            if self.edge0_moe.is_some() {
+            if edge0 {
                 for (gate, value) in scratch.z_buf[z_off..z_off + value_dim]
                     .iter()
                     .zip(&mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim])
@@ -1046,6 +1023,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
         n_tokens: usize,
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
+        edge0: bool,
     ) {
         let n_embd = self.config.n_embd;
         let n_ff = self.config.n_ff;
@@ -1077,7 +1055,7 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 FFN input shape");
 
-        if self.edge0_moe.is_some() {
+        if edge0 {
             for (gate, up) in scratch.ffn_gate_buf[..n_tokens * n_ff]
                 .iter()
                 .zip(&mut scratch.ffn_up_buf[..n_tokens * n_ff])
@@ -1112,54 +1090,6 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 FFN output shape");
     }
-}
-
-fn forward_edge0_moe_token(
-    moe: &Edge0MoeWeights<'_>,
-    input: &[f32],
-    shared: &mut [f32],
-) -> Result<(), String> {
-    let logits = moe.router.matmul(input);
-    if logits.iter().any(|value| !value.is_finite()) {
-        return Err("Edge0 router produced non-finite logits".into());
-    }
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp = logits
-        .iter()
-        .map(|value| (*value - max).exp())
-        .collect::<Vec<_>>();
-    let total = exp.iter().sum::<f32>();
-    let probabilities = exp.iter().map(|value| *value / total).collect::<Vec<_>>();
-    let mut indices = (0..logits.len()).collect::<Vec<_>>();
-    indices.sort_by(|&a, &b| {
-        probabilities[b]
-            .total_cmp(&probabilities[a])
-            .then_with(|| a.cmp(&b))
-    });
-    let chosen = &indices[..moe.used];
-    let chosen_total = chosen
-        .iter()
-        .map(|&index| probabilities[index])
-        .sum::<f32>();
-    let mut routed = vec![0.0f32; shared.len()];
-    for &expert in chosen {
-        let mut gate = moe.gate[expert].matmul(input);
-        let up = moe.up[expert].matmul(input);
-        for (gate_value, up_value) in gate.iter_mut().zip(up) {
-            *gate_value = silu(*gate_value) * up_value;
-        }
-        let down = moe.down[expert].matmul(&gate);
-        let score = probabilities[expert] / chosen_total;
-        for (out, value) in routed.iter_mut().zip(down) {
-            *out += score * value;
-        }
-    }
-    let shared_gate = moe.shared_gate.matmul(input)[0];
-    let shared_scale = 1.0 / (1.0 + (-shared_gate).exp());
-    for (out, value) in shared.iter_mut().zip(routed) {
-        *out = value + shared_scale * *out;
-    }
-    Ok(())
 }
 
 /// Free-function wrapper around `Qwen35Model<'a>` + `Qwen35Session`.
