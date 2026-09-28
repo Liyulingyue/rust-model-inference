@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-014) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-015) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -709,9 +709,105 @@ Falcon-H1 的 attention 是 **GQA**，三个维度的 head 数不同：
   `RMI_FALCON_H1_Q4K_M_MODEL` env 并记录 golden。
 - Q4_K_M 的 `ffn_down` 也是 Q6_K，已随本次修复一同跑通。
 - **3B 变体已实测**（2026-09-29，`Falcon-H1-3B-Instruct-Q4_K_M.gguf`）：config
-  `n_embd=2560 / n_head=10 / n_head_kv=2 / head_dim=128` → `group_size=5`
-  （1.5B 是 4），`attn_v`/`ffn_down` 同为 Q6_K。同一修复代码零改动跑通，
-  Paris / 4 / red / 中文 ML 四例全对，13-14 t/s @ 8 线程。
+   `n_embd=2560 / n_head=10 / n_head_kv=2 / head_dim=128` → `group_size=5`
+   （1.5B 是 4），`attn_v`/`ffn_down` 同为 Q6_K。同一修复代码零改动跑通，
+   Paris / 4 / red / 中文 ML 四例全对，13-14 t/s @ 8 线程。
+
+---
+
+### TODO-015: arch 接入的"公共层报到"问题 — 设计记录，暂不实施
+
+#### 起因
+
+`Falcon-H1` 适配 CLI 后用 `/v1/chat/completions` 失败：
+
+```
+Architecture "falcon-h1" is not supported by the server text endpoints
+```
+
+排查发现一个 arch 要为**三个公共入口各报到一次**，且漏了不报错：
+
+| 入口 | 位置 | falcon 状态 |
+|---|---|---|
+| CLI | `src/app/text/generation.rs` `} else if arch ==` | ✅ 已接 |
+| HTTP runtime | `src/app/text/runtime.rs::build_text_runtime` | ❌ 无 adapter |
+| HTTP prompt | `src/app/server/api/tools.rs::is_qwen35` / `llama_family` | ❌ 无分支 |
+| JEV | `src/app/jev/single.rs` `match &*arch` | ❌ 落进 `other => Err` |
+
+维护者的比喻：**公共层是"插口/门牌"，用户只面对任务（传文本/图片 → 拿结果），不关心里面是谁**。而当前 registry 全是 `match arch`——**按施工队组织，不按门牌组织**，导致：
+
+1. 新 arch 不知道该去哪几处报到（falcon 漏了 2 处，且静默）；
+2. 不支持某能力的 arch（如 TTS）要"证明自己不该在 JEV 里"，需要维护
+   "故意不支持"白名单；
+3. 同一个能力在三个入口重复出现。
+
+#### 三层拆解（讨论结论）
+
+| 层 | 现状 | 是否要动 |
+|---|---|---|
+| **执行接口** | `TextRuntime` / `JevScorer` trait 已存在且健康（JEV 9/9 trunks 统一走 trait，TODO-014 之后仍成立） | 不用动 |
+| **公共 API** | HTTP 的 `/v1/chat/completions` / `/v1/audio/speech` 本来就是按任务分、不关心背后 arch | 已经对了 |
+| **登记处** | 3 个手写 `match arch`，新 arch 报到 3 次、漏了不报错 | **唯一真痛点** |
+
+关键认知：用户问"falcon 为什么 HTTP 不能用"，答案是 **adapter 没写**（工作量问题），
+不是"架构缺插口"——接口在，只是没插。
+
+#### 评估过的方案
+
+**A. distributed slice（`inventory` crate）+ capability 门牌**
+
+```rust
+pub mod capability {
+    #[distributed_slice] pub static TEXT_GENERATE: [CapabilityFactory];
+    #[distributed_slice] pub static JEV: [CapabilityFactory];
+    #[distributed_slice] pub static TTS: [CapabilityFactory];
+    // ...
+}
+// trunk 内自己挂门；不写就是不支持 → TTS 天然不进 JEV，无需白名单
+// 公共层写完永久冻结
+```
+
+- 语义最干净："不声明 = 不支持"，新 arch 零公共层改动。
+- **否决（现在）**：为"省 30 行 registry"引入 linker-magic 依赖不值；且
+  I/O 组合仍在快速扩张（chat: 纯文本 → +图 → +音频/视频；omni 会把
+  chat/score/embed 的边界糊掉），**预定义 capability slot 是在流沙上钉钉子**——
+  真到 omni 那天，是 I/O 抽象重塑 capability，不是反过来。
+
+**B. Plugin trait + 单注册表（~500 LOC 重构）**
+- 否决：公共层仍要每 arch 加一行；且 TTS 不支持 JEV 要靠 `default fn` 或按
+  capability 拆 4 个 trait，比 A 更脏。
+
+**C. loader arch 列表提成 `SUPPORTED_ARCHES` const + coverage 测试（~80 LOC）**
+- **设计已定稿，暂不实施**。见下。
+
+#### TODO-015 的落地设计（将来启用时直接用）
+
+1. `src/core/loader.rs`：把 `model_config_from_source` 里的 `matches!(...)`
+   改成 `pub const SUPPORTED_ARCHES: &[&str]` + `contains`。新 arch 必须先加进
+   const → 测试自动覆盖它。
+2. `tests/arch_coverage.rs`（或 lib test `arch_coverage`）：遍历 `SUPPORTED_ARCHES`，
+   断言每个 arch 在 CLI / HTTP / JEV 三个 dispatch 都有**显式**答案
+   （`Supported` 或在带原因注释的"故意不支持"白名单里）。
+3. CI 加**独立 job**（不能并进 `cargo test --lib`——那 19 个 pre-existing
+   failures 会把它染红）：
+   ```yaml
+   arch-coverage:
+     steps:
+       - run: cargo test --profile release-fast --lib arch_coverage
+   ```
+
+效果：falcon 这类"静默漏注册"以后 CI 立刻红；本地
+`cargo test --lib arch_coverage` 秒级回报。零新依赖、零架构改动。
+
+#### 触发条件（满足任一才启动实施）
+
+- arch 数量 > 25，或
+- 新 arch 接入频率 > 每月 1 个（"报到 3 次"成为真瓶颈），或
+- omni 模型（原生统一多模态 I/O）落地——届时 I/O 抽象自然重塑 capability 定义，
+  **那时做 A 才是顺势而为**，今天钉死的 slot 只会碍事。
+
+在触发前，处理方式是：**新 arch 接入时手工检查三处 dispatch + 补实现**
+（正如本次给 falcon 补 HTTP/JEV）。
 
 ---
 
