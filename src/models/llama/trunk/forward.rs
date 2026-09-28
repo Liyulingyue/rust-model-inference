@@ -336,6 +336,148 @@ pub fn run_inference(
     )
 }
 
+const IM_START_MARK: &str = concat!("<", "|im_start", "|", ">");
+const IM_END_MARK: &str = concat!("<", "|im_end", "|", ">");
+const THINK_MARK: &str = concat!("<", "|think", "|", ">");
+const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");
+
+/// Render one turn's text for the llama-family templates.
+///
+/// The per-arch selection used to be inline in `build_prompt_tokens` for a
+/// single turn only. Extracted so the multi-turn entry point can reuse it
+/// verbatim; the single-turn path calls this with exactly one turn and is
+/// therefore byte-identical to its previous behaviour.
+#[allow(clippy::too_many_arguments)]
+fn llama_turn_text(
+    arch: &str,
+    is_minicpm5: bool,
+    has_chatml_template: bool,
+    role: &str,
+    content: &str,
+    thinking: bool,
+) -> String {
+    if arch == "k2-horizon" {
+        // K2-Horizon's own control tokens have no multi-turn shape;
+        // callers must reject multi-turn before we get here.
+        return format_k2_horizon_chat_prompt_with_thinking(content, thinking);
+    }
+    if arch == "granite" {
+        return format!("<|start_of_role|>{role}<|end_of_role|>{content}<|end_of_text|>\n");
+    }
+    if arch == "nanbeige" {
+        if has_chatml_template {
+            return format!("{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n");
+        }
+        return format!("{role}\n{content}\n");
+    }
+    if is_minicpm5 {
+        // MiniCPM5 ChatML; thinking=false emits an empty reasoning block.
+        if thinking {
+            return format!("{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n");
+        }
+        return format!(
+            "{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n{IM_START_MARK}assistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n"
+        );
+    }
+    format!("user\n{content}\nassistant\n{THINK_MARK}\n")
+}
+
+/// True when `arch`'s template can express more than one turn.
+fn llama_supports_multiturn(arch: &str, is_minicpm5: bool) -> bool {
+    if arch == "k2-horizon" {
+        return false;
+    }
+    if is_minicpm5 {
+        return true;
+    }
+    // nanbeige (ChatML template) and granite (start_of_role) do.
+    // Plain llama / exaone fall back to the `user\n...assistant\n` shape,
+    // which llama.cpp renders as repeated `{role}\n{content}\n` blocks, so
+    // multi-turn is expressible there too — as repeated turns plus a final
+    // assistant prompt, which is what llama.cpp does.
+    matches!(arch, "nanbeige" | "granite" | "llama" | "exaone")
+}
+
+/// Build the prompt token vector for a llama-family arch from message turns.
+///
+/// `turns` are the caller's messages in order (system / user / assistant).
+/// This is what the HTTP layer uses; the CLI keeps calling
+/// [`build_prompt_tokens`], which is a one-turn specialisation of this and
+/// produces byte-identical output.
+pub fn build_prompt_tokens_from_turns(
+    source: &dyn TensorSource,
+    tokenizer: &crate::core::tokenizer::BPETokenizer,
+    turns: &[(&str, &str)],
+    thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    let is_minicpm5 = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("minicpm"))
+        .unwrap_or(false);
+    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5) {
+        return Err(format!(
+            "multi-turn chat is unsupported for architecture {arch:?}; only a single user turn is rendered"
+        ));
+    }
+    let has_chatml_template = source
+        .metadata("tokenizer.chat_template")
+        .and_then(|v| v.to_string_val())
+        .is_some_and(|t| t.contains(" + IM_START + "));
+    let mut prompt_text = String::new();
+    for (role, content) in turns {
+        prompt_text.push_str(&llama_turn_text(
+            &arch,
+            is_minicpm5,
+            has_chatml_template,
+            role,
+            content,
+            thinking,
+        ));
+    }
+    // The single-turn callers end with an assistant prompt; reproduce that
+    // when the caller did not already append one.
+    //
+    // EXCLUDED: k2-horizon. Its `llama_turn_text` already returns the full
+    // single-turn template INCLUDING the assistant prefix, so appending
+    // another assistant turn duplicated the user content in the prompt and
+    // the model echoed it back (caught by the CLI/HTTP sentinel).
+    if turns.len() == 1 && turns[0].0 != "assistant" && arch != "k2-horizon" {
+        // Mirrors the previous single-turn behaviour: every non-ChatML
+        // arch appends `assistant\n...` here. ChatML archs already end their
+        // turn with " + IM_END + ", which is also where generation starts.
+        if arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+            prompt_text.push_str(&llama_turn_text(
+                &arch,
+                is_minicpm5,
+                has_chatml_template,
+                "assistant",
+                "",
+                thinking,
+            ));
+        }
+    }
+    eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    let add_special = arch == "nanbeige";
+    let mut body = tokenizer.encode(
+        &prompt_text,
+        crate::core::tokenizer::EncodeOptions {
+            add_special,
+            parse_special: true,
+        },
+    );
+    if !add_special {
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
+        }
+    }
+    eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+    Ok(body)
+}
 pub fn run_inference_tokens(
     source: &dyn TensorSource,
     input_tokens: Vec<u32>,
@@ -2325,6 +2467,3 @@ pub fn build_prompt_tokens(
     eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
     Ok(body)
 }
-
-const THINK_MARK: &str = concat!("<", "|think", "|", ">");
-const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");

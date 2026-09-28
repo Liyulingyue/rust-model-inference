@@ -90,6 +90,37 @@ pub fn build_prompt(
     choice: &ToolChoice,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     let qwen35 = is_qwen35(arch)?;
+    // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
+    // them with qwen ChatML happens to work (the model copes) but diverges
+    // from the CLI and from the official Jinja template — and it is the
+    // reason lfm2moe answers carried a stray `<think>` opener. Route them to
+    // the LFM2 builder, which is also what the CLI uses.
+    if matches!(arch, "lfm2moe" | "lfm2") {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for LFM2 architectures".into());
+        }
+        let lfm_messages: Vec<crate::prompt::Lfm2Message<'_>> = messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "system" | "user" | "assistant"))
+            .map(|m| crate::prompt::Lfm2Message {
+                role: m.role.as_str(),
+                content: m.text.as_str(),
+            })
+            .collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        // LFM2's own template, matching the CLI's `build_lfm2_chat_prompt`
+        // (thinking = true, i.e. no trailing `\n\n`). Passing `false` here
+        // appends the non-thinking suffix and desynchronises HTTP from the CLI
+        // by two tokens — the CLI/HTTP sentinel caught exactly that.
+        let ids =
+            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, true)?;
+        let images: Vec<Vec<u8>> = messages
+            .iter()
+            .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+            .collect();
+        return Ok((ids, images));
+    }
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
     }
@@ -101,17 +132,36 @@ pub fn build_prompt(
         if !tools.is_empty() {
             return Err("Function tools are unsupported for llama-family architectures".into());
         }
-        // The llama trunk prompt builder takes the raw `prompt` string of
-        // the single user turn. System turns are ignored (their chat
-        // templates don't include a system turn). thinking=false for HTTP
-        // (no flag).
+        // Llama-family templates CAN express history (nanbeige ChatML,
+        // granite start_of_role, plain llama `{role}\n{content}\n`). Render
+        // the whole conversation instead of only the last user turn — the old
+        // behaviour dropped system/assistant/earlier-user turns, so the model
+        // forgot everything it had been told. k2-horizon's control tokens have
+        // no multi-turn shape and the builder rejects it explicitly.
         let last_user = messages
             .iter()
-            .rev()
-            .find(|m| m.role == "user")
+            .rposition(|m| m.role == "user")
             .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
-        let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
-        let images = last_user.images.iter().map(|i| i.bytes.clone()).collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::models::llama::trunk::build_prompt_tokens_from_turns(
+            source, &tokenizer, &turns, false,
+        )?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
         return Ok((ids, images));
     }
     validate_tools(tools, choice)?;

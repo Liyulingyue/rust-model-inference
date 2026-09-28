@@ -43,11 +43,12 @@ pub mod defaults {
     pub const PREFILL_BATCH_SIZE: usize = 64;
     /// Same as `CliOptions::DEFAULT_MAX_CONTEXT` (8192).
     pub const MAX_CONTEXT: usize = 8192;
-    /// KV format the HTTP layer has always used, and which the adapters were
-    /// verified against. Deliberately *not* the CLI default (F32): changing it
-    /// would shift HTTP numerics, which is outside the unification's
-    /// byte-compatibility guarantee.
-    pub const KV_FORMAT: KvFormat = KvFormat::F16;
+    /// Same as `CliOptions::default()` — F32. Previously frozen at F16 to
+    /// preserve legacy HTTP numerics, but the CLI/HTTP sentinel proved that
+    /// choice was itself the divergence: the CLI runs F32 by default, so HTTP
+    /// answered differently for the same prompt. Matching the CLI default is
+    /// the whole point of these constants.
+    pub const KV_FORMAT: KvFormat = KvFormat::F32;
     /// 0 means "let the pool decide", matching `resolve_thread_count(0, _)`.
     pub const THREADS: usize = 0;
 }
@@ -296,6 +297,9 @@ impl TextRuntime for LlamaTextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,
@@ -705,6 +709,9 @@ impl TextRuntime for Qwen35TextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,
@@ -732,7 +739,10 @@ impl Lfm2MoeTextRuntime {
         let session = crate::models::lfm2moe::Lfm2MoeSession::from_source(
             source.as_ref(),
             options.threads,
-            KvFormat::F16,
+            // Honor the caller's KV format, like every other adapter. Hard-
+            // coding F16 here diverged from the CLI (which defaults to F32)
+            // and the CLI/HTTP sentinel caught the resulting logit drift.
+            options.kv_format,
             options.max_context,
         )?;
         // SAFETY: source outlives the runtime (see LlamaTextRuntime::new).
@@ -826,6 +836,9 @@ impl TextRuntime for Lfm2MoeTextRuntime {
             text.push_str(&tail);
             let _ = sink.push_text(&tail);
         }
+        // A reasoning opener that never closed cannot be stripped after the
+        // fact (the sink already streamed it), so this only matters for
+        // callers that read `GeneratedText::text`.
         Ok(GeneratedText {
             text,
             token_ids,
@@ -921,7 +934,17 @@ mod tests {
         assert_eq!(options.threads, defaults::THREADS);
         assert_eq!(options.max_context, defaults::MAX_CONTEXT);
         assert_eq!(options.prefill_batch_size, defaults::PREFILL_BATCH_SIZE);
-        assert!(matches!(options.kv_format, crate::app::cli::KvFormat::F16));
+        // F32, matching `CliOptions::default()` so HTTP and CLI agree.
+        assert!(matches!(options.kv_format, crate::app::cli::KvFormat::F32));
+        // The default must equal the CLI's own resolution, not merely the
+        // module constant — otherwise the two front-ends drift again.
+        let cli = crate::app::cli::CliOptions::default();
+        assert_eq!(options.kv_format, cli.kv_format);
+        assert_eq!(options.max_context, cli.effective_max_context());
+        assert_eq!(
+            options.prefill_batch_size,
+            cli.effective_prefill_batch_size().unwrap()
+        );
     }
 
     struct StubSource;

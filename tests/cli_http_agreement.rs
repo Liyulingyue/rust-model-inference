@@ -142,37 +142,28 @@ fn http_text(
             .with_mmproj(mmp());
     let mut runtime = build_text_runtime(&arch, options)
         .unwrap_or_else(|e| panic!("no runtime for arch {arch}: {e}"));
-    // Both front-ends must start from identical prompt ids. For llama-family
-    // archs that means the trunk's own prompt builder (the one `tools.rs`
-    // routes to); otherwise the qwen ChatML builder the server uses.
-    let ids = if matches!(
-        arch.as_str(),
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite"
-    ) {
-        // llama-family: the trunk's own prompt builder (what tools.rs routes to).
-        rust_model_inference::models::llama::trunk::build_prompt_tokens(loader, PROMPT, false)
-            .expect("llama-family prompt build")
-    } else if arch == "lfm2moe" {
-        // lfm2moe: the trunk uses the LFM2 template, not ChatML.
-        rust_model_inference::prompt::build_lfm2_chat_prompt(
-            &tokenizer,
-            &[rust_model_inference::prompt::Lfm2Message {
-                role: "user",
-                content: prompt,
-            }],
-        )
-        .expect("lfm2 prompt build")
-    } else {
-        rust_model_inference::prompt::build_qwen_chat_prompt(
-            &tokenizer,
-            &[rust_model_inference::prompt::QwenMessage {
-                role: "user",
-                content: prompt,
-            }],
-            false,
-        )
-        .expect("qwen prompt build")
-    };
+    // The prompt must come from `tools::build_prompt` — the exact function
+    // the server routes `/v1/chat/completions` through. Re-deriving the ids
+    // here from a per-arch builder would silently test a different prompt
+    // than production: that is exactly how the lfm2moe divergence went
+    // unnoticed (the sentinel built LFM2 ids while the server built ChatML).
+    let source: &'static dyn rust_model_inference::core::tensor::TensorSource =
+        &*Box::leak(Box::new(LeakedLoader(loader)));
+    let (ids, _images) = rust_model_inference::app::server::api::tools::build_prompt(
+        source,
+        &tokenizer,
+        &arch,
+        &[rust_model_inference::app::server::api::protocol::Message {
+            role: "user".into(),
+            text: prompt.to_string(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        }],
+        &[],
+        &rust_model_inference::app::server::api::protocol::ToolChoice::Auto,
+    )
+    .expect("prompt build");
     let request = GenerationRequest {
         token_ids: ids,
         max_new_tokens: MAX_TOKENS,

@@ -1,4 +1,4 @@
-mod api;
+pub mod api;
 mod rerank;
 use std::sync::{Arc, Mutex};
 
