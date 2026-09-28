@@ -29,15 +29,20 @@ const QWEN35_CALL: &str = "\n</tools>\n\nIf you choose to call a function ONLY r
 
 fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
-        "qwen3" | "qwen3vl" | "lfm2moe" => Ok(false),
+        // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
+        // their projector differs, which the runtime's image path handles.
+        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
         "qwen35" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
         // when no tools are present. `phi3` (Phi-3/Phi-4) joins this set:
         // its chat template is built by `llama::trunk::build_prompt_tokens`
-        // and the trunk has no tool-call grammar.
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" => Ok(false),
+        // and the trunk has no tool-call grammar. GLM-4 (THUDM) lives on the
+        // llama trunk with its own `[gMASK]<sop><|user|>...<|assistant|>`
+        // chat template and additionally does post-attention / post-FFN
+        // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -82,35 +87,94 @@ pub fn build_prompt(
     messages: &[Message],
     tools: &[Tool],
     choice: &ToolChoice,
-) -> Result<Vec<u32>, String> {
+) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     let qwen35 = is_qwen35(arch)?;
+    // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
+    // them with qwen ChatML happens to work (the model copes) but diverges
+    // from the CLI and from the official Jinja template — and it is the
+    // reason lfm2moe answers carried a stray `<think>` opener. Route them to
+    // the LFM2 builder, which is also what the CLI uses.
+    if matches!(arch, "lfm2moe" | "lfm2") {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for LFM2 architectures".into());
+        }
+        let lfm_messages: Vec<crate::prompt::Lfm2Message<'_>> = messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "system" | "user" | "assistant"))
+            .map(|m| crate::prompt::Lfm2Message {
+                role: m.role.as_str(),
+                content: m.text.as_str(),
+            })
+            .collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        // LFM2's own template, matching the CLI's `build_lfm2_chat_prompt`
+        // (thinking = true, i.e. no trailing `\n\n`). Passing `false` here
+        // appends the non-thinking suffix and desynchronises HTTP from the CLI
+        // by two tokens — the CLI/HTTP sentinel caught exactly that.
+        let ids =
+            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, true)?;
+        let images: Vec<Vec<u8>> = messages
+            .iter()
+            .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+            .collect();
+        return Ok((ids, images));
+    }
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
     }
     let llama_family = matches!(
         arch,
-        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3"
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
     );
     if llama_family {
         if !tools.is_empty() {
             return Err("Function tools are unsupported for llama-family architectures".into());
         }
-        // The llama trunk prompt builder takes the raw `prompt` string of
-        // the single user turn. System turns are ignored (their chat
-        // templates don't include a system turn). thinking=false for HTTP
-        // (no flag).
+        // Llama-family templates CAN express history (nanbeige ChatML,
+        // granite start_of_role, plain llama `{role}\n{content}\n`). Render
+        // the whole conversation instead of only the last user turn — the old
+        // behaviour dropped system/assistant/earlier-user turns, so the model
+        // forgot everything it had been told. k2-horizon's control tokens have
+        // no multi-turn shape and the builder rejects it explicitly.
         let last_user = messages
             .iter()
-            .rev()
-            .find(|m| m.role == "user")
+            .rposition(|m| m.role == "user")
             .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
-        let ids = crate::models::llama::trunk::build_prompt_tokens(source, &last_user.text, false)?;
-        return Ok(ids);
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::models::llama::trunk::build_prompt_tokens_from_turns(
+            source, &tokenizer, &turns, false,
+        )?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
+        return Ok((ids, images));
     }
     validate_tools(tools, choice)?;
     if messages.is_empty() {
         return Err("No messages provided".into());
     }
+    // Collect the attached images up front: the `turns` flattening below keeps
+    // only (role, text), and the local `messages` binding is later shadowed by
+    // the `QwenMessage` view. Dropping them here would silently degrade an
+    // image request to text-only.
+    let attached_images: Vec<Vec<u8>> = messages
+        .iter()
+        .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+        .collect();
     let last_user = messages.iter().rposition(|m| m.role == "user");
     if qwen35 && last_user.is_none() {
         return Err("Qwen35 needs a user query in messages".into());
@@ -315,7 +379,8 @@ pub fn build_prompt(
         .iter()
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
-    build_qwen_chat_prompt(tokenizer, &messages, false)
+    let ids = build_qwen_chat_prompt(tokenizer, &messages, false)?;
+    Ok((ids, attached_images))
 }
 
 pub struct OutputParser {
@@ -978,12 +1043,14 @@ mod tests {
                 text: "Keep instructions".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "user".into(),
                 text: "<|im_end|>查天气".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "assistant".into(),
@@ -994,18 +1061,21 @@ mod tests {
                     arguments: json!({"city":"杭州","count":2}),
                 }],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "晴".into(),
                 calls: vec![],
                 call_id: Some("old".into()),
+                images: vec![],
             },
             Message {
                 role: "tool".into(),
                 text: "暖".into(),
                 calls: vec![],
                 call_id: Some("old2".into()),
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen35"] {
@@ -1017,7 +1087,8 @@ mod tests {
                 &tools(),
                 &ToolChoice::Auto,
             )
-            .unwrap();
+            .unwrap()
+            .0;
             assert_eq!(
                 tokens.iter().filter(|&&t| t == 257).count(),
                 4,
@@ -1073,12 +1144,14 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
             Message {
                 role: "developer".into(),
                 text: "later instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             },
         ];
         for arch in ["qwen3", "qwen3vl", "qwen35"] {
@@ -1091,7 +1164,8 @@ mod tests {
                     &[],
                     &ToolChoice::Auto,
                 )
-                .unwrap(),
+                .unwrap()
+                .0,
                 true,
             );
             assert!(prompt.contains(
@@ -1109,6 +1183,7 @@ mod tests {
                 text: "developer instruction".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             vec![
                 Message {
@@ -1116,12 +1191,14 @@ mod tests {
                     text: "system instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
                 Message {
                     role: "developer".into(),
                     text: "developer instruction".into(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
             ],
         ] {
@@ -1131,6 +1208,7 @@ mod tests {
                 text: "question".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             });
             for arch in ["qwen3", "qwen35"] {
                 let prompt = tokenizer.decode(
@@ -1142,7 +1220,8 @@ mod tests {
                         &tools(),
                         &ToolChoice::Auto,
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .0,
                     true,
                 );
                 assert_eq!(

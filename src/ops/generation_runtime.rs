@@ -15,6 +15,10 @@ pub struct GenerationRequest {
     pub token_ids: Vec<u32>,
     pub max_new_tokens: usize,
     pub sampling: SamplingParams,
+    /// Decoded image bytes (PNG/JPEG/...) attached to the prompt turn. Empty
+    /// for text-only. Adapters that have no vision path must ignore them, and
+    /// the caller should reject earlier when the arch cannot take images.
+    pub images: Vec<Vec<u8>>,
 }
 
 impl GenerationRequest {
@@ -23,6 +27,7 @@ impl GenerationRequest {
             token_ids,
             max_new_tokens,
             sampling: SamplingParams::default(),
+            images: Vec::new(),
         }
     }
 }

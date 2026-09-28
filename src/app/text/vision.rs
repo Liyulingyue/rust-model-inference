@@ -15,6 +15,18 @@ pub(crate) fn encode_qwen35_image(
     image_path: &Path,
     n_threads_arg: usize,
 ) -> Result<(VisionGrid, Vec<f32>), String> {
+    let image = crate::app::media::decode_image(image_path)?;
+    encode_qwen35_image_dynamic(mmproj_source, &image, n_threads_arg)
+}
+
+/// Encode an already-decoded image. Split out of [`encode_qwen35_image`] so
+/// callers that hold bytes (the HTTP image-content blocks: base64 / data URI /
+/// in-memory uploads) do not have to round-trip through a temp file.
+pub(crate) fn encode_qwen35_image_dynamic(
+    mmproj_source: &dyn TensorSource,
+    image: &image::DynamicImage,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>), String> {
     let start = Instant::now();
     let mut encoder = VisionEncoder::from_source(mmproj_source)
         .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
@@ -27,9 +39,6 @@ pub(crate) fn encode_qwen35_image(
         encoder.config.patch_size,
         encoder.config.spatial_merge_size
     );
-    let load_start = Instant::now();
-    let image = decode_image(image_path)?;
-    let load_time = load_start.elapsed();
     let original_w =
         usize::try_from(image.width()).map_err(|_| "Original image width does not fit usize")?;
     let original_h =
@@ -85,10 +94,8 @@ pub(crate) fn encode_qwen35_image(
     }
     let total = start.elapsed();
     eprintln!(
-        "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
+        "[pipeline-timing] image_total={:.3}s  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
         total.as_secs_f64(),
-        load_time.as_secs_f64(),
-        load_time.as_secs_f64() / total.as_secs_f64() * 100.0,
         preprocess_time.as_secs_f64(),
         preprocess_time.as_secs_f64() / total.as_secs_f64() * 100.0,
         encode_time.as_secs_f64(),
@@ -277,4 +284,113 @@ pub(super) fn validate_single_qwen_media(
         );
     }
     Ok(())
+}
+
+/// Encoded image for the qwen3vl (`Qwen3VlMerger`) projector family.
+///
+/// The Qwen3-VL projector emits not only the projected embeddings but also
+/// per-layer *deepstack* features that must be injected at specific decoder
+/// layers, so both are returned. `grid_shapes` feeds the media positions.
+pub struct Qwen3VlImage {
+    /// Projected embeddings, `rows * n_embd` floats.
+    pub media: Vec<f32>,
+    /// Per-layer deepstack features (empty when the projector has none).
+    pub deepstack_layers: Vec<Vec<f32>>,
+    /// `(grid_h, grid_w)` per encoded frame pair.
+    pub grid_shapes: Vec<(usize, usize)>,
+}
+
+impl Qwen3VlImage {
+    /// Number of placeholder tokens this image occupies.
+    pub fn rows(&self, n_embd: usize) -> usize {
+        if n_embd == 0 {
+            0
+        } else {
+            self.media.len() / n_embd
+        }
+    }
+}
+
+/// Encode an already-decoded image for the qwen3vl projector.
+///
+/// Split out of `app::text::multimodal::run_qwen3_family_multimodal` so the
+/// HTTP layer can feed in-memory bytes (base64 / uploads) through the same
+/// code path. A single image is encoded as the `(0, 0)` frame pair, exactly
+/// like the CLI's non-video path.
+pub(crate) fn encode_qwen3vl_image_dynamic(
+    mmproj_source: &dyn TensorSource,
+    image: &image::DynamicImage,
+    n_threads_arg: usize,
+) -> Result<Qwen3VlImage, String> {
+    use crate::app::media::{normalize_resized_image, validate_mmproj_capabilities, MediaKind};
+    use crate::models::qwen3::vision::{
+        qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
+        VisionScratchpad as VisionScratchpad3vl,
+    };
+
+    // Must be a Qwen3-VL projector (not the Qwen2.5-Omni one).
+    if !matches!(
+        validate_mmproj_capabilities("qwen3vl", mmproj_source, MediaKind::Image)?,
+        crate::app::media::ProjectorFamily::Qwen3VlMerger
+    ) {
+        return Err("mmproj is not a Qwen3-VL (merger) projector".into());
+    }
+
+    let mut encoder = VisionEncoder3vl::from_source(mmproj_source)
+        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    encoder.precompute();
+    let original_w =
+        usize::try_from(image.width()).map_err(|_| "image width does not fit usize")?;
+    let original_h =
+        usize::try_from(image.height()).map_err(|_| "image height does not fit usize")?;
+    let grid = qwen3vl_smart_resize(original_w, original_h, &encoder.config)?;
+    let mean = encoder.config.image_mean.clone();
+    let std = encoder.config.image_std.clone();
+    let normalized =
+        normalize_resized_image(image, grid.image_width(), grid.image_height(), &mean, &std)?;
+
+    let mut scratch = VisionScratchpad3vl::new(&encoder.config);
+    // A single image is the (0, 0) pair — the same frame twice, matching the
+    // CLI's `pairs = vec![(0, 0)]` for non-video input.
+    encoder.encode_pair(
+        &normalized,
+        &normalized,
+        grid.image_width(),
+        grid.image_height(),
+        &mut scratch,
+    )?;
+
+    let mut media = scratch.projected.clone();
+    let n_embd = encoder.config.n_embd;
+    let rows = if n_embd == 0 { 0 } else { media.len() / n_embd };
+    let deepstack_layers = encoder
+        .config
+        .has_deepstack_layers
+        .iter()
+        .filter(|enabled| **enabled)
+        .count();
+    let mut deepstack_layers_out: Vec<Vec<f32>> = Vec::new();
+    if deepstack_layers > 0 {
+        if scratch.deepstack.len() % deepstack_layers != 0 {
+            return Err("Vision deepstack output is not layer aligned".into());
+        }
+        deepstack_layers_out.resize_with(deepstack_layers, Vec::new);
+        let per_layer = scratch.deepstack.len() / deepstack_layers;
+        for (layer, output) in deepstack_layers_out.iter_mut().enumerate() {
+            output
+                .extend_from_slice(&scratch.deepstack[layer * per_layer..(layer + 1) * per_layer]);
+        }
+    }
+    // The projected width must match the LLM's embedding width; the caller
+    // checks that, but a zero-width projector is always wrong.
+    if rows == 0 {
+        return Err("Vision encoder produced zero image tokens".into());
+    }
+    media.truncate(rows * n_embd);
+    let _ = n_threads_arg; // encode_pair is single-threaded; pool not needed
+    Ok(Qwen3VlImage {
+        media,
+        deepstack_layers: deepstack_layers_out,
+        grid_shapes: vec![(grid.grid_h, grid.grid_w)],
+    })
 }

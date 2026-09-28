@@ -1,5 +1,9 @@
+#[cfg(test)]
+mod fixtures;
+pub mod image_input;
 pub mod protocol;
 mod stop;
+mod think;
 pub mod tools;
 
 use protocol::{Message, Request};
@@ -161,7 +165,12 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jev/grouped", post(jev_grouped))
         .route("/v1/jev/image", post(jev_image_score))
         .route("/v1/jev/image_grouped", post(jev_image_grouped))
-        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
+        // 32 MB, not 4 MB: an image-bearing request carries base64, which
+        // inflates the payload by ~33%, so a 4 MB limit rejected a ~3 MB PNG
+        // with 413 before the handler ever saw it. Matches the ceiling the
+        // audio transcription route already uses (64 MB) within the same
+        // order of magnitude.
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
 }
 
 async fn chat(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
@@ -297,7 +306,14 @@ fn resolve(
     Ok(())
 }
 
-async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, String)> {
+/// What `prompt()` produces: the tokenized prompt plus any images attached to
+/// the (last) user turn.
+struct PromptResult {
+    ids: Vec<u32>,
+    images: Vec<Vec<u8>>,
+}
+
+async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u16, String)> {
     let Backend::Text(text) = state.model.as_ref() else {
         return Err((400, "Server is not running a text model".into()));
     };
@@ -325,10 +341,11 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
                     text: instructions.clone(),
                     calls: vec![],
                     call_id: None,
+                    images: vec![],
                 },
             );
         }
-        let ids = tools::build_prompt(
+        let (ids, images) = tools::build_prompt(
             &*source,
             &tokenizer,
             &arch,
@@ -351,7 +368,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<Vec<u32>, (u16, S
                 ),
             ));
         }
-        Ok(ids)
+        Ok(PromptResult { ids, images })
     })
     .await
     .map_err(|e| (500, format!("Prompt worker failed: {e}")))?
@@ -400,6 +417,7 @@ fn store_response(
             text: String::new(),
             calls: vec![],
             call_id: None,
+            images: vec![],
         };
         if let Some(output) = value["output"].as_array() {
             for item in output {
@@ -500,8 +518,8 @@ async fn handle(
             )
         }
     };
-    let ids = match prompt(&state, &request).await {
-        Ok(ids) => ids,
+    let PromptResult { ids, images } = match prompt(&state, &request).await {
+        Ok(prompt) => prompt,
         Err((status, e)) => return error(protocol, status, e),
     };
     let prefix = match protocol {
@@ -526,6 +544,7 @@ async fn handle(
                 &state,
                 &request,
                 &ids,
+                &images,
                 |delta| send(&tx, encoder.delta(&delta)),
                 || tx.is_closed(),
             );
@@ -581,6 +600,7 @@ async fn handle(
             &state,
             &request,
             &ids,
+            &images,
             |_| true,
             || cancelled.load(Ordering::Relaxed),
         )?;
@@ -616,7 +636,7 @@ async fn count_tokens(
         return error(Protocol::Anthropic, status, e);
     }
     match prompt(&state, &request).await {
-        Ok(ids) => Json(serde_json::json!({"input_tokens":ids.len()})).into_response(),
+        Ok(prompt) => Json(serde_json::json!({"input_tokens":prompt.ids.len()})).into_response(),
         Err((status, e)) => error(Protocol::Anthropic, status, e),
     }
 }
@@ -652,10 +672,12 @@ async fn delete_response(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate(
     state: &AppState,
     request: &Request,
     ids: &[u32],
+    images: &[Vec<u8>],
     mut emit: impl FnMut(Delta) -> bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
@@ -667,6 +689,9 @@ fn generate(
     }
     let mut parser = tools::OutputParser::new(&text.arch, &request.tools, &request.choice);
     let mut stop = stop::StopFilter::new(request.stop.clone());
+    // Strip a leading reasoning block first: a stop sequence inside the block
+    // must not cut generation short, and the parser should never see it.
+    let mut think = think::ThinkFilter::new();
     let mut callback_error = None;
     let mut stopped = false;
     let mut on_token = |chunk: &str| -> bool {
@@ -674,7 +699,7 @@ fn generate(
             stopped = true;
             return false;
         }
-        let output = stop.push(chunk);
+        let output = stop.push(&think.push(chunk));
         match parser.push(&output) {
             Ok(deltas) => {
                 for delta in deltas {
@@ -723,6 +748,7 @@ fn generate(
             repetition_penalty: 1.0,
             ..SamplingParams::default()
         },
+        images: images.to_vec(),
     };
     let generation = runtime.generate(&generation_request, &mut sink)?;
     let completion_tokens = generation.token_ids.len();
@@ -731,6 +757,11 @@ fn generate(
     }
     if cancelled() {
         return Err("Client disconnected".into());
+    }
+    for delta in parser.push(&stop.push(&think.finish()))? {
+        if !emit(delta) {
+            return Err("Client disconnected".into());
+        }
     }
     for delta in parser.push(&stop.finish())? {
         if !emit(delta) {
@@ -772,6 +803,7 @@ mod tests {
             text: "hello".into(),
             calls: vec![],
             call_id: None,
+            images: vec![],
         }
     }
     #[test]
@@ -820,12 +852,14 @@ mod tests {
                 },
             ],
             call_id: None,
+            images: vec![],
         };
         let result = |id: &str, text: &str| Message {
             role: "tool".into(),
             text: text.into(),
             calls: vec![],
             call_id: Some(id.into()),
+            images: vec![],
         };
         let mut messages = vec![
             message(),
@@ -848,12 +882,14 @@ mod tests {
                 arguments: serde_json::json!({}),
             }],
             call_id: None,
+            images: vec![],
         };
         let result = |id: &str| Message {
             role: "tool".into(),
             text: "ok".into(),
             calls: vec![],
             call_id: Some(id.into()),
+            images: vec![],
         };
         assert!(
             check_history(&[message(), call("a"), call("b"), result("a"), result("b")]).is_ok()
@@ -928,6 +964,7 @@ mod http_tests {
                 text: "x".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             tools: vec![protocol::Tool {
                 name: "f".into(),
@@ -964,6 +1001,7 @@ mod http_tests {
                 text: "x".into(),
                 calls: vec![],
                 call_id: None,
+                images: vec![],
             }],
             tools: vec![],
             choice: protocol::ToolChoice::None,

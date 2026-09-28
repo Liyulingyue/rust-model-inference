@@ -54,6 +54,11 @@ pub enum ChatTemplate {
     /// Microsoft Phi-4 (`<|role|>content<|end|>` per turn, `<|assistant|>` to
     /// open the assistant turn).
     Phi4,
+    /// GLM-4 (THUDM) chat template. Prefix `[gMASK]<sop>` (special
+    /// tokens in the GLM-4 vocab) followed by
+    /// `<|user|>\n{user_msg}<|assistant|>\n`.
+    /// Special tokens are emitted via `parse_special = true` on encode.
+    Glm4,
 }
 
 impl ChatTemplate {
@@ -82,6 +87,7 @@ impl ChatTemplate {
             ),
             Self::Exaone => format!("[|user|]{user_msg}[|endofturn|]\n[|assistant|]"),
             Self::Phi4 => format!("<|user|>{user_msg}<|end|><|assistant|>"),
+            Self::Glm4 => format!("[gMASK]<sop><|user|>\n{user_msg}<|assistant|>\n"),
         }
     }
 
@@ -94,6 +100,7 @@ impl ChatTemplate {
             Self::Lfm2 => "LFM2 (<|start_of_role|>)",
             Self::Exaone => "EXAONE ([|user|]/[|endofturn|])",
             Self::Phi4 => "Phi-4 (<|role|>/<|end|>)",
+            Self::Glm4 => "GLM-4 ([gMASK]<sop><|user|>...)",
         }
     }
 }
@@ -123,6 +130,11 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
 
         // LFM2 / LFM2.5 — Liquid AI's own role markers.
         "lfm2" | "lfm2moe" => ChatTemplate::Lfm2,
+
+        // GLM-4 (THUDM) — `[gMASK]<sop>` prefix, `<|user|>` / `<|assistant|>`
+        // role markers. Special tokens are emitted via
+        // `parse_special=true` on encode.
+        "glm4" => ChatTemplate::Glm4,
 
         // Hunyuan-Dense and others: no chat template baked in; fall
         // back to base-mode (caller keeps the raw prompt).
@@ -156,6 +168,7 @@ pub fn parse_preset(name: &str) -> Option<ChatTemplate> {
         "phi" | "phi3" | "phi4" => Some(ChatTemplate::Phi4),
         "gemma" | "gemma4" => Some(ChatTemplate::GemmaTurn),
         "lfm2" => Some(ChatTemplate::Lfm2),
+        "glm4" | "glm-4" => Some(ChatTemplate::Glm4),
         // "none" / "off" / "base" / "auto" all return None — the caller
         // treats these as "use default or skip wrapping" depending on
         // context.

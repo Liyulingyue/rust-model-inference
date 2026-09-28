@@ -367,15 +367,20 @@ pub fn run_inference(
                 prompt.to_string()
             }
         } else if is_minicpm5 {
-            // MiniCPM5 uses ChatML (`<|im_start|>{role}\n{content}<|im_end|>`)
+            // MiniCPM5 uses ChatML (`{role}\n{content}`)
             // per its GGUF `tokenizer.chat_template`. The template supports
             // `enable_thinking`: when false, emits `🤔\n\n\web_search\n\n`
             // (empty thinking block → direct answer). When true, emits `🤔\n`
             // (thinking mode). Default: non-thinking for fast direct answers.
             // (Ref: OpenBMB/MiniCPM GGUF chat_template, `enable_thinking` branch)
-            format!(
-                "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n🤔\n\n</think>\n\n"
-            )
+            format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
+        } else if arch == "glm4" {
+            // GLM-4 chat template: `[gMASK]<sop>` prefix, then
+            // `<|user|>\n{prompt}<|assistant|>\n`. `[gMASK]` is the
+            // BOS-like sentinel (id 151329 in GLM-4's vocab); `<sop>` is
+            // 151332. Both are special tokens, recognised as single ids
+            // because `parse_special=true`.
+            format!("[gMASK]<sop><|user|>\n{prompt}<|assistant|>\n")
         } else if is_mistral {
             format!("[INST] {prompt} [/INST]")
         } else if is_zephyr {
@@ -433,6 +438,148 @@ pub fn run_inference(
     )
 }
 
+const IM_START_MARK: &str = concat!("<", "|im_start", "|", ">");
+const IM_END_MARK: &str = concat!("<", "|im_end", "|", ">");
+const THINK_MARK: &str = concat!("<", "|think", "|", ">");
+const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");
+
+/// Render one turn's text for the llama-family templates.
+///
+/// The per-arch selection used to be inline in `build_prompt_tokens` for a
+/// single turn only. Extracted so the multi-turn entry point can reuse it
+/// verbatim; the single-turn path calls this with exactly one turn and is
+/// therefore byte-identical to its previous behaviour.
+#[allow(clippy::too_many_arguments)]
+fn llama_turn_text(
+    arch: &str,
+    is_minicpm5: bool,
+    has_chatml_template: bool,
+    role: &str,
+    content: &str,
+    thinking: bool,
+) -> String {
+    if arch == "k2-horizon" {
+        // K2-Horizon's own control tokens have no multi-turn shape;
+        // callers must reject multi-turn before we get here.
+        return format_k2_horizon_chat_prompt_with_thinking(content, thinking);
+    }
+    if arch == "granite" {
+        return format!("<|start_of_role|>{role}<|end_of_role|>{content}<|end_of_text|>\n");
+    }
+    if arch == "nanbeige" {
+        if has_chatml_template {
+            return format!("{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n");
+        }
+        return format!("{role}\n{content}\n");
+    }
+    if is_minicpm5 {
+        // MiniCPM5 ChatML; thinking=false emits an empty reasoning block.
+        if thinking {
+            return format!("{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n");
+        }
+        return format!(
+            "{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n{IM_START_MARK}assistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n"
+        );
+    }
+    format!("user\n{content}\nassistant\n{THINK_MARK}\n")
+}
+
+/// True when `arch`'s template can express more than one turn.
+fn llama_supports_multiturn(arch: &str, is_minicpm5: bool) -> bool {
+    if arch == "k2-horizon" {
+        return false;
+    }
+    if is_minicpm5 {
+        return true;
+    }
+    // nanbeige (ChatML template) and granite (start_of_role) do.
+    // Plain llama / exaone fall back to the `user\n...assistant\n` shape,
+    // which llama.cpp renders as repeated `{role}\n{content}\n` blocks, so
+    // multi-turn is expressible there too — as repeated turns plus a final
+    // assistant prompt, which is what llama.cpp does.
+    matches!(arch, "nanbeige" | "granite" | "llama" | "exaone")
+}
+
+/// Build the prompt token vector for a llama-family arch from message turns.
+///
+/// `turns` are the caller's messages in order (system / user / assistant).
+/// This is what the HTTP layer uses; the CLI keeps calling
+/// [`build_prompt_tokens`], which is a one-turn specialisation of this and
+/// produces byte-identical output.
+pub fn build_prompt_tokens_from_turns(
+    source: &dyn TensorSource,
+    tokenizer: &crate::core::tokenizer::BPETokenizer,
+    turns: &[(&str, &str)],
+    thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    let is_minicpm5 = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("minicpm"))
+        .unwrap_or(false);
+    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5) {
+        return Err(format!(
+            "multi-turn chat is unsupported for architecture {arch:?}; only a single user turn is rendered"
+        ));
+    }
+    let has_chatml_template = source
+        .metadata("tokenizer.chat_template")
+        .and_then(|v| v.to_string_val())
+        .is_some_and(|t| t.contains(" + IM_START + "));
+    let mut prompt_text = String::new();
+    for (role, content) in turns {
+        prompt_text.push_str(&llama_turn_text(
+            &arch,
+            is_minicpm5,
+            has_chatml_template,
+            role,
+            content,
+            thinking,
+        ));
+    }
+    // The single-turn callers end with an assistant prompt; reproduce that
+    // when the caller did not already append one.
+    //
+    // EXCLUDED: k2-horizon. Its `llama_turn_text` already returns the full
+    // single-turn template INCLUDING the assistant prefix, so appending
+    // another assistant turn duplicated the user content in the prompt and
+    // the model echoed it back (caught by the CLI/HTTP sentinel).
+    if turns.len() == 1 && turns[0].0 != "assistant" && arch != "k2-horizon" {
+        // Mirrors the previous single-turn behaviour: every non-ChatML
+        // arch appends `assistant\n...` here. ChatML archs already end their
+        // turn with " + IM_END + ", which is also where generation starts.
+        if arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+            prompt_text.push_str(&llama_turn_text(
+                &arch,
+                is_minicpm5,
+                has_chatml_template,
+                "assistant",
+                "",
+                thinking,
+            ));
+        }
+    }
+    eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    let add_special = arch == "nanbeige";
+    let mut body = tokenizer.encode(
+        &prompt_text,
+        crate::core::tokenizer::EncodeOptions {
+            add_special,
+            parse_special: true,
+        },
+    );
+    if !add_special {
+        if let Some(bos) = tokenizer.bos_id() {
+            body.insert(0, bos);
+        }
+    }
+    eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
+    Ok(body)
+}
 pub fn run_inference_tokens(
     source: &dyn TensorSource,
     input_tokens: Vec<u32>,
@@ -665,6 +812,7 @@ pub fn run_inference_tokens(
             let score_stride = scratch.score_stride;
             let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
             let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+            let ffn_fused_ptr = scratch.ffn_fused.as_mut_ptr();
             let q8_buf_ptr = scratch.q8_buf.as_mut_ptr();
             let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
             let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -683,7 +831,8 @@ pub fn run_inference_tokens(
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
 
             let t0 = Instant::now();
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
@@ -748,6 +897,18 @@ pub fn run_inference_tokens(
                 let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
                 let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
                 let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
+
+                // GLM-4 ships separate `attn_q/k/v.bias` tensors
+                // (plain llama does not). Add them in-place.
+                if let Some(bq) = lw.bq.as_deref() {
+                    vec_add_into(bq, q);
+                }
+                if let Some(bk) = lw.bk.as_deref() {
+                    vec_add_into(bk, k_new);
+                }
+                if let Some(bv) = lw.bv.as_deref() {
+                    vec_add_into(bv, v_new);
+                }
 
                 dbg_tensor(step, "q_proj", layer, q);
                 dbg_tensor(step, "k_proj", layer, k_new);
@@ -896,7 +1057,8 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "attn_out", layer, attn_out);
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
             let t0 = Instant::now();
             quantize_q8_0_into(
                 attn_out,
@@ -932,6 +1094,13 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "attn_proj", layer, attn_proj);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+            // GLM-4 (`glm4` arch) applies an RMSNorm on the attention
+            // output *before* the residual add. Standard llama skips it.
+            if let Some(attn_post_norm) = lw.attn_post_norm.as_deref() {
+                normed.copy_from_slice(attn_proj);
+                rms_norm_grouped(normed, attn_post_norm, attn_proj, norm_groups, eps);
+                dbg_tensor(step, "post_attn_norm", layer, attn_proj);
+            }
             if residual_scale != 0.0 {
                 vec_mad_f32(x, attn_proj, residual_scale);
             } else {
@@ -1016,43 +1185,95 @@ pub fn run_inference_tokens(
                 let q8k = unsafe { std::slice::from_raw_parts(q8k, n_embd / 256) };
                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-                lw.w_gate.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    up_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-                lw.w_up.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    gate_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-
-                if crate::ops::gpu_matmul_active() {
-                    // Matmul ran as one fenced GPU dispatch owned by thread 0;
-                    // per-thread row slices would race with it.
-                    if ith == 0 {
-                        silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                let ffn_fused_buf =
+                    unsafe { std::slice::from_raw_parts_mut(ffn_fused_ptr, 2 * n_ff) };
+                // GLM-4 ships a single fused `ffn_up.weight` of shape
+                // `[n_embd, 2*n_ff]`; first half is gate, second is up.
+                // Plain llama uses two distinct matmuls. We dispatch
+                // on `arch` to keep llama fused rows byte-stable.
+                if arch == "glm4" {
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        ffn_fused_buf,
+                        n_embd,
+                        2 * n_ff,
+                        ith,
+                        nth,
+                    );
+                    // Apply SwiGLU on the fused output: up = silu(gate)*up.
+                    // The matmul partitions by `2*n_ff` rows; silu's
+                    // gate slice is the first half and up slice is the
+                    // second half, so each thread silus its own slice.
+                    // For the gpu path, only thread 0 runs to avoid
+                    // the multi-thread fence. After silu, copy the up
+                    // half into `gate_buf` so the downstream w_down
+                    // matmul (which always reads from `gate_buf`) sees
+                    // the post-silu activation without an extra branch.
+                    if crate::ops::gpu_matmul_active() {
+                        if ith == 0 {
+                            // Disjoint slices of `ffn_fused_buf` — safe
+                            // because the halves don't alias. Split at
+                            // `n_ff` to satisfy the borrow checker.
+                            let (gate_part, up_part) = ffn_fused_buf.split_at_mut(n_ff);
+                            silu_mul_approx_inplace(gate_part, &mut up_part[..n_ff]);
+                            gate_buf[..n_ff].copy_from_slice(&up_part[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        let (gate_part, up_part) = ffn_fused_buf.split_at_mut(n_ff);
+                        silu_mul_approx_inplace(
+                            &gate_part[r_start..r_end],
+                            &mut up_part[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_part[r_start..r_end]);
                     }
                 } else {
-                    // Must match the matmul kernel's ceil row partition exactly: a floor
-                    // split races with the kernel when n_ff % nth != 0 (silu would
-                    // read rows the matmul hasn't written yet).
-                    let per_thread = (n_ff + nth - 1) / nth;
-                    let r_start = ith * per_thread;
-                    let r_end = (r_start + per_thread).min(n_ff);
-                    silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+
+                    if crate::ops::gpu_matmul_active() {
+                        // Matmul ran as one fenced GPU dispatch owned by thread 0;
+                        // per-thread row slices would race with it.
+                        if ith == 0 {
+                            silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                        }
+                    } else {
+                        // Must match the matmul kernel's ceil row partition exactly: a floor
+                        // split races with the kernel when n_ff % nth != 0 (silu would
+                        // read rows the matmul hasn't written yet).
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &up_buf[r_start..r_end],
+                            &mut gate_buf[r_start..r_end],
+                        );
+                    }
                 }
             });
 
@@ -1071,19 +1292,19 @@ pub fn run_inference_tokens(
                 let scale_buf =
                     unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
                 let q8k_buf =
-                    unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+                    unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
                 quantize_q8_0_into(
                     gate_buf,
                     n_ff,
                     &mut q8_buf[..n_ff],
                     &mut scale_buf[..n_ff / 32],
                 );
-                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
+                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff.div_ceil(256)]);
             }
 
             let q8 = q8_buf[..n_ff].as_ptr();
             let sc = scale_buf[..n_ff / 32].as_ptr();
-            let q8k = q8k_buf[..n_ff / 256].as_ptr();
+            let q8k = q8k_buf[..n_ff.div_ceil(256)].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
                 let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
                 let q8 = unsafe { std::slice::from_raw_parts(q8, n_ff) };
@@ -1122,6 +1343,12 @@ pub fn run_inference_tokens(
             dbg_tensor(step, "down_buf", layer, down_buf);
             dbg_full(step, "down_buf", layer, down_buf, n_embd);
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
+            // GLM-4 also RMSNorm-s the FFN output before residual add.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                normed.copy_from_slice(down_buf);
+                rms_norm_grouped(normed, ffn_post_norm, down_buf, norm_groups, eps);
+                dbg_tensor(step, "post_mlp_norm", layer, down_buf);
+            }
             if residual_scale != 0.0 {
                 vec_mad_f32(x, down_buf, residual_scale);
             } else {
@@ -1513,6 +1740,7 @@ pub fn run_forward_logits_llama_inner(
             let score_stride = scratch.score_stride;
             let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
             let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+            let ffn_fused_ptr = scratch.ffn_fused.as_mut_ptr();
             let q8_buf_ptr = scratch.q8_buf.as_mut_ptr();
             let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
             let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -1531,7 +1759,8 @@ pub fn run_forward_logits_llama_inner(
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
 
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             quantize_q8_0_into(
@@ -1819,19 +2048,19 @@ pub fn run_forward_logits_llama_inner(
                 let scale_buf =
                     unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
                 let q8k_buf =
-                    unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+                    unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, (max_n_in + 255) / 256) };
                 quantize_q8_0_into(
                     gate_buf,
                     n_ff,
                     &mut q8_buf[..n_ff],
                     &mut scale_buf[..n_ff / 32],
                 );
-                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff / 256]);
+                crate::ops::quantize_row_q8_k_into(gate_buf, &mut q8k_buf[..n_ff.div_ceil(256)]);
             }
 
             let q8 = q8_buf[..n_ff].as_ptr();
             let sc = scale_buf[..n_ff / 32].as_ptr();
-            let q8k = q8k_buf[..n_ff / 256].as_ptr();
+            let q8k = q8k_buf[..n_ff.div_ceil(256)].as_ptr();
             pool.compute(move |ith: usize, nth: usize| {
                 let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
                 let q8 = unsafe { std::slice::from_raw_parts(q8, n_ff) };
@@ -2359,6 +2588,13 @@ pub fn build_prompt_tokens(
         // inline template exactly so HTTP `/v1/chat/completions` produces the
         // same prompt bytes as the CLI.
         format!("<|user|>{prompt}<|end|><|assistant|>")
+    } else if arch == "glm4" {
+        // GLM-4 chat template: `[gMASK]<sop>` prefix, then
+        // `<|user|>\n{prompt}<|assistant|>\n`. `[gMASK]` is the
+        // BOS-like sentinel (id 151329 in GLM-4's vocab); `<sop>` is
+        // 151332. Both are special tokens, recognised as single ids
+        // because `parse_special=true`.
+        format!("[gMASK]<sop><|user|>\n{prompt}<|assistant|>\n")
     } else {
         format!("user\n{prompt}\nassistant\n<think>\n")
     };
@@ -2382,6 +2618,3 @@ pub fn build_prompt_tokens(
     eprintln!("[RUST_TOKENS] n={} ids={:?}", body.len(), body);
     Ok(body)
 }
-
-const THINK_MARK: &str = concat!("<", "|think", "|", ">");
-const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");

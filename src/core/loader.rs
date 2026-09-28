@@ -410,6 +410,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "nemotron_h"
             | "falcon-h1"
             | "phi3"
+            | "glm4"
             | "gemma-embedding"
             | "bert"
             | "jina-bert-v2"

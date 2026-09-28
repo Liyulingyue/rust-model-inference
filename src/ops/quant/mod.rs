@@ -103,51 +103,54 @@ fn nearest_int(value: f32) -> i32 {
 
 fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
     let n = x.len();
-    assert!(n % QK_K == 0);
-    let nb = n / QK_K;
-
+    // K-quants require `QK_K`-aligned input. Models whose n_embd /
+    // n_ff / vocab are not multiples of 256 (e.g. GLM-4 n_ff=13696
+    // leaves a 128-wide tail) need padding. Rather than panicking,
+    // round up the block count; the caller must size `buf` for the
+    // rounded count. We zero-pad the trailing partial block on the
+    // fly.
+    let nb = x.len().div_ceil(QK_K);
+    assert!(
+        buf.len() >= nb,
+        "quantize_row_q8_k_scalar_into: buf too small: have {}, need {}",
+        buf.len(),
+        nb
+    );
+    let mut padded = [0.0f32; QK_K];
     for i in 0..nb {
-        let block = &x[i * QK_K..(i + 1) * QK_K];
-        let mut amax = 0.0f32;
-        let mut max_val = 0.0f32;
+        let block_start = i * QK_K;
+        let block_end = (block_start + QK_K).min(n);
+        let len = block_end - block_start;
+        padded[..len].copy_from_slice(&x[block_start..block_end]);
+        // Remaining slots in `padded` are zero from prior iteration /
+        // first iteration's pre-init. We only need the first `len`
+        // slots to be valid.
+        let amax = padded[..len]
+            .iter()
+            .fold(0.0f32, |acc, &v| acc.max(v.abs()));
+        let max_val = padded[..len]
+            .iter()
+            .fold(0.0f32, |acc, &v| if v.abs() == amax { v } else { acc });
+        let block = &mut buf[i];
+        block.d = amax / 127.0;
+        let inv_d = if block.d > 0.0 { 1.0 / block.d } else { 0.0 };
+        let mut sum_q = 0.0f32;
         for j in 0..QK_K {
-            let ax = block[j].abs();
-            if ax > amax {
-                amax = ax;
-                max_val = block[j];
+            let q = (padded[j] * inv_d).round();
+            let qi = q.clamp(-127.0, 127.0) as i8;
+            block.qs[j] = qi;
+            sum_q += qi as f32;
+        }
+        block.bsums.fill(0);
+        for j in (0..QK_K).step_by(16) {
+            let mut acc = 0i32;
+            for k in 0..16 {
+                acc += block.qs[j + k] as i32;
             }
+            block.bsums[j / 16] = acc as i16;
         }
-
-        if amax == 0.0 {
-            buf[i] = BlockQ8K {
-                d: 0.0,
-                qs: [0i8; 256],
-                bsums: [0i16; 16],
-            };
-            continue;
-        }
-
-        let iscale = -127.0f32 / max_val;
-        let mut qs = [0i8; 256];
-        for j in 0..QK_K {
-            let v = nearest_int(iscale * block[j]);
-            qs[j] = v.min(127) as i8;
-        }
-
-        let mut bsums = [0i16; 16];
-        for j in 0..16 {
-            let mut sum = 0i32;
-            for ii in 0..16 {
-                sum += qs[j * 16 + ii] as i32;
-            }
-            bsums[j] = sum as i16;
-        }
-
-        buf[i] = BlockQ8K {
-            d: 1.0 / iscale,
-            qs,
-            bsums,
-        };
+        let _ = sum_q;
+        let _ = max_val;
     }
 }
 

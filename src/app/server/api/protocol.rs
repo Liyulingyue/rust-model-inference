@@ -13,6 +13,8 @@ pub struct Message {
     pub text: String,
     pub calls: Vec<ToolCall>,
     pub call_id: Option<String>,
+    /// Decoded image bytes attached to this turn (empty for text-only).
+    pub images: Vec<crate::app::server::api::image_input::ImageRef>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tool {
@@ -404,12 +406,37 @@ fn validate_options(body: &Value, protocol: Protocol) -> Result<(), String> {
     Ok(())
 }
 
-fn text_content(content: &Value, nullable: bool) -> Result<String, String> {
+use crate::app::server::api::image_input::{decode_image_source, ImageRef};
+
+/// Gate for remote (`http(s)://`) image URLs. Currently always `false`:
+/// fetching remote URLs from an inference server is an SSRF surface, so it
+/// becomes an opt-in `--allow-remote-images` flag in a follow-up commit.
+/// Gate for remote (`http(s)://`) image URLs. Read from the process-global set
+/// by `--allow-remote-images` at startup; defaults to off.
+fn allow_remote_images() -> bool {
+    crate::app::server::api::image_input::allow_remote()
+}
+
+/// Split a message `content` value into its text and its images.
+///
+/// Accepts the image shapes the three supported protocols actually send:
+/// * OpenAI Chat Completions: `{"type":"image_url","image_url":{"url":...}}`
+/// * OpenAI Responses: `{"type":"input_image","image_url":"..."}`
+/// * Anthropic Messages: `{"type":"image","source":{"type":"base64","data":...}}`
+///
+/// `allow_remote` is the server's `--allow-remote-images` flag (currently
+/// always false; the flag is plumbed in a follow-up).
+fn content_parts(
+    content: &Value,
+    nullable: bool,
+    allow_remote: bool,
+) -> Result<(String, Vec<ImageRef>), String> {
     match content {
-        Value::Null if nullable => Ok(String::new()),
-        Value::String(s) => Ok(s.clone()),
+        Value::Null if nullable => Ok((String::new(), Vec::new())),
+        Value::String(s) => Ok((s.clone(), Vec::new())),
         Value::Array(blocks) => {
             let mut text = String::new();
+            let mut images = Vec::new();
             for b in blocks {
                 match b.get("type").and_then(Value::as_str) {
                     Some("text" | "input_text" | "output_text") => {
@@ -422,17 +449,71 @@ fn text_content(content: &Value, nullable: bool) -> Result<String, String> {
                                 .ok_or("text block requires a string text")?,
                         );
                     }
+                    // OpenAI Chat Completions image: {"image_url": {"url": ...}}
+                    Some("image_url") => {
+                        let url = b
+                            .get("image_url")
+                            .and_then(|v| v.get("url").or(Some(v)))
+                            .and_then(Value::as_str)
+                            .ok_or("image_url block requires a string url")?;
+                        images.push(decode_image_source(url, allow_remote)?);
+                    }
+                    // OpenAI Responses image: {"input_image", "image_url": "..."}
+                    Some("input_image") => {
+                        let url = b
+                            .get("image_url")
+                            .and_then(|v| v.as_str().or_else(|| v.get("url")?.as_str()))
+                            .ok_or("input_image block requires a string image_url")?;
+                        images.push(decode_image_source(url, allow_remote)?);
+                    }
+                    // Anthropic Messages image: {"source": {"type": "base64", "data": ...}}
+                    Some("image") => {
+                        let source = b
+                            .get("source")
+                            .ok_or("image block requires a source object")?;
+                        match source.get("type").and_then(Value::as_str) {
+                            Some("base64") => {
+                                let data = source
+                                    .get("data")
+                                    .and_then(Value::as_str)
+                                    .ok_or("image source requires base64 data")?;
+                                images.push(decode_image_source(data, allow_remote)?);
+                            }
+                            Some("url") => {
+                                let url = source
+                                    .get("url")
+                                    .and_then(Value::as_str)
+                                    .ok_or("image source requires a url")?;
+                                images.push(decode_image_source(url, allow_remote)?);
+                            }
+                            other => {
+                                return Err(format!(
+                                    "unsupported image source type {other:?}; only base64 and url"
+                                ))
+                            }
+                        }
+                    }
                     other => {
                         return Err(format!(
-                            "unsupported content block {other:?}; only text is supported"
+                            "unsupported content block {other:?}; only text and image are supported"
                         ))
                     }
                 }
             }
-            Ok(text)
+            Ok((text, images))
         }
-        _ => Err("content must be a string or an array of text blocks".into()),
+        _ => Err("content must be a string or an array of content blocks".into()),
     }
+}
+
+/// Text-only view of `content`, for call sites that cannot carry images
+/// (system turns, tool results, the Anthropic top-level `system`).
+fn text_content(content: &Value, nullable: bool) -> Result<String, String> {
+    let (text, images) = content_parts(content, nullable, false)?;
+    if !images.is_empty() {
+        return Err("images are not allowed in this message position".into());
+    }
+    Ok(text)
 }
 fn message(role: &str, text: String) -> Message {
     Message {
@@ -440,6 +521,18 @@ fn message(role: &str, text: String) -> Message {
         text,
         calls: vec![],
         call_id: None,
+        images: vec![],
+    }
+}
+
+/// Same as [`message`] but carrying images (user turns only).
+fn message_with_images(role: &str, text: String, images: Vec<ImageRef>) -> Message {
+    Message {
+        role: role.into(),
+        text,
+        calls: vec![],
+        call_id: None,
+        images,
     }
 }
 fn json_arguments(value: &Value) -> Result<Value, String> {
@@ -469,10 +562,17 @@ fn chat_messages(body: &Value) -> Result<Vec<Message>, String> {
             }
         }
         let nullable = role == "assistant";
-        let mut item = message(
-            &role,
-            text_content(m.get("content").unwrap_or(&Value::Null), nullable)?,
-        );
+        let (text, images) = content_parts(
+            m.get("content").unwrap_or(&Value::Null),
+            nullable,
+            allow_remote_images(),
+        )?;
+        if !images.is_empty() && role != "user" {
+            return Err(format!(
+                "images are only supported on user turns, not {role}"
+            ));
+        }
+        let mut item = message_with_images(&role, text, images);
         if let Some(calls) = m.get("tool_calls").filter(|v| !v.is_null()) {
             if role != "assistant" {
                 return Err("tool_calls require an assistant message".into());
@@ -514,7 +614,13 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
         }
         let content = m.get("content").ok_or("message requires content")?;
         if !content.is_array() {
-            result.push(message(&role, text_content(content, false)?));
+            let (text, images) = content_parts(content, false, allow_remote_images())?;
+            if !images.is_empty() && role != "user" {
+                return Err(format!(
+                    "images are only supported on user turns, not {role}"
+                ));
+            }
+            result.push(message_with_images(&role, text, images));
             continue;
         }
         let mut item = message(&role, String::new());
@@ -533,6 +639,30 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
                         block.get("input").ok_or("tool_use requires input")?,
                     )?,
                 }),
+                Some("image") if role == "user" => {
+                    // Anthropic's image block: {"source": {"type": "base64", "data": ...}}
+                    // or {"source": {"type": "url", "url": ...}}.
+                    let source = block
+                        .get("source")
+                        .ok_or("image block requires a source object")?;
+                    let raw = match source.get("type").and_then(Value::as_str) {
+                        Some("base64") => source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .ok_or("image source requires base64 data")?,
+                        Some("url") => source
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .ok_or("image source requires a url")?,
+                        other => {
+                            return Err(format!(
+                                "unsupported image source type {other:?}; only base64 and url"
+                            ))
+                        }
+                    };
+                    item.images
+                        .push(decode_image_source(raw, allow_remote_images())?);
+                }
                 Some("tool_result") if role == "user" => {
                     if !item.text.is_empty() || !item.calls.is_empty() {
                         result.push(item);
@@ -552,7 +682,12 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
                 other => return Err(format!("unsupported Anthropic content block {other:?}")),
             }
         }
-        if !item.text.is_empty() || !item.calls.is_empty() || content.as_array().unwrap().is_empty()
+        // Push unless this turn carried nothing at all (an empty block array
+        // yields no turn). An image-only turn must survive this check.
+        if !item.text.is_empty()
+            || !item.calls.is_empty()
+            || !item.images.is_empty()
+            || content.as_array().unwrap().is_empty()
         {
             result.push(item);
         }
@@ -573,8 +708,9 @@ fn response_messages(body: &Value) -> Result<Vec<Message>, String> {
             "message"=>{
                 let role=required_string(item,"role")?;
                 if !matches!(role.as_str(),"user"|"assistant"|"system"|"developer"){return Err(format!("unsupported Responses message role {role}"));}
-                let text=text_content(item.get("content").ok_or("message requires content")?,false)?;
-                if role=="assistant"&&result.last().is_some_and(|m|m.role=="assistant"&&m.call_id.is_none()) {result.last_mut().unwrap().text.push_str(&text);} else {result.push(message(&role,text));}
+                let (text,images)=content_parts(item.get("content").ok_or("message requires content")?,false,allow_remote_images())?;
+                if !images.is_empty() && role!="user" {return Err(format!("images are only supported on user turns, not {role}"));}
+                if role=="assistant"&&result.last().is_some_and(|m|m.role=="assistant"&&m.call_id.is_none()) {result.last_mut().unwrap().text.push_str(&text);} else {result.push(message_with_images(&role,text,images));}
             }
             "function_call"=>{
                 let call=ToolCall{id:required_string(item,"call_id")?,name:required_string(item,"name")?,arguments:json_arguments(item.get("arguments").ok_or("function_call requires arguments")?)?};
@@ -1117,6 +1253,7 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::server::api::fixtures::{synthetic_png, synthetic_png_b64 as apple_png_b64};
     fn generation() -> Generation {
         Generation {
             text: "Let me check.".into(),
@@ -1507,5 +1644,110 @@ mod tests {
         assert!(Protocol::Responses
             .parse(&json!({"input":"Hi","max_tokens":1}))
             .is_err());
+    }
+
+    #[test]
+    fn chat_image_url_block_is_parsed_into_image_bytes() {
+        // OpenAI Chat Completions shape: {"image_url": {"url": "data:..."}}
+        let b64 = apple_png_b64();
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"what is this?"},
+            {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{b64}")}},
+        ]}]});
+        let request = Protocol::Chat.parse(&body).unwrap();
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].text, "what is this?");
+        assert_eq!(request.messages[0].images.len(), 1);
+        assert_eq!(
+            request.messages[0].images[0].bytes.len(),
+            synthetic_png().len()
+        );
+        // And it decodes as the real 401x287 image.
+        assert_eq!(
+            crate::app::server::api::image_input::decode_image_bytes(
+                &request.messages[0].images[0].bytes
+            )
+            .unwrap()
+            .width(),
+            401
+        );
+    }
+
+    #[test]
+    fn anthropic_image_source_base64_is_parsed() {
+        // Anthropic Messages shape: {"source": {"type": "base64", "data": ...}} — RAW base64.
+        let b64 = apple_png_b64();
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":b64}},
+        ]}]});
+        let request = Protocol::Anthropic.parse(&body).unwrap();
+        assert_eq!(request.messages[0].images.len(), 1);
+        assert_eq!(
+            request.messages[0].images[0].bytes.len(),
+            synthetic_png().len()
+        );
+    }
+
+    #[test]
+    fn responses_input_image_block_is_parsed() {
+        // OpenAI Responses shape: {"input_image", "image_url": "data:..."}
+        let b64 = apple_png_b64();
+        let body = json!({"input":[
+            {"type":"message","role":"user","content":[
+                {"type":"input_image","image_url":format!("data:image/png;base64,{b64}")},
+            ]},
+        ]});
+        let request = Protocol::Responses.parse(&body).unwrap();
+        assert_eq!(request.messages[0].images.len(), 1);
+    }
+
+    #[test]
+    fn remote_image_url_is_rejected_with_enable_hint() {
+        for protocol in [Protocol::Chat, Protocol::Anthropic, Protocol::Responses] {
+            let body = match protocol {
+                Protocol::Chat => json!({"messages":[{"role":"user","content":[
+                    {"type":"image_url","image_url":{"url":"https://example.com/cat.png"}},
+                ]}]}),
+                Protocol::Anthropic => json!({"messages":[{"role":"user","content":[
+                    {"type":"image","source":{"type":"url","url":"https://example.com/cat.png"}},
+                ]}]}),
+                Protocol::Responses => json!({"input":[
+                    {"type":"message","role":"user","content":[
+                        {"type":"input_image","image_url":"https://example.com/cat.png"},
+                    ]},
+                ]}),
+            };
+            let error = protocol.parse(&body).unwrap_err();
+            assert!(
+                error.contains("--allow-remote-images"),
+                "{protocol:?} must reject remote URLs with the enable hint, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn images_on_non_user_turns_are_rejected() {
+        let b64 = apple_png_b64();
+        let body = json!({"messages":[
+            {"role":"user","content":"hi"},
+            {"role":"assistant","content":[
+                {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{b64}")}},
+            ]},
+        ]});
+        let error = Protocol::Chat.parse(&body).unwrap_err();
+        assert!(error.contains("only supported on user turns"), "{error}");
+    }
+
+    #[test]
+    fn images_on_system_turns_are_rejected() {
+        let b64 = apple_png_b64();
+        let body = json!({"messages":[
+            {"role":"system","content":[
+                {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{b64}")}},
+            ]},
+            {"role":"user","content":"hi"},
+        ]});
+        let error = Protocol::Chat.parse(&body).unwrap_err();
+        assert!(error.contains("only supported on user turns"), "{error}");
     }
 }

@@ -145,6 +145,8 @@ impl<'model> Qwen3Session<'model> {
             kv_state,
             scratch: ExecutionScratchpad {
                 x: vec![0.0; config.n_embd],
+                x_after_attn: vec![0.0; config.n_embd],
+                x_after_mlp: vec![0.0; config.n_embd],
                 normed: vec![0.0; config.n_embd],
                 q: vec![0.0; n_embd_q],
                 k_new: vec![0.0; kv_stride],
@@ -154,6 +156,7 @@ impl<'model> Qwen3Session<'model> {
                 down_buf: vec![0.0; config.n_embd],
                 gate_buf: vec![0.0; config.n_ff],
                 up_buf: vec![0.0; config.n_ff],
+                ffn_fused: vec![0.0; 2 * config.n_ff],
                 logits: vec![0.0; config.vocab],
                 q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
