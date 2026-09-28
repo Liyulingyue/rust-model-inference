@@ -938,24 +938,34 @@ impl<'a> LlamaSession<'a> {
             // right rope schedule (neox vs grouped-norm).
             let _ = &mut arch_buf;
             let arch_for_rope: &str = arch.as_str();
-            apply_rope(
-                arch_for_rope,
-                q,
-                pos,
-                n_embd_head_k,
-                freq_base,
-                cfg.rope_dim,
-                cfg.attn_factor,
-            );
-            apply_rope(
-                arch_for_rope,
-                k_new,
-                pos,
-                n_embd_head_k,
-                freq_base,
-                cfg.rope_dim,
-                cfg.attn_factor,
-            );
+            // Apply RoPE per head. The llama CLI path passes `q[h*head_dim..(h+1)*head_dim]`
+            // so `apply_rope`'s `head_dim`/`rope_dim` limits are scoped to a single
+            // head's lane. Calling it on the whole buffer would only rotate the first
+            // `rope_dim` elements of the buffer (head 0's lanes) and skip every
+            // other head — which is what caused Phi-4's session path to diverge
+            // from the CLI path (top token was EOS instead of "2").
+            for h in 0..cfg.n_head {
+                apply_rope(
+                    arch_for_rope,
+                    &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                    pos,
+                    n_embd_head_k,
+                    freq_base,
+                    cfg.rope_dim,
+                    cfg.attn_factor,
+                );
+            }
+            for h in 0..cfg.n_head_kv {
+                apply_rope(
+                    arch_for_rope,
+                    &mut k_new[h * n_embd_head_k..(h + 1) * n_embd_head_k],
+                    pos,
+                    n_embd_head_k,
+                    freq_base,
+                    cfg.rope_dim,
+                    cfg.attn_factor,
+                );
+            }
 
             // KV cache append — same as legacy.
             let kb = layer * max_ctx * n_embd_gqa;

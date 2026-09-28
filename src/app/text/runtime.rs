@@ -181,17 +181,19 @@ pub struct LlamaTextRuntime {
 impl LlamaTextRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self, String> {
         let source = options.source.clone();
-        // TODO: switch to `from_source_with_max_rows(..., prefill_batch_size)`
-        // once the `forward_one_token` divergence with the CLI's inline loop
-        // is debugged. Right now batched prefill gives correct logits for
-        // Llama-3.2-1B but wrong logits for Phi-4-mini (session-path vs
-        // CLI-path divergence), so we keep `max_rows == 1` (legacy
-        // per-token prefill) to avoid breaking Phi-4 HTTP inference.
-        let session = LlamaSession::from_source(
+        // Use batched prefill (`max_rows = prefill_batch_size`) when the
+        // caller opts in (>= 2). Phi-4's per-head RoPE bug was fixed by
+        // iterating `apply_rope` over each head's `head_dim`-sized slice,
+        // so the session path now matches the CLI path; `max_rows == 1`
+        // stays as a safe fallback when the operator keeps the legacy
+        // single-row scratchpad.
+        let prefill_rows = options.prefill_batch_size.max(1);
+        let session = LlamaSession::from_source_with_max_rows(
             source.as_ref(),
             options.threads,
             options.kv_format,
             options.max_context,
+            prefill_rows,
         )?;
         // SAFETY: `source` is held by the runtime for its whole lifetime, so
         // borrowing session data from it for `'static` stays valid.
