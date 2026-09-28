@@ -41,6 +41,7 @@
 | Qwen3-VL                      | 0.6B / 2B  | 多模态               |                                       |              | 待核验 |
 | Qwen3.5                       | 0.8B / 2B  | 文本                 | llama.cpp @ `b96806d`                 |              | 待核验 |
 | Qwen3.8                       | 27B        | 多模态               | llama.cpp @ `b96806d`                 |              | 待核验 |
+| Edge0-35B-A3B-preview | 35B / 3B active | 文本 | Edge0 @ `fb4cd2c` | 本地原始 safetensors → 无损 Edge0 GGUF | 标量 CPU 四步 greedy 与官方文本一致；首层 embedding、RMSNorm、完整 QKV F32 逐位核验；不含视觉权重，未接入 prerouter；[范围与命令](../tools/oracle/edge0/README.md) |
 | Qwen-Drive-1.0               | 4B         | 自动驾驶多模态感知 / 规划 | 官方实现 @ `28091c1`；llama.cpp @ `b96806d` | https://modelscope.cn/models/Qwen/Qwen-Drive-1.0-4B | BF16 VLM、mmproj、SFT/RL planner 与 F32 perception 已导出；Tokenizer、规划 checkpoint 和感知 BF16 算子逐位核验；CUDA 端到端感知尚未核验；[导出、哈希与限制](../tools/oracle/qwen_drive/README.md) |
 | Qwen-Image-2.1               | 7B         | DiT 速度场前向计算     | stable-diffusion.cpp @ `2f886889` |              | 本地 Q8_0 GGUF 的 16×16 latent、128 行 context、timestep 500 CPU 前向逐位对齐；CLI 可用 `--qwen-latent-width/--qwen-latent-height` 指定尺寸；当前入口输出原始 F32 速度场，不含文本编码、采样器或 VAE 解码。 |
 | Spark-X2.5                    | 1.7B / 4B  | 文本                 | XHToken/llama.cpp                     | https://www.modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF             | √ |

@@ -143,6 +143,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
+        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
@@ -498,6 +499,7 @@ fn tiny_dense_session_model_with_embedding(
         output_norm: vec![1.0; n_embd],
         output_weight: mk_weight(vocab_size),
         layers: vec![layer],
+        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }
@@ -599,6 +601,7 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         output_norm: vec![1.0; 256],
         output_weight: q8_weight(32),
         layers: vec![layer],
+        edge0_moe: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
     }

@@ -150,7 +150,7 @@ pub fn build_text_runtime(
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
         Ok(Box::new(Qwen3TextRuntime::new(options)?))
-    } else if arch == "qwen35" {
+    } else if matches!(arch, "qwen35" | "edge0") {
         Ok(Box::new(Qwen35TextRuntime::new(options)?))
     } else if arch == "lfm2moe" {
         Ok(Box::new(Lfm2MoeTextRuntime::new(options)?))
@@ -625,6 +625,7 @@ impl Qwen35TextRuntime {
         // SAFETY: source outlives the runtime (see LlamaTextRuntime::new).
         let model: crate::models::qwen35::Qwen35Model<'static> =
             unsafe { std::mem::transmute(model) };
+        let arch = arch_of(&source);
         Ok(Self {
             model: Mutex::new(model),
             _source: source,
@@ -633,7 +634,7 @@ impl Qwen35TextRuntime {
             prefill_batch_size: options.prefill_batch_size,
             mmproj: options.mmproj.clone(),
             threads: options.threads,
-            arch: "qwen35".to_string(),
+            arch,
         })
     }
 }

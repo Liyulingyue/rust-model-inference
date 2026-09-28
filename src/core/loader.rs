@@ -397,6 +397,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "edge0"
             | "qwen3tts"
             | "llama"
             | "exaone"
@@ -535,7 +536,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "nanbeige" {
+    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"

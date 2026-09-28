@@ -12,13 +12,13 @@
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
 use super::util::{l2_norm, softplus_f32};
-use super::weights::{Qwen35LayerWeights, Qwen35Model};
+use super::weights::{Edge0MoeWeights, Qwen35LayerWeights, Qwen35Model};
 use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace,
+    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu, silu_approx_inplace,
     silu_mul_approx_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
@@ -239,6 +239,16 @@ impl<'a> super::weights::Qwen35Model<'a> {
         let trace_layer =
             |layer: usize| layer == 0 || first_dense_layer == Some(layer) || layer + 1 == n_layer;
 
+        #[cfg(feature = "parity-trace")]
+        if self.edge0_moe.is_some() {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                "edge0.embedding",
+                None,
+                &[n_tokens, n_embd],
+                &scratch.x[..n_tokens * n_embd],
+            ));
+        }
+
         for il in 0..n_layer {
             let layer = &self.layers[il];
             let is_recr = cfg.is_recurrent[il];
@@ -252,6 +262,15 @@ impl<'a> super::weights::Qwen35Model<'a> {
                     &layer.attn_norm,
                     eps,
                 );
+            }
+            #[cfg(feature = "parity-trace")]
+            if self.edge0_moe.is_some() && trace_layer(il) {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("edge0.norm-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.normed_buf[..n_tokens * n_embd],
+                ));
             }
             #[cfg(feature = "parity-trace")]
             if !is_recr && trace_layer(il) {
@@ -337,7 +356,19 @@ impl<'a> super::weights::Qwen35Model<'a> {
             let buf_ptr = scratch.buf.as_ptr();
             let buf_len = n_tokens * n_embd;
             let ffn_input = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
+            let edge0_input = self.edge0_moe.as_ref().map(|_| ffn_input.to_vec());
             self.forward_ffn_parallel(layer, ffn_input, n_tokens, scratch, pool);
+            if let Some(moe) = self.edge0_moe.as_ref().map(|layers| &layers[il]) {
+                let ffn_input = edge0_input.as_ref().unwrap();
+                for token in 0..n_tokens {
+                    let offset = token * n_embd;
+                    forward_edge0_moe_token(
+                        moe,
+                        &ffn_input[offset..offset + n_embd],
+                        &mut scratch.buf[offset..offset + n_embd],
+                    )?;
+                }
+            }
             t_ffn += t0.elapsed().as_secs_f64();
 
             for t in 0..n_tokens {
@@ -752,6 +783,15 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 pool,
             )
             .expect("validated Qwen3.5 recurrent projection shape");
+        #[cfg(feature = "parity-trace")]
+        if self.edge0_moe.is_some() && trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("edge0.qkv-{il}"),
+                Some(il),
+                &[n_tokens, conv_dim],
+                &scratch.qkv_buf[..n_tokens * conv_dim],
+            ));
+        }
         for t in 0..n_tokens {
             let n_beta = num_v_heads;
             sigmoid_inplace(&mut scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]);
@@ -790,7 +830,13 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 }
                 scratch.qkv_buf[qkv_off + c] = conv_val;
             }
-            silu_approx_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
+            if self.edge0_moe.is_some() {
+                for value in &mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim] {
+                    *value = silu(*value);
+                }
+            } else {
+                silu_approx_inplace(&mut scratch.qkv_buf[qkv_off..qkv_off + conv_dim]);
+            }
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -870,7 +916,11 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 let gate_val = scratch.alpha_buf[t * num_v_heads + v_h];
                 let beta_val = scratch.beta_buf[t * num_v_heads + v_h];
                 let state_off = v_h * head_v_dim * head_v_dim;
-                let k_h = v_h % num_k_heads;
+                let k_h = if self.edge0_moe.is_some() {
+                    v_h / (num_v_heads / num_k_heads)
+                } else {
+                    v_h % num_k_heads
+                };
                 let decay = gate_val.exp();
                 crate::ops::ssm_state_decay(
                     &mut ssm_state[state_off..state_off + head_v_dim * head_v_dim],
@@ -937,10 +987,19 @@ impl<'a> super::weights::Qwen35Model<'a> {
                 );
             }
             let z_off = t * value_dim;
-            crate::ops::silu_mul_approx_inplace(
-                &scratch.z_buf[z_off..z_off + value_dim],
-                &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim],
-            );
+            if self.edge0_moe.is_some() {
+                for (gate, value) in scratch.z_buf[z_off..z_off + value_dim]
+                    .iter()
+                    .zip(&mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim])
+                {
+                    *value *= silu(*gate);
+                }
+            } else {
+                crate::ops::silu_mul_approx_inplace(
+                    &scratch.z_buf[z_off..z_off + value_dim],
+                    &mut scratch.attn_out_buf[t * value_dim..t * value_dim + value_dim],
+                );
+            }
         }
         #[cfg(feature = "parity-trace")]
         if trace_layer {
@@ -1018,10 +1077,19 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 FFN input shape");
 
-        silu_mul_approx_inplace(
-            &scratch.ffn_gate_buf[..n_tokens * n_ff],
-            &mut scratch.ffn_up_buf[..n_tokens * n_ff],
-        );
+        if self.edge0_moe.is_some() {
+            for (gate, up) in scratch.ffn_gate_buf[..n_tokens * n_ff]
+                .iter()
+                .zip(&mut scratch.ffn_up_buf[..n_tokens * n_ff])
+            {
+                *up *= silu(*gate);
+            }
+        } else {
+            silu_mul_approx_inplace(
+                &scratch.ffn_gate_buf[..n_tokens * n_ff],
+                &mut scratch.ffn_up_buf[..n_tokens * n_ff],
+            );
+        }
 
         let down_input = &scratch.ffn_up_buf[..n_tokens * n_ff];
         scratch
@@ -1044,6 +1112,54 @@ impl<'a> super::weights::Qwen35Model<'a> {
             )
             .expect("validated Qwen3.5 FFN output shape");
     }
+}
+
+fn forward_edge0_moe_token(
+    moe: &Edge0MoeWeights<'_>,
+    input: &[f32],
+    shared: &mut [f32],
+) -> Result<(), String> {
+    let logits = moe.router.matmul(input);
+    if logits.iter().any(|value| !value.is_finite()) {
+        return Err("Edge0 router produced non-finite logits".into());
+    }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exp = logits
+        .iter()
+        .map(|value| (*value - max).exp())
+        .collect::<Vec<_>>();
+    let total = exp.iter().sum::<f32>();
+    let probabilities = exp.iter().map(|value| *value / total).collect::<Vec<_>>();
+    let mut indices = (0..logits.len()).collect::<Vec<_>>();
+    indices.sort_by(|&a, &b| {
+        probabilities[b]
+            .total_cmp(&probabilities[a])
+            .then_with(|| a.cmp(&b))
+    });
+    let chosen = &indices[..moe.used];
+    let chosen_total = chosen
+        .iter()
+        .map(|&index| probabilities[index])
+        .sum::<f32>();
+    let mut routed = vec![0.0f32; shared.len()];
+    for &expert in chosen {
+        let mut gate = moe.gate[expert].matmul(input);
+        let up = moe.up[expert].matmul(input);
+        for (gate_value, up_value) in gate.iter_mut().zip(up) {
+            *gate_value = silu(*gate_value) * up_value;
+        }
+        let down = moe.down[expert].matmul(&gate);
+        let score = probabilities[expert] / chosen_total;
+        for (out, value) in routed.iter_mut().zip(down) {
+            *out += score * value;
+        }
+    }
+    let shared_gate = moe.shared_gate.matmul(input)[0];
+    let shared_scale = 1.0 / (1.0 + (-shared_gate).exp());
+    for (out, value) in shared.iter_mut().zip(routed) {
+        *out = value + shared_scale * *out;
+    }
+    Ok(())
 }
 
 /// Free-function wrapper around `Qwen35Model<'a>` + `Qwen35Session`.

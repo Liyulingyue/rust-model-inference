@@ -104,57 +104,67 @@ impl Qwen35Config {
     /// Build a `Qwen35Config` from a GGUF tensor source.
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
         let base = crate::core::loader::model_config_from_source(source)?;
+        let prefix = if source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("edge0")
+        {
+            "edge0"
+        } else {
+            "qwen35"
+        };
 
         let get_u32 = |key: &str| -> Result<u32, String> {
             source
-                .metadata(key)
+                .metadata(&format!("{prefix}.{key}"))
                 .and_then(|v| v.to_u64())
                 .map(|v| v as u32)
-                .ok_or_else(|| format!("Missing qwen35 metadata: {}", key))
+                .ok_or_else(|| format!("Missing {prefix} metadata: {key}"))
         };
 
         let key_length = source
-            .metadata("qwen35.attention.key_length")
+            .metadata(&format!("{prefix}.attention.key_length"))
             .and_then(|v| v.to_u64())
             .unwrap_or(base.n_embd_head as u64) as usize;
         let value_length = source
-            .metadata("qwen35.attention.value_length")
+            .metadata(&format!("{prefix}.attention.value_length"))
             .and_then(|v| v.to_u64())
             .unwrap_or(base.n_embd_head as u64) as usize;
 
         let rope_dimension_count = source
-            .metadata("qwen35.rope.dimension_count")
+            .metadata(&format!("{prefix}.rope.dimension_count"))
             .and_then(|v| v.to_u64())
             .unwrap_or(64) as usize;
 
-        let rope_dimension_sections = match source.metadata("qwen35.rope.dimension_sections") {
-            Some(MetaValue::Array(_, vals)) => {
-                let s: Vec<i32> = vals
-                    .iter()
-                    .filter_map(|v| v.to_u64().map(|x| x as i32))
-                    .collect();
-                [
-                    s.first().copied().unwrap_or(16),
-                    s.get(1).copied().unwrap_or(16),
-                    s.get(2).copied().unwrap_or(16),
-                    s.get(3).copied().unwrap_or(16),
-                ]
-            }
-            _ => {
-                let sec = rope_dimension_count as i32 / 4;
-                [sec, sec, sec, sec]
-            }
-        };
+        let rope_dimension_sections =
+            match source.metadata(&format!("{prefix}.rope.dimension_sections")) {
+                Some(MetaValue::Array(_, vals)) => {
+                    let s: Vec<i32> = vals
+                        .iter()
+                        .filter_map(|v| v.to_u64().map(|x| x as i32))
+                        .collect();
+                    [
+                        s.first().copied().unwrap_or(16),
+                        s.get(1).copied().unwrap_or(16),
+                        s.get(2).copied().unwrap_or(16),
+                        s.get(3).copied().unwrap_or(16),
+                    ]
+                }
+                _ => {
+                    let sec = rope_dimension_count as i32 / 4;
+                    [sec, sec, sec, sec]
+                }
+            };
 
-        let ssm_d_conv = get_u32("qwen35.ssm.conv_kernel")? as usize;
-        let ssm_d_state = get_u32("qwen35.ssm.state_size")? as usize;
-        let ssm_n_group = get_u32("qwen35.ssm.group_count")? as usize;
-        let ssm_dt_rank = get_u32("qwen35.ssm.time_step_rank")? as usize;
-        let ssm_d_inner = get_u32("qwen35.ssm.inner_size")? as usize;
+        let ssm_d_conv = get_u32("ssm.conv_kernel")? as usize;
+        let ssm_d_state = get_u32("ssm.state_size")? as usize;
+        let ssm_n_group = get_u32("ssm.group_count")? as usize;
+        let ssm_dt_rank = get_u32("ssm.time_step_rank")? as usize;
+        let ssm_d_inner = get_u32("ssm.inner_size")? as usize;
         let full_attention_interval_raw =
-            full_attention_interval(source.metadata("qwen35.full_attention_interval"))?;
+            full_attention_interval(source.metadata(&format!("{prefix}.full_attention_interval")))?;
         let n_nextn = source
-            .metadata("qwen35.nextn_predict_layers")
+            .metadata(&format!("{prefix}.nextn_predict_layers"))
             .and_then(unsigned_u64)
             .unwrap_or(0) as usize;
         let n_layer_impl = base
@@ -178,6 +188,7 @@ impl Qwen35Config {
             || ssm_dt_rank == 0
             || ssm_d_inner == 0
             || ssm_d_inner % ssm_dt_rank != 0
+            || ssm_dt_rank % ssm_n_group != 0
         {
             return Err(format!(
                 "Invalid qwen35 SSM inner/rank dimensions: conv={ssm_d_conv}, state={ssm_d_state}, groups={ssm_n_group}, inner_size={ssm_d_inner}, time_step_rank={ssm_dt_rank}"
@@ -186,7 +197,7 @@ impl Qwen35Config {
         let mut is_recurrent = recurrent_layer_mask(
             base.n_layer,
             n_nextn,
-            source.metadata("qwen35.attention.recurrent_layers"),
+            source.metadata(&format!("{prefix}.attention.recurrent_layers")),
             full_attention_interval_raw,
         )?;
         is_recurrent.truncate(n_layer_impl);
