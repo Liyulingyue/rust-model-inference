@@ -66,6 +66,11 @@ impl PreparedRows {
         }
     }
 
+    /// Largest `rows` chunk the buffer can hold.
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
     pub(crate) fn prepare(
         &mut self,
         input: &[f32],

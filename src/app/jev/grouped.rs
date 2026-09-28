@@ -302,6 +302,19 @@ fn build_jev_token_ids_for_arch(
                 Ok(ids)
             }
         }
+        // Phi-3 / Phi-4 chat template is single-turn `<|user|>…<|end|><|assistant|>`
+        // with no system role. `payload` already folds the system instructions
+        // and question into the user message.
+        "phi3" => {
+            let prompt = format!("<|user|>{payload}<|end|><|assistant|>");
+            Ok(tokenizer.encode(
+                &prompt,
+                EncodeOptions {
+                    add_special: true,
+                    parse_special: true,
+                },
+            ))
+        }
         "gemma4" => {
             let prompt = format!("{system}\n\n{payload}\n\n<turn|>\n<|turn>model\n");
             let bos = tokenizer.bos_id().ok_or("Gemma4 tokenizer missing BOS")?;
@@ -514,7 +527,7 @@ pub fn run_jev_grouped_decision_data(
             prefill_batch_size,
             false,
         )?,
-        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" => {
+        "llama" | "k2-horizon" | "granite" | "nanbeige" | "qwen2_2" | "phi3" => {
             llama::run_jev_grouped_llama(
                 source.clone(),
                 context,

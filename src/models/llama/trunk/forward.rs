@@ -189,11 +189,107 @@ pub(crate) fn apply_rope(
     pos: usize,
     head_dim: usize,
     freq_base: f32,
+    rope_dim: usize,
+    attn_factor: f32,
 ) {
-    if arch == "k2-horizon" {
+    // Phi-3 / Phi-4 only apply RoPE to the first `rope_dim` of `head_dim`;
+    // the remaining lanes pass through unchanged. Mirror that by splitting
+    // the slice and only rotating the head. (`rope_dim = head_dim` for
+    // non-phi architectures.)
+    //
+    // Phi-3 / Phi-4 also multiply every RoPE output by `attn_factor`
+    // (= `rope.scaling.attn_factor` in GGUF metadata). This factor is
+    // baked into the model's weights during training and missing it
+    // shifts the qk inner products enough to break greedy decoding.
+    //
+    // `rope_dim` is also the dim used to build the cos/sin table (i.e.
+    // `theta_scale = freq_base^(-2/rope_dim)`). llama.cpp's ggml_rope_ext
+    // uses `n_dims` as the rotation count for both the slice AND the
+    // frequency table — i.e. partial RoPE uses rope_dim frequencies, not
+    // head_dim frequencies.
+    //
+    // Phi-3 / Phi-4 / Phi-2 / Phi-MoE / Gemma-2 / Gemma-3 / GPT-NeoX /
+    // Exaone / OpenELM / StableLM all use the "neox" (half-rotation) rope
+    // layout in llama.cpp: `out[i] = x[i]*cos - x[i + half]*sin`, with
+    // `half = rope_dim / 2`. The "normal" (interleaved) layout is used
+    // by llama / qwen / granite / k2-horizon.
+    let neox_layout = arch == "phi3"
+        || arch == "phi2"
+        || arch == "phimoe"
+        || arch == "gemma"
+        || arch == "gemma2"
+        || arch == "gemma3"
+        || arch == "gptneox"
+        || arch == "exaone"
+        || arch == "exaone4"
+        || arch == "openelm"
+        || arch == "stablelm";
+    let rope_dim = rope_dim.min(head_dim);
+    if rope_dim < head_dim {
+        apply_partial_rope(values, pos, rope_dim, freq_base, neox_layout);
+        apply_attn_factor(values, rope_dim, attn_factor);
+        return;
+    }
+    if neox_layout || arch == "k2-horizon" {
         rope_neox_inplace(values, pos, head_dim, freq_base);
     } else {
         rope_norm(values, pos, head_dim, freq_base);
+    }
+    apply_attn_factor(values, head_dim, attn_factor);
+}
+
+/// Apply RoPE to the first `rope_dim` of `values`. `neox_layout=true`
+/// uses the half-rotation pattern (`x[i]` paired with `x[i + half]`),
+/// which is what Phi-3 / Phi-4 / Gemma / GPT-NeoX use in llama.cpp.
+/// `neox_layout=false` uses the interleaved-pair pattern
+/// (`x[2i]` paired with `x[2i + 1]`).
+///
+/// The cos/sin table is built against `rope_dim` itself (not `head_dim`),
+/// matching llama.cpp's `n_dims` semantics.
+fn apply_partial_rope(
+    values: &mut [f32],
+    pos: usize,
+    rope_dim: usize,
+    freq_base: f32,
+    neox_layout: bool,
+) {
+    use crate::ops::rope::neox::rope_sin_cos;
+    if rope_dim < 2 {
+        return;
+    }
+    let half = rope_dim / 2;
+    let theta_scale = freq_base.powf(-2.0f32 / rope_dim as f32);
+    let mut theta = pos as f32;
+    for i in 0..half {
+        let (c, s) = rope_sin_cos(theta);
+        if neox_layout {
+            // Half-rotation: x[i] paired with x[i + half].
+            let x0 = values[i];
+            let x1 = values[i + half];
+            values[i] = x0 * c - x1 * s;
+            values[i + half] = x0 * s + x1 * c;
+        } else {
+            // Interleaved: x[2i] paired with x[2i + 1].
+            let x0 = values[2 * i];
+            let x1 = values[2 * i + 1];
+            values[2 * i] = x0 * c - x1 * s;
+            values[2 * i + 1] = x0 * s + x1 * c;
+        }
+        theta *= theta_scale;
+    }
+}
+
+/// Phi-3 / Phi-4 weight every RoPE output by `attn_factor`. We do the
+/// multiply in-place on the freshly rotated values so the change is
+/// invisible to callers that pass `attn_factor = 1.0` (the llama default).
+///
+/// Forwarded to [`crate::ops::vec_scale_f32`] which dispatches to AVX2 /
+/// NEON under the hood. Phi-4 calls this `n_layer * n_head * (prompt +
+/// generation)` times, so the per-call savings compound across the
+/// whole sequence.
+fn apply_attn_factor(values: &mut [f32], head_dim: usize, attn_factor: f32) {
+    if attn_factor != 1.0 && head_dim > 0 {
+        crate::ops::vec_scale_f32(&mut values[..head_dim], attn_factor);
     }
 }
 
@@ -254,6 +350,12 @@ pub fn run_inference(
             format!(
                 "<|start_of_role|>user<|end_of_role|>{prompt}<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"
             )
+        } else if arch == "phi3" {
+            // Phi-4 (and Phi-3) wraps each turn as
+            // `<|role|>content<|end|>`; the assistant turn opens with
+            // `<|assistant|>`. The trailing `<|end|>` from the user turn
+            // already ends the user message.
+            format!("<|user|>{prompt}<|end|><|assistant|>")
         } else if arch == "nanbeige" {
             if source
                 .metadata("tokenizer.chat_template")
@@ -532,6 +634,26 @@ pub fn run_inference_tokens(
     let n_ff = config.n_ff;
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
+    // Phi-3 / Phi-4 apply RoPE only to the first `rope.dimension_count`
+    // of `head_dim`; the rest pass through. Default to head_dim when the
+    // metadata is missing (other architectures always rope the full head).
+    let rope_dim = source
+        .metadata(&format!("{arch}.rope.dimension_count"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .filter(|v| *v > 0)
+        .unwrap_or(n_embd_head);
+    // Phi-3 / Phi-4 use partial RoPE: rotate the first `rope_dim` of the
+    // head (e.g. 96 of 128), leave the rest untouched. The cos/sin
+    // table is built against `rope_dim` itself, not the full head_dim.
+    let rope_dim = rope_dim.min(n_embd_head_k);
+    // Phi-3 / Phi-4 scale RoPE outputs by `rope.scaling.attn_factor`; the
+    // default of 1.0 means "no rescaling" (standard llama behaviour).
+    let attn_factor: f32 = source
+        .metadata(&format!("{arch}.rope.scaling.attn_factor"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
     let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     // Granite-specific scaling factors. Zero means "not used" (no-op).
@@ -722,6 +844,7 @@ pub fn run_inference_tokens(
                 &mut scale_buf[..n_embd / 32],
             );
             let q8 = q8_buf[..n_embd].as_ptr();
+
             let sc = scale_buf[..n_embd / 32].as_ptr();
             crate::ops::quantize_row_q8_k_into(normed, &mut q8k_buf[..n_embd / 256]);
             let q8k = q8k_buf[..n_embd / 256].as_ptr();
@@ -802,6 +925,8 @@ pub fn run_inference_tokens(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
+                        attn_factor,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -811,6 +936,8 @@ pub fn run_inference_tokens(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
+                        attn_factor,
                     );
                 }
                 dbg_tensor(step, "Qcur", layer, q);
@@ -1518,6 +1645,17 @@ pub fn run_forward_logits_llama_inner(
     let n_ff = config.n_ff;
     let eps = config.norm_eps;
     let freq_base = config.rope_freq_base;
+    let rope_dim = source
+        .metadata(&format!("{arch}.rope.dimension_count"))
+        .and_then(|v| v.to_u64())
+        .map(|v| v as usize)
+        .filter(|v| *v > 0)
+        .unwrap_or(n_embd_head);
+    let attn_factor: f32 = source
+        .metadata(&format!("{arch}.rope.scaling.attn_factor"))
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
     let norm_groups = normalization_groups(source, &arch, n_embd)?;
 
     let arch_prefix = &arch;
@@ -1692,6 +1830,8 @@ pub fn run_forward_logits_llama_inner(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
+                        attn_factor,
                     );
                 }
                 for h in 0..n_head_kv {
@@ -1701,6 +1841,8 @@ pub fn run_forward_logits_llama_inner(
                         pos,
                         n_embd_head_k,
                         freq_base,
+                        rope_dim,
+                        attn_factor,
                     );
                 }
 
@@ -2390,7 +2532,7 @@ mod tests {
 
         let mut actual = [1.0, 2.0, 3.0, 4.0];
         let mut expected = actual;
-        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0);
+        apply_rope("k2-horizon", &mut actual, 7, 4, 10_000_000.0, 4, 1.0);
         crate::ops::rope_neox_inplace(&mut expected, 7, 4, 10_000_000.0);
         assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
     }
@@ -2440,6 +2582,12 @@ pub fn build_prompt_tokens(
         }
     } else if is_minicpm5 {
         format!("user\n{prompt}\nassistant\n🤔\n\n</think>\n\n")
+    } else if arch == "phi3" {
+        // Phi-3 / Phi-4 single-turn chat template: `<|user|>…<|end|><|assistant|>`.
+        // No system role, no `<think>` block. Matches the CLI's `run_inference_tokens`
+        // inline template exactly so HTTP `/v1/chat/completions` produces the
+        // same prompt bytes as the CLI.
+        format!("<|user|>{prompt}<|end|><|assistant|>")
     } else if arch == "glm4" {
         // GLM-4 chat template: `[gMASK]<sop>` prefix, then
         // `<|user|>\n{prompt}<|assistant|>\n`. `[gMASK]` is the
@@ -2451,6 +2599,9 @@ pub fn build_prompt_tokens(
         format!("user\n{prompt}\nassistant\n<think>\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    // Granite/MiniCPM5/Phi-3/Phi-4 all ship `add_bos_token=false`, so
+    // `encode()` does not emit BOS via `add_special=true`. Match the CLI
+    // path (run_inference_tokens below) by always prepending BOS manually.
     let add_special = arch == "nanbeige";
     let mut body = tokenizer.encode(
         &prompt_text,

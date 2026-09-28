@@ -14,7 +14,7 @@ pub(super) fn validate_gemma4_temperature(arch: &str, temperature: f32) -> Resul
 pub(crate) fn uses_llama_trunk(arch: &str) -> bool {
     matches!(
         arch,
-        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "glm4"
+        "llama" | "exaone" | "k2-horizon" | "granite" | "nanbeige" | "phi3" | "glm4"
     )
 }
 
@@ -33,10 +33,52 @@ pub fn run_inference(
     repetition_penalty: f32,
     chat_template: Option<&str>,
 ) -> Result<(), String> {
-    let arch = source
+    // Read arch into an owned String so the borrow of `source.metadata`
+    // is released before the phi3 wrap below moves `source`.
+    let arch: String = source
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
+        .map(|s| s.to_string())
         .unwrap_or_default();
+
+    // Phi-3 / Phi-4 stores attention and FFN as fused QKV / fused
+    // gate-up tensors. Wrap the source so the llama trunk sees the
+    // standard per-projection layout (attn_q/attn_k/attn_v, ffn_gate/ffn_up).
+    let source: Arc<dyn TensorSource> = if arch == "phi3" {
+        // Pull dimensions off the source first; once those borrow
+        // lifetimes drop, we can hand a clone to Phi3Source::new.
+        let n_embd: usize = source
+            .metadata("phi3.embedding_length")
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let n_head: usize = source
+            .metadata("phi3.attention.head_count")
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(1);
+        let n_head_kv: usize = source
+            .metadata("phi3.attention.head_count_kv")
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(n_head);
+        let n_ff: usize = source
+            .metadata("phi3.feed_forward_length")
+            .and_then(|v| v.to_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let head_dim = if n_head > 0 { n_embd / n_head } else { 0 };
+        let n_embd_q = n_head * head_dim;
+        let n_embd_gqa = n_head_kv * head_dim;
+        Arc::new(crate::models::phi3::Phi3Source::new(
+            source.clone(),
+            n_embd_q,
+            n_embd_gqa,
+            n_ff,
+        ))
+    } else {
+        source
+    };
 
     if arch == "hunyuan-dense" {
         crate::app::text::run_hunyuan_inference(

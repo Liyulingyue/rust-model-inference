@@ -3,6 +3,35 @@
 //! `sum_sq_f32`（通用 reduce Σ x² → f64）和它的 AVX2/NEON 内核放在
 //! `ops/dot.rs`，与 `hsum_ps` 等横向归约工具同处。本文件只调用之。
 
+/// Layer normalization (BERT family, `ggml_norm` + affine weight/bias).
+///
+/// `y[i] = (x[i] - mean) / sqrt(var + eps) * weight[i] + bias[i]`
+/// with `mean = Σx / n` and `var = Σ(x - mean)² / n`, both accumulated in
+/// f64 to match the reduction order of the pinned ggml kernels.
+///
+/// `bias` may be empty when a tensor carries only an affine scale.
+pub fn layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output: &mut [f32]) {
+    let n = input.len().min(weight.len()).min(output.len());
+    assert_eq!(bias.len(), n, "layer_norm bias must match the row length");
+    if n == 0 {
+        return;
+    }
+    let sum: f64 = input[..n].iter().map(|&value| f64::from(value)).sum();
+    let mean = sum / n as f64;
+    let var: f64 = input[..n]
+        .iter()
+        .map(|&value| {
+            let centered = f64::from(value) - mean;
+            centered * centered
+        })
+        .sum();
+    let var = var / n as f64;
+    let scale = 1.0f32 / (var as f32 + eps).sqrt();
+    for i in 0..n {
+        output[i] = (input[i] - mean as f32) * scale * weight[i] + bias[i];
+    }
+}
+
 pub fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
     let n = input.len().min(weight.len()).min(output.len());
     let sum_sq = super::sum_sq_f32(&input[..n]);
