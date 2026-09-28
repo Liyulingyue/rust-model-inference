@@ -257,6 +257,12 @@ fn main() {
             app::QwenImage21Request {
                 latent,
                 context,
+                latent_width: options
+                    .qwen_latent_width
+                    .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_LATENT),
+                latent_height: options
+                    .qwen_latent_height
+                    .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_LATENT),
                 timestep: options
                     .qwen_timestep
                     .unwrap_or(app::QWEN_IMAGE_2_1_DEFAULT_TIMESTEP),

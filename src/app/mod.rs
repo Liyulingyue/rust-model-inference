@@ -36,7 +36,7 @@ pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;
 pub use qwen_image_2_1::{
     qwen_image_2_1_signature, read_f32_file, run_qwen_image_2_1, QwenImage21Request,
-    QWEN_IMAGE_2_1_DEFAULT_TIMESTEP,
+    QWEN_IMAGE_2_1_DEFAULT_LATENT, QWEN_IMAGE_2_1_DEFAULT_TIMESTEP,
 };
 pub use selftest::run_self_test;
 pub use text::{

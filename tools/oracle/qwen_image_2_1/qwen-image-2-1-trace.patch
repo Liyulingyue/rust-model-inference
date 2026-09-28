@@ -2,15 +2,15 @@
 +++ b/src/model/diffusion/qwen_image_2_1.hpp
 @@ -2,6 +2,8 @@
  #define __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
- 
+
  #include "model/diffusion/qwen_image.hpp"
 +
 +#include "qwen_image_2_1_trace.hpp"
- 
+
  namespace Qwen {
- 
+
 @@ -162,8 +164,11 @@
- 
+
          ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
              x = std::dynamic_pointer_cast<QwenImage21ZeroCenterRMSNorm>(blocks["text_norm"])->forward(ctx, x);
 +            ctx->capture_tensor("qwen.debug.txt_norm", x);
@@ -64,7 +64,7 @@
 +            return out;
          }
      };
- 
+
 @@ -326,9 +340,12 @@
              auto time = ggml_concat(ctx->ggml_ctx, timestep, ggml_ext_zeros_like(ctx->ggml_ctx, timestep), 0);
              // Runtime flow timesteps already use the [0, 1000] scale.
@@ -218,7 +218,7 @@
 +++ b/examples/CMakeLists.txt
 @@ -1,4 +1,5 @@
  include_directories(${CMAKE_CURRENT_SOURCE_DIR})
- 
+
  add_subdirectory(cli)
 +add_subdirectory(qwen_image_2_1_trace)
  add_subdirectory(server)
@@ -607,9 +607,9 @@
  #include "core/segment_graph_bindings.h"
  #include "core/segment_weight_pipeline.h"
 +#include "qwen_image_2_1_trace.hpp"
- 
+
  using namespace sd;
- 
+
 @@ -749,7 +750,8 @@
                        const std::vector<ggml_tensor*>& params) const {
      auto manager = residency_manager.lock();
@@ -652,7 +652,7 @@
 +++ b/src/model/diffusion/qwen_image.hpp
 @@ -86,7 +86,9 @@
              auto linear_2 = std::dynamic_pointer_cast<Linear>(blocks["linear_2"]);
- 
+
              sample = linear_1->forward(ctx, sample);
 +            ctx->capture_tensor("qwen.debug.temb_linear1", sample);
              sample = ggml_silu_inplace(ctx->ggml_ctx, sample);

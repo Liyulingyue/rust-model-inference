@@ -2,9 +2,9 @@
 //!
 //! Adapted against the pinned stable-diffusion.cpp oracle
 //! (tools/oracle/qwen_image_2_1) with per-checkpoint bit parity. The GGUF
-//! carries no metadata (kv=0): the architecture is identified by tensor
-//! names and the config is detected from tensor shapes, matching the
-//! oracle's `QwenImage21Config::detect_from_weights`.
+//! carries no metadata (kv=0): the architecture is identified by its complete
+//! tensor contract and the config is detected from tensor shapes, matching
+//! the oracle's `QwenImage21Config::detect_from_weights`.
 
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 
@@ -15,12 +15,25 @@ pub(crate) use dit::QwenImage21Dit;
 /// Prefix every tensor in the diffusion GGUF carries.
 pub(crate) const PREFIX: &str = "model.diffusion_model";
 
-/// Detects the Qwen-Image-2.1 signature from tensor names alone, mirroring
-/// the oracle's version sniffing (`model.diffusion_model.txt_in.text_norm.weight`).
+const EXPECTED_IN_CHANNELS: usize = 64;
+const EXPECTED_OUT_CHANNELS: usize = 64;
+const EXPECTED_HIDDEN_SIZE: usize = 4096;
+const EXPECTED_HEAD_DIM: usize = 128;
+const EXPECTED_INTERMEDIATE_SIZE: usize = 12288;
+const EXPECTED_NUM_LAYERS: usize = 32;
+
+/// Recognizes this no-metadata DiT family; `validate_dit` then checks the
+/// complete contract and reports a useful error for damaged GGUFs.
 pub fn matches_signature(source: &dyn TensorSource) -> bool {
     source
         .tensor_info(&format!("{PREFIX}.txt_in.text_norm.weight"))
         .is_some()
+        && source
+            .tensor_info(&format!("{PREFIX}.img_in.weight"))
+            .is_some()
+        && source
+            .tensor_info(&format!("{PREFIX}.transformer_blocks.0.attn.norm_q.weight"))
+            .is_some()
 }
 
 /// Public wrapper for the app layer; the full contract is checked by
@@ -70,46 +83,52 @@ impl QwenImage21Config {
             ));
         }
 
-        let mut num_layers = 0usize;
-        while source
-            .tensor_info(&format!(
-                "{PREFIX}.transformer_blocks.{num_layers}.attn.to_q.weight"
-            ))
-            .is_some()
-        {
-            num_layers += 1;
-        }
-        if num_layers == 0 {
-            return Err("Model declares no transformer blocks".into());
-        }
+        let dimension = |name: &str, value: u64| {
+            usize::try_from(value).map_err(|_| format!("Invalid {name} dimension: {value}"))
+        };
+        let in_channels = dimension("img_in.weight", img_in.dims[0])?;
+        let hidden_size = dimension("img_in.weight", img_in.dims[1])?;
+        let out_channels = dimension("proj_out.weight", proj_out.dims[1])?;
+        let context_dim = dimension("txt_in.in_layer.weight", txt_in.dims[0])?;
+        let head_dim = dimension("transformer_blocks.0.attn.norm_q.weight", norm_q.dims[0])?;
+        let intermediate_size = dimension(
+            "transformer_blocks.0.img_mlp.gate_up.weight",
+            gate_up.dims[1],
+        )? / 2;
 
         Ok(Self {
-            in_channels: img_in.dims[0] as usize,
-            hidden_size: img_in.dims[1] as usize,
-            out_channels: proj_out.dims[1] as usize,
-            context_dim: txt_in.dims[0] as usize,
-            head_dim: norm_q.dims[0] as usize,
-            intermediate_size: gate_up.dims[1] as usize / 2,
-            num_layers,
+            in_channels,
+            hidden_size,
+            out_channels,
+            context_dim,
+            head_dim,
+            intermediate_size,
+            num_layers: EXPECTED_NUM_LAYERS,
         })
     }
 }
 
 pub fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     let config = QwenImage21Config::detect_from_source(source)?;
-    if config.hidden_size != config.context_dim {
+    if config.in_channels != EXPECTED_IN_CHANNELS
+        || config.out_channels != EXPECTED_OUT_CHANNELS
+        || config.hidden_size != EXPECTED_HIDDEN_SIZE
+        || config.context_dim != EXPECTED_HIDDEN_SIZE
+        || config.head_dim != EXPECTED_HEAD_DIM
+        || config.intermediate_size != EXPECTED_INTERMEDIATE_SIZE
+        || config.num_layers != EXPECTED_NUM_LAYERS
+    {
         return Err(format!(
-            "Qwen-Image-2.1 requires hidden_size == context_dim, got {} and {}",
-            config.hidden_size, config.context_dim
+            "Unsupported Qwen-Image-2.1 DiT config: expected {}x{} in/out, hidden/context {}, head {}, intermediate {}, layers {}; got {:?}",
+            EXPECTED_IN_CHANNELS,
+            EXPECTED_OUT_CHANNELS,
+            EXPECTED_HIDDEN_SIZE,
+            EXPECTED_HEAD_DIM,
+            EXPECTED_INTERMEDIATE_SIZE,
+            EXPECTED_NUM_LAYERS,
+            config
         ));
     }
-    if config.hidden_size % config.head_dim != 0 {
-        return Err(format!(
-            "Qwen-Image-2.1 hidden_size {} not divisible by head_dim {}",
-            config.hidden_size, config.head_dim
-        ));
-    }
-
     let mut expected: Vec<(String, [u64; 2], GGMLType)> = Vec::new();
     let mut matrix = |name: String, dims: [u64; 2], ggml_type: GGMLType| {
         expected.push((name, dims, ggml_type));
@@ -244,10 +263,7 @@ fn require_vector(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims.first() != Some(&len)
-        || info.dims.len() > 2
-        || info.dims.iter().skip(1).any(|&dimension| dimension != 1)
-    {
+    if info.dims.as_slice() != &[len] {
         return Err(format!(
             "Invalid {name} dimensions: expected [{len}], got {:?}",
             info.dims

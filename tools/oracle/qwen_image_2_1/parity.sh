@@ -29,7 +29,7 @@ QWEN_IMAGE_2_1_ORACLE_TRACE="$oracle_trace" "$oracle_bin" \
     --diffusion-model "$dit" --threads "$threads" --latent-w 16 --latent-h 16 \
     --context-len 128 --timestep 500 > "$trace_root/oracle.log" 2>&1
 
-trace_filter='qwen.pe,qwen.time_embed,qwen.modulation,qwen.txt_in,qwen.joint,qwen.joint_final,qwen.scale,qwen.norm_out,qwen.out,qwen.output'
+trace_filter='qwen.pe,qwen.time_embed,qwen.modulation,qwen.txt_in,qwen.joint,qwen.joint_final,qwen.scale,qwen.norm_out,qwen.out,qwen.input.x,qwen.input.context,qwen.input.timesteps,qwen.output'
 for layer in {0..31}; do
     trace_filter+=",qwen.block.${layer}"
 done
@@ -40,4 +40,9 @@ RMI_PARITY_FILTER="$trace_filter" RMI_PARITY_TRACE="$rust_trace" "$rust_bin" \
 
 echo "QWEN_IMAGE_2_1_ORACLE_TRACE=$oracle_trace"
 echo "QWEN_IMAGE_2_1_RUST_TRACE=$rust_trace"
-echo "then: cargo test --profile release-fast --test qwen_image_2_1_reference -- --ignored"
+(
+    cd "$repo"
+    QWEN_IMAGE_2_1_ORACLE_TRACE="$oracle_trace" \
+        QWEN_IMAGE_2_1_RUST_TRACE="$rust_trace" \
+        cargo test --profile release-fast --test qwen_image_2_1_reference -- --ignored
+)

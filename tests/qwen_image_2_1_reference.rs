@@ -9,8 +9,8 @@
 //!   QWEN_IMAGE_2_1_RUST_TRACE=<rust.jsonl> \
 //!   cargo test --profile release-fast --test qwen_image_2_1_reference
 //!
-//! Every traced checkpoint — pe, timestep embed, modulation, txt_in, joint,
-//! all 32 blocks, final layer, velocity — must match the oracle bit for bit.
+//! Every traced checkpoint — inputs, pe, timestep embed, modulation, txt_in,
+//! joint, all 32 blocks, final layer, velocity — must match the oracle bit for bit.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,9 @@ const CHECKPOINTS: &[&str] = &[
     "qwen.scale",
     "qwen.norm_out",
     "qwen.out",
+    "qwen.input.x",
+    "qwen.input.context",
+    "qwen.input.timesteps",
     "qwen.output",
 ];
 

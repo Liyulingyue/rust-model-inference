@@ -284,17 +284,25 @@ fn malformed_dimensions_are_rejected_without_panicking() {
     assert!(validate_dit(&source)
         .unwrap_err()
         .contains("text_norm.weight"));
+
+    let mut source = minimal_source();
+    source
+        .tensors
+        .get_mut(&format!("{PREFIX}.txt_in.text_norm.weight"))
+        .unwrap()
+        .dims = vec![4096, 1];
+    assert!(validate_dit(&source)
+        .unwrap_err()
+        .contains("text_norm.weight"));
 }
 
 #[test]
-fn trailing_block_trim_matches_oracle_layer_detection() {
-    // The oracle derives the layer count from the highest block index, so a
-    // fully removed trailing block lowers num_layers instead of erroring.
+fn trailing_block_trim_is_rejected_by_the_model_contract() {
     let source = minimal_source();
     let name = format!("{PREFIX}.transformer_blocks.31.attn.to_q.weight");
     let trimmed = source.without(&name);
-    validate_dit(&trimmed).unwrap();
-    assert_eq!(config_from_source(&trimmed).unwrap().num_layers, 31);
+    let error = validate_dit(&trimmed).unwrap_err();
+    assert!(error.contains(&name), "{error}");
 }
 
 #[test]

@@ -24,10 +24,15 @@ pub fn read_f32_file(path: &Path) -> Result<Vec<f32>, String> {
             bytes.len()
         ));
     }
-    Ok(bytes
+    let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
+        .collect();
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(values)
+    } else {
+        Err(format!("{} contains NaN or infinity", resolved.display()))
+    }
 }
 
 pub fn qwen_image_2_1_signature(source: &dyn TensorSource) -> bool {
@@ -50,6 +55,8 @@ pub const QWEN_IMAGE_2_1_DEFAULT_SEED: u32 = 1_234_567;
 pub struct QwenImage21Request {
     pub latent: Option<Vec<f32>>,
     pub context: Option<Vec<f32>>,
+    pub latent_width: usize,
+    pub latent_height: usize,
     pub timestep: f32,
     pub out: std::path::PathBuf,
 }
@@ -64,9 +71,18 @@ pub fn run_qwen_image_2_1(
     let pool = Arc::new(ComputePool::new(n_threads.max(1)));
     let dit = QwenImage21Dit::load(Arc::clone(&source), pool)?;
 
-    let latent_side = QWEN_IMAGE_2_1_DEFAULT_LATENT;
-    let image_tokens = latent_side * latent_side;
+    if request.latent_width == 0 || request.latent_height == 0 {
+        return Err("Qwen-Image-2.1 latent width and height must be positive".into());
+    }
+    if !request.timestep.is_finite() {
+        return Err("Qwen-Image-2.1 timestep must be finite".into());
+    }
+    let image_tokens = request
+        .latent_width
+        .checked_mul(request.latent_height)
+        .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
     let latent_channels = config.in_channels;
+    let synthetic_input = request.latent.is_none() || request.context.is_none();
     // One generator threads latent then context, matching the oracle harness.
     let mut state = QWEN_IMAGE_2_1_DEFAULT_SEED;
     let mut next_default = |count: usize| -> Vec<f32> {
@@ -74,17 +90,22 @@ pub fn run_qwen_image_2_1(
             .map(|_| next_deterministic_value(&mut state))
             .collect()
     };
+    let expected_latent = latent_channels
+        .checked_mul(image_tokens)
+        .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
     let latent = match request.latent {
         Some(values) => values,
-        None => next_default(latent_channels * image_tokens),
+        None => next_default(expected_latent),
     };
     let context = match request.context {
         Some(values) => values,
         None => next_default(config.context_dim * QWEN_IMAGE_2_1_DEFAULT_CONTEXT),
     };
-    if latent.len() != latent_channels * image_tokens {
+    if latent.len() != expected_latent {
         return Err(format!(
-            "Qwen-Image-2.1 latent must hold {latent_channels}x{latent_side}x{latent_side} values, got {}",
+            "Qwen-Image-2.1 latent must hold {latent_channels}x{}x{} values, got {}",
+            request.latent_width,
+            request.latent_height,
             latent.len()
         ));
     }
@@ -95,16 +116,30 @@ pub fn run_qwen_image_2_1(
             context.len()
         ));
     }
+    if !latent.iter().all(|value| value.is_finite())
+        || !context.iter().all(|value| value.is_finite())
+    {
+        return Err("Qwen-Image-2.1 latent and context must contain only finite values".into());
+    }
     let context_len = context.len() / config.context_dim;
+
+    if synthetic_input {
+        eprintln!(
+            "Qwen-Image-2.1: using deterministic synthetic input for missing files; this is DiT-only and does not generate an image"
+        );
+    }
 
     let velocity = dit.forward(
         &latent,
-        latent_side,
-        latent_side,
+        request.latent_width,
+        request.latent_height,
         &context,
         context_len,
         request.timestep,
     )?;
+    if !velocity.iter().all(|value| value.is_finite()) {
+        return Err("Qwen-Image-2.1 produced NaN or infinity".into());
+    }
     write_velocity_atomically(&request.out, &velocity)?;
     println!(
         "Qwen-Image-2.1 velocity written to {} ({} values, context {context_len}, timestep {})",

@@ -506,19 +506,43 @@ impl QwenImage21Dit {
         let config = &self.config;
         let hidden = config.hidden_size;
         let heads = hidden / config.head_dim;
-        let image_tokens = width * height;
-        let seq = context_len + image_tokens;
-        if latent.len() != config.in_channels * image_tokens {
+        if width == 0 || height == 0 {
+            return Err("Qwen-Image-2.1 latent width and height must be positive".into());
+        }
+        let image_tokens = width
+            .checked_mul(height)
+            .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
+        let seq = context_len
+            .checked_add(image_tokens)
+            .ok_or("Qwen-Image-2.1 sequence length overflow")?;
+        if context_len == 0 {
+            return Err("Qwen-Image-2.1 context must not be empty".into());
+        }
+        if !timestep.is_finite()
+            || !latent.iter().all(|value| value.is_finite())
+            || !context.iter().all(|value| value.is_finite())
+        {
+            return Err("Qwen-Image-2.1 inputs must contain only finite values".into());
+        }
+        let expected_latent = config
+            .in_channels
+            .checked_mul(image_tokens)
+            .ok_or("Qwen-Image-2.1 latent dimensions overflow")?;
+        let expected_context = config
+            .context_dim
+            .checked_mul(context_len)
+            .ok_or("Qwen-Image-2.1 context dimensions overflow")?;
+        if latent.len() != expected_latent {
             return Err(format!(
                 "Invalid latent length: expected {}, got {}",
-                config.in_channels * image_tokens,
+                expected_latent,
                 latent.len()
             ));
         }
-        if context.len() != config.context_dim * context_len {
+        if context.len() != expected_context {
             return Err(format!(
                 "Invalid context length: expected {}, got {}",
-                config.context_dim * context_len,
+                expected_context,
                 context.len()
             ));
         }
@@ -526,14 +550,6 @@ impl QwenImage21Dit {
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(name, None, shape, values));
         };
-        report("qwen.input.x", &[width, height, config.in_channels], latent);
-        report(
-            "qwen.input.context",
-            &[config.context_dim, context_len],
-            context,
-        );
-        report("qwen.input.timesteps", &[1], &[timestep]);
-
         // The RoPE table depends only on dimensions and precedes the model
         // projections in the oracle trace.
         let pe = self.build_pe(width, height, context_len, seq)?;
@@ -669,6 +685,14 @@ impl QwenImage21Dit {
             &mut q8,
         )?;
         report("qwen.out", &[config.out_channels, image_rows], &out);
+        // Keep input records adjacent to the oracle's post-graph input trace.
+        report("qwen.input.x", &[width, height, config.in_channels], latent);
+        report(
+            "qwen.input.context",
+            &[config.context_dim, context_len],
+            context,
+        );
+        report("qwen.input.timesteps", &[1], &[timestep]);
 
         // --- unpatchify back to [W, H, C]. ---
         let mut output = vec![0.0f32; config.out_channels * image_tokens];
