@@ -14,10 +14,11 @@ PYTHON=/path/to/repo/.venv/bin/python
 "$PYTHON" -m tools.converter.edge0.convert_edge0 "$MODEL" --out "$MODEL/Edge0-35B-A3B-preview-lossless.gguf"
 RUSTFLAGS='-C no-vectorize-loops -C no-vectorize-slp' cargo build --profile release-fast --features parity-trace --bin rust-model-inference
 TRACE=$(mktemp /tmp/edge0-trace-XXXXXX)
-RMI_SCALAR=1 RMI_PARITY_TRACE="$TRACE" RMI_PARITY_FILTER=edge0.embedding,edge0.norm-0,edge0.qkv-0,conv_output_raw-0,q_conv_predelta-0,k_conv_predelta-0,qwen35.greedy_token_ids \
+EDGE0_TRACE_FILTER=edge0.embedding,edge0.norm-0,edge0.qkv-0,edge0.z-0,edge0.beta-0,conv_output_raw-0,q_conv_predelta-0,k_conv_predelta-0,new_state-0,final_output-0,edge0.recurrent_projection-0,edge0.moe_input-0,edge0.router-0,edge0.chosen-0,edge0.routed-0,edge0.shared_gate-0,edge0.shared-0,layer_output-0,qwen35.greedy_token_ids
+RMI_SCALAR=1 RMI_PARITY_TRACE="$TRACE" RMI_PARITY_FILTER="$EDGE0_TRACE_FILTER" \
   target/release-fast/rust-model-inference --model "$MODEL/Edge0-35B-A3B-preview-lossless.gguf" \
   --prompt Hello --threads 1 --kv-cache f32 --prefill-batch-size 1 --max-tokens 4 --temp 0
 "$PYTHON" tools/oracle/edge0/check_scalar.py "$MODEL" "$TRACE"
 ```
 
-已验证：四组文本的 token IDs 一致，`Hello` 的四步 greedy IDs 与官方 Edge0 同为 `[9419, 0, 2500, 628]`；独立 Python 标量检查器（SiLU 使用系统标量 `expf`）对第一条输入的 2048 个 embedding、2048 个首层 RMSNorm、8192 个 QKV、8192 个因果卷积及 4096 个 Q/K 归一化 F32 值逐位一致。Q/K 使用官方 Edge0 的加性 `1e-6` RMSNorm 和 head 缩放，Qwen3.5 仍保留原有 L2 计算。检查器对单 bit 改动报错。官方 MLX 使用 BF16/Metal，只用于核对 token 行为，不用于 F32 位级对齐；尚无整模型逐层、完整 logits 的独立标量位级结论。
+已验证：四组文本的 token IDs 一致，`Hello` 的四步 greedy IDs 与官方 Edge0 同为 `[9419, 0, 2500, 628]`；独立 Python 标量检查器从原始 safetensors 复算首 token 的 embedding 到完整第 0 层输出，567,585 个 F32 值及 4 个专家 ID 逐位一致。覆盖 QKV/LoRA、卷积、加性 `1e-6` Q/K RMSNorm、beta、524,288 个 recurrent 状态值、输出投影、router、4 个选中专家、共享专家及其 LoRA；所选专家为 `[129, 38, 132, 213]`。SiLU 使用系统标量 `expf`，Rust 显式走标量内核并关闭自动向量化，不调用 BLAS 等外部加速库。Qwen3.5 保留原有 L2 计算。官方 MLX 使用 BF16/Metal，只用于核对 token 行为，不用于 F32 位级对齐；其余 39 层与完整 logits 尚无独立标量位级结论。

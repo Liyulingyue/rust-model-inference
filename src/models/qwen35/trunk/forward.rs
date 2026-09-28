@@ -327,6 +327,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     eps,
                 );
             }
+            #[cfg(feature = "parity-trace")]
+            if edge0 && trace_layer(il) {
+                parity_trace::report(parity_trace::checkpoint_rows(
+                    &format!("edge0.moe_input-{il}"),
+                    Some(il),
+                    &[n_tokens, n_embd],
+                    &scratch.buf[..n_tokens * n_embd],
+                ));
+            }
 
             let t0 = std::time::Instant::now();
             let buf_ptr = scratch.buf.as_ptr();
@@ -342,6 +351,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         moe,
                         &ffn_input[offset..offset + n_embd],
                         &mut scratch.buf[offset..offset + n_embd],
+                        il,
+                        token,
                     )?;
                 }
             }
@@ -768,6 +779,12 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 &[n_tokens, conv_dim],
                 &scratch.qkv_buf[..n_tokens * conv_dim],
             ));
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("edge0.z-{il}"),
+                Some(il),
+                &[n_tokens, value_dim],
+                &scratch.z_buf[..n_tokens * value_dim],
+            ));
         }
         for t in 0..n_tokens {
             let n_beta = num_v_heads;
@@ -777,6 +794,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 scratch.alpha_buf[t * num_v_heads + v] =
                     softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
             }
+        }
+        #[cfg(feature = "parity-trace")]
+        if edge0 && trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("edge0.beta-{il}"),
+                Some(il),
+                &[n_tokens, num_v_heads],
+                &scratch.beta_buf[..n_tokens * num_v_heads],
+            ));
         }
         let t_matmul = t0.elapsed().as_secs_f64();
 
@@ -1011,6 +1037,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .prepared
             .matmul(ssm_out, output_input, &mut result, pool)
             .expect("validated Qwen3.5 recurrent output shape");
+        #[cfg(feature = "parity-trace")]
+        if edge0 && trace_layer {
+            parity_trace::report(parity_trace::checkpoint_rows(
+                &format!("edge0.recurrent_projection-{il}"),
+                Some(il),
+                &[n_tokens, n_embd],
+                &result,
+            ));
+        }
         let t_out_matmul = t0.elapsed().as_secs_f64();
         if profile {
             eprintln!(

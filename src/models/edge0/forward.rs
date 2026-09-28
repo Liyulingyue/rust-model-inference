@@ -84,8 +84,21 @@ pub(crate) fn forward_edge0_moe_token(
     moe: &Edge0MoeWeights<'_>,
     input: &[f32],
     shared: &mut [f32],
+    layer: usize,
+    token: usize,
 ) -> Result<(), String> {
     let logits = moe.router.matmul(input);
+    #[cfg(feature = "parity-trace")]
+    if layer == 0 && token == 0 {
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "edge0.router-0",
+            Some(layer),
+            &[logits.len()],
+            &logits,
+        ));
+    }
+    #[cfg(not(feature = "parity-trace"))]
+    let _ = (layer, token);
     if logits.iter().any(|value| !value.is_finite()) {
         return Err("Edge0 router produced non-finite logits".into());
     }
@@ -103,6 +116,16 @@ pub(crate) fn forward_edge0_moe_token(
             .then_with(|| a.cmp(&b))
     });
     let chosen = &indices[..moe.used];
+    #[cfg(feature = "parity-trace")]
+    if layer == 0 && token == 0 {
+        let values = chosen.iter().map(|&index| index as f32).collect::<Vec<_>>();
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "edge0.chosen-0",
+            Some(layer),
+            &[values.len()],
+            &values,
+        ));
+    }
     let chosen_total = chosen
         .iter()
         .map(|&index| probabilities[index])
@@ -122,6 +145,27 @@ pub(crate) fn forward_edge0_moe_token(
     }
     let shared_gate = moe.shared_gate.matmul(input)[0];
     let shared_scale = 1.0 / (1.0 + (-shared_gate).exp());
+    #[cfg(feature = "parity-trace")]
+    if layer == 0 && token == 0 {
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "edge0.routed-0",
+            Some(layer),
+            &[routed.len()],
+            &routed,
+        ));
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "edge0.shared-0",
+            Some(layer),
+            &[shared.len()],
+            shared,
+        ));
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "edge0.shared_gate-0",
+            Some(layer),
+            &[1],
+            &[shared_scale],
+        ));
+    }
     for (out, value) in shared.iter_mut().zip(routed) {
         *out = value + shared_scale * *out;
     }
