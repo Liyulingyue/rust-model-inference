@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-011…TODO-012…TODO-013) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-014) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -637,6 +637,78 @@ HTTP 路径**已经完整**（PR #118 + `da6bbcb` + 后续）—— 缺的是 CL
 - `src/app/cli/parse.rs` — 加 `--system` CLI flag
 - `src/main.rs` — interactive dispatch 把 `options.thinking` 透传
 - `tests/cli_history.rs`（新）— 多轮 history 一致性测试
+
+---
+
+### TODO-014: Falcon-H1 Q4_K_M 加载 panic — ✅ 已修复 (2026-09-29)
+
+#### 现象
+
+`unsloth/Falcon-H1-1.5B-Instruct-GGUF` 的 **Q4_K_M**（以及任何把 `attn_v` /
+`ffn_down` 打成 Q6_K 的量化：Q5_K_M / Q6_K / UD-* 等）在 prefill 阶段 panic：
+
+```
+thread 'main' panicked at src/ops/kernel/q6_k.rs:79
+range start index 1290240 out of range for slice of length 430080
+```
+
+`430080 = 256 rows × 1680 B` 正是 `blk.0.attn_v.weight`（dims `[2048, 256]` Q6_K）
+的真实体积，而 kernel 却按 `n_out = 1024` 切分行索引（`out_idx = 768` × 4 线程）。
+Q8_0 模型不受影响，因为 unsloth 在该量化下把所有 attn 张量都打成 Q8_0。
+
+#### 根因
+
+Falcon-H1 的 attention 是 **GQA**，三个维度的 head 数不同：
+
+| 张量 | GGUF dims | 语义 | 代码里当时的值 |
+|---|---|---|---|
+| `attn_q.weight` | [2048, **1024**] | `n_head * head_dim_k` (8×128) | 1024 ✓ |
+| `attn_k.weight` | [2048, **256**] | `n_head_kv * head_dim_k` (2×128) | 256 ✓ |
+| `attn_v.weight` | [2048, **256**] | `n_head_kv * head_dim_v` (2×128) | **1024 ✗** |
+| `attn_output.weight` | [**1024**, 2048] | `n_head * head_dim_v` (concat 后) | **256 ✗** |
+
+`forward.rs` 当时把 `n_attn_v` 定义成 `n_head * head_dim_v`（=1024，
+"concat 输出"维度），并用它同时驱动：
+
+1. V matmul 的 `n_out`（应为 256 → 越界 panic），
+2. V KV-cache / f16 cache 的行 stride（应为 256），
+3. `w_o` matmul 的 `n_in`（应为 1024）。
+
+`weights.rs::load_weight` 用的是 `n_head_kv * n_embd_head_v`（=256，正确），
+所以维度校验通过、加载不报错，直到 forward 时 kernel 才越界。
+
+#### 修复
+
+`src/models/falcon_h1/trunk/forward.rs` 把 `n_attn_v` 拆成两个名字：
+
+- `n_attn_v_kv = n_head_kv * head_dim_v` — V projection 输出、V cache、
+  `v_f16_storage` stride、`v_col` 索引；
+- `n_attn_o = n_head * head_dim_v` — `attn_out` 缓冲区、`w_o` matmul 的 `n_in`。
+
+`n_attn_q` / `n_attn_kv` 不变。`FalconH1Scratch::new` 的 `v` / `v_buf` /
+`attn_out` 分配分别改用 `n_attn_v_kv` 与 `n_attn_o`。
+
+#### 验证
+
+本地 `Falcon-H1-1.5B-Instruct-Q4_K_M.gguf`，8 线程，`--max-context 512`，greedy：
+
+| prompt | 输出 |
+|---|---|
+| `What is the capital of France? Answer with just the city name.` | `Paris` |
+| `What is 2+2? Answer with just the number.` | `4` |
+| `Name one color in the rainbow.` | `Red` |
+| `用中文回答：什么是机器学习？` | 中文 ML 解释（流畅，未截断） |
+
+速度 26–28 t/s prompt、24–25 t/s generation。lib 测试 934 passed /
+19 failed（= 之前修完 3 条 baseline 后的水平，无新增）。
+
+#### 遗留 / 后续
+
+- **未做** bitwise llama.cpp oracle 对比（Q4_K_M 精度基线）。`tests/falcon_h1_q8.rs`
+  目前只 gate 在 Q8_0 模型上；Q4_K_M 若要纳入 sentinel，需要新增
+  `RMI_FALCON_H1_Q4K_M_MODEL` env 并记录 golden。
+- Q4_K_M 的 `ffn_down` 也是 Q6_K，已随本次修复一同跑通。
+- 3B 变体同型（仅 n_embd/n_layer/n_head/n_ff/ssm_* 不同），未实测。
 
 ---
 
