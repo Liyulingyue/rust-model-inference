@@ -116,7 +116,9 @@ pub fn build_prompt(
         // straight to the answer.
         let thinking = enable_thinking.unwrap_or(true);
         let ids = crate::prompt::build_lfm2_chat_prompt_with_thinking(
-            &tokenizer, &lfm_messages, thinking,
+            &tokenizer,
+            &lfm_messages,
+            thinking,
         )?;
         let images: Vec<Vec<u8>> = messages
             .iter()

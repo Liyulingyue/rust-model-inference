@@ -958,7 +958,7 @@ mod http_tests {
     }
     #[test]
     fn response_request_metadata_is_reflected() {
-let request = Request {
+        let request = Request {
             model: Some("local".into()),
             messages: vec![Message {
                 role: "user".into(),

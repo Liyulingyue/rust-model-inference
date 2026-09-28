@@ -370,7 +370,15 @@ mod tests {
         let mut filter = ThinkFilter::new();
         let mut out = String::new();
         // ``close``, then 1 char of opener, then rest of opener + think content.
-        for chunk in [close, "\n", &open[..1], &open[1..], "think body\n", close, "answer"] {
+        for chunk in [
+            close,
+            "\n",
+            &open[..1],
+            &open[1..],
+            "think body\n",
+            close,
+            "answer",
+        ] {
             out.push_str(&filter.push(chunk));
         }
         out.push_str(&filter.finish());
