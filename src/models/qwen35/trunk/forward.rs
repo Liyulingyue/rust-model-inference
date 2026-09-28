@@ -17,7 +17,7 @@ use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::models::edge0::forward::forward_edge0_moe_token;
+use crate::models::edge0::forward::{forward_edge0_moe_token, normalize_recurrent_qk};
 use crate::models::edge0::weights::Edge0MoeWeights;
 use crate::ops::{
     dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu, silu_approx_inplace,
@@ -844,14 +844,15 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 }
             }
             for h in 0..num_k_heads {
-                l2_norm(
-                    &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim],
-                    eps,
-                );
-                l2_norm(
-                    &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim],
-                    eps,
-                );
+                let q = &mut scratch.q_buf[t * key_dim + h * head_k_dim..][..head_k_dim];
+                let k = &mut scratch.k_buf2[t * key_dim + h * head_k_dim..][..head_k_dim];
+                if edge0 {
+                    normalize_recurrent_qk(q, eps, 1.0 / head_k_dim as f32);
+                    normalize_recurrent_qk(k, eps, 1.0 / (head_k_dim as f32).sqrt());
+                } else {
+                    l2_norm(q, eps);
+                    l2_norm(k, eps);
+                }
             }
         }
         #[cfg(feature = "parity-trace")]
@@ -873,7 +874,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let tc = tc0.elapsed().as_secs_f64();
 
         let ts0 = std::time::Instant::now();
-        let q_scale = 1.0 / (head_k_dim as f32).sqrt();
+        let q_scale = if edge0 {
+            1.0
+        } else {
+            1.0 / (head_k_dim as f32).sqrt()
+        };
         let ssm_state = &mut scratch.ssm_states[il];
         for t in 0..n_tokens {
             #[cfg(feature = "parity-trace")]

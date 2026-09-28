@@ -8,6 +8,27 @@ use crate::models::qwen35::trunk::HybridTrunk;
 use crate::models::qwen35::Qwen35Scratchpad;
 use crate::ops::silu;
 
+/// Edge0's Q/K path uses RMSNorm with additive epsilon before its head scaling.
+pub(crate) fn normalize_recurrent_qk(values: &mut [f32], eps: f32, factor: f32) {
+    let sum = values
+        .iter()
+        .map(|&value| f64::from(value * value))
+        .sum::<f64>();
+    let mean = (sum / values.len() as f64) as f32;
+    let scale = 1.0f32 / (mean + eps).sqrt();
+    for value in values {
+        *value = (*value * scale) * factor;
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn recurrent_qk_norm_adds_epsilon_to_mean_square() {
+    let mut values = [0.02f32, 0.01];
+    normalize_recurrent_qk(&mut values, 1e-6, 0.5);
+    assert_eq!(values.map(f32::to_bits), [0x3f2195f4, 0x3ea195f4]);
+}
+
 impl<'a> Edge0Model<'a> {
     pub(crate) fn forward_at(
         &mut self,

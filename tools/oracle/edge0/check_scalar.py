@@ -1,10 +1,11 @@
-"""Check real Edge0 embedding, first norm, and QKV F32 bits without MLX/BLAS/SIMD.
+"""Check real Edge0 first-token recurrent inputs without MLX/BLAS/SIMD.
 
-Run after a `Hello` CLI trace with RMI_PARITY_FILTER=edge0.embedding,edge0.norm-0,edge0.qkv-0.
+Run after a `Hello` CLI trace with the RMI_PARITY_FILTER in this directory's README.
 The first prompt token is 248045 (<|im_start|>).
 """
 
 import argparse
+import ctypes
 import json
 import math
 import struct
@@ -110,6 +111,7 @@ def check(model_dir, prefix):
             total = f32(total + f32(value * f16(a, rank * 2048 + col)))
         low.append(total)
     rows = range(8192)
+    qkv_values = []
     for row in rows:
         _, _, packed = tensor(stem + ".weight", row * 1024, 1024)
         _, _, scales = tensor(stem + ".scales", row * 64, 64)
@@ -125,9 +127,47 @@ def check(model_dir, prefix):
         for rank, value in enumerate(low):
             delta = f32(delta + f32(value * f16(lora_b, rank)))
         expected = f32(total + f32(2.0 * delta))
+        qkv_values.append(expected)
         if bits(expected) != qkv[4 * row:4 * (row + 1)]:
             raise AssertionError(f"QKV F32 mismatch at row {row}")
-    print(f"matched 2048 embedding, 2048 first norm, and {len(rows)} QKV F32 words bitwise")
+
+    shape, dtype, conv_weight = tensor("language_model.model.layers.0.linear_attn.conv1d.weight")
+    if (shape, dtype) != ([8192, 4, 1], "BF16"):
+        raise ValueError("unexpected first convolution contract")
+    conv = trace(prefix, "conv_output_raw-0")
+    if len(conv) != 8192 * 4:
+        raise ValueError("unexpected first convolution trace length")
+    # At the first prompt token the causal four-tap state contains three zeros.
+    for channel, value in enumerate(qkv_values):
+        total = 0.0
+        for tap in range(4):
+            previous = value if tap == 3 else 0.0
+            total = f32(total + f32(bf16(conv_weight, channel * 4 + tap) * previous))
+        if bits(total) != conv[4 * channel:4 * (channel + 1)]:
+            raise AssertionError(f"first convolution F32 mismatch at channel {channel}")
+
+    expf = ctypes.CDLL(None).expf
+    expf.argtypes = [ctypes.c_float]
+    expf.restype = ctypes.c_float
+    conv_values = struct.unpack("<8192f", conv)
+    for name, start, factor in (
+        ("q", 0, f32(1.0 / 128.0)),
+        ("k", 2048, f32(1.0 / f32(math.sqrt(128.0)))),
+    ):
+        actual = trace(prefix, f"{name}_conv_predelta-0")
+        if len(actual) != 2048 * 4:
+            raise ValueError(f"unexpected first {name} norm trace length")
+        for head in range(16):
+            values = [f32(value / f32(1.0 + expf(f32(-value))))
+                      for value in conv_values[start + head * 128:start + (head + 1) * 128]]
+            mean_sq = f32(sum(float(f32(value * value)) for value in values) / 128)
+            scale = f32(1.0 / f32(math.sqrt(f32(mean_sq + 1e-6))))
+            for dimension, value in enumerate(values):
+                expected = f32(f32(value * scale) * factor)
+                offset = 4 * (head * 128 + dimension)
+                if bits(expected) != actual[offset:offset + 4]:
+                    raise AssertionError(f"first {name} norm F32 mismatch at head {head}, dimension {dimension}")
+    print("matched first-token embedding, RMSNorm, QKV, convolution, and Q/K normalization F32 words bitwise")
 
 
 if __name__ == "__main__":
