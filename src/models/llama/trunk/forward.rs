@@ -436,7 +436,12 @@ pub fn build_prompt_tokens_from_turns(
     }
     // The single-turn callers end with an assistant prompt; reproduce that
     // when the caller did not already append one.
-    if turns.len() == 1 && turns[0].0 != "assistant" {
+    //
+    // EXCLUDED: k2-horizon. Its `llama_turn_text` already returns the full
+    // single-turn template INCLUDING the assistant prefix, so appending
+    // another assistant turn duplicated the user content in the prompt and
+    // the model echoed it back (caught by the CLI/HTTP sentinel).
+    if turns.len() == 1 && turns[0].0 != "assistant" && arch != "k2-horizon" {
         // Mirrors the previous single-turn behaviour: every non-ChatML
         // arch appends `assistant\n...` here. ChatML archs already end their
         // turn with " + IM_END + ", which is also where generation starts.

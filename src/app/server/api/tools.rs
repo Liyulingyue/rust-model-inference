@@ -103,8 +103,12 @@ pub fn build_prompt(
             .collect();
         let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        // LFM2's own template, matching the CLI's `build_lfm2_chat_prompt`
+        // (thinking = true, i.e. no trailing `\n\n`). Passing `false` here
+        // appends the non-thinking suffix and desynchronises HTTP from the CLI
+        // by two tokens — the CLI/HTTP sentinel caught exactly that.
         let ids =
-            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, false)?;
+            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, true)?;
         let images: Vec<Vec<u8>> = messages
             .iter()
             .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
