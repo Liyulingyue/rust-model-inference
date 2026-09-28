@@ -49,6 +49,24 @@ fn default_threads_are_capped_but_explicit_value_wins() {
 }
 
 #[test]
+fn qwen_image_cli_parses_latent_shape_and_rejects_nonfinite_timestep() {
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--qwen-latent-width",
+        "24",
+        "--qwen-latent-height",
+        "32",
+        "--qwen-timestep",
+        "250.5",
+    ]))
+    .unwrap();
+    assert_eq!(options.qwen_latent_width, Some(24));
+    assert_eq!(options.qwen_latent_height, Some(32));
+    assert_eq!(options.qwen_timestep, Some(250.5));
+    assert!(parse_cli_options(&args(&["rmi", "--qwen-timestep", "NaN"])).is_err());
+}
+
+#[test]
 fn normal_generation_does_not_run_the_final_unused_forward() {
     assert_eq!(inference_step_budget(5, 32, false), 36);
     assert_eq!(inference_step_budget(5, 0, false), 5);
