@@ -92,7 +92,37 @@ prompt 串由 `SchemaTransformer` 生成。**精确模板还没扒**，写转换
    `microsoft/deberta-v3-large` 或 `fastino/gliner2-large-v1` 取。
    `AutoTokenizer.from_pretrained(repo_or_dir)` 依赖那些文件。
 
-## 实现的自然切分
+## ## Tokenizer (determined)
+
+DebertaV2Tokenizer, vocab_type spm, do_lower_case false, split_by_punct
+false.  SentencePiece unigram, case sensitive.  The checkpoint on
+ModelScope carries only model.safetensors and config.json; the tokenizer
+pack comes from base model fastino/gliner2-large-v1 and is already in
+models/GLiNER2.5-Decide/:
+
+- spm.model, 2.4 MB (the real vocab model)
+- tokenizer_config.json / special_tokens_map.json
+
+Special token ids:
+
+| token | id | | token | id |
+|---|---|---|---|---|
+| [PAD] | 0 | | [SEP_STRUCT] | 128001 |
+| [CLS] | 1 | | [SEP_TEXT] | 128002 |
+| [SEP] | 2 | | [P] | 128003 |
+| [UNK] | 3 | | [C] | 128004 |
+| [MASK] | 128000 | | [E] | 128005 |
+| | | | [R] | 128006 |
+| | | | [L] | 128007 |
+| | | | [EXAMPLE] | 128008 |
+| | | | [OUTPUT] | 128009 |
+| | | | [DESCRIPTION] | 128010 |
+
+[L] is the label marker and [P] the prompt marker; scoring drops the [P]
+row via embs[1:].  bos and cls are both [CLS], eos is [SEP].
+
+
+实现的自然切分
 
 建议分两步，各自可验收：
 
