@@ -284,39 +284,40 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
-    // The four bert-family variants use three different tokenizers:
-    //   * `bert`/`jina-bert-v2`/`nomic-bert` ship `tokenizer.ggml.model =
-    //     "bert"` (WordPiece).
-    //   * `nomic-bert-moe` ships `tokenizer.ggml.model = "t5"` (UGM, an
-    //     XLM unigram with a precompiled XCDA charsmap).
-    // We dispatch on the architecture rather than on `tokenizer.ggml.model`
-    // because the WPM tokenizer is not a `dyn Tokenizer` and the BPE
-    // fallback in `load_tokenizer` would reject "bert".
-    let arch = source
-        .metadata("general.architecture")
-        .and_then(MetaValue::to_string_val)
-        .unwrap_or_default()
-        .to_string();
-    let prompt_tokens = if arch == "nomic-bert-moe" {
-        let tok = crate::core::tokenizer::load_tokenizer(|k| source.metadata(k).cloned())
-            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-        tok.encode(
-            prompt,
-            EncodeOptions {
-                add_special: true,
-                parse_special: true,
-            },
-        )
-    } else {
-        let tok = WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-        tok.encode(
-            prompt,
-            EncodeOptions {
-                add_special: true,
-                parse_special: true,
-            },
-        )
+    // The tokenizer is chosen by `tokenizer.ggml.model`, exactly as
+    // `llama-vocab.cpp:1804+` does — NOT by the model architecture. The two
+    // are independent: `bert`-arch weights ship either WordPiece (`"bert"`,
+    // the English BERT family) or a SentencePiece unigram (`"t5"` →
+    // LLAMA_VOCAB_TYPE_UGM, the XLM-Roberta family such as bge-m3), while
+    // `nomic-bert` uses `"bert"` and `nomic-bert-moe` uses `"t5"`.
+    //
+    // Keying this off the arch silently breaks every model whose pair does not
+    // match the two that happened to be verified first: bge-m3 is `arch=bert`
+    // + `tokenizer.ggml.model=t5`, and routing by arch sent it to WordPiece,
+    // which rejects the model with "expected bert".
+    //
+    // WPM lives outside the `Tokenizer` trait, so it gets its own arm and
+    // everything else goes through `load_tokenizer` (t5 → UGM, llama → SPM,
+    // otherwise BPE).
+    let options = EncodeOptions {
+        add_special: true,
+        parse_special: true,
+    };
+    let prompt_tokens = {
+        let model = source
+            .metadata("tokenizer.ggml.model")
+            .and_then(MetaValue::to_string_val)
+            .unwrap_or_default()
+            .to_string();
+        if model == "bert" {
+            WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+                .encode(prompt, options)
+        } else {
+            crate::core::tokenizer::load_tokenizer(|k| source.metadata(k).cloned())
+                .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?
+                .encode(prompt, options)
+        }
     };
     if prompt_tokens.is_empty() {
         return Err("Embedding input produced no tokens".into());
