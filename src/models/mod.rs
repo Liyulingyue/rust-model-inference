@@ -8,6 +8,7 @@ pub mod falcon_h1;
 pub mod funasr;
 pub mod gemma4;
 pub mod gemma_embedding;
+pub mod gliner;
 pub mod laya;
 pub mod lfm2;
 pub mod lfm25;

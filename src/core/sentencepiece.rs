@@ -498,6 +498,28 @@ impl Normalizer {
         Ok(normalizer)
     }
 
+    /// Build from the parts the GGUF converter stores, so the runtime never
+    /// needs the `spm.model` sidecar.
+    pub fn from_parts(
+        charsmap: &[u8],
+        add_dummy_prefix: bool,
+        remove_extra_whitespaces: bool,
+        escape_whitespaces: bool,
+        treat_whitespace_as_suffix: bool,
+    ) -> Result<Self, String> {
+        Ok(Normalizer {
+            charsmap: if charsmap.is_empty() {
+                None
+            } else {
+                Some(CharsMap::parse(charsmap)?)
+            },
+            add_dummy_prefix,
+            remove_extra_whitespaces,
+            escape_whitespaces,
+            treat_whitespace_as_suffix,
+        })
+    }
+
     /// Builder hook for `treat_whitespace_as_suffix`, which lives on the
     /// `TrainerSpec` rather than the `NormalizerSpec`.
     pub fn with_treat_whitespace_as_suffix(mut self, value: bool) -> Self {
