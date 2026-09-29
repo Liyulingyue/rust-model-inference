@@ -26,6 +26,7 @@ pub mod memory;
 pub mod model;
 pub mod prefill;
 pub mod scratchpad;
+pub mod sentencepiece;
 pub mod tensor;
 pub mod thread_pool;
 pub mod tokenizer;
