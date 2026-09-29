@@ -10,7 +10,9 @@ use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{EncodeOptions, WPMTokenizer};
 use crate::ops::kernel::{QuantizedTensor, Weight};
-use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm, softmax_inplace};
+use crate::ops::{
+    embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm_nrot, softmax_inplace,
+};
 use std::sync::Arc;
 
 use super::weights::{load_weights, BertVariant, BertWeights, MAX_ALIBI_BIAS_JINA_V2};
@@ -30,6 +32,10 @@ struct BertConfig {
     /// `rope.freq_base`. Only meaningful for `nomic-bert` (the one variant that
     /// ropes): it trains at 1000 Hz, not the 10 000 Hz llama default.
     rope_freq_base: f32,
+    /// `rope.dimension_count` — how many lanes of each head RoPE rotates.
+    /// Defaults to `n_embd_head_k` (`llama-model.cpp:1438-1445`), which is why
+    /// the models that omit the key still rotate every lane.
+    n_rot: usize,
     /// `pooling_type` (`llama.h:177-182`): 0 none, 1 mean, 2 CLS, 3 last.
     /// `bert` ships 2, while jina-bert-v2 and nomic-bert ship 1.
     pooling_type: u64,
@@ -99,6 +105,12 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
         // with 1000 via `nomic-bert.rope.freq_base`. Only the roped variant
         // reads this, but loading it unconditionally keeps the config honest.
         rope_freq_base: float("rope.freq_base").unwrap_or(10_000.0),
+        // `llama-model.cpp:1438-1445`: `n_rot` defaults to `n_embd_head_k` and
+        // is only overridden when the GGUF ships `rope.dimension_count`. The
+        // three roped bert-family GGUFs all omit it, so they rotate every lane
+        // — but a partial-rotary encoder would be silently over-rotated if we
+        // hardcoded `head_dim` here.
+        n_rot: uint("rope.dimension_count").unwrap_or(n_embd_head_k),
         // 1 (mean) is the safe default: every variant verified before bge-small
         // used it, and `bert` is the one that passes 2 explicitly.
         pooling_type: uint64("pooling_type").unwrap_or(1),
@@ -225,12 +237,46 @@ pub fn moe_gate(logits: &[f32], k: usize, w_scale: f32) -> (Vec<usize>, Vec<f32>
     let selected = order[..k].to_vec();
 
     let scale = f64::from(w_scale);
-    let scale = if scale != 0.0 && scale != 1.0 { scale } else { 1.0 };
+    let scale = if scale != 0.0 && scale != 1.0 {
+        scale
+    } else {
+        1.0
+    };
     let weights = selected
         .iter()
         .map(|&e| (probs[e] * scale) as f32)
         .collect();
     (selected, weights)
+}
+
+/// Add the separate Q/K/V biases on top of a fused-QKV projection output.
+///
+/// `out` is one token's `[q | k | v]` slice of width
+/// `n_embd_q + 2 * n_embd_gqa`; `n_embd_q` / `n_embd_gqa` locate the sub-slices.
+///
+/// The oracle's guard is `else if (layer.wq_b && layer.wk_b && layer.wv_b)`
+/// (`llama-graph.cpp:1663`): all three must be present before **any** of them is
+/// added, because it concatenates them into one `[q | k | v]` vector first.
+/// A partial set is therefore left untouched here too.
+///
+/// Returns whether the biases were applied.
+fn add_split_qkv_biases(
+    q_bias: &super::weights::Bias,
+    k_bias: &super::weights::Bias,
+    v_bias: &super::weights::Bias,
+    out: &mut [f32],
+    n_embd_q: usize,
+    n_embd_gqa: usize,
+) -> bool {
+    if q_bias.values.is_none() || k_bias.values.is_none() || v_bias.values.is_none() {
+        return false;
+    }
+    let (q, rest) = out.split_at_mut(n_embd_q);
+    let (k, v) = rest.split_at_mut(n_embd_gqa);
+    q_bias.add_to(q);
+    k_bias.add_to(k);
+    v_bias.add_to(v);
+    true
 }
 
 pub fn compute_embedding(
@@ -415,6 +461,22 @@ pub fn run_embedding_tokens(
                     out,
                     &pool,
                 );
+                // A fused `attn_qkv` may still ship *separate* Q/K/V biases:
+                // `create_tensor_qkv` (`llama-model.cpp:3358-3363`) loads
+                // `wq_b`/`wk_b`/`wv_b` whenever there is no fused
+                // `attn_qkv.bias`, and `build_qkv`
+                // (`llama-graph.cpp:1663-1668`) concatenates them into one
+                // `[q | k | v]` vector and adds it to the fused projection
+                // output. Skipping this silently drops the bias, which is the
+                // same failure shape as the attention-projection residual bug.
+                add_split_qkv_biases(
+                    &lw.wq_bias,
+                    &lw.wk_bias,
+                    &lw.wv_bias,
+                    out,
+                    n_embd_q,
+                    n_embd_gqa,
+                );
             }
         } else {
             for t in 0..n_tokens {
@@ -455,18 +517,22 @@ pub fn run_embedding_tokens(
             }
         }
 
-        // RoPE for nomic-bert only, applied per head on the Q and K halves.
-        // `n_rot` is `n_embd/n_head` (the GGUF carries no
-        // `rope.dimension_count`), which equals `head_dim` here, so every lane
-        // rotates. The rope variant is `LLAMA_ROPE_TYPE_NORM`
-        // (`llama-model.cpp:3055`), i.e. interleaved pairs, not NEOX.
+        // RoPE for nomic-bert / nomic-bert-moe / jina-bert-v3, applied per head
+        // on the Q and K halves. `n_rot` comes from
+        // `rope.dimension_count` and defaults to `n_embd/n_head`
+        // (`llama-model.cpp:1438-1445`), which equals `head_dim` for every
+        // model verified so far, so all lanes rotate; a partial-rotary encoder
+        // would only turn its first `n_rot` lanes. The rope variant is
+        // `LLAMA_ROPE_TYPE_NORM` (`llama-model.cpp:3055`), i.e. interleaved
+        // pairs, not NEOX.
         if cfg.variant.uses_rope() {
+            debug_assert!(cfg.n_rot <= head_k);
             for t in 0..n_tokens {
                 let row = &mut qkv_buf[t * qkv_width..(t + 1) * qkv_width];
                 let (q, rest) = row.split_at_mut(n_embd_q);
                 let (k, _) = rest.split_at_mut(n_embd_gqa);
-                rope_norm(q, t, head_k, cfg.rope_freq_base);
-                rope_norm(k, t, head_k, cfg.rope_freq_base);
+                rope_norm_nrot(q, t, head_k, cfg.n_rot, cfg.rope_freq_base);
+                rope_norm_nrot(k, t, head_k, cfg.n_rot, cfg.rope_freq_base);
             }
         }
 
@@ -883,7 +949,11 @@ mod moe_gate_tests {
         // 0.0 0.9 0.2 -0.3 1.5 0.4 -0.8 0.1 -> experts 4 then 1.
         let logits = [0.0f32, 0.9, 0.2, -0.3, 1.5, 0.4, -0.8, 0.1];
         let (selected, weights) = moe_gate(&logits, 2, 1.0);
-        assert_eq!(selected, vec![4, 1], "top-2 by logit must be experts 4 and 1");
+        assert_eq!(
+            selected,
+            vec![4, 1],
+            "top-2 by logit must be experts 4 and 1"
+        );
         // Softmax is monotonic, so the weights must be ordered the same way.
         assert!(weights[0] > weights[1]);
         // ...and they are plain softmax probabilities, not renormalized over
@@ -894,7 +964,10 @@ mod moe_gate_tests {
             "selected weights must NOT sum to 1 (got {total}); \
              renormalizing is the SOFTMAX_WEIGHT variant bert.cpp does not use"
         );
-        assert!(total > 0.5, "the top-2 should still hold most of the mass: {total}");
+        assert!(
+            total > 0.5,
+            "the top-2 should still hold most of the mass: {total}"
+        );
         // Cross-check against a hand-computed softmax over all 8 logits. The
         // gate returns f32, so the tolerance is f32 ulp, not f64 exactness.
         let expected: Vec<f64> = logits
@@ -917,7 +990,10 @@ mod moe_gate_tests {
         let (selected, weights) = moe_gate(&logits, 2, 1.0);
         assert_eq!(selected, vec![0, 1], "ties break to the lower ids");
         let total = sum(&weights);
-        assert!((total - 0.25).abs() < 1e-6, "flat router keeps only 0.25 mass");
+        assert!(
+            (total - 0.25).abs() < 1e-6,
+            "flat router keeps only 0.25 mass"
+        );
     }
 
     #[test]
@@ -949,5 +1025,75 @@ mod moe_gate_tests {
         let (selected, weights) = moe_gate(&logits, 8, 1.0);
         assert_eq!(selected.len(), 2);
         assert_eq!(weights.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod fused_qkv_bias_tests {
+    use super::add_split_qkv_biases;
+    use crate::models::bert_family::weights::Bias;
+
+    fn bias(seed: f32, len: usize) -> Bias {
+        Bias {
+            values: Some((0..len).map(|i| seed + i as f32).collect()),
+        }
+    }
+
+    #[test]
+    fn all_three_biases_land_in_their_own_slices() {
+        // Widths: q = 4, k = 4, v = 4, so `out` is [q | k | v].
+        let (n_q, n_kv) = (4usize, 4usize);
+        let qb = bias(10.0, n_q);
+        let kb = bias(20.0, n_kv);
+        let vb = bias(30.0, n_kv);
+        let mut out = vec![0.0f32; n_q + 2 * n_kv];
+
+        let applied = add_split_qkv_biases(&qb, &kb, &vb, &mut out, n_q, n_kv);
+        assert!(applied, "all three biases present must mean applied");
+        assert_eq!(&out[..n_q], &[10.0, 11.0, 12.0, 13.0], "Q slice");
+        assert_eq!(&out[n_q..n_q + n_kv], &[20.0, 21.0, 22.0, 23.0], "K slice");
+        assert_eq!(&out[n_q + n_kv..], &[30.0, 31.0, 32.0, 33.0], "V slice");
+    }
+
+    #[test]
+    fn biases_accumulate_onto_existing_projection_output() {
+        let (n_q, n_kv) = (2usize, 2usize);
+        let mut out = vec![1.0f32; n_q + 2 * n_kv];
+        let applied = add_split_qkv_biases(
+            &bias(0.5, n_q),
+            &bias(0.25, n_kv),
+            &bias(0.75, n_kv),
+            &mut out,
+            n_q,
+            n_kv,
+        );
+        assert!(applied);
+        assert_eq!(&out, &[1.5, 2.5, 1.25, 2.25, 1.75, 2.75]);
+    }
+
+    #[test]
+    fn a_partial_bias_set_adds_nothing() {
+        // `llama-graph.cpp:1663` requires wq_b && wk_b && wv_b, so a model that
+        // ships only some of them gets none of them. Dropping a single bias
+        // while adding the others would be a silent divergence.
+        let (n_q, n_kv) = (2usize, 2usize);
+        let empty = Bias { values: None };
+        let full = bias(1.0, n_q);
+        let full_kv = bias(2.0, n_kv);
+
+        for (q, k, v) in [
+            (&empty, &full_kv, &full_kv),
+            (&full, &empty, &full_kv),
+            (&full, &full_kv, &empty),
+            (&empty, &empty, &empty),
+        ] {
+            let mut out = vec![7.0f32; n_q + 2 * n_kv];
+            let applied = add_split_qkv_biases(q, k, v, &mut out, n_q, n_kv);
+            assert!(!applied, "a partial set must not be applied");
+            assert!(
+                out.iter().all(|&v| v == 7.0),
+                "a partial set must leave the projection untouched, got {out:?}"
+            );
+        }
     }
 }

@@ -57,7 +57,9 @@ fn contract_loads_and_pins_nomic_bert_moe_metadata() {
 
     assert!((f("nomic-bert-moe.attention.layer_norm_epsilon") - 1e-5).abs() < 1e-10);
     assert!((f("nomic-bert-moe.rope.freq_base") - 10000.0).abs() < 1.0);
-    assert!(loader.metadata("nomic-bert-moe.rope.dimension_count").is_none());
+    assert!(loader
+        .metadata("nomic-bert-moe.rope.dimension_count")
+        .is_none());
 
     let cfg = rust_model_inference::core::loader::model_config_from_source(&loader)
         .expect("model_config_from_source must resolve nomic-bert-moe");
@@ -93,8 +95,9 @@ fn ugm_tokenizer_pins_ids_and_round_trip() {
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     assert_eq!(model, "t5", "nomic-bert-moe ships the UGM tokenizer");
-    let tok = rust_model_inference::core::tokenizer::load_tokenizer(|k| loader.metadata(k).cloned())
-        .expect("tokenizer must load");
+    let tok =
+        rust_model_inference::core::tokenizer::load_tokenizer(|k| loader.metadata(k).cloned())
+            .expect("tokenizer must load");
     assert_eq!(tok.vocab_size(), 250048);
     assert_eq!(tok.bos_id(), Some(0));
     assert_eq!(tok.eos_id(), Some(2));
@@ -109,9 +112,15 @@ fn ugm_tokenizer_pins_ids_and_round_trip() {
     );
     assert_eq!(ids.first().copied(), Some(0), "starts with [CLS]/<s>");
     assert_eq!(ids.last().copied(), Some(2), "ends with [EOS]");
-    assert!(ids.len() >= 5 && ids.len() <= 32, "token count out of range");
+    assert!(
+        ids.len() >= 5 && ids.len() <= 32,
+        "token count out of range"
+    );
     let detok = tok.decode(&ids, false);
-    assert!(detok.contains("capital"), "decode round-trip must keep word meaning");
+    assert!(
+        detok.contains("capital"),
+        "decode round-trip must keep word meaning"
+    );
 }
 
 #[test]
@@ -233,7 +242,10 @@ fn moe_router_gate_keeps_the_unselected_expert_mass() {
         "selected weights must not be renormalized to 1 (got {total}); \
          bert.cpp:173 uses SOFTMAX, not SOFTMAX_WEIGHT"
     );
-    assert!(total > 0.5, "a confident router should still hold most mass: {total}");
+    assert!(
+        total > 0.5,
+        "a confident router should still hold most mass: {total}"
+    );
 
     // Flat logits are the degenerate case the old code got most wrong: each of
     // 8 experts gets 1/8, so the top-2 hold exactly 0.25 and the old
