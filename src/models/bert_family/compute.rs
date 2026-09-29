@@ -1098,3 +1098,134 @@ mod fused_qkv_bias_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod alibi_tests {
+    use super::alibi_slopes;
+    use crate::models::bert_family::weights::{BertVariant, MAX_ALIBI_BIAS_JINA_V2};
+
+    /// Oracle formula, transcribed from `ggml-cpu/ops.cpp:5620-5645` inside
+    /// `ggml_compute_forward_soft_max_f32`:
+    ///
+    /// ```text
+    /// n_head_log2 = 1 << floor(log2(n_head))
+    /// m0 = 2^(-max_bias / n_head_log2)
+    /// m1 = 2^(-(max_bias / 2) / n_head_log2)
+    /// slope(h) = h < n_head_log2 ? m0^(h+1) : m1^(2*(h-n_head_log2)+1)
+    /// ```
+    fn oracle_slope(h: usize, n_head: usize, max_bias: f32) -> f32 {
+        let log2 = (n_head as f32).log2().floor() as u32;
+        let n_head_log2 = 1usize << log2;
+        let m0 = 2.0f32.powf(-max_bias / n_head_log2 as f32);
+        let m1 = 2.0f32.powf(-(max_bias / 2.0) / n_head_log2 as f32);
+        if h < n_head_log2 {
+            m0.powf((h + 1) as f32)
+        } else {
+            m1.powf((2 * (h - n_head_log2) + 1) as f32)
+        }
+    }
+
+    #[test]
+    fn alibi_slopes_match_the_oracle_formula_bit_for_bit() {
+        for n_head in [4usize, 8, 12, 16] {
+            for max_bias in [1.0f32, 2.0, 8.0] {
+                let slopes = alibi_slopes(n_head, max_bias);
+                assert_eq!(slopes.len(), n_head);
+                for (h, &got) in slopes.iter().enumerate() {
+                    let want = oracle_slope(h, n_head, max_bias);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "n_head={n_head} max_bias={max_bias} head={h}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alibi_slopes_follow_the_two_branch_shape() {
+        // The slope sequence is NOT globally monotonic, and that is correct:
+        // `ops.cpp:5641` switches from the m0 branch to the m1 branch at
+        // n_head_log2, and the second branch restarts from a *larger* value.
+        // For n_head = 12, n_head_log2 = 8, so heads 0..7 decay by half each
+        // time and heads 8..11 restart at m1^1 = 0.707. Asserting global
+        // monotonicity here would be asserting a bug.
+        for n_head in [4usize, 8, 12, 16] {
+            let slopes = alibi_slopes(n_head, MAX_ALIBI_BIAS_JINA_V2);
+            assert_eq!(slopes.len(), n_head);
+            let log2 = (n_head as f32).log2().floor() as u32;
+            let n_head_log2 = 1usize << log2;
+
+            for branch in [(0usize, n_head_log2), (n_head_log2, n_head)] {
+                for w in slopes[branch.0..branch.1].windows(2) {
+                    assert!(
+                        w[0] > w[1],
+                        "branch {branch:?} must strictly decrease: {:?}",
+                        slopes
+                    );
+                }
+            }
+            // Every slope is a positive, finite, sub-unity discount.
+            for (h, &s) in slopes.iter().enumerate() {
+                assert!(s > 0.0 && s <= 1.0, "head {h}: {s}");
+            }
+            // Head 0 is m0^1 = 2^(-max_bias / n_head_log2): 0.25 at n_head 4,
+            // 0.5 at 8 and 12, 2^-0.5 at 16. Derived rather than hardcoded so
+            // the assertion holds at every width the loop covers.
+            let log2f = (n_head as f32).log2().floor();
+            let expected_head0 =
+                2.0f32.powf(-MAX_ALIBI_BIAS_JINA_V2 / (1usize << log2f as u32) as f32);
+            assert!(
+                (slopes[0] - expected_head0).abs() < 1e-6,
+                "head 0 was {}, expected {expected_head0}",
+                slopes[0]
+            );
+            if n_head_log2 < n_head {
+                assert!(
+                    (slopes[n_head_log2] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+                    "branch switch head was {}",
+                    slopes[n_head_log2]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jina_bert_v2_is_the_only_alibi_variant() {
+        // This is the decision the ALiBi branch in the forward keys off. If it
+        // ever stops being jina-only, the hardcoded
+        // MAX_ALIBI_BIAS_JINA_V2 has to be re-derived per variant.
+        assert!(BertVariant::JinaBertV2.uses_alibi());
+        for other in [
+            BertVariant::Bert,
+            BertVariant::NomicBert,
+            BertVariant::NomicBertMoe,
+        ] {
+            assert!(
+                !other.uses_alibi(),
+                "{other:?} must not apply ALiBi under the 8.0 bias"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nonzero_bias_means_alibi_is_on() {
+        // `llama-model.cpp:1483` — `use_alibi = (f_max_alibi_bias > 0.0f)`.
+        // The two jina GGUFs shipped on ModelScope omit
+        // `{arch}.attention.max_alibi_bias` entirely, and `llama-model.cpp`
+        // never reads that key for this arch anyway; jina-bert-v2.cpp:5 sets
+        // 8.0f unconditionally. So "the GGUF lacks the key" must NOT be read as
+        // "ALiBi disabled" - this pins the correct constant.
+        assert!(
+            MAX_ALIBI_BIAS_JINA_V2 > 0.0,
+            "jina-bert-v2 must keep its 8.0 bias; defaulting to 0.0 would \
+             silently disable ALiBi for every jina-bert-v2 model"
+        );
+        // ...and the slopes derived from it must not be all-ones, which is what
+        // the fully-disabled path produces.
+        let alibi = alibi_slopes(12, MAX_ALIBI_BIAS_JINA_V2);
+        let disabled = alibi_slopes(12, 0.0);
+        assert_ne!(alibi, disabled, "bias 8.0 must not collapse to no ALiBi");
+    }
+}

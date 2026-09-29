@@ -38,7 +38,10 @@ impl BertVariant {
         }
     }
 
-    /// `f_max_alibi_bias > 0` ⇒ ALiBi (`jina-bert-v2.cpp:5`, `llama-model.cpp:1483`).
+    /// ALiBi is applied for this variant, with bias
+    /// [`MAX_ALIBI_BIAS_JINA_V2`]. See that constant for why the GGUF key is
+    /// irrelevant: `jina-bert-v2.cpp:5` sets `f_max_alibi_bias = 8.0f`
+    /// unconditionally, and `llama-model.cpp:1483` derives `use_alibi` from it.
     pub fn uses_alibi(self) -> bool {
         matches!(self, BertVariant::JinaBertV2)
     }
@@ -79,7 +82,23 @@ impl BertVariant {
     }
 }
 
-/// ALiBi `f_max_alibi_bias` for jina-bert-v2 (`jina-bert-v2.cpp:5`).
+/// ALiBi `f_max_alibi_bias` for jina-bert-v2, hardcoded exactly as
+/// `references/llama.cpp/src/models/jina-bert-v2.cpp:5` does it:
+///
+/// ```c++
+/// hparams.f_max_alibi_bias = 8.0f;   // unconditional, not read from the GGUF
+/// ```
+///
+/// **The GGUF key being absent does not disable ALiBi here.**
+/// `LLM_KV_ATTENTION_MAX_ALIBI_BIAS` is never read in `llama-model.cpp`'s
+/// `load_hparams`; only a few other arches (`mpt.cpp:6`, `jais.cpp:5`) consult
+/// it with a "do not overwrite the default" flag. Both jina GGUFs available
+/// locally omit the key, yet llama.cpp still applies an 8.0 ALiBi because the
+/// arch-level hparams loader sets it unconditionally, and
+/// `llama-model.cpp:1483` then derives `use_alibi = (f_max_alibi_bias > 0.0f)`.
+///
+/// Do not "fix" this into a GGUF-derived value defaulting to 0.0: that would
+/// silently turn ALiBi off for every jina-bert-v2 model.
 pub const MAX_ALIBI_BIAS_JINA_V2: f32 = 8.0;
 
 /// Bundle for a 3D expert tensor of shape `[rows, cols, n_expert]` (per
