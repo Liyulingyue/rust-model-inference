@@ -416,6 +416,18 @@ fn main() {
             }
         }
         return;
+    } else if options.embedding && prompt.is_empty() {
+        // An empty `--prompt` under `--embedding` used to fall through this
+        // whole chain into `run_interactive`, which then blocked on stdin and
+        // exited 0 having printed nothing but the interactive banner. An
+        // embedding model has no interactive mode, so make it an error instead
+        // of a silent mode switch.
+        app::run_or_exit(Err(
+            "--embedding requires a non-empty --prompt (interactive mode is not \
+             available for embedding models)"
+                .into(),
+        ));
+        return;
     } else if !prompt.is_empty() {
         if arch == "qwen35" {
             app::run_or_exit(app::run_multimodal_with_video(

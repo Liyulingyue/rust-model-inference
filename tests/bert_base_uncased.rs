@@ -319,3 +319,55 @@ fn over_long_prompt_is_rejected_with_a_useful_error() {
         .unwrap_or_else(|e| panic!("an in-range prompt must embed: {e}"));
     assert_eq!(embedding.len(), 768);
 }
+
+#[test]
+fn an_out_of_vocabulary_word_becomes_unk_not_silence() {
+    // Regression test for the WordPiece rollback path. `llama-vocab.cpp:829-833`
+    // rolls a word back on the first missed position and then *falls through*
+    // to the "we didn't find any matches" check, emitting exactly one `[UNK]`.
+    // Our implementation used to `return` from that branch instead, so the word
+    // disappeared: `"🎉🎊"` produced `[CLS, SEP]` - the same token sequence as
+    // `"   "` - and `"hello 🎉 world"` produced `hello world`. The embedding for
+    // a prompt full of emoji was therefore bit-identical to a whitespace-only
+    // prompt, i.e. the input was silently discarded.
+    let Some(loader) = loader() else { return };
+    let tok =
+        WPMTokenizer::from_gguf_metadata(|k| loader.metadata(k).cloned()).expect("WPM must build");
+    assert_eq!(tok.unk_id(), Some(100), "[UNK]");
+
+    let emoji = tok.encode(
+        "\u{1F389}\u{1F38A}",
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    assert_eq!(
+        emoji,
+        vec![101, 100, 102],
+        "an unmatchable word must become a single [UNK], not vanish"
+    );
+
+    let mixed = tok.encode(
+        "hello \u{1F389} world",
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    assert_eq!(
+        mixed,
+        vec![101, 7592, 100, 2088, 102],
+        "an OOV word between matching words keeps its [UNK]"
+    );
+
+    // Whitespace-only input still produces no word at all, so no [UNK] either.
+    let spaces = tok.encode(
+        "   ",
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    );
+    assert_eq!(spaces, vec![101, 102]);
+}
