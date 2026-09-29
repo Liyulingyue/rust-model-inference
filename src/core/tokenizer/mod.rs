@@ -5,6 +5,8 @@ use unicode_categories::UnicodeCategories;
 
 use crate::core::tensor::{MetaValue, MetaValueType};
 
+pub mod ugm;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeOptions {
     pub add_special: bool,
@@ -277,7 +279,7 @@ impl BPETokenizer {
         let mut token_types = vec![TokenType::Normal; tokens.len()];
         let mut merge_ranks = HashMap::new();
 
-        for (rank, merge) in include_str!("../models/diffusion/z_image/qwen_merges.txt")
+        for (rank, merge) in include_str!("../../models/diffusion/z_image/qwen_merges.txt")
             .lines()
             .enumerate()
         {
@@ -1635,7 +1637,7 @@ pub fn load_tokenizer(
             Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
         }
         Some(MetaValue::String(value)) if value == "t5" => Ok(Box::new(
-            crate::core::ugm::UgmTokenizer::from_gguf_metadata(get_meta)
+            ugm::UgmTokenizer::from_gguf_metadata(get_meta)
                 .map_err(|e| e.to_string())?,
         )),
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
@@ -2933,3 +2935,9 @@ mod wpm_unk_tests {
         assert_eq!(encode("hello world"), vec![1, 3, 4, 2]);
     }
 }
+
+/// Re-export the UGM (SentencePiece unigram) tokenizer at the same flat
+/// path level as BPE/SPM/WPM. `load_tokenizer` above routes
+/// `tokenizer.ggml.model = "t5"` GGUFs here.
+pub use ugm::{UgmError, UgmTokenizer};
+
