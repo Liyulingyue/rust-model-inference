@@ -57,7 +57,7 @@ dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arc
 
 | arch | 模型与规格 | 状态 |
 |---|---|---|
-| `bert` | bge-small-en-v1.5 33M（已验证） | **已接 2026-09-28**（Verified，`tests/bge_small_en_v1_5.rs` 4/4） |
+| `bert` | bge-small-en-v1.5 33M、**bert-base-uncased 110M**（均已验证） | **已接 2026-09-28 / 2026-09-29**（Verified，`tests/bge_small_en_v1_5.rs` 4/4 + `tests/bert_base_uncased.rs` 6/6；后者首次真正跑到 `position_embd.weight` 与 mean-pooling 默认值） |
 | `jina-bert-v2` | jina-embeddings-v2-base-zh(893M) | **已接**（Verified，`tests/jina_v2_base_en.rs` 4/4） |
 | `nomic-bert` | nomic-embed-text-v1.5 137M | **已接 2026-09-28**（Verified，`tests/nomic_embed_text_v1_5.rs` 5/5） |
 | `nomic-bert-moe` | nomic-embed-text-v2-moe 512MB | **已接 2026-09-29**（Verified，`tests/nomic_embed_text_v2_moe.rs` 5/5；含 UGM tokenizer + 偶奇层 dense/MoE 调度） |
@@ -78,9 +78,23 @@ dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arc
 | 投影 bias | 4 组 | 4 组 | **全无** |
 | rope freq_base | - | - | **1000** |
 
-**下一个最便宜的是 `jina-bert-v3`（570M）**：和 `bert` / `jina-bert-v2` / `nomic-bert` /
-`nomic-bert-moe` 同在 `bert.cpp` 共享 graph 内，只差 RoPE + GELU SEQ + `token_types`
-几个开关，无需新模块。
+**权重可用性（2026-09-29 实测，别再凭印象写「下一个」）**：
+ggml-org 在 ModelScope 上共 195 个 repo，encoder 相关的只有
+`bert-base-uncased`(110M) / `bge-small-en-v1.5-Q8_0-GGUF` /
+`bge-m3-Q8_0-GGUF`(635MB) / `gte-small-Q8_0-GGUF`(37MB) /
+`e5-small-v2-Q8_0-GGUF`(37MB) / `jina-embeddings-v2-base-{en,code}-Q8_0-GGUF` /
+`jina-reranker-v1-turbo-en-GGUF` / `embeddinggemma-300m-GGUF` / `Nomic-Embed-Text-V2-GGUF`。
+**ggml-org 名下没有 jina-bert-v3，也没有 modern-bert。**
+
+- `jina-bert-v3`（570M）：全站唯一 GGUF 是社区转换
+  `fuyuantech/jina-embeddings-v3-Q4_K_M`（392MB，Q4_K_M，非 ggml-org）。
+  它是唯一能验证 **fused QKV + 独立 Q/K/V bias**（`ed973d4` 刚补的路径）和
+  `n_rot` 半旋转的样本；jina 系历来带 Q/K/V bias，而 nomic 系不带，
+  所以这条路径目前**仍无模型验证过**。代价是第三方 Q4_K_M + 392MB。
+- `bert-base-uncased`（110M，ggml-org 官方）：**已接**，见 C 区表格。
+- `gte-small-q8_0` / `e5-small-v2-q8_0`（各 37MB，ggml-org 官方）：同为 `bert`
+  arch，是给 `bert` 变体补充更多 pooling / 维度假例的最便宜来源。
+
 `nomic-bert-moe` 已落地过一次 MoE 路由（router logits → top-k → softmax →
 per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可复用同一形状，
 届时主要差异在专家张量的切分方式。
@@ -120,15 +134,22 @@ per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可
    跑通 `tests/nomic_embed_text_v2_moe.rs` 5/5。GGUF 489MB，CLI/HTTP 768 维输出 bit
    一致，跨语言语义排序正确。**同时落地了 MoE 路由的最小可用形状**（router logits →
    top-k → softmax → per-expert `expert @ x → gelu → @ down`），是后续大权重 MoE 的前置。
-4. **`jina-bert-v3`（570M）** — C 区里最便宜的剩余项：同 `bert.cpp` graph，只差
-   RoPE + GELU SEQ + `token_types` 几个开关。
-5. **C 区其余** — `modern-bert`（需新建独立模块，`modern-bert.cpp` 不在共享 graph 内）
-   → `llama-embed` → `neo-bert` / `eurobert` → `pangu-embed`。
-6. **MoE 大模型**（权重规模大，接入前先确认有对应规模的验证环境）：`qwen3moe`
+4. ~~`bert-base-uncased`（110M，ggml-org 官方 Q8_0 113MB）~~ **已完成 2026-09-29**：
+   `arch="bert"` 变体首次用真权重验证，`position_embd.weight` 路径 +
+   mean-pooling 默认值 + 四组投影 bias 全部跑到，`tests/bert_base_uncased.rs` 6/6。
+5. **`jina-bert-v3`（570M）** — 见上面「权重可用性」：全站只有社区转换的
+   `fuyuantech/jina-embeddings-v3-Q4_K_M`（392MB）。它验证的是 `ed973d4` 补的
+   fused QKV + 独立 Q/K/V bias 与 `n_rot`，这两条路径**至今没有任何模型验证过**。
+   是否接受「非 ggml-org 的第三方 Q4_K_M」需要先拍板。
+6. **C 区其余** — `gte-small` / `e5-small-v2`（各 37MB，ggml-org 官方，
+   给 `bert` 变体补更多 pooling / 维度假例）→ `modern-bert`（需新建独立模块，
+   `modern-bert.cpp` 不在共享 graph 内）→ `llama-embed` → `neo-bert` / `eurobert`
+   → `pangu-embed`。
+7. **MoE 大模型**（权重规模大，接入前先确认有对应规模的验证环境）：`qwen3moe`
    （Qwen3-30B-A3B，已有 qwen3 trunk，边际成本最低）→ `hunyuan-moe`
    （复用 `src/models/qwen3/hunyuan.rs`）→ `glm4-moe` → `llama4`。
-7. **`mistral3`（Mistral-Small-24B）** — 标准架构，覆盖面大。
-8. 其余按 B → D 顺序视需求推进。
+8. **`mistral3`（Mistral-Small-24B）** — 标准架构，覆盖面大。
+9. 其余按 B → D 顺序视需求推进。
 
 ## TODO：BERT 家族位级 oracle 对齐（**暂缓，勿与他方核对工作并行**）
 
