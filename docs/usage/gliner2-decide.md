@@ -197,7 +197,7 @@ tokens.extend([")", ")"])
    所有层共用第一层的投影——共用会让 layer 0 之后的每一层全错。
 3. **ST-transposed 残差。** 子层是 `LayerNorm(f(x) + x)`，norm 看的是**和**。
 4. **c2p 和 p2c 用同一张位置下标表。** 参考代码写的是
-   `c2p_pos = clamp(rel + att_span)` 和 `p2p_pos = clamp(-r_pos + att_span)`，
+   `c2p_pos = clamp(rel + att_span)` 和 `p2c_pos = clamp(-r_pos + att_span)`，
    看着是两个表，但 p2c 那边多了一次 `gather(...).transpose(-1, -2)`，轴一换
    就变成 `clamp(-(s - t) + att_span)`，和 c2p 完全一样。照字面写会多取一次负号，
    每一层就开始漂。
