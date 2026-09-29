@@ -4,17 +4,28 @@
 //! (`references/llama.cpp/src/models/bert.cpp:22-62`), which in GGUF land is
 //! the `blk.{l}.attn_*` / `blk.{l}.ffn_*` / `blk.{l}.*_norm` vocabulary.
 
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BertVariant {
-    /// `arch = "bert"` — absolute `position_embd`, GELU FFN over `ffn_up`.
+    /// `arch = "bert"` — absolute `position_embd`, GELU FFN over a single `ffn_up`.
     Bert,
     /// `arch = "jina-bert-v2"` — ALiBi, required `token_types`, GEGLU FFN.
     JinaBertV2,
     /// `arch = "nomic-bert"` — RoPE, fused QKV, SwiGLU FFN, no projection bias.
     NomicBert,
+    /// `arch = "nomic-bert-moe"` — fused QKV, RoPE; FFN alternates between
+    /// GELU MoE (`expert_count=8`, top-2 softmax) and dense GELU per
+    /// `moe_every_n_layers` (`nomic-bert-moe.cpp:36-44`,
+    /// `bert.cpp:165-178`).
+    NomicBertMoe,
+}
+
+impl std::fmt::Display for BertVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.arch_name())
+    }
 }
 
 impl BertVariant {
@@ -23,6 +34,7 @@ impl BertVariant {
             BertVariant::Bert => "bert",
             BertVariant::JinaBertV2 => "jina-bert-v2",
             BertVariant::NomicBert => "nomic-bert",
+            BertVariant::NomicBertMoe => "nomic-bert-moe",
         }
     }
 
@@ -47,7 +59,13 @@ impl BertVariant {
     /// RoPE applied to Q and K. `bert.cpp:120-133` ropes only NOMIC_BERT /
     /// NOMIC_BERT_MOE / JINA_BERT_V3; BERT and jina-bert-v2 fall through.
     pub fn uses_rope(self) -> bool {
-        matches!(self, BertVariant::NomicBert)
+        matches!(self, BertVariant::NomicBert | BertVariant::NomicBertMoe)
+    }
+
+    /// Whether the variant has any MoE layers at all (currently only
+    /// `nomic-bert-moe`).
+    pub fn uses_moe(self) -> bool {
+        matches!(self, BertVariant::NomicBertMoe)
     }
 
     pub fn from_arch(arch: &str) -> Option<Self> {
@@ -55,6 +73,7 @@ impl BertVariant {
             "bert" => Some(BertVariant::Bert),
             "jina-bert-v2" => Some(BertVariant::JinaBertV2),
             "nomic-bert" => Some(BertVariant::NomicBert),
+            "nomic-bert-moe" => Some(BertVariant::NomicBertMoe),
             _ => None,
         }
     }
@@ -62,6 +81,59 @@ impl BertVariant {
 
 /// ALiBi `f_max_alibi_bias` for jina-bert-v2 (`jina-bert-v2.cpp:5`).
 pub const MAX_ALIBI_BIAS_JINA_V2: f32 = 8.0;
+
+/// Bundle for a 3D expert tensor of shape `[rows, cols, n_expert]` (per
+/// GGUF dim order). The bytes are laid out as `n_expert` concatenated
+/// `[rows, cols]` quantized matrices, each stored in the same Q8_0
+/// block-stride as a stand-alone tensor of the same shape.
+#[derive(Clone)]
+pub struct MoeExperts<'a> {
+    pub bytes: &'a [u8],
+    pub ggml_type: GGMLType,
+    pub rows: usize,
+    pub cols: usize,
+    pub n_expert: usize,
+}
+
+impl<'a> MoeExperts<'a> {
+    pub fn per_expert_bytes(&self, expert: usize) -> &'a [u8] {
+        // Q8_0 block = 2-byte f16 scale + 32 int8 quants per 32 elements.
+        // Q4K = 144, Q6K = 210; if you need other quantizations here,
+        // add the matching block size.
+        let block_size = match self.ggml_type {
+            GGMLType::Q8_0 => 34,
+            GGMLType::Q4K => 144,
+            GGMLType::Q6K => 210,
+            _ => panic!("unsupported MoE expert ggml type"),
+        };
+        let blocks_per_expert = (self.rows * self.cols) / 32;
+        let stride = blocks_per_expert * block_size;
+        let start = expert * stride;
+        let end = start + stride;
+        &self.bytes[start..end]
+    }
+}
+
+fn load_moe_experts<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    rows: usize,
+    cols: usize,
+    n_expert: usize,
+) -> Option<MoeExperts<'a>> {
+    let info = source.tensor_info(name)?;
+    let bytes = source.tensor_slice(name)?;
+    if n_expert == 0 || bytes.is_empty() {
+        return None;
+    }
+    Some(MoeExperts {
+        bytes,
+        ggml_type: info.ggml_type,
+        rows,
+        cols,
+        n_expert,
+    })
+}
 
 pub struct BertLayerWeights<'a> {
     pub wq: Option<Weight<'a>>,
@@ -78,12 +150,29 @@ pub struct BertLayerWeights<'a> {
     pub wo_bias: Bias,
     pub attn_out_norm: NormWithBias,
     pub layer_out_norm: NormWithBias,
-    pub ffn_up: Weight<'a>,
-    pub ffn_gate: Option<Weight<'a>>,
+    /// `true` if this layer is an MoE layer (only `nomic-bert-moe` ever
+    /// sets this). When true, `ffn_gate_inp`/`ffn_up_exps`/`ffn_down_exps`
+    /// carry the expert weights and `ffn_up`/`ffn_down` are absent.
+    pub is_moe_layer: bool,
+    /// Dense GELU branch (BERT / jina / nomic-bert / nomic-bert-moe
+    /// non-MoE layers). Required when `is_moe_layer == false`.
+    pub ffn_up: Option<Weight<'a>>,
+    pub ffn_down: Option<Weight<'a>>,
     pub ffn_up_bias: Bias,
-    pub ffn_gate_bias: Bias,
-    pub ffn_down: Weight<'a>,
     pub ffn_down_bias: Bias,
+    /// Gated-FFN projection. Required for `jina-bert-v2` (GEGLU) and
+    /// `nomic-bert` (SwiGLU); absent for plain `bert` and MoE layers.
+    pub ffn_gate: Option<Weight<'a>>,
+    pub ffn_gate_bias: Bias,
+    /// Router logits projection [n_embd, n_expert], F32. Only present on
+    /// MoE layers.
+    pub ffn_gate_inp: Option<Weight<'a>>,
+    /// Per-expert up projection (3D Q8_0). Stored as a `MoeExperts`
+    /// because each expert slice must be presented as a 2D `[rows, cols]`
+    /// matrix to the Q8_0 matmul kernel.
+    pub ffn_up_exps: Option<MoeExperts<'a>>,
+    /// Per-expert down projection (3D Q8_0).
+    pub ffn_down_exps: Option<MoeExperts<'a>>,
 }
 
 /// A projection bias. Empty when the GGUF omits it (BERT tensors are
@@ -125,6 +214,17 @@ pub struct BertWeights<'a> {
     /// The GGUF spells it `position_embd`, not `pos_embd`
     /// (`llama-arch.cpp:480`); the shorter form does not exist in any GGUF.
     pub pos_embd: Option<(&'a [u8], GGMLType)>,
+    /// `moe_every_n_layers` (`LLM_KV_MOE_EVERY_N_LAYERS`, default 0 = no
+    /// MoE). Layer `l` is an MoE layer when `moe_every_n_layers > 0` and
+    /// `l % moe_every_n_layers == 1` (`bert.cpp:165-178`).
+    pub moe_every_n_layers: usize,
+    /// Number of experts per MoE layer (`LLM_KV_EXPERT_COUNT`).
+    pub expert_count: usize,
+    /// Number of experts used per token (`LLM_KV_EXPERT_USED_COUNT`,
+    /// top-k for the router).
+    pub expert_used_count: usize,
+    /// `expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCALE`); default 1.0.
+    pub expert_weights_scale: f32,
     pub layers: Vec<BertLayerWeights<'a>>,
 }
 
@@ -252,6 +352,32 @@ pub fn load_weights<S: TensorSource + ?Sized>(
     n_embd_head: usize,
     n_ff: usize,
 ) -> BertWeights<'_> {
+    // MoE hyperparameters — read unconditionally so per-layer loading
+    // can dispatch even when the variant isn't MoE (the fields default
+    // to zero/empty and the dispatch `l % moe_every_n_layers == 1` is a
+    // no-op when moe_every_n_layers == 0).
+    let arch = variant.arch_name();
+    let moe_every_n_layers = source
+        .metadata(format!("{arch}.moe_every_n_layers").as_str())
+        .and_then(MetaValue::to_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let expert_count = source
+        .metadata(format!("{arch}.expert_count").as_str())
+        .and_then(MetaValue::to_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let expert_used_count = source
+        .metadata(format!("{arch}.expert_used_count").as_str())
+        .and_then(MetaValue::to_u64)
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    let expert_weights_scale = source
+        .metadata(format!("{arch}.expert_weights_scale").as_str())
+        .and_then(|v| v.to_f64())
+        .map(|v| v as f32)
+        .unwrap_or(1.0);
+
     let embd_info = source
         .tensor_info("token_embd.weight")
         .expect("missing token_embd.weight");
@@ -307,12 +433,12 @@ pub fn load_weights<S: TensorSource + ?Sized>(
         );
     }
 
-    let layers = (0..n_layer)
+    // Per-layer first pass: attention tensors + LayerNorms. FFN tensors
+    // are filled in a second pass below because the field layout differs
+    // between MoE and dense.
+    let mut layers: Vec<BertLayerWeights> = (0..n_layer)
         .map(|l| {
             let name_of = |suffix: &str| format!("blk.{l}.{suffix}");
-            let bias_of = |suffix: &str| Bias {
-                values: optional_f32_tensor(source, &name_of(suffix), n_embd),
-            };
             // nomic-bert ships one fused [n_embd, n_embd_q + 2*n_embd_gqa]
             // projection (`create_tensor_qkv` accepts a fused tensor first).
             // The others split q/k/v.
@@ -351,6 +477,8 @@ pub fn load_weights<S: TensorSource + ?Sized>(
                     n_embd_gqa,
                 )),
             };
+            let is_moe =
+                variant.uses_moe() && moe_every_n_layers > 0 && (l % moe_every_n_layers == 1);
             BertLayerWeights {
                 wq,
                 wq_bias: Bias {
@@ -377,29 +505,115 @@ pub fn load_weights<S: TensorSource + ?Sized>(
                     weight: f32_tensor(source, &name_of("layer_output_norm.weight"), n_embd),
                     bias: f32_tensor(source, &name_of("layer_output_norm.bias"), n_embd),
                 },
-                ffn_up: load_sized_weight(source, &name_of("ffn_up.weight"), n_embd, n_ff),
-                ffn_gate: match variant.uses_gelu_gate() || variant.uses_silu_gate() {
-                    true => Some(load_sized_weight(
-                        source,
-                        &name_of("ffn_gate.weight"),
-                        n_embd,
-                        n_ff,
-                    )),
-                    false => None,
-                },
-                ffn_up_bias: Bias {
-                    values: optional_f32_tensor(source, &name_of("ffn_up.bias"), n_ff),
-                },
-                ffn_gate_bias: Bias {
-                    values: optional_f32_tensor(source, &name_of("ffn_gate.bias"), n_ff),
-                },
-                ffn_down: load_sized_weight(source, &name_of("ffn_down.weight"), n_ff, n_embd),
-                ffn_down_bias: Bias {
-                    values: optional_f32_tensor(source, &name_of("ffn_down.bias"), n_embd),
-                },
+                is_moe_layer: is_moe,
+                ffn_up: None,
+                ffn_down: None,
+                ffn_up_bias: Bias::default(),
+                ffn_down_bias: Bias::default(),
+                ffn_gate: None,
+                ffn_gate_bias: Bias::default(),
+                ffn_gate_inp: None,
+                ffn_up_exps: None,
+                ffn_down_exps: None,
             }
         })
         .collect();
+
+    // ---- second pass: FFN tensors ----
+    for l in 0..n_layer {
+        let name_of = |suffix: &str| format!("blk.{l}.{suffix}");
+        if layers[l].is_moe_layer {
+            // MoE branch. `ffn_gate_inp` is a plain F32 router matrix
+            // `[n_embd, n_expert]`; `ffn_up_exps` and `ffn_down_exps` are
+            // 3D `[n_ff, n_embd, n_expert]` / `[n_embd, n_ff, n_expert]`
+            // Q8_0 tensors.
+            let gate_info = source
+                .tensor_info(&name_of("ffn_gate_inp.weight"))
+                .map(|info| {
+                    (
+                        source
+                            .tensor_slice(&name_of("ffn_gate_inp.weight"))
+                            .expect("missing ffn_gate_inp.weight data"),
+                        info.ggml_type,
+                    )
+                });
+            let ffn_gate_inp = gate_info.as_ref().map(|(bytes, ty)| {
+                Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    *ty,
+                    n_embd,
+                    expert_count,
+                ))
+            });
+            // GGUF stores both experts as `[ne0 × ne1]` row-major, where
+            // `ne0` (innermost) is the column count. For up: ne0 = n_ff;
+            // for down: ne0 = n_embd. We pass them through `load_moe_experts`
+            // which stores the raw bytes plus row/col metadata; the
+            // forward path slices a 2D window per expert for matmul.
+            let ffn_up_exps = load_moe_experts(
+                source,
+                &name_of("ffn_up_exps.weight"),
+                n_ff,
+                n_embd,
+                expert_count,
+            );
+            let ffn_down_exps = load_moe_experts(
+                source,
+                &name_of("ffn_down_exps.weight"),
+                n_embd,
+                n_ff,
+                expert_count,
+            );
+            assert!(ffn_gate_inp.is_some(), "moe layer missing ffn_gate_inp");
+            assert!(ffn_up_exps.is_some(), "moe layer missing ffn_up_exps");
+            assert!(ffn_down_exps.is_some(), "moe layer missing ffn_down_exps");
+            layers[l].ffn_gate_inp = ffn_gate_inp;
+            layers[l].ffn_up_exps = ffn_up_exps;
+            layers[l].ffn_down_exps = ffn_down_exps;
+        } else {
+            // Dense FFN branch — same as `nomic-bert-moe.cpp:36-39` for
+            // nomic-bert-moe, or `bert.cpp:179-186` for the others.
+            layers[l].ffn_up = Some(load_sized_weight(
+                source,
+                &name_of("ffn_up.weight"),
+                n_embd,
+                n_ff,
+            ));
+            layers[l].ffn_down = Some(load_sized_weight(
+                source,
+                &name_of("ffn_down.weight"),
+                n_ff,
+                n_embd,
+            ));
+            layers[l].ffn_up_bias = Bias {
+                values: optional_f32_tensor(source, &name_of("ffn_up.bias"), n_ff),
+            };
+            layers[l].ffn_down_bias = Bias {
+                values: optional_f32_tensor(source, &name_of("ffn_down.bias"), n_embd),
+            };
+            // jina-bert-v2 has GEGLU on every layer (`bert.cpp:187-194`).
+            if variant.uses_gelu_gate() {
+                layers[l].ffn_gate = Some(load_sized_weight(
+                    source,
+                    &name_of("ffn_gate.weight"),
+                    n_embd,
+                    n_ff,
+                ));
+                layers[l].ffn_gate_bias = Bias {
+                    values: optional_f32_tensor(source, &name_of("ffn_gate.bias"), n_ff),
+                };
+            }
+            // nomic-bert (v1.5) has SwiGLU on every layer (`nomic-bert.cpp:41`).
+            if variant.uses_silu_gate() {
+                layers[l].ffn_gate = Some(load_sized_weight(
+                    source,
+                    &name_of("ffn_gate.weight"),
+                    n_embd,
+                    n_ff,
+                ));
+            }
+        }
+    }
 
     BertWeights {
         variant,
@@ -409,6 +623,10 @@ pub fn load_weights<S: TensorSource + ?Sized>(
         tok_norm,
         token_types,
         pos_embd,
+        moe_every_n_layers,
+        expert_count,
+        expert_used_count,
+        expert_weights_scale,
         layers,
     }
 }

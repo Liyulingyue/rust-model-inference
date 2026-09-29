@@ -9,6 +9,7 @@ use crate::core::loader::model_config_from_source;
 use crate::core::tensor::{MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{EncodeOptions, WPMTokenizer};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm, softmax_inplace};
 use std::sync::Arc;
 
@@ -171,17 +172,40 @@ pub fn compute_embedding(
     prompt: &str,
     n_threads_arg: usize,
 ) -> Result<Vec<f32>, String> {
-    // `tokenizer.ggml.model = "bert"` → WordPiece, with the `▁`-prefixed
-    // spelling slang llama.cpp uses for the whole encoder family.
-    let tokenizer = WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    let prompt_tokens = tokenizer.encode(
-        prompt,
-        EncodeOptions {
-            add_special: true,
-            parse_special: true,
-        },
-    );
+    // The four bert-family variants use three different tokenizers:
+    //   * `bert`/`jina-bert-v2`/`nomic-bert` ship `tokenizer.ggml.model =
+    //     "bert"` (WordPiece).
+    //   * `nomic-bert-moe` ships `tokenizer.ggml.model = "t5"` (UGM, an
+    //     XLM unigram with a precompiled XCDA charsmap).
+    // We dispatch on the architecture rather than on `tokenizer.ggml.model`
+    // because the WPM tokenizer is not a `dyn Tokenizer` and the BPE
+    // fallback in `load_tokenizer` would reject "bert".
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default()
+        .to_string();
+    let prompt_tokens = if arch == "nomic-bert-moe" {
+        let tok = crate::core::tokenizer::load_tokenizer(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        tok.encode(
+            prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    } else {
+        let tok = WPMTokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        tok.encode(
+            prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    };
     if prompt_tokens.is_empty() {
         return Err("Embedding input produced no tokens".into());
     }
@@ -453,100 +477,241 @@ pub fn run_embedding_tokens(
             x.copy_from_slice(&normed);
         }
 
-        // 4. FFN: GELU (single up) or GEGLU (gelu(up) * gate), then
-        //    residual re-add and the output LayerNorm.
-        for t in 0..n_tokens {
-            let x = &hidden[t * n_embd..(t + 1) * n_embd];
-            lw.ffn_up.quantize_and_matmul_with_scratch(
-                x,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                &mut up_buf,
-                &pool,
-            );
-            lw.ffn_up_bias.add_to(&mut up_buf);
-
-            // `ggml_geglu_split(cur, tmp)` with `cur = gate` and `tmp = up`
-            // (`llama-graph.cpp:1825-1831,1866-1869`), and
-            // `ggml_vec_geglu_f32(y, x, g)` computes `gelu(x) * g` with
-            // `x = src0 = gate`. So the FFN is `gelu(gate) * up` — the gate is
-            // the activated side and `ffn_up` is the plain multiplier.
-            // The down projection always reads `ffn_in`; for the gelu-only
-            // variant that is `up_buf` itself.
-            let ffn_in: &[f32] = if cfg.variant.uses_gelu_gate() {
-                let gate = lw
-                    .ffn_gate
-                    .as_ref()
-                    .expect("geglu variant requires ffn_gate");
-                gate.quantize_and_matmul_with_scratch(
+        // 4. FFN: GELU/GEGLU/SwiGLU dense, or 8x top-2 MoE for `nomic-bert-moe` MoE
+        //    layers. The MoE branch mirrors `build_moe_ffn`
+        //    (`llama-graph.cpp:2002`) reduced to scalar batches — router
+        //    logits, top-k, softmax, weighted sum of per-expert (up →
+        //    GELU → down) outputs. MoE experts use plain GELU (no gate),
+        //    same as the dense `BERT || NOMIC_BERT_MOE` arm at `bert.cpp:179`.
+        if lw.is_moe_layer {
+            let router = lw
+                .ffn_gate_inp
+                .as_ref()
+                .expect("moe layer missing ffn_gate_inp");
+            let up_exps = lw
+                .ffn_up_exps
+                .as_ref()
+                .expect("moe layer missing ffn_up_exps");
+            let down_exps = lw
+                .ffn_down_exps
+                .as_ref()
+                .expect("moe layer missing ffn_down_exps");
+            assert!(weights.expert_count > 0);
+            assert!(weights.expert_used_count > 0);
+            let mut logits = vec![0.0f32; weights.expert_count];
+            let mut hidden_e = vec![0.0f32; n_embd];
+            for t in 0..n_tokens {
+                let x = &hidden[t * n_embd..(t + 1) * n_embd];
+                // Router logits [n_expert] per token.
+                router.quantize_and_matmul_with_scratch(
                     x,
                     &mut q8k_buf,
                     &mut q8_buf,
                     &mut scale_buf,
-                    &mut gate_buf,
+                    &mut logits,
                     &pool,
                 );
-                lw.ffn_gate_bias.add_to(&mut gate_buf);
-                gelu_ggml_f16_inplace(&mut gate_buf);
-                for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
-                    *slot *= *up;
+
+                // Top-k by logit, ties broken by lower id.
+                let mut order: Vec<usize> = (0..weights.expert_count).collect();
+                order.sort_by(|&a, &b| {
+                    logits[b]
+                        .partial_cmp(&logits[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let k = weights.expert_used_count.min(weights.expert_count);
+                let selected_logits: Vec<f32> = (0..k).map(|i| logits[order[i]]).collect();
+
+                // Softmax over the top-k logits. llama.cpp's
+                // `LLM_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT` path applies
+                // softmax to the *selected* weights after top-k
+                // (`llama-graph.cpp:2122-2128`).
+                let mut max_logit = selected_logits[0];
+                for &v in selected_logits.iter() {
+                    if v > max_logit {
+                        max_logit = v;
+                    }
                 }
-                &gate_buf[..]
-            } else if cfg.variant.uses_silu_gate() {
-                // `bert.cpp:196-203` — the `bert.cpp` fall-through arm, which
-                // nomic-bert reaches because it is in neither the GELU arm
-                // (`bert.cpp:179`) nor the GEGLU arm (`bert.cpp:187`).
-                // `build_ffn(up, gate, ...)` with SILU + FFN_PAR gives
-                // `ggml_swiglu_split(cur = gate, tmp = up)` =
-                // `silu(gate) * up`, so again the gate is the activated side.
-                let gate = lw
-                    .ffn_gate
-                    .as_ref()
-                    .expect("swiglu variant requires ffn_gate");
-                gate.quantize_and_matmul_with_scratch(
+                let mut weights_sum = 0.0f64;
+                let mut sel = vec![0.0f64; k];
+                for i in 0..k {
+                    sel[i] = (selected_logits[i] - max_logit).exp() as f64;
+                    weights_sum += sel[i];
+                }
+                if weights_sum == 0.0 {
+                    weights_sum = 1.0;
+                }
+                let inv = (1.0 / weights_sum) * (weights.expert_weights_scale as f64);
+                for v in sel.iter_mut() {
+                    *v *= inv;
+                }
+
+                // Weighted sum of expert (up → gelu → down) outputs.
+                for slot in hidden_e.iter_mut() {
+                    *slot = 0.0;
+                }
+                for i in 0..k {
+                    let e = order[i];
+                    let weight_e = sel[i] as f32;
+                    let up_weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                        up_exps.per_expert_bytes(e),
+                        up_exps.ggml_type,
+                        up_exps.cols, // n_in = inner dim
+                        up_exps.rows, // n_out = outer dim
+                    ));
+                    let down_weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                        down_exps.per_expert_bytes(e),
+                        down_exps.ggml_type,
+                        down_exps.cols, // n_in = inner dim
+                        down_exps.rows, // n_out = outer dim
+                    ));
+                    // `expert @ x` (per-expert up is `[n_ff rows × n_embd cols]`
+                    // in storage, the matmul reads it row-major as
+                    // `[ne0=n_embd, ne1=n_ff]`, so `output[m] = Σ_k
+                    // expert[m, k] * x[k]` gives the `n_ff` vector we want).
+                    up_weight.quantize_and_matmul_with_scratch(
+                        x,
+                        &mut q8k_buf,
+                        &mut q8_buf,
+                        &mut scale_buf,
+                        &mut up_buf,
+                        &pool,
+                    );
+                    gelu_ggml_f16_inplace(&mut up_buf);
+                    down_weight.quantize_and_matmul_with_scratch(
+                        &up_buf,
+                        &mut q8k_buf,
+                        &mut q8_buf,
+                        &mut scale_buf,
+                        &mut down_buf,
+                        &pool,
+                    );
+                    // hidden_e += weight_e * (up_buf @ down_exps[e])
+                    for (acc, &v) in hidden_e.iter_mut().zip(down_buf.iter()) {
+                        *acc += weight_e * v;
+                    }
+                }
+
+                // Add the MoE FFN contribution to the residual (the
+                // attention-projected residual is added separately above)
+                // and run the layer's output LayerNorm.
+                let x = &mut hidden[t * n_embd..(t + 1) * n_embd];
+                for i in 0..n_embd {
+                    x[i] += hidden_e[i];
+                }
+                layer_norm(
                     x,
-                    &mut q8k_buf,
-                    &mut q8_buf,
-                    &mut scale_buf,
-                    &mut gate_buf,
-                    &pool,
+                    &lw.layer_out_norm.weight,
+                    &lw.layer_out_norm.bias,
+                    cfg.eps,
+                    &mut normed,
                 );
-                lw.ffn_gate_bias.add_to(&mut gate_buf);
-                silu_inplace(&mut gate_buf);
-                for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
-                    *slot *= *up;
-                }
-                &gate_buf[..]
-            } else {
-                // `bert.cpp:155-160` — plain GELU over the single `ffn_up`.
-                gelu_ggml_f16_inplace(&mut up_buf);
-                &up_buf[..]
-            };
-
-            lw.ffn_down.quantize_and_matmul_with_scratch(
-                ffn_in,
-                &mut q8k_buf,
-                &mut q8_buf,
-                &mut scale_buf,
-                &mut down_buf,
-                &pool,
-            );
-            lw.ffn_down_bias.add_to(&mut down_buf);
-
-            let x = &mut hidden[t * n_embd..(t + 1) * n_embd];
-            for i in 0..n_embd {
-                x[i] += down_buf[i];
+                x.copy_from_slice(&normed);
             }
-            // `bert.cpp:195` — output LayerNorm closes the layer.
-            layer_norm(
-                x,
-                &lw.layer_out_norm.weight,
-                &lw.layer_out_norm.bias,
-                cfg.eps,
-                &mut normed,
-            );
-            x.copy_from_slice(&normed);
+        } else {
+            // ---- Dense FFN (BERT / jina / nomic / nomic-moe dense) ----
+            let ffn_up = lw
+                .ffn_up
+                .as_ref()
+                .expect("dense layer missing ffn_up.weight");
+            let ffn_down = lw
+                .ffn_down
+                .as_ref()
+                .expect("dense layer missing ffn_down.weight");
+            for t in 0..n_tokens {
+                let x = &hidden[t * n_embd..(t + 1) * n_embd];
+                ffn_up.quantize_and_matmul_with_scratch(
+                    x,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    &mut up_buf,
+                    &pool,
+                );
+                lw.ffn_up_bias.add_to(&mut up_buf);
+
+                // `ggml_geglu_split(cur, tmp)` with `cur = gate` and `tmp = up`
+                // (`llama-graph.cpp:1825-1831,1866-1869`), and
+                // `ggml_vec_geglu_f32(y, x, g)` computes `gelu(x) * g` with
+                // `x = src0 = gate`. So the FFN is `gelu(gate) * up` — the
+                // gate is the activated side and `ffn_up` is the plain
+                // multiplier. The down projection always reads `ffn_in`; for
+                // the gelu-only variant that is `up_buf` itself.
+                let ffn_in: &[f32] = if cfg.variant.uses_gelu_gate() {
+                    let gate = lw
+                        .ffn_gate
+                        .as_ref()
+                        .expect("geglu variant requires ffn_gate");
+                    gate.quantize_and_matmul_with_scratch(
+                        x,
+                        &mut q8k_buf,
+                        &mut q8_buf,
+                        &mut scale_buf,
+                        &mut gate_buf,
+                        &pool,
+                    );
+                    lw.ffn_gate_bias.add_to(&mut gate_buf);
+                    gelu_ggml_f16_inplace(&mut gate_buf);
+                    for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
+                        *slot *= *up;
+                    }
+                    &gate_buf[..]
+                } else if cfg.variant.uses_silu_gate() {
+                    // `bert.cpp:196-203` — the `bert.cpp` fall-through arm,
+                    // which nomic-bert reaches because it is in neither the
+                    // GELU arm (`bert.cpp:179`) nor the GEGLU arm
+                    // (`bert.cpp:187`). `build_ffn(up, gate, ...)` with
+                    // SILU + FFN_PAR gives `ggml_swiglu_split(cur = gate,
+                    // tmp = up)` = `silu(gate) * up`, so again the gate is
+                    // the activated side.
+                    let gate = lw
+                        .ffn_gate
+                        .as_ref()
+                        .expect("swiglu variant requires ffn_gate");
+                    gate.quantize_and_matmul_with_scratch(
+                        x,
+                        &mut q8k_buf,
+                        &mut q8_buf,
+                        &mut scale_buf,
+                        &mut gate_buf,
+                        &pool,
+                    );
+                    lw.ffn_gate_bias.add_to(&mut gate_buf);
+                    silu_inplace(&mut gate_buf);
+                    for (slot, up) in gate_buf.iter_mut().zip(&up_buf) {
+                        *slot *= *up;
+                    }
+                    &gate_buf[..]
+                } else {
+                    // `bert.cpp:155-160` — plain GELU over the single `ffn_up`.
+                    gelu_ggml_f16_inplace(&mut up_buf);
+                    &up_buf[..]
+                };
+
+                ffn_down.quantize_and_matmul_with_scratch(
+                    ffn_in,
+                    &mut q8k_buf,
+                    &mut q8_buf,
+                    &mut scale_buf,
+                    &mut down_buf,
+                    &pool,
+                );
+                lw.ffn_down_bias.add_to(&mut down_buf);
+
+                let x = &mut hidden[t * n_embd..(t + 1) * n_embd];
+                for i in 0..n_embd {
+                    x[i] += down_buf[i];
+                }
+                // `bert.cpp:195` — output LayerNorm closes the layer.
+                layer_norm(
+                    x,
+                    &lw.layer_out_norm.weight,
+                    &lw.layer_out_norm.bias,
+                    cfg.eps,
+                    &mut normed,
+                );
+                x.copy_from_slice(&normed);
+            }
         }
     }
 

@@ -50,8 +50,8 @@
 
 ## C. Encoder / Embedding 家族（一次实现覆盖 5+ 模型，ROI 最高）
 
-2026-09-28 状态：**C 区已兑现 3/7**，且证明「一次实现覆盖多模型」的判断是对的——
-`src/models/bert_family/` + `src/models/gemma_embedding/` 两个模块就吃掉了 3 个 arch。
+2026-09-29 状态：**C 区已兑现 4/7**。`nomic-bert-moe` 完成（含 UGM tokenizer + 偶奇层
+dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arch。
 
 与已有 Qwen3-Embedding 同赛道，粒度小、无生成逻辑：
 
@@ -60,7 +60,7 @@
 | `bert` | bge-small-en-v1.5 33M（已验证） | **已接 2026-09-28**（Verified，`tests/bge_small_en_v1_5.rs` 4/4） |
 | `jina-bert-v2` | jina-embeddings-v2-base-zh(893M) | **已接**（Verified，`tests/jina_v2_base_en.rs` 4/4） |
 | `nomic-bert` | nomic-embed-text-v1.5 137M | **已接 2026-09-28**（Verified，`tests/nomic_embed_text_v1_5.rs` 5/5） |
-| `nomic-bert-moe` | nomic-embed-text-v2-moe 512MB | 待接：`ggml-org/Nomic-Embed-Text-V2-GGUF` 已有，只差 MoE 路由 |
+| `nomic-bert-moe` | nomic-embed-text-v2-moe 512MB | **已接 2026-09-29**（Verified，`tests/nomic_embed_text_v2_moe.rs` 5/5；含 UGM tokenizer + 偶奇层 dense/MoE 调度） |
 | `modern-bert` | ModernBERT 150M–1.4B | 待接：llama.cpp 有独立 `modern-bert.cpp`，**不在** `bert.cpp` 共享 graph 里 |
 | `jina-bert-v3` | jina-embeddings-v3 570M | 待接：在 `bert.cpp` 共享 graph 内，需 RoPE + GELU SEQ + `token_types` |
 | `neo-bert` / `eurobert` | 436M / 210M–1.2B | 待接 |
@@ -78,9 +78,8 @@
 | 投影 bias | 4 组 | 4 组 | **全无** |
 | rope freq_base | - | - | **1000** |
 
-**下一个最便宜的是 `nomic-bert-moe`**：GGUF 已在 ModelScope（`ggml-org/Nomic-Embed-Text-V2-GGUF`，
-512MB），且它和 `nomic-bert` 共用 `bert.cpp` graph，只是 FFN 走 MoE 分支
-（`bert.cpp:165-178`，`moe_every_n_layers`）。
+**下一个最便宜的是 `qwen3moe`**：GGUF 已在 ModelScope（`ggml-org/...`），共用 qwen3 trunk，
+只差 MoE 路由。
 
 ## D. 经典 / SSM / 小模型（有兴趣再接）
 
@@ -113,12 +112,10 @@
    `lfm2moe` / `pig` / `hunyuan-dense` 三项经复核早已登记为 `Verified`，是本文件写错了。
 2. ~~`bert` 变体验证~~ **已完成**（bge-small-en-v1.5），并因此发现一个波及三个变体的
    attention 残差 bug。
-3. **`nomic-bert-moe`** — GGUF 已在 ModelScope（`ggml-org/Nomic-Embed-Text-V2-GGUF`，489MB），
-   但要先建 **UGM tokenizer**：该文件是多语言 XLM 版（`general.name='Nomic Xlm 2048'`），
-   `tokenizer.ggml.model='t5'` → `LLAMA_VOCAB_TYPE_UGM`，需要 XCDA trie 解码
-   （`precompiled_charsmap` 237KB 位压缩 blob）+ `normalize_prefix` + naive trie 匹配 +
-   双精度 Viterbi。仓库目前**完全没有 UGM 基础设施**，工作量约为 nomic-bert 的 3 倍。
-3. **`qwen3moe`（Qwen3-30B-A3B）** — 已有 qwen3 trunk，边际成本最低，且 MoE 路由是后续
+3. ~~`nomic-bert-moe`~~ **已完成 2026-09-29**：UGM tokenizer + 偶奇层 dense/MoE 调度已
+   跑通 `tests/nomic_embed_text_v2_moe.rs` 5/5。GGUF 489MB，CLI+HTTP 768 维输出与 bit
+   一致，跨语言语义排序正确。
+4. **`qwen3moe`（Qwen3-30B-A3B）** — 已有 qwen3 trunk，边际成本最低，且 MoE 路由是后续
    `llama4`/`hunyuan-moe`/`glm4-moe` 的共同前置。
 4. **`mistral3`（Mistral-Small-24B）** — 标准架构，1 天量级，覆盖面大。
 5. **C 区剩余** — `jina-bert-v3`（同 graph 加开关）→ `modern-bert`（独立 graph）→ `llama-embed`。

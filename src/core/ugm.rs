@@ -215,6 +215,11 @@ pub struct UgmTokenizer {
     control_token_id: u32,
     /// Optional: the `<unk>` token id (preferred UNK surface).
     unk_id: Option<u32>,
+    /// `tokenizer.ggml.eos_token_id`. `llama-vocab.cpp:2042` defaults to
+    /// `1` for `t5`; the GGUF for nomic-embed-text-v2-moe overrides it to
+    /// `2`. Returned from `eos_id()` so callers can compare against the
+    /// last token of `encode()`.
+    eos_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +297,7 @@ impl UgmTokenizer {
         // ---- special ids (llama-vocab.cpp:2042-2046 defaults) ----
         let special_bos_id = u32_meta(&get_meta, "tokenizer.ggml.bos_token_id");
         let special_unk_id = u32_meta(&get_meta, "tokenizer.ggml.unknown_token_id");
+        let special_eos_id = u32_meta(&get_meta, "tokenizer.ggml.eos_token_id");
         let control_token_id = special_bos_id.unwrap_or(0);
 
         // ---- flags ----
@@ -382,6 +388,7 @@ impl UgmTokenizer {
             unused_token_id: None,
             control_token_id,
             unk_id: special_unk_id,
+            eos_id: special_eos_id,
             // add_bos / add_eos are read by callers; the UGM session does
             // not embed them. Tokenizer-level metadata is stored in
             // `vocab_model` so the wrapper at the top level can emit
@@ -412,7 +419,10 @@ impl UgmTokenizer {
     }
 
     pub fn eos_id(&self) -> Option<u32> {
-        Some(self.unk_id())
+        // Match `llama-vocab.cpp:2042` then override from GGUF
+        // `tokenizer.ggml.eos_token_id`. The `t5` default is 1; the
+        // nomic-bert-moe GGUF overrides it to 2.
+        self.eos_id
     }
 
     /// Decode one token id back to bytes, applying `render_special` for
