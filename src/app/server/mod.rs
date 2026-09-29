@@ -841,6 +841,10 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
     // rerank model. Detected by metadata peek BEFORE the full Text
     // build (which would load unrelated multimodal state).
+    //
+    // This is the only metadata-probed backend in this function; the others are
+    // flag-driven. Why they differ — and why adding a probe is usually the wrong
+    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) {
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
     }
