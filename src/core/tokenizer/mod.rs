@@ -1637,8 +1637,7 @@ pub fn load_tokenizer(
             Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
         }
         Some(MetaValue::String(value)) if value == "t5" => Ok(Box::new(
-            ugm::UgmTokenizer::from_gguf_metadata(get_meta)
-                .map_err(|e| e.to_string())?,
+            ugm::UgmTokenizer::from_gguf_metadata(get_meta).map_err(|e| e.to_string())?,
         )),
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
@@ -2940,4 +2939,3 @@ mod wpm_unk_tests {
 /// path level as BPE/SPM/WPM. `load_tokenizer` above routes
 /// `tokenizer.ggml.model = "t5"` GGUFs here.
 pub use ugm::{UgmError, UgmTokenizer};
-
