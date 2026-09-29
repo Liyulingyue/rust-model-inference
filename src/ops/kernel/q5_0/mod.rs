@@ -120,54 +120,54 @@ impl<'a> Kernel for Q5_0Kernel<'a> {
 mod tests {
     use super::*;
 
-/// Build a single Q5_0 block with constant `d` (F16 scale), `qh`
-/// (high-bit table), and `qs` (low-nibble table). Q5_0 has no `m`
-/// field — every block is just 22 bytes: 2 (d) + 4 (qh) + 16 (qs).
-/// Per-element value is `d * q - 16` where `q = (qh_bit << 4) | nibble`.
-fn q5_0_uniform_block(d: f32, qh: u32, qs: &[u8; 16]) -> Vec<u8> {
-    let mut block = Vec::with_capacity(22);
-    block.extend_from_slice(&crate::ops::f32_to_f16(d).to_le_bytes());
-    block.extend_from_slice(&qh.to_le_bytes());
-    block.extend_from_slice(qs);
-    block
-}
+    /// Build a single Q5_0 block with constant `d` (F16 scale), `qh`
+    /// (high-bit table), and `qs` (low-nibble table). Q5_0 has no `m`
+    /// field — every block is just 22 bytes: 2 (d) + 4 (qh) + 16 (qs).
+    /// Per-element value is `d * q - 16` where `q = (qh_bit << 4) | nibble`.
+    fn q5_0_uniform_block(d: f32, qh: u32, qs: &[u8; 16]) -> Vec<u8> {
+        let mut block = Vec::with_capacity(22);
+        block.extend_from_slice(&crate::ops::f32_to_f16(d).to_le_bytes());
+        block.extend_from_slice(&qh.to_le_bytes());
+        block.extend_from_slice(qs);
+        block
+    }
 
-#[test]
-fn q5_0_kernel_uniform_block_yields_zero_for_zero_signal() {
-    // qs = 0x88 means every nibble is 8 (low 4 bits) → element value
-    // is `d * q - 16 = 1 * 8 - 16 = -8` per element. Dot with an
-    // all-ones input gives `-8 * 32 = -256`. Times the input scale
-    // (1.0) yields -256, not zero — the assertion below is a
-    // regression check that the FMA loop runs to completion without
-    // overflow / NaN rather than expecting zero output.
-    let weight = q5_0_uniform_block(1.0, 0, &[0x88; 16]);
-    let input_q8 = vec![1i8 as u8; 32];
-    let input_scales = vec![1.0f32];
+    #[test]
+    fn q5_0_kernel_uniform_block_yields_zero_for_zero_signal() {
+        // qs = 0x88 means every nibble is 8 (low 4 bits) → element value
+        // is `d * q - 16 = 1 * 8 - 16 = -8` per element. Dot with an
+        // all-ones input gives `-8 * 32 = -256`. Times the input scale
+        // (1.0) yields -256, not zero — the assertion below is a
+        // regression check that the FMA loop runs to completion without
+        // overflow / NaN rather than expecting zero output.
+        let weight = q5_0_uniform_block(1.0, 0, &[0x88; 16]);
+        let input_q8 = vec![1i8 as u8; 32];
+        let input_scales = vec![1.0f32];
 
-    let mut output = [0.0f32; 1];
-    let kernel = Q5_0Kernel::new(&weight, 32, 1);
-    kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
+        let mut output = [0.0f32; 1];
+        let kernel = Q5_0Kernel::new(&weight, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
-    // Per-element value: d * q - 16 = 1 * 8 - 16 = -8.
-    // Sum over 32 elements with all-1 input: -8 * 32 = -256.
-    assert_eq!(output, [-256.0]);
-}
+        // Per-element value: d * q - 16 = 1 * 8 - 16 = -8.
+        // Sum over 32 elements with all-1 input: -8 * 32 = -256.
+        assert_eq!(output, [-256.0]);
+    }
 
-#[test]
-fn q5_0_kernel_high_bit_lifts_uniform_block_value() {
-    // Same block as the previous test but with every high bit set:
-    // q = (1 << 4) | 8 = 24, value = 1 * 24 - 16 = 8 per element.
-    // Dot with all-1 input = 8 * 32 = 256. Doubling the previous
-    // test's output confirms the high-bit path is wired correctly.
-    let qh = u32::MAX; // 32 high bits all set
-    let weight = q5_0_uniform_block(1.0, qh, &[0x88; 16]);
-    let input_q8 = vec![1i8 as u8; 32];
-    let input_scales = vec![1.0f32];
+    #[test]
+    fn q5_0_kernel_high_bit_lifts_uniform_block_value() {
+        // Same block as the previous test but with every high bit set:
+        // q = (1 << 4) | 8 = 24, value = 1 * 24 - 16 = 8 per element.
+        // Dot with all-1 input = 8 * 32 = 256. Doubling the previous
+        // test's output confirms the high-bit path is wired correctly.
+        let qh = u32::MAX; // 32 high bits all set
+        let weight = q5_0_uniform_block(1.0, qh, &[0x88; 16]);
+        let input_q8 = vec![1i8 as u8; 32];
+        let input_scales = vec![1.0f32];
 
-    let mut output = [0.0f32; 1];
-    let kernel = Q5_0Kernel::new(&weight, 32, 1);
-    kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
+        let mut output = [0.0f32; 1];
+        let kernel = Q5_0Kernel::new(&weight, 32, 1);
+        kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
-    assert_eq!(output, [256.0]);
-}
+        assert_eq!(output, [256.0]);
+    }
 }

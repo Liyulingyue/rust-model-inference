@@ -1192,11 +1192,10 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
-        Backend::Embedding(_) => router
-            .route(
-                "/v1/embeddings",
-                post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
-            ),
+        Backend::Embedding(_) => router.route(
+            "/v1/embeddings",
+            post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
         Backend::Asr(_) => router
             .route(
                 "/v1/audio/transcriptions",

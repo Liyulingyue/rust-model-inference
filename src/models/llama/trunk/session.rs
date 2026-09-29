@@ -873,7 +873,8 @@ impl<'a> LlamaSession<'a> {
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in.div_ceil(256)) };
+            let q8k_buf =
+                unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in.div_ceil(256)) };
 
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             quantize_q8_0_into(

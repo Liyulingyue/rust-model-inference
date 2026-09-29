@@ -1379,9 +1379,8 @@ mod tests {
     fn encode_audio_chunk_split_emits_n_times_30s_chunks() {
         let mmproj = std::env::var("RMI_JINA_AUDIO_MMPROJ")
             .expect("set RMI_JINA_AUDIO_MMPROJ to the audio mmproj GGUF path");
-        let source: Arc<dyn TensorSource> = Arc::new(
-            crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap(),
-        );
+        let source: Arc<dyn TensorSource> =
+            Arc::new(crate::GGUFLoader::from_file(std::path::Path::new(&mmproj)).unwrap());
         let projection = 1024;
         let tokens_per_chunk = 750;
         // 60 s → 2 chunks; 35 s → 2 chunks (second chunk = 5 s padded
