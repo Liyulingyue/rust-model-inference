@@ -80,23 +80,67 @@ CLM 没有自己的 binary，走既有的 `rust-model-inference`，挂在 JEV fl
 2. 27.1489  Bugs and outages
 ```
 
-## 4. 为什么没有 HTTP 端点
+## 4. 服务端模式
 
-有意不做 `/v1/rank`。仓库已有的打分暴露策略是 JEV 一族
-（`/v1/jev/score`、`/v1/jev/grouped`、`/v1/jev/image`、
-`/v1/jev/image_grouped`），CLM 要接也应该接进这套，而不是另起一个
-OpenAI 风格的 `/v1/rank`。
+CLM 没有自己的 binary，也不引入 OpenAI 风格的 `/v1/rank`。它复用仓库既有的
+JEV flag 家族——打分这件事在仓库里已经有一套约定，CLM 只是它的另一种打分实现。
 
-CLM 目前只有 CLI，因为接进 `/v1/jev/*` 不是改个路由名的事：
+**启动**（`--clm-head` 是启动参数，和 `--mmproj` 同级）：
 
-- JEV 的打分是**跑生成模型看 label logit**，CLM 是**embedding 余弦**，两套数；
-- CLM 需要**额外的头文件**和 encoder 配对加载，JEV 的 scorer 接口
-  （`build_prompt` + `forward_logits`）没有"第二个权重文件"这个维度；
-- 按 `schema.py`，`action` 侧可按 candidate 缓存复用（~1k 候选时快 13x），
-  这也需要在 backend 层做缓存，和 `Backend::Rerank` 那种一次性打分不同。
+```bash
+./target/release/rust-model-server \
+  --model models/Qwen3-8B-GGUF/Qwen3-8B-BF16.gguf \
+  --clm-head models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf \
+  --host 0.0.0.0 --port 8080 --threads 8
+```
 
-要做的话参照 `Backend::Rerank` 加一个 `Backend::Clm`，路由挂 `/v1/jev/...`
-家族。
+启动日志会打 `mode=clm`。
+
+**请求**（`/v1/jev/score`，请求体和 logit 打分的 JEV 完全一致，调用方
+感知不到内部是 cosine 还是 logit）：
+
+```bash
+curl http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' -d '{
+  "context": "Customer: my invoice was charged twice and nobody answers the phone!\n\nWhich team should handle this?",
+  "questions": [{"text": "", "options": ["Charges, invoices, refunds", "Bugs and outages"]}]
+}'
+```
+
+```json
+{
+  "mode": "single",
+  "results": [{
+    "mode": "choice", "labels": ["A","B"],
+    "descriptions": ["Charges, invoices, refunds","Bugs and outages"],
+    "probabilities": {"A": 0.9721649289131165, "B": 0.027835026383399963},
+    "choice": "A", "confidence": 0.47216495871543884,
+    "entropy": 0.1271340698003769, "margin": 0.9443299174308777,
+    "prefill_ms": 29213
+  }]
+}
+```
+
+`values` 字段（原始 score）在 JSON 里也会带上。
+
+**只注册 `/v1/jev/score` 一个路由**，其余一律 404——这是模型能力边界，不是
+接口缺功能：
+
+| 路由 | CLM 后端 | 原因 |
+|---|---|---|
+| `/v1/jev/score` | yes | CLM 就是干这个的 |
+| `/v1/jev/grouped` | 404 | grouped 做 per-group softmax，cosine 打分没有对应物 |
+| `/v1/jev/image`、`/v1/jev/image_grouped` | 404 | 头是在文本 embedding 上训的，接不了图像 |
+| `/v1/chat/completions` 等 | 404 | CLM 不生成文本 |
+
+同一个 server 进程不会同时提供 CLM 打分和 JEV logit 打分——由启动时有没有
+`--clm-head` 决定。这样调用方不需要协商模式，运维也只用看一个 flag。
+
+### 性能：未做 candidate 缓存
+
+参考实现把 action 侧的 embedding 按 candidate 缓存复用（~1k 候选时声称快
+13x），这边没做，每次请求都重新 embed 所有 candidate。正确性优先，等真有
+吞吐需求再加——加了之后要注意缓存 key 必须含 encoder + heads 的身份，
+否则换模型后会读到别的头的投影。
 
 ## 5. 精度
 
@@ -114,5 +158,6 @@ CLM 目前只有 CLI，因为接进 `/v1/jev/*` 不是改个路由名的事：
 | 头加载 / forward / 打分 | `src/models/clm/mod.rs` |
 | .pt -> GGUF 转换器 | `tools/converter/clm/convert_clm.py` |
 | 转换器 round-trip 测试 | `tools/converter/clm/test_convert_clm.py` |
-| CLI 分发（JEV 族肢） | `src/app/jev/clm.rs`（`run_clm_decision` / `run_clm_decision_data`） |
+| 分发（CLI 与 HTTP 共用） | `src/app/jev/clm.rs`（`run_clm_decision` / `run_clm_decision_data` / `run_clm_scoring`） |
+| HTTP 后端 | `Backend::Clm` / `build_clm`（`src/app/server/mod.rs`）、`jev_score` 的 CLM 分支（`src/app/server/api.rs`） |
 | encoder last-token 隐状态 | `Qwen3Session::forward_last_hidden`（`src/models/qwen3/trunk/session.rs`） |

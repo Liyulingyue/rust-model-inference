@@ -21,7 +21,7 @@ pub(crate) mod grouped;
 pub(crate) mod single;
 pub(crate) mod types;
 
-pub use clm::run_clm_decision;
+pub use clm::{run_clm_decision, run_clm_scoring};
 pub use grouped::{
     build_grouped_payload, build_grouped_system, prepare_jev_grouped_questions,
     run_jev_grouped_decision, run_jev_grouped_decision_data,

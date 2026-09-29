@@ -70,34 +70,19 @@ fn embed(
         .map_err(|e| format!("forward: {e}"))
 }
 
-pub fn run_clm_decision_data(
-    source: Arc<dyn TensorSource>,
-    head_path: &Path,
+/// Score with an already-loaded encoder + heads.  The server keeps both
+/// alive across requests, so it uses this instead of
+/// [`run_clm_decision_data`], which would re-read the head file every
+/// call.
+pub fn run_clm_scoring(
+    model: &Qwen3Model,
+    tokenizer: &Arc<BPETokenizer>,
+    heads: &ClmHeads,
     context: &str,
     questions: &[JevQuestionInput],
-    n_threads_arg: usize,
 ) -> Result<Vec<JevResult>, String> {
     let prepared = super::prepare_jev_questions(questions, None)?;
-
-    let head_source: Box<dyn TensorSource> =
-        open_model_source(head_path, ComponentRole::Llm)
-            .map_err(|e| format!("open CLM heads ({}): {e}", head_path.display()))?;
-    let heads = ClmHeads::from_source(head_source.as_ref())?;
-
-    let tokenizer = Arc::new(
-        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
-            .map_err(|e| format!("init tokenizer: {e}"))?,
-    );
-    let pool = Arc::new(ComputePool::new(n_threads_arg.max(1)));
-    let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)
-        .map_err(|e| format!("load encoder: {e}"))?;
     let config = model.config().clone();
-    if config.architecture != "qwen3" {
-        return Err(format!(
-            "CLM needs a qwen3 encoder, got {:?}",
-            config.architecture
-        ));
-    }
     if config.n_embd != heads.encoder_dim() {
         return Err(format!(
             "encoder hidden size {} does not match the CLM heads (expected {})",
@@ -107,8 +92,8 @@ pub fn run_clm_decision_data(
     }
 
     eprintln!(
-        "CLM: encoder {}x{} + heads from {} ({} questions)",
-        config.n_layer, config.n_embd, head_path.display(), prepared.len()
+        "CLM: encoder {}x{} + heads ({} questions)",
+        config.n_layer, config.n_embd, prepared.len()
     );
 
     let t0 = std::time::Instant::now();
@@ -178,6 +163,36 @@ pub fn run_clm_decision_data(
         });
     }
     Ok(results)
+}
+
+
+/// Load the head file, then delegate to [`run_clm_scoring`].  CLI only.
+pub fn run_clm_decision_data(
+    source: Arc<dyn TensorSource>,
+    head_path: &Path,
+    context: &str,
+    questions: &[JevQuestionInput],
+    n_threads_arg: usize,
+) -> Result<Vec<JevResult>, String> {
+    let head_source: Box<dyn TensorSource> =
+        open_model_source(head_path, ComponentRole::Llm)
+            .map_err(|e| format!("open CLM heads ({}): {e}", head_path.display()))?;
+    let heads = ClmHeads::from_source(head_source.as_ref())?;
+
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(n_threads_arg.max(1)));
+    let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    if model.config().architecture != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {:?}",
+            model.config().architecture
+        ));
+    }
+    run_clm_scoring(&model, &tokenizer, &heads, context, questions)
 }
 
 /// CLI entry: score then print exactly the way the logit-based JEV

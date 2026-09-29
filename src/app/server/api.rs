@@ -1127,7 +1127,7 @@ struct JevGroupedOptionInput {
 }
 
 #[derive(serde::Deserialize)]
-struct JevScoreRequest {
+pub struct JevScoreRequest {
     #[serde(default)]
     context: String,
     questions: Vec<JevOptionInput>,
@@ -1149,7 +1149,7 @@ fn default_grouped_mode() -> String {
     "multi_select".to_string()
 }
 
-async fn jev_score(
+pub async fn jev_score(
     State(state): State<AppState>,
     body: Result<Json<JevScoreRequest>, JsonRejection>,
 ) -> Response {
@@ -1180,6 +1180,28 @@ async fn jev_score(
 
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
+
+    // A CLM backend scores by cosine instead of by label logit.  The
+    // heads come from startup (--clm-head), so the request shape is
+    // unchanged and a caller cannot tell the two apart.
+    if let Backend::Clm(clm) = state.model.as_ref() {
+        let results = match crate::app::run_clm_scoring(
+            clm.model.as_ref(),
+            &clm.tokenizer,
+            &clm.heads,
+            &req.context,
+            &questions,
+        ) {
+            Ok(r) => r,
+            Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        return Json(json!({
+            "mode": "single",
+            "context": req.context,
+            "results": results,
+        }))
+        .into_response();
+    }
 
     let results = match crate::app::run_jev_decision_data(
         source,
@@ -1276,6 +1298,8 @@ async fn jev_grouped(
 fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
     match state.model.as_ref() {
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
+        // CLM owns an encoder too; it just scores differently.
+        Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
         other => Err(format!(
             "/v1/jev/* requires a text backend (got {})",
             backend_label(other)
@@ -1290,22 +1314,23 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Asr(_) => "asr",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
     }
 }
 
 fn jev_threads(state: &AppState) -> usize {
-    if let Backend::Text(text) = state.model.as_ref() {
-        text.pool.n_threads()
-    } else {
-        1
+    match state.model.as_ref() {
+        Backend::Text(text) => text.pool.n_threads(),
+        Backend::Clm(clm) => clm.model.pool().n_threads(),
+        _ => 1,
     }
 }
 
 fn jev_prefill_batch_size(state: &AppState) -> usize {
-    if let Backend::Text(text) = state.model.as_ref() {
-        text.prefill_batch_size
-    } else {
-        64
+    match state.model.as_ref() {
+        Backend::Text(text) => text.prefill_batch_size,
+        Backend::Clm(clm) => clm.prefill_batch_size,
+        _ => 64,
     }
 }
 

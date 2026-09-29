@@ -50,6 +50,24 @@ enum Backend {
     Asr(AsrBackend),
     Tts(TtsBackend),
     Rerank(RerankBackend),
+    Clm(ClmBackend),
+}
+
+/// CLM backend: a Qwen3 encoder plus the projection-head GGUF named by
+/// `--clm-head`.  Scores candidates by cosine in projection space, so it
+/// exposes the JEV score route and nothing else.
+struct ClmBackend {
+    /// Kept so the JEV plumbing can hand out an `Arc<dyn TensorSource>`
+    /// the same way it does for `TextBackend`.
+    source: Arc<dyn TensorSource>,
+    /// Leaked for the same reason as `RerankBackend::model`:
+    /// `Qwen3Session` wants a `&'static` model.
+    model: Arc<&'static Qwen3Model>,
+    /// Owned, no borrow: the loader copies the weights out.
+    heads: crate::models::clm::ClmHeads,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
 }
 
 struct RerankBackend {
@@ -666,6 +684,12 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     if is_rerank_gguf(&options.model) {
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
     }
+    // CLM is opted into rather than detected: the encoder is an ordinary
+    // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
+    // that makes it a CLM backend.
+    if options.clm_head.is_some() {
+        return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
+    }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
 }
 
@@ -716,6 +740,47 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
     let model: &'static Qwen3Model = Box::leak(Box::new(model));
     Ok(RerankBackend {
         model: Arc::new(model),
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
+}
+
+fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(Arc::clone(&source), Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    let arch = model.config().architecture.clone();
+    if arch != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
+        ));
+    }
+    let context_length = model.config().n_ctx;
+
+    let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
+    let head_source: Box<dyn TensorSource> = open_or_exit(&head_path, ComponentRole::Llm);
+    let heads = crate::models::clm::ClmHeads::from_source(head_source.as_ref())
+        .map_err(|e| format!("load CLM heads from {}: {e}", head_path.display()))?;
+    if model.config().n_embd != heads.encoder_dim() {
+        return Err(format!(
+            "encoder hidden size {} does not match the CLM heads (expected {})",
+            model.config().n_embd,
+            heads.encoder_dim()
+        ));
+    }
+
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(ClmBackend {
+        source,
+        model: Arc::new(model),
+        heads,
         tokenizer,
         prefill_batch_size,
         context_length,
@@ -1026,6 +1091,7 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1053,6 +1119,10 @@ pub fn run_server() {
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
+        // CLM scores by cosine, so only the single-question route applies.
+        // Grouped does a per-group softmax that has no cosine analogue,
+        // and the image routes need a vision encoder the heads never saw.
+        Backend::Clm(_) => router.route("/v1/jev/score", post(api::jev_score)),
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

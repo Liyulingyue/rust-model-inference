@@ -28,7 +28,8 @@ pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_at
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, image_supported_arch,
     jev_payload_json, jev_system_prompt, prepare_jev_grouped_questions, prepare_jev_questions,
-    run_clm_decision, run_jev_decision, run_jev_decision_data, run_jev_grouped_decision,
+    run_clm_decision, run_clm_scoring, run_jev_decision, run_jev_decision_data,
+    run_jev_grouped_decision,
     run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
     JevQuestionInput, JevResult,
 };
