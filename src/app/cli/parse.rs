@@ -287,6 +287,12 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--clm-head" => {
+                if i + 1 < args.len() {
+                    options.clm_head = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
             "--tts-model" => {
                 if i + 1 < args.len() {
                     options.tts_model = Some(args[i + 1].as_str().into());

@@ -38,15 +38,16 @@ modelscope download --model ggml-org/Qwen3-8B-GGUF \
 
 ## 2. 打分
 
-```bash
-./target/release/clm_rerank \
-  --model  models/Qwen3-8B-GGUF/Qwen3-8B-BF16.gguf \
-  --clm-head models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf \
-  --state "Customer: my invoice was charged twice and nobody answers the phone!
+CLM 没有自己的 binary，走既有的 `rust-model-inference`，挂在 JEV flag 家族下：
 
-Which team should handle this?" \
-  --cand "Charges, invoices, refunds" \
-  --cand "Bugs and outages" \
+```bash
+./target/release/rust-model-inference \
+  --model models/Qwen3-8B-GGUF/Qwen3-8B-BF16.gguf \
+  --jev --clm-head models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf \
+  --jev-context "Customer: my invoice was charged twice and nobody answers the phone!" \
+  --jev-question "Which team should handle this?" \
+  --jev-option "Charges, invoices, refunds" \
+  --jev-option "Bugs and outages" \
   --threads 8
 ```
 
@@ -57,7 +58,7 @@ Which team should handle this?" \
 2. 27.1489  Bugs and outages
 ```
 
-`--cand` 可重复，或用 `--candidates <file>` 一行一个。
+`--jev-option` 可重复。QEV 的 26 个候选上限（A..Z）同样适用于这里。
 
 ## 3. prompt 布局（不看这个会排错序）
 
@@ -113,5 +114,5 @@ CLM 目前只有 CLI，因为接进 `/v1/jev/*` 不是改个路由名的事：
 | 头加载 / forward / 打分 | `src/models/clm/mod.rs` |
 | .pt -> GGUF 转换器 | `tools/converter/clm/convert_clm.py` |
 | 转换器 round-trip 测试 | `tools/converter/clm/test_convert_clm.py` |
-| CLI | `src/bin/clm_rerank.rs` |
+| CLI 分发（JEV 族肢） | `src/app/jev/clm.rs`（`run_clm_decision` / `run_clm_decision_data`） |
 | encoder last-token 隐状态 | `Qwen3Session::forward_last_hidden`（`src/models/qwen3/trunk/session.rs`） |

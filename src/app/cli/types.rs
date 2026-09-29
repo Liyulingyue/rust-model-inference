@@ -28,6 +28,9 @@ pub struct CliOptions {
     pub output: Option<PathBuf>,
     pub model: PathBuf,
     pub mmproj: Option<PathBuf>,
+    /// CLM projection-head GGUF. Pairs with `--model` (the encoder) and
+    /// only means anything together with `--jev`.
+    pub clm_head: Option<PathBuf>,
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
