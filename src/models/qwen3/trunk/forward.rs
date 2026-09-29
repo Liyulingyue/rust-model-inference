@@ -27,6 +27,7 @@ use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen3::Qwen3VulkanSession;
+use rayon::prelude::*;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -196,6 +197,21 @@ impl Qwen3Model {
     ) -> Result<Vec<f32>, String> {
         text_encode(self, token_ids, positions)
     }
+
+    pub fn text_encode_embeddings(
+        &self,
+        embeddings: Vec<f32>,
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+    ) -> Result<Vec<f32>, String> {
+        if positions.len() != key_mask.len()
+            || embeddings.len() != positions.len().saturating_mul(self.config.n_embd)
+            || key_mask.first() != Some(&true)
+        {
+            return Err("Invalid Qwen text embeddings or attention mask".into());
+        }
+        text_encode_inner(self, embeddings, positions, Some(key_mask))
+    }
 }
 
 pub fn text_encode(
@@ -217,13 +233,24 @@ pub fn text_encode(
     }
 
     let embeddings = model.embed_tokens(token_ids)?;
+    text_encode_inner(model, embeddings, positions, None)
+}
+
+fn text_encode_inner(
+    model: &Qwen3Model,
+    embeddings: Vec<f32>,
+    positions: &[[usize; 4]],
+    key_mask: Option<&[bool]>,
+) -> Result<Vec<f32>, String> {
+    let n_tokens = positions.len();
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
-    if positions
-        .iter()
-        .enumerate()
-        .all(|(index, position)| position[0] == index)
+    if key_mask.is_none()
+        && positions
+            .iter()
+            .enumerate()
+            .all(|(index, position)| position[0] == index)
     {
         if let Some(context) = crate::ops::get_vulkan_context() {
             match text_encode_vulkan(model, &embeddings, n_tokens, context) {
@@ -269,66 +296,44 @@ pub fn text_encode(
         let mut q_all = vec![0.0; n_tokens * n_embd_q];
         let mut k_all = vec![0.0; n_tokens * n_embd_k];
         let mut v_all = vec![0.0; n_tokens * n_embd_v];
-        for tok in 0..n_tokens {
-            let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-            let q_off = tok * n_embd_q;
-            let k_off = tok * n_embd_k;
-            let v_off = tok * n_embd_v;
+        q_all
+            .par_chunks_mut(n_embd_q)
+            .zip(k_all.par_chunks_mut(n_embd_k))
+            .zip(v_all.par_chunks_mut(n_embd_v))
+            .enumerate()
+            .for_each(|(tok, ((q_row, k_row), v_row))| {
+                let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
 
-            let blocks = (cfg.n_embd + 31) / 32;
-            let mut q8_buf = vec![0u8; cfg.n_embd];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+                let blocks = (cfg.n_embd + 31) / 32;
+                let mut q8_buf = vec![0u8; cfg.n_embd];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
 
-            layer.wq.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut q_all[q_off..q_off + n_embd_q],
-                cfg.n_embd,
-                n_embd_q,
-                0,
-                1,
-            );
-            layer.wk.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut k_all[k_off..k_off + n_embd_k],
-                cfg.n_embd,
-                n_embd_k,
-                0,
-                1,
-            );
-            layer.wv.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut v_all[v_off..v_off + n_embd_v],
-                cfg.n_embd,
-                n_embd_v,
-                0,
-                1,
-            );
-            if let Some(bias) = layer.q_bias.as_deref() {
-                for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
-                    *value += *bias;
+                layer.wq.kernel.forward_prepared(
+                    norm_row, &q8_buf, &scale_buf, None, q_row, cfg.n_embd, n_embd_q, 0, 1,
+                );
+                layer.wk.kernel.forward_prepared(
+                    norm_row, &q8_buf, &scale_buf, None, k_row, cfg.n_embd, n_embd_k, 0, 1,
+                );
+                layer.wv.kernel.forward_prepared(
+                    norm_row, &q8_buf, &scale_buf, None, v_row, cfg.n_embd, n_embd_v, 0, 1,
+                );
+                if let Some(bias) = layer.q_bias.as_deref() {
+                    for (value, bias) in q_row.iter_mut().zip(bias) {
+                        *value += *bias;
+                    }
                 }
-            }
-            if let Some(bias) = layer.k_bias.as_deref() {
-                for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
-                    *value += *bias;
+                if let Some(bias) = layer.k_bias.as_deref() {
+                    for (value, bias) in k_row.iter_mut().zip(bias) {
+                        *value += *bias;
+                    }
                 }
-            }
-            if let Some(bias) = layer.v_bias.as_deref() {
-                for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
-                    *value += *bias;
+                if let Some(bias) = layer.v_bias.as_deref() {
+                    for (value, bias) in v_row.iter_mut().zip(bias) {
+                        *value += *bias;
+                    }
                 }
-            }
-        }
+            });
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
             apply_qk_norms(
@@ -353,6 +358,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(q_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             q_slice,
@@ -372,6 +380,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(k_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             k_slice,
@@ -387,6 +398,7 @@ pub fn text_encode(
         }
 
         let mut attn_out = vec![0.0; n_tokens * n_attn];
+        let scalar_qwen2vl = cfg.architecture == "qwen2vl" && crate::ops::scalar_mode();
         for head in 0..cfg.n_head {
             let kv_head = head / group_size;
             let q_off = head * cfg.n_embd_head_k;
@@ -398,6 +410,9 @@ pub fn text_encode(
                 let mut max_val = f32::NEG_INFINITY;
                 let mut scores = vec![0.0; n_tokens];
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     let q_row =
                         &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
                     let k_row =
@@ -408,44 +423,72 @@ pub fn text_encode(
                     }
                 }
                 let mut exp_sum = 0.0f32;
+                let mut exp_sum_exact = 0.0f64;
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     scores[j] = (scores[j] - max_val).exp();
-                    exp_sum += scores[j];
+                    if scalar_qwen2vl {
+                        exp_sum_exact += scores[j] as f64;
+                    } else {
+                        exp_sum += scores[j];
+                    }
                 }
+                let inv_sum = if scalar_qwen2vl {
+                    (1.0f64 / exp_sum_exact) as f32
+                } else {
+                    0.0
+                };
                 for j in 0..=i {
-                    scores[j] /= exp_sum;
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
+                    if scalar_qwen2vl {
+                        scores[j] *= inv_sum;
+                    } else {
+                        scores[j] /= exp_sum;
+                    }
                 }
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
+                    let mut sum_exact = 0.0f64;
                     for j in 0..=i {
+                        if key_mask.is_some_and(|mask| !mask[j]) {
+                            continue;
+                        }
                         let v_row =
                             &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
-                        sum += scores[j] * v_row[dim];
+                        let product = scores[j] * v_row[dim];
+                        if scalar_qwen2vl {
+                            sum_exact += product as f64;
+                        } else {
+                            sum += product;
+                        }
                     }
-                    attn_out[i * n_attn + attn_off + dim] = sum;
+                    attn_out[i * n_attn + attn_off + dim] = if scalar_qwen2vl {
+                        sum_exact as f32
+                    } else {
+                        sum
+                    };
                 }
             }
         }
 
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
-        for tok in 0..n_tokens {
-            let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-            let blocks = (n_attn + 31) / 32;
-            let mut q8_buf = vec![0u8; n_attn];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-            layer.wo.kernel.forward_prepared(
-                attn_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                n_attn,
-                cfg.n_embd,
-                0,
-                1,
-            );
-        }
+        attn_proj_out
+            .par_chunks_mut(cfg.n_embd)
+            .enumerate()
+            .for_each(|(tok, out_row)| {
+                let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
+                let blocks = (n_attn + 31) / 32;
+                let mut q8_buf = vec![0u8; n_attn];
+                let mut scale_buf = vec![0.0f32; blocks];
+                quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
+                layer.wo.kernel.forward_prepared(
+                    attn_row, &q8_buf, &scale_buf, None, out_row, n_attn, cfg.n_embd, 0, 1,
+                );
+            });
 
         for tok in 0..n_tokens {
             let off = tok * cfg.n_embd;
@@ -478,35 +521,23 @@ pub fn text_encode(
         } else {
             let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-            for tok in 0..n_tokens {
-                let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                layer.w_gate.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-                layer.w_up.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-            }
+            gate_buf
+                .par_chunks_mut(cfg.n_ff)
+                .zip(up_buf.par_chunks_mut(cfg.n_ff))
+                .enumerate()
+                .for_each(|(tok, (gate_row, up_row))| {
+                    let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
+                    let blocks = (cfg.n_embd + 31) / 32;
+                    let mut q8_buf = vec![0u8; cfg.n_embd];
+                    let mut scale_buf = vec![0.0f32; blocks];
+                    quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
+                    layer.w_gate.kernel.forward_prepared(
+                        ffn_row, &q8_buf, &scale_buf, None, gate_row, cfg.n_embd, cfg.n_ff, 0, 1,
+                    );
+                    layer.w_up.kernel.forward_prepared(
+                        ffn_row, &q8_buf, &scale_buf, None, up_row, cfg.n_embd, cfg.n_ff, 0, 1,
+                    );
+                });
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_ff;
@@ -516,28 +547,31 @@ pub fn text_encode(
             }
 
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let blocks = (cfg.n_ff + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_ff];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_ff,
-                    &mut q8_buf,
-                    &mut scale_buf,
-                );
-                layer.w_down.kernel.forward_prepared(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    cfg.n_ff,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
+            down_buf
+                .par_chunks_mut(cfg.n_embd)
+                .enumerate()
+                .for_each(|(tok, out_row)| {
+                    let blocks = (cfg.n_ff + 31) / 32;
+                    let mut q8_buf = vec![0u8; cfg.n_ff];
+                    let mut scale_buf = vec![0.0f32; blocks];
+                    quantize_q8_0_into(
+                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                        cfg.n_ff,
+                        &mut q8_buf,
+                        &mut scale_buf,
+                    );
+                    layer.w_down.kernel.forward_prepared(
+                        &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
+                        &q8_buf,
+                        &scale_buf,
+                        None,
+                        out_row,
+                        cfg.n_ff,
+                        cfg.n_embd,
+                        0,
+                        1,
+                    );
+                });
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;

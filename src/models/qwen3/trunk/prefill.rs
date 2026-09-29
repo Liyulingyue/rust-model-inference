@@ -484,6 +484,13 @@ impl Qwen3Session<'_> {
                             config.n_embd_head_k,
                             config.freq_base,
                         ),
+                        Qwen3Rope::Mrope { sections } => rope_mrope(
+                            head,
+                            position,
+                            sections,
+                            config.n_embd_head_k,
+                            config.freq_base,
+                        ),
                         Qwen3Rope::Interleaved { sections, n_dims } => rope_mrope_interleaved(
                             head,
                             position,
@@ -499,6 +506,13 @@ impl Qwen3Session<'_> {
                         Qwen3Rope::Neox => rope_neox_inplace(
                             head,
                             position[0],
+                            config.n_embd_head_k,
+                            config.freq_base,
+                        ),
+                        Qwen3Rope::Mrope { sections } => rope_mrope(
+                            head,
+                            position,
+                            sections,
                             config.n_embd_head_k,
                             config.freq_base,
                         ),

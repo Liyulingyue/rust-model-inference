@@ -64,8 +64,13 @@ pub fn rope_mrope(
             let idx1 = idx0 + half;
             let x0 = x[idx0];
             let x1 = x[idx1];
-            x[idx0] = x0.mul_add(cos_a, -(x1 * sin_a));
-            x[idx1] = x0.mul_add(sin_a, x1 * cos_a);
+            if crate::ops::scalar_mode() {
+                x[idx0] = x0 * cos_a - x1 * sin_a;
+                x[idx1] = x0 * sin_a + x1 * cos_a;
+            } else {
+                x[idx0] = x0.mul_add(cos_a, -(x1 * sin_a));
+                x[idx1] = x0.mul_add(sin_a, x1 * cos_a);
+            }
             for value in &mut theta {
                 *value *= theta_scale;
             }

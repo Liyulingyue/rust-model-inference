@@ -1,0 +1,97 @@
+{
+  "sd_cpp_commit": "3f8527a46c54ecf4cb4ed6003da8e8982283c73c",
+  "ggml_commit": "89c4413f5da6fb20cc796f16033d37f129be81fd",
+  "scope": "Transformer fixtures and fixed 32x32 image-edit cases; CPU scalar only; no external acceleration",
+  "cases": [
+    {
+      "kind": "edit",
+      "case": 0,
+      "image_tokens": 2,
+      "text_tokens": 2,
+      "timestep": 0.375,
+      "checkpoints": 44,
+      "f32_words": 384128,
+      "inputs_sha256": {
+        "img.f32": "b98a7824ed13f7f80b6b3eda6bf742101a6ff3e7e0b39466f0bfc0c7f3a4b6ff",
+        "positions.f32": "e198b0cbae02565635e8fb53b5d29d451e2b1d2deb724424d5ee02b2f8a307d8",
+        "txt.f32": "3a4749af1a5bebe340b15086669f06ba6678fb3d238100c7cb1e492853cde7e6"
+      },
+      "output_sha256": "124259b48efa4ee9dc0d8be7422d6f44e068b125b05eb19aedb738a3577b5b30"
+    },
+    {
+      "kind": "edit",
+      "case": 1,
+      "image_tokens": 3,
+      "text_tokens": 1,
+      "timestep": 0.875,
+      "checkpoints": 44,
+      "f32_words": 384192,
+      "inputs_sha256": {
+        "img.f32": "562d2b1d21513e259bf94ab8930b038f03ac5d8e029dd376ad721e7d6608bcdc",
+        "positions.f32": "6ee67ca6ace8f4c812afe20f2482101cb9c79641ac72cca8c8c353f60cc46b60",
+        "txt.f32": "15fc5c1c28b39e62397a514a15255faedf8b0ad6cba223d8baaea5d71e75a6ac"
+      },
+      "output_sha256": "d65cdccf9840d30d58b1d286dd782acafb97448aab9d67655b3023ea203ad217"
+    },
+    {
+      "kind": "turbo",
+      "case": 0,
+      "image_tokens": 2,
+      "text_tokens": 2,
+      "timestep": 0.375,
+      "checkpoints": 44,
+      "f32_words": 384128,
+      "inputs_sha256": {
+        "img.f32": "b98a7824ed13f7f80b6b3eda6bf742101a6ff3e7e0b39466f0bfc0c7f3a4b6ff",
+        "positions.f32": "e198b0cbae02565635e8fb53b5d29d451e2b1d2deb724424d5ee02b2f8a307d8",
+        "txt.f32": "3a4749af1a5bebe340b15086669f06ba6678fb3d238100c7cb1e492853cde7e6"
+      },
+      "output_sha256": "bc98cced50bd952cb3cf9abba4793ed291ded29d5987de20da027f65b4c90e16"
+    },
+    {
+      "kind": "turbo",
+      "case": 1,
+      "image_tokens": 3,
+      "text_tokens": 1,
+      "timestep": 0.875,
+      "checkpoints": 44,
+      "f32_words": 384192,
+      "inputs_sha256": {
+        "img.f32": "562d2b1d21513e259bf94ab8930b038f03ac5d8e029dd376ad721e7d6608bcdc",
+        "positions.f32": "6ee67ca6ace8f4c812afe20f2482101cb9c79641ac72cca8c8c353f60cc46b60",
+        "txt.f32": "15fc5c1c28b39e62397a514a15255faedf8b0ad6cba223d8baaea5d71e75a6ac"
+      },
+      "output_sha256": "2ba85d3ffc2c0163d443fcc5107738de2b6aa58b93349bb948b5c82c02ae8060"
+    }
+  ],
+  "platform": "macOS ARM64",
+  "rust_profile": "release-fast",
+  "rust_flags": "-C no-vectorize-loops -C no-vectorize-slp",
+  "model_sha256": {
+    "edit": "a998d17d51943ab15bf3ba3ca1a509be3792987395c3bcb8d6bcbfafa7030a42",
+    "turbo": "ac4ae6172eea6dc892ba8c1cb63ec5b1232a294d0c430299ec26006f956e437b"
+  },
+  "total_checkpoints": 176,
+  "total_f32_words": 1536640,
+  "image_edit_cases": {
+    "input_ppm_sha256": "c077b55e9044a504c6589b6fc30d87da4ef0b380f4f3deb7f6f1fcd52e19cc6c",
+    "side": 32,
+    "prompt": "edit the image",
+    "seed": 42,
+    "cfg": 1,
+    "threads": 8,
+    "cond_f32_sha256": "43ae6ca0cd40a76dade01d14fd6527242b02196116c04730461706082e9ae648",
+    "ref_latent_f32_sha256": "bbf2d6669aaacaad0769134846e640f0bb6a402e516877d6d3d8559777dc2cfc",
+    "noise_f32_sha256": "25b240f61d97a94b04f85628abd6f3eeccda21e09d8d262f3cad738445a42811",
+    "edit": {
+      "steps": 1,
+      "denoised_f32_sha256": "64e85bad2cc60b3ae39b343f8cd7f5bcab5817e4b6ad62c1633d73fa145db16f",
+      "decoded_rgb_sha256": "b258ae5b533ad60e974074c8589d0e6a9272bce2784680abf78061045bcf95d1"
+    },
+    "turbo": {
+      "steps": 2,
+      "denoised_f32_sha256": "992cda42a9ae5ce3154898f561512001030df1054aa96dfea3fa0f1387e2e8df",
+      "decoded_rgb_sha256": "b89eb0c7121759cf9eaf5b7634a4593b3ce9f846ecd2510b1b7c1da4d52e7124"
+    }
+  }
+}

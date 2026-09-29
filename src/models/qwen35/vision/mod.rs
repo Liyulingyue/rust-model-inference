@@ -4,8 +4,8 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, rope_vision, softmax_inplace, vec_add,
-    vec_add_into,
+    dot_f16_f32, dot_f32, gelu_ggml_f16_inplace, gelu_ggml_f32, rope_vision, softmax_inplace,
+    vec_add, vec_add_into,
 };
 use clip_config::ClipVisionConfig;
 use rayon::prelude::*;
@@ -69,6 +69,28 @@ fn load_source_weight<'a, S: TensorSource + ?Sized>(
 }
 
 fn matmul_weight_batch(weight: &Weight<'_>, input: &[f32], output: &mut [f32]) {
+    if weight.ggml_type == GGMLType::BF16 && crate::ops::scalar_mode() {
+        let bytes = weight.kernel.weight_bytes().expect("BF16 weight bytes");
+        let mut rounded = vec![0u16; weight.n_in];
+        for (input, output) in input
+            .chunks_exact(weight.n_in)
+            .zip(output.chunks_exact_mut(weight.n_out))
+        {
+            for (&value, bits) in input.iter().zip(&mut rounded) {
+                *bits = crate::ops::f32_to_bf16(value);
+            }
+            for (row, value) in bytes.chunks_exact(weight.n_in * 2).zip(output) {
+                let mut sum = 0.0f64;
+                for (w, x) in row.chunks_exact(2).zip(&rounded) {
+                    let w = crate::ops::bf16_to_f32(u16::from_le_bytes([w[0], w[1]]));
+                    let x = crate::ops::bf16_to_f32(*x);
+                    sum += f64::from(w * x);
+                }
+                *value = sum as f32;
+            }
+        }
+        return;
+    }
     if weight.ggml_type == GGMLType::F16 {
         let weight_bytes = weight
             .kernel
@@ -220,6 +242,92 @@ fn matmul_patch_weight_batch(
         for (row, value) in weight_f16.chunks_exact(weight.n_in).zip(output) {
             *value = crate::ops::dot_f16(row, &input_f16, weight.n_in);
         }
+    }
+}
+
+fn patch_embed_qwen25_scalar(
+    frame_a: &[f32],
+    frame_b: &[f32],
+    img_w: usize,
+    img_h: usize,
+    patch_size: usize,
+    first: &Weight<'_>,
+    second: &Weight<'_>,
+    output: &mut [f32],
+) {
+    let round_weight = |weight: &Weight<'_>| {
+        weight
+            .kernel
+            .weight_bytes()
+            .expect("BF16 patch weight bytes")
+            .chunks_exact(2)
+            .map(|bytes| {
+                let value = crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+                crate::ops::f32_to_f16(value)
+            })
+            .collect::<Vec<_>>()
+    };
+    let weights_a = round_weight(first);
+    let weights_b = round_weight(second);
+    let area = patch_size * patch_size;
+    let patch_dim = 3 * area;
+    let patches_x = img_w / patch_size;
+    let mut inputs_a = vec![0u16; patch_dim];
+    let mut inputs_b = vec![0u16; patch_dim];
+    for py in 0..img_h / patch_size {
+        for px in 0..patches_x {
+            for c in 0..3 {
+                for ky in 0..patch_size {
+                    for kx in 0..patch_size {
+                        let input = ((py * patch_size + ky) * img_w + px * patch_size + kx) * 3 + c;
+                        let index = c * area + ky * patch_size + kx;
+                        inputs_a[index] = crate::ops::f32_to_f16(frame_a[input]);
+                        inputs_b[index] = crate::ops::f32_to_f16(frame_b[input]);
+                    }
+                }
+            }
+            let patch = py * patches_x + px;
+            for channel in 0..first.n_out {
+                let start = channel * patch_dim;
+                let mut sum = 0.0f64;
+                for c in 0..3 {
+                    let offset = start + c * area;
+                    for (weights, inputs) in [(&weights_a, &inputs_a), (&weights_b, &inputs_b)] {
+                        for i in 0..area {
+                            let w = crate::ops::f16_to_f32(weights[offset + i]);
+                            let x = crate::ops::f16_to_f32(inputs[c * area + i]);
+                            sum += f64::from(w * x);
+                        }
+                    }
+                }
+                output[patch * first.n_out + channel] = sum as f32;
+            }
+        }
+    }
+}
+
+fn qwen25_rope_scalar(head: &mut [f32], position: [usize; 4]) {
+    #[cfg_attr(target_os = "linux", link(name = "m"))]
+    unsafe extern "C" {
+        fn powf(base: f32, exponent: f32) -> f32;
+        fn cos(value: f64) -> f64;
+        fn sin(value: f64) -> f64;
+    }
+    let half = head.len() / 2;
+    let axis_pairs = half / 2;
+    let end = (head.len() as f32 / 2.0 - 2.0) / (head.len() as f32 / 2.0);
+    let step = end / (axis_pairs - 1) as f32;
+    for pair in 0..half {
+        let axis = pair / axis_pairs;
+        let scale = (pair % axis_pairs) as f32 * step;
+        let omega = 1.0f32 / unsafe { powf(10000.0, scale) };
+        let angle = position[axis] as f32 * omega;
+        let cos = unsafe { cos(f64::from(angle)) } as f32;
+        let sin = unsafe { sin(f64::from(angle)) } as f32;
+        let x0 = head[pair];
+        let x1 = head[pair + half];
+        head[pair] = x0 * cos + x1 * -sin;
+        head[pair + half] = x0 * sin + x1 * cos;
     }
 }
 
@@ -981,17 +1089,28 @@ impl<'a> VisionEncoder<'a> {
 
         let t_layers = std::time::Instant::now();
         let mrope_positions = build_vit_mrope_positions(n_patches_x, n_patches_y, merge);
+        // Qwen2.5-VL groups four merged patches per 112-pixel attention window.
+        let window_ids = if cfg.n_wa_pattern == 8 {
+            qwen25_window_ids(n_patches_x / merge, n_patches_y / merge, merge)
+        } else {
+            Vec::new()
+        };
         for layer in 0..cfg.n_layer {
-            self.forward_vit_layer(layer, scratch, n_tokens, &mrope_positions, pool);
+            self.forward_vit_layer(
+                layer,
+                scratch,
+                n_tokens,
+                &mrope_positions,
+                &window_ids,
+                pool,
+            );
             #[cfg(feature = "parity-trace")]
-            if layer == 0 || layer + 1 == cfg.n_layer {
-                crate::parity_trace::report(crate::parity_trace::checkpoint(
-                    "omni.vision.layer_out",
-                    Some(layer),
-                    &[n_tokens, n_embd],
-                    &scratch.merged[..n_tokens * n_embd],
-                ));
-            }
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "omni.vision.layer_out",
+                Some(layer),
+                &[n_tokens, n_embd],
+                &scratch.merged[..n_tokens * n_embd],
+            ));
         }
         let t_layers = t_layers.elapsed();
 
@@ -1008,10 +1127,11 @@ impl<'a> VisionEncoder<'a> {
                             cfg.eps,
                         );
                     } else {
-                        layer_norm_without_bias(
+                        vision_norm_without_bias(
                             &mut scratch.merged[offset..offset + n_embd],
                             &precomputed.post_ln_weight,
                             cfg.eps,
+                            cfg.n_wa_pattern == 8,
                         );
                     }
                 }
@@ -1032,7 +1152,6 @@ impl<'a> VisionEncoder<'a> {
             }
         }
         let t_postln = t_postln.elapsed();
-
         let t_proj = std::time::Instant::now();
         self.project(n_patches_x, n_patches_y, n_embd, merge, scratch, pool);
         let t_proj = t_proj.elapsed();
@@ -1079,6 +1198,34 @@ impl<'a> VisionEncoder<'a> {
         let n_patches = n_patches_x * n_patches_y;
 
         if let Some(pc) = self.precomputed.as_ref() {
+            if cfg.n_wa_pattern == 8
+                && crate::ops::scalar_mode()
+                && pc.patch_weight.ggml_type == GGMLType::BF16
+                && pc
+                    .patch_weight_1
+                    .as_ref()
+                    .is_some_and(|w| w.ggml_type == GGMLType::BF16)
+            {
+                patch_embed_qwen25_scalar(
+                    frame_a,
+                    frame_b,
+                    img_w,
+                    img_h,
+                    ps,
+                    &pc.patch_weight,
+                    pc.patch_weight_1.as_ref().unwrap(),
+                    &mut scratch.patch_embd[..n_patches * n_embd],
+                );
+                #[cfg(feature = "parity-trace")]
+                report_patch_checkpoint(
+                    "omni.vision.patch_sum",
+                    &scratch.patch_embd[..n_patches * n_embd],
+                    n_patches_y,
+                    n_patches_x,
+                    n_embd,
+                );
+                return;
+            }
             scratch.patch_weight_buf.resize(n_patches * patch_dim, 0.0);
             let fill_patches = |frame: &[f32], patches: &mut [f32]| {
                 for py in 0..n_patches_y {
@@ -1238,6 +1385,7 @@ impl<'a> VisionEncoder<'a> {
         scratch: &mut VisionScratchpad,
         n_tokens: usize,
         mrope_positions: &[[usize; 4]],
+        window_ids: &[usize],
         pool: &Arc<ComputePool>,
     ) {
         let do_profile = std::env::var("PROFILE_VIT_LAYER").is_ok();
@@ -1290,7 +1438,7 @@ impl<'a> VisionEncoder<'a> {
                         unsafe {
                             let row =
                                 std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
-                            layer_norm_without_bias(row, weight, eps);
+                            vision_norm_without_bias(row, weight, eps, cfg.n_wa_pattern == 8);
                         }
                     }
                 });
@@ -1366,7 +1514,12 @@ impl<'a> VisionEncoder<'a> {
                 let w = decode_f32_slice(layer.ln1_weight);
                 for t in 0..n_tokens {
                     let off = t * n_embd;
-                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], &w, eps);
+                    vision_norm_without_bias(
+                        &mut scratch.merged[off..off + n_embd],
+                        &w,
+                        eps,
+                        cfg.n_wa_pattern == 8,
+                    );
                 }
             }
 
@@ -1444,6 +1597,19 @@ impl<'a> VisionEncoder<'a> {
             }
         }
         t_ln1 = t_ln1_start.elapsed().as_secs_f64();
+        #[cfg(feature = "parity-trace")]
+        if il == 0 {
+            let mut query = Vec::with_capacity(n_tokens * n_embd);
+            for row in scratch.qkv_buf[..n_tokens * n_embd * 3].chunks_exact(n_embd * 3) {
+                query.extend_from_slice(&row[..n_embd]);
+            }
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "omni.vision.query",
+                Some(il),
+                &[n_tokens, n_embd],
+                &query,
+            ));
+        }
         let t_rope_start = std::time::Instant::now();
         for t in 0..n_tokens {
             let src_off = t * n_embd * 3;
@@ -1472,29 +1638,48 @@ impl<'a> VisionEncoder<'a> {
             let q_base = h * n_tokens * d_head;
             let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
             for t in 0..n_tokens {
-                rope_vision(
-                    &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
-                    mrope_positions[t],
-                    mrope_sections,
-                    d_head,
-                    freq_base,
-                    d_head / 2,
-                );
-                rope_vision(
-                    &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
-                    mrope_positions[t],
-                    mrope_sections,
-                    d_head,
-                    freq_base,
-                    d_head / 2,
-                );
+                for offset in [q_base, k_base] {
+                    let head =
+                        &mut scratch.attn_buf[offset + t * d_head..offset + (t + 1) * d_head];
+                    if cfg.n_wa_pattern == 8 && crate::ops::scalar_mode() {
+                        qwen25_rope_scalar(head, mrope_positions[t]);
+                    } else {
+                        rope_vision(
+                            head,
+                            mrope_positions[t],
+                            mrope_sections,
+                            d_head,
+                            freq_base,
+                            d_head / 2,
+                        );
+                    }
+                }
             }
         }
         t_rope = t_rope_start.elapsed().as_secs_f64();
+        #[cfg(feature = "parity-trace")]
+        if il == 0 {
+            let mut query = vec![0.0; n_tokens * n_embd];
+            for t in 0..n_tokens {
+                for h in 0..n_head {
+                    let src = &scratch.attn_buf[h * n_tokens * d_head + t * d_head
+                        ..h * n_tokens * d_head + (t + 1) * d_head];
+                    query[t * n_embd + h * d_head..t * n_embd + (h + 1) * d_head]
+                        .copy_from_slice(src);
+                }
+            }
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "omni.vision.rotated_query",
+                Some(il),
+                &[n_tokens, n_embd],
+                &query,
+            ));
+        }
 
         let t_attn_start = std::time::Instant::now();
         let scale = 1.0 / (d_head as f32).sqrt();
         let attn_buf = &scratch.attn_buf[..3 * n_head * n_tokens * d_head];
+        let windowed = !window_ids.is_empty() && (il + 1) % cfg.n_wa_pattern != 0;
 
         let scores = scratch.score_buf.as_mut_ptr();
         let out_buf = scratch.attn_out_buf.as_mut_ptr();
@@ -1525,7 +1710,7 @@ impl<'a> VisionEncoder<'a> {
                 for t in 0..n_tokens {
                     let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
                     #[cfg(target_arch = "x86_64")]
-                    if use_avx2 {
+                    if use_avx2 && !windowed {
                         unsafe {
                             attention_qk_avx2(
                                 q_ptr,
@@ -1538,6 +1723,10 @@ impl<'a> VisionEncoder<'a> {
                         }
                     } else {
                         for s in 0..n_tokens {
+                            if windowed && window_ids[t] != window_ids[s] {
+                                score_slice[t * n_tokens + s] = f32::NEG_INFINITY;
+                                continue;
+                            }
                             let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
                             let mut sum = 0.0f32;
                             for i in 0..d_head {
@@ -1550,6 +1739,10 @@ impl<'a> VisionEncoder<'a> {
                     {
                         let q_slice = std::slice::from_raw_parts(q_ptr, d_head);
                         for s in 0..n_tokens {
+                            if windowed && window_ids[t] != window_ids[s] {
+                                score_slice[t * n_tokens + s] = f32::NEG_INFINITY;
+                                continue;
+                            }
                             let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
                             let k_slice = std::slice::from_raw_parts(k_ptr, d_head);
                             let dot = dot_f32(q_slice, k_slice, d_head);
@@ -1706,7 +1899,7 @@ impl<'a> VisionEncoder<'a> {
                         unsafe {
                             let row =
                                 std::slice::from_raw_parts_mut(merged_ptr.add(t * n_embd), n_embd);
-                            layer_norm_without_bias(row, weight, eps);
+                            vision_norm_without_bias(row, weight, eps, cfg.n_wa_pattern == 8);
                         }
                     }
                 });
@@ -1774,7 +1967,12 @@ impl<'a> VisionEncoder<'a> {
                 let w = decode_f32_slice(layer.ln2_weight);
                 for t in 0..n_tokens {
                     let off = t * n_embd;
-                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], &w, eps);
+                    vision_norm_without_bias(
+                        &mut scratch.merged[off..off + n_embd],
+                        &w,
+                        eps,
+                        cfg.n_wa_pattern == 8,
+                    );
                 }
             }
 
@@ -1982,7 +2180,9 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        gelu_ggml_f16_inplace(&mut mm0_out[..n_projected * merged_embd]);
+        for value in &mut mm0_out[..n_projected * merged_embd] {
+            *value = gelu_ggml_f32(*value);
+        }
 
         if let Some(ref pc) = self.precomputed {
             matmul_weight_batch_pooled(
@@ -2050,6 +2250,18 @@ fn spatial_merge(
             }
         }
     }
+}
+
+fn qwen25_window_ids(groups_w: usize, groups_h: usize, merge: usize) -> Vec<usize> {
+    let windows_w = groups_w.div_ceil(4);
+    let mut ids = Vec::with_capacity(groups_w * groups_h * merge * merge);
+    for y in 0..groups_h {
+        for x in 0..groups_w {
+            let window = (y / 4) * windows_w + x / 4;
+            ids.extend(std::iter::repeat_n(window, merge * merge));
+        }
+    }
+    ids
 }
 
 fn build_vit_mrope_positions(
@@ -2458,6 +2670,14 @@ fn layer_norm_without_bias(x: &mut [f32], w: &[f32], eps: f32) {
     let (mean, var) = ggml_layer_norm_stats(&x[..n]);
     let inv = 1.0 / (var + eps).sqrt();
     layer_norm_scale(&mut x[..n], &w[..n], mean, inv);
+}
+
+fn vision_norm_without_bias(x: &mut [f32], w: &[f32], eps: f32, rms: bool) {
+    if rms {
+        crate::ops::rms_norm_inplace(x, w, eps);
+    } else {
+        layer_norm_without_bias(x, w, eps);
+    }
 }
 
 fn layer_norm_scale_bias(x: &mut [f32], w: &[f32], b: &[f32], mean: f32, inv: f32) {
@@ -2876,6 +3096,14 @@ unsafe fn attn_scaled_add_avx2(out: &mut [f32], v: *const f32, scale: f32, d: us
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qwen25_windows_follow_merged_patch_grid() {
+        let ids = super::qwen25_window_ids(6, 5, 2);
+        assert_eq!(ids.len(), 6 * 5 * 4);
+        assert_eq!(&ids[0..4], &[0; 4]);
+        assert_eq!(&ids[4 * 4..5 * 4], &[1; 4]);
+        assert_eq!(&ids[4 * 6 * 4..4 * 6 * 4 + 4], &[2; 4]);
+    }
     use super::*;
 
     fn test_pool() -> Arc<ComputePool> {
