@@ -104,6 +104,11 @@ pub fn run_clm_scoring(
         // --jev-question is empty the caller already packed the whole
         // state into --jev-context, so appending an empty question would
         // leave a stray blank line and shift every score.
+        // TODO(clm): extract this into a pure `clm_state_text(ctx, q)` and
+        // unit-test it.  It is pure string logic but it is load-bearing:
+        // getting the blank line wrong dropped every score by ~3 points
+        // (30.70 -> 27.59 measured) and can silently flip a ranking.
+        // Nothing currently fails if it regresses.
         let state_text = if q.text.trim().is_empty() {
             context.trim().to_string()
         } else {
@@ -112,6 +117,12 @@ pub fn run_clm_scoring(
         let z_state = heads
             .project_state(&embed(&tokenizer, &model, &state_text)?, &mut scratch)?;
 
+        // TODO(clm): no candidate cache.  The reference client memoises the
+        // action-side embedding per candidate and reports ~13x at 1k
+        // candidates; we re-embed every candidate on every request.  Fine
+        // for tens, wrong shape for hundreds.  If added, the cache key must
+        // include the encoder + heads identity or a model swap reads back
+        // another head's projection.
         let mut values = Vec::with_capacity(q.descriptions.len());
         for cand in &q.descriptions {
             let z = heads.project_candidate(&embed(&tokenizer, &model, cand)?, &mut scratch)?;

@@ -161,3 +161,41 @@ curl http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' -d '
 | 分发（CLI 与 HTTP 共用） | `src/app/jev/clm.rs`（`run_clm_decision` / `run_clm_decision_data` / `run_clm_scoring`） |
 | HTTP 后端 | `Backend::Clm` / `build_clm`（`src/app/server/mod.rs`）、`jev_score` 的 CLM 分支（`src/app/server/api.rs`） |
 | encoder last-token 隐状态 | `Qwen3Session::forward_last_hidden`（`src/models/qwen3/trunk/session.rs`） |
+
+## 7. TODO
+
+按优先级。代码里对应位置都有 TODO(clm) 戳。
+
+### 1. state_text 拼接没有测试（最该补的）
+
+src/app/jev/clm.rs 里 context / question 拼成 state 的那段是纯字符串逻辑，
+但它是会影响排序的：空 question 处理错会留一个空行，每个分数掉约 3 分
+（实测 30.70 -> 27.59），排序可能悄悄翻掉而现在没有任何东西会失败。
+
+要补的话：把 state_text 抽成纯函数 clm_state_text(ctx, question)，然后对
+"两者都非空 / question 为空 / 两者都带首尾空白"三种情况做单测。现在没法
+直接单测是因为 run_clm_scoring 一上来就加载 encoder 并跑 forward。
+
+### 2. candidate 缓存没做（性能，非正确性）
+
+参考实现按 candidate 缓存 action 侧 embedding，宣称 ~1k 候选快 13x；现在
+每个请求重新 embed 所有候选。几十个候选无所谓，几百个就是数量级差异。
+要做的话缓存 key 必须含 encoder + heads 的身份，否则换模型后会读到另一个
+头的投影。
+
+### 3. encoder 精度没有检查（build_clm）
+
+CLM 是 encoder-locked。拿 Q4_K_M 的 Qwen3-8B 启动照样起、照样出分，只是
+分数整体偏移、不能跟论文数字比。倾向 warn 而不是拒，因为低内存环境想跑着
+看是合理需求。需要 config 侧暴露 embedding dtype 才能真正判断。
+
+### 4. --clm-head 和 Qwen3-Reranker GGUF 同时给会静默走 rerank
+
+build_backend 里 is_rerank_gguf 判断排在 clm_head 前面，所以传 Reranker
+GGUF + --clm-head 时头文件被静默忽略。应该报错。
+
+### 5. 多轮对话没有专门形状（倾向：不做）
+
+state 就是一个字符串，调用方要累积历史就自己拼。这和参考实现一致
+（system_one(state, ...) 也是单 state）。如果以后要显式支持 conversation
+历史，那是另一套 API，不应硬塞进现在的 context 字段。

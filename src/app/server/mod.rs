@@ -687,6 +687,9 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // CLM is opted into rather than detected: the encoder is an ordinary
     // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
     // that makes it a CLM backend.
+    // TODO(clm): this check sits after is_rerank_gguf, so passing a
+    // Qwen3-Reranker GGUF together with --clm-head silently drops the
+    // head file and serves rerank.  Should be an explicit error.
     if options.clm_head.is_some() {
         return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
     }
@@ -762,6 +765,10 @@ fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
             "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
         ));
     }
+    // TODO(clm): the heads are encoder-locked, so a quantised base encoder
+    // shifts every score -- functionally fine, but not comparable to the
+    // paper's numbers.  Warn here instead of refusing, since a low-memory
+    // setup may legitimately want a Q4_K_M encoder.
     let context_length = model.config().n_ctx;
 
     let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
