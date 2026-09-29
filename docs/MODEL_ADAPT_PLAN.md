@@ -130,6 +130,44 @@ per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可
 7. **`mistral3`（Mistral-Small-24B）** — 标准架构，覆盖面大。
 8. 其余按 B → D 顺序视需求推进。
 
+## TODO：BERT 家族位级 oracle 对齐（**暂缓，勿与他方核对工作并行**）
+
+状态：**待办，未开始**。挂在这里是因为「另有人在跑核对」，两边同时动 llama.cpp
+oracle 侧容易互相覆盖 / 撞同一份 patch 与构建产物。**动手前必须先确认那侧已经收尾
+或者让对方知道**，否则不要开始。
+
+动机：C 区已接的 5 个 encoder（`bert` / `jina-bert-v2` / `nomic-bert` /
+`nomic-bert-moe` / `embeddinggemma`）目前只做到「语义排序看起来对」，**没有一个是
+位级对齐过的**。这不是形式问题——`attn_proj` 从未加回残差那个 bug 就是"语义相似度
+依然很高、但整层恒等"的典型，位级对比是唯一能稳定抓住这类问题的手段。
+
+现成的基础设施（不必从零搭）：
+
+- `tools/oracle/shared/build_llama_oracle.sh` — 把 llama.cpp pin 到
+  `749f688fcaa4c472ec034b08cb8a907c45cfaa02`、打 `llama-scalar-trace.patch`
+  （关 NEON / `-ffp-contract=off`，保证标量可复现）、构建
+  `llama-eval-callback`。**注意当前 checkout 是另一个 commit，需要先切。**
+- `llama-eval-callback` 是**通用 graph dumper**，会把图里每个 op 的名称与数值打出来，
+  不限于 patch 里已挂钩子的 `qwen3.cpp`；encoder 走的是 `bert.cpp`，
+  预期至少能拿到 `inp_embd` → 各层 attention/FFN 中间量 → pooling 后的输出。
+- 5 个 GGUF 权重均已在本地，合计约 1.1GB。
+
+建议的落地顺序（从小到大，先在最便宜的模型上把流程跑通）：
+
+1. `bge-small-en-v1.5`（35MB，`bert` 变体，带 `position_embd` 与 CLS pooling，
+   是最容易暴露 pooling / 残差问题的样本）
+2. `jina-embeddings-v2-base-en`（140MB，ALiBi + geglu + QKV bias）
+3. `nomic-embed-text-v1.5`（140MB，fused QKV + RoPE(interleaved) + SwiGLU）
+4. `embeddinggemma-300m`（319MB，QK-norm + 4-norm sandwich + 对称 SWA，
+   不属 `bert_family`，是独立模块）
+5. `nomic-embed-text-v2-moe`（489MB，MoE 路由 + UGM tokenizer，
+   重点看 router logits 与 per-expert 输出）
+
+对齐口径：同一 prompt、同一 tokens 序列、对比 `llama-eval-callback` 打出的中间张量
+与本仓库实现；超出 f32 末位 ulp 的差异要定位到具体算子，而不是调阈值糊过去。
+任一项对齐通过后，再把 `docs/MODEL_LIST.md` / `docs/develop/SUPPORTED_MODELS.md`
+里对应行的「未做 llama.cpp 位级 oracle 对齐」划掉。
+
 ## 排查方法（下次更新用）
 
 ```bash
