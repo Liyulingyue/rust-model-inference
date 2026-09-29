@@ -249,18 +249,19 @@ Rust 侧实现在 `src/core/sentencepiece.rs`，包含：
 ## 7. 精度验证
 
 ```bash
-models/.venv/bin/python /tmp/gliner_ref/dump_golden.py   # 重新生成 fixture
 cargo test --profile release-fast --test gliner2_classify_parity
 cargo test --profile release-fast --test gliner2_spm_parity
 cargo test --profile release-fast --test gliner2_cli
 ```
 
-`tests/fixtures/gliner2-decide/` 下两个 fixture 都由参考栈
-（GLiNER2 的 `SchemaTransformer` + `transformers` 4.48.1 的 DeBERTa-v3 +
-checkpoint 自己的头）生成：
+`tests/fixtures/gliner2-decide/` 下两个 fixture 由参考栈生成（GLiNER2 的
+`SchemaTransformer` + `transformers` 4.48.1 的 DeBERTa-v3 + checkpoint 自己的头）：
 
 - `classify-golden.json` — 6 个 case 的 `input_ids`、`[P]/[L]` 下标、每 label logit
 - `spm-pieces.json` — 69 条字符串的 SentencePiece pieces / ids
+
+生成脚本在 `tools/oracle/gliner2/`，复现步骤见
+[`tools/oracle/gliner2/README.md`](../../tools/oracle/gliner2/README.md)。
 
 实测 6 个 case 全部对齐，**最大 logit 偏差 7.2e-6**（F32 累加顺序差），所以
 测试阈值定在 1e-4。
