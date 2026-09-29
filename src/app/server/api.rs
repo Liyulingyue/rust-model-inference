@@ -1186,10 +1186,10 @@ pub async fn jev_score(
         // The label set is caller-supplied, exactly like the other JEV modes,
         // so the request shape does not change.  Each question is one task:
         // the question text is the head name, the options are its labels.
-        let tasks: Vec<crate::app::jev::gliner2::LabelSet> = req
+        let tasks: Vec<crate::app::LabelSet> = req
             .questions
             .iter()
-            .map(|q| crate::app::jev::gliner2::LabelSet {
+            .map(|q| crate::app::LabelSet {
                 name: q.text.clone(),
                 labels: q.options.clone(),
                 descriptions: q.descriptions.clone(),

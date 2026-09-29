@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use super::{JevMode, JevQuestionInput, JevResult};
 use crate::app::cli::CliOptions;
+use crate::app::jev::{JevMode, JevQuestionInput, JevResult};
 use crate::core::sentencepiece::SentencePieceTokenizer;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::{open_model_source, ComponentRole};

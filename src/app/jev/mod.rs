@@ -15,18 +15,23 @@
 //!   `JevScorer` implementations).
 //! - [`grouped`]: grouped-mode scoring (entry point + 8 per-arch
 //!   `JevGroupedScorer` implementations).
+//! - [`adapters`]: backends that cannot be expressed by [`single::JevScorer`]
+//!   — a different architecture, a different scoring rule, or both. See
+//!   [`adapters`] for why this exists.
+//! - `clm`: the earlier instance of that same pattern, not moved (it predates
+//!   the `adapters` layout and is already merged/verified).
 
+pub mod adapters;
 pub(crate) mod clm;
-pub mod gliner2;
 pub(crate) mod grouped;
 pub(crate) mod single;
 pub(crate) mod types;
 
-pub use clm::{run_clm_decision, run_clm_scoring};
-pub use gliner2::{
+pub use adapters::gliner2::{
     gliner2_schema, load_gliner2_source, parse_schema, run_gliner2_decision, run_gliner2_scoring,
     schema_from_label_sets, schema_from_questions, LabelSet,
 };
+pub use clm::{run_clm_decision, run_clm_scoring};
 pub use grouped::{
     build_grouped_payload, build_grouped_system, prepare_jev_grouped_questions,
     run_jev_grouped_decision, run_jev_grouped_decision_data,

@@ -419,11 +419,18 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 ## 14. 源码索引
 
 > **Status (2026-09-22)**：JEV 评分已重构。`src/app/text.rs` 从 4597 行
-> 降至 1748 行，所有 JEV 代码迁出至 `src/app/jev/` 子模块，下设三个目录：
+> 降至 1748 行，所有 JEV 代码迁出至 `src/app/jev/` 子模块，下设三组目录：
 > `types.rs`（数据）、`single.rs` + `single/<arch>.rs`（单 question 评分）、
 > `grouped.rs` + `grouped/<arch>.rs`（分组评分）。两个评分 trait
 > `JevScorer` / `JevGroupedScorer` 把原来 ~80% 的 per-arch 复制粘贴
 > 收敛到 9-10 个 arch 各一个小 struct + 一个 dispatch 表项。
+>
+> **Status (2026-09-29)**：新增 `adapters/`。`JevScorer` 的打分本质是
+> `logits[label_token_id]` softmax（见 `compute_jev_result`），要求「因果
+> decoder + chat template + 单 token 的 A..Z label」三者同时成立。违背任一
+> 前提的后端（CLM 是投影空间 cosine，GLiNER2 是 DeBERTa 编码器 + marker
+> 位置过 MLP）套不进去，落到 `adapters/`。它不叫 scorer 因为它不实现
+> trait——只是把结果包成统一的 `Vec<JevResult>`。
 
 | 路径 | 角色 |
 |---|---|
@@ -451,6 +458,9 @@ Choice / Binary / Score 与 MultiSelect / BlockChoice 的代码路径**完全隔
 | `src/app/jev/grouped/lfm25.rs` (91 行) | LFM2.5 grouped scorer |
 | `src/app/jev/grouped/nemotron_h.rs` (79 行) | Nemotron-H grouped scorer |
 | `src/app/jev/grouped/hunyuan.rs` (95 行) | Hunyuan-Dense grouped scorer |
+| `src/app/jev/adapters/mod.rs` | 说明为什么会有这一层：`JevScorer` 表达不了的后端（不同架构 / 不同打分规则）在这里落地，只负责产出统一形状的 `Vec<JevResult>` |
+| `src/app/jev/adapters/gliner2.rs` | GLiNER2.5-Decide adapter：`gliner2_schema` / `schema_from_questions` / `schema_from_label_sets`（构造任务集）、`run_gliner2_scoring` / `run_gliner2_decision`、`load_gliner2_source` |
+| `src/app/jev/clm.rs` | CLM adapter（同类里更早的一个，未迁入 `adapters/`：已合并验证过，搬迁只会产生无收益 churn） |
 | `src/models/*/trunk/forward.rs` 或 `session.rs` | 各 trunk 的 `forward_logits` 实现 |
 | `tests/quantized_inference.rs` | 已有 IQ4_NL parity 测试 |
 
