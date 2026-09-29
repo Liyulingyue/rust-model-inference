@@ -469,12 +469,23 @@ pub fn run_embedding_tokens(
     ];
     let mut q8_buf = vec![0u8; max_width];
     let mut scale_buf = vec![0.0f32; max_width.div_ceil(32)];
+    // Attention scratch, allocated once for the whole forward. `scores` used to
+    // be allocated inside the `for token { for head {` nest, i.e.
+    // `n_tokens * n_head * n_layer` times — 4608 allocations for a 32-token
+    // bge-m3 prompt — for a buffer that depends on none of the three.
+    let mut scores = vec![0.0f32; n_tokens];
+    // Snapshot of `hidden` at the top of each layer (`bert.cpp:151`'s `inpL`).
+    // Same allocation-once discipline: `hidden.clone()` per layer was
+    // `n_layer` allocations plus copies that are still required either way.
+    let mut residual = vec![0.0f32; n_tokens * n_embd];
 
     for layer in 0..n_layer {
         let lw = &weights.layers[layer];
         // `bert.cpp:141` — the layer input is re-added after attention and
-        // again after the FFN (residual re-add, not a pre-norm sandwich).
-        let residual: Vec<f32> = hidden.clone();
+        // again after the FFN (residual re-add, not a pre-norm sandwich). The
+        // snapshot itself is still needed every layer; only its allocation
+        // moved out of the loop.
+        residual.copy_from_slice(&hidden);
 
         // 1. Q / K / V with biases. Fused `attn_qkv` for nomic-bert, three
         //    separate projections for the others. `bert.cpp:120-133` ropes Q
@@ -576,7 +587,6 @@ pub fn run_embedding_tokens(
                 let kv_h = h / group_size;
                 let q_off = h * head_k;
                 let out_base = h * head_v;
-                let mut scores = vec![0.0f32; n_tokens];
                 for s in 0..n_tokens {
                     let q_row = &qkv_buf[t * qkv_width..t * qkv_width + n_embd_q];
                     let k_row = &qkv_buf[s * qkv_width + n_embd_q..s * qkv_width + qkv_width];
