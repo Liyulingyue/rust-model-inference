@@ -145,8 +145,6 @@ impl<'model> Qwen3Session<'model> {
             kv_state,
             scratch: ExecutionScratchpad {
                 x: vec![0.0; config.n_embd],
-                x_after_attn: vec![0.0; config.n_embd],
-                x_after_mlp: vec![0.0; config.n_embd],
                 normed: vec![0.0; config.n_embd],
                 q: vec![0.0; n_embd_q],
                 k_new: vec![0.0; kv_stride],
@@ -166,7 +164,7 @@ impl<'model> Qwen3Session<'model> {
                         qs: [0; 256],
                         bsums: [0; 16],
                     };
-                    max_n_in / 256
+                    max_n_in.div_ceil(256)
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],

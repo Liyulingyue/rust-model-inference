@@ -32,6 +32,12 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
         "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
+        // Falcon-H1 uses the same ChatML role markers as Qwen (verified
+        // against the unsloth GGUF: <|im_start|>user\n...
+        // <|im_end|> <|im_start|>assistant\n), so it rides the same
+        // renderer; it has no tool grammar and no vision path, so
+        // build_prompt rejects tools/images before we get here.
+        "falcon-h1" => Ok(false),
         "qwen35" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -87,6 +93,7 @@ pub fn build_prompt(
     messages: &[Message],
     tools: &[Tool],
     choice: &ToolChoice,
+    enable_thinking: Option<bool>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
@@ -108,12 +115,17 @@ pub fn build_prompt(
             .collect();
         let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-        // LFM2's own template, matching the CLI's `build_lfm2_chat_prompt`
-        // (thinking = true, i.e. no trailing `\n\n`). Passing `false` here
-        // appends the non-thinking suffix and desynchronises HTTP from the CLI
-        // by two tokens — the CLI/HTTP sentinel caught exactly that.
-        let ids =
-            crate::prompt::build_lfm2_chat_prompt_with_thinking(&tokenizer, &lfm_messages, true)?;
+        // LFM2 / LFM2.5 reasoning is opt-in via the prompt tail. Default
+        // is to leave the reasoning block on (matches the CLI flag and
+        // the upstream Jinja default for thinking-tuned variants);
+        // `enable_thinking = false` injects `\n\n` so the model skips
+        // straight to the answer.
+        let thinking = enable_thinking.unwrap_or(true);
+        let ids = crate::prompt::build_lfm2_chat_prompt_with_thinking(
+            &tokenizer,
+            &lfm_messages,
+            thinking,
+        )?;
         let images: Vec<Vec<u8>> = messages
             .iter()
             .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
@@ -122,6 +134,18 @@ pub fn build_prompt(
     }
     if arch == "qwen3vl" && !tools.is_empty() {
         return Err("Function tools are unsupported for Qwen3VL text generation".into());
+    }
+    // Falcon-H1 speaks Qwen-flavoured ChatML (`{role}`), so it
+    // shares the Qwen-family multi-turn renderer below — but it has no
+    // tool-call grammar and no vision path, so refuse tools here rather
+    // than silently rendering a tool prompt the model ignores.
+    if arch == "falcon-h1" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Falcon-H1 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Falcon-H1 text generation".into());
+        }
     }
     let llama_family = matches!(
         arch,
@@ -153,8 +177,14 @@ pub fn build_prompt(
             })
             .map(|m| (m.role.as_str(), m.text.as_str()))
             .collect();
+        // Llama-family templates bake the `THINK_MARK` opener into the
+        // assistant turn by default (matches the CLI sentinel). Reasoning
+        // models (k2-horizon, MiniCPM5) accept `enable_thinking = false`
+        // to suppress the reasoning block in the prompt tail; for plain
+        // llama / nanbeige / granite / glm4 the flag is ignored.
+        let thinking = enable_thinking.unwrap_or(false);
         let ids = crate::models::llama::trunk::build_prompt_tokens_from_turns(
-            source, &tokenizer, &turns, false,
+            source, &tokenizer, &turns, thinking,
         )?;
         let images = messages[last_user]
             .images
@@ -379,7 +409,8 @@ pub fn build_prompt(
         .iter()
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
-    let ids = build_qwen_chat_prompt(tokenizer, &messages, false)?;
+    let thinking = enable_thinking.unwrap_or(false);
+    let ids = build_qwen_chat_prompt(tokenizer, &messages, thinking)?;
     Ok((ids, attached_images))
 }
 
@@ -1086,6 +1117,7 @@ mod tests {
                 &messages,
                 &tools(),
                 &ToolChoice::Auto,
+                None,
             )
             .unwrap()
             .0;
@@ -1120,7 +1152,8 @@ mod tests {
             "qwen3vl",
             &messages,
             &tools(),
-            &ToolChoice::Auto
+            &ToolChoice::Auto,
+            None,
         )
         .unwrap_err()
         .contains("unsupported"));
@@ -1130,7 +1163,8 @@ mod tests {
             "llama",
             &messages,
             &tools(),
-            &ToolChoice::Auto
+            &ToolChoice::Auto,
+            None,
         )
         .is_err());
     }
@@ -1163,6 +1197,7 @@ mod tests {
                     &messages,
                     &[],
                     &ToolChoice::Auto,
+                    None,
                 )
                 .unwrap()
                 .0,
@@ -1219,6 +1254,7 @@ mod tests {
                         &messages,
                         &tools(),
                         &ToolChoice::Auto,
+                        None,
                     )
                     .unwrap()
                     .0,

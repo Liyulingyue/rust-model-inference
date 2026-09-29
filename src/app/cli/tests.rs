@@ -49,6 +49,24 @@ fn default_threads_are_capped_but_explicit_value_wins() {
 }
 
 #[test]
+fn qwen_image_cli_parses_latent_shape_and_rejects_nonfinite_timestep() {
+    let options = parse_cli_options(&args(&[
+        "rmi",
+        "--qwen-latent-width",
+        "24",
+        "--qwen-latent-height",
+        "32",
+        "--qwen-timestep",
+        "250.5",
+    ]))
+    .unwrap();
+    assert_eq!(options.qwen_latent_width, Some(24));
+    assert_eq!(options.qwen_latent_height, Some(32));
+    assert_eq!(options.qwen_timestep, Some(250.5));
+    assert!(parse_cli_options(&args(&["rmi", "--qwen-timestep", "NaN"])).is_err());
+}
+
+#[test]
 fn normal_generation_does_not_run_the_final_unused_forward() {
     assert_eq!(inference_step_budget(5, 32, false), 36);
     assert_eq!(inference_step_budget(5, 0, false), 5);
@@ -930,6 +948,13 @@ fn asr_cli_rejects_conflicting_modes_before_model_load() {
 
 #[test]
 fn gemma4_media_requires_mmproj() {
+    // `--audio` WITHOUT `--mmproj` is legal here since standalone ASR support
+    // landed (sensevoice-small / paraformer take --audio directly). This
+    // validate layer has no access to the arch string, so it cannot tell
+    // "gemma4 + audio" (encoder+LLM split, needs --mmproj) from
+    // "sensevoice + audio" (standalone ASR, must NOT have --mmproj). The
+    // mmproj requirement for the gemma4 path is enforced by the dispatcher
+    // in `app::asr`, where the arch is known — see validate.rs:198-201.
     let parse = |values: &[&str]| parse_cli_options(&args(values)).unwrap();
     assert!(validate_cli_options(&parse(&[
         "rmi",
@@ -940,7 +965,7 @@ fn gemma4_media_requires_mmproj() {
         "--prompt",
         "x",
     ]))
-    .is_err());
+    .is_ok());
     assert!(validate_cli_options(&parse(&[
         "rmi",
         "--model",
@@ -955,6 +980,26 @@ fn gemma4_media_requires_mmproj() {
         "x",
     ]))
     .is_ok());
+    // What IS enforced at validate time: --image under --embedding without
+    // --mmproj, and --video without --mmproj. Those paths have no
+    // standalone variant to disambiguate against.
+    assert!(validate_cli_options(&parse(&[
+        "rmi",
+        "--model",
+        "gemma.gguf",
+        "--embedding",
+        "--image",
+        "a.png",
+    ]))
+    .is_err());
+    assert!(validate_cli_options(&parse(&[
+        "rmi",
+        "--model",
+        "gemma.gguf",
+        "--video",
+        "a.mp4",
+    ]))
+    .is_err());
 }
 
 #[test]

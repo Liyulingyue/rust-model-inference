@@ -523,12 +523,16 @@ impl BPETokenizer {
             })
             .collect();
 
-        // Some GGUFs (notably MiniCPM5) tag chat-marker tokens like
-        // `<|im_end|>` as `token_type = Normal` instead of Control. The
-        // semantic-token list below is the source of truth for which
-        // literals count as "stop here", so re-scan the vocab and pull
-        // any literal in that list into `special_tokens` regardless of
-        // its declared type.
+        // MiniCPM5's GGUF is the one outlier: it tags chat-marker tokens
+        // like `` as `token_type = Normal` instead of Control, so the
+        // semantic-token list has to re-scan the vocab and pull those
+        // literals in regardless of the declared type. For every other
+        // pretokenizer the declared `token_type` stays authoritative — a
+        // token typed Normal is treated as ordinary text even if its
+        // literal happens to spell a ChatML marker (that's the
+        // `normal_control_looking_literal_has_no_chatml_semantic_name`
+        // contract: literals alone do not confer special semantics).
+        let force_semantic_registration = matches!(pre, PreTokenizer::Minicpm5);
         let semantic_literals: &[(&str, &str)] = match pre {
             PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
             PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
@@ -537,7 +541,10 @@ impl BPETokenizer {
         };
         for (literal, _) in semantic_literals {
             if let Some(&id) = token_to_id.get(*literal) {
-                if !special_tokens.iter().any(|t| t.text == *literal) {
+                if !special_tokens.iter().any(|t| t.text == *literal)
+                    && (force_semantic_registration
+                        || token_types.get(id as usize) == Some(&TokenType::Control))
+                {
                     special_tokens.push(SpecialToken {
                         text: (*literal).into(),
                         id,

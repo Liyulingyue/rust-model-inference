@@ -131,9 +131,7 @@ pub fn run_omni_embedding(
     audio_path: Option<&Path>,
     prompt: &str,
     threads: usize,
-    output: EmbeddingOutput,
-) -> Result<(), String> {
-    let started = std::time::Instant::now();
+) -> Result<Vec<f32>, String> {
     let arch = source
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
@@ -193,7 +191,7 @@ pub fn run_omni_embedding(
     );
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids("omni.tokens", &tokens));
-    let embedding = run_embedding_tokens(
+    run_embedding_tokens(
         source,
         &tokens,
         Some(MediaEmbeddings {
@@ -201,9 +199,7 @@ pub fn run_omni_embedding(
             values: &media,
         }),
         threads,
-    )?;
-    print_embedding(&embedding, output, started.elapsed().as_millis());
-    Ok(())
+    )
 }
 
 #[cfg(test)]
@@ -338,7 +334,6 @@ mod tests {
             None,
             "prompt",
             1,
-            EmbeddingOutput::Summary,
         )
         .unwrap_err();
         assert!(error.contains("Jina embedding model"), "{error}");

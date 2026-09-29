@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-010) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-016) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -405,6 +405,444 @@ Qwen3、Qwen3.5、Gemma4 仍分别维护自己的 chunk loop、CPU/Vulkan fallba
 
 - llama.cpp：`src/llama-batch.h`、`src/llama-memory.h`、`src/llama-context.cpp`、`src/llama-graph.h`
 - 当前 Rust：`src/core/prefill.rs`、`src/ops/kernel/mod.rs::PreparedRows`、`src/models/qwen3/trunk/prefill.rs`、`src/models/qwen35/trunk/session.rs`、`src/models/gemma4/trunk/forward.rs`
+
+---
+
+### TODO-011: GLM-4 commit `65f8c8b` follow-up cleanups — ✅ 已完成 (2026-09-29)
+
+来源：merge `origin/main` (62ab751) → `msi-new2` (daed1ec) 后评审 6 个非 PR commit 时记录。
+GLM-4 (`arch="glm4"`) 在 llama trunk 上跑通（Paris、中文 ML 题本地 IQ4_NL 验证通过），
+这些都是 cosmetic / dead-code。在 `msi-new3`（PR #120 合并后的新起点）上**全部处理完毕**。
+
+1. ~~**删除 dead scratchpad 字段 `x_after_attn` / `x_after_mlp`**~~ ✅ 已删。
+   原 `src/core/scratchpad.rs` 的 `Default::default` / `new_batched` +
+   `src/models/qwen3/trunk/session.rs` 共 6 处分配，forward.rs 无任何读取。每
+   batch row 多 ~8KB（n_embd × 2 × 4B）释放。
+2. ~~**清理 `quantize_row_q8_k_scalar_into` 死代码**~~ ✅ 已清理，**并发现一个真 bug**：
+   `max_val` 的累加器 + `sum_q` 都已丢弃（`let _ = max_val; let _ = sum_q;`），
+   dead code 已删。**但清理过程中发现 `padded` buffer 尾部未清零** —
+   GLM-4 n_ff=13696 = 54 blocks（53×256 + 1×128），最后 partial block 的
+   `padded[128..256]` 保留前一个 full block 的脏值并参与量化，quantize 结果错。
+   修复：`padded[len..].fill(0.0)`。由新增的 4 个单元测试验证（删掉 fix 后 2 个
+   测试立即 FAILED，确认测试能抓住 bug）。
+3. **`tools.rs` 让 glm4 + tools 显式 Err — 误报，无需修**。
+   当前 `tools.rs` 的 `llama_family` 分支在 `if !tools.is_empty()` 时已经统一
+   `return Err("Function tools are unsupported for llama-family architectures")`
+   （由 PR `b018708` #112 "HTTP CLI 公共逻辑抽取" 引入），glm4 + tools 已被拒。
+   **修 TODO 说明此条为误报**，不是真实 bug。
+4. ~~**修复 `docs/MODEL_LIST.md` 孤行 `| `**~~ ✅ 已删。GLM-4 row 末尾原本
+   缺失闭合 `）`，一并补上。
+5. ~~**squash 掉 cix3 docs stash dance**~~ ✅ 已由 PR #120 的 squash merge 处理，
+   main 历史已干净（无需单独 rebase）。
+6. ~~**补 Q8_K zero-pad 单元测试**~~ ✅ 已加。
+   `src/ops/quant/mod.rs::q8k_padding_tests` 4 个测试：
+   - `partial_block_tail_roundtrips_to_zero`：GLM-4 n_ff=13696 partial block
+     尾部 roundtrip 到 0
+   - `partial_block_valid_values_roundtrip_within_quantum`：有效值误夽
+     ≤ 半个 quantum（`d/2`）
+   - `partial_block_tail_is_independent_of_previous_block`：直接验证字段 2 的
+     脏 buffer bug — 删掉 fix 后 FAILED
+   - `undersized_buffer_panics`：buf 长度合约 `len.div_ceil(QK_K)` 强制执行
+
+关联文件：
+- `src/core/scratchpad.rs` — 字段 1（已删）
+- `src/models/qwen3/trunk/session.rs` — 字段 1（已删）
+- `src/ops/quant/mod.rs:104-155` + `q8k_padding_tests` — 字段 2 + 6（已修 + 已测）
+- `docs/MODEL_LIST.md` — 字段 4（已删孤行 + 补 `）`）
+
+---
+
+### TODO-012: minijinja-based user-GGUF chat_template support
+
+#### 动机
+
+当前 prompt builder 在 `src/prompt.rs` 和 `src/models/llama/trunk/forward.rs::llama_turn_text`
+里 hardcoded 一组已知 arch 的模板（`lfm2`/`lfm2moe`/`qwen3`/`qwen35`/llama/nanbeige/
+granite/glm4/minicpm5/phi3/exaone/k2-horizon）。当用户用 HF 微调了一个模型
+（典型场景：微调 Qwen3-0.6B Instruct 改 chat_template），GGUF 里
+`tokenizer.chat_template` 会变 — 我们的 hardcoded path 渲染错，模型输出
+退化，但代码完全无感。要支持这个场景，必须把 chat template render 委托
+给 GGUF 自带的 Jinja。
+
+#### 设计：共存，不是替代
+
+minijinja 与现有 hardcoded builder **共存**，通过 `build_prompt` dispatch
+**选择**走哪条：
+
+```
+build_prompt() dispatch
+ ├─ 优先级 1: 用户显式 chat_template override（HTTP field / CLI flag / env var）
+ ├─ 优先级 2: 已知 arch fast path（hardcoded builder，零 runtime 开销）
+ ├─ 优先级 3: GGUF 自带 chat_template（minijinja render）
+ └─ 优先级 4: 兜底（raw prompt）
+```
+
+理由：
+- 手写 builder 是 **fast path**：编译期已知、0 开销、当前所有 model list
+  都 byte-aligned 过官方模板（PR #118 + da6bbcb + 后续实测验证）。
+  **不删**。
+- minijinja 是 **fallback / escape hatch**：用户传任意 HF GGUF / 微调模型
+  / 自定义 jinja 时自动走通。**不动现有 fast path**。
+- 两条 path 产物等价 — 都是 `Vec<u32>` tokens，下游 runtime 完全无感。
+- 跨验证：用 minijinja render 一个等价 jinja（展开我们手写 builder 的逻辑），
+  验证 byte-equal — 这给我们一个 regression net，防 hardcoded 漂移。
+
+#### 触发入口（用户可控的 4 种）
+
+| 入口 | 用例 |
+|---|---|
+| GGUF 自带 `tokenizer.chat_template` + 未知 arch | 用户上传任意 HF 模型，自动 render |
+| GGUF 自带 `tokenizer.chat_template` + 已知 arch 但与 hardcoded 不一致 | 检测 diff，触发 jinja 兜底 |
+| HTTP `/v1/chat/completions` 的 `chat_template` 字段 | 想精确控制的 OpenAI 兼容客户端 |
+| CLI `--chat-template-file path.j2` 或 env `RMI_CHAT_TEMPLATE_FILE` | 本地测试 / 容器化部署 |
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| 加 `minijinja = "2"` 依赖 + json/macros features | 1 | 编译时间 +5s |
+| 实现 `{% generation %}` block（minja 兼容） | ~50 | 中：custom parser extension via `unstable_machinery` |
+| 实现 `raise` statement（minja 兼容） | ~30 | 低：minijinja 自带 syntax hook |
+| `JinjaChatTemplate::new()` + cache | ~30 | 低 |
+| `build_prompt` 集成 + 分发 | ~50 | 低（向后兼容 fallback） |
+| HTTP `chat_template` 字段 | ~20 | 低 |
+| CLI `--chat-template-file` flag + env var | ~30 | 低 |
+| 测试（minja `tests_files/` 借用为 golden） | ~100 | 中（要选几个真实 GGUF 跑 byte-equal） |
+| 跨验证（jinja-rendered == hardcoded for 已知 arch） | ~50 | 低 |
+| **总计** | **~360 LOC + 1 dep** | **新功能 PR，不动现有 fast path** |
+
+#### 验证策略
+
+1. **已知 arch 不变**：跑现有 `tests/cli_http_agreement.rs` + `prompt.rs::tests`
+   byte-equal 测试，确认 jinja 引入后 hardcoded path 行为零漂移。
+2. **minja `tests_files/`**：借用其 ~80 个真实模型的 `tokenizer.chat_template`
+   + 期望输出，做 golden test（不需要权重，只需 template + 合成 messages）。
+3. **LFM2.5-8B-A1B 真实 GGUF**：用 `RUST_LFM2MOE_DEBUG_LOGITS` 验证 jinja render
+   vs hardcoded render 输出的 token 序列一致。
+
+#### ROI 时间线
+
+- 现在：**0%** — 项目当前 model list 完备，plain text 全部对齐官方 jinja 输出
+  （已 byte-equal 验证），用户微调场景没出现。
+- 3-6 个月：**30%** — 如果项目推"通用 GGUF 推理"产品定位。
+- 12+ 个月：**100%** — 任何 HF 推理产品最终都要支持任意 jinja 模板，这是行业
+  标准做法（llama.cpp / vLLM / TGI 都已支持）。
+
+#### 不立即实施的核心理由
+
+1. **零增量价值**：当前所有 model list 的 plain text 输出已 byte-equal 官方 jinja。
+2. **不解决"thinking-tuned 模型仍 emit think block"问题** — 这是模型训练特性，
+   jinja 也救不了（已经验证）。
+3. **不解决 byte-slice panic 等已修 bug**（这些是 hardcoded path 内部的 bug，
+   跟 jinja 正交）。
+4. **避免 scope creep — TODO-011 的 6 条死代码提醒我们**：不必要的代码会带来
+   维护负担。jinja 是 ~360 LOC + 1 dep，没用户报"prompt 不对"前不值。
+
+#### 触发条件（何时启用）
+
+满足下列**任一**条件即应启动实施：
+
+- 用户公开 issue / Discord 报告"我的微调模型 prompt 渲染错"（≥3 次报告后启动）
+- 项目决定支持"用户上传任意 HF GGUF"产品定位（一次性启动）
+- 仓库添加 ≥5 个新 arch 而其中 ≥2 个 GGUF 带非标准 chat_template（渐进启动）
+
+#### 关联文件（实施时）
+
+- `Cargo.toml` — 加 `minijinja = "2"` 依赖
+- `src/prompt/jinja.rs` (新) — JinjaChatTemplate 封装
+- `src/app/server/api/tools.rs::build_prompt` — 加 dispatch 分支（不删 fast path）
+- `src/app/server/api/protocol.rs::Request` — 加 `chat_template` 字段
+- `src/app/cli/parse.rs` — 加 `--chat-template-file` flag
+- `src/prompt.rs` (现有) — 不动，保留 hardcoded builder 作为 fast path
+- `docs/usage/*.md` — 加新章节解释"用户微调模型怎么用"
+
+---
+
+### TODO-013: CLI interactive mode — multi-turn history + slash commands
+
+#### 现状
+
+CLI interactive mode **已存在**（`src/app/text/generation.rs:218` 的
+`run_interactive` 和 `:267` 的 `run_interactive_qwen35`），触发条件是
+`options.prompt.is_empty()`（`src/main.rs:495` 的 else 分支）。REPL
+loop 完整，从 stdin 读行、Ctrl+C / EOF 退出。
+
+但**核心功能缺失**：
+
+| 功能 | 状态 |
+|---|---|
+| REPL loop（stdin → stdout） | ✅ |
+| Ctrl+C / EOF 退出 | ✅ |
+| 每次 input 独立生成 reply | ✅ |
+| **multi-turn history** | ❌ 每行独立，模型看不到前文 |
+| **system turn（CLI 配置）** | ❌ 无 CLI 接口；模型不知道角色 |
+| **`/clear` / `/system "..."` / `/exit` 命令** | ❌ |
+| **streaming token-by-token 输出** | ❌ 整段生成完才 print |
+| **`--thinking` / `--no-thinking` 生效** | ❌ `run_inference` 在 interactive 路径 hardcode `thinking=false` |
+| **KV cache 增量（不重 prefill）** | ❌ 每轮从 0 开始 |
+
+**最大痛点**：
+```bash
+> Hi, I'm Alice.
+Hello Alice!
+
+> What is my name?
+I don't know your name.  # ← 不记得 "Alice"
+```
+
+根因：`lfm2::run_inference` 和 `lfm25::run_inference` 都签名是
+`(..., prompt: &str, ...)`，内部 `build_lfm2_chat_prompt_with_thinking`
+的 `&[Lfm2Message]` 被 hardcode 为 `[Lfm2Message { role: "user",
+content: prompt }]`，没有 history / system 概念。
+
+HTTP 路径**已经完整**（PR #118 + `da6bbcb` + 后续）—— 缺的是 CLI。
+
+#### 实施 cost（粗算）
+
+| 步骤 | LOC | 风险 |
+|---|---|---|
+| `lfm2::run_inference` 加 `turns: &[Lfm2Message]` 替代 `prompt: &str` | ~15 | 低（纯重命名 + 调整） |
+| `lfm25::run_inference` 同上 | ~15 | 低 |
+| `run_interactive` 重写：维护 `Vec<(role, content)>` history + system + slash commands | ~80 | 低 |
+| `run_interactive_qwen35` 同上（multimodal path） | ~80 | 低 |
+| Streaming token 输出（可选） | ~50 | 中（要 token sink 接口） |
+| 思考 flag 透传 | ~5 | 低 |
+| 测试（stdin mock + 历史一致性） | ~80 | 中 |
+| **总计** | **~325 LOC** | **触及多个 model forward 入口；可能影响 Oracle 测试 baseline** |
+
+#### 为什么不立即实施
+
+1. **interactive mode 是 partial feature，不是 bug**。当前 1-shot-per-line
+   满足 smoke test / benchmark / debug 三大主要 CLI 场景。
+2. **HTTP 路径已完整**（multi-turn, system, thinking, streaming）。
+   真正需要 multi-turn 对话的用户走 HTTP。
+3. **改 `lfm2::run_inference` 签名**会触动 CLI / benchmark / Oracle
+   test 的多个调用点，需要回归测试全套 llm 模型的 greedy baseline。
+4. **ROI 偏低**：LFM2.5-8B-A1B 等思考模型在 CLI 上调试时确实希望有 history，
+   但生产场景主要是 HTTP API 调用方。
+
+#### 触发条件
+
+满足下列**任一**条件即应启动：
+
+- 用户公开 issue / Discord 报告"interactive mode 不支持 multi-turn"（≥3 次）
+- LFM2.5-Thinking 系列在 CLI 上成为常见调试 / 微调工作流
+- 决定给仓库加一个"开发者本地 chat loop"功能，作为测试 / 微调工具
+
+#### 关联文件（实施时）
+
+- `src/models/lfm2/trunk/forward.rs` — `run_inference` 接受 turns
+- `src/models/lfm25/trunk/forward.rs` — 同上
+- `src/app/text/generation.rs` — `run_interactive` 重写 + 加 streaming 接口
+- `src/app/cli/parse.rs` — 加 `--system` CLI flag
+- `src/main.rs` — interactive dispatch 把 `options.thinking` 透传
+- `tests/cli_history.rs`（新）— 多轮 history 一致性测试
+
+---
+
+### TODO-014: Falcon-H1 Q4_K_M 加载 panic — ✅ 已修复 (2026-09-29)
+
+#### 现象
+
+`unsloth/Falcon-H1-1.5B-Instruct-GGUF` 的 **Q4_K_M**（以及任何把 `attn_v` /
+`ffn_down` 打成 Q6_K 的量化：Q5_K_M / Q6_K / UD-* 等）在 prefill 阶段 panic：
+
+```
+thread 'main' panicked at src/ops/kernel/q6_k.rs:79
+range start index 1290240 out of range for slice of length 430080
+```
+
+`430080 = 256 rows × 1680 B` 正是 `blk.0.attn_v.weight`（dims `[2048, 256]` Q6_K）
+的真实体积，而 kernel 却按 `n_out = 1024` 切分行索引（`out_idx = 768` × 4 线程）。
+Q8_0 模型不受影响，因为 unsloth 在该量化下把所有 attn 张量都打成 Q8_0。
+
+#### 根因
+
+Falcon-H1 的 attention 是 **GQA**，三个维度的 head 数不同：
+
+| 张量 | GGUF dims | 语义 | 代码里当时的值 |
+|---|---|---|---|
+| `attn_q.weight` | [2048, **1024**] | `n_head * head_dim_k` (8×128) | 1024 ✓ |
+| `attn_k.weight` | [2048, **256**] | `n_head_kv * head_dim_k` (2×128) | 256 ✓ |
+| `attn_v.weight` | [2048, **256**] | `n_head_kv * head_dim_v` (2×128) | **1024 ✗** |
+| `attn_output.weight` | [**1024**, 2048] | `n_head * head_dim_v` (concat 后) | **256 ✗** |
+
+`forward.rs` 当时把 `n_attn_v` 定义成 `n_head * head_dim_v`（=1024，
+"concat 输出"维度），并用它同时驱动：
+
+1. V matmul 的 `n_out`（应为 256 → 越界 panic），
+2. V KV-cache / f16 cache 的行 stride（应为 256），
+3. `w_o` matmul 的 `n_in`（应为 1024）。
+
+`weights.rs::load_weight` 用的是 `n_head_kv * n_embd_head_v`（=256，正确），
+所以维度校验通过、加载不报错，直到 forward 时 kernel 才越界。
+
+#### 修复
+
+`src/models/falcon_h1/trunk/forward.rs` 把 `n_attn_v` 拆成两个名字：
+
+- `n_attn_v_kv = n_head_kv * head_dim_v` — V projection 输出、V cache、
+  `v_f16_storage` stride、`v_col` 索引；
+- `n_attn_o = n_head * head_dim_v` — `attn_out` 缓冲区、`w_o` matmul 的 `n_in`。
+
+`n_attn_q` / `n_attn_kv` 不变。`FalconH1Scratch::new` 的 `v` / `v_buf` /
+`attn_out` 分配分别改用 `n_attn_v_kv` 与 `n_attn_o`。
+
+#### 验证
+
+本地 `Falcon-H1-1.5B-Instruct-Q4_K_M.gguf`，8 线程，`--max-context 512`，greedy：
+
+| prompt | 输出 |
+|---|---|
+| `What is the capital of France? Answer with just the city name.` | `Paris` |
+| `What is 2+2? Answer with just the number.` | `4` |
+| `Name one color in the rainbow.` | `Red` |
+| `用中文回答：什么是机器学习？` | 中文 ML 解释（流畅，未截断） |
+
+速度 26–28 t/s prompt、24–25 t/s generation。lib 测试 934 passed /
+19 failed（= 之前修完 3 条 baseline 后的水平，无新增）。
+
+#### 遗留 / 后续
+
+- **未做** bitwise llama.cpp oracle 对比（Q4_K_M 精度基线）。`tests/falcon_h1_q8.rs`
+  目前只 gate 在 Q8_0 模型上；Q4_K_M 若要纳入 sentinel，需要新增
+  `RMI_FALCON_H1_Q4K_M_MODEL` env 并记录 golden。
+- Q4_K_M 的 `ffn_down` 也是 Q6_K，已随本次修复一同跑通。
+- **3B 变体已实测**（2026-09-29，`Falcon-H1-3B-Instruct-Q4_K_M.gguf`）：config
+   `n_embd=2560 / n_head=10 / n_head_kv=2 / head_dim=128` → `group_size=5`
+   （1.5B 是 4），`attn_v`/`ffn_down` 同为 Q6_K。同一修复代码零改动跑通，
+   Paris / 4 / red / 中文 ML 四例全对，13-14 t/s @ 8 线程。
+
+---
+
+### TODO-015: arch 接入的"公共层报到"问题 — 设计记录，暂不实施
+
+#### 起因
+
+`Falcon-H1` 适配 CLI 后用 `/v1/chat/completions` 失败：
+
+```
+Architecture "falcon-h1" is not supported by the server text endpoints
+```
+
+排查发现一个 arch 要为**三个公共入口各报到一次**，且漏了不报错：
+
+| 入口 | 位置 | falcon 状态 |
+|---|---|---|
+| CLI | `src/app/text/generation.rs` `} else if arch ==` | ✅ 已接 |
+| HTTP runtime | `src/app/text/runtime.rs::build_text_runtime` | ❌ 无 adapter |
+| HTTP prompt | `src/app/server/api/tools.rs::is_qwen35` / `llama_family` | ❌ 无分支 |
+| JEV | `src/app/jev/single.rs` `match &*arch` | ❌ 落进 `other => Err` |
+
+维护者的比喻：**公共层是"插口/门牌"，用户只面对任务（传文本/图片 → 拿结果），不关心里面是谁**。而当前 registry 全是 `match arch`——**按施工队组织，不按门牌组织**，导致：
+
+1. 新 arch 不知道该去哪几处报到（falcon 漏了 2 处，且静默）；
+2. 不支持某能力的 arch（如 TTS）要"证明自己不该在 JEV 里"，需要维护
+   "故意不支持"白名单；
+3. 同一个能力在三个入口重复出现。
+
+#### 三层拆解（讨论结论）
+
+| 层 | 现状 | 是否要动 |
+|---|---|---|
+| **执行接口** | `TextRuntime` / `JevScorer` trait 已存在且健康（JEV 9/9 trunks 统一走 trait，TODO-014 之后仍成立） | 不用动 |
+| **公共 API** | HTTP 的 `/v1/chat/completions` / `/v1/audio/speech` 本来就是按任务分、不关心背后 arch | 已经对了 |
+| **登记处** | 3 个手写 `match arch`，新 arch 报到 3 次、漏了不报错 | **唯一真痛点** |
+
+关键认知：用户问"falcon 为什么 HTTP 不能用"，答案是 **adapter 没写**（工作量问题），
+不是"架构缺插口"——接口在，只是没插。
+
+#### 评估过的方案
+
+**A. distributed slice（`inventory` crate）+ capability 门牌**
+
+```rust
+pub mod capability {
+    #[distributed_slice] pub static TEXT_GENERATE: [CapabilityFactory];
+    #[distributed_slice] pub static JEV: [CapabilityFactory];
+    #[distributed_slice] pub static TTS: [CapabilityFactory];
+    // ...
+}
+// trunk 内自己挂门；不写就是不支持 → TTS 天然不进 JEV，无需白名单
+// 公共层写完永久冻结
+```
+
+- 语义最干净："不声明 = 不支持"，新 arch 零公共层改动。
+- **否决（现在）**：为"省 30 行 registry"引入 linker-magic 依赖不值；且
+  I/O 组合仍在快速扩张（chat: 纯文本 → +图 → +音频/视频；omni 会把
+  chat/score/embed 的边界糊掉），**预定义 capability slot 是在流沙上钉钉子**——
+  真到 omni 那天，是 I/O 抽象重塑 capability，不是反过来。
+
+**B. Plugin trait + 单注册表（~500 LOC 重构）**
+- 否决：公共层仍要每 arch 加一行；且 TTS 不支持 JEV 要靠 `default fn` 或按
+  capability 拆 4 个 trait，比 A 更脏。
+
+**C. loader arch 列表提成 `SUPPORTED_ARCHES` const + coverage 测试（~80 LOC）**
+- **设计已定稿，暂不实施**。见下。
+
+#### TODO-015 的落地设计（将来启用时直接用）
+
+1. `src/core/loader.rs`：把 `model_config_from_source` 里的 `matches!(...)`
+   改成 `pub const SUPPORTED_ARCHES: &[&str]` + `contains`。新 arch 必须先加进
+   const → 测试自动覆盖它。
+2. `tests/arch_coverage.rs`（或 lib test `arch_coverage`）：遍历 `SUPPORTED_ARCHES`，
+   断言每个 arch 在 CLI / HTTP / JEV 三个 dispatch 都有**显式**答案
+   （`Supported` 或在带原因注释的"故意不支持"白名单里）。
+3. CI 加**独立 job**（不能并进 `cargo test --lib`——那 19 个 pre-existing
+   failures 会把它染红）：
+   ```yaml
+   arch-coverage:
+     steps:
+       - run: cargo test --profile release-fast --lib arch_coverage
+   ```
+
+效果：falcon 这类"静默漏注册"以后 CI 立刻红；本地
+`cargo test --lib arch_coverage` 秒级回报。零新依赖、零架构改动。
+
+#### 触发条件（满足任一才启动实施）
+
+- arch 数量 > 25，或
+- 新 arch 接入频率 > 每月 1 个（"报到 3 次"成为真瓶颈），或
+- omni 模型（原生统一多模态 I/O）落地——届时 I/O 抽象自然重塑 capability 定义，
+  **那时做 A 才是顺势而为**，今天钉死的 slot 只会碍事。
+
+在触发前，处理方式是：**新 arch 接入时手工检查三处 dispatch + 补实现**
+（正如本次给 falcon 补 HTTP/JEV）。
+
+---
+
+### TODO-016: Jina v5 Omni audio encoder — oracle 验证待补
+
+本仓库 `encode_audio()` 已按 jina-ai `feat-v5-omni` llama.cpp fork 设计切 30 s Whisper 块（见 commit `9717d17`），但**未跑过 llama.cpp 端的逐位对照**：
+
+1. **per-chunk byte-equal 对齐 llama.cpp `b96806d`**
+   - 现存 `tests/jina_audio_projection_matches_llama_cpp_bits`（#[ignore]）已经覆盖单 30 s 块的 750 × 1024 投影 F32 对照，但每次跑需要：
+     - `LLAMA_DIR` 是固定 commit `b96806d96061049a5b574269b049bf6241d63d46` 的独立副本
+     - 应用 `tools/oracle/jina_audio/mtmd-audio-projection.patch` + `tools/oracle/qwen35/qwen35-scalar-softmax.patch`
+     - `cmake -B build-rmi-jina-audio -DGGML_ACCELERATE=OFF -DGGML_METAL=OFF -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX`
+     - 跑 `llama-mtmd-cli` dump oracle F32，再跑 `cargo test ... -- --ignored`
+   - macOS ARM CPU / 单线程 / 标量 softmax / 关 Flash Attention 的严格 CPU 路径
+   - 触发条件：新增 jina v5 audio encoder 任何改动时必跑
+
+2. **跨块拼接 oracle 对齐**
+   - 上一步只覆盖单个 30 s 块。我们的 `encode_audio()` 把多个 30 s 块的 post-conv tokens 拼给 LLM，让 LLM cross-attend 跨块融合
+   - 上游 `feat-v5-omni` fork 也是同样设计（mtmd split 30s + LLM cross-attend），所以两边的最终 LLM embedding 应等价
+   - 当前只在仓库端跑过 30s / 60s / 90s 端到端语义验证（cos 关系正确），**未跟 llama.cpp 跨块拼接对比**
+   - 验证方法：取 jina-omni + llama.cpp fork + 一段 >30s 音频（e.g. 60s），分别跑两端的最终 embedding，断言 cos ≥ 0.99 + max abs diff 在量化噪声内（Q8_0 文本 + F16 mmproj 路径下应该是 ~1e-3）
+   - 触发条件：commit `9717d17` 之后任何 jina v5 改动、Q4_K / Q5_K / Q6_K 等不同量化、新 mmproj 版本
+
+**当前不做**：
+- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
+- 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
+- 触发再做：第二条等用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+
+**实施步骤**（任一触发条件满足时）：
+1. `cd $LLAMA_DIR && git checkout b96806d` 起固定 commit
+2. apply 现有两个 patch
+3. cmake + build（macOS ARM / Linux x86_64 各一次）
+4. 跑现有 `jina_audio_projection_matches_llama_cpp_bits` 对 30s 单块
+5. 新增 `jina_audio_projection_matches_llama_cpp_bits_concat`（#[ignore]）跑 60s 跨块拼接
+6. 把对照数据 commit 到 `tools/oracle/jina_audio/`（或外置 datum）
 
 ---
 

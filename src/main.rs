@@ -3,6 +3,10 @@ use std::sync::Arc;
 
 use rust_model_inference::app;
 use rust_model_inference::format::ggufrs::ComponentRole;
+use rust_model_inference::models::diffusion::qwen_image_2_1::{
+    matches_signature, DEFAULT_LATENT_SIDE, DEFAULT_TIMESTEP,
+};
+use rust_model_inference::models::qwen3::embedding::print_embedding;
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
 use rust_model_inference::DreamXConfig;
@@ -219,6 +223,52 @@ fn main() {
 
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(model_path, ComponentRole::Llm));
+    // Qwen-Image-2.1 diffusion GGUFs carry no metadata (kv=0), so the route is
+    // chosen by tensor-name signature before the metadata-driven LLM path.
+    if matches_signature(source.as_ref()) {
+        let out = match options
+            .out
+            .clone()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            Some(out) => out,
+            None => {
+                app::run_or_exit(Err(
+                    "Qwen-Image-2.1 requires --out for the velocity output".into()
+                ));
+                return;
+            }
+        };
+        let load = |path: Option<&std::path::PathBuf>| -> Result<Option<Vec<f32>>, String> {
+            match path {
+                Some(path) => app::read_f32_file(path).map(Some),
+                None => Ok(None),
+            }
+        };
+        let (latent, context) = match (
+            load(options.qwen_latent_file.as_ref()),
+            load(options.qwen_context_file.as_ref()),
+        ) {
+            (Ok(latent), Ok(context)) => (latent, context),
+            (Err(error), _) | (_, Err(error)) => {
+                app::run_or_exit(Err(error));
+                return;
+            }
+        };
+        app::run_or_exit(app::run_qwen_image_2_1(
+            source,
+            app::QwenImage21Request {
+                latent,
+                context,
+                latent_width: options.qwen_latent_width.unwrap_or(DEFAULT_LATENT_SIDE),
+                latent_height: options.qwen_latent_height.unwrap_or(DEFAULT_LATENT_SIDE),
+                timestep: options.qwen_timestep.unwrap_or(DEFAULT_TIMESTEP),
+                out,
+            },
+            n_threads,
+        ));
+        return;
+    }
     let arch = source
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
@@ -268,7 +318,8 @@ fn main() {
     }
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
-        app::run_or_exit(app::run_omni_embedding(
+        let started = std::time::Instant::now();
+        let embedding = match app::run_omni_embedding(
             source.as_ref(),
             explicit_mmproj.expect("validated media embedding mmproj"),
             image,
@@ -276,8 +327,18 @@ fn main() {
             audio,
             prompt,
             options.threads,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Inference error: {error}");
+                std::process::exit(1);
+            }
+        };
+        print_embedding(
+            &embedding,
             options.embedding_output,
-        ));
+            started.elapsed().as_millis(),
+        );
         return;
     }
 

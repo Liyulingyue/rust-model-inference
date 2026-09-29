@@ -137,6 +137,7 @@ pub fn run_inference(
             kv_format,
             max_context,
             repetition_penalty,
+            thinking,
             prefill_batch_size,
         )
     } else if uses_llama_trunk(&arch) {

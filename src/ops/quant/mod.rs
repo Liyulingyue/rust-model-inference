@@ -62,18 +62,23 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
 pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
+    // AVX2 path requires n % QK_K == 0 (uses 256-wide SIMD lanes); fall back
+    // to scalar for non-block-aligned inputs (GLM-4 ffn_down is 13696 =
+    // 53*256 + 128, ffn_gate/up are aligned but ffn_down is not). The
+    // scalar path zero-pads the partial tail per commit bb81dd1.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         return unsafe { quantize_row_q8_k_avx2(x) };
     }
     quantize_row_q8_k_scalar(x)
 }
 
 pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     debug_assert!(buf.len() >= nb);
+    // Same dispatch: AVX2 requires block-aligned lengths.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         unsafe { quantize_row_q8_k_avx2_into(x, buf) };
         return;
     }
@@ -109,7 +114,7 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
     // round up the block count; the caller must size `buf` for the
     // rounded count. We zero-pad the trailing partial block on the
     // fly.
-    let nb = x.len().div_ceil(QK_K);
+    let nb = n.div_ceil(QK_K);
     assert!(
         buf.len() >= nb,
         "quantize_row_q8_k_scalar_into: buf too small: have {}, need {}",
@@ -122,24 +127,23 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
         let block_end = (block_start + QK_K).min(n);
         let len = block_end - block_start;
         padded[..len].copy_from_slice(&x[block_start..block_end]);
-        // Remaining slots in `padded` are zero from prior iteration /
-        // first iteration's pre-init. We only need the first `len`
-        // slots to be valid.
+        // The tail `padded[len..]` may still carry data from a previous,
+        // longer block. Zero it so the partial-block padding is actually
+        // zero — otherwise the stale values get quantized into `qs` and
+        // corrupt the round-trip.
+        padded[len..].fill(0.0);
+        // Unsigned scale (d = amax/127). The legacy signed form
+        // (`-127/max_val`) is mathematically equivalent whenever amax is
+        // the true max-|x|, which is what the fold below computes.
         let amax = padded[..len]
             .iter()
             .fold(0.0f32, |acc, &v| acc.max(v.abs()));
-        let max_val = padded[..len]
-            .iter()
-            .fold(0.0f32, |acc, &v| if v.abs() == amax { v } else { acc });
         let block = &mut buf[i];
         block.d = amax / 127.0;
         let inv_d = if block.d > 0.0 { 1.0 / block.d } else { 0.0 };
-        let mut sum_q = 0.0f32;
         for j in 0..QK_K {
             let q = (padded[j] * inv_d).round();
-            let qi = q.clamp(-127.0, 127.0) as i8;
-            block.qs[j] = qi;
-            sum_q += qi as f32;
+            block.qs[j] = q.clamp(-127.0, 127.0) as i8;
         }
         block.bsums.fill(0);
         for j in (0..QK_K).step_by(16) {
@@ -149,8 +153,6 @@ fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
             }
             block.bsums[j / 16] = acc as i16;
         }
-        let _ = sum_q;
-        let _ = max_val;
     }
 }
 
@@ -3355,5 +3357,139 @@ mod i_quant_tests {
         let dot = vec_dot_iq3_xxs_q8k_scalar(first_block, &q8k);
         eprintln!("iq3_xxs first model block dot = {}", dot);
         assert!(dot.is_finite());
+    }
+}
+
+#[cfg(test)]
+mod q8k_padding_tests {
+    use super::*;
+
+    /// Dequantise one `BlockQ8K` back to f32. Mirrors the standard
+    /// `d * q` inverse so a round-trip test can measure absolute error.
+    fn dequant_block(block: &BlockQ8K, len: usize) -> Vec<f32> {
+        block.qs[..len]
+            .iter()
+            .map(|&q| block.d * q as f32)
+            .collect()
+    }
+
+    /// GLM-4 n_ff=13696 = 52 * 256 + 128. The trailing partial block is
+    /// 128 wide and MUST round-trip to zero (zero-padding) — otherwise
+    /// the dequantised values would carry stale data from the previous
+    /// full-width block.
+    #[test]
+    fn partial_block_tail_roundtrips_to_zero() {
+        let n_ff: usize = 13_696;
+        let input: Vec<f32> = (0..n_ff).map(|i| (i as f32 * 0.001).sin()).collect();
+        let nb = n_ff.div_ceil(QK_K);
+        assert_eq!(nb, 54, "GLM-4 shape");
+        let tail_len = n_ff - (nb - 1) * QK_K;
+        assert_eq!(tail_len, 128, "partial block width");
+
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        // Tail of the partial block must dequantise to zero.
+        let tail = dequant_block(&buf[nb - 1], QK_K);
+        for (i, &v) in tail.iter().enumerate().skip(tail_len) {
+            assert_eq!(v, 0.0, "tail byte {i} should quantise to zero, got {v}");
+        }
+    }
+
+    /// Round-trip error on the raw input must stay within the Q8_K
+    /// quantisation bound (|d/2| = one half-quantum-step). Catches any
+    /// regression in the zero-padding logic that corrupts valid values.
+    #[test]
+    fn partial_block_valid_values_roundtrip_within_quantum() {
+        let n_ff: usize = 13_696;
+        let input: Vec<f32> = (0..n_ff).map(|i| (i as f32 * 0.037).cos() * 0.5).collect();
+        let nb = n_ff.div_ceil(QK_K);
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        for block_idx in 0..nb {
+            let start = block_idx * QK_K;
+            let len = (n_ff - start).min(QK_K);
+            let round_tripped = dequant_block(&buf[block_idx], len);
+            for (i, &rt) in round_tripped.iter().enumerate() {
+                let original = input[start + i];
+                let err = (rt - original).abs();
+                let bound = buf[block_idx].d / 2.0 + 1e-6;
+                assert!(
+                    err <= bound,
+                    "block {block_idx} byte {i}: err {err} > bound {bound}"
+                );
+            }
+        }
+    }
+
+    /// The bug that motivated this test: a caller reusing a scratch
+    /// buffer would previously see stale quantised values in the tail
+    /// of a partial block. Directly asserts the fix.
+    #[test]
+    fn partial_block_tail_is_independent_of_previous_block() {
+        // One full block of non-zero values followed by a partial block.
+        // The partial block must NOT inherit the full block's values.
+        let mut input = vec![1.0f32; QK_K];
+        input.extend((0..128).map(|i| (i as f32) * -0.01));
+        let n: usize = input.len();
+
+        let nb = n.div_ceil(QK_K);
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        // Bytes [128..256] of the last block must be zero (the previous
+        // block quantized 1.0 to ±127 — anything non-zero here is stale).
+        for j in 128..QK_K {
+            assert_eq!(
+                buf[nb - 1].qs[j],
+                0,
+                "tail byte {j} should be zero, got {} (stale from block {})",
+                buf[nb - 1].qs[j],
+                nb - 2
+            );
+        }
+    }
+
+    /// The buffer-size contract: `buf.len() >= nb` where `nb = len.div_ceil(QK_K)`.
+    #[test]
+    fn undersized_buffer_panics() {
+        let input = vec![0.5f32; 13696];
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0; QK_K],
+                bsums: [0; 16]
+            };
+            1
+        ];
+        let result = std::panic::catch_unwind(move || {
+            super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+        });
+        assert!(
+            result.is_err(),
+            "undersized buf must panic rather than write out of bounds"
+        );
     }
 }

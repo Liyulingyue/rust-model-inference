@@ -3,4 +3,5 @@
 //! See `trunk/mod.rs` for the architecture summary and the pinned
 //! llama.cpp reference.
 
+pub mod runtime;
 pub mod trunk;

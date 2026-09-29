@@ -4,6 +4,17 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.qwen_latent_width.is_some_and(|value| value == 0)
+        || options.qwen_latent_height.is_some_and(|value| value == 0)
+    {
+        return Err("--qwen-latent-width and --qwen-latent-height must be positive".into());
+    }
+    if options
+        .qwen_timestep
+        .is_some_and(|value| !value.is_finite())
+    {
+        return Err("--qwen-timestep must be finite".into());
+    }
     if options.gliner2_decide {
         if !options.jev {
             return Err("--gliner2-decide requires --jev".into());

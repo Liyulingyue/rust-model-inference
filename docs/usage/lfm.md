@@ -60,8 +60,17 @@ cargo run --release --bin rust-model-inference -- \
 - 文本生成：~28 t/s（短 prompt）
 - 完整 reasoning + 答案：约 5–10 秒（typical reasoning 长度 50–150 tokens）
 
-注：本仓库**未实现** `--thinking` / `--no-thinking` 切换标志 — 当前所有 LFM2.5
-生成都包含 `` 段。若需去除，使用下游工具（如 `awk`）按 `` 切分。
+CLI / HTTP 端都已经支持 thinking 切换。CLI 通过 `--thinking` / `--no-thinking`
+控制，HTTP 通过 `enable_thinking` 字段控制（详见
+[§7.1](#71-enable_thinking-服务端开关)）：
+- 默认（`--thinking` / `enable_thinking: true`）— 与训练时一致，模型输出
+  ``…`` reasoning 段
+- `--no-thinking` / `enable_thinking: false` — prompt 尾部追加 `\n\n`，
+  让模型跳过 thinking 直接答
+- 模型是 thinking-trained 时，`--no-thinking` 只是 hint（prompt 层的提示），
+  不一定能完全阻止模型 emit think block；当前实现仍会发出一个短的 ``…``
+  段。HTTP 路径下 `ThinkFilter`（`src/app/server/api/think.rs`）会自动
+  剥掉 leading `` 块再透传真正的答案。CLI 路径下 think 段直接流到 stdout。
 
 ## 3. LFM2-MoE
 
@@ -154,7 +163,9 @@ tokens 的 matmul，不是 SIMD gap。如果要测大图，建议加 `--gpu`（V
 
 `LFM2.5-Thinking` 区别于 `LFM2.5-Instruct`：Thinking 模型默认在 `<think>...</think>`
 内输出 reasoning；本仓库代码会用同一个 `lfm25` trunk，但**思考文本会直接流
-到 stdout**。后续若需去除可引入 `--no-thinking` 标志（当前未实现）。
+到 stdout / 客户端**。HTTP 端可以通过 `enable_thinking: false` 字段抑制
+（详见 §7.1），CLI 端通过 `--no-thinking` 标志抑制 — 两者都让 prompt
+尾部追加 `\n\n` 让模型尝试跳过 thinking。
 
 ## 6. 与 llama.cpp 的对齐
 
@@ -175,6 +186,45 @@ cargo run --release --bin server -- \
 ```
 
 服务端对 LFM2 / LFM2.5 / LFM2-MoE 等纯文本架构按 CLI 选项暴露，无图像/音频模态。
+
+### 7.1 `enable_thinking` 服务端开关
+
+`/v1/chat/completions`（以及 Anthropic / Responses 协议）接受顶层
+`enable_thinking: bool` 字段（同时也接受 jinja 风格的嵌套
+`chat_template_kwargs: {"enable_thinking": ...}`，顶层优先）。`null` /
+缺失 = 用模型训练时的默认（thinking-tuned 变体如 LFM2.5-Thinking 默认开）。
+
+| arch | `None` 默认 | `enable_thinking: false` 的行为 |
+|---|---|---|
+| `lfm2moe`（LFM2.5-8B-A1B 等） | `true`（训练时是 thinking 模型） | prompt 尾部追加 `\n\n`，让模型尝试跳过 thinking |
+| `lfm2`（LFM2 / LFM2.5 文本） | `true` | 同上 |
+| `llama` / `nanbeige` / `granite` / `glm4` / `phi3` | `false`（HTTP 路径原本就走 `thinking=false`） | k2-horizon / MiniCPM5 才会显式生效；其它 arch 的 prompt 模板忽略此字段 |
+| `qwen3` / `qwen35` / `qwen3vl` | `false` | 通过 `append_qwen_assistant_prefix(false)` 触发 non-thinking tail |
+
+LFM2 / LFM2.5 实测（`LFM2.5-8B-A1B-Q8_0`，`max_tokens=150`，问 "What is
+the capital of France?"）：
+
+| 字段 | prompt tok | completion tok | 客户端收到 |
+|---|---|---|---|
+| `enable_thinking: false` | 33 | 104 | `'\nParis'`（think 段被 ThinkFilter 自动剥掉） |
+| `enable_thinking: true` | 32 | 77 | `'\nParis'` |
+| 缺失 | 32 | 77 | `'\nParis'` |
+
+**注意**：LFM2.5-Thinking 是 thinking-trained 模型，即使
+`enable_thinking: false`，模型仍可能 emit 一个短的 ``…`` reasoning
+段（仅是 prompt 层的 hint，不是 jinja 层的开关）。`ThinkFilter`
+（`src/app/server/api/think.rs`）自动剥掉 leading think 块，客户端看到
+的内容仍是纯答案。如果模型 emit 中段的 `` 块（`...answer thinking ...answer`
+ 格式），则不会被剥掉 — 这是已知限制（详见 TODO）。
+
+类型错误（`enable_thinking: "yes"`）返回 400：
+
+```json
+{"error":{"message":"enable_thinking must be a boolean", ...}}
+```
+
+CLI 上对应的 `--thinking` / `--no-thinking` 标志**尚未实现**；想关闭
+thinking 请走 HTTP。
 
 ## 8. 已确认的限制 / 边界
 

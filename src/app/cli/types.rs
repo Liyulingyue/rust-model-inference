@@ -104,6 +104,11 @@ pub struct CliOptions {
     pub srt: bool,
     pub vad: Option<PathBuf>,
     pub vad_maxseg: usize,
+    pub qwen_context_file: Option<PathBuf>,
+    pub qwen_latent_file: Option<PathBuf>,
+    pub qwen_latent_width: Option<usize>,
+    pub qwen_latent_height: Option<usize>,
+    pub qwen_timestep: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default)]

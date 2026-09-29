@@ -1,0 +1,714 @@
+--- a/src/model/diffusion/qwen_image_2_1.hpp
++++ b/src/model/diffusion/qwen_image_2_1.hpp
+@@ -2,6 +2,8 @@
+ #define __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
+
+ #include "model/diffusion/qwen_image.hpp"
++
++#include "qwen_image_2_1_trace.hpp"
+
+ namespace Qwen {
+
+@@ -162,8 +164,11 @@
+
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+             x = std::dynamic_pointer_cast<QwenImage21ZeroCenterRMSNorm>(blocks["text_norm"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_norm", x);
+             x = std::dynamic_pointer_cast<Linear>(blocks["in_layer"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_in_layer", x);
+             x = ggml_ext_gelu(ctx->ggml_ctx, x);
++            ctx->capture_tensor("qwen.debug.txt_gelu", x);
+             return std::dynamic_pointer_cast<Linear>(blocks["out_layer"])->forward(ctx, x);
+         }
+     };
+@@ -190,6 +195,8 @@
+             k      = std::dynamic_pointer_cast<RMSNorm>(blocks["norm_k"])->forward(ctx, k);
+             q      = Rope::apply_rope(ctx->ggml_ctx, q, pe);
+             k      = Rope::apply_rope(ctx->ggml_ctx, k, pe);
++            ctx->capture_tensor("qwen.debug.attn.q", q);
++            ctx->capture_tensor("qwen.debug.attn.k", k);
+             if (cache.mode == QwenImage21PrefixCache::Mode::STORE) {
+                 // Preserve query-first attention evaluation while writing each layer's
+                 // prefix before its full-sequence K/V can accumulate across layers.
+@@ -239,6 +246,7 @@
+                     auto sk             = ggml_ext_slice(ctx->ggml_ctx, k, 1, 0, segment.end);
+                     auto sv             = ggml_ext_slice(ctx->ggml_ctx, v, 2, 0, segment.end);
+                     auto out            = attend(sq, sk, sv, masks[i]);
++                    ctx->capture_tensor("qwen.debug.attn.seg" + std::to_string(i), out);
+                     result              = result == nullptr ? out : ggml_concat(ctx->ggml_ctx, result, out, 1);
+                 }
+             }
+@@ -282,11 +290,16 @@
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x, const std::vector<ggml_tensor*>& modulation, ggml_tensor* pe, const QwenImage21Layout& layout, const std::vector<ggml_tensor*>& masks, const QwenImage21PrefixCache& cache) {
+             const int64_t prefix_length = cache.mode == QwenImage21PrefixCache::Mode::REUSE ? 0 : layout.prefix_length;
+             auto h                      = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"])->forward(ctx, x);
++            ctx->capture_tensor("qwen.debug.b.norm1", h);
+             h                           = modulate(ctx->ggml_ctx, h, modulation[0], prefix_length);
++            ctx->capture_tensor("qwen.debug.b.mod1", h);
+             h                           = std::dynamic_pointer_cast<QwenImage21Attention>(blocks["attn"])->forward(ctx, h, pe, layout.segments, masks, cache);
++            ctx->capture_tensor("qwen.debug.b.attn", h);
+             x                           = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[1], prefix_length, true));
++            ctx->capture_tensor("qwen.debug.b.res1", x);
+             h                           = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm2"])->forward(ctx, x);
+             h                           = modulate(ctx->ggml_ctx, h, modulation[2], prefix_length);
++            ctx->capture_tensor("qwen.debug.b.mod2", h);
+             ggml_tensor* gate;
+             auto fused = blocks.find("img_mlp.gate_up");
+             if (fused != blocks.end()) {
+@@ -300,7 +313,8 @@
+             }
+             h = ggml_mul(ctx->ggml_ctx, h, ggml_silu(ctx->ggml_ctx, gate));
+             h = std::dynamic_pointer_cast<Linear>(blocks["img_mlp.out"])->forward(ctx, h);
+-            return ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
++            auto out = ggml_add(ctx->ggml_ctx, x, modulate(ctx->ggml_ctx, h, modulation[3], prefix_length, true));
++            return out;
+         }
+     };
+
+@@ -326,9 +340,12 @@
+             auto time = ggml_concat(ctx->ggml_ctx, timestep, ggml_ext_zeros_like(ctx->ggml_ctx, timestep), 0);
+             // Runtime flow timesteps already use the [0, 1000] scale.
+             time               = ggml_ext_timestep_embedding(ctx->ggml_ctx, time, 256, 10000, 1.f);
++            ctx->capture_tensor("qwen.debug.time", time);
+             time               = std::dynamic_pointer_cast<TimestepEmbedding>(blocks["time_text_embed.timestep_embedder"])->forward(ctx, time);
++            ctx->capture_tensor("qwen.time_embed", time);
+             time               = ggml_silu(ctx->ggml_ctx, time);
+             auto modulation    = std::dynamic_pointer_cast<Linear>(blocks["modulation.1"])->forward(ctx, time);
++            ctx->capture_tensor("qwen.modulation", modulation);
+             auto mod           = ggml_ext_chunk(ctx->ggml_ctx, modulation, 4, 0);
+             auto img_in        = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
+             ggml_tensor* joint = nullptr;
+@@ -336,6 +353,7 @@
+                 joint = img_in->forward(ctx, DiT::patchify(ctx->ggml_ctx, x, 1, 1));
+             } else {
+                 auto text = std::dynamic_pointer_cast<QwenImage21TextProjection>(blocks["txt_in"])->forward(ctx, context);
++                ctx->capture_tensor("qwen.txt_in", text);
+                 for (const auto& segment : layout.segments) {
+                     ggml_tensor* h;
+                     if (segment.image_index < 0) {
+@@ -347,6 +365,7 @@
+                     }
+                     joint = joint == nullptr ? h : ggml_concat(ctx->ggml_ctx, joint, h, 1);
+                 }
++                ctx->capture_tensor("qwen.joint", joint);
+             }
+             sd::ggml_graph_cut::mark_graph_cut(joint, "qwen_image_2_1.prelude", "joint");
+             for (int i = 0; i < config.num_layers; ++i) {
+@@ -356,15 +375,20 @@
+                 layer_cache.cut_group   = "qwen_image_2_1." + layer;
+                 auto block              = std::dynamic_pointer_cast<QwenImage21TransformerBlock>(blocks[layer]);
+                 joint                   = block->forward(ctx, joint, mod, pe, layout, masks, layer_cache);
++                ctx->capture_tensor("qwen.block." + std::to_string(i), joint);
+                 sd::ggml_graph_cut::mark_graph_cut(joint, layer_cache.cut_group, "joint");
+             }
+             if (cache.mode != QwenImage21PrefixCache::Mode::REUSE) {
+                 joint = ggml_ext_slice(ctx->ggml_ctx, joint, 1, layout.prefix_length, joint->ne[1]);
++                ctx->capture_tensor("qwen.joint_final", joint);
+             }
+             auto scale = std::dynamic_pointer_cast<Linear>(blocks["norm_out.linear"])->forward(ctx, ggml_ext_chunk(ctx->ggml_ctx, time, 2, 1)[0]);
++            ctx->capture_tensor("qwen.scale", scale);
+             joint      = std::dynamic_pointer_cast<LayerNorm>(blocks["norm_out.norm"])->forward(ctx, joint);
+             joint      = ggml_mul(ctx->ggml_ctx, joint, ggml_scale_bias(ctx->ggml_ctx, scale, 1.f, 1.f));
++            ctx->capture_tensor("qwen.norm_out", joint);
+             joint      = std::dynamic_pointer_cast<Linear>(blocks["proj_out"])->forward(ctx, joint);
++            ctx->capture_tensor("qwen.out", joint);
+             return DiT::unpatchify_and_crop(ctx->ggml_ctx, joint, x->ne[1], x->ne[0], 1, 1);
+         }
+     };
+@@ -518,6 +542,9 @@
+                 }
+                 embedding.values = Rope::embed_nd(embedding.ids, 1, 10000.f, config.axes_dim, embedding.layout, &embedding.frequencies);
+                 pe_data          = finish_rope_pe(std::move(embedding));
++                if (!cached) {
++                    qwen_image_2_1_trace_f32("qwen.pe", pe_data.data(), pe_data.size(), {2, 2, config.head_dim / 2, static_cast<int64_t>(pe_data.size() / (4 * config.head_dim / 2))});
++                }
+                 mask_data.clear();
+                 if (!cached) {
+                     for (const auto& segment : layout.segments) {
+@@ -586,6 +613,9 @@
+                     LOG_DEBUG("Qwen Image 2.1: cached prefix %" PRIu64 " (%" PRId64 " tokens, %s)", extra->prefix_id, layout.prefix_length, ggml_type_name(cache.type));
+                 }
+             }
++            qwen_image_2_1_trace_f32("qwen.input.x", x.values(), x.shape());
++            qwen_image_2_1_trace_f32("qwen.input.context", context.values(), context.shape());
++            qwen_image_2_1_trace_f32("qwen.input.timesteps", tensor_or_empty(inputs.timesteps).values(), tensor_or_empty(inputs.timesteps).shape());
+             return result;
+         }
+     };
+--- a/src/qwen_image_2_1_trace.hpp
++++ b/src/qwen_image_2_1_trace.hpp
+@@ -0,0 +1,76 @@
++#pragma once
++
++// Parity-trace helper for the Qwen-Image-2.1 oracle harness. Writes JSONL
++// records with f32 sidecar binaries, mirroring tools/oracle/z_image.
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++inline const char* qwen_image_2_1_trace_path() {
++    return std::getenv("QWEN_IMAGE_2_1_ORACLE_TRACE");
++}
++
++inline std::string qwen_image_2_1_trace_json_string(const std::string& value) {
++    std::string out = "\"";
++    for (char ch : value) {
++        if (ch == '\\' || ch == '\"') out += '\\';
++        out += ch;
++    }
++    return out + "\"";
++}
++
++inline bool qwen_image_2_1_trace_raw(const std::string& name,
++                                     const void* data,
++                                     size_t element_size,
++                                     size_t count,
++                                     std::vector<int64_t> shape,
++                                     const char* type) {
++    const char* trace = qwen_image_2_1_trace_path();
++    if (trace == nullptr) return true;
++    while (shape.size() > 1 && shape.back() == 1) shape.pop_back();
++    size_t expected = 1;
++    for (int64_t dimension : shape) {
++        if (dimension < 0) return false;
++        expected *= static_cast<size_t>(dimension);
++    }
++    if (expected != count) return false;
++
++    static std::mutex mutex;
++    static std::map<std::string, size_t> occurrences;
++    std::lock_guard<std::mutex> lock(mutex);
++    size_t occurrence = occurrences[name]++;
++    std::string sidecar = std::string(trace) + "." + name;
++    if (occurrence != 0) sidecar += "." + std::to_string(occurrence);
++    sidecar += "." + std::string(type);
++
++    std::ofstream binary(sidecar, std::ios::binary | std::ios::trunc);
++    binary.write(static_cast<const char*>(data), static_cast<std::streamsize>(count * element_size));
++    if (!binary) return false;
++
++    std::ofstream json(trace, std::ios::app);
++    json << "{\"name\":" << qwen_image_2_1_trace_json_string(name) << ",\"shape\":[";
++    for (size_t i = 0; i < shape.size(); ++i) {
++        if (i != 0) json << ',';
++        json << shape[i];
++    }
++    json << "],\"len\":" << count << ",\"occurrence\":" << occurrence
++         << ",\"binary_path\":" << qwen_image_2_1_trace_json_string(sidecar) << "}\n";
++    return static_cast<bool>(json);
++}
++
++inline bool qwen_image_2_1_trace_f32(const std::string& name,
++                                     const std::vector<float>& values,
++                                     std::vector<int64_t> shape) {
++    return qwen_image_2_1_trace_raw(name, values.data(), sizeof(float), values.size(), std::move(shape), "f32");
++}
++
++inline bool qwen_image_2_1_trace_f32(const std::string& name,
++                                     const float* values,
++                                     size_t count,
++                                     std::vector<int64_t> shape) {
++    return qwen_image_2_1_trace_raw(name, values, sizeof(float), count, std::move(shape), "f32");
++}
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -1,4 +1,5 @@
+ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
+ add_subdirectory(cli)
++add_subdirectory(qwen_image_2_1_trace)
+ add_subdirectory(server)
+--- a/examples/qwen_image_2_1_trace/CMakeLists.txt
++++ b/examples/qwen_image_2_1_trace/CMakeLists.txt
+@@ -0,0 +1,15 @@
++set(TARGET qwen-image-2-1-oracle)
++
++add_executable(${TARGET}
++    main.cpp
++)
++if(APPLE)
++    sd_set_macos_rpaths(${TARGET})
++endif()
++target_include_directories(${TARGET} PRIVATE
++    "${CMAKE_CURRENT_SOURCE_DIR}/.."
++    "${PROJECT_SOURCE_DIR}/src"
++)
++install(TARGETS ${TARGET} RUNTIME)
++target_link_libraries(${TARGET} PRIVATE stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
++target_compile_features(${TARGET} PUBLIC c_std_11 cxx_std_17)
+--- a/examples/qwen_image_2_1_trace/main.cpp
++++ b/examples/qwen_image_2_1_trace/main.cpp
+@@ -0,0 +1,409 @@
++// Standalone Qwen-Image-2.1 DiT oracle harness: loads the diffusion GGUF,
++// runs a single model forward on deterministic synthetic inputs, and traces
++// intermediate checkpoints when QWEN_IMAGE_2_1_ORACLE_TRACE is set.
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <limits>
++#include <map>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "ggml-cpu.h"
++#include "ggml.h"
++#include "ggml-backend.h"
++
++#include "model/diffusion/qwen_image_2_1.hpp"
++#include "model_loader.h"
++#include "qwen_image_2_1_trace.hpp"
++#include "stable-diffusion.h"
++
++namespace {
++
++void harness_log(enum sd_log_level_t level, const char* text, void*) {
++    static const char* prefixes[] = { "[DEBUG]", "[VERBOSE]", "[INFO]", "[WARN]", "[ERROR]" };
++    size_t index = level <= SD_LOG_ERROR ? (size_t)level : (size_t)SD_LOG_ERROR;
++    fprintf(level >= SD_LOG_ERROR ? stderr : stdout, "%s %s", prefixes[index], text);
++}
++
++struct HarnessOptions {
++    std::string diffusion_model;
++    int threads        = 1;
++    int64_t latent_w   = 16;
++    int64_t latent_h   = 16;
++    int64_t context_len = 128;
++    float timestep     = 500.0f;
++    uint32_t seed      = 1234567u;
++};
++
++uint32_t next_random(uint32_t& state) {
++    state = state * 1664525u + 1013904223u;
++    return state;
++}
++
++// Deterministic values in [-1, 1) with exact float construction on both sides
++// of the parity check.
++float next_value(uint32_t& state) {
++    uint32_t word = next_random(state);
++    uint32_t mantissa = (word >> 8) & 0xFFFF;
++    return static_cast<float>(mantissa) / 32768.0f - 1.0f;
++}
++
++// Minimal GGUF v3 reader: maps the data section and resolves tensor byte
++// offsets so the harness can feed params without the ModelManager pipeline.
++struct RawGguf {
++    const uint8_t* base = nullptr;
++    size_t size = 0;
++    struct TensorBytes {
++        const uint8_t* data;
++        size_t bytes;
++        ggml_type type;
++        int64_t ne[4];
++    };
++    std::map<std::string, TensorBytes> tensors;
++};
++
++bool read_string(const uint8_t* data, size_t size, size_t& pos, std::string& out) {
++    uint64_t length = 0;
++    if (pos > size || size - pos < sizeof(length)) return false;
++    std::memcpy(&length, data + pos, sizeof(length));
++    pos += sizeof(length);
++    if (length > size - pos) return false;
++    const size_t string_length = static_cast<size_t>(length);
++    out.assign(reinterpret_cast<const char*>(data) + pos, string_length);
++    pos += string_length;
++    return true;
++}
++
++bool load_raw_gguf(const std::string& path, RawGguf& gguf) {
++    int fd = open(path.c_str(), O_RDONLY);
++    if (fd < 0) return false;
++    struct stat st;
++    if (fstat(fd, &st) != 0) {
++        close(fd);
++        return false;
++    }
++    gguf.size = static_cast<size_t>(st.st_size);
++    void* mapped = mmap(nullptr, gguf.size, PROT_READ, MAP_PRIVATE, fd, 0);
++    close(fd);
++    if (mapped == MAP_FAILED) return false;
++    gguf.base = static_cast<const uint8_t*>(mapped);
++
++    const uint8_t* data = gguf.base;
++    size_t pos = 0;
++    uint32_t magic = 0, version = 0;
++    uint64_t tensor_count = 0, kv_count = 0;
++    if (pos > gguf.size || gguf.size - pos < 4) return false;
++    std::memcpy(&magic, data + pos, 4);
++    pos += 4;
++    if (magic != 0x46554747u) return false;  // "GGUF" little endian
++    if (gguf.size - pos < 4 + sizeof(uint64_t) + sizeof(uint64_t)) return false;
++    std::memcpy(&version, data + pos, 4);
++    pos += 4;
++    if (version < 2 || version > 3) return false;
++    std::memcpy(&tensor_count, data + pos, 8);
++    pos += 8;
++    std::memcpy(&kv_count, data + pos, 8);
++    pos += 8;
++
++    auto skip_scalar = [&](uint32_t type) -> bool {
++        size_t width = 0;
++        switch (type) {
++            case 0:  // UINT8
++            case 1:  // INT8
++            case 7:  // BOOL
++                width = 1;
++                break;
++            case 2:  // UINT16
++            case 3:  // INT16
++                width = 2;
++                break;
++            case 4:  // UINT32
++            case 5:  // INT32
++            case 6:  // FLOAT32
++                width = 4;
++                break;
++            case 10:  // UINT64
++            case 11:  // INT64
++            case 12:  // FLOAT64
++                width = 8;
++                break;
++            default:
++                return false;
++        }
++        if (width > gguf.size - pos) return false;
++        pos += width;
++        return true;
++    };
++
++    // Skip key/value pairs (untagged GGUFs from this pipeline have none, but
++    // tolerate them to stay format-correct).
++    for (uint64_t i = 0; i < kv_count; ++i) {
++        std::string key;
++        if (!read_string(data, gguf.size, pos, key)) return false;
++        if (pos + 4 > gguf.size) return false;
++        uint32_t value_type = 0;
++        std::memcpy(&value_type, data + pos, 4);
++        pos += 4;
++        if (value_type == 8) {  // string
++            std::string unused;
++            if (!read_string(data, gguf.size, pos, unused)) return false;
++        } else if (value_type == 9) {  // array
++            if (pos + 8 > gguf.size) return false;
++            uint64_t count = 0;
++            std::memcpy(&count, data + pos, 8);
++            pos += 8;
++            uint32_t element_type = 0;
++            if (pos + 4 > gguf.size) return false;
++            std::memcpy(&element_type, data + pos, 4);
++            pos += 4;
++            for (uint64_t j = 0; j < count; ++j) {
++                if (element_type == 8) {
++                    std::string unused;
++                    if (!read_string(data, gguf.size, pos, unused)) return false;
++                } else if (!skip_scalar(element_type)) {
++                    return false;
++                }
++            }
++        } else if (value_type != 8 && value_type != 9) {
++            if (!skip_scalar(value_type)) return false;
++        } else {
++            return false;
++        }
++    }
++
++    struct Entry {
++        ggml_type type;
++        int64_t ne[4];
++        uint64_t offset;
++    };
++    std::map<std::string, Entry> entries;
++    for (uint64_t i = 0; i < tensor_count; ++i) {
++        std::string name;
++        if (!read_string(data, gguf.size, pos, name)) return false;
++        if (pos + 4 > gguf.size) return false;
++        uint32_t n_dims = 0;
++        std::memcpy(&n_dims, data + pos, 4);
++        pos += 4;
++        if (n_dims > 4) return false;
++        Entry entry{};
++        entry.ne[0] = entry.ne[1] = entry.ne[2] = entry.ne[3] = 1;
++        for (uint32_t d = 0; d < n_dims; ++d) {
++            uint64_t dim = 0;
++            if (pos + 8 > gguf.size) return false;
++            std::memcpy(&dim, data + pos, 8);
++            pos += 8;
++            if (dim > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
++            entry.ne[d] = static_cast<int64_t>(dim);
++        }
++        uint32_t type = 0;
++        if (pos + 4 > gguf.size) return false;
++        std::memcpy(&type, data + pos, 4);
++        pos += 4;
++        entry.type = static_cast<ggml_type>(type);
++        if (pos + 8 > gguf.size) return false;
++        std::memcpy(&entry.offset, data + pos, 8);
++        pos += 8;
++        entries.emplace(name, entry);
++    }
++
++    if (pos > std::numeric_limits<size_t>::max() - 31) return false;
++    size_t data_section = (pos + 31) & ~static_cast<size_t>(31);
++    for (const auto& [name, entry] : entries) {
++        if (static_cast<uint32_t>(entry.type) >= GGML_TYPE_COUNT) return false;
++        size_t elements = 1;
++        for (int d = 0; d < 4; ++d) {
++            if (entry.ne[d] < 0) return false;
++            const uint64_t dimension = static_cast<uint64_t>(entry.ne[d]);
++            if (dimension > std::numeric_limits<size_t>::max()) return false;
++            const size_t dim = static_cast<size_t>(dimension);
++            if (dim != 0 && elements > std::numeric_limits<size_t>::max() / dim) return false;
++            elements *= dim;
++        }
++        const size_t block_size = ggml_blck_size(entry.type);
++        const size_t type_size = ggml_type_size(entry.type);
++        if (block_size == 0 || elements % block_size != 0) return false;
++        const size_t block_count = elements / block_size;
++        if (type_size != 0 && block_count > std::numeric_limits<size_t>::max() / type_size) return false;
++        const size_t bytes = block_count * type_size;
++        if (data_section > gguf.size || entry.offset > std::numeric_limits<size_t>::max() - data_section) return false;
++        const size_t tensor_start = data_section + static_cast<size_t>(entry.offset);
++        if (tensor_start > gguf.size || bytes > gguf.size - tensor_start) return false;
++        RawGguf::TensorBytes tensor_bytes;
++        tensor_bytes.data = gguf.base + data_section + entry.offset;
++        tensor_bytes.bytes = bytes;
++        tensor_bytes.type = entry.type;
++        tensor_bytes.ne[0] = entry.ne[0];
++        tensor_bytes.ne[1] = entry.ne[1];
++        tensor_bytes.ne[2] = entry.ne[2];
++        tensor_bytes.ne[3] = entry.ne[3];
++        gguf.tensors.emplace(name, tensor_bytes);
++    }
++    return true;
++}
++
++// The harness runs without a DeviceResidencyManager, so param tensors get
++// their data mapped directly from the GGUF file before compute. F32 params
++// stored as BF16 in the file are widened (exact, zero-extended mantissa).
++struct ConversionBuffers {
++    static std::vector<std::unique_ptr<float[]>>& get() {
++        static std::vector<std::unique_ptr<float[]>> buffers;
++        return buffers;
++    }
++};
++
++bool fill_params_from_gguf(Qwen::QwenImage21Runner& runner, const RawGguf& gguf) {
++    std::map<std::string, ggml_tensor*> params;
++    runner.get_param_tensors(params, "model.diffusion_model");
++    std::vector<std::unique_ptr<float[]>>& conversions = ConversionBuffers::get();
++    for (const auto& [name, tensor] : params) {
++        auto found = gguf.tensors.find(name);
++        if (found == gguf.tensors.end()) {
++            LOG_ERROR("gguf is missing tensor %s", name.c_str());
++            return false;
++        }
++        const RawGguf::TensorBytes& bytes = found->second;
++        const bool same_type = tensor->type == bytes.type;
++        const bool bf16_to_f32 = !same_type && tensor->type == GGML_TYPE_F32 && bytes.type == GGML_TYPE_BF16;
++        bool dims_match = tensor->ne[0] == bytes.ne[0] && tensor->ne[1] == bytes.ne[1] &&
++                          tensor->ne[2] == bytes.ne[2] && tensor->ne[3] == bytes.ne[3];
++        if (!dims_match) {
++            LOG_ERROR("tensor %s type/dims mismatch with the gguf file", name.c_str());
++            return false;
++        }
++        if (same_type) {
++            if (static_cast<size_t>(ggml_nbytes(tensor)) != bytes.bytes) {
++                LOG_ERROR("tensor %s: gguf bytes %zu != expected %zu",
++                          name.c_str(), bytes.bytes, (size_t)ggml_nbytes(tensor));
++                return false;
++            }
++            tensor->data = const_cast<uint8_t*>(bytes.data);
++        } else if (bf16_to_f32) {
++            const int64_t elements = ggml_nelements(tensor);
++            auto widened = std::make_unique<float[]>(elements);
++            for (int64_t i = 0; i < elements; ++i) {
++                uint16_t value = 0;
++                std::memcpy(&value, bytes.data + i * 2, 2);
++                uint32_t bits = static_cast<uint32_t>(value) << 16;
++                std::memcpy(&widened[i], &bits, 4);
++            }
++            tensor->data = widened.get();
++            conversions.push_back(std::move(widened));
++        } else {
++            LOG_ERROR("tensor %s: unsupported gguf type %s for param type %s",
++                      name.c_str(), ggml_type_name(bytes.type), ggml_type_name(tensor->type));
++            return false;
++        }
++    }
++    LOG_INFO("filled %zu param tensors from gguf", params.size());
++    return true;
++}
++
++HarnessOptions parse_options(int argc, char** argv) {
++    HarnessOptions options;
++    for (int i = 1; i < argc; ++i) {
++        const std::string arg = argv[i];
++        auto value = [&](const char* error) -> std::string {
++            if (i + 1 >= argc) {
++                LOG_ERROR("%s", error);
++                exit(2);
++            }
++            return argv[++i];
++        };
++        if (arg == "--diffusion-model") {
++            options.diffusion_model = value("--diffusion-model requires a path");
++        } else if (arg == "--threads") {
++            options.threads = std::atoi(value("--threads requires a number").c_str());
++        } else if (arg == "--latent-w") {
++            options.latent_w = std::atoll(value("--latent-w requires a number").c_str());
++        } else if (arg == "--latent-h") {
++            options.latent_h = std::atoll(value("--latent-h requires a number").c_str());
++        } else if (arg == "--context-len") {
++            options.context_len = std::atoll(value("--context-len requires a number").c_str());
++        } else if (arg == "--timestep") {
++            options.timestep = std::atof(value("--timestep requires a number").c_str());
++        } else if (arg == "--seed") {
++            options.seed = static_cast<uint32_t>(std::strtoul(value("--seed requires a number").c_str(), nullptr, 10));
++        } else {
++            LOG_ERROR("unknown argument %s", arg.c_str());
++            exit(2);
++        }
++    }
++    if (options.diffusion_model.empty()) {
++        LOG_ERROR("--diffusion-model is required");
++        exit(2);
++    }
++    return options;
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++    sd_set_log_callback(harness_log, nullptr);
++    const HarnessOptions options = parse_options(argc, argv);
++
++    ModelLoader loader;
++    if (!loader.init_from_file(options.diffusion_model, "")) {
++        LOG_ERROR("failed to load %s", options.diffusion_model.c_str());
++        return 1;
++    }
++
++    ggml_backend_t backend = ggml_backend_cpu_init();
++    if (backend == nullptr) {
++        LOG_ERROR("failed to initialize CPU backend");
++        return 1;
++    }
++
++    Qwen::QwenImage21Runner runner(backend, loader.get_tensor_storage_map(), "model.diffusion_model", nullptr, nullptr);
++    LOG_INFO("qwen_image_2_1 config: layers=%d hidden=%" PRId64 " context=%" PRId64,
++             runner.config.num_layers, runner.config.hidden_size, runner.config.context_dim);
++
++    RawGguf raw_gguf;
++    if (!load_raw_gguf(options.diffusion_model, raw_gguf)) {
++        LOG_ERROR("failed to parse gguf file %s", options.diffusion_model.c_str());
++        return 1;
++    }
++    if (!fill_params_from_gguf(runner, raw_gguf)) {
++        return 1;
++    }
++
++    // Latent layout matches the oracle: ggml ne = [W, H, C, 1].
++    sd::Tensor<float> x({options.latent_w, options.latent_h, runner.config.in_channels, 1});
++    uint32_t state = options.seed;
++    for (auto& value : x.values()) {
++        value = next_value(state);
++    }
++    sd::Tensor<float> context({runner.config.context_dim, options.context_len});
++    for (auto& value : context.values()) {
++        value = next_value(state);
++    }
++    sd::Tensor<float> timesteps({1}, {options.timestep});
++
++    DiffusionParams params;
++    params.x         = &x;
++    params.context   = &context;
++    params.timesteps = &timesteps;
++    params.extra     = QwenImage21DiffusionExtra{};
++
++    sd::Tensor<float> result = runner.compute(options.threads, params);
++    if (result.empty()) {
++        LOG_ERROR("oracle compute failed");
++        return 1;
++    }
++    qwen_image_2_1_trace_f32("qwen.output", result.values(), result.shape());
++
++    // The velocity contract: one value per latent element.
++    if (result.numel() != x.numel()) {
++        LOG_ERROR("unexpected output size %zu vs %zu", (size_t)result.numel(), (size_t)x.numel());
++        return 1;
++    }
++    LOG_INFO("oracle compute ok: %zu outputs", (size_t)result.numel());
++    ggml_backend_free(backend);
++    return 0;
++}
+--- a/src/core/ggml_runner.cpp
++++ b/src/core/ggml_runner.cpp
+@@ -10,6 +10,7 @@
+ #include "core/layer_split_partition.h"
+ #include "core/segment_graph_bindings.h"
+ #include "core/segment_weight_pipeline.h"
++#include "qwen_image_2_1_trace.hpp"
+
+ using namespace sd;
+
+@@ -749,7 +750,8 @@
+                       const std::vector<ggml_tensor*>& params) const {
+     auto manager = residency_manager.lock();
+     if (manager == nullptr) {
+-        return params.empty();
++        // Harness mode: host memory is the only backend, assume it fits.
++        return true;
+     }
+     for (const auto& request : requests) {
+         if (!manager->fits_compute_backend_capacity(request, params)) {
+@@ -819,6 +821,7 @@
+                 continue;
+             }
+             auto debug_tensor = make_sd_tensor_from_ggml<float>(tensor);
++            qwen_image_2_1_trace_f32(entry.second, debug_tensor.values(), debug_tensor.shape());
+             print_sd_tensor(debug_tensor, false, entry.second.c_str());
+         }
+     }
+--- a/src/core/segment_weight_pipeline.cpp
++++ b/src/core/segment_weight_pipeline.cpp
+@@ -104,12 +104,13 @@
+     bool SegmentWeightPipeline::segment_start(size_t segment_index, const std::function<bool()>& ensure_capacity) {
+         GGML_ASSERT(pinned_params_.empty());
+         activate(segment_index);
++        auto manager = residency_manager_.lock();
++        if (manager == nullptr) {
++            // Harness mode: params are pre-filled from the mmapped GGUF file.
++            return true;
++        }
+         if (!ensure_capacity()) {
+             return false;
+-        }
+-        auto manager = residency_manager_.lock();
+-        if (manager == nullptr) {
+-            return segment_params_[segment_index].empty();
+         }
+         if (!manager->prepare_params(segment_params_[segment_index])) {
+             return false;
+--- a/src/model/diffusion/qwen_image.hpp
++++ b/src/model/diffusion/qwen_image.hpp
+@@ -86,7 +86,9 @@
+             auto linear_2 = std::dynamic_pointer_cast<Linear>(blocks["linear_2"]);
+
+             sample = linear_1->forward(ctx, sample);
++            ctx->capture_tensor("qwen.debug.temb_linear1", sample);
+             sample = ggml_silu_inplace(ctx->ggml_ctx, sample);
++            ctx->capture_tensor("qwen.debug.temb_silu", sample);
+             sample = linear_2->forward(ctx, sample);
+             return sample;
+         }

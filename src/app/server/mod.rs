@@ -1,5 +1,6 @@
 pub mod api;
 mod rerank;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -128,6 +129,7 @@ unsafe impl Sync for TextBackend {}
 
 struct EmbeddingBackend {
     source: Arc<dyn TensorSource>,
+    mmproj_path: Option<PathBuf>,
 }
 
 struct AsrBackend {
@@ -164,9 +166,32 @@ struct ModelInfo {
 struct EmbeddingRequest {
     #[serde(default)]
     model: Option<String>,
-    input: serde_json::Value,
+    /// Text inputs for the text-only embedding path. Optional when
+    /// `audio`/`image`/`video` is present (multimodal path).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
     #[serde(default)]
     encoding_format: Option<String>,
+    /// Optional base64-encoded audio bytes for multimodal embedding
+    /// (jina-v5-omni / qwen3-omni with audio mmproj). When present,
+    /// the server routes through `run_omni_embedding` instead of the
+    /// text-only path. The byte payload may be raw audio (decoded by
+    /// `ffmpeg` via the same WAV/MP3/FLAC/OGG/M4A/OPUS path as the
+    /// CLI `--audio` flag).
+    #[serde(default)]
+    audio: Option<String>,
+    /// Same as `Optional base64-encoded image for multimodal
+    /// embedding. Accepts raw image bytes (jpg/png/webp/...).
+    #[serde(default)]
+    image: Option<String>,
+    /// Optional base64-encoded video bytes. Decoded by ffprobe/ffmpeg.
+    #[serde(default)]
+    video: Option<String>,
+    /// Optional prompt string used as the LLM-side system turn for
+    /// multimodal embedding (e.g. "Query: ..." vs "Respond this
+    /// document ..."). Defaults to "" when omitted.
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -266,9 +291,130 @@ async fn embeddings(
         )
             .into_response();
     };
+    // Multimodal path: any of audio/image/video routes the request
+    // through `run_omni_embedding`, which needs mmproj + a temp file
+    // path for the media blob. mmproj is required here (matching the
+    // CLI `--mmproj` requirement).
+    let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
+    if has_media {
+        let Some(mmproj_path) = backend.mmproj_path.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Multimodal embedding requires --mmproj on server startup".into(),
+                }),
+            )
+                .into_response();
+        };
+        let media_count = usize::from(req.audio.is_some())
+            + usize::from(req.image.is_some())
+            + usize::from(req.video.is_some());
+        if media_count != 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Exactly one of audio/image/video may be set per request".into(),
+                }),
+            )
+                .into_response();
+        }
+        let media_b64 = req
+            .audio
+            .as_ref()
+            .or(req.image.as_ref())
+            .or(req.video.as_ref())
+            .cloned()
+            .unwrap();
+        let ext = if req.audio.is_some() {
+            "wav"
+        } else if req.image.is_some() {
+            "jpg"
+        } else {
+            "mp4"
+        };
+        let prompt = req.prompt.unwrap_or_default();
+        let source = backend.source.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            let temp_path = std::env::temp_dir().join(format!(
+                "rmi-media-{}.{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+                ext
+            ));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(media_b64.trim())
+                .map_err(|error| format!("Invalid base64 media payload: {error}"))?;
+            std::fs::write(&temp_path, &bytes)
+                .map_err(|error| format!("Failed to write media temp file: {error}"))?;
+            let image_path = if req.image.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let video_path = if req.video.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let audio_path = if req.audio.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let result = crate::app::run_omni_embedding(
+                source.as_ref(),
+                &mmproj_path,
+                image_path,
+                video_path,
+                audio_path,
+                &prompt,
+                0,
+            );
+            let _ = std::fs::remove_file(&temp_path);
+            let embedding = result?;
+            Ok::<_, String>(EmbeddingObject {
+                object: "embedding".to_string(),
+                embedding,
+                index: 0,
+            })
+        })
+        .await
+        {
+            Ok(Ok(object)) => vec![object],
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("embedding worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let total_tokens: usize = result.len();
+        let response = EmbeddingResponse {
+            object: "list".to_string(),
+            data: result,
+            model: state.model_name.clone(),
+            usage: EmbeddingUsage {
+                prompt_tokens: total_tokens,
+                total_tokens,
+            },
+        };
+        return (StatusCode::OK, Json(response)).into_response();
+    }
     let inputs: Result<Vec<String>, String> = match req.input {
-        serde_json::Value::String(text) => Ok(vec![text]),
-        serde_json::Value::Array(items) => items
+        Some(serde_json::Value::String(text)) => Ok(vec![text]),
+        Some(serde_json::Value::Array(items)) => items
             .into_iter()
             .map(|item| {
                 item.as_str()
@@ -276,7 +422,8 @@ async fn embeddings(
                     .ok_or_else(|| "embedding input must be string or array of strings".to_string())
             })
             .collect(),
-        _ => Err("embedding input must be string or array of strings".into()),
+        Some(_) => Err("embedding input must be string or array of strings".into()),
+        None => Err("embedding input is required when audio/image/video are not set".into()),
     };
     let inputs = match inputs {
         Ok(value) => value,
@@ -687,6 +834,7 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         let source = open_or_exit(&options.model, ComponentRole::Llm);
         return Ok(Arc::new(Backend::Embedding(EmbeddingBackend {
             source: Arc::from(source),
+            mmproj_path: options.mmproj.clone(),
         })));
     }
     // Cross-encoder rerank detection: a GGUF that carries
@@ -1153,7 +1301,10 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
-        Backend::Embedding(_) => router.route("/v1/embeddings", post(embeddings)),
+        Backend::Embedding(_) => router.route(
+            "/v1/embeddings",
+            post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
         Backend::Asr(_) => router
             .route(
                 "/v1/audio/transcriptions",
