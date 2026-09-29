@@ -139,6 +139,27 @@ fn the_schema_flag_wins_over_the_question_flags() {
 }
 
 #[test]
+fn the_schema_flag_alone_is_enough() {
+    // No --jev-question at all: --gliner2-schema carries the whole task set, so
+    // the CLI must not demand the A/B/C flags as well.
+    let parsed = options(&[
+        "rmi",
+        "--model",
+        "m.gguf",
+        "--jev",
+        "--gliner2-decide",
+        "--jev-context",
+        "hello",
+        "--gliner2-schema",
+        r#"{"rating":["0","10"]}"#,
+    ]);
+    validate_cli_options(&parsed).unwrap();
+    let tasks = parse_schema(&gliner2_schema(&parsed, &[]).unwrap()).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].name, "rating");
+}
+
+#[test]
 fn a_broken_schema_flag_is_reported_as_such() {
     let parsed = options(&[
         "rmi",

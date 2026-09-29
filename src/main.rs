@@ -369,30 +369,41 @@ fn main() {
         ));
     } else if options.jev && options.gliner2_decide {
         // GLiNER2.5-Decide: the encoder and the classifier live in one GGUF, so
-        // --model alone selects it. `--gliner2-schema` takes the reference
-        // `classify_text` mapping; without it the task comes from
-        // --jev-question + --jev-option so the A/B/C shell still works.
-        match app::build_jev_inputs(&options) {
-            Ok(Some(app::JevInputs::Grouped { .. })) => app::run_or_exit(Err(
-                "--gliner2-decide does not support --jev-multi / --jev-block".to_string(),
-            )),
-            Ok(Some(app::JevInputs::Single { context, questions, .. })) => {
-                let schema = app::unwrap_or_exit(app::gliner2_schema(&options, &questions));
-                let tasks = app::unwrap_or_exit(
-                    app::parse_schema(&schema)
-                        .map_err(|error| format!("--gliner2-schema: {error}")),
-                );
-                app::run_or_exit(app::run_gliner2_decision(
-                    source,
-                    &tasks,
-                    &context,
-                    options.threads,
-                    options.jev_output_json,
-                ));
+        // --model alone selects it. The task mapping comes from
+        // --gliner2-schema, or from --jev-question + --jev-option so the plain
+        // A/B/C shell still works. `build_jev_inputs` is not used: it insists
+        // on a --jev-question, which --gliner2-schema does not need.
+        let context = match options.jev_context.clone() {
+            Some(context) => context,
+            None => {
+                app::run_or_exit(Err("--jev requires --jev-context <text>".into()));
+                unreachable!()
             }
-            Ok(None) => app::run_or_exit(Err("--jev requires --jev-context".into())),
-            Err(e) => app::run_or_exit(Err(e)),
+        };
+        if options.gliner2_schema.is_none() && options.jev_questions.is_empty() {
+            app::run_or_exit(Err(
+                "--gliner2-decide needs --gliner2-schema, or at least one --jev-option".to_string(),
+            ));
         }
+        let questions: Vec<app::JevQuestionInput> = options
+            .jev_questions
+            .iter()
+            .map(|question| app::JevQuestionInput {
+                text: question.text.clone(),
+                options: question.options.clone(),
+            })
+            .collect();
+        let schema = app::unwrap_or_exit(app::gliner2_schema(&options, &questions));
+        let tasks = app::unwrap_or_exit(
+            app::parse_schema(&schema).map_err(|error| format!("--gliner2-schema: {error}")),
+        );
+        app::run_or_exit(app::run_gliner2_decision(
+            source,
+            &tasks,
+            &context,
+            options.threads,
+            options.jev_output_json,
+        ));
     } else if options.jev && options.clm_head.is_some() {
         // CLM: one encoder + a projection-head file, scored by cosine
         // instead of a label logit.  Same --jev flag family, so the
