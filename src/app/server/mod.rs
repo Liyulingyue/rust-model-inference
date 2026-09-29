@@ -51,6 +51,36 @@ enum Backend {
     Asr(AsrBackend),
     Tts(TtsBackend),
     Rerank(RerankBackend),
+    Clm(ClmBackend),
+    Gliner2(Gliner2Backend),
+}
+
+/// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
+/// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
+/// caller-supplied label set, so it exposes the JEV score route and nothing
+/// else.  The SentencePiece tokenizer is built once here; the model itself is
+/// zero-copy views over the mapping and is cheap to rebuild per request.
+struct Gliner2Backend {
+    source: Box<dyn TensorSource>,
+    tokenizer: crate::core::sentencepiece::SentencePieceTokenizer,
+    n_threads: usize,
+}
+
+/// CLM backend: a Qwen3 encoder plus the projection-head GGUF named by
+/// `--clm-head`.  Scores candidates by cosine in projection space, so it
+/// exposes the JEV score route and nothing else.
+struct ClmBackend {
+    /// Kept so the JEV plumbing can hand out an `Arc<dyn TensorSource>`
+    /// the same way it does for `TextBackend`.
+    source: Arc<dyn TensorSource>,
+    /// Leaked for the same reason as `RerankBackend::model`:
+    /// `Qwen3Session` wants a `&'static` model.
+    model: Arc<&'static Qwen3Model>,
+    /// Owned, no borrow: the loader copies the weights out.
+    heads: crate::models::clm::ClmHeads,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
 }
 
 struct RerankBackend {
@@ -811,8 +841,24 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
     // rerank model. Detected by metadata peek BEFORE the full Text
     // build (which would load unrelated multimodal state).
+    //
+    // This is the only metadata-probed backend in this function; the others are
+    // flag-driven. Why they differ — and why adding a probe is usually the wrong
+    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) {
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
+    }
+    // CLM is opted into rather than detected: the encoder is an ordinary
+    // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
+    // that makes it a CLM backend.
+    // TODO(clm): this check sits after is_rerank_gguf, so passing a
+    // Qwen3-Reranker GGUF together with --clm-head silently drops the
+    // head file and serves rerank.  Should be an explicit error.
+    if options.clm_head.is_some() {
+        return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
+    }
+    if options.gliner2_decide {
+        return Ok(Arc::new(Backend::Gliner2(build_gliner2(options)?)));
     }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
 }
@@ -867,6 +913,71 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
         tokenizer,
         prefill_batch_size,
         context_length,
+    })
+}
+
+fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(Arc::clone(&source), Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    let arch = model.config().architecture.clone();
+    if arch != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
+        ));
+    }
+    // TODO(clm): the heads are encoder-locked, so a quantised base encoder
+    // shifts every score -- functionally fine, but not comparable to the
+    // paper's numbers.  Warn here instead of refusing, since a low-memory
+    // setup may legitimately want a Q4_K_M encoder.
+    let context_length = model.config().n_ctx;
+
+    let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
+    let head_source: Box<dyn TensorSource> = open_or_exit(&head_path, ComponentRole::Llm);
+    let heads = crate::models::clm::ClmHeads::from_source(head_source.as_ref())
+        .map_err(|e| format!("load CLM heads from {}: {e}", head_path.display()))?;
+    if model.config().n_embd != heads.encoder_dim() {
+        return Err(format!(
+            "encoder hidden size {} does not match the CLM heads (expected {})",
+            model.config().n_embd,
+            heads.encoder_dim()
+        ));
+    }
+
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(ClmBackend {
+        source,
+        model: Arc::new(model),
+        heads,
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
+}
+
+fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
+    let (source, tokenizer) = crate::app::load_gliner2_source(&options.model)?;
+    // Validate the whole contract once at startup rather than per request.
+    crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+        source.as_ref(),
+        tokenizer.clone(),
+    )
+    .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
+    Ok(Gliner2Backend {
+        source,
+        tokenizer,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
     })
 }
 
@@ -1174,6 +1285,8 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
+        Backend::Gliner2(_) => "gliner2",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1204,6 +1317,15 @@ pub fn run_server() {
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
+        // CLM scores by cosine, so only the single-question route applies.
+        // Grouped does a per-group softmax that has no cosine analogue,
+        // and the image routes need a vision encoder the heads never saw.
+        // GLiNER2 and CLM both score a caller-supplied label set on one
+        // encoder pass, so the single-question route covers them; grouped mode
+        // (per-group softmax) and the image routes do not apply.
+        Backend::Clm(_) | Backend::Gliner2(_) => {
+            router.route("/v1/jev/score", post(api::jev_score))
+        }
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

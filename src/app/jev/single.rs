@@ -590,6 +590,7 @@ pub(crate) fn compute_jev_result(
         entropy,
         margin,
         prefill_ms,
+        selected: Vec::new(),
     }
 }
 
