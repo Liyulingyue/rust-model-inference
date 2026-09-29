@@ -78,8 +78,12 @@ dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arc
 | 投影 bias | 4 组 | 4 组 | **全无** |
 | rope freq_base | - | - | **1000** |
 
-**下一个最便宜的是 `qwen3moe`**：GGUF 已在 ModelScope（`ggml-org/...`），共用 qwen3 trunk，
-只差 MoE 路由。
+**下一个最便宜的是 `jina-bert-v3`（570M）**：和 `bert` / `jina-bert-v2` / `nomic-bert` /
+`nomic-bert-moe` 同在 `bert.cpp` 共享 graph 内，只差 RoPE + GELU SEQ + `token_types`
+几个开关，无需新模块。
+`nomic-bert-moe` 已落地过一次 MoE 路由（router logits → top-k → softmax →
+per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可复用同一形状，
+届时主要差异在专家张量的切分方式。
 
 ## D. 经典 / SSM / 小模型（有兴趣再接）
 
@@ -106,21 +110,25 @@ dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arc
 - **llama.cpp 试验分支 / 内部占位**：`unknown`、`dflash`、`hrm-text`、`muse-glimmer`、`rnd1`
 - **纯 decoder-only 编码任务需另做训练框架**：`t5`、`gpt2`(可作为 encoder 复用)
 
-## 建议执行顺序（2026-09-28 二次刷新）
+## 建议执行顺序（2026-09-29 三次刷新）
 
 1. ~~补文档~~ **已完成**：A 区只剩 `yue2`，已如实标 `Supported`（无 GGUF 不标 `Verified`）；
    `lfm2moe` / `pig` / `hunyuan-dense` 三项经复核早已登记为 `Verified`，是本文件写错了。
 2. ~~`bert` 变体验证~~ **已完成**（bge-small-en-v1.5），并因此发现一个波及三个变体的
    attention 残差 bug。
 3. ~~`nomic-bert-moe`~~ **已完成 2026-09-29**：UGM tokenizer + 偶奇层 dense/MoE 调度已
-   跑通 `tests/nomic_embed_text_v2_moe.rs` 5/5。GGUF 489MB，CLI+HTTP 768 维输出与 bit
-   一致，跨语言语义排序正确。
-4. **`qwen3moe`（Qwen3-30B-A3B）** — 已有 qwen3 trunk，边际成本最低，且 MoE 路由是后续
-   `llama4`/`hunyuan-moe`/`glm4-moe` 的共同前置。
-4. **`mistral3`（Mistral-Small-24B）** — 标准架构，1 天量级，覆盖面大。
-5. **C 区剩余** — `jina-bert-v3`（同 graph 加开关）→ `modern-bert`（独立 graph）→ `llama-embed`。
-6. **`hunyuan-moe`（Hy-MT2 MoE 版）** — 复用已有 `src/models/qwen3/hunyuan.rs`，加 MoE 即完成。
-7. 其余按 B → D 顺序视需求推进。
+   跑通 `tests/nomic_embed_text_v2_moe.rs` 5/5。GGUF 489MB，CLI/HTTP 768 维输出 bit
+   一致，跨语言语义排序正确。**同时落地了 MoE 路由的最小可用形状**（router logits →
+   top-k → softmax → per-expert `expert @ x → gelu → @ down`），是后续大权重 MoE 的前置。
+4. **`jina-bert-v3`（570M）** — C 区里最便宜的剩余项：同 `bert.cpp` graph，只差
+   RoPE + GELU SEQ + `token_types` 几个开关。
+5. **C 区其余** — `modern-bert`（需新建独立模块，`modern-bert.cpp` 不在共享 graph 内）
+   → `llama-embed` → `neo-bert` / `eurobert` → `pangu-embed`。
+6. **MoE 大模型**（权重规模大，接入前先确认有对应规模的验证环境）：`qwen3moe`
+   （Qwen3-30B-A3B，已有 qwen3 trunk，边际成本最低）→ `hunyuan-moe`
+   （复用 `src/models/qwen3/hunyuan.rs`）→ `glm4-moe` → `llama4`。
+7. **`mistral3`（Mistral-Small-24B）** — 标准架构，覆盖面大。
+8. 其余按 B → D 顺序视需求推进。
 
 ## 排查方法（下次更新用）
 
