@@ -62,16 +62,166 @@ for each task:
 即：**encoder 前向 → 取每个 `[L]` marker 位置的隐状态 → 过 classifier → 每个 label 一个 logit**。
 `span_rep` / `count_pred` / `count_embed` 在这个路径上完全不参与。
 
-## 输入构造
+## 输入构造（已确定）
 
 `token_pooling == "first"`，`extract_embeddings_from_batch` 走 gather 快路径：
 - `batch.text_word_indices` —— text 各 word 的首 token 下标
-- `batch.schema_special_indices` —— schema 特殊 token（`[L]` 等）的下标
+- `batch.schema_special_indices` —— schema 特殊 token（`[P]`/`[L]`）的下标
 
-输入序列大致是 `[CLS] text tokens [SEP] [L] label1 [L] label2 ...`，
-prompt 串由 `SchemaTransformer` 生成。**精确模板还没扒**，写转换器/推理前需要从
-`gliner2/processor.py` 的 `collate_fn_inference` 和 `processing/layouts.py`
-里抠出来。这是实现前必须先确定的第一个点。
+调用链：`collate_fn_inference` → `_collate_batch` → `_transform_record` →
+`_infer_from_json` → `_build_outputs` → `_format_input_with_mapping`。
+源码位置：`/tmp/gliner2-src/gliner2/processor.py`。
+
+### 1. text 侧（`WhitespaceTokenSplitter`，默认 `word_splitter="whitespace"`）
+
+正则（`re.VERBOSE | re.IGNORECASE`，`lower=True` 只对 token 值小写）：
+
+```python
+r"""(?:https?://[^\s]+|www\.[^\s]+)
+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}
+|@[a-z0-9_]+
+|\w+(?:[-_]\w+)*
+|\S"""
+```
+
+`_normalize_text` 先补句末标点：空串→`.`；不以 `.`/`!`/`?` 结尾→追加 `.`。
+
+### 2. schema 侧（`_transform_schema`）
+
+```python
+prompt_str = task                                  # 或 f"{task}: {prompt}"
+for label, desc in label_descriptions:             # example_mode == "both"
+    prompt_str += f" [DESCRIPTION] {label}: {desc}"
+for inp, out in examples:                          # 只保留 out in labels
+    prompt_str += f" [EXAMPLE] {inp} [OUTPUT] {out}"
+
+tokens = ["(", "[P]", prompt_str, "("]
+for field_name in fields:                          # 声明顺序，推理不 shuffle
+    tokens.extend(["[L]", field_name])
+tokens.extend([")", ")"])
+```
+
+推理时 `example_modes = ["both"]`（`is_training=False`），所以描述和 few-shot
+**总是同时**进 prompt；`sampling=None` 时 label 顺序与 schema 声明一致。
+
+### 3. 拼装（`_format_input_with_mapping`）
+
+```python
+combined = []
+for struct in schema_tokens_list:
+    combined.extend(struct)
+    combined.append("[SEP_STRUCT]")
+if combined: combined.pop()          # 去掉最后一个多余的 [SEP_STRUCT]
+combined.append("[SEP_TEXT]")
+combined.extend(text_tokens)
+```
+
+**注意：没有 `[CLS]` / `[SEP]`。** `input_ids = tokenizer.convert_tokens_to_ids(subwords)`
+直接把 subword 序列送进 DeBERTa，不走 `build_inputs_with_special_tokens`。
+
+marker 槽位（`schema_marker_orig_indices`）：每段里 `offset+1`（`[P]`）以及
+`range(4, len(struct)-2, 2)`（全部 `[L]`）。记录的是 **subword 下标**，
+顺序为 `[P], [L]_0, [L]_1, ...`；`embs[1:]` 丢掉 `[P]` 行后与 label 顺序一一对应。
+
+### 4. 单个 token 的 subword 化
+
+`sub_tokens = tokenizer.tokenize(token)`。对 10 个 GLiNER special token
+（`[P]`/`[L]`/`[SEP_TEXT]`/`[SEP_STRUCT]`/…），`SchemaTransformer.__init__`
+先 `add_special_tokens({"additional_special_tokens": SPECIAL_TOKENS})`，
+所以 `PreTrainedTokenizer.tokenize` 的 `tokens_trie` 会整块切出，恒为 1 个 id。
+`(`、`)`、`,`、`|` 不是 added token，走 SentencePiece。
+
+`DebertaV2Tokenizer` 自身不实现 `tokenize`/`convert_tokens_to_ids`，落到
+`PreTrainedTokenizer`：
+
+- `tokenize(t)`：trie 切 added token → 否则 `spm.encode(t, out_type=str)`
+  （`split_by_punct=False`，所以没有 DeBERTa 的数字+逗号特殊处理）
+- `convert_tokens_to_ids(tok)`：先查 `_added_tokens_encoder`（`[P]`→128003 等），
+  否则 `spm.PieceToId(tok)`
+
+## 分类头激活：ReLU
+
+`gliner2/models/span/model.py` 里 classifier 是
+`create_mlp(input_dim=1024, intermediate_dims=[2048], output_dim=1, dropout=0.,
+activation="relu", add_layer_norm=False)`，
+而 `create_mlp` 的顺序是 `Linear → (LayerNorm) → act → (Dropout)`，所以：
+
+```
+classifier.0  Linear(1024 -> 2048)
+classifier.1  ReLU
+classifier.2  Linear(2048 -> 1)
+```
+
+与 safetensors 里只有 `classifier.0` / `classifier.2` 两组权重一致。
+
+## 解码（`inference/runtime.py::_extract_classification_result`）
+
+```python
+logits = classifier(embs[1:]).squeeze(-1) / temperature   # temperature 默认 1.0
+act = class_act or ("sigmoid" if multi_label else "softmax")
+multi_label: 取所有 prob >= cls_threshold 的 label；空则回退 argmax
+否则:        argmax 的 label + 它的 prob
+```
+
+`classify_text` 的入参形态（`runtime._classification_schema`）：
+
+```python
+{head: [labels]}                                   # single-label
+{head: {"labels": [labels],
+        "multi_label": False, "cls_threshold": 0.5}}
+{head: {"labels": {name: description, ...}}}       # 带描述
+{head: {"labels": [...], "prompt": "..."}}         # 附加指令
+```
+
+`{"labels": {"name": "desc"}}` 时 `label_names = dict.keys()`，描述进
+`label_descriptions` 参与 prompt 拼接。
+
+## DeBERTa-v3-large 编码器配置（已确认）
+
+底座 `microsoft/deberta-v3-large` 的 `config.json`：
+
+```json
+{"model_type": "deberta-v2", "hidden_size": 1024, "num_hidden_layers": 24,
+ "num_attention_heads": 16, "intermediate_size": 4096, "hidden_act": "gelu",
+ "layer_norm_eps": 1e-7, "relative_attention": true, "position_buckets": 256,
+ "max_position_embeddings": 512, "max_relative_positions": -1,
+ "position_biased_input": false, "type_vocab_size": 0,
+ "norm_rel_ebd": "layer_norm", "pos_att_type": "p2c|c2p", "share_att_key": true}
+```
+
+这解释了 checkpoint 的 tensor 形状与"缺件"：
+
+- `position_biased_input=false` → **没有** `position_embeddings`
+- `type_vocab_size=0` → **没有** `token_type_embeddings`
+- `max_relative_positions=-1 → 512`，`pos_ebd_size = position_buckets*2 = 512`
+  → `rel_embeddings.weight [512, 1024]`
+- `norm_rel_ebd="layer_norm"` → `encoder.encoder.LayerNorm.{weight,bias}`
+- `conv_kernel_size` 缺省 0 → **没有** `ConvLayer`（DeBERTa-v1 才有）
+
+前向（transformers 4.48.1 `models/deberta_v2/modeling_deberta_v2.py`，
+reference 在 `/tmp/tfdl/x/transformers/models/deberta_v2/`）：
+
+1. `embeddings`：只查 `word_embeddings` → LayerNorm(eps=1e-7) → 乘 mask
+2. 每层：
+   - `rel_embeddings` 过 `LayerNorm` 得到 `rel_emb`（`norm_rel_ebd`）
+   - `attn = Dense(softmax(Dense_self_attn(x) + x))`（**残差先加，再 LayerNorm**，
+     即 ST-transposed）
+   - `out = LayerNorm(Dense(GELU(Dense(attn))) + attn)`（同样是 ST-transposed）
+3. `score_scale = 1 / sqrt(head_dim * scale_factor)`，`scale_factor = 1 + |pos_att_type| = 3`
+   （content-content / c2p / p2c 三项共用同一个 scale，**不是** `1/sqrt(64)`）
+4. 相对位置（`make_log_bucket_position`，bucket=256、max=512）：
+
+```text
+c2p_pos = clamp(relative_pos + 256, 0, 511)
+p2c_pos = clamp(-relative_pos + 256, 0, 511)
+pos_key   = transpose_for_scores(key_proj(rel_emb[:512]))     # share_att_key
+pos_query = transpose_for_scores(query_proj(rel_emb[:512]))
+c2p = gather(Q · pos_key^T, c2p_pos) / scale
+p2c = gather(K · pos_query^T, p2c_pos)^T / scale
+```
+
+5. 推理是 `model.eval()`，两个 dropout 都是恒等。batch=1 时 `attention_mask`
+   全 1，mask 只影响 padding 位置。
 
 ## 主要工作量 / 风险
 
@@ -87,10 +237,14 @@ prompt 串由 `SchemaTransformer` 生成。**精确模板还没扒**，写转换
 4. **safetensors → GGUF 转换器**：从零写。仓库现有转换器（breeze / dots /
    dreamx / laya / yue2 / qwen_drive）都是 safetensors→GGUF，可以照 `laya` 的
    结构抄，laya 是最接近的先例（也是 encoder + 决策头）。
-5. **下载 tokenizer 文件**：ModelScope 的 `GLiNER2.5-Decide` 只有
-   `model.safetensors` + `config.json`，tokenizer 要从底座
-   `microsoft/deberta-v3-large` 或 `fastino/gliner2-large-v1` 取。
-   `AutoTokenizer.from_pretrained(repo_or_dir)` 依赖那些文件。
+
+已解决：
+
+- tokenizer 文件已下载到 `models/GLiNER2.5-Decide/`
+- 无 conv 权重是**正常**的：v3 的 `conv_kernel_size` 缺省 0
+- `classifier.1` = ReLU（见上）
+- 精确 token 序列已确定（见上）
+
 
 ## ## Tokenizer (determined)
 
@@ -134,12 +288,16 @@ row via embs[1:].  bos and cls are both [CLS], eos is [SEP].
 
 ## TODO(clm-style)
 
-代码还没落，所以只有文档戳。真正开始实现前必须先确定：
+- `[x]` `collate_fn_inference` 产出的精确 token 序列
+- `[x]` `classifier.1` 激活函数 → ReLU
+- `[x]` DeBERTa-v3 attention / conv 细节
+- `[x]` 下载 tokenizer 文件
+- `[ ]` 探针 `spm.model` protobuf：normalizer_spec、byte_fallback、piece score 类型
+- `[ ]` `tools/converter/gliner/convert_gliner.py`
+- `[ ]` Rust SentencePiece unigram 分词
+- `[ ]` Rust DeBERTa-v3 encoder 前向
+- `[ ]` Rust schema prompt 构造 + word splitter
+- `[ ]` classifier 头 + softmax/sigmoid 解码
+- `[ ]` CLI (`--gliner2-decide`) + HTTP endpoint
+- `[ ]` golden 向量：抓 HF 参考的 input_ids / logits 落盘
 
-- `[ ]` `collate_fn_inference` 产出的精确 token 序列（`[L]` / `[P]` 的位置和 id）
-- `[ ]` `classifier.1` 到底是 GELU 还是 ReLU（未序列化，要看模型代码）
-- `[ ]` DeBERTa-v3 attention 的 rope/相对位置细节（`glm` 系无 RoPE，用
-      `rel_embeddings`，但 `should_apply_ln` / `conv_kernel_size` 等开关要确认；
-      DeBERTa-v3 的 embedding 段还有一层 conv，本 checkpoint 的 tensor 列表里
-      **没有** conv 权重，需要确认是否被裁掉）
-- `[ ]` 下载 tokenizer 文件并确认 SP unigram 参数
