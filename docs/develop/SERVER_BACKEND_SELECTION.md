@@ -65,22 +65,25 @@ rerank 的困境是**同一个 arch 名下有两种模型**。GLiNER 的 GGUF �
 3. **多重条件互相印证。** `pooling_type` 是 llama.cpp 侧的约定，`cls.output.weight`
    是权重侧的事实；只有一方可能是转换器的疏漏，两边都在才下结论。
 
-## 已知隐患：探测排在 flag 之前
+## 已知隐患（已修）：探测排在 flag 之前
 
 ```rust
 if is_rerank_gguf(&options.model) { ... }   // 先跑
 if options.clm_head.is_some() { ... }       // 后跑
 ```
 
-所以 `--clm-head some-reranker.gguf` 会静默落进 Rerank，**头文件被丢掉**，服务起
-来但打分用的是 rerank 而不是 CLM 的 cosine。这是 `TODO(clm)` 记录的问题。
+顺序难倒置（探测必须早于 `build_text`，否则白加载几个 GB），所以探测命中时
+**显式报错**而不是让 flag 被静默丢掉：
 
-顺序本身难倒置（探测必须早于 `build_text`，否则白加载几个 GB），但"静默"是可以修的：
-探测命中且用户同时给了 flag 时应该显式报错。
+| 同时给的 flag | 行为 |
+|---|---|
+| `--clm-head h.gguf` | 400：`--clm-head` 选 CLM，但 model 是 reranker，`h.gguf` 会被丢 |
+| `--gliner2-decide` | 400：同上，且 GLiNER2 需要 DeBERTa GGUF 而非 Qwen3 reranker |
+| `--mmproj m.gguf` | 400：`--mmproj` 意味多模态聊天，reranker 上它会被丢 |
+| 无其它 backend flag | 正常进 Rerank（探测的本职） |
 
-（附注：`--tts` / `--audio` / `--embedding` 排在探测**之前**。它们都是 flag 且
-互不重叠，先返回不影响探测；但如果用户同时传了这些 flag 和一个 reranker GGUF，
-同样会静默丢掉前面的 flag。）
+`--tts` / `--audio` / `--embedding` 排在探测**之前**且各自提前 return，所以它们
+天然优先，不存在"丢掉"的问题——用户显式选了那个后端。
 
 ## 新增后端时的决策树
 

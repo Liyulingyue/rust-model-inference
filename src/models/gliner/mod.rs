@@ -168,15 +168,19 @@ impl<'a> GlinerModel<'a> {
     }
 
     /// Scores for a prompt that was encoded and run separately.
+    ///
+    /// `tasks` must be the same list `encode_prompt` was called with: the
+    /// `[L]` marker count is `labels + 1` per task (`[P]` first), and the
+    /// scoring loop `skip(1)`s the prompt row then zips against the labels.
+    /// A mismatched list would silently truncate rather than error, so the
+    /// correspondence is checked here instead of trusting the caller.
     pub fn score_prompt(
         &self,
         tasks: &[Task],
         encoded: &EncodedPrompt,
         hidden: &[f32],
     ) -> Result<Vec<TaskResult>, String> {
-        if encoded.markers.len() != tasks.len() {
-            return Err("task/marker count mismatch".into());
-        }
+        validate_task_markers(tasks, encoded)?;
         let d = self.config.n_embd;
         if hidden.len() != encoded.input_ids.len() * d {
             return Err("hidden state does not match the encoded prompt".into());
@@ -252,6 +256,29 @@ impl<'a> GlinerModel<'a> {
         );
         Ok(out[0] + self.weights.classifier_2_bias[0])
     }
+}
+
+/// The task list and the encoded prompt must describe the same tasks, or the
+/// scoring loop (which `skip(1)`s the `[P]` row and zips the rest against the
+/// labels) would silently truncate. Pure function of its arguments so the
+/// guard is unit-testable without a GGUF.
+fn validate_task_markers(tasks: &[Task], encoded: &EncodedPrompt) -> Result<(), String> {
+    if encoded.markers.len() != tasks.len() {
+        return Err("task/marker count mismatch".into());
+    }
+    for (task, markers) in tasks.iter().zip(&encoded.markers) {
+        let expected = task.labels.len() + 1;
+        if markers.positions.len() != expected {
+            return Err(format!(
+                "task {:?}: {} marker positions for {} labels (expected {} including [P])",
+                task.name,
+                markers.positions.len(),
+                task.labels.len(),
+                expected
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn decode(task: &Task, logits: &[f32]) -> Vec<LabelScore> {
@@ -461,6 +488,54 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prompt::TaskMarkers;
+
+    fn task_with_labels(name: &str, labels: &[&str]) -> Task {
+        Task::new(name, labels.iter().map(|l| Label::new(*l)).collect())
+    }
+
+    fn encoded_with_marker_counts(counts: &[usize]) -> EncodedPrompt {
+        EncodedPrompt {
+            input_ids: vec![0],
+            markers: counts
+                .iter()
+                .map(|&count| TaskMarkers {
+                    positions: vec![7; count],
+                    labels: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn task_marker_guard_accepts_the_matching_shape() {
+        let tasks = vec![task_with_labels("intent", &["a", "b", "c"])];
+        let encoded = encoded_with_marker_counts(&[4]); // [P] + 3 labels
+        assert!(validate_task_markers(&tasks, &encoded).is_ok());
+    }
+
+    #[test]
+    fn task_marker_guard_rejects_a_short_marker_list() {
+        // One label's `[L]` marker missing (e.g. re-scoring with a different
+        // task list). Without the guard the third label would silently get
+        // no score at all.
+        let tasks = vec![task_with_labels("intent", &["a", "b", "c"])];
+        let encoded = encoded_with_marker_counts(&[3]);
+        let error = validate_task_markers(&tasks, &encoded).unwrap_err();
+        assert!(error.contains("\"intent\""), "{error}");
+        assert!(error.contains("3 marker positions"), "{error}");
+    }
+
+    #[test]
+    fn task_marker_guard_rejects_a_task_count_mismatch() {
+        let tasks = vec![
+            task_with_labels("intent", &["a"]),
+            task_with_labels("sentiment", &["x"]),
+        ];
+        let encoded = encoded_with_marker_counts(&[2]);
+        let error = validate_task_markers(&tasks, &encoded).unwrap_err();
+        assert!(error.contains("task/marker count mismatch"), "{error}");
+    }
 
     #[test]
     fn softmax_is_normalised() {
