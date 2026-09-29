@@ -77,8 +77,7 @@ fn relative_bucket(rel: i32, mid: usize, max_position: usize) -> i32 {
         // when the first arm fired, so the `ln(0)` below is never reached.
         return rel;
     }
-    let log_pos = (abs_pos / mid as f32).ln()
-        / ((max_position - 1) as f32 / mid as f32).ln()
+    let log_pos = (abs_pos / mid as f32).ln() / ((max_position - 1) as f32 / mid as f32).ln()
         * (mid - 1) as f32
         + mid as f32;
     (log_pos * rel.signum() as f32) as i32
@@ -123,7 +122,11 @@ impl MatmulScratch {
     fn new(max_width: usize) -> Self {
         MatmulScratch {
             q8k: vec![
-                crate::ops::quant::BlockQ8K { d: 0.0, qs: [0i8; 256], bsums: [0i16; 16] };
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0i8; 256],
+                    bsums: [0i16; 16]
+                };
                 max_width.div_ceil(crate::ops::quant::QK_K)
             ],
             q8: vec![0u8; max_width],
@@ -242,11 +245,19 @@ fn decode_row(
     }
     let needed = (offset + out.len()) * 4;
     if bytes.len() < needed {
-        return Err(format!("tensor row at {offset} (+{}) exceeds its data", out.len()));
+        return Err(format!(
+            "tensor row at {offset} (+{}) exceeds its data",
+            out.len()
+        ));
     }
     for (index, slot) in out.iter_mut().enumerate() {
         let base = (offset + index) * 4;
-        *slot = f32::from_le_bytes([bytes[base], bytes[base + 1], bytes[base + 2], bytes[base + 3]]);
+        *slot = f32::from_le_bytes([
+            bytes[base],
+            bytes[base + 1],
+            bytes[base + 2],
+            bytes[base + 3],
+        ]);
     }
     Ok(())
 }
@@ -299,7 +310,12 @@ pub fn encode(
     for index in 0..rel_rows {
         let start = index * d;
         let slice = &mut rel_table[start..start + d];
-        decode_row(weights.rel_embeddings, weights.rel_embeddings_type, start, slice)?;
+        decode_row(
+            weights.rel_embeddings,
+            weights.rel_embeddings_type,
+            start,
+            slice,
+        )?;
         if config.norm_rel_embeddings {
             layer_norm(
                 slice,
@@ -334,7 +350,13 @@ pub fn encode(
     }
     let mut normed = vec![0.0f32; d];
     for slot in hidden.chunks_exact_mut(d) {
-        layer_norm(slot, &weights.tok_norm.weight, &weights.tok_norm.bias, config.eps, &mut normed);
+        layer_norm(
+            slot,
+            &weights.tok_norm.weight,
+            &weights.tok_norm.bias,
+            config.eps,
+            &mut normed,
+        );
         slot.copy_from_slice(&normed);
     }
 
@@ -362,9 +384,33 @@ pub fn encode(
         add_bias_rows(&mut pos_query, d, &layer.attn_q_bias);
         add_bias_rows(&mut pos_key, d, &layer.attn_k_bias);
         // Q/K/V per token.
-        project_all(&layer.attn_q, &layer.attn_q_bias, &hidden, &mut q, d, d, &pool);
-        project_all(&layer.attn_k, &layer.attn_k_bias, &hidden, &mut k, d, d, &pool);
-        project_all(&layer.attn_v, &layer.attn_v_bias, &hidden, &mut v, d, d, &pool);
+        project_all(
+            &layer.attn_q,
+            &layer.attn_q_bias,
+            &hidden,
+            &mut q,
+            d,
+            d,
+            &pool,
+        );
+        project_all(
+            &layer.attn_k,
+            &layer.attn_k_bias,
+            &hidden,
+            &mut k,
+            d,
+            d,
+            &pool,
+        );
+        project_all(
+            &layer.attn_v,
+            &layer.attn_v_bias,
+            &hidden,
+            &mut v,
+            d,
+            d,
+            &pool,
+        );
 
         // Bidirectional attention; batch is always 1 so no key is masked.
         for t in 0..n_tokens {

@@ -129,7 +129,12 @@ impl<'a> GlinerModel<'a> {
                 classifier_intermediate,
             },
         )?;
-        Ok(Self { source, config, spm, weights })
+        Ok(Self {
+            source,
+            config,
+            spm,
+            weights,
+        })
     }
 
     pub fn config(&self) -> &EncoderConfig {
@@ -146,11 +151,7 @@ impl<'a> GlinerModel<'a> {
     }
 
     /// Hidden states for an already-encoded prompt.
-    pub fn forward(
-        &self,
-        input_ids: &[u32],
-        n_threads_arg: usize,
-    ) -> Result<Vec<f32>, String> {
+    pub fn forward(&self, input_ids: &[u32], n_threads_arg: usize) -> Result<Vec<f32>, String> {
         compute::encode(&self.weights, &self.config, input_ids, n_threads_arg)
     }
 
@@ -254,7 +255,10 @@ impl<'a> GlinerModel<'a> {
 }
 
 fn decode(task: &Task, logits: &[f32]) -> Vec<LabelScore> {
-    let scaled: Vec<f32> = logits.iter().map(|value| value / task.temperature).collect();
+    let scaled: Vec<f32> = logits
+        .iter()
+        .map(|value| value / task.temperature)
+        .collect();
     let multi = task.multi_label;
     let probabilities: Vec<f32> = match task.activation.as_deref() {
         Some("softmax") => softmax(&scaled),
@@ -381,8 +385,14 @@ pub fn load_spm(source: &dyn TensorSource) -> Result<SentencePieceTokenizer, Str
     )?;
     SentencePieceTokenizer::from_parts(
         pieces,
-        scores_raw[..piece_count].iter().map(|value| *value as f32).collect(),
-        types_raw[..piece_count].iter().map(|value| *value as u8).collect(),
+        scores_raw[..piece_count]
+            .iter()
+            .map(|value| *value as f32)
+            .collect(),
+        types_raw[..piece_count]
+            .iter()
+            .map(|value| *value as u8)
+            .collect(),
         meta_bool(source, &key("spm.byte_fallback"))?,
         normalizer,
     )
@@ -473,7 +483,10 @@ mod tests {
         let scores = decode(&task, &[-1.0, 3.0]);
         // `class_act = "auto"` on a single-label head is softmax, not sigmoid.
         let total: f32 = scores.iter().map(|score| score.probability).sum();
-        assert!((total - 1.0).abs() < 1e-6, "single-label head must softmax, got {total}");
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "single-label head must softmax, got {total}"
+        );
         assert!(scores[1].probability > 0.97);
         assert_eq!(select(&task, &scores), vec!["b".to_string()]);
     }
@@ -489,7 +502,10 @@ mod tests {
 
     #[test]
     fn multi_label_head_keeps_every_label_over_the_threshold() {
-        let mut task = Task::new("topics", vec![Label::new("a"), Label::new("b"), Label::new("c")]);
+        let mut task = Task::new(
+            "topics",
+            vec![Label::new("a"), Label::new("b"), Label::new("c")],
+        );
         task.multi_label = true;
         task.cls_threshold = 0.4;
         let scores = decode(&task, &[2.0, -3.0, 1.0]);
@@ -509,7 +525,10 @@ mod tests {
     #[test]
     fn base64_round_trips_the_charsmap_header() {
         // 4 bytes -> 8 chars, verified against the standard alphabet.
-        assert_eq!(base64_decode("AAAEAA==").unwrap(), vec![0x00, 0x00, 0x04, 0x00]);
+        assert_eq!(
+            base64_decode("AAAEAA==").unwrap(),
+            vec![0x00, 0x00, 0x04, 0x00]
+        );
         assert_eq!(
             base64_decode("//79/A==").unwrap(),
             vec![0xFF, 0xFE, 0xFD, 0xFC]

@@ -88,7 +88,10 @@ pub fn run_inference(
         ));
     }
 
-    let mut sampler = crate::ops::sampling::LlamaSampler::new(sample_defaults(source).0, sample_defaults(source).1);
+    let mut sampler = crate::ops::sampling::LlamaSampler::new(
+        sample_defaults(source).0,
+        sample_defaults(source).1,
+    );
     sampler.prime(&ids);
     let mut decoder = crate::core::tokenizer::StreamingDecoder::new(&*tokenizer, false);
     let mut scratch = runtime.scratch();
@@ -117,15 +120,22 @@ pub fn run_inference(
         }
         let mut logits = logits;
         if std::env::var_os("RUST_XING4_DEBUG").is_some() {
-            let mut idxs: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            let mut idxs: Vec<(usize, f32)> =
+                logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
             idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
             let top_ids: Vec<u32> = idxs[..8].iter().map(|&(i, _)| i as u32).collect();
             let decoded = tokenizer.decode(&top_ids, false);
-            let top: Vec<String> = idxs[..8].iter().map(|&(i, v)| format!("{i}:{v:.3}")).collect();
+            let top: Vec<String> = idxs[..8]
+                .iter()
+                .map(|&(i, v)| format!("{i}:{v:.3}"))
+                .collect();
             eprintln!("[xing4] decoded top8 = {decoded:?}");
             let sum: f64 = logits.iter().map(|&v| v as f64).sum();
             let sqsum: f64 = logits.iter().map(|&v| (v as f64) * (v as f64)).sum();
-            eprintln!("[xing4] pos={pos} logits sum={sum:.3} sq={sqsum:.2} top8={}", top.join(" "));
+            eprintln!(
+                "[xing4] pos={pos} logits sum={sum:.3} sq={sqsum:.2} top8={}",
+                top.join(" ")
+            );
         }
         let chosen_id = sampler.sample(&mut logits, temperature, repetition_penalty);
         if stop_after(chosen_id, generated.len(), max_tokens, bench, eos_id) {

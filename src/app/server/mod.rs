@@ -812,14 +812,19 @@ fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
 fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
     let (source, tokenizer) = crate::app::load_gliner2_source(&options.model)?;
     // Validate the whole contract once at startup rather than per request.
-    crate::models::gliner::GlinerModel::from_source_with_tokenizer(source.as_ref(), tokenizer.clone())
-        .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
+    crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+        source.as_ref(),
+        tokenizer.clone(),
+    )
+    .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
     Ok(Gliner2Backend {
         source,
         tokenizer,
         n_threads: crate::app::resolve_thread_count(
             options.threads,
-            std::thread::available_parallelism().map(|value| value.get()).unwrap_or(4),
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
         ),
     })
 }

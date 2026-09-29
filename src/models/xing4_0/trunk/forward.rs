@@ -77,7 +77,10 @@ pub struct Xing4Scratch {
 impl Xing4Scratch {
     pub fn new(cfg: &Xing4Config, max_ctx: usize) -> Self {
         let hc_dim = cfg.hc_count * cfg.n_embd;
-        let ffn_w = cfg.n_ff.max(cfg.n_ff_exp).max(cfg.n_expert_used * cfg.n_ff_exp);
+        let ffn_w = cfg
+            .n_ff
+            .max(cfg.n_ff_exp)
+            .max(cfg.n_expert_used * cfg.n_ff_exp);
         let q_lat_w = cfg.n_head * (cfg.kv_lora_rank + cfg.n_embd_head_qk_rope);
         let attn_out_w = cfg.n_head * cfg.n_embd_head_v;
         let max_n_in = cfg
@@ -115,7 +118,11 @@ impl Xing4Scratch {
             q8_buf: vec![0; max_n_in],
             q8_scales: vec![0.0; max_n_in / 32],
             q8k_buf: vec![
-                crate::ops::quant::BlockQ8K { d: 0.0, qs: [0; 256], bsums: [0; 16] };
+                crate::ops::quant::BlockQ8K {
+                    d: 0.0,
+                    qs: [0; 256],
+                    bsums: [0; 16]
+                };
                 max_n_in / 256
             ],
             logits: vec![0.0; cfg.n_vocab],
@@ -234,7 +241,10 @@ impl<'a> Xing4Runtime<'a> {
     pub fn init_hc(&self, token: u32, hc_state: &mut [f32]) {
         let n = self.cfg.n_embd;
         let mut first = vec![0.0f32; n];
-        self.globals.tok_embd.kernel.embedding_lookup(token, n, &mut first);
+        self.globals
+            .tok_embd
+            .kernel
+            .embedding_lookup(token, n, &mut first);
         for s in 0..self.cfg.hc_count {
             hc_state[s * n..(s + 1) * n].copy_from_slice(&first);
         }
@@ -252,9 +262,18 @@ impl<'a> Xing4Runtime<'a> {
             }
             s.lane[d] = acc / hc as f32;
         }
-        rms_norm_grouped(&s.lane, &self.globals.output_norm, &mut s.normed[..n], 1, c.norm_eps);
+        rms_norm_grouped(
+            &s.lane,
+            &self.globals.output_norm,
+            &mut s.normed[..n],
+            1,
+            c.norm_eps,
+        );
         let vocab = c.n_vocab;
-        self.globals.output.kernel.forward(&s.normed[..n], &mut s.logits[..vocab], n, vocab);
+        self.globals
+            .output
+            .kernel
+            .forward(&s.normed[..n], &mut s.logits[..vocab], n, vocab);
         s.logits[..vocab].to_vec()
     }
 
@@ -313,7 +332,14 @@ impl<'a> Xing4Runtime<'a> {
     }
 
     /// `streams[dst] = lane * post[dst] + Σ_src comb[dst][src] * residual[src]`
-    fn spread_lane(&self, lane: &[f32], post: &[f32], comb: &[f32], residual: &[f32], hc_state: &mut [f32]) {
+    fn spread_lane(
+        &self,
+        lane: &[f32],
+        post: &[f32],
+        comb: &[f32],
+        residual: &[f32],
+        hc_state: &mut [f32],
+    ) {
         let (n, hc) = (self.cfg.n_embd, self.cfg.hc_count);
         for dst in 0..hc {
             for d in 0..n {
@@ -369,19 +395,46 @@ impl<'a> Xing4Runtime<'a> {
             s.residual.copy_from_slice(&hc_state[..flat]);
             {
                 let (fn_w, base, scale) = (&lw.hc_attn_fn, &lw.hc_attn_base, &lw.hc_attn_scale);
-                self.hc_gate(&s.residual, fn_w, base, scale,
-                    &mut s.hc_normed, &mut s.mixes, &mut s.pre, &mut s.post, &mut s.comb);
+                self.hc_gate(
+                    &s.residual,
+                    fn_w,
+                    base,
+                    scale,
+                    &mut s.hc_normed,
+                    &mut s.mixes,
+                    &mut s.pre,
+                    &mut s.post,
+                    &mut s.comb,
+                );
             }
             self.mix_lane(&s.residual, &s.pre, &mut s.lane);
 
-            rms_norm_grouped(&s.lane, &lw.attn_norm, &mut s.normed[..n_embd], 1, c.norm_eps);
-            Self::prep(&s.normed[..n_embd], n_embd, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+            rms_norm_grouped(
+                &s.lane,
+                &lw.attn_norm,
+                &mut s.normed[..n_embd],
+                1,
+                c.norm_eps,
+            );
+            Self::prep(
+                &s.normed[..n_embd],
+                n_embd,
+                &mut s.q8_buf,
+                &mut s.q8_scales,
+                &mut s.q8k_buf,
+            );
 
             // q lane: n_embd -> q_lora -> n_head * head_k
             lw.wq_a.kernel.forward_prepared(
-                &s.normed[..n_embd], &s.q8_buf[..n_embd], &s.q8_scales[..n_embd / 32],
-                Some(&s.q8k_buf[..n_embd / 256]), &mut s.q_a[..c.q_lora_rank],
-                n_embd, c.q_lora_rank, 0, 1,
+                &s.normed[..n_embd],
+                &s.q8_buf[..n_embd],
+                &s.q8_scales[..n_embd / 32],
+                Some(&s.q8k_buf[..n_embd / 256]),
+                &mut s.q_a[..c.q_lora_rank],
+                n_embd,
+                c.q_lora_rank,
+                0,
+                1,
             );
             rms_norm_grouped(
                 &s.q_a[..c.q_lora_rank],
@@ -390,13 +443,24 @@ impl<'a> Xing4Runtime<'a> {
                 1,
                 c.norm_eps,
             );
-            lw.wq_b.kernel.forward(&s.normed[..c.q_lora_rank], &mut s.q[..c.n_head * head_k], c.q_lora_rank, c.n_head * head_k);
+            lw.wq_b.kernel.forward(
+                &s.normed[..c.q_lora_rank],
+                &mut s.q[..c.n_head * head_k],
+                c.q_lora_rank,
+                c.n_head * head_k,
+            );
 
             // kv latent for this position: n_embd -> cache_w
             lw.wkv_a_mqa.kernel.forward_prepared(
-                &s.normed[..n_embd], &s.q8_buf[..n_embd], &s.q8_scales[..n_embd / 32],
-                Some(&s.q8k_buf[..n_embd / 256]), &mut s.kv_a[..cache_w],
-                n_embd, cache_w, 0, 1,
+                &s.normed[..n_embd],
+                &s.q8_buf[..n_embd],
+                &s.q8_scales[..n_embd / 32],
+                Some(&s.q8k_buf[..n_embd / 256]),
+                &mut s.kv_a[..cache_w],
+                n_embd,
+                cache_w,
+                0,
+                1,
             );
 
             // RoPE: per-head query rope part + shared key rope part.
@@ -417,15 +481,22 @@ impl<'a> Xing4Runtime<'a> {
             );
             let base = il * self.max_ctx * cache_w + pos * cache_w;
             self.kv_cache[base..base + kv_lora].copy_from_slice(&s.latent[..kv_lora]);
-            self.kv_cache[base + kv_lora..base + cache_w].copy_from_slice(&s.kv_a[kv_lora..cache_w]);
+            self.kv_cache[base + kv_lora..base + cache_w]
+                .copy_from_slice(&s.kv_a[kv_lora..cache_w]);
 
             // Absorb queries: q_latent[h] = concat(wk_b[h] @ q_nope[h], q_pe[h]).
             for h in 0..c.n_head {
                 let q_off = h * head_k;
                 let dst = h * q_lat_w;
-                lw.wk_b[h].kernel.forward(&s.q[q_off..q_off + nope], &mut s.q_latent[dst..dst + kv_lora], nope, kv_lora);
+                lw.wk_b[h].kernel.forward(
+                    &s.q[q_off..q_off + nope],
+                    &mut s.q_latent[dst..dst + kv_lora],
+                    nope,
+                    kv_lora,
+                );
                 let after = dst + kv_lora;
-                s.q_latent[after..after + rope_dim].copy_from_slice(&s.q[q_off + nope..q_off + head_k]);
+                s.q_latent[after..after + rope_dim]
+                    .copy_from_slice(&s.q[q_off + nope..q_off + head_k]);
             }
 
             // Attention over the latent.
@@ -451,7 +522,12 @@ impl<'a> Xing4Runtime<'a> {
                         *slot += w * self.kv_cache[off + d];
                     }
                 }
-                lw.wv_b[h].kernel.forward(&s.o_latent[..kv_lora], &mut s.o_heads[h * v_dim..(h + 1) * v_dim], kv_lora, v_dim);
+                lw.wv_b[h].kernel.forward(
+                    &s.o_latent[..kv_lora],
+                    &mut s.o_heads[h * v_dim..(h + 1) * v_dim],
+                    kv_lora,
+                    v_dim,
+                );
             }
 
             if std::env::var_os("RUST_XING4_DEBUG").is_some() && il < 2 {
@@ -460,17 +536,35 @@ impl<'a> Xing4Runtime<'a> {
                 eprintln!("[xing4] il={il} pos={pos} attn_lane sq={st:.3} max={mx:.4}");
             }
             // wo: [n_head * v_dim] -> n_embd
-            Self::prep(&s.o_heads, attn_out_w, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+            Self::prep(
+                &s.o_heads,
+                attn_out_w,
+                &mut s.q8_buf,
+                &mut s.q8_scales,
+                &mut s.q8k_buf,
+            );
             lw.wo.kernel.forward_prepared(
-                &s.o_heads, &s.q8_buf[..attn_out_w], &s.q8_scales[..attn_out_w / 32],
-                Some(&s.q8k_buf[..attn_out_w / 256]), &mut s.lane,
-                attn_out_w, n_embd, 0, 1,
+                &s.o_heads,
+                &s.q8_buf[..attn_out_w],
+                &s.q8_scales[..attn_out_w / 32],
+                Some(&s.q8k_buf[..attn_out_w / 256]),
+                &mut s.lane,
+                attn_out_w,
+                n_embd,
+                0,
+                1,
             );
             let lane = s.lane.clone();
             self.spread_lane(&lane, &s.post, &s.comb, &s.residual, hc_state);
             if std::env::var_os("RUST_XING4_DEBUG").is_some() && il < 2 {
-                let st: f64 = hc_state[..flat].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                let mx = hc_state[..flat].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let st: f64 = hc_state[..flat]
+                    .iter()
+                    .map(|&v| (v as f64) * (v as f64))
+                    .sum();
+                let mx = hc_state[..flat]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 eprintln!("[xing4] il={il} pos={pos} after_attn_post sq={st:.3} max={mx:.4}");
             }
 
@@ -478,47 +572,110 @@ impl<'a> Xing4Runtime<'a> {
             s.residual.copy_from_slice(&hc_state[..flat]);
             {
                 let (fn_w, base, scale) = (&lw.hc_ffn_fn, &lw.hc_ffn_base, &lw.hc_ffn_scale);
-                self.hc_gate(&s.residual, fn_w, base, scale,
-                    &mut s.hc_normed, &mut s.mixes, &mut s.pre, &mut s.post, &mut s.comb);
+                self.hc_gate(
+                    &s.residual,
+                    fn_w,
+                    base,
+                    scale,
+                    &mut s.hc_normed,
+                    &mut s.mixes,
+                    &mut s.pre,
+                    &mut s.post,
+                    &mut s.comb,
+                );
             }
             self.mix_lane(&s.residual, &s.pre, &mut s.lane);
-            rms_norm_grouped(&s.lane, &lw.ffn_norm, &mut s.normed[..n_embd], 1, c.norm_eps);
+            rms_norm_grouped(
+                &s.lane,
+                &lw.ffn_norm,
+                &mut s.normed[..n_embd],
+                1,
+                c.norm_eps,
+            );
             if std::env::var_os("RUST_XING4_DEBUG").is_some() && il < 2 {
                 let st: f64 = s.lane.iter().map(|&v| (v as f64) * (v as f64)).sum();
                 let mx = s.lane.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 eprintln!("[xing4] il={il} pos={pos} ffn_lane sq={st:.3} max={mx:.4}");
             }
-            Self::prep(&s.normed[..n_embd], n_embd, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+            Self::prep(
+                &s.normed[..n_embd],
+                n_embd,
+                &mut s.q8_buf,
+                &mut s.q8_scales,
+                &mut s.q8k_buf,
+            );
 
             let lane: Vec<f32> = if c.is_dense_ffn(il) {
                 let ff = c.n_ff;
                 lw.dense.w_gate.kernel.forward_prepared(
-                    &s.normed[..n_embd], &s.q8_buf[..n_embd], &s.q8_scales[..n_embd / 32],
-                    Some(&s.q8k_buf[..n_embd / 256]), &mut s.ffn_gate[..ff],
-                    n_embd, ff, 0, 1,
+                    &s.normed[..n_embd],
+                    &s.q8_buf[..n_embd],
+                    &s.q8_scales[..n_embd / 32],
+                    Some(&s.q8k_buf[..n_embd / 256]),
+                    &mut s.ffn_gate[..ff],
+                    n_embd,
+                    ff,
+                    0,
+                    1,
                 );
                 lw.dense.w_up.kernel.forward_prepared(
-                    &s.normed[..n_embd], &s.q8_buf[..n_embd], &s.q8_scales[..n_embd / 32],
-                    Some(&s.q8k_buf[..n_embd / 256]), &mut s.ffn_up[..ff],
-                    n_embd, ff, 0, 1,
+                    &s.normed[..n_embd],
+                    &s.q8_buf[..n_embd],
+                    &s.q8_scales[..n_embd / 32],
+                    Some(&s.q8k_buf[..n_embd / 256]),
+                    &mut s.ffn_up[..ff],
+                    n_embd,
+                    ff,
+                    0,
+                    1,
                 );
                 crate::ops::silu_mul_approx_inplace(&s.ffn_gate[..ff], &mut s.ffn_up[..ff]);
                 if std::env::var_os("RUST_XING4_DEBUG").is_some() && il == 0 {
-                    let gsq: f64 = s.ffn_up[..ff].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    let gmx = s.ffn_up[..ff].iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let nsq: f64 = s.normed[..n_embd].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    let nmx = s.normed[..n_embd].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let gsq: f64 = s.ffn_up[..ff]
+                        .iter()
+                        .map(|&v| (v as f64) * (v as f64))
+                        .sum();
+                    let gmx = s.ffn_up[..ff]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let nsq: f64 = s.normed[..n_embd]
+                        .iter()
+                        .map(|&v| (v as f64) * (v as f64))
+                        .sum();
+                    let nmx = s.normed[..n_embd]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
                     eprintln!("[xing4] il=0 normed sq={nsq:.4} max={nmx:.4} | h sq={gsq:.1} max={gmx:.4} | norm_w[0]={:.4} ffnnorm_w[0]={:.4}", lw.attn_norm[0], lw.ffn_norm[0]);
                 }
-                Self::prep(&s.ffn_up[..ff], ff, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+                Self::prep(
+                    &s.ffn_up[..ff],
+                    ff,
+                    &mut s.q8_buf,
+                    &mut s.q8_scales,
+                    &mut s.q8k_buf,
+                );
                 lw.dense.w_down.kernel.forward_prepared(
-                    &s.ffn_up[..ff], &s.q8_buf[..ff], &s.q8_scales[..ff / 32],
-                    Some(&s.q8k_buf[..ff / 256]), &mut s.moe_out[..n_embd],
-                    ff, n_embd, 0, 1,
+                    &s.ffn_up[..ff],
+                    &s.q8_buf[..ff],
+                    &s.q8_scales[..ff / 32],
+                    Some(&s.q8k_buf[..ff / 256]),
+                    &mut s.moe_out[..n_embd],
+                    ff,
+                    n_embd,
+                    0,
+                    1,
                 );
                 if std::env::var_os("RUST_XING4_DEBUG").is_some() && il == 0 {
-                    let dsq: f64 = s.moe_out[..n_embd].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    let dmx = s.moe_out[..n_embd].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let dsq: f64 = s.moe_out[..n_embd]
+                        .iter()
+                        .map(|&v| (v as f64) * (v as f64))
+                        .sum();
+                    let dmx = s.moe_out[..n_embd]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
                     eprintln!("[xing4] il=0 down_out sq={dsq:.2} max={dmx:.4}");
                 }
                 s.moe_out[..n_embd].to_vec()
@@ -530,8 +687,14 @@ impl<'a> Xing4Runtime<'a> {
             };
             self.spread_lane(&lane, &s.post, &s.comb, &s.residual, hc_state);
             if std::env::var_os("RUST_XING4_DEBUG").is_some() && il < 2 {
-                let st: f64 = hc_state[..flat].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                let mx = hc_state[..flat].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let st: f64 = hc_state[..flat]
+                    .iter()
+                    .map(|&v| (v as f64) * (v as f64))
+                    .sum();
+                let mx = hc_state[..flat]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 eprintln!("[xing4] il={il} pos={pos} after_ffn_post sq={st:.3} max={mx:.4}");
             }
         }
@@ -587,7 +750,8 @@ impl<'a> Xing4Runtime<'a> {
                 *v *= scale;
             }
         }
-        s.expert_sel.copy_from_slice(&sel.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+        s.expert_sel
+            .copy_from_slice(&sel.iter().map(|&(e, _)| e).collect::<Vec<_>>());
         s.expert_w.copy_from_slice(&w);
         s.routed_acc[..n].fill(0.0);
 
@@ -595,19 +759,45 @@ impl<'a> Xing4Runtime<'a> {
         for k in 0..n_used {
             let e = s.expert_sel[k];
             moe.gate_exps[e].kernel.forward_prepared(
-                &s.normed[..n], &s.q8_buf[..n], &s.q8_scales[..n / 32],
-                Some(&s.q8k_buf[..n / 256]), &mut s.ffn_gate[..ff], n, ff, 0, 1,
+                &s.normed[..n],
+                &s.q8_buf[..n],
+                &s.q8_scales[..n / 32],
+                Some(&s.q8k_buf[..n / 256]),
+                &mut s.ffn_gate[..ff],
+                n,
+                ff,
+                0,
+                1,
             );
             moe.up_exps[e].kernel.forward_prepared(
-                &s.normed[..n], &s.q8_buf[..n], &s.q8_scales[..n / 32],
-                Some(&s.q8k_buf[..n / 256]), &mut s.ffn_up[..ff], n, ff, 0, 1,
+                &s.normed[..n],
+                &s.q8_buf[..n],
+                &s.q8_scales[..n / 32],
+                Some(&s.q8k_buf[..n / 256]),
+                &mut s.ffn_up[..ff],
+                n,
+                ff,
+                0,
+                1,
             );
             crate::ops::silu_mul_approx_inplace(&s.ffn_gate[..ff], &mut s.ffn_up[..ff]);
-            Self::prep(&s.ffn_up[..ff], ff, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+            Self::prep(
+                &s.ffn_up[..ff],
+                ff,
+                &mut s.q8_buf,
+                &mut s.q8_scales,
+                &mut s.q8k_buf,
+            );
             moe.down_exps[e].kernel.forward_prepared(
-                &s.ffn_up[..ff], &s.q8_buf[..ff], &s.q8_scales[..ff / 32],
-                Some(&s.q8k_buf[..ff / 256]), &mut s.moe_out[..n],
-                ff, n, 0, 1,
+                &s.ffn_up[..ff],
+                &s.q8_buf[..ff],
+                &s.q8_scales[..ff / 32],
+                Some(&s.q8k_buf[..ff / 256]),
+                &mut s.moe_out[..n],
+                ff,
+                n,
+                0,
+                1,
             );
             let wk = s.expert_w[k];
             for d in 0..n {
@@ -618,19 +808,45 @@ impl<'a> Xing4Runtime<'a> {
         // Shared expert, always on, added unweighted.
         if c.n_expert_shared > 0 {
             moe.shared_gate.kernel.forward_prepared(
-                &s.normed[..n], &s.q8_buf[..n], &s.q8_scales[..n / 32],
-                Some(&s.q8k_buf[..n / 256]), &mut s.ffn_gate[..ff], n, ff, 0, 1,
+                &s.normed[..n],
+                &s.q8_buf[..n],
+                &s.q8_scales[..n / 32],
+                Some(&s.q8k_buf[..n / 256]),
+                &mut s.ffn_gate[..ff],
+                n,
+                ff,
+                0,
+                1,
             );
             moe.shared_up.kernel.forward_prepared(
-                &s.normed[..n], &s.q8_buf[..n], &s.q8_scales[..n / 32],
-                Some(&s.q8k_buf[..n / 256]), &mut s.ffn_up[..ff], n, ff, 0, 1,
+                &s.normed[..n],
+                &s.q8_buf[..n],
+                &s.q8_scales[..n / 32],
+                Some(&s.q8k_buf[..n / 256]),
+                &mut s.ffn_up[..ff],
+                n,
+                ff,
+                0,
+                1,
             );
             crate::ops::silu_mul_approx_inplace(&s.ffn_gate[..ff], &mut s.ffn_up[..ff]);
-            Self::prep(&s.ffn_up[..ff], ff, &mut s.q8_buf, &mut s.q8_scales, &mut s.q8k_buf);
+            Self::prep(
+                &s.ffn_up[..ff],
+                ff,
+                &mut s.q8_buf,
+                &mut s.q8_scales,
+                &mut s.q8k_buf,
+            );
             moe.shared_down.kernel.forward_prepared(
-                &s.ffn_up[..ff], &s.q8_buf[..ff], &s.q8_scales[..ff / 32],
-                Some(&s.q8k_buf[..ff / 256]), &mut s.moe_out[..n],
-                ff, n, 0, 1,
+                &s.ffn_up[..ff],
+                &s.q8_buf[..ff],
+                &s.q8_scales[..ff / 32],
+                Some(&s.q8k_buf[..ff / 256]),
+                &mut s.moe_out[..n],
+                ff,
+                n,
+                0,
+                1,
             );
             for d in 0..n {
                 s.routed_acc[d] += s.moe_out[d];

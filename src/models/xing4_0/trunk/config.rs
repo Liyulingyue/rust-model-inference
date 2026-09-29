@@ -116,10 +116,7 @@ impl Xing4Config {
                 .unwrap_or(4096),
             rope_yarn_beta_fast: opt_f32(&format!("{ARCH}.rope.scaling.yarn_beta_fast"), 32.0),
             rope_yarn_beta_slow: opt_f32(&format!("{ARCH}.rope.scaling.yarn_beta_slow"), 1.0),
-            rope_yarn_log_mult: opt_f32(
-                &format!("{ARCH}.rope.scaling.yarn_log_multiplier"),
-                0.1,
-            ),
+            rope_yarn_log_mult: opt_f32(&format!("{ARCH}.rope.scaling.yarn_log_multiplier"), 0.1),
 
             q_lora_rank: get_u32(&format!("{ARCH}.attention.q_lora_rank"))?,
             kv_lora_rank: get_u32(&format!("{ARCH}.attention.kv_lora_rank"))?,
@@ -131,8 +128,7 @@ impl Xing4Config {
             n_expert_used: get_u32(&format!("{ARCH}.expert_used_count"))?,
             n_expert_shared: get_u32(&format!("{ARCH}.expert_shared_count")).unwrap_or(0),
             n_ff_exp: get_u32(&format!("{ARCH}.expert_feed_forward_length"))?,
-            n_layer_dense_lead: get_u32(&format!("{ARCH}.leading_dense_block_count"))
-                .unwrap_or(0),
+            n_layer_dense_lead: get_u32(&format!("{ARCH}.leading_dense_block_count")).unwrap_or(0),
             expert_gating_func: source
                 .metadata(&format!("{ARCH}.expert_gating_func"))
                 .and_then(MetaValue::to_u64)

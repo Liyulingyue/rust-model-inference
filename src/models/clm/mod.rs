@@ -168,12 +168,19 @@ impl ClmHeads {
             return Err(format!("clm.depth must be >= 2, got {}", cfg.depth));
         }
         if cfg.logit_scale <= 0.0 {
-            return Err(format!("clm.logit_scale must be > 0, got {}", cfg.logit_scale));
+            return Err(format!(
+                "clm.logit_scale must be > 0, got {}",
+                cfg.logit_scale
+            ));
         }
 
         let state_head = load_head(source, &cfg, "state_head")?;
         let action_head = load_head(source, &cfg, "action_head")?;
-        Ok(Self { cfg, state_head, action_head })
+        Ok(Self {
+            cfg,
+            state_head,
+            action_head,
+        })
     }
 
     pub fn config(&self) -> &ClmConfig {
@@ -186,7 +193,11 @@ impl ClmHeads {
     }
 
     /// `state_head(state_emb)`, L2-normalised.
-    pub fn project_state(&self, state_emb: &[f32], scratch: &mut Vec<f32>) -> Result<Vec<f32>, String> {
+    pub fn project_state(
+        &self,
+        state_emb: &[f32],
+        scratch: &mut Vec<f32>,
+    ) -> Result<Vec<f32>, String> {
         if state_emb.len() != self.cfg.hidden {
             return Err(format!(
                 "state embedding is {} wide, heads expect {}",
@@ -198,7 +209,11 @@ impl ClmHeads {
     }
 
     /// `action_head(candidate_emb)`, L2-normalised.
-    pub fn project_candidate(&self, cand_emb: &[f32], scratch: &mut Vec<f32>) -> Result<Vec<f32>, String> {
+    pub fn project_candidate(
+        &self,
+        cand_emb: &[f32],
+        scratch: &mut Vec<f32>,
+    ) -> Result<Vec<f32>, String> {
         if cand_emb.len() != self.cfg.hidden {
             return Err(format!(
                 "candidate embedding is {} wide, heads expect {}",
@@ -244,11 +259,20 @@ fn load_head(source: &dyn TensorSource, cfg: &ClmConfig, head: &str) -> Result<H
             cfg.width,
         )?);
         if cfg.layernorm {
-            norms.push(load_norm(source, &format!("{ARCH}.{head}.norms.{i}"), cfg.width)?);
+            norms.push(load_norm(
+                source,
+                &format!("{ARCH}.{head}.norms.{i}"),
+                cfg.width,
+            )?);
         }
     }
     let out = load_linear(source, &format!("{ARCH}.{head}.out"), cfg.width, cfg.proj)?;
-    Ok(Head { inp, hidden, norms, out })
+    Ok(Head {
+        inp,
+        hidden,
+        norms,
+        out,
+    })
 }
 
 /// GGML stores `[n_in, n_out]` (ne0 first); torch stores `[n_out, n_in]`.
@@ -287,7 +311,12 @@ fn load_linear(
 
     let bname = format!("{prefix}.bias");
     let bias = load_f32(source, &bname, &[n_out as u64])?;
-    Ok(Linear { weight, bias, n_in, n_out })
+    Ok(Linear {
+        weight,
+        bias,
+        n_in,
+        n_out,
+    })
 }
 
 fn load_norm(source: &dyn TensorSource, prefix: &str, width: usize) -> Result<LayerNorm, String> {
@@ -328,7 +357,10 @@ mod tests {
     fn heads() -> ClmHeads {
         let path = Path::new("models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf");
         if !path.exists() {
-            panic!("missing {}; run tools/converter/clm/convert_clm.py first", path.display());
+            panic!(
+                "missing {}; run tools/converter/clm/convert_clm.py first",
+                path.display()
+            );
         }
         let source = open_model_source(path, ComponentRole::Llm).expect("open clm gguf");
         ClmHeads::from_source(source.as_ref()).expect("load clm heads")
@@ -348,11 +380,29 @@ mod tests {
         assert_eq!(heads.config().hidden, 4096);
         assert_eq!(heads.config().width, 1536);
         assert_eq!(heads.config().proj, 512);
-        assert_eq!(heads.config().logit_scale, golden["scale"].as_f64().unwrap() as f32);
+        assert_eq!(
+            heads.config().logit_scale,
+            golden["scale"].as_f64().unwrap() as f32
+        );
 
-        let state: Vec<f32> = golden["state"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let cand1: Vec<f32> = golden["cand1"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let cand2: Vec<f32> = golden["cand2"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let state: Vec<f32> = golden["state"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let cand1: Vec<f32> = golden["cand1"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let cand2: Vec<f32> = golden["cand2"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
 
         let mut scratch = Vec::new();
         let zs = heads.project_state(&state, &mut scratch).unwrap();
@@ -361,7 +411,10 @@ mod tests {
 
         for (got, want) in zs.iter().zip(golden["z_state"].as_array().unwrap()) {
             let want = want.as_f64().unwrap() as f32;
-            assert!((got - want).abs() < 1e-4, "z_state mismatch: {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1e-4,
+                "z_state mismatch: {got} vs {want}"
+            );
         }
         // Unit length is the contract the scorer relies on.
         let norm: f32 = zs.iter().map(|v| v * v).sum();
@@ -369,10 +422,16 @@ mod tests {
 
         let s1 = heads.score(&zs, &zc1);
         let s2 = heads.score(&zs, &zc2);
-        assert!((s1 - golden["score1"].as_f64().unwrap() as f32).abs() < 1e-3,
-                "score1 {s1} vs {}", golden["score1"]);
-        assert!((s2 - golden["score2"].as_f64().unwrap() as f32).abs() < 1e-3,
-                "score2 {s2} vs {}", golden["score2"]);
+        assert!(
+            (s1 - golden["score1"].as_f64().unwrap() as f32).abs() < 1e-3,
+            "score1 {s1} vs {}",
+            golden["score1"]
+        );
+        assert!(
+            (s2 - golden["score2"].as_f64().unwrap() as f32).abs() < 1e-3,
+            "score2 {s2} vs {}",
+            golden["score2"]
+        );
     }
 
     /// A wrong embedding width has to be an error, not a silent garbage score.
@@ -384,4 +443,3 @@ mod tests {
         assert!(heads.project_candidate(&[0.0; 4095], &mut scratch).is_err());
     }
 }
-

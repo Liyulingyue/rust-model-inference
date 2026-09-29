@@ -74,10 +74,17 @@ fn piece_to_id_round_trips() {
 #[test]
 fn model_shape_matches_the_checkpoint() {
     let spm = tokenizer();
-    assert_eq!(spm.len(), 128000, "SP vocab before the 11 added GLiNER tokens");
+    assert_eq!(
+        spm.len(),
+        128000,
+        "SP vocab before the 11 added GLiNER tokens"
+    );
     assert_eq!(spm.unk_id(), 3);
     // The reference encodes these with no byte fallback, so a plain ASCII word
     // must be a single piece.
-    assert_eq!(spm.encode_pieces("refund_request"), ["▁refund", "_", "request"]);
+    assert_eq!(
+        spm.encode_pieces("refund_request"),
+        ["▁refund", "_", "request"]
+    );
     assert_eq!(spm.encode_pieces("("), ["▁("]);
 }

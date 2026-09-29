@@ -125,7 +125,10 @@ impl SentencePieceTokenizer {
             match types[index] {
                 TYPE_NORMAL | TYPE_USER_DEFINED | TYPE_UNUSED => {
                     if normal_ids.insert(piece.clone(), id).is_some() {
-                        return Err(format!("duplicate piece {:?}", String::from_utf8_lossy(piece)));
+                        return Err(format!(
+                            "duplicate piece {:?}",
+                            String::from_utf8_lossy(piece)
+                        ));
                     }
                     if types[index] == TYPE_NORMAL {
                         min_score = min_score.min(scores[index]);
@@ -134,7 +137,10 @@ impl SentencePieceTokenizer {
                 }
                 _ => {
                     if reserved_ids.insert(piece.clone(), id).is_some() {
-                        return Err(format!("duplicate piece {:?}", String::from_utf8_lossy(piece)));
+                        return Err(format!(
+                            "duplicate piece {:?}",
+                            String::from_utf8_lossy(piece)
+                        ));
                     }
                     if types[index] == TYPE_UNKNOWN {
                         if unk_id != u32::MAX {
@@ -265,7 +271,15 @@ impl SentencePieceTokenizer {
                 } else {
                     self.scores[id as usize]
                 };
-                push_node(&mut nodes, &mut begin_nodes, &mut end_nodes, begin, piece_len, id, score);
+                push_node(
+                    &mut nodes,
+                    &mut begin_nodes,
+                    &mut end_nodes,
+                    begin,
+                    piece_len,
+                    id,
+                    score,
+                );
                 if piece_len == utf8_char_len(sentence, begin) {
                     has_single_node = true;
                 }
@@ -290,10 +304,24 @@ impl SentencePieceTokenizer {
         // pushed before anything else can land at `len` — and nothing else does,
         // because `PopulateNodes` never starts a node at `len`.
         let bos = nodes.len();
-        nodes.push(Node { begin: 0, end: 0, id: 0, score: 0.0, backtrace: 0.0, prev: None });
+        nodes.push(Node {
+            begin: 0,
+            end: 0,
+            id: 0,
+            score: 0.0,
+            backtrace: 0.0,
+            prev: None,
+        });
         end_nodes[0].push(bos);
         let eos = nodes.len();
-        nodes.push(Node { begin: len, end: len, id: 0, score: 0.0, backtrace: 0.0, prev: None });
+        nodes.push(Node {
+            begin: len,
+            end: len,
+            id: 0,
+            score: 0.0,
+            backtrace: 0.0,
+            prev: None,
+        });
         begin_nodes[len].push(eos);
 
         for pos in 0..=len {
@@ -359,7 +387,14 @@ fn push_node(
     score: f32,
 ) {
     let index = nodes.len();
-    nodes.push(Node { begin, end: begin + len, id, score, backtrace: 0.0, prev: None });
+    nodes.push(Node {
+        begin,
+        end: begin + len,
+        id,
+        score,
+        backtrace: 0.0,
+        prev: None,
+    });
     begin_nodes[begin].push(index);
     end_nodes[begin + len].push(index);
 }
@@ -367,7 +402,9 @@ fn push_node(
 /// Length in bytes of the UTF-8 character starting at `pos`; a malformed byte
 /// counts as one, matching `string_util::IsValidDecodeUTF8`.
 fn utf8_char_len(bytes: &[u8], pos: usize) -> usize {
-    let Some(first) = bytes.get(pos) else { return 1 };
+    let Some(first) = bytes.get(pos) else {
+        return 1;
+    };
     let len = match first {
         0x00..=0x7f => 1,
         0xc0..=0xdf => 2,
@@ -576,7 +613,11 @@ impl Normalizer {
         }
 
         if self.remove_extra_whitespaces {
-            let marker: &[u8] = if self.escape_whitespaces { &SPACE_SYMBOL } else { b" " };
+            let marker: &[u8] = if self.escape_whitespaces {
+                &SPACE_SYMBOL
+            } else {
+                b" "
+            };
             while out.len() >= marker.len() && out.ends_with(marker) {
                 let new_len = out.len() - marker.len();
                 out.truncate(new_len);
@@ -633,8 +674,7 @@ impl CharsMap {
         if blob.len() <= 4 {
             return Err("precompiled charsmap is truncated".into());
         }
-        let trie_size =
-            u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+        let trie_size = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
         if trie_size >= blob.len() || trie_size % 4 != 0 {
             return Err("precompiled charsmap has a bad trie size".into());
         }
@@ -673,7 +713,10 @@ impl CharsMap {
 
     fn segment(&self, offset: usize) -> Option<&[u8]> {
         let rest = self.pool.get(offset..)?;
-        let len = rest.iter().position(|&byte| byte == 0).unwrap_or(rest.len());
+        let len = rest
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(rest.len());
         Some(&rest[..len])
     }
 }
@@ -761,7 +804,10 @@ impl<'a> Iterator for ProtoReader<'a> {
                 }
                 let raw = &self.buf[next..end];
                 self.pos = end;
-                Some((field, Value::F32(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))))
+                Some((
+                    field,
+                    Value::F32(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])),
+                ))
             }
             // Groups (3, 4) and the deprecated 6/7 wire types never appear in a
             // SentencePiece model; stop rather than mis-parse.
@@ -839,7 +885,10 @@ mod tests {
     #[test]
     fn normalizer_defaults_escape_whitespace() {
         let normalizer = Normalizer::default();
-        assert_eq!(normalizer.normalize(b"hello world"), "\u{2581}hello\u{2581}world".as_bytes());
+        assert_eq!(
+            normalizer.normalize(b"hello world"),
+            "\u{2581}hello\u{2581}world".as_bytes()
+        );
         assert_eq!(normalizer.normalize(b"  hi  "), "\u{2581}hi".as_bytes());
     }
 }

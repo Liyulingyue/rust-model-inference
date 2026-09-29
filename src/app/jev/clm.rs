@@ -16,9 +16,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{JevQuestionInput, JevResult, JevMode};
-use crate::core::thread_pool::ComputePool;
+use super::{JevMode, JevQuestionInput, JevResult};
 use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::models::clm::ClmHeads;
@@ -48,15 +48,17 @@ fn embed(
     // candidate reaches the encoder exactly as the caller wrote it.
     let token_ids = tokenizer.encode(
         text,
-        EncodeOptions { add_special: false, parse_special: false },
+        EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        },
     );
     if token_ids.is_empty() {
         return Err(format!("empty input: {text:?}"));
     }
     let positions = qwen_text_positions(token_ids.len());
     let capacity = token_ids.len() + 4;
-    let mut session =
-        Qwen3Session::new(model, capacity).map_err(|e| format!("session: {e}"))?;
+    let mut session = Qwen3Session::new(model, capacity).map_err(|e| format!("session: {e}"))?;
     session
         .forward_last_hidden(
             Qwen3Input {
@@ -93,7 +95,9 @@ pub fn run_clm_scoring(
 
     eprintln!(
         "CLM: encoder {}x{} + heads ({} questions)",
-        config.n_layer, config.n_embd, prepared.len()
+        config.n_layer,
+        config.n_embd,
+        prepared.len()
     );
 
     let t0 = std::time::Instant::now();
@@ -114,8 +118,8 @@ pub fn run_clm_scoring(
         } else {
             format!("{}\n\n{}", context.trim(), q.text.trim())
         };
-        let z_state = heads
-            .project_state(&embed(&tokenizer, &model, &state_text)?, &mut scratch)?;
+        let z_state =
+            heads.project_state(&embed(&tokenizer, &model, &state_text)?, &mut scratch)?;
 
         // TODO(clm): no candidate cache.  The reference client memoises the
         // action-side embedding per candidate and reports ~13x at 1k
@@ -140,9 +144,11 @@ pub fn run_clm_scoring(
         // report, so a caller can read either mode the same way.
         let confidence = match choice_label {
             Some(c) => {
-                let i = labels(q.descriptions.len()).iter().position(|&l| l == c).unwrap_or(0);
-                probabilities[i]
-                    - probabilities.iter().sum::<f32>() / probabilities.len() as f32
+                let i = labels(q.descriptions.len())
+                    .iter()
+                    .position(|&l| l == c)
+                    .unwrap_or(0);
+                probabilities[i] - probabilities.iter().sum::<f32>() / probabilities.len() as f32
             }
             None => 0.0,
         };
@@ -153,8 +159,7 @@ pub fn run_clm_scoring(
             .sum::<f32>();
         let mut sorted = probabilities.clone();
         sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        let margin = sorted.first().copied().unwrap_or(0.0)
-            - sorted.get(1).copied().unwrap_or(0.0);
+        let margin = sorted.first().copied().unwrap_or(0.0) - sorted.get(1).copied().unwrap_or(0.0);
 
         results.push(JevResult {
             mode: JevMode::Choice,
@@ -177,7 +182,6 @@ pub fn run_clm_scoring(
     Ok(results)
 }
 
-
 /// Load the head file, then delegate to [`run_clm_scoring`].  CLI only.
 pub fn run_clm_decision_data(
     source: Arc<dyn TensorSource>,
@@ -186,9 +190,8 @@ pub fn run_clm_decision_data(
     questions: &[JevQuestionInput],
     n_threads_arg: usize,
 ) -> Result<Vec<JevResult>, String> {
-    let head_source: Box<dyn TensorSource> =
-        open_model_source(head_path, ComponentRole::Llm)
-            .map_err(|e| format!("open CLM heads ({}): {e}", head_path.display()))?;
+    let head_source: Box<dyn TensorSource> = open_model_source(head_path, ComponentRole::Llm)
+        .map_err(|e| format!("open CLM heads ({}): {e}", head_path.display()))?;
     let heads = ClmHeads::from_source(head_source.as_ref())?;
 
     let tokenizer = Arc::new(
@@ -229,11 +232,11 @@ pub fn run_clm_decision(
     }
     for r in &results {
         println!("Q: {}", r.question);
-        for (label, (desc, (p, v))) in r
-            .labels
-            .iter()
-            .zip(r.descriptions.iter().zip(r.probabilities.iter().zip(r.values.iter())))
-        {
+        for (label, (desc, (p, v))) in r.labels.iter().zip(
+            r.descriptions
+                .iter()
+                .zip(r.probabilities.iter().zip(r.values.iter())),
+        ) {
             println!("  {label}. {desc}  p={p:.4}  score={v:.4}");
         }
         if let Some(c) = r.choice_label {

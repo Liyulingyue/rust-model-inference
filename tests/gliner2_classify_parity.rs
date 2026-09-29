@@ -105,7 +105,11 @@ fn matches_the_reference_stack() {
 
     let value = fixture();
     let cases = value["cases"].as_array().expect("cases");
-    assert!(cases.len() >= 6, "fixture looks truncated: {} cases", cases.len());
+    assert!(
+        cases.len() >= 6,
+        "fixture looks truncated: {} cases",
+        cases.len()
+    );
 
     for case in cases {
         let text = case["text"].as_str().expect("text");
@@ -116,10 +120,7 @@ fn matches_the_reference_stack() {
         let encoded = model
             .encode_prompt(&tasks, text)
             .unwrap_or_else(|error| panic!("encode {text:?}: {error}"));
-        assert_eq!(
-            encoded.input_ids, want_ids,
-            "input_ids differ for {text:?}"
-        );
+        assert_eq!(encoded.input_ids, want_ids, "input_ids differ for {text:?}");
         let got_positions: Vec<Vec<usize>> = encoded
             .markers
             .iter()
@@ -138,7 +139,12 @@ fn matches_the_reference_stack() {
             .unwrap_or_else(|error| panic!("score {text:?}: {error}"));
         assert_eq!(results.len(), tasks.len());
 
-        for (task_index, want_logits) in case["logits"].as_array().expect("logits").iter().enumerate() {
+        for (task_index, want_logits) in case["logits"]
+            .as_array()
+            .expect("logits")
+            .iter()
+            .enumerate()
+        {
             let got = &results[task_index];
             let want: Vec<f32> = want_logits
                 .as_array()
@@ -146,7 +152,11 @@ fn matches_the_reference_stack() {
                 .iter()
                 .map(|value| value.as_f64().expect("logit") as f32)
                 .collect();
-            assert_eq!(got.scores.len(), want.len(), "label count differs for {text:?}");
+            assert_eq!(
+                got.scores.len(),
+                want.len(),
+                "label count differs for {text:?}"
+            );
             for (index, (score, expected)) in got.scores.iter().zip(&want).enumerate() {
                 assert!(
                     (score.logit - expected).abs() < LOGIT_TOLERANCE,
@@ -160,7 +170,10 @@ fn matches_the_reference_stack() {
             // `selected` must be consistent with the decoded probabilities.
             let total: f32 = got.scores.iter().map(|score| score.probability).sum();
             if got.multi_label {
-                assert!(got.scores.iter().all(|score| (0.0..=1.0).contains(&score.probability)));
+                assert!(got
+                    .scores
+                    .iter()
+                    .all(|score| (0.0..=1.0).contains(&score.probability)));
                 assert!(!got.selected.is_empty());
             } else {
                 assert!(

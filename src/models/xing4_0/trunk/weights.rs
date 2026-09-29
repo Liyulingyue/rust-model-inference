@@ -79,8 +79,7 @@ fn load_f32<S: TensorSource + ?Sized>(
     name: &str,
     expected: usize,
 ) -> Result<Vec<f32>, String> {
-    load_f32_tensor(source, name, &[expected as u64])
-        .map_err(|e| format!("{name}: {e}"))
+    load_f32_tensor(source, name, &[expected as u64]).map_err(|e| format!("{name}: {e}"))
 }
 
 /// Load an F32/BF16 tensor with any shape, returning it flattened. Used
@@ -96,8 +95,14 @@ fn load_f32_flat<S: TensorSource + ?Sized>(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("tensor {name} not found"))?;
-    if !matches!(info.ggml_type, crate::core::tensor::GGMLType::F32 | crate::core::tensor::GGMLType::BF16) {
-        return Err(format!("{name}: expected F32/BF16, found {:?}", info.ggml_type));
+    if !matches!(
+        info.ggml_type,
+        crate::core::tensor::GGMLType::F32 | crate::core::tensor::GGMLType::BF16
+    ) {
+        return Err(format!(
+            "{name}: expected F32/BF16, found {:?}",
+            info.ggml_type
+        ));
     }
     let total: u64 = info.dims.iter().product();
     if total as usize != expected {
@@ -121,7 +126,10 @@ fn load_weight<'a, S: TensorSource + ?Sized>(
         .tensor_info(name)
         .ok_or_else(|| format!("tensor info {name} not found"))?;
     Ok(Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes, info.ggml_type, n_in, n_out,
+        bytes,
+        info.ggml_type,
+        n_in,
+        n_out,
     )))
 }
 
@@ -141,7 +149,9 @@ fn expert_weights<'a, S: TensorSource + ?Sized>(
         .tensor_info(name)
         .ok_or_else(|| format!("tensor info {name} not found"))?;
     if bytes.len() % n_expert != 0 {
-        return Err(format!("{name}: byte size not divisible by {n_expert} experts"));
+        return Err(format!(
+            "{name}: byte size not divisible by {n_expert} experts"
+        ));
     }
     let per = bytes.len() / n_expert;
     Ok((0..n_expert)

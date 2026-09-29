@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use super::{JevQuestionInput, JevMode, JevResult};
+use super::{JevMode, JevQuestionInput, JevResult};
 use crate::app::cli::CliOptions;
 use crate::core::sentencepiece::SentencePieceTokenizer;
 use crate::core::tensor::TensorSource;
@@ -46,15 +46,13 @@ pub fn gliner2_schema(
 /// One task per `--jev-question`: the question text is the head name and the
 /// options are its label set. This is the HTTP shape too, so a caller uses the
 /// same request body whichever front end it talks to.
-pub fn schema_from_questions(
-    questions: &[JevQuestionInput],
-) -> Result<serde_json::Value, String> {
+pub fn schema_from_questions(questions: &[JevQuestionInput]) -> Result<serde_json::Value, String> {
     let tasks: Vec<LabelSet> = questions
         .iter()
         .map(|question| LabelSet {
-                name: question.text.clone(),
-                labels: question.options.clone(),
-                descriptions: None,
+            name: question.text.clone(),
+            labels: question.options.clone(),
+            descriptions: None,
             multi_label: false,
             cls_threshold: None,
             prompt: None,
@@ -98,7 +96,10 @@ pub fn schema_from_label_sets(tasks: &[LabelSet]) -> Result<serde_json::Value, S
                 }
                 let mut labelled = serde_json::Map::new();
                 for (label, description) in task.labels.iter().zip(descriptions) {
-                    labelled.insert(label.clone(), serde_json::Value::String(description.clone()));
+                    labelled.insert(
+                        label.clone(),
+                        serde_json::Value::String(description.clone()),
+                    );
                 }
                 entry.insert("labels".into(), serde_json::Value::Object(labelled));
             }
@@ -149,7 +150,9 @@ pub fn parse_schema(schema: &serde_json::Value) -> Result<Vec<Task>, String> {
 
 /// Labels are `A`, `B`, ... just like the logit-based JEV scorers use.
 fn labels(count: usize) -> Vec<char> {
-    (0..count).map(|index| (b'A' + index as u8) as char).collect()
+    (0..count)
+        .map(|index| (b'A' + index as u8) as char)
+        .collect()
 }
 
 /// Score with an already-loaded model. The server keeps it alive across
@@ -166,12 +169,18 @@ pub fn run_gliner2_scoring(
     let out: Vec<JevResult> = results
         .iter()
         .map(|result| {
-            let probabilities: Vec<f32> =
-                result.scores.iter().map(|score| score.probability).collect();
+            let probabilities: Vec<f32> = result
+                .scores
+                .iter()
+                .map(|score| score.probability)
+                .collect();
             let values: Vec<f32> = result.scores.iter().map(|score| score.logit).collect();
             let labels = labels(result.scores.len());
-            let descriptions: Vec<String> =
-                result.scores.iter().map(|score| score.label.clone()).collect();
+            let descriptions: Vec<String> = result
+                .scores
+                .iter()
+                .map(|score| score.label.clone())
+                .collect();
             let best = probabilities
                 .iter()
                 .enumerate()
@@ -189,10 +198,14 @@ pub fn run_gliner2_scoring(
                 .sum::<f32>();
             let mut sorted = probabilities.clone();
             sorted.sort_by(|a, b| b.total_cmp(a));
-            let margin = sorted.first().copied().unwrap_or(0.0)
-                - sorted.get(1).copied().unwrap_or(0.0);
+            let margin =
+                sorted.first().copied().unwrap_or(0.0) - sorted.get(1).copied().unwrap_or(0.0);
             JevResult {
-                mode: if result.multi_label { JevMode::MultiSelect } else { JevMode::Choice },
+                mode: if result.multi_label {
+                    JevMode::MultiSelect
+                } else {
+                    JevMode::Choice
+                },
                 question: result.task.clone(),
                 labels,
                 descriptions,

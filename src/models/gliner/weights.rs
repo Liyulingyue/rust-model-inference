@@ -48,12 +48,20 @@ pub struct ModelWeights<'a> {
     pub classifier_2_bias: Vec<f32>,
 }
 
-fn load_vec<S: TensorSource + ?Sized>(source: &S, name: &str, len: usize) -> Result<Vec<f32>, String> {
+fn load_vec<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    len: usize,
+) -> Result<Vec<f32>, String> {
     crate::core::tensor::load_f32_tensor(source, name, &[len as u64])
         .map_err(|error| format!("{name}: {error}"))
 }
 
-fn load_norm<S: TensorSource + ?Sized>(source: &S, name: &str, width: usize) -> Result<Norm, String> {
+fn load_norm<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    width: usize,
+) -> Result<Norm, String> {
     Ok(Norm {
         weight: load_vec(source, &format!("{name}.weight"), width)?,
         bias: load_vec(source, &format!("{name}.bias"), width)?,
@@ -153,7 +161,12 @@ pub fn load_weights<'a, S: TensorSource + ?Sized>(
         d,
         spec.classifier_intermediate,
     )?;
-    let classifier_2 = load_weight(source, "classifier.2.weight", spec.classifier_intermediate, 1)?;
+    let classifier_2 = load_weight(
+        source,
+        "classifier.2.weight",
+        spec.classifier_intermediate,
+        1,
+    )?;
 
     Ok(ModelWeights {
         token_embd,

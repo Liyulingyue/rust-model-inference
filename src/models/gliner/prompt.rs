@@ -40,7 +40,15 @@ pub const OUTPUT_TOKEN: &str = "[OUTPUT]";
 
 /// The ten schema markers GLiNER2 registers as additional special tokens.
 pub const SPECIAL_TOKENS: [&str; 10] = [
-    SEP_STRUCT, SEP_TEXT, P_TOKEN, "[C]", "[E]", "[R]", L_TOKEN, EXAMPLE_TOKEN, OUTPUT_TOKEN,
+    SEP_STRUCT,
+    SEP_TEXT,
+    P_TOKEN,
+    "[C]",
+    "[E]",
+    "[R]",
+    L_TOKEN,
+    EXAMPLE_TOKEN,
+    OUTPUT_TOKEN,
     DESC_TOKEN,
 ];
 
@@ -107,7 +115,11 @@ pub struct Label {
 
 impl Label {
     pub fn new(name: impl Into<String>) -> Self {
-        Label { name: name.into(), description: None, examples: Vec::new() }
+        Label {
+            name: name.into(),
+            description: None,
+            examples: Vec::new(),
+        }
     }
 }
 
@@ -231,9 +243,10 @@ impl Task {
                     ));
                 }
                 let read = |index: usize, field: &str| {
-                    items[index].as_str().map(str::to_string).ok_or_else(|| {
-                        format!("task {name:?}: example {field} must be a string")
-                    })
+                    items[index]
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("task {name:?}: example {field} must be a string"))
                 };
                 let (input, output) = (read(0, "input")?, read(1, "label")?);
                 // Few-shot examples attach to their own label, and the
@@ -243,9 +256,7 @@ impl Task {
                     .iter_mut()
                     .find(|label| label.name == output)
                     .ok_or_else(|| {
-                        format!(
-                            "task {name:?}: example label {output:?} is not one of its labels"
-                        )
+                        format!("task {name:?}: example label {output:?} is not one of its labels")
                     })?;
                 target.examples.push((input, output));
             }
@@ -257,10 +268,9 @@ impl Task {
     fn labels_from_array(name: &str, items: &[serde_json::Value]) -> Result<Self, String> {
         let mut labels = Vec::with_capacity(items.len());
         for item in items {
-            labels.push(Label::new(
-                item.as_str()
-                    .ok_or_else(|| format!("task {name:?}: every label must be a string"))?,
-            ));
+            labels.push(Label::new(item.as_str().ok_or_else(|| {
+                format!("task {name:?}: every label must be a string")
+            })?));
         }
         let task = Task::new(name, labels);
         task.validate()?;
@@ -273,12 +283,19 @@ impl Task {
             return Err("task name must be a non-empty string".into());
         }
         if self.labels.is_empty() {
-            return Err(format!("task {:?} must declare at least one label", self.name));
+            return Err(format!(
+                "task {:?} must declare at least one label",
+                self.name
+            ));
         }
         let mut seen: Vec<&str> = Vec::with_capacity(self.labels.len());
         for value in std::iter::once(&self.name)
             .chain(self.labels.iter().map(|label| &label.name))
-            .chain(self.labels.iter().filter_map(|label| label.description.as_ref()))
+            .chain(
+                self.labels
+                    .iter()
+                    .filter_map(|label| label.description.as_ref()),
+            )
             .chain(self.prompt.iter())
             .chain(
                 self.labels
@@ -307,7 +324,11 @@ impl Task {
             for (_, output) in &label.examples {
                 // The processor drops examples whose output is not a declared
                 // label; refusing them here keeps the prompt honest.
-                if !self.labels.iter().any(|candidate| candidate.name == *output) {
+                if !self
+                    .labels
+                    .iter()
+                    .any(|candidate| candidate.name == *output)
+                {
                     return Err(format!(
                         "task {:?}: example label {output:?} is not one of its labels",
                         self.name
@@ -322,11 +343,17 @@ impl Task {
             ));
         }
         if self.temperature <= 0.0 {
-            return Err(format!("task {:?}: temperature must be positive", self.name));
+            return Err(format!(
+                "task {:?}: temperature must be positive",
+                self.name
+            ));
         }
         match self.activation.as_deref() {
             None | Some("auto") | Some("softmax") | Some("sigmoid") => Ok(()),
-            Some(other) => Err(format!("task {:?}: unknown activation {other:?}", self.name)),
+            Some(other) => Err(format!(
+                "task {:?}: unknown activation {other:?}",
+                self.name
+            )),
         }
     }
 
@@ -346,7 +373,12 @@ impl Task {
                 prompt.push_str(&format!(" {EXAMPLE_TOKEN} {input} {OUTPUT_TOKEN} {output}"));
             }
         }
-        let mut tokens = vec!["(".to_string(), P_TOKEN.to_string(), prompt, "(".to_string()];
+        let mut tokens = vec![
+            "(".to_string(),
+            P_TOKEN.to_string(),
+            prompt,
+            "(".to_string(),
+        ];
         for label in &self.labels {
             tokens.push(L_TOKEN.to_string());
             tokens.push(label.name.clone());
@@ -417,7 +449,10 @@ pub fn encode_token(
         for candidate in rest.char_indices() {
             let (index, _) = candidate;
             for (text, _) in ADDED_TOKENS {
-                if rest[index..].starts_with(text) && (index < at || (index == at && hit.is_some_and(|current| text.len() > current.len()))) {
+                if rest[index..].starts_with(text)
+                    && (index < at
+                        || (index == at && hit.is_some_and(|current| text.len() > current.len())))
+                {
                     at = index;
                     hit = Some(text);
                 }
@@ -503,7 +538,10 @@ pub fn build_prompt(
     let mut input_ids: Vec<u32> = Vec::new();
     let mut markers: Vec<TaskMarkers> = Vec::with_capacity(schema_tokens.len());
     for (task_index, task) in tasks.iter().enumerate() {
-        markers.push(TaskMarkers { positions: Vec::new(), labels: task.labels.iter().map(|l| l.name.clone()).collect() });
+        markers.push(TaskMarkers {
+            positions: Vec::new(),
+            labels: task.labels.iter().map(|l| l.name.clone()).collect(),
+        });
     }
     for (orig_index, token) in combined.iter().enumerate() {
         let sub = encode_token(token, spm);
@@ -542,10 +580,19 @@ mod tests {
 
     #[test]
     fn splits_urls_emails_and_handles() {
-        assert_eq!(words("mail me at a@b.co"), vec!["mail", "me", "at", "a@b.co"]);
+        assert_eq!(
+            words("mail me at a@b.co"),
+            vec!["mail", "me", "at", "a@b.co"]
+        );
         assert_eq!(words("ping @handle_now"), vec!["ping", "@handle_now"]);
-        assert_eq!(words("see https://x.dev/a?b=c now"), vec!["see", "https://x.dev/a?b=c", "now"]);
-        assert_eq!(words("go to www.example.com"), vec!["go", "to", "www.example.com"]);
+        assert_eq!(
+            words("see https://x.dev/a?b=c now"),
+            vec!["see", "https://x.dev/a?b=c", "now"]
+        );
+        assert_eq!(
+            words("go to www.example.com"),
+            vec!["go", "to", "www.example.com"]
+        );
     }
 
     #[test]
@@ -571,10 +618,7 @@ mod tests {
 
     #[test]
     fn schema_prompt_spells_the_marker_layout() {
-        let task = Task::new(
-            "intent",
-            vec![Label::new("a"), Label::new("b")],
-        );
+        let task = Task::new("intent", vec![Label::new("a"), Label::new("b")]);
         assert_eq!(
             task.schema_tokens(),
             vec!["(", "[P]", "intent", "(", "[L]", "a", "[L]", "b", ")", ")"]
@@ -588,7 +632,10 @@ mod tests {
         task.labels[0].description = Some("it worked".into());
         task.labels[0].examples = vec![("it worked".into(), "yes".into())];
         let tokens = task.schema_tokens();
-        assert_eq!(tokens[2], "answer: Did it work? [DESCRIPTION] yes: it worked [EXAMPLE] it worked [OUTPUT] yes");
+        assert_eq!(
+            tokens[2],
+            "answer: Did it work? [DESCRIPTION] yes: it worked [EXAMPLE] it worked [OUTPUT] yes"
+        );
     }
 
     #[test]

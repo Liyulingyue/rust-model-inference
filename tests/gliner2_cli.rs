@@ -5,8 +5,8 @@
 //! `tests/gliner2_classify_parity.rs`.
 
 use rust_model_inference::app::{
-    gliner2_schema, parse_cli_options, parse_schema, schema_from_label_sets,
-    schema_from_questions, validate_cli_options, JevQuestionInput, LabelSet,
+    gliner2_schema, parse_cli_options, parse_schema, schema_from_label_sets, schema_from_questions,
+    validate_cli_options, JevQuestionInput, LabelSet,
 };
 
 fn options(args: &[&str]) -> rust_model_inference::app::CliOptions {
@@ -41,7 +41,13 @@ fn gliner2_decide_requires_jev_and_excludes_clm() {
     assert!(validate_cli_options(&no_jev).is_err());
 
     let both = options(&[
-        "rmi", "--model", "m.gguf", "--jev", "--gliner2-decide", "--clm-head", "h.gguf",
+        "rmi",
+        "--model",
+        "m.gguf",
+        "--jev",
+        "--gliner2-decide",
+        "--clm-head",
+        "h.gguf",
     ]);
     assert!(validate_cli_options(&both).is_err());
 
@@ -65,7 +71,11 @@ fn questions_become_one_task_each() {
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].name, "intent");
     assert_eq!(
-        tasks[0].labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        tasks[0]
+            .labels
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>(),
         ["a", "b"]
     );
     assert_eq!(tasks[1].name, "priority");
@@ -74,9 +84,15 @@ fn questions_become_one_task_each() {
 
 #[test]
 fn an_empty_label_set_is_an_error_not_an_empty_task() {
-    let questions = vec![JevQuestionInput { text: "intent".into(), options: vec![] }];
+    let questions = vec![JevQuestionInput {
+        text: "intent".into(),
+        options: vec![],
+    }];
     assert!(schema_from_questions(&questions).is_err());
-    let unnamed = vec![JevQuestionInput { text: "  ".into(), options: vec!["a".into()] }];
+    let unnamed = vec![JevQuestionInput {
+        text: "  ".into(),
+        options: vec!["a".into()],
+    }];
     assert!(schema_from_questions(&unnamed).is_err());
 }
 
@@ -94,7 +110,10 @@ fn label_sets_cover_descriptions_thresholds_and_prompts() {
     assert!(parsed[0].multi_label);
     assert_eq!(parsed[0].cls_threshold, 0.4);
     assert_eq!(parsed[0].prompt.as_deref(), Some("which parts?"));
-    assert_eq!(parsed[0].labels[0].description.as_deref(), Some("the battery"));
+    assert_eq!(
+        parsed[0].labels[0].description.as_deref(),
+        Some("the battery")
+    );
     assert_eq!(parsed[0].labels[1].name, "keyboard");
 }
 
@@ -129,10 +148,16 @@ fn the_schema_flag_wins_over_the_question_flags() {
         r#"{"intent":["a","b"],"aspects":{"labels":["x","y"],"multi_label":true}}"#,
     ]);
     validate_cli_options(&parsed).unwrap();
-    let questions = vec![JevQuestionInput { text: "ignored".into(), options: vec!["ignored".into()] }];
+    let questions = vec![JevQuestionInput {
+        text: "ignored".into(),
+        options: vec!["ignored".into()],
+    }];
     let tasks = parse_schema(&gliner2_schema(&parsed, &questions).unwrap()).unwrap();
     assert_eq!(
-        tasks.iter().map(|task| task.name.as_str()).collect::<Vec<_>>(),
+        tasks
+            .iter()
+            .map(|task| task.name.as_str())
+            .collect::<Vec<_>>(),
         ["intent", "aspects"]
     );
     assert!(tasks[1].multi_label);
@@ -196,7 +221,10 @@ fn reference_schema_shapes_all_parse() {
     assert_eq!(tasks[0].labels.len(), 2);
     assert!(tasks[1].multi_label);
     assert_eq!(tasks[1].cls_threshold, 0.4);
-    assert_eq!(tasks[2].labels[0].description.as_deref(), Some("wants a new PIN"));
+    assert_eq!(
+        tasks[2].labels[0].description.as_deref(),
+        Some("wants a new PIN")
+    );
     assert_eq!(tasks[3].prompt.as_deref(), Some("Did it work?"));
     assert_eq!(tasks[3].labels[0].examples.len(), 1);
     assert_eq!(tasks[3].labels[1].examples.len(), 0);
