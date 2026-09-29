@@ -6,6 +6,7 @@ use rust_model_inference::format::ggufrs::ComponentRole;
 use rust_model_inference::models::diffusion::qwen_image_2_1::{
     matches_signature, DEFAULT_LATENT_SIDE, DEFAULT_TIMESTEP,
 };
+use rust_model_inference::models::qwen3::embedding::print_embedding;
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
 use rust_model_inference::DreamXConfig;
@@ -318,7 +319,8 @@ fn main() {
     }
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
-        app::run_or_exit(app::run_omni_embedding(
+        let started = std::time::Instant::now();
+        let embedding = match app::run_omni_embedding(
             source.as_ref(),
             explicit_mmproj.expect("validated media embedding mmproj"),
             image,
@@ -326,8 +328,18 @@ fn main() {
             audio,
             prompt,
             options.threads,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Inference error: {error}");
+                std::process::exit(1);
+            }
+        };
+        print_embedding(
+            &embedding,
             options.embedding_output,
-        ));
+            started.elapsed().as_millis(),
+        );
         return;
     }
 
