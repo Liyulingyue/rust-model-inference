@@ -136,11 +136,15 @@ impl MatmulScratch {
 ///
 /// `Weight::n_out` is *not* usable for F32: `QuantizedTensor::n_rows` reports
 /// `!data.is_empty()` for that variant, so every F32 `Weight` claims an output
-/// width of 1. `quantize_and_matmul_with_scratch` reads `self.n_out`, so
-/// calling it on an F32 weight would silently compute a single column. The F32
-/// path therefore calls the kernel directly with the real width, which is the
-/// same call the prepared path makes (`input_q8` empty ⇒ the F32 branch of
-/// `forward_prepared`), and keeps the SIMD + thread-pool dispatch.
+/// width of 1 and `quantize_and_matmul_with_scratch` — which reads
+/// `self.n_out` — would silently compute a single column. The F32 path
+/// therefore takes the weight's F32 slice and drives the SIMD row selector
+/// itself with the real width, which also keeps the row partitioning (and so
+/// the thread pool) in play.
+///
+/// `Kernel::forward_prepared` is not usable here even for F32: the F32 kernel
+/// implements it as the *scalar* fallback, while the selector is what picks
+/// AVX2/NEON.
 pub fn matmul_into(
     weight: &Weight<'_>,
     input: &[f32],
@@ -151,27 +155,27 @@ pub fn matmul_into(
 ) {
     debug_assert_eq!(input.len(), n_in);
     debug_assert_eq!(output.len(), n_out);
-    if !matches!(weight.ggml_type, crate::core::tensor::GGMLType::F32) {
-        let mut scratch = MatmulScratch::new(n_in.max(n_out));
-        weight.quantize_and_matmul_with_scratch(
-            input,
-            &mut scratch.q8k,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            output,
-            pool,
-        );
+    if let Some(rows) = weight.kernel.f32_slice() {
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(|ith, nth| {
+            // Same disjointness contract as `quantize_and_matmul_with_scratch`:
+            // the selector writes only the `ith` row band of `output`.
+            let out = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out) };
+            crate::ops::kernel::f32::forward_f32_rows_dispatch(
+                rows, input, out, n_in, n_out, ith, nth,
+            );
+        });
         return;
     }
-    let output_ptr = output.as_mut_ptr();
-    pool.compute(|ith, nth| {
-        // Same disjointness contract as `quantize_and_matmul_with_scratch`:
-        // the kernel writes only `output[ith * n_out .. (ith + 1) * n_out]`.
-        let out = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out) };
-        weight
-            .kernel
-            .forward_prepared(input, &[], &[], None, out, n_in, n_out, ith, nth);
-    });
+    let mut scratch = MatmulScratch::new(n_in.max(n_out));
+    weight.quantize_and_matmul_with_scratch(
+        input,
+        &mut scratch.q8k,
+        &mut scratch.q8,
+        &mut scratch.scales,
+        output,
+        pool,
+    );
 }
 
 /// `weight @ input` with a fresh output buffer.

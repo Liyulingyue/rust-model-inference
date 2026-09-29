@@ -28,8 +28,9 @@ pub use diffusion::{run_dreamx_cli, run_pig_image, run_z_image_cli, write_png_at
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, image_supported_arch,
     jev_payload_json, jev_system_prompt, prepare_jev_grouped_questions, prepare_jev_questions,
-    run_clm_decision, run_clm_scoring, run_jev_decision, run_jev_decision_data,
-    run_jev_grouped_decision,
+    gliner2_schema, load_gliner2_source, parse_schema, run_clm_decision, run_clm_scoring,
+    run_gliner2_decision, schema_from_label_sets, schema_from_questions, LabelSet,
+    run_gliner2_scoring, run_jev_decision, run_jev_decision_data, run_jev_grouped_decision,
     run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
     JevQuestionInput, JevResult,
 };
@@ -126,6 +127,18 @@ pub fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
         );
         std::process::exit(1);
     })
+}
+
+/// Unwrap a startup-time value or exit with the usual error prefix, for the
+/// call sites inside a `match` that already returned.
+pub fn unwrap_or_exit<T>(result: Result<T, String>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn run_or_exit(result: Result<(), String>) {

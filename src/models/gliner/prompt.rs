@@ -140,6 +140,133 @@ impl Task {
         }
     }
 
+    /// Parse one entry of a `classify_text` task mapping.
+    ///
+    /// Accepts exactly the shapes the reference `runtime._classification_schema`
+    /// takes, so a documented snippet runs unchanged:
+    ///
+    /// ```json
+    /// ["a", "b"]
+    /// {"labels": ["a", "b"], "multi_label": true, "cls_threshold": 0.4}
+    /// {"labels": {"a": "the a label", "b": "the b label"}}
+    /// {"labels": ["yes", "no"], "prompt": "Did it work?"}
+    /// ```
+    pub fn from_json(name: &str, value: &serde_json::Value) -> Result<Self, String> {
+        let mut task = Task::new(name, Vec::new());
+        let spec = match value {
+            serde_json::Value::Array(items) => return Self::labels_from_array(name, items),
+            serde_json::Value::Object(map) if map.contains_key("labels") => map,
+            _ => {
+                return Err(format!(
+                    "task {name:?} must be a label array or an object with a \"labels\" key"
+                ))
+            }
+        };
+        task.labels = match spec.get("labels").expect("checked above") {
+            serde_json::Value::Array(items) => Self::labels_from_array(name, items)?.labels,
+            serde_json::Value::Object(entries) => {
+                let mut labels = Vec::with_capacity(entries.len());
+                for (label, description) in entries {
+                    let description = description.as_str().ok_or_else(|| {
+                        format!("task {name:?}: description of {label:?} must be a string")
+                    })?;
+                    labels.push(Label {
+                        name: label.clone(),
+                        description: Some(description.to_string()),
+                        examples: Vec::new(),
+                    });
+                }
+                labels
+            }
+            _ => {
+                return Err(format!(
+                    "task {name:?}: \"labels\" must be an array or a {{label: description}} object"
+                ))
+            }
+        };
+        if let Some(prompt) = spec.get("prompt") {
+            task.prompt = Some(
+                prompt
+                    .as_str()
+                    .ok_or_else(|| format!("task {name:?}: \"prompt\" must be a string"))?
+                    .to_string(),
+            );
+        }
+        if let Some(multi_label) = spec.get("multi_label") {
+            task.multi_label = multi_label
+                .as_bool()
+                .ok_or_else(|| format!("task {name:?}: \"multi_label\" must be a boolean"))?;
+        }
+        if let Some(threshold) = spec.get("cls_threshold") {
+            task.cls_threshold = threshold
+                .as_f64()
+                .ok_or_else(|| format!("task {name:?}: \"cls_threshold\" must be a number"))?
+                as f32;
+        }
+        if let Some(activation) = spec.get("class_act") {
+            task.activation = Some(
+                activation
+                    .as_str()
+                    .ok_or_else(|| format!("task {name:?}: \"class_act\" must be a string"))?
+                    .to_string(),
+            );
+        }
+        if let Some(temperature) = spec.get("temperature") {
+            task.temperature = temperature
+                .as_f64()
+                .ok_or_else(|| format!("task {name:?}: \"temperature\" must be a number"))?
+                as f32;
+        }
+        if let Some(examples) = spec.get("examples") {
+            let pairs = examples.as_array().ok_or_else(|| {
+                format!("task {name:?}: \"examples\" must be an array of [input, label] pairs")
+            })?;
+            for pair in pairs {
+                let items = pair.as_array().ok_or_else(|| {
+                    format!("task {name:?}: each example must be a [input, label] pair")
+                })?;
+                if items.len() != 2 {
+                    return Err(format!(
+                        "task {name:?}: each example must have exactly 2 items"
+                    ));
+                }
+                let read = |index: usize, field: &str| {
+                    items[index].as_str().map(str::to_string).ok_or_else(|| {
+                        format!("task {name:?}: example {field} must be a string")
+                    })
+                };
+                let (input, output) = (read(0, "input")?, read(1, "label")?);
+                // Few-shot examples attach to their own label, and the
+                // reference only renders examples whose output is declared.
+                let target = task
+                    .labels
+                    .iter_mut()
+                    .find(|label| label.name == output)
+                    .ok_or_else(|| {
+                        format!(
+                            "task {name:?}: example label {output:?} is not one of its labels"
+                        )
+                    })?;
+                target.examples.push((input, output));
+            }
+        }
+        task.validate()?;
+        Ok(task)
+    }
+
+    fn labels_from_array(name: &str, items: &[serde_json::Value]) -> Result<Self, String> {
+        let mut labels = Vec::with_capacity(items.len());
+        for item in items {
+            labels.push(Label::new(
+                item.as_str()
+                    .ok_or_else(|| format!("task {name:?}: every label must be a string"))?,
+            ));
+        }
+        let task = Task::new(name, labels);
+        task.validate()?;
+        Ok(task)
+    }
+
     /// Reject strings that would corrupt marker parsing, matching `_clean`.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {

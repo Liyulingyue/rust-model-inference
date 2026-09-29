@@ -293,6 +293,13 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--gliner2-decide" => options.gliner2_decide = true,
+            "--gliner2-schema" => {
+                if i + 1 < args.len() {
+                    options.gliner2_schema = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             "--tts-model" => {
                 if i + 1 < args.len() {
                     options.tts_model = Some(args[i + 1].as_str().into());

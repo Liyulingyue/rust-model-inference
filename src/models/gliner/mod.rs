@@ -61,6 +61,17 @@ pub struct GlinerModel<'a> {
 impl<'a> GlinerModel<'a> {
     /// Load from a GGUF produced by `tools/converter/gliner/convert_gliner.py`.
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
+        let spm = load_spm(source)?;
+        Self::from_source_with_tokenizer(source, spm)
+    }
+
+    /// Same as [`GlinerModel::from_source`], reusing an already-built
+    /// tokenizer. Rebuilding it costs a 128k-piece trie, which a server pays
+    /// once at startup rather than per request.
+    pub fn from_source_with_tokenizer(
+        source: &'a dyn TensorSource,
+        spm: SentencePieceTokenizer,
+    ) -> Result<Self, String> {
         let arch = meta_str(source, "general.architecture")?;
         if arch != ARCH {
             return Err(format!("expected {ARCH} architecture, got {arch:?}"));
@@ -99,7 +110,6 @@ impl<'a> GlinerModel<'a> {
         if meta_str(source, "tokenizer.ggml.model")? != "spm" {
             return Err("gliner2 requires a SentencePiece tokenizer".into());
         }
-        let spm = load_spm(source)?;
         if spm.len() + 11 != config.vocab_size {
             return Err(format!(
                 "vocab_size {} does not match {} SentencePiece pieces plus 11 added tokens",
@@ -350,7 +360,7 @@ fn meta_bool(source: &dyn TensorSource, name: &str) -> Result<bool, String> {
 /// `vocab_size` — the SentencePiece pieces followed by the eleven added GLiNER
 /// tokens — so everything is cut back to `spm.piece_count` first. The added
 /// tokens never reach the lattice: `prompt::encode_token` resolves them by name.
-fn load_spm(source: &dyn TensorSource) -> Result<SentencePieceTokenizer, String> {
+pub fn load_spm(source: &dyn TensorSource) -> Result<SentencePieceTokenizer, String> {
     let piece_count = meta_usize(source, &key("spm.piece_count"))?;
     let pieces = meta_bytes_array(source, piece_count)?;
     let types_raw = meta_uint_array(source, &key("spm.piece_types"))?;

@@ -17,11 +17,16 @@
 //!   `JevGroupedScorer` implementations).
 
 pub(crate) mod clm;
+pub mod gliner2;
 pub(crate) mod grouped;
 pub(crate) mod single;
 pub(crate) mod types;
 
 pub use clm::{run_clm_decision, run_clm_scoring};
+pub use gliner2::{
+    gliner2_schema, load_gliner2_source, parse_schema, run_gliner2_decision, run_gliner2_scoring,
+    schema_from_label_sets, schema_from_questions, LabelSet,
+};
 pub use grouped::{
     build_grouped_payload, build_grouped_system, prepare_jev_grouped_questions,
     run_jev_grouped_decision, run_jev_grouped_decision_data,

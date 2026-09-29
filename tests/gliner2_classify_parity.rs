@@ -11,7 +11,6 @@
 //! Regenerate with the reference script (needs `transformers==4.48.1`,
 //! `sentencepiece` and `torch`).
 
-use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
 use rust_model_inference::models::gliner::prompt::{Label, Task};
 use rust_model_inference::models::gliner::GlinerModel;

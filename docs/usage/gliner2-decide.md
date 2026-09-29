@@ -1,303 +1,278 @@
-# GLiNER2.5-Decide 适配侦察记录
+# GLiNER2.5-Decide 用法
 
-状态：**侦察完成，未开始实现**。这篇记录架构事实和实现边界，避免下次重新扒。
-
-模型：`fastino/GLiNER2.5-Decide`（ModelScope，safetensors F32 1.9GB）
-
-## 它是什么
-
-340M 英文分类器，底座 `microsoft/deberta-v3-large`（300M）+ 一个 MLP 分类头。
-`classify_text(text, {head: [labels]})` 一次前向给出每个 label 的 logit。
-不生成文本、不推理、不解释。README 明确说 "No prompt template. No generated tokens."
-
-benchmark（fastino/fast-decisions，17 域各 300 样本 exact-match）：
-GLiNER2.5-Decide 60.2% > GLiNER2.5-Decide-1B 59.6% > JevK5 57.6% > SemIf(Qwen3.5-4B) 56.4%
-
-## 架构事实（已从 checkpoint 验证）
-
-`config.json`：
-- `architectures: ["SpanExtractor"]`, `architecture: "span"`, `config_version: 3`
-- `model_name: "microsoft/deberta-v3-large"`
-- `token_pooling: "first"`
-- `max_width: 8`, `span_head.span_mode: "markerV0"`（NER 用，classify 不需要）
-- `use_moe: false`
-
-tensor（419 个，按前缀分组）：
-
-| 前缀 | 数量 | classify 需要？ |
-|---|---|---|
-| `encoder.embeddings.word_embeddings.weight` [128011, 1024] | 1 | 是 |
-| `encoder.embeddings.LayerNorm.{weight,bias}` [1024] | 各 1 | 是 |
-| `encoder.encoder.rel_embeddings.weight` [512, 1024] | 1 | 是（disentangled attention 关键） |
-| `encoder.encoder.layer.N.attention.self.{query,key,value}_proj.{weight,bias}` | 24 层 | 是 |
-| `encoder.encoder.layer.N.attention.output.dense.{weight,bias}` + `output.LayerNorm` | 24 层 | 是（ST-transposed） |
-| `encoder.encoder.layer.N.intermediate.dense.{weight,bias}` [4096, 1024] | 24 层 | 是（FFN up） |
-| `encoder.encoder.layer.N.output.dense.{weight,bias}` + `output.LayerNorm` | 24 层 | 是（FFN down） |
-| `encoder.encoder.LayerNorm.{weight,bias}` | 各 1 | 是（最终层范数） |
-| `classifier.{0,2}.{weight,bias}` | 2 层 | 是 |
-| `span_rep.*` | 6 | 否（NER span 头） |
-| `count_embed.*` / `count_pred.*` | 若干 | 否（NER 计数头） |
-
-维度：hidden 1024，24 层，vocab 128011，FFN 4096，rel embeddings 512 桶。
-
-## 分类头形状
+GLiNER2.5-Decide 不是生成模型。它是 DeBERTa-v3-large encoder 上面接一个两层
+MLP 分类头，**一次前向给出每个 label 的 logit**，不生成 token、不推理、不解释。
 
 ```
-classifier.0: Linear(1024 -> 2048)   [2048, 1024]
-classifier.1: 激活（未序列化，代码里是 Sequential 的中间层）
-classifier.2: Linear(2048 -> 1)      [1, 2048]
+logit(label) = classifier(hidden_at_[L]_marker)(label)
 ```
 
-推理路径（`gliner2/classification/scoring.py::batch_score`）：
+label 集合在**调用时**传进去，不是模型里烤死的。ModelScope 上的
+`fastino/GLiNER2.5-Decide` 是 340M 参数、1.9GB safetensors。
+
+## 1. 准备
+
+```bash
+# 1) 权重 + tokenizer
+models/.venv/bin/modelscope download --model fastino/GLiNER2.5-Decide \
+    model.safetensors config.json --local-dir ./GLiNER2.5-Decide
+models/.venv/bin/modelscope download --model fastino/gliner2-large-v1 \
+    spm.model tokenizer_config.json special_tokens_map.json \
+    --local-dir ./GLiNER2.5-Decide
+
+# 2) 转 GGUF（F32，1.75GB）
+models/.venv/bin/python tools/converter/gliner/convert_gliner.py \
+    models/GLiNER2.5-Decide models/GLiNER2.5-Decide/gliner2-decide-f32.gguf
+```
+
+SentencePiece 词表、piece score、piece type、`nmt_nfkc` charsmap 和三个
+normalizer flag 全部**内嵌进 GGUF metadata**，所以跑起来只需要一个 `.gguf`，
+不需要 `spm.model` 边车文件。
+
+## 2. 命令行
+
+没有专用 binary，挂在既有 JEV flag 家族下（和 CLM 同级）：
+
+```bash
+./target/release/rust-model-inference \
+  --model models/GLiNER2.5-Decide/gliner2-decide-f32.gguf \
+  --jev --gliner2-decide \
+  --jev-context "My subscription renewed on April 15 for ¥5,400 after the service was already down. Can I get that charge refunded?" \
+  --jev-question intent \
+  --jev-option order_status --jev-option refund_request \
+  --jev-option cancel_subscription --jev-option update_payment \
+  --jev-option login_problem --jev-option shipping_delay \
+  --jev-option bug_report --jev-option speak_to_human --jev-option other
+```
+
+实测输出（复现 ModelScope README 那个例子的 `{"intent": "refund_request"}`）：
+
+```
+GLiNER2: deberta-v3 24x1024x16, 1 task(s)
+Q: intent
+  A. order_status  p=0.0002  score=-4.8493
+  B. refund_request  p=0.9971  score=3.5138
+  C. cancel_subscription  p=0.0006  score=-3.8711
+  ...
+  -> choice: B
+```
+
+`--jev-question` 是**头的名字**，`--jev-option` 是它的 label 集合。多个
+`--jev-question` 就是多个头，一次前向全出（对应 README 的 “Several decisions
+at once”）：
+
+```bash
+  --jev-question intent   --jev-option maintenance --jev-option room_change --jev-option billing \
+  --jev-question priority --jev-option low --jev-option normal --jev-option high --jev-option urgent \
+  --jev-question needs_human --jev-option yes --jev-option no
+```
+
+每个 question 一行 `Q:`，各自带自己的概率和 choice。
+
+### `--gliner2-schema`：直接吃参考实现的 `classify_text` 参数
+
+`--jev-option` 只能表达“纯 label 列表的单标签头”。要多标签、阈值、label 描述、
+指令、few-shot，用 `--gliner2-schema`，它就是参考实现 `classify_text(text, tasks)`
+第二个参数的 JSON：
+
+```bash
+./target/release/rust-model-inference \
+  --model models/GLiNER2.5-Decide/gliner2-decide-f32.gguf \
+  --jev --gliner2-decide \
+  --jev-context "Battery dies before lunch, but the keyboard and the screen are the best I have used on a laptop." \
+  --gliner2-schema '{
+    "aspects": {"labels": ["battery","keyboard","screen","camera","price","support"],
+                "multi_label": true, "cls_threshold": 0.4}
+  }'
+```
+
+支持的四种形态（与参考 `runtime._classification_schema` 一一对应）：
+
+| 形态 | 含义 |
+|---|---|
+| `["a","b"]` | 单标签，softmax |
+| `{"labels": [...], "multi_label": true, "cls_threshold": 0.4}` | 多标签，独立 sigmoid |
+| `{"labels": {"a": "描述", "b": "描述"}}` | label 带描述，描述进 prompt |
+| `{"labels": [...], "prompt": "...", "examples": [["in","out"]]}` | 附加指令 / few-shot |
+
+还接受 `class_act`（`softmax` / `sigmoid` / `auto`，默认 `auto` = 多标签走
+sigmoid、否则 softmax）和 `temperature`（默认 1.0，除在 logit 上）。
+
+`--gliner2-schema` 优先于 `--jev-question` / `--jev-option`。两边都不给就报错。
+
+## 3. 服务端模式
+
+`--gliner2-decide` 是启动参数（和 `--clm-head` 同级），请求体不带模型路径：
+
+```bash
+./target/release/rust-model-server \
+  --model models/GLiNER2.5-Decide/gliner2-decide-f32.gguf \
+  --gliner2-decide --host 0.0.0.0 --port 8080 --threads 8
+```
+
+启动日志打 `mode=gliner2`。**只注册 `/v1/jev/score`**，其余一律 404。
+
+请求体和 JEV logit 打分完全一致，一个 question 就是一个头：
+
+```bash
+curl http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' -d '{
+  "context": "Battery dies before lunch, but the keyboard and the screen are the best I have used on a laptop.",
+  "questions": [{"text": "aspects",
+                 "options": ["battery","keyboard","screen","camera","price","support"],
+                 "multi_label": true, "cls_threshold": 0.4}]
+}'
+```
+
+`multi_label` / `cls_threshold` / `prompt` / `descriptions` 是 GLiNER2 专有的
+可选字段（`descriptions` 与 `options` 等长，按序对应）；其他 JEV 后端忽略它们。
+
+```json
+{
+  "mode": "single",
+  "results": [{
+    "mode": "multi_select", "labels": ["A","B","C","D","E","F"],
+    "descriptions": ["battery","keyboard","screen","camera","price","support"],
+    "values": [1.6774151, 4.9915481, 4.0002327, -7.0071478, -6.8949332, -5.6953726],
+    "probabilities": {"A": 0.8426, "B": 0.9933, "C": 0.9820,
+                      "D": 0.0009, "E": 0.0010, "F": 0.0034},
+    "choice": "B", "selected": ["battery", "keyboard", "screen"],
+    "confidence": 0.5227, "entropy": 0.2013, "margin": 0.0112, "prefill_ms": 3068
+  }]
+}
+```
+
+`selected` 就是参考实现会返回的那个列表。`values` 现在对所有 JEV 模式都带
+（以前只有 `score` 模式带），因为 GLiNER 每个 label 都有真实 logit 值。
+`/v1/jev/grouped` 返回 404：grouped 做 per-group softmax，GLiNER 的每头独立
+归一化没有对应物。
+
+## 4. prompt 布局（不看这个会排错序）
+
+这是最容易踩的坑，全部来自 `gliner2/processor.py`：
+
+- **没有 `[CLS]` / `[SEP]`。** `input_ids` 直接是 subword 序列，
+  `build_inputs_with_special_tokens` 根本没被调用。
+- **单头时没有 `[SEP_STRUCT]`。** 拼装时每个 schema 后面都加一个
+  `[SEP_STRUCT]`，然后 `pop()` 掉最后一个——所以只有多头 prompt 才带分隔符。
+- **分类行就是 `[L]` marker 自己的隐状态**，`embs[1:]` 丢掉 `[P]` prompt 行。
+- **描述和 few-shot 总是同时进 prompt。** 推理时 `example_mode == "both"`。
+- **text 先补句末标点**（`_normalize_text`：空串→`.`，不以 `.!?` 结尾→追加 `.`），
+  然后按 GLiNER 自己的 word splitter 切词并小写，再逐词送 SentencePiece。
+
+单头、单 label 的完整序列长这样：
+
+```
+▁(  [P]  ▁intent  ▁(  [L]  ▁order _ status  [L]  ▁refund _ request  ...  ▁)  ▁)  [SEP_TEXT]  text…
+```
+
+对照实现（`src/models/gliner/prompt.rs`）：
 
 ```python
-encoded = model.encoder(input_ids, attention_mask).last_hidden_state
-_, schema_embs = processor.extract_embeddings_from_batch(encoded, input_ids, batch)
-for each task:
-    embs = schema_embs[t_idx]
-    label_embs = embs[1:]                       # 丢掉 [P] prompt 行
-    logits = model.classifier(torch.stack(label_embs)).squeeze(-1)
-```
-
-即：**encoder 前向 → 取每个 `[L]` marker 位置的隐状态 → 过 classifier → 每个 label 一个 logit**。
-`span_rep` / `count_pred` / `count_embed` 在这个路径上完全不参与。
-
-## 输入构造（已确定）
-
-`token_pooling == "first"`，`extract_embeddings_from_batch` 走 gather 快路径：
-- `batch.text_word_indices` —— text 各 word 的首 token 下标
-- `batch.schema_special_indices` —— schema 特殊 token（`[P]`/`[L]`）的下标
-
-调用链：`collate_fn_inference` → `_collate_batch` → `_transform_record` →
-`_infer_from_json` → `_build_outputs` → `_format_input_with_mapping`。
-源码位置：`/tmp/gliner2-src/gliner2/processor.py`。
-
-### 1. text 侧（`WhitespaceTokenSplitter`，默认 `word_splitter="whitespace"`）
-
-正则（`re.VERBOSE | re.IGNORECASE`，`lower=True` 只对 token 值小写）：
-
-```python
-r"""(?:https?://[^\s]+|www\.[^\s]+)
-|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}
-|@[a-z0-9_]+
-|\w+(?:[-_]\w+)*
-|\S"""
-```
-
-`_normalize_text` 先补句末标点：空串→`.`；不以 `.`/`!`/`?` 结尾→追加 `.`。
-
-### 2. schema 侧（`_transform_schema`）
-
-```python
-prompt_str = task                                  # 或 f"{task}: {prompt}"
-for label, desc in label_descriptions:             # example_mode == "both"
-    prompt_str += f" [DESCRIPTION] {label}: {desc}"
-for inp, out in examples:                          # 只保留 out in labels
-    prompt_str += f" [EXAMPLE] {inp} [OUTPUT] {out}"
-
 tokens = ["(", "[P]", prompt_str, "("]
-for field_name in fields:                          # 声明顺序，推理不 shuffle
+for field_name in fields:          # 声明顺序，推理不 shuffle
     tokens.extend(["[L]", field_name])
 tokens.extend([")", ")"])
 ```
 
-推理时 `example_modes = ["both"]`（`is_training=False`），所以描述和 few-shot
-**总是同时**进 prompt；`sampling=None` 时 label 顺序与 schema 声明一致。
+`prompt_str` 是 `task` 或 `f"{task}: {prompt}"`，后面按声明顺序拼
+`" [DESCRIPTION] {label}: {desc}"` 和 `" [EXAMPLE] {in} [OUTPUT] {out}"`。
 
-### 3. 拼装（`_format_input_with_mapping`）
+### 会被拒绝的字符串
 
-```python
-combined = []
-for struct in schema_tokens_list:
-    combined.extend(struct)
-    combined.append("[SEP_STRUCT]")
-if combined: combined.pop()          # 去掉最后一个多余的 [SEP_STRUCT]
-combined.append("[SEP_TEXT]")
-combined.extend(text_tokens)
-```
+`_RESERVED`（`[P] [L] [C] [E] [R] [DESCRIPTION] [EXAMPLE] [OUTPUT] ( )`）
+出现在 task 名、label 名、描述、指令或 few-shot 里会**直接报错**，不是静默
+截断。原因是这些串原样进 prompt，一个多余的 `[L]` 会把后面的 logit 整体错位
+一位——参考实现在 `gliner2/classification/schema.py` 里也是这么防的。
 
-**注意：没有 `[CLS]` / `[SEP]`。** `input_ids = tokenizer.convert_tokens_to_ids(subwords)`
-直接把 subword 序列送进 DeBERTa，不走 `build_inputs_with_special_tokens`。
+## 5. DeBERTa-v3 encoder 细节
 
-marker 槽位（`schema_marker_orig_indices`）：每段里 `offset+1`（`[P]`）以及
-`range(4, len(struct)-2, 2)`（全部 `[L]`）。记录的是 **subword 下标**，
-顺序为 `[P], [L]_0, [L]_1, ...`；`embs[1:]` 丢掉 `[P]` 行后与 label 顺序一一对应。
+`src/models/gliner/compute.rs`。四个和 `bert` / `jina-bert-v2` 不一样的地方，
+每一个都会把结果改坏：
 
-### 4. 单个 token 的 subword 化
+1. **Disentangled attention。** score = `content·content + content·position +
+   position·content`，三项**共用同一个** `1/sqrt(head_dim * scale_factor)`，
+   `scale_factor = 1 + |pos_att_type| = 3`。不是 `1/sqrt(64)`。
+2. **位置向量来自本层自己的 `query_proj` / `key_proj`**（`share_att_key`），
+   而 `rel_embeddings` 表由 encoder 统一 LayerNorm 一次后传给所有层。**不是**
+   所有层共用第一层的投影——共用会让 layer 0 之后的每一层全错。
+3. **ST-transposed 残差。** 子层是 `LayerNorm(f(x) + x)`，norm 看的是**和**。
+4. **c2p 和 p2c 用同一张位置下标表。** 参考代码写的是
+   `c2p_pos = clamp(rel + att_span)` 和 `p2p_pos = clamp(-r_pos + att_span)`，
+   看着是两个表，但 p2c 那边多了一次 `gather(...).transpose(-1, -2)`，轴一换
+   就变成 `clamp(-(s - t) + att_span)`，和 c2p 完全一样。照字面写会多取一次负号，
+   每一层就开始漂。
 
-`sub_tokens = tokenizer.tokenize(token)`。对 10 个 GLiNER special token
-（`[P]`/`[L]`/`[SEP_TEXT]`/`[SEP_STRUCT]`/…），`SchemaTransformer.__init__`
-先 `add_special_tokens({"additional_special_tokens": SPECIAL_TOKENS})`，
-所以 `PreTrainedTokenizer.tokenize` 的 `tokens_trie` 会整块切出，恒为 1 个 id。
-`(`、`)`、`,`、`|` 不是 added token，走 SentencePiece。
-
-`DebertaV2Tokenizer` 自身不实现 `tokenize`/`convert_tokens_to_ids`，落到
-`PreTrainedTokenizer`：
-
-- `tokenize(t)`：trie 切 added token → 否则 `spm.encode(t, out_type=str)`
-  （`split_by_punct=False`，所以没有 DeBERTa 的数字+逗号特殊处理）
-- `convert_tokens_to_ids(tok)`：先查 `_added_tokens_encoder`（`[P]`→128003 等），
-  否则 `spm.PieceToId(tok)`
-
-## 分类头激活：ReLU
-
-`gliner2/models/span/model.py` 里 classifier 是
-`create_mlp(input_dim=1024, intermediate_dims=[2048], output_dim=1, dropout=0.,
-activation="relu", add_layer_norm=False)`，
-而 `create_mlp` 的顺序是 `Linear → (LayerNorm) → act → (Dropout)`，所以：
-
-```
-classifier.0  Linear(1024 -> 2048)
-classifier.1  ReLU
-classifier.2  Linear(2048 -> 1)
-```
-
-与 safetensors 里只有 `classifier.0` / `classifier.2` 两组权重一致。
-
-## 解码（`inference/runtime.py::_extract_classification_result`）
-
-```python
-logits = classifier(embs[1:]).squeeze(-1) / temperature   # temperature 默认 1.0
-act = class_act or ("sigmoid" if multi_label else "softmax")
-multi_label: 取所有 prob >= cls_threshold 的 label；空则回退 argmax
-否则:        argmax 的 label + 它的 prob
-```
-
-`classify_text` 的入参形态（`runtime._classification_schema`）：
-
-```python
-{head: [labels]}                                   # single-label
-{head: {"labels": [labels],
-        "multi_label": False, "cls_threshold": 0.5}}
-{head: {"labels": {name: description, ...}}}       # 带描述
-{head: {"labels": [...], "prompt": "..."}}         # 附加指令
-```
-
-`{"labels": {"name": "desc"}}` 时 `label_names = dict.keys()`，描述进
-`label_descriptions` 参与 prompt 拼接。
-
-## DeBERTa-v3-large 编码器配置（已确认）
-
-底座 `microsoft/deberta-v3-large` 的 `config.json`：
-
-```json
-{"model_type": "deberta-v2", "hidden_size": 1024, "num_hidden_layers": 24,
- "num_attention_heads": 16, "intermediate_size": 4096, "hidden_act": "gelu",
- "layer_norm_eps": 1e-7, "relative_attention": true, "position_buckets": 256,
- "max_position_embeddings": 512, "max_relative_positions": -1,
- "position_biased_input": false, "type_vocab_size": 0,
- "norm_rel_ebd": "layer_norm", "pos_att_type": "p2c|c2p", "share_att_key": true}
-```
-
-这解释了 checkpoint 的 tensor 形状与"缺件"：
-
-- `position_biased_input=false` → **没有** `position_embeddings`
-- `type_vocab_size=0` → **没有** `token_type_embeddings`
-- `max_relative_positions=-1 → 512`，`pos_ebd_size = position_buckets*2 = 512`
-  → `rel_embeddings.weight [512, 1024]`
-- `norm_rel_ebd="layer_norm"` → `encoder.encoder.LayerNorm.{weight,bias}`
-- `conv_kernel_size` 缺省 0 → **没有** `ConvLayer`（DeBERTa-v1 才有）
-
-前向（transformers 4.48.1 `models/deberta_v2/modeling_deberta_v2.py`，
-reference 在 `/tmp/tfdl/x/transformers/models/deberta_v2/`）：
-
-1. `embeddings`：只查 `word_embeddings` → LayerNorm(eps=1e-7) → 乘 mask
-2. 每层：
-   - `rel_embeddings` 过 `LayerNorm` 得到 `rel_emb`（`norm_rel_ebd`）
-   - `attn = Dense(softmax(Dense_self_attn(x) + x))`（**残差先加，再 LayerNorm**，
-     即 ST-transposed）
-   - `out = LayerNorm(Dense(GELU(Dense(attn))) + attn)`（同样是 ST-transposed）
-3. `score_scale = 1 / sqrt(head_dim * scale_factor)`，`scale_factor = 1 + |pos_att_type| = 3`
-   （content-content / c2p / p2c 三项共用同一个 scale，**不是** `1/sqrt(64)`）
-4. 相对位置（`make_log_bucket_position`，bucket=256、max=512）：
+相对位置分桶（`make_log_bucket_position`，bucket=256、max=512、att_span=256）：
 
 ```text
-c2p_pos = clamp(relative_pos + 256, 0, 511)
-p2c_pos = clamp(-relative_pos + 256, 0, 511)
-pos_key   = transpose_for_scores(key_proj(rel_emb[:512]))     # share_att_key
-pos_query = transpose_for_scores(query_proj(rel_emb[:512]))
-c2p = gather(Q · pos_key^T, c2p_pos) / scale
-p2c = gather(K · pos_query^T, p2c_pos)^T / scale
+mid = 128
+abs_pos = if -128 < rel < 128 { 127 } else { |rel| }
+log_pos = ceil(ln(abs_pos/128) / ln(511/128) * 127) + 128
+bucket  = if abs_pos <= 128 { rel } else { log_pos * sign(rel) }
+c2p_pos = p2c_pos = clamp(bucket + 256, 0, 511)
 ```
 
-5. 推理是 `model.eval()`，两个 dropout 都是恒等。batch=1 时 `attention_mask`
-   全 1，mask 只影响 padding 位置。
+其余配置（`microsoft/deberta-v3-large`）解释了 checkpoint 里缺哪些东西：
+`position_biased_input=false` → 没有 position embedding；`type_vocab_size=0` →
+没有 token_type embedding；v3 的 `conv_kernel_size` 缺省 0 → **没有** conv
+（那是 v1 才有）；`norm_rel_ebd="layer_norm"` → `rel_norm` 作用在相对位置表上，
+不是作用在输出上；`max_relative_positions=-1` + `position_buckets=256` →
+`rel_embeddings` 是 `[512, 1024]`（`position_buckets * 2`）。
 
-## 主要工作量 / 风险
+分类头是 `create_mlp(1024, [2048], 1, activation="relu")`，即
+`Linear → ReLU → Linear`。所以 safetensors 里只有 `classifier.0` / `classifier.2`
+两组权重，中间那层是 ReLU 而不是 LayerNorm。
 
-1. **DeBERTa-v3 encoder（最大头）**。disentangled attention 是真正的新数学：
-   score = content·content + content·position + position·content，
-   靠 `rel_embeddings`（512×1024）做相对位置项。仓库现有的 attention（llama
-   GQA / qwen / gemma4 / lfm2 / falcon / nemotron）都是标准 dot-product，
-   没有可复用的 kernel。
-2. **ST-transposed**：LayerNorm 在残差相加**之前**，不是之后。和我们已经习惯的
-   pre-norm/post-norm 都不一样，是 DeBERTa 的特色。
-3. **SentencePiece tokenizer**：仓库现在只有 BPE（qwen/llama 家）和 laya 那套。
-   DeBERTa-v3-large  vocab 128011 是 SP unigram。`tokenizer.ggml.model` 会是新值。
-4. **safetensors → GGUF 转换器**：从零写。仓库现有转换器（breeze / dots /
-   dreamx / laya / yue2 / qwen_drive）都是 safetensors→GGUF，可以照 `laya` 的
-   结构抄，laya 是最接近的先例（也是 encoder + 决策头）。
+## 6. Tokenizer
 
-已解决：
+`DebertaV2Tokenizer` + SentencePiece **unigram**，大小写敏感，128000 个 piece。
+Rust 侧实现在 `src/core/sentencepiece.rs`，包含：
 
-- tokenizer 文件已下载到 `models/GLiNER2.5-Decide/`
-- 无 conv 权重是**正常**的：v3 的 `conv_kernel_size` 缺省 0
-- `classifier.1` = ReLU（见上）
-- 精确 token 序列已确定（见上）
+- `nmt_nfkc` normalizer（Darts double-array 查表 + dummy prefix / 空白折叠 /
+  空白转 `▁`）
+- unigram Viterbi（`Lattice::Viterbi`，含 `has_single_node` 的 UNK 回退）
+- byte fallback（`byte_fallback = true`，未知字符拆成 `<0xXX>`）
+- `tokens_trie` 语义的 added-token 切分：**字符串内部的** `[DESCRIPTION]` 等
+  也会被切出来。GLiNER2 把这些 marker 拼进 prompt 串，所以这一步不做就会
+  拿到不同的 id。
 
+两个坑：
 
-## ## Tokenizer (determined)
+- **lattice 的位置是字符位置，不是字节位置。** `▁`（U+2581）占 3 字节，
+  其中间两个字节**不是** lattice 位置，不能在那里插 UNK 节点。Rust 侧按字节
+  偏移建 lattice，所以只遍历字符起点。
+- **`QuantizedTensor::n_rows()` 对 F32 返回 1**，所以 F32 权重的
+  `Weight::n_out` 是 1。`quantize_and_matmul_with_scratch` 读的是
+  `self.n_out`，直接调会在 F32 上只算一列——`compute::matmul_into` 因此自己
+  拿 `kernel.f32_slice()` 驱动 SIMD 行 kernel 并传真实宽度。
 
-DebertaV2Tokenizer, vocab_type spm, do_lower_case false, split_by_punct
-false.  SentencePiece unigram, case sensitive.  The checkpoint on
-ModelScope carries only model.safetensors and config.json; the tokenizer
-pack comes from base model fastino/gliner2-large-v1 and is already in
-models/GLiNER2.5-Decide/:
+## 7. 精度验证
 
-- spm.model, 2.4 MB (the real vocab model)
-- tokenizer_config.json / special_tokens_map.json
+```bash
+models/.venv/bin/python /tmp/gliner_ref/dump_golden.py   # 重新生成 fixture
+cargo test --profile release-fast --test gliner2_classify_parity
+cargo test --profile release-fast --test gliner2_spm_parity
+cargo test --profile release-fast --test gliner2_cli
+```
 
-Special token ids:
+`tests/fixtures/gliner2-decide/` 下两个 fixture 都由参考栈
+（GLiNER2 的 `SchemaTransformer` + `transformers` 4.48.1 的 DeBERTa-v3 +
+checkpoint 自己的头）生成：
 
-| token | id | | token | id |
-|---|---|---|---|---|
-| [PAD] | 0 | | [SEP_STRUCT] | 128001 |
-| [CLS] | 1 | | [SEP_TEXT] | 128002 |
-| [SEP] | 2 | | [P] | 128003 |
-| [UNK] | 3 | | [C] | 128004 |
-| [MASK] | 128000 | | [E] | 128005 |
-| | | | [R] | 128006 |
-| | | | [L] | 128007 |
-| | | | [EXAMPLE] | 128008 |
-| | | | [OUTPUT] | 128009 |
-| | | | [DESCRIPTION] | 128010 |
+- `classify-golden.json` — 6 个 case 的 `input_ids`、`[P]/[L]` 下标、每 label logit
+- `spm-pieces.json` — 69 条字符串的 SentencePiece pieces / ids
 
-[L] is the label marker and [P] the prompt marker; scoring drops the [P]
-row via embs[1:].  bos and cls are both [CLS], eos is [SEP].
+实测 6 个 case 全部对齐，**最大 logit 偏差 7.2e-6**（F32 累加顺序差），所以
+测试阈值定在 1e-4。
 
+## 8. 性能
 
-实现的自然切分
+aarch64、8 线程、45 token 单头：**5.9s**（参考 PyTorch 同输入 2.3s）。
+102 token 四头：8.2s。
 
-建议分两步，各自可验收：
+大头是**每层都要重算** `pos_ebd_size × n_embd` 的两次位置投影
+（24 层 × 2 × 512 × 1024 × 1024 ≈ 25.8 GMAC，比 token 侧重 4 倍）。这是
+DeBERTa-v3 本身的形状，参考实现同样每层重算，跨层没有可缓存的东西。
 
-- **第一步**：DeBERTa-v3 encoder（24 层，含 SP tokenizer）+ F32/Q8_0 GGUF 转换。
-  验收标准：给定同一段文本，embedding 和 HF 参考逐位对齐。
-  这一步就是 laya PR 的等价工作量。
-- **第二步**：SchemaTransformer prompt 构造 + classifier 头 + `classify_text`
-  CLI/HTTP。验收标准：README 里的 customer support intent 等例子复现。
-
-## TODO(clm-style)
-
-- `[x]` `collate_fn_inference` 产出的精确 token 序列
-- `[x]` `classifier.1` 激活函数 → ReLU
-- `[x]` DeBERTa-v3 attention / conv 细节
-- `[x]` 下载 tokenizer 文件
-- `[ ]` 探针 `spm.model` protobuf：normalizer_spec、byte_fallback、piece score 类型
-- `[ ]` `tools/converter/gliner/convert_gliner.py`
-- `[ ]` Rust SentencePiece unigram 分词
-- `[ ]` Rust DeBERTa-v3 encoder 前向
-- `[ ]` Rust schema prompt 构造 + word splitter
-- `[ ]` classifier 头 + softmax/sigmoid 解码
-- `[ ]` CLI (`--gliner2-decide`) + HTTP endpoint
-- `[ ]` golden 向量：抓 HF 参考的 input_ids / logits 落盘
-
+`--threads 12` 在本机会退化到 70s+（`ComputePool` 自旋等 barrier 的既有
+行为，和仓库里其他模型一致）；默认上限是 8，正常用不要手动调过。

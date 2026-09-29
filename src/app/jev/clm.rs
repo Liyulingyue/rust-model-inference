@@ -171,6 +171,7 @@ pub fn run_clm_scoring(
             entropy,
             margin,
             prefill_ms: t0.elapsed().as_millis(),
+            selected: Vec::new(),
         });
     }
     Ok(results)

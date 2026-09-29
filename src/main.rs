@@ -9,7 +9,7 @@ use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim";#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
     QwenDrive,
@@ -367,6 +367,32 @@ fn main() {
             options.effective_max_context(),
             options.effective_repetition_penalty(),
         ));
+    } else if options.jev && options.gliner2_decide {
+        // GLiNER2.5-Decide: the encoder and the classifier live in one GGUF, so
+        // --model alone selects it. `--gliner2-schema` takes the reference
+        // `classify_text` mapping; without it the task comes from
+        // --jev-question + --jev-option so the A/B/C shell still works.
+        match app::build_jev_inputs(&options) {
+            Ok(Some(app::JevInputs::Grouped { .. })) => app::run_or_exit(Err(
+                "--gliner2-decide does not support --jev-multi / --jev-block".to_string(),
+            )),
+            Ok(Some(app::JevInputs::Single { context, questions, .. })) => {
+                let schema = app::unwrap_or_exit(app::gliner2_schema(&options, &questions));
+                let tasks = app::unwrap_or_exit(
+                    app::parse_schema(&schema)
+                        .map_err(|error| format!("--gliner2-schema: {error}")),
+                );
+                app::run_or_exit(app::run_gliner2_decision(
+                    source,
+                    &tasks,
+                    &context,
+                    options.threads,
+                    options.jev_output_json,
+                ));
+            }
+            Ok(None) => app::run_or_exit(Err("--jev requires --jev-context".into())),
+            Err(e) => app::run_or_exit(Err(e)),
+        }
     } else if options.jev && options.clm_head.is_some() {
         // CLM: one encoder + a projection-head file, scored by cosine
         // instead of a label logit.  Same --jev flag family, so the
