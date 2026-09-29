@@ -873,7 +873,7 @@ impl<'a> LlamaSession<'a> {
             let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
             let q8_buf = unsafe { std::slice::from_raw_parts_mut(q8_buf_ptr, max_n_in) };
             let scale_buf = unsafe { std::slice::from_raw_parts_mut(scale_buf_ptr, max_n_in / 32) };
-            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in / 256) };
+            let q8k_buf = unsafe { std::slice::from_raw_parts_mut(q8k_buf_ptr, max_n_in.div_ceil(256)) };
 
             rms_norm_grouped(x, &lw.attn_norm, normed, norm_groups, eps);
             quantize_q8_0_into(
@@ -1185,7 +1185,7 @@ impl<'a> LlamaSession<'a> {
             );
             crate::ops::quantize_row_q8_k_into(
                 &scratch.gate_buf[..n_ff],
-                &mut scratch.q8k_buf[..n_ff / 256],
+                &mut scratch.q8k_buf[..n_ff.div_ceil(256)],
             );
             let q8_ptr_down = scratch.q8_buf.as_ptr();
             let sc_ptr_down = scratch.scale_buf.as_ptr();
