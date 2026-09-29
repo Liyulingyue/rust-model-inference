@@ -39,4 +39,4 @@ cargo run --release -- --model "$JINA_MODEL" --embedding \
   --prompt 'Represent this audio for retrieval.' --threads 1 --embedding-output summary
 ```
 
-对照覆盖全部 `750 × 1024` 个投影 F32 原始位。当前仅支持一段不超过 30 秒的 Whisper audio chunk；超过长度会明确报错。上述逐位结果限定为 macOS ARM CPU、单线程、标量 softmax、关闭 Flash Attention 的 Oracle 配置。
+对照覆盖全部 `750 × 1024` 个投影 F32 原始位（单个 30 s Whisper chunk）。长音频按 30 s 切块，per-chunk 投影是 byte-equal 对照 llama.cpp 的 `feat-v5-omni` fork mtmd split；LLM cross-attend 跨块由 llama.cpp 后续处理，本仓库的 `encode_audio` 只负责 audio encoder 自身。整体 byte 对齐应延伸到跨块拼接的 LLM 段，本目录目前只标定 audio encoder 的逐块输出。上述逐位结果限定为 macOS ARM CPU、单线程、标量 softmax、关闭 Flash Attention 的 Oracle 配置。
