@@ -202,4 +202,47 @@ fn embedding_orders_relevant_document_above_unrelated() {
         "semantic ordering broken: pos={s_pos} rel={s_rel} unrel={s_unrel}"
     );
     assert!(s_pos > 0.8, "relevant similarity too low: {s_pos}");
+
+    // The MoE FFN contribution used to be inflated: `moe_gate` renormalized the
+    // top-2 softmax weights to sum to 1, which multiplies every MoE layer's
+    // output by 1/(p_a + p_b) >= 1. `bert.cpp:173` selects the SOFTMAX gating
+    // variant (not SOFTMAX_WEIGHT) and `bert.cpp:171` passes `norm_w = false`,
+    // so the selected probabilities are used as-is. With the fix the
+    // positive-vs-unrelated gap is wide enough to pin; before it, the
+    // unrelated document still scored ~0.66 against the query.
+    assert!(
+        s_pos - s_unrel > 0.35,
+        "MoE gating regression: pos={s_pos} unrel={s_unrel}; the top-2 softmax \
+         weights are probably being renormalized to sum to 1 again"
+    );
+}
+
+#[test]
+fn moe_router_gate_keeps_the_unselected_expert_mass() {
+    use rust_model_inference::models::bert_family::compute::moe_gate;
+
+    // The real router is not reachable without the model, so this pins the
+    // semantics directly against the values the 489MB GGUF produces in
+    // practice: confident logits for the top-2, near-flat for the rest.
+    let logits = [0.0f32, 0.9, 0.2, -0.3, 1.5, 0.4, -0.8, 0.1];
+    let (selected, weights) = moe_gate(&logits, 2, 1.0);
+    assert_eq!(selected, vec![4, 1], "top-2 by logit");
+    let total: f64 = weights.iter().map(|&w| f64::from(w)).sum();
+    assert!(
+        total < 1.0,
+        "selected weights must not be renormalized to 1 (got {total}); \
+         bert.cpp:173 uses SOFTMAX, not SOFTMAX_WEIGHT"
+    );
+    assert!(total > 0.5, "a confident router should still hold most mass: {total}");
+
+    // Flat logits are the degenerate case the old code got most wrong: each of
+    // 8 experts gets 1/8, so the top-2 hold exactly 0.25 and the old
+    // renormalizing path quadrupled the FFN output.
+    let flat = [0.0f32; 8];
+    let (_, flat_weights) = moe_gate(&flat, 2, 1.0);
+    let flat_total: f64 = flat_weights.iter().map(|&w| f64::from(w)).sum();
+    assert!(
+        (flat_total - 0.25).abs() < 1e-6,
+        "flat router must keep only 0.25 of the mass, got {flat_total}"
+    );
 }

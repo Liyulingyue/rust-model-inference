@@ -167,6 +167,72 @@ fn l2_normalize(values: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
+/// MoE router gate for one token, matching `LLM_FFN_EXPERT_GATING` +
+/// `build_moe_ffn` as `bert.cpp:165-176` calls it.
+///
+/// `bert.cpp:173` selects `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX`, so:
+///   1. `probs = softmax(logits)` over **all** experts
+///      (`llama-graph.cpp:2052-2055`);
+///   2. `selected = argsort_top_k(probs, k)` (`llama-graph.cpp:2118`);
+///   3. `weights = probs[selected]`, read straight back out by
+///      `ggml_get_rows` (`llama-graph.cpp:2133`) and **not** renormalized,
+///      because `bert.cpp:171` passes `norm_w = false` so the
+///      `ggml_div`-by-`weights_sum` block at `llama-graph.cpp:2143-2155`
+///      is skipped;
+///   4. `w_scale` is applied only when it is neither `0.0` (hparams
+///      default, "unset") nor `1.0` (`llama-graph.cpp:2156`).
+///
+/// Consequence worth stating: `selected` weights sum to at most 1, and the
+/// shortfall is the mass the unselected experts keep. Renormalizing them to
+/// sum to 1 is the `SOFTMAX_WEIGHT` variant, which `bert.cpp` does not use;
+/// it scales the FFN output by `1/(sum of selected probs) >= 1`.
+///
+/// Returns `(selected expert ids sorted by descending probability, weights)`.
+pub fn moe_gate(logits: &[f32], k: usize, w_scale: f32) -> (Vec<usize>, Vec<f32>) {
+    let n_expert = logits.len();
+    let k = k.min(n_expert);
+
+    let mut max_logit = f32::NEG_INFINITY;
+    for &v in logits.iter() {
+        if v > max_logit {
+            max_logit = v;
+        }
+    }
+    // f64 accumulation: the logits are small but the softmax denominator is a
+    // sum of exponentials, and the graph is otherwise f32.
+    let mut probs = vec![0.0f64; n_expert];
+    let mut probs_sum = 0.0f64;
+    for (p, &logit) in probs.iter_mut().zip(logits.iter()) {
+        let value = ((logit - max_logit).exp()) as f64;
+        *p = value;
+        probs_sum += value;
+    }
+    if probs_sum > 0.0 {
+        for p in probs.iter_mut() {
+            *p /= probs_sum;
+        }
+    }
+
+    // Top-k by probability, ties broken by lower id. Selecting on `probs`
+    // rather than on `logits` picks the same experts (softmax is monotonic)
+    // and keeps the comparison in the same domain the oracle uses.
+    let mut order: Vec<usize> = (0..n_expert).collect();
+    order.sort_unstable_by(|&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let selected = order[..k].to_vec();
+
+    let scale = f64::from(w_scale);
+    let scale = if scale != 0.0 && scale != 1.0 { scale } else { 1.0 };
+    let weights = selected
+        .iter()
+        .map(|&e| (probs[e] * scale) as f32)
+        .collect();
+    (selected, weights)
+}
+
 pub fn compute_embedding(
     source: &dyn TensorSource,
     prompt: &str,
@@ -498,7 +564,35 @@ pub fn run_embedding_tokens(
                 .expect("moe layer missing ffn_down_exps");
             assert!(weights.expert_count > 0);
             assert!(weights.expert_used_count > 0);
-            let mut logits = vec![0.0f32; weights.expert_count];
+            let n_expert = weights.expert_count;
+            let k = weights.expert_used_count.min(n_expert);
+
+            // Build every expert's kernel once per layer instead of once per
+            // selected expert per token. `Weight::from_quantized` boxes a
+            // kernel over a `&[u8]` slice, so the previous `for token { for k {`
+            // nesting re-boxed them `n_tokens * k` times for no benefit.
+            let up_weights: Vec<Weight<'_>> = (0..n_expert)
+                .map(|e| {
+                    Weight::from_quantized(QuantizedTensor::from_bytes(
+                        up_exps.per_expert_bytes(e),
+                        up_exps.ggml_type,
+                        up_exps.cols, // n_in = inner dim
+                        up_exps.rows, // n_out = outer dim
+                    ))
+                })
+                .collect();
+            let down_weights: Vec<Weight<'_>> = (0..n_expert)
+                .map(|e| {
+                    Weight::from_quantized(QuantizedTensor::from_bytes(
+                        down_exps.per_expert_bytes(e),
+                        down_exps.ggml_type,
+                        down_exps.cols, // n_in = inner dim
+                        down_exps.rows, // n_out = outer dim
+                    ))
+                })
+                .collect();
+
+            let mut logits = vec![0.0f32; n_expert];
             let mut hidden_e = vec![0.0f32; n_embd];
             for t in 0..n_tokens {
                 let x = &hidden[t * n_embd..(t + 1) * n_embd];
@@ -512,64 +606,40 @@ pub fn run_embedding_tokens(
                     &pool,
                 );
 
-                // Top-k by logit, ties broken by lower id.
-                let mut order: Vec<usize> = (0..weights.expert_count).collect();
-                order.sort_by(|&a, &b| {
-                    logits[b]
-                        .partial_cmp(&logits[a])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let k = weights.expert_used_count.min(weights.expert_count);
-                let selected_logits: Vec<f32> = (0..k).map(|i| logits[order[i]]).collect();
-
-                // Softmax over the top-k logits. llama.cpp's
-                // `LLM_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT` path applies
-                // softmax to the *selected* weights after top-k
-                // (`llama-graph.cpp:2122-2128`).
-                let mut max_logit = selected_logits[0];
-                for &v in selected_logits.iter() {
-                    if v > max_logit {
-                        max_logit = v;
-                    }
-                }
-                let mut weights_sum = 0.0f64;
-                let mut sel = vec![0.0f64; k];
-                for i in 0..k {
-                    sel[i] = (selected_logits[i] - max_logit).exp() as f64;
-                    weights_sum += sel[i];
-                }
-                if weights_sum == 0.0 {
-                    weights_sum = 1.0;
-                }
-                let inv = (1.0 / weights_sum) * (weights.expert_weights_scale as f64);
-                for v in sel.iter_mut() {
-                    *v *= inv;
-                }
+                // `bert.cpp:173` passes LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
+                // so `llama-graph.cpp:2052-2055` softmaxes over ALL n_expert
+                // logits first; `ggml_argsort_top_k` at line 2118 then picks
+                // n_expert_used, and `ggml_get_rows` at line 2133 reads the
+                // *selected probabilities* straight back out as the weights.
+                // The 9th `build_moe_ffn` argument from `bert.cpp:171` is
+                // `norm_w = false`, so the block at lines 2143-2155 does NOT
+                // renormalize them to sum to 1: the k weights sum to
+                // p_a + ... <= 1 and the leftover mass stays on the experts
+                // that were not selected.
+                //
+                // Renormalizing (the SOFTMAX_WEIGHT path, which is what this
+                // loop used to implement) multiplies the expert output by
+                // 1/(p_a + p_b) >= 1 - up to 2x when the router is unsure - so
+                // it is not an equivalent shortcut.
+                let (selected, gate) = moe_gate(&logits, k, weights.expert_weights_scale);
+                let weight_of = |e: usize| -> f32 {
+                    gate[selected
+                        .iter()
+                        .position(|&s| s == e)
+                        .expect("expert id missing from the top-k selection")]
+                };
 
                 // Weighted sum of expert (up → gelu → down) outputs.
                 for slot in hidden_e.iter_mut() {
                     *slot = 0.0;
                 }
-                for i in 0..k {
-                    let e = order[i];
-                    let weight_e = sel[i] as f32;
-                    let up_weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-                        up_exps.per_expert_bytes(e),
-                        up_exps.ggml_type,
-                        up_exps.cols, // n_in = inner dim
-                        up_exps.rows, // n_out = outer dim
-                    ));
-                    let down_weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-                        down_exps.per_expert_bytes(e),
-                        down_exps.ggml_type,
-                        down_exps.cols, // n_in = inner dim
-                        down_exps.rows, // n_out = outer dim
-                    ));
+                for &e in selected.iter() {
+                    let weight_e = weight_of(e);
                     // `expert @ x` (per-expert up is `[n_ff rows × n_embd cols]`
                     // in storage, the matmul reads it row-major as
                     // `[ne0=n_embd, ne1=n_ff]`, so `output[m] = Σ_k
                     // expert[m, k] * x[k]` gives the `n_ff` vector we want).
-                    up_weight.quantize_and_matmul_with_scratch(
+                    up_weights[e].quantize_and_matmul_with_scratch(
                         x,
                         &mut q8k_buf,
                         &mut q8_buf,
@@ -578,7 +648,7 @@ pub fn run_embedding_tokens(
                         &pool,
                     );
                     gelu_ggml_f16_inplace(&mut up_buf);
-                    down_weight.quantize_and_matmul_with_scratch(
+                    down_weights[e].quantize_and_matmul_with_scratch(
                         &up_buf,
                         &mut q8k_buf,
                         &mut q8_buf,
@@ -797,4 +867,87 @@ pub fn run_embedding(
         }
     };
     print_embedding(&pooled, output);
+}
+
+#[cfg(test)]
+mod moe_gate_tests {
+    use super::moe_gate;
+
+    /// Sums a slice in f64 so the assertion is not itself a float puzzle.
+    fn sum(values: &[f32]) -> f64 {
+        values.iter().map(|&v| f64::from(v)).sum()
+    }
+
+    #[test]
+    fn softmax_gate_picks_the_two_largest_logits() {
+        // 0.0 0.9 0.2 -0.3 1.5 0.4 -0.8 0.1 -> experts 4 then 1.
+        let logits = [0.0f32, 0.9, 0.2, -0.3, 1.5, 0.4, -0.8, 0.1];
+        let (selected, weights) = moe_gate(&logits, 2, 1.0);
+        assert_eq!(selected, vec![4, 1], "top-2 by logit must be experts 4 and 1");
+        // Softmax is monotonic, so the weights must be ordered the same way.
+        assert!(weights[0] > weights[1]);
+        // ...and they are plain softmax probabilities, not renormalized over
+        // the selection: this pair holds only part of the mass.
+        let total = sum(&weights);
+        assert!(
+            total < 1.0 - 1e-6,
+            "selected weights must NOT sum to 1 (got {total}); \
+             renormalizing is the SOFTMAX_WEIGHT variant bert.cpp does not use"
+        );
+        assert!(total > 0.5, "the top-2 should still hold most of the mass: {total}");
+        // Cross-check against a hand-computed softmax over all 8 logits. The
+        // gate returns f32, so the tolerance is f32 ulp, not f64 exactness.
+        let expected: Vec<f64> = logits
+            .iter()
+            .map(|&l| {
+                let e = ((l - 1.5f32).exp()) as f64;
+                let denom: f64 = logits.iter().map(|&o| ((o - 1.5f32).exp()) as f64).sum();
+                e / denom
+            })
+            .collect();
+        assert!((f64::from(weights[0]) - expected[4]).abs() < 1e-7);
+        assert!((f64::from(weights[1]) - expected[1]).abs() < 1e-7);
+    }
+
+    #[test]
+    fn unsure_router_is_left_mostly_unweighted() {
+        // Flat logits: every expert gets 1/8, so the top-2 hold only 0.25.
+        // This is where renormalizing would have inflated the output 4x.
+        let logits = [0.0f32; 8];
+        let (selected, weights) = moe_gate(&logits, 2, 1.0);
+        assert_eq!(selected, vec![0, 1], "ties break to the lower ids");
+        let total = sum(&weights);
+        assert!((total - 0.25).abs() < 1e-6, "flat router keeps only 0.25 mass");
+    }
+
+    #[test]
+    fn ties_break_to_the_lower_expert_id() {
+        let logits = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let (selected, _) = moe_gate(&logits, 2, 1.0);
+        assert_eq!(selected, vec![0, 1]);
+    }
+
+    #[test]
+    fn w_scale_only_applies_when_it_is_neither_zero_nor_one() {
+        let logits = [0.0f32, 2.0, 1.0, 0.5, 0.25, 0.125, 0.0, 0.0];
+        let (_, unscaled) = moe_gate(&logits, 2, 1.0);
+        let (_, scaled) = moe_gate(&logits, 2, 0.5);
+        for (u, s) in unscaled.iter().zip(scaled.iter()) {
+            assert!((f64::from(*u) * 0.5 - f64::from(*s)).abs() < 1e-9);
+        }
+        // 0.0 is the hparams "unset" default, so it must behave like 1.0
+        // (`llama-graph.cpp:2156` guards on both 0.0 and 1.0).
+        let (_, via_zero) = moe_gate(&logits, 2, 0.0);
+        for (u, z) in unscaled.iter().zip(via_zero.iter()) {
+            assert_eq!(u, z, "w_scale = 0.0 must be a no-op, not a zero-out");
+        }
+    }
+
+    #[test]
+    fn k_is_clamped_to_the_expert_count() {
+        let logits = [1.0f32, 0.5];
+        let (selected, weights) = moe_gate(&logits, 8, 1.0);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(weights.len(), 2);
+    }
 }
