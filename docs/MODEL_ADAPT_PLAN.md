@@ -77,23 +77,45 @@ dense/MoE 调度）。`src/models/bert_family/` 一份 graph 吃掉了 4 个 arc
 | FFN | GELU SEQ | GEGLU | **SwiGLU** |
 | 投影 bias | 4 组 | 4 组 | **全无** |
 | rope freq_base | - | - | **1000** |
+### 权重可用性（2026-09-29 实测，别再凭印象写「下一个」）
 
-**权重可用性（2026-09-29 实测，别再凭印象写「下一个」）**：
-ggml-org 在 ModelScope 上共 195 个 repo，encoder 相关的只有
-`bert-base-uncased`(110M) / `bge-small-en-v1.5-Q8_0-GGUF` /
-`bge-m3-Q8_0-GGUF`(635MB) / `gte-small-Q8_0-GGUF`(37MB) /
-`e5-small-v2-Q8_0-GGUF`(37MB) / `jina-embeddings-v2-base-{en,code}-Q8_0-GGUF` /
-`jina-reranker-v1-turbo-en-GGUF` / `embeddinggemma-300m-GGUF` / `Nomic-Embed-Text-V2-GGUF`。
-**ggml-org 名下没有 jina-bert-v3，也没有 modern-bert。**
+ggml-org 在 ModelScope 上共 195 个 repo，**encoder 相关的权重全部在此**：
 
-- `jina-bert-v3`（570M）：全站唯一 GGUF 是社区转换
-  `fuyuantech/jina-embeddings-v3-Q4_K_M`（392MB，Q4_K_M，非 ggml-org）。
-  它是唯一能验证 **fused QKV + 独立 Q/K/V bias**（`ed973d4` 刚补的路径）和
-  `n_rot` 半旋转的样本；jina 系历来带 Q/K/V bias，而 nomic 系不带，
-  所以这条路径目前**仍无模型验证过**。代价是第三方 Q4_K_M + 392MB。
-- `bert-base-uncased`（110M，ggml-org 官方）：**已接**，见 C 区表格。
-- `gte-small-q8_0` / `e5-small-v2-q8_0`（各 37MB，ggml-org 官方）：同为 `bert`
-  arch，是给 `bert` 变体补充更多 pooling / 维度假例的最便宜来源。
+| repo | 文件 | 大小 | arch / tokenizer | 状态 |
+|---|---|---|---|---|
+| `ggml-org/bert-base-uncased` | `bert-base-uncased-Q8_0.gguf` | 113MB | `bert` / `bert` | 已接（Verified） |
+| `ggml-org/bge-small-en-v1.5-Q8_0-GGUF` | `bge-small-en-v1.5-q8_0.gguf` | 35MB | `bert` / `bert` | 已接（Verified） |
+| `ggml-org/bge-m3-Q8_0-GGUF` | `bge-m3-q8_0.gguf` | 606MB | `bert` / **`t5`** | 已接（Verified） |
+| `ggml-org/gte-small-Q8_0-GGUF` | `gte-small-q8_0.gguf` | 35MB | `bert` / `bert` | 已接（Verified） |
+| `ggml-org/e5-small-v2-Q8_0-GGUF` | `e5-small-v2-q8_0.gguf` | 35MB | `bert` / `bert` | 已接（Verified） |
+| `ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF` | `jina-embeddings-v2-base-en-q8_0.gguf` | 140MB | `jina-bert-v2` / `bert` | 已接（Verified） |
+| `ggml-org/jina-embeddings-v2-base-code-Q8_0-GGUF` | `jina-embeddings-v2-base-code-q8_0.gguf` | 173MB | `jina-bert-v2` / `bert` | 待接（同 arch 同 tokenizer，增量价值低） |
+| `ggml-org/embeddinggemma-300M-GGUF` | `embeddinggemma-300M-Q8_0.gguf` | 319MB | `gemma-embedding` / `llama` | 已接（Verified） |
+| `ggml-org/Nomic-Embed-Text-V2-GGUF` | `nomic-embed-text-v2-moe-q8_0.gguf` | 489MB | `nomic-bert-moe` / `t5` | 已接（Verified） |
+| `ggml-org/jina-reranker-v1-turbo-en-GGUF` | `Jina-Bert-Implementation-38M-F16.gguf` | 74MB | `jina-bert-v2` / **`gpt2`** | 待接，见下 |
+
+**ggml-org 名下没有 `jina-bert-v3`，也没有 `modern-bert`。**
+
+### `jina-bert-v3` 的唯一来源是社区转换
+
+全站唯一 GGUF：`fuyuantech/jina-embeddings-v3-Q4_K_M`（392MB，Q4_K_M）。
+仓库只有 4 个文件——1 个 gguf + 312 字节 README + 50 字节 configuration.json +
+`.gitattributes`，**没有任何转换者 / 时间 / 脚本说明**，而 ggml-org 那些 repo
+至少是同源流水线产物。若要用它验证 `ed973d4` 补的 fused QKV + 独立 Q/K/V bias
+与 partial `n_rot`，需先拍板是否接受「非 ggml-org 的第三方 Q4_K_M」；
+**出现任何异常（元数据不符 / 张量布局古怪 / 输出可疑）就直接撤，不要硬推。**
+
+### `jina-reranker-v1-turbo-en`（待接，且验证深度有限）
+
+74MB / F16 / `arch=jina-bert-v2` / `tokenizer.ggml.model="gpt2"`（BPE）/ 6 层 /
+384 维 / mean pooling。已下载到 `models/jina-reranker-v1-turbo-en-GGUF/`。
+它是第三个「arch 与 tokenizer 错配」的真实样本，`0897baa` 的按
+`tokenizer.ggml.model` 分发正好覆盖它（否则会被塞进 WordPiece 然后报错）。
+
+**但验证深度有限**：reranker 靠 `[CLS]` 过 `cls.weight` 投影出一个 logit 来打分，
+而这个 GGUF 的 102 个张量是 6×16 + 6 个 top-level，**没有 `cls.weight` / `cls.bias` /
+`cls_out`**。所以本仓库只能验到「加载 + 输出合理 embedding」，
+**无法复现它的相关性排序**。接之前先想清楚要验什么。
 
 `nomic-bert-moe` 已落地过一次 MoE 路由（router logits → top-k → softmax →
 per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可复用同一形状，

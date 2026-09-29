@@ -39,6 +39,11 @@ struct BertConfig {
     /// `pooling_type` (`llama.h:177-182`): 0 none, 1 mean, 2 CLS, 3 last.
     /// `bert` ships 2, while jina-bert-v2 and nomic-bert ship 1.
     pooling_type: u64,
+    /// `context_length` — the trained context. Equals the row count of
+    /// `position_embd.weight` for the absolute-position variants and the RoPE
+    /// `n_ctx_orig` for the roped ones. `0` means the GGUF did not ship it, in
+    /// which case no length check is applied.
+    n_ctx_train: usize,
 }
 
 fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
@@ -114,6 +119,12 @@ fn read_meta(source: &dyn TensorSource) -> Result<BertConfig, String> {
         // 1 (mean) is the safe default: every variant verified before bge-small
         // used it, and `bert` is the one that passes 2 explicitly.
         pooling_type: uint64("pooling_type").unwrap_or(1),
+        // `context_length` is the size of `position_embd.weight`'s row count
+        // for the absolute-position variants (`bert.cpp:31`),
+        // and the RoPE `n_ctx_orig` for the roped ones. Either way an input
+        // longer than this has no defined positions, so it has to be rejected
+        // rather than silently indexed out of range.
+        n_ctx_train: uint("context_length").unwrap_or(0),
     })
     .and_then(|cfg| {
         if cfg.pooling_type > 3 {
@@ -334,6 +345,25 @@ pub fn run_embedding_tokens(
         return Err("Embedding input produced no tokens".into());
     }
     let cfg = read_meta(source)?;
+    // `llama-context.cpp:133` sizes the KV cache (and hence the accepted batch)
+    // from `hparams.n_ctx_train`, so an over-long input is a hard error in
+    // llama.cpp rather than a silent truncation.
+    //
+    // Without this the over-length prompt dies much later and much less
+    // usefully: the absolute-position variants index `position_embd.weight`
+    // row by row, so a 700-token prompt on a 512-row table fails inside
+    // `decode_f32_row_at_public` and surfaces as "position_embd.weight is not
+    // decodable as f32" — which describes a decode failure that never happened
+    // and hides the actual out-of-range index. There is no truncation path on
+    // purpose: silently dropping 200 tokens changes what the embedding means.
+    if cfg.n_ctx_train != 0 && token_ids.len() > cfg.n_ctx_train {
+        return Err(format!(
+            "prompt is too long: {} tokens, but this model was trained for {} \
+             (context_length); split the input or use a longer-context model",
+            token_ids.len(),
+            cfg.n_ctx_train
+        ));
+    }
     let (n_embd, n_layer, n_head, n_head_kv) = (cfg.n_embd, cfg.n_layer, cfg.n_head, cfg.n_head_kv);
     let (head_k, head_v, n_ff) = (cfg.n_embd_head_k, cfg.n_embd_head_v, cfg.n_ff);
     let n_embd_q = n_head * head_k;

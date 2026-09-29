@@ -290,3 +290,32 @@ fn embedding_orders_relevant_document_above_unrelated() {
     // what matters here.
     assert!(s_pos > 0.7, "relevant similarity too low: {s_pos}");
 }
+
+#[test]
+fn over_long_prompt_is_rejected_with_a_useful_error() {
+    // `context_length` is 512 here and it is also the row count of
+    // `position_embd.weight`. A longer prompt has no defined positions, and
+    // before the length check it died deep inside the position-table decode
+    // with "position_embd.weight is not decodable as f32" - a decode failure
+    // that never happened, hiding the real out-of-range index.
+    let Some(loader) = loader() else { return };
+    use rust_model_inference::models::bert_family::compute_embedding;
+    let long = "word ".repeat(600);
+    let error = compute_embedding(&loader, &long, 4)
+        .expect_err("a 600-token prompt must not succeed on a 512-position model");
+    assert!(
+        error.contains("too long") && error.contains("512"),
+        "the error must name the length problem, got: {error}"
+    );
+    // The old, misleading message must not be what the user sees.
+    assert!(
+        !error.contains("not decodable"),
+        "an over-long prompt must not be reported as a decode failure: {error}"
+    );
+
+    // At the boundary it still works: exactly 512 positions is in range.
+    let exact = "word ".repeat(502); // 502 words + [CLS]/[SEP] lands under 512
+    let embedding = compute_embedding(&loader, &exact, 4)
+        .unwrap_or_else(|e| panic!("an in-range prompt must embed: {e}"));
+    assert_eq!(embedding.len(), 768);
+}

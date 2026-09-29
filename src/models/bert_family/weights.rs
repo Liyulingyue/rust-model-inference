@@ -261,6 +261,12 @@ pub fn decode_f32_row_public(bytes: &[u8], expected_len: usize) -> Option<Vec<f3
 /// `token_types` and `position_embd` are F32 tables indexed per element
 /// position (`bert.cpp:83-89` reads `token_types` row 0 and `position_embd` row
 /// `pos`), so both go through here. `token_types` passes row 0.
+///
+/// Returns `None` both for an unsupported ggml type and for a `row` past the
+/// end of the table. Callers must not word the failure as "not decodable as
+/// f32" — an out-of-range row is an over-long prompt, not a decode problem.
+/// The bert-family forward checks `context_length` up front precisely so this
+/// case cannot be reached with a misattributed message.
 pub fn decode_f32_row_at_public(bytes: &[u8], row: usize, expected_len: usize) -> Option<Vec<f32>> {
     decode_f32_row_at(GGMLType::F32, bytes, row, expected_len)
 }
