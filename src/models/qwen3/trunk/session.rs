@@ -164,7 +164,7 @@ impl<'model> Qwen3Session<'model> {
                         qs: [0; 256],
                         bsums: [0; 16],
                     };
-                    max_n_in / 256
+                    max_n_in.div_ceil(256)
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],
