@@ -11,8 +11,35 @@
 
 use super::neox::rope_sin_cos;
 
+/// Interleaved-pair RoPE rotating **all** `head_dim` lanes of every head.
+///
+/// Equivalent to [`rope_norm_nrot`] with `n_rot == head_dim`, which is what
+/// every caller without a `rope.dimension_count` key wants.
 pub fn rope_norm(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
-    let half = head_dim / 2;
+    rope_norm_impl(x, pos, head_dim, head_dim, freq_base);
+}
+
+/// Interleaved-pair RoPE that rotates only the first `n_rot` lanes of each
+/// head, leaving the tail `[n_rot, head_dim)` untouched.
+///
+/// Mirrors `ggml_compute_forward_rope_f32` (`ggml-cpu/ops.cpp:6098`): `n_dims`
+/// is `n_rot`, `theta_scale` is `powf(freq_base, -2.0f/n_dims)` — computed from
+/// `n_rot`, **not** from `head_dim` — and the channels past `n_dims` are copied
+/// through unchanged (`ops.cpp:6224-6234`).
+///
+/// `n_rot` must be even and `<= head_dim`; anything else falls back to
+/// rotating the whole head, which is what the callers without a
+/// `rope.dimension_count` key did before this function existed.
+pub fn rope_norm_nrot(x: &mut [f32], pos: usize, head_dim: usize, n_rot: usize, freq_base: f32) {
+    if n_rot == 0 || n_rot > head_dim || n_rot % 2 != 0 {
+        rope_norm_impl(x, pos, head_dim, head_dim, freq_base);
+        return;
+    }
+    rope_norm_impl(x, pos, head_dim, n_rot, freq_base);
+}
+
+fn rope_norm_impl(x: &mut [f32], pos: usize, head_dim: usize, n_rot: usize, freq_base: f32) {
+    let half = n_rot / 2;
     let n_heads = x.len() / head_dim;
     if half == 0 || n_heads == 0 {
         return;
@@ -23,7 +50,7 @@ pub fn rope_norm(x: &mut [f32], pos: usize, head_dim: usize, freq_base: f32) {
     // implementation. Reduces `sin_cos` calls from `n_heads × half` to `half`.
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
-    let theta_scale = freq_base.powf(-2.0f32 / head_dim as f32);
+    let theta_scale = freq_base.powf(-2.0f32 / n_rot as f32);
     let mut theta = pos as f32;
     for i in 0..half {
         let (c, s) = rope_sin_cos(theta);

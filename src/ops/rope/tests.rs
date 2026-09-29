@@ -2,7 +2,7 @@
 
 use super::{
     neox::{rope_neox_inplace_scalar, rope_neox_inplace_with_table, rope_sin_cos},
-    rope_mrope, rope_neox_inplace, rope_neox_sleef, rope_norm, rope_sin_cos_sleef,
+    rope_mrope, rope_neox_inplace, rope_neox_sleef, rope_norm, rope_norm_nrot, rope_sin_cos_sleef,
     rope_sin_cos_sleef_table_with_threads, rope_vision,
 };
 
@@ -274,6 +274,104 @@ fn rope_neox_inplace_with_table_matches_breeze_bf_round_reference() {
                 b.to_bits(),
                 "head_dim={head_dim} n_heads={n_heads} pos={pos} idx={i}: expected={a} simd={b}"
             );
+        }
+    }
+}
+
+#[test]
+fn rope_norm_nrot_with_full_head_dim_is_identical_to_rope_norm() {
+    // Every roped bert-family GGUF omits `rope.dimension_count`, so n_rot falls
+    // back to head_dim. That path must stay bit-identical to `rope_norm`, which
+    // the other RoPE tests already pin.
+    for head_dim in [8usize, 16, 64] {
+        for n_heads in [1usize, 3, 12] {
+            for pos in [0usize, 1, 7, 512] {
+                let base: Vec<f32> = (0..head_dim * n_heads)
+                    .map(|i| ((i * 37 + pos * 11) % 97) as f32 * 0.05 - 2.0)
+                    .collect();
+                let mut full = base.clone();
+                let mut via_nrot = base.clone();
+                rope_norm(&mut full, pos, head_dim, 1000.0);
+                rope_norm_nrot(&mut via_nrot, pos, head_dim, head_dim, 1000.0);
+                for (i, (a, b)) in full.iter().zip(via_nrot.iter()).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "head_dim={head_dim} n_heads={n_heads} pos={pos} idx={i}: {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rope_norm_nrot_leaves_the_tail_lanes_untouched() {
+    // `ggml_compute_forward_rope_f32` rotates only the first n_dims channels and
+    // copies the rest through verbatim (`ggml-cpu/ops.cpp:6224-6234`).
+    let head_dim = 8usize;
+    let n_heads = 2usize;
+    let n_rot = 4usize;
+    let base: Vec<f32> = (0..head_dim * n_heads)
+        .map(|i| i as f32 * 0.25 - 1.5)
+        .collect();
+    let mut rotated = base.clone();
+    rope_norm_nrot(&mut rotated, 3, head_dim, n_rot, 1000.0);
+
+    for h in 0..n_heads {
+        let b = h * head_dim;
+        // Tail lanes are byte-identical to the input.
+        for lane in n_rot..head_dim {
+            assert_eq!(
+                rotated[b + lane].to_bits(),
+                base[b + lane].to_bits(),
+                "tail lane {lane} of head {h} must be copied through unchanged"
+            );
+        }
+        // Rotated lanes must actually have moved.
+        let moved = (0..n_rot).any(|lane| rotated[b + lane] != base[b + lane]);
+        assert!(
+            moved,
+            "head {h}: the first {n_rot} lanes should have rotated"
+        );
+    }
+}
+
+#[test]
+fn rope_norm_nrot_uses_n_rot_for_the_theta_scale() {
+    // theta_scale is powf(freq_base, -2/n_rot) — from n_rot, not head_dim
+    // (`ggml-cpu/ops.cpp:6143`). Partial rotation therefore advances the phase
+    // *slower* per index than a full rotation over the same lanes would.
+    let head_dim = 8usize;
+    let base: Vec<f32> = (0..head_dim).map(|i| i as f32 * 0.5 - 1.0).collect();
+
+    let mut partial = base.clone();
+    rope_norm_nrot(&mut partial, 5, head_dim, 4, 1000.0);
+
+    // A 4-lane rotation at pos 5 must not equal a 4-lane rotation computed with
+    // head_dim's theta_scale, so just assert the value is finite and distinct
+    // enough to prove the two formulas differ.
+    let mut full_width = base.clone();
+    rope_norm(&mut full_width, 5, head_dim, 1000.0);
+    let differs = (0..4).any(|i| partial[i] != full_width[i]);
+    assert!(differs, "partial n_rot must use its own theta_scale");
+    assert!(partial.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn rope_norm_nrot_rejects_out_of_range_n_rot_by_falling_back() {
+    // Odd / oversized / zero n_rot cannot describe a rotation; the function
+    // falls back to rotating the whole head rather than panicking or doing
+    // something half-applied.
+    let head_dim = 8usize;
+    let base: Vec<f32> = (0..head_dim).map(|i| i as f32 * 0.5).collect();
+    for bad_n_rot in [0usize, 3, 7, 9, 64] {
+        let mut got = base.clone();
+        let mut want = base.clone();
+        rope_norm_nrot(&mut got, 2, head_dim, bad_n_rot, 1000.0);
+        rope_norm(&mut want, 2, head_dim, 1000.0);
+        for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "n_rot={bad_n_rot} idx={i}");
         }
     }
 }
