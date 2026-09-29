@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-015) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-016) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -808,6 +808,41 @@ pub mod capability {
 
 在触发前，处理方式是：**新 arch 接入时手工检查三处 dispatch + 补实现**
 （正如本次给 falcon 补 HTTP/JEV）。
+
+---
+
+### TODO-016: Jina v5 Omni audio encoder — oracle 验证待补
+
+本仓库 `encode_audio()` 已按 jina-ai `feat-v5-omni` llama.cpp fork 设计切 30 s Whisper 块（见 commit `9717d17`），但**未跑过 llama.cpp 端的逐位对照**：
+
+1. **per-chunk byte-equal 对齐 llama.cpp `b96806d`**
+   - 现存 `tests/jina_audio_projection_matches_llama_cpp_bits`（#[ignore]）已经覆盖单 30 s 块的 750 × 1024 投影 F32 对照，但每次跑需要：
+     - `LLAMA_DIR` 是固定 commit `b96806d96061049a5b574269b049bf6241d63d46` 的独立副本
+     - 应用 `tools/oracle/jina_audio/mtmd-audio-projection.patch` + `tools/oracle/qwen35/qwen35-scalar-softmax.patch`
+     - `cmake -B build-rmi-jina-audio -DGGML_ACCELERATE=OFF -DGGML_METAL=OFF -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX`
+     - 跑 `llama-mtmd-cli` dump oracle F32，再跑 `cargo test ... -- --ignored`
+   - macOS ARM CPU / 单线程 / 标量 softmax / 关 Flash Attention 的严格 CPU 路径
+   - 触发条件：新增 jina v5 audio encoder 任何改动时必跑
+
+2. **跨块拼接 oracle 对齐**
+   - 上一步只覆盖单个 30 s 块。我们的 `encode_audio()` 把多个 30 s 块的 post-conv tokens 拼给 LLM，让 LLM cross-attend 跨块融合
+   - 上游 `feat-v5-omni` fork 也是同样设计（mtmd split 30s + LLM cross-attend），所以两边的最终 LLM embedding 应等价
+   - 当前只在仓库端跑过 30s / 60s / 90s 端到端语义验证（cos 关系正确），**未跟 llama.cpp 跨块拼接对比**
+   - 验证方法：取 jina-omni + llama.cpp fork + 一段 >30s 音频（e.g. 60s），分别跑两端的最终 embedding，断言 cos ≥ 0.99 + max abs diff 在量化噪声内（Q8_0 文本 + F16 mmproj 路径下应该是 ~1e-3）
+   - 触发条件：commit `9717d17` 之后任何 jina v5 改动、Q4_K / Q5_K / Q6_K 等不同量化、新 mmproj 版本
+
+**当前不做**：
+- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
+- 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
+- 触发再做：第二条等用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+
+**实施步骤**（任一触发条件满足时）：
+1. `cd $LLAMA_DIR && git checkout b96806d` 起固定 commit
+2. apply 现有两个 patch
+3. cmake + build（macOS ARM / Linux x86_64 各一次）
+4. 跑现有 `jina_audio_projection_matches_llama_cpp_bits` 对 30s 单块
+5. 新增 `jina_audio_projection_matches_llama_cpp_bits_concat`（#[ignore]）跑 60s 跨块拼接
+6. 把对照数据 commit 到 `tools/oracle/jina_audio/`（或外置 datum）
 
 ---
 
