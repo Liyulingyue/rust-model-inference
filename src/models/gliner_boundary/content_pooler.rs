@@ -36,8 +36,16 @@ pub struct SpanContentPooler<'a> {
 }
 
 impl<'a> SpanContentPooler<'a> {
+    /// Load the pooler from `source`.
+    ///
+    /// `prefix` is the state-dict prefix without the `value_projection` /
+    /// `layer_norm` leaf names, i.e. `boundary_head.pair_scorer.content_pooler`
+    /// or `boundary_head.shared_pool_scorer.content_pooler`. base-v1 ships two
+    /// independent poolers with the same shapes and different values, so the
+    /// prefix is not cosmetic.
     pub fn load(
         source: &'a dyn TensorSource,
+        prefix: &str,
         text_hidden_size: usize,
         content_dim: usize,
         content_soft_max_pool: bool,
@@ -51,25 +59,18 @@ impl<'a> SpanContentPooler<'a> {
         }
         let value_projection = load_weight(
             source,
-            "boundary_head.pair_scorer.content_pooler.value_projection.weight",
+            &format!("{prefix}.value_projection.weight"),
             text_hidden_size,
             content_dim,
         )?;
         let value_bias = load_vec(
             source,
-            "boundary_head.pair_scorer.content_pooler.value_projection.bias",
+            &format!("{prefix}.value_projection.bias"),
             content_dim,
         )?;
-        let layer_norm_weight = load_vec(
-            source,
-            "boundary_head.pair_scorer.content_pooler.layer_norm.weight",
-            content_dim,
-        )?;
-        let layer_norm_bias = load_vec(
-            source,
-            "boundary_head.pair_scorer.content_pooler.layer_norm.bias",
-            content_dim,
-        )?;
+        let layer_norm_weight =
+            load_vec(source, &format!("{prefix}.layer_norm.weight"), content_dim)?;
+        let layer_norm_bias = load_vec(source, &format!("{prefix}.layer_norm.bias"), content_dim)?;
         Ok(Self {
             content_dim,
             output_dim: content_dim,

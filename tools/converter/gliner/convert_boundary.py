@@ -249,6 +249,9 @@ BOUNDARY_FLAG_KEYS = (
     "enable_rotary_endpoints",
     "reranker_endpoint_compat",
     "bidirectional_proposals",
+    "adaptive_threshold",
+    "hard_negative_keep_all_when_absent",
+    "directional_relation_states",
     "enable_relations",
     "enable_records",
     "enable_count_head",
@@ -277,7 +280,9 @@ BOUNDARY_INT_KEYS = (
     "relation_pair_cap",
     "boundary_attention_layers",
     "boundary_attention_heads",
+    "boundary_attention_window",
     "boundary_refinement_layers",
+    "candidate_attention_heads",
     "candidate_attention_layers",
     "query_attention_layers",
 )
@@ -296,12 +301,15 @@ BOUNDARY_FLOAT_KEYS = (
     "record_anchor_proposal_threshold",
     "record_field_threshold",
 )
-BOUNDARY_STR_KEYS = ("candidate_pool",)
+BOUNDARY_STR_KEYS = ("candidate_pool", "boundary_marginal_loss", "loss_reduction", "overlap_policy", "export_mode")
 BOUNDARY_INT_KEYS_REQUIRED = (
     "boundary_dim",
     "pair_dim",
     "content_dim",
     "multihead_pair_compat_heads",
+    "pool_boundary_top_k",
+    "pool_size",
+    "min_pool_per_query",
 )
 BOUNDARY_FLAG_KEYS_REQUIRED = (
     "use_inside_evidence",

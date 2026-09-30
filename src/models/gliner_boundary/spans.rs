@@ -8,6 +8,12 @@
 //!  3. `BoundaryProposer::score_explicit_pairs` — marginal-free compat prior
 //!  4. `PairScorer.forward` — per-candidate score
 //!
+//! [`score_document_candidates`] is the *other* entry point and the one
+//! ordinary span extraction uses: `gliner2.5-base-v1` sets
+//! `candidate_pool = "shared"`, so `BoundaryHead.forward` builds one
+//! document-wide pool (`DocumentCandidatePool`) and scores it against every
+//! query in one pass (`SharedPoolScorer`).
+//!
 //! This mirrors `BoundaryExtractor.score_explicit_spans`
 //! (`boundary/model.py:274`), which is the span-conditioned entry point used
 //! by the reference engine to score caller-supplied spans: the entity
@@ -26,6 +32,7 @@
 
 use super::loader::BoundaryModel;
 use super::pair_scorer::PairScoreInputs;
+use super::pool::SharedPoolInputs;
 
 /// One scored candidate span.
 #[derive(Clone, Debug)]
@@ -111,4 +118,122 @@ pub fn score_spans(
             logit: scores[idx],
         })
         .collect()
+}
+
+/// One batch of document-level candidates, in the public per-query order.
+///
+/// `PooledCandidates::to_candidate_batch` (`pool.py:41`) is the reference's
+/// adapter from its candidate-major internals to this shape; the fields here
+/// are the result of that transpose.
+pub struct DocumentCandidateBatch {
+    /// `[B, Q, C, 2]` candidate `(start, end)` pairs, query-agnostic within a
+    /// row of the batch.
+    pub indices: Vec<usize>,
+    /// `[B, Q, C]` final per-candidate logits. Invalid candidates carry
+    /// `MASK_LOGIT`.
+    pub pair_logits: Vec<f32>,
+    /// `[B, Q, C]`. False for padding and for inactive queries.
+    pub valid_mask: Vec<bool>,
+    /// `[B, C, pair_dim]` contextual candidate states. Feeds the record head's
+    /// `candidate_encoder`; `None` would be equivalent to
+    /// `candidate_attention_layers = 0` plus no records.
+    pub candidate_states: Vec<f32>,
+    /// `C`, the padded pool width.
+    pub pool_size: usize,
+}
+
+/// Score the shared document pool for every query.
+///
+/// This is the mainline path (`BoundaryHead.forward` with
+/// `candidate_pool == "shared"`, `model.py:396-466`):
+///  1. `BoundaryEncoder` — text → boundary states
+///  2. `BoundaryQueryHead` — per-query marginals + inside prefix
+///  3. `DocumentCandidatePool` — one deduplicated span pool per document
+///  4. `SharedPoolScorer` — score the pool against all queries
+///
+/// `indices` / `valid_mask` / `pair_logits` are returned transposed to
+/// `[B, Q, C]`; `candidate_states` stays `[B, C, pair_dim]` because the
+/// reference keeps it candidate-major.
+pub fn score_document_candidates(
+    model: &BoundaryModel<'_>,
+    text_states: &[f32],
+    text_mask: &[Vec<bool>],
+    query_states: &[f32],
+    query_mask: &[Vec<bool>],
+) -> DocumentCandidateBatch {
+    let batch = text_mask.len();
+    let q_count = query_mask.first().map_or(0, Vec::len);
+    if batch == 0 || q_count == 0 {
+        return DocumentCandidateBatch {
+            indices: Vec::new(),
+            pair_logits: Vec::new(),
+            valid_mask: Vec::new(),
+            candidate_states: Vec::new(),
+            pool_size: model.settings.pool_size,
+        };
+    }
+
+    let encoding = model.boundary.forward(text_states, text_mask);
+    let marginals = model.query_head.forward(
+        &encoding.states,
+        &encoding.mask,
+        text_states,
+        text_mask,
+        query_states,
+        query_mask,
+    );
+    let pooled = model.pool_builder.build(
+        &encoding.states,
+        &encoding.mask,
+        query_mask,
+        &marginals.start_logits,
+        &marginals.end_logits,
+    );
+    let text_lengths: Vec<usize> = text_mask
+        .iter()
+        .map(|row| row.iter().filter(|m| **m).count())
+        .collect();
+    let (pair_logits, candidate_states) = model.pool_scorer.forward(
+        &SharedPoolInputs {
+            boundary_states: &encoding.states,
+            query_states,
+            query_mask,
+            inside_prefix: &marginals.inside_prefix,
+            inside_prefix_mean: &marginals.inside_prefix_mean,
+            text_states,
+            text_mask,
+            start_logits: &marginals.start_logits,
+            end_logits: &marginals.end_logits,
+            text_lengths: &text_lengths,
+            q_count,
+        },
+        &pooled,
+    );
+
+    // `to_candidate_batch`: expand the query-agnostic pool across queries and
+    // transpose the candidate-major scores.
+    let c = pooled.pool_size;
+    let mut indices = vec![0usize; batch * q_count * c * 2];
+    let mut valid_mask = vec![false; batch * q_count * c];
+    let mut transposed = vec![0.0f32; batch * q_count * c];
+    for b in 0..batch {
+        for q in 0..q_count {
+            for slot in 0..c {
+                let dst = b * q_count * c + q * c + slot;
+                let src = b * c + slot;
+                indices[dst * 2] = pooled.indices[src * 2];
+                indices[dst * 2 + 1] = pooled.indices[src * 2 + 1];
+                valid_mask[dst] = pooled.mask[src];
+                transposed[dst] = pair_logits[src * q_count + q];
+            }
+        }
+    }
+
+    DocumentCandidateBatch {
+        indices,
+        pair_logits: transposed,
+        valid_mask,
+        candidate_states,
+        pool_size: c,
+    }
 }

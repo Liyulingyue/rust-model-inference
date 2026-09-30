@@ -38,11 +38,12 @@
 //! `candidate_pool = "shared"` (base-v1's setting), which is tracked
 //! separately in `glinerTODO.md`.
 
-use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 
 use super::content_pooler::SpanContentPooler;
 use super::proposer::RotaryBoundaryEmbedding;
+use super::settings::BoundarySettings;
 
 /// `MASK_LOGIT` from `boundary/constants.py`. A finite sentinel, not `-inf`,
 /// so sums and softmaxes downstream stay finite.
@@ -60,6 +61,20 @@ pub struct PairScorerFeatures {
     pub endpoint_difference_features: bool,
     pub enable_rotary_endpoints: bool,
     pub reranker_endpoint_compat: bool,
+}
+
+impl From<&BoundarySettings> for PairScorerFeatures {
+    fn from(settings: &BoundarySettings) -> Self {
+        Self {
+            use_inside_evidence: settings.use_inside_evidence,
+            enable_span_content: settings.enable_span_content,
+            content_soft_max_pool: settings.content_soft_max_pool,
+            query_conditioned_inside_weight: settings.query_conditioned_inside_weight,
+            endpoint_difference_features: settings.endpoint_difference_features,
+            enable_rotary_endpoints: settings.enable_rotary_endpoints,
+            reranker_endpoint_compat: settings.reranker_endpoint_compat,
+        }
+    }
 }
 
 /// Everything [`PairScorer::forward`] needs.
@@ -146,19 +161,13 @@ impl<'a> PairScorer<'a> {
     /// Load the pair scorer. `hidden_size` is the encoder width, which is both
     /// the `content_pooler.value_projection` input and (for base-v1) the
     /// query width.
-    pub fn load(source: &'a dyn TensorSource, hidden_size: usize) -> Result<Self, String> {
-        let settings = load_settings(source)?.ok_or_else(|| {
-            "missing gliner2.boundary.* settings metadata; re-convert the checkpoint with \
-             tools/converter/gliner/convert_boundary.py so the pair scorer's feature flags \
-             come from the config instead of defaults"
-                .to_string()
-        })?;
-        let features = settings.features;
-        let pair_dim = source
-            .metadata("gliner2.boundary.pair_dim")
-            .and_then(|v| v.to_u64())
-            .map(|v| v as usize)
-            .ok_or("missing metadata gliner2.boundary.pair_dim")?;
+    pub fn load(
+        source: &'a dyn TensorSource,
+        hidden_size: usize,
+        settings: &BoundarySettings,
+    ) -> Result<Self, String> {
+        let features = PairScorerFeatures::from(settings);
+        let pair_dim = settings.pair_dim;
         let q_dim = source
             .tensor_info("boundary_head.pair_scorer.query_gate.weight")
             .ok_or("missing boundary_head.pair_scorer.query_gate.weight")?
@@ -276,6 +285,7 @@ impl<'a> PairScorer<'a> {
         let content_pooler = if features.enable_span_content {
             Some(SpanContentPooler::load(
                 source,
+                "boundary_head.pair_scorer.content_pooler",
                 hidden_size,
                 settings.content_dim,
                 features.content_soft_max_pool,
@@ -654,73 +664,6 @@ impl<'a> PairScorer<'a> {
         );
         out
     }
-}
-
-// ---------------------------------------------------------------------------
-// Metadata
-// ---------------------------------------------------------------------------
-
-/// Settings the loader needs to build [`PairScorerFeatures`], plus the dims
-/// and rotary base it validates tensors against.
-struct ScorerSettings {
-    features: PairScorerFeatures,
-    content_dim: usize,
-    multihead_pair_compat_heads: usize,
-    rotary_base: f32,
-}
-
-/// Read the transcoded `boundary_head` settings. `Ok(None)` means the GGUF
-/// predates the settings metadata, which the caller turns into a
-/// re-conversion hint rather than a silent default.
-fn load_settings(source: &dyn TensorSource) -> Result<Option<ScorerSettings>, String> {
-    let flag = |name: &str| -> Result<Option<bool>, String> {
-        match source.metadata(&format!("gliner2.boundary.{name}")) {
-            None => Ok(None),
-            Some(MetaValue::Bool(value)) => Ok(Some(*value)),
-            Some(MetaValue::Uint32(value)) => Ok(Some(*value != 0)),
-            Some(MetaValue::Int32(value)) => Ok(Some(*value != 0)),
-            Some(MetaValue::Uint64(value)) => Ok(Some(*value != 0)),
-            Some(MetaValue::Int64(value)) => Ok(Some(*value != 0)),
-            Some(other) => Err(format!("gliner2.boundary.{name} is not a bool: {other:?}")),
-        }
-    };
-    let number = |name: &str| -> Result<Option<f64>, String> {
-        match source.metadata(&format!("gliner2.boundary.{name}")) {
-            None => Ok(None),
-            Some(value) => value
-                .to_f64()
-                .map(Some)
-                .ok_or_else(|| format!("gliner2.boundary.{name} is not a number: {value:?}")),
-        }
-    };
-    if source
-        .metadata("gliner2.boundary.use_inside_evidence")
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let required_flag = |name: &str| -> Result<bool, String> {
-        flag(name)?.ok_or_else(|| format!("missing metadata gliner2.boundary.{name}"))
-    };
-    let required_usize = |name: &str| -> Result<usize, String> {
-        number(name)?
-            .map(|value| value as usize)
-            .ok_or_else(|| format!("missing metadata gliner2.boundary.{name}"))
-    };
-    Ok(Some(ScorerSettings {
-        features: PairScorerFeatures {
-            use_inside_evidence: required_flag("use_inside_evidence")?,
-            enable_span_content: required_flag("enable_span_content")?,
-            content_soft_max_pool: required_flag("content_soft_max_pool")?,
-            query_conditioned_inside_weight: required_flag("query_conditioned_inside_weight")?,
-            endpoint_difference_features: required_flag("endpoint_difference_features")?,
-            enable_rotary_endpoints: required_flag("enable_rotary_endpoints")?,
-            reranker_endpoint_compat: required_flag("reranker_endpoint_compat")?,
-        },
-        content_dim: required_usize("content_dim")?,
-        multihead_pair_compat_heads: required_usize("multihead_pair_compat_heads")?,
-        rotary_base: number("rotary_base")?.unwrap_or(10000.0) as f32,
-    }))
 }
 
 // ---------------------------------------------------------------------------

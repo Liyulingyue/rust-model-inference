@@ -25,7 +25,9 @@ pub mod forward;
 pub mod loader;
 pub mod marginals;
 pub mod pair_scorer;
+pub mod pool;
 pub mod proposer;
+pub mod settings;
 pub mod spans;
 
 pub use content_pooler::SpanContentPooler;
@@ -33,8 +35,10 @@ pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
 pub use marginals::{BoundaryMarginals, BoundaryQueryHead};
 pub use pair_scorer::{PairScoreInputs, PairScorer, PairScorerFeatures};
+pub use pool::{DocumentCandidatePool, PooledCandidates};
 pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
-pub use spans::{score_spans, ScoredSpan};
+pub use settings::BoundarySettings;
+pub use spans::{score_document_candidates, score_spans, DocumentCandidateBatch, ScoredSpan};
 
 use crate::core::tensor::TensorSource;
 

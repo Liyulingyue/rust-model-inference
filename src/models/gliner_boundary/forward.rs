@@ -74,7 +74,16 @@ pub struct ResidualSwiGLU<'a> {
 }
 
 impl<'a> BoundaryEncoder<'a> {
-    pub fn load(source: &'a dyn TensorSource, hidden_size: usize) -> Result<Self, String> {
+    /// `attention_window` is `boundary_head.boundary_attention_window`: the
+    /// local attention band `|i - j| <= window` applied to every attention
+    /// block. base-v1 uses 128, which is a no-op for documents shorter than
+    /// 257 boundary positions — i.e. it only binds on long documents, so a
+    /// short fixture will not catch a missing window.
+    pub fn load(
+        source: &'a dyn TensorSource,
+        hidden_size: usize,
+        attention_window: usize,
+    ) -> Result<Self, String> {
         let boundary_dim = source
             .tensor_info("boundary_head.boundary_encoder.layer_norm.weight")
             .ok_or("missing boundary_head.boundary_encoder.layer_norm.weight")?
@@ -204,7 +213,7 @@ impl<'a> BoundaryEncoder<'a> {
                     boundary_dim,
                 )?,
                 num_heads,
-                window: 0, // window is read from metadata; 0 = full attention for now
+                window: attention_window,
             });
             attn_index += 1;
         }
@@ -492,6 +501,23 @@ fn load_weight<'a>(
     )))
 }
 
+/// The `BoundaryAttentionBlock` attention mask (`encoding.py:122-131`):
+///
+/// ```text
+/// allowed[i][j] = (mask[j] && (window == 0 || |i - j| <= window)) || (i == j)
+/// ```
+///
+/// The diagonal OR is unconditional — the reference does *not* gate it on
+/// `mask[i]`, which is what keeps a padding query row from having an entirely
+/// masked row (and therefore a NaN softmax). Exposed so the mask can be
+/// tested directly: `boundary_attention_window` is 128 for base-v1, so it only
+/// starts excluding keys past 257 boundary positions, far beyond the
+/// document lengths the end-to-end fixtures use.
+pub fn attention_allowed(mask_row: &[bool], i: usize, j: usize, window: usize) -> bool {
+    let in_window = window == 0 || i.abs_diff(j) <= window;
+    (mask_row.get(j).copied().unwrap_or(false) && in_window) || i == j
+}
+
 /// `head_dim` for attention blocks is `boundary_dim / num_heads`. The
 /// reference uses `boundary_attention_heads` from metadata (default 4).
 /// We can't read metadata per-block, so we default to 4 and require the
@@ -549,9 +575,9 @@ fn run_attention_block(
         }
     }
 
-    // Self-attention per (batch, head). causal = false (boundary attn is
-    // bidirectional); window is optional and we currently skip it for
-    // simplicity (boundary_attention_window is metadata-only for now).
+    // Self-attention per (batch, head). Not causal (boundary attention is
+    // bidirectional), and restricted to the local band `|i - j| <= window`
+    // when `window > 0` (`BoundaryAttentionBlock.forward`, encoding.py:122).
     let mut output = vec![0.0f32; total];
     for b in 0..batch {
         for head in 0..num_heads {
@@ -584,11 +610,19 @@ fn run_attention_block(
                     scores[i * boundary_len + j] = s * scale;
                 }
             }
-            // Apply mask + diagonal (matches `BoundaryAttentionBlock.forward`).
+            // allowed[j] = mask[j] && |i - j| <= window, then OR the diagonal
+            // unconditionally so a padding query row still has one legal key
+            // (encoding.py:122-131). The unconditional OR matters: the
+            // reference does not gate it on mask[i].
+            let window = block.window;
             for i in 0..boundary_len {
                 for j in 0..boundary_len {
-                    let valid =
-                        mask[b * boundary_len + j] || (i == j && mask[b * boundary_len + i]);
+                    let valid = attention_allowed(
+                        &mask[b * boundary_len..(b + 1) * boundary_len],
+                        i,
+                        j,
+                        window,
+                    );
                     if !valid {
                         scores[i * boundary_len + j] = f32::NEG_INFINITY;
                     }

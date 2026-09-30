@@ -30,7 +30,9 @@ use std::sync::Arc;
 use super::forward::BoundaryEncoder;
 use super::marginals::BoundaryQueryHead;
 use super::pair_scorer::PairScorer;
+use super::pool::{DocumentCandidatePool, SharedPoolScorer};
 use super::proposer::BoundaryProposer;
+use super::settings::BoundarySettings;
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
 pub struct BoundaryModel<'a> {
@@ -49,6 +51,14 @@ pub struct BoundaryModel<'a> {
     pub query_head: BoundaryQueryHead<'a>,
     pub proposer: BoundaryProposer<'a>,
     pub pair_scorer: PairScorer<'a>,
+    /// The transcoded `boundary_head` settings, the single source of truth for
+    /// which optional feature sources exist.
+    pub settings: BoundarySettings,
+    /// The shared document span pool. This is the mainline when
+    /// `candidate_pool = "shared"` (base-v1's setting); `proposer` /
+    /// `pair_scorer` then only serve `score_explicit_spans`.
+    pub pool_builder: DocumentCandidatePool<'a>,
+    pub pool_scorer: SharedPoolScorer<'a>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -123,18 +133,36 @@ impl<'a> BoundaryModel<'a> {
         let classifier_3 = load_weight(source, "classifier.3.weight", classifier_intermediate, 1)?;
         let classifier_3_bias = load_vec(source, "classifier.3.bias", 1)?;
 
-        // 6. BoundaryEncoder weights
-        let boundary = BoundaryEncoder::load(source, n_embd)?;
+        // 6. Settings. Read before the heads, since they size themselves from
+        //    it (`boundary_attention_window` in particular changes the encoder
+        //    attention mask).
+        let settings = BoundarySettings::from_source(source)?;
 
-        // 7. BoundaryQueryHead weights (per-query marginals over boundary positions)
+        // 7. BoundaryEncoder weights
+        let boundary = BoundaryEncoder::load(source, n_embd, settings.boundary_attention_window)?;
+
+        // 8. BoundaryQueryHead weights (per-query marginals over boundary positions)
         let query_head = BoundaryQueryHead::load(source, n_embd)?;
 
-        // 8. BoundaryProposer weights (endpoint projections + rotary).
+        // 9. BoundaryProposer weights (endpoint projections + rotary).
         let proposer = BoundaryProposer::load(source, n_embd)?;
 
-        // 9. PairScorer weights (endpoint projections + query gate +
-        //    compat_mix + length_query_projection + optional rotary).
-        let pair_scorer = PairScorer::load(source, n_embd)?;
+        // 10. PairScorer weights (endpoint projections + query gate +
+        //    compat_mix + length_query_projection + optional rotary,
+        //    span content, inside weight, endpoint difference).
+        let pair_scorer = PairScorer::load(source, n_embd, &settings)?;
+
+        // 11. Shared document pool + scorer. `candidate_pool = "shared"` makes
+        //     this the mainline; the pair scorer above then only serves
+        //     `score_explicit_spans`.
+        let pool_builder = DocumentCandidatePool::load(
+            source,
+            settings.boundary_dim,
+            settings.pool_boundary_top_k,
+            settings.pool_size,
+            settings.min_pool_per_query,
+        )?;
+        let pool_scorer = SharedPoolScorer::load(source, n_embd, &settings)?;
 
         Ok(Self {
             config,
@@ -148,6 +176,9 @@ impl<'a> BoundaryModel<'a> {
             query_head,
             proposer,
             pair_scorer,
+            settings,
+            pool_builder,
+            pool_scorer,
         })
     }
 }

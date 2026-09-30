@@ -144,18 +144,25 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **commit**：`1d98e37`（score_spans）+ 本次（全 feature + metadata 转写）
 - **删除**：`dump_pair_scorer_limited.py` / `pair_scorer_limited_parity.rs` / `pair-scorer-limited-golden.json`。limited config 不是任何已发布 checkpoint 的真实配置，留着只会诱导「默认值够用」的错觉
 
-### 🔴 5.2.2b 文档级推理路径：DocumentCandidatePool + SharedPoolScorer（**待开工，下一个**）
+### ✅ 5.2.2b 文档级推理路径：DocumentCandidatePool + SharedPoolScorer（主线）
 - **关键发现**：`gliner2.5-base-v1` 的 `candidate_pool = "shared"`，所以**普通推理根本不走 `SparseBoundaryPairScorer`**
   - `model.py:396-466`：`DocumentCandidatePool`（`pool.py:107`）建候选 + `SharedPoolScorer`（`pool.py:446`）打分，然后 `pair_logits = pooled_logits.transpose(1, 2)`
-  - `SparseBoundaryPairScorer` 只在 `score_explicit_spans` 里被调用，也就是：entity 分类（`engine.py:692`，`choice_pairs = [(i, i+1)]`）、entity 属性（`engine.py:435`）、joint-IE
-  - 也就是说 5.2.2a 做完的是**分类/属性打分**这条线，`SharedPoolScorer` 才是 span 抽取的主线
-- **参考实现规模**：`DocumentCandidatePool` 约 340 行 + `SharedPoolScorer` 约 190 行 Python（含 `OverlapBiasedCandidateAttention` / `EvidenceConditionedQueryAttention`；base-v1 的 `candidate_attention_layers=0`、`query_attention_layers=0`，所以 base-v1 用不到这两个 attention）
-- **GGUF 权重**（已 bundled，132 个 tensor 内）：
-  - `boundary_head.shared_pool_builder.{start,end}_projection` (128×128)
-  - `boundary_head.shared_pool_scorer.{start,end,query,length,prior,content}_projection`、`candidate_norm`、`film`、`film_output.{0,3}`、`content_pooler.*`
-  - 注意 `shared_pool_scorer.content_pooler` 是**另一份** content pooler，参数和 `pair_scorer.content_pooler` 不同名也不同值，不能复用
-- **byte-exact oracle**：与 5.2.2a 同套机制。注意 `SharedPoolScorer` 的 inside evidence 同样要 `+ inside_prefix_mean * width` 还原
-- **风险**：sparse top-K 候选选取依赖数值精度（`boundary_top_k_alpha=0.08` 动态 bucket），是这条线的主要难点
+  - `engine.py:78` 调的是 `self.boundary_head(...)`（即 `BoundaryHead.forward`），它按 `candidate_pool` 分支——所以这条就是推理主线
+  - `SparseBoundaryPairScorer` 只在 `score_explicit_spans` 里被调用，也就是：entity 分类（`engine.py:692`，`choice_pairs = [(i, i+1)]`）、entity 属性（`engine.py:435`）、joint-IE。5.2.2a 做的是这条线
+- **实现**：
+  - `settings.rs`（新）：`gliner2.boundary.*` metadata → 单一 `BoundarySettings`，所有 head 的 feature flag / dim 只有一个来源
+  - `pool.rs`（新）：`DocumentCandidatePool`（query union → top-k 边界 → 笛卡尔配对 → per-query quota → 去重截断）+ `SharedPoolScorer`（candidate 向量 → query dot + FiLM → marginals + inside evidence）
+  - `spans.rs`：`score_document_candidates()` 顶层 API，返回 public `[B,Q,C]` 顺序（`to_candidate_batch` 的转置）
+- **oracle**：
+  - `dump_document_candidate_pool.py`：max proposal delta **2.622e-6**（3 cases，最长 24 token / 625 笛卡尔对 / 满 192 pool）
+  - `dump_shared_pool_scorer.py`：max pair-logit delta **1.526e-5**；同时比对 `candidate` 采样行
+  - 测试按**顺序**而非只比分数断言：pool 是离散算法，tie-break 不同就会选出不同 span，那种错看起来像数值噪声
+- **抓到的三个真 bug**：
+  1. **`apply_linear_full` 不能用于多行**。它从 `input.len()` 推 `n_in`，喂给它整个 `[rows, in]` 块会把块当成一个宽向量、按错误 stride 读权重行。已加 `apply_linear_rows` 并要求显式传 `n_out`
+  2. **`Weight::n_out` 在 F32 上无意义**：`QuantizedTensor::n_rows()` 对 F32 返回 `usize::from(!data.is_empty())`，即 0 或 1。现有调用点全靠 slice 长度推形状，所以只在单行投影下侥幸正确
+  3. **`film(query).chunk(2, -1)` 的 beta 偏移是 `qi * 2 * pair + pair`**，我先写成 `qi * 3 * pair + pair`，`qi=1` 时直接越界
+- **`boundary_attention_window` 一直没被实现**（base-v1 = 128）。原代码注释写「metadata-only for now」，因为所有 fixture 都 <= 24 token，`|i-j| <= 128` 全真，删掉窗口也照样 byte-exact。已修 + 新增 `dump_boundary_attention_window.py`（n = 8 / 273，逐行记录 allowed key 集合）专门堵这个洞
+- **commit**：`7fbc0d2` 之后的 boundary pool commit
 
 ### 🟡 5.2.3 relations + records + count + abstention（待开工）
 - **范围**：relation_scorer（head/tail projection + biaffine + mlp）、record_decoder（candidate/field/instance projection + key/value attention）、count_head（scalar projection）、null_projection（scalar projection）
@@ -178,12 +185,20 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.1 | BoundaryEncoder forward + oracle | ✅ | `d725de8` + `b678b95` |
 | 5.2.1b | BoundaryQueryHead + oracle | ✅ | `f3d6643` |
 | 5.2.2a | score_explicit_pairs + PairScorer（全 feature） | ✅ | `6eafe4e` + `1d98e37` + 本次 |
-| 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | 🔴 待开工 | — |
+| 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | ✅ | 本次 |
 | 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
 | 5.2.4 | entity 分类解码 + CLI / HTTP | 🟢 待开工 | — |
 
-已完成：boundary encoder、per-query marginals、显式 span 的 compat prior、完整 pair scorer，全部 byte-exact（1e-6 量级）。这条线覆盖 entity 分类与属性打分。
-**下一块是主线**：`candidate_pool="shared"` 意味着 span 抽取本身走 `DocumentCandidatePool` + `SharedPoolScorer`，约 700 行 Python 参考实现，7 个 boundary 测试文件目前仍然全部从中间层状态起步。
+已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
+`score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
+
+**仍然没有的（重要）**：
+- 真实 tokenizer → `compute::encode` → query prompt builder → decode 的端到端路径。所有测试都从 `text_states` / `query_states` 起步
+- entity 分类解码（`classifier.0` + ReLU + `classifier.3`）
+- relations / records / count / abstention
+- CLI / HTTP 路由
+
+下一步按 5.2.4 走：先补真实入口（复用 Decide 的 tokenizer + `prompt::encode_token`），把「能跑」和「跑得对」接上，再做解码。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
