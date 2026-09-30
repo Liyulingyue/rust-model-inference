@@ -846,14 +846,19 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     // flag-driven. Why they differ — and why adding a probe is usually the wrong
     // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) {
+        // The probe outranks the flag-driven backends below, so a caller
+        // who explicitly selected one of them would have it silently
+        // dropped (their flag ignored, the rerank backend served).
+        // Error out instead: the model file and the flag disagree, and
+        // neither resolution is obviously what the caller wanted.
+        if let Some(error) = rerank_probe_flag_conflict(options) {
+            return Err(error);
+        }
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
     }
     // CLM is opted into rather than detected: the encoder is an ordinary
     // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
     // that makes it a CLM backend.
-    // TODO(clm): this check sits after is_rerank_gguf, so passing a
-    // Qwen3-Reranker GGUF together with --clm-head silently drops the
-    // head file and serves rerank.  Should be an explicit error.
     if options.clm_head.is_some() {
         return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
     }
@@ -868,6 +873,42 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 /// `<arch>.pooling_type = 4` AND a `cls.output.weight` tensor is
 /// present. Done as a quick metadata probe without holding the file
 /// open.
+/// When the rerank metadata probe fires, the caller may still have
+/// explicitly selected a different backend with a flag. The probe
+/// outranks those backends in `build_backend`, so honoring it would
+/// silently drop the flag. Returns the error message to surface
+/// instead, or `None` when the flags are compatible with rerank.
+///
+/// Pure function of `CliOptions` so the dispatch table can be unit
+/// tested without a GGUF on disk. See
+/// `docs/develop/SERVER_BACKEND_SELECTION.md`.
+fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
+    let model = options.model.display();
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
+    if let Some(head) = &options.clm_head {
+        return Some(format!(
+            "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
+             would be dropped. Pass a plain Qwen3 encoder as --model instead",
+            head.display()
+        ));
+    }
+    if options.gliner2_decide {
+        return Some(format!(
+            "--gliner2-decide selects the GLiNER2 backend, but {reranker}; the probe wins \
+             and the flag would be dropped. GLiNER2 needs a DeBERTa GGUF as --model"
+        ));
+    }
+    if let Some(mmproj) = &options.mmproj {
+        return Some(format!(
+            "--mmproj selects multimodal chat, but {reranker}; the probe wins and {} would \
+             be dropped. Pass a chat-capable Qwen3 GGUF as --model instead",
+            mmproj.display()
+        ));
+    }
+    None
+}
+
 fn is_rerank_gguf(path: &std::path::Path) -> bool {
     use crate::MetaValue;
     let loader = match crate::GGUFLoader::from_file(path) {
@@ -1368,7 +1409,15 @@ mod tests {
 
 #[cfg(test)]
 mod server_mode_tests {
-    use super::{reject_unsupported_server_modes, CliOptions};
+    use super::{reject_unsupported_server_modes, rerank_probe_flag_conflict, CliOptions};
+    use std::path::PathBuf;
+
+    fn options_with(model: &str) -> CliOptions {
+        CliOptions {
+            model: PathBuf::from(model),
+            ..CliOptions::default()
+        }
+    }
 
     #[test]
     fn dreamx_is_rejected_before_backend_construction() {
@@ -1380,5 +1429,60 @@ mod server_mode_tests {
         assert!(reject_unsupported_server_modes(&options)
             .unwrap_err()
             .contains("--dreamx"));
+    }
+
+    #[test]
+    fn rerank_probe_conflict_is_silent_for_plain_rerank_invocation() {
+        // The documented happy path: no other backend flag, so the probe
+        // owns the dispatch and nothing is dropped.
+        assert!(rerank_probe_flag_conflict(&options_with("Qwen3-Reranker.gguf")).is_none());
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_clm_head() {
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(error.contains("heads.gguf"), "{error}");
+        assert!(error.contains("Qwen3-Reranker.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_gliner2_decide() {
+        let options = CliOptions {
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--gliner2-decide"), "{error}");
+        assert!(error.contains("DeBERTa"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_mmproj() {
+        let options = CliOptions {
+            mmproj: Some(PathBuf::from("vision.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--mmproj"), "{error}");
+        assert!(error.contains("vision.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_reports_first_conflicting_flag_only() {
+        // clm_head is checked first; a caller who set both should still
+        // get one actionable message rather than a concatenated wall.
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(!error.contains("--gliner2-decide"), "{error}");
     }
 }

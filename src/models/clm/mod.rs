@@ -20,11 +20,10 @@
 //!
 //! GELU is the exact erf form (`nn.GELU()` default) and the LayerNorm uses
 //! `eps = 1e-5` (also the `nn.LayerNorm` default); both are load-bearing for
-//! bit-level parity with the reference and are asserted by
-//! `tests::matches_reference_golden_vectors`.
+//! bit-level parity with the reference; see `tools/oracle/clm/README.md`.
 
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
-use crate::ops::gelu_erf_inplace;
+use crate::ops::{dot_f32, gelu_erf_inplace, layer_norm};
 
 pub const ARCH: &str = "clm";
 
@@ -63,11 +62,7 @@ impl Linear {
         debug_assert_eq!(out.len(), self.n_out);
         for (o, slot) in out.iter_mut().enumerate() {
             let row = &self.weight[o * self.n_in..(o + 1) * self.n_in];
-            let mut acc = self.bias[o];
-            for (w, &v) in row.iter().zip(x.iter()) {
-                acc += w * v;
-            }
-            *slot = acc;
+            *slot = dot_f32(x, row, self.n_in) + self.bias[o];
         }
     }
 }
@@ -79,14 +74,8 @@ struct LayerNorm {
 }
 
 impl LayerNorm {
-    fn apply(&self, x: &mut [f32]) {
-        let n = x.len() as f32;
-        let mean = x.iter().sum::<f32>() / n;
-        let var = x.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / n;
-        let inv = 1.0 / (var + LAYERNORM_EPS).sqrt();
-        for (i, v) in x.iter_mut().enumerate() {
-            *v = (*v - mean) * inv * self.weight[i] + self.bias[i];
-        }
+    fn apply(&self, input: &[f32], output: &mut [f32]) {
+        layer_norm(input, &self.weight, &self.bias, LAYERNORM_EPS, output);
     }
 }
 
@@ -100,11 +89,13 @@ struct Head {
 
 impl Head {
     /// Project an encoder embedding into the shared space and L2-normalise it.
-    fn project(&self, x: &[f32], scratch: &mut Vec<f32>) -> Vec<f32> {
+    fn project(&self, x: &[f32], scratch: &mut Vec<f32>, label: &str) -> Result<Vec<f32>, String> {
         debug_assert_eq!(x.len(), self.inp.n_in);
         scratch.resize(self.inp.n_out, 0.0);
         self.inp.apply(x, scratch);
+        trace(label, "inp", scratch);
         gelu_erf_inplace(scratch);
+        trace(label, "gelu1", scratch);
 
         // Reference: `h = act(nrm(lin(x)))` -- the LayerNorm sits AFTER the
         // hidden linear, on its output.  Norming before the matmul gives a
@@ -112,25 +103,25 @@ impl Head {
         for (block, lin) in self.hidden.iter().enumerate() {
             let mut h = vec![0.0; lin.n_out];
             lin.apply(scratch, &mut h);
+            trace(label, "hidden", &h);
             if let Some(norm) = self.norms.get(block) {
-                norm.apply(&mut h);
+                norm.apply(&h, scratch);
+            } else {
+                *scratch = h;
             }
-            gelu_erf_inplace(&mut h);
-            *scratch = h;
+            trace(label, "norm", scratch);
+            gelu_erf_inplace(scratch);
+            trace(label, "gelu2", scratch);
         }
 
         let mut z = vec![0.0; self.out.n_out];
         self.out.apply(scratch, &mut z);
+        trace(label, "out", &z);
 
         // F::normalize(dim=-1): divide by the L2 norm.
-        let norm_sq: f32 = z.iter().map(|&v| v * v).sum();
-        if norm_sq > 0.0 {
-            let inv = 1.0 / norm_sq.sqrt();
-            for v in z.iter_mut() {
-                *v *= inv;
-            }
-        }
-        z
+        crate::models::qwen3::embedding::l2_normalize_embedding(&mut z)?;
+        trace(label, "unit", &z);
+        Ok(z)
     }
 }
 
@@ -205,7 +196,7 @@ impl ClmHeads {
                 self.cfg.hidden
             ));
         }
-        Ok(self.state_head.project(state_emb, scratch))
+        self.state_head.project(state_emb, scratch, "state")
     }
 
     /// `action_head(candidate_emb)`, L2-normalised.
@@ -221,7 +212,7 @@ impl ClmHeads {
                 self.cfg.hidden
             ));
         }
-        Ok(self.action_head.project(cand_emb, scratch))
+        self.action_head.project(cand_emb, scratch, "action")
     }
 
     /// `logit_scale * dot(z_state, z_candidate)` for already-projected,
@@ -230,7 +221,15 @@ impl ClmHeads {
     pub fn score(&self, z_state: &[f32], z_cand: &[f32]) -> f32 {
         debug_assert_eq!(z_state.len(), self.cfg.proj);
         debug_assert_eq!(z_cand.len(), self.cfg.proj);
-        self.cfg.logit_scale * z_state.iter().zip(z_cand).map(|(a, b)| a * b).sum::<f32>()
+        let score = self.cfg.logit_scale * dot_f32(z_state, z_cand, self.cfg.proj);
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "clm.logits",
+            None,
+            &[1],
+            &[score],
+        ));
+        score
     }
 
     /// Convenience: embed -> project -> score for one pair.
@@ -244,6 +243,18 @@ impl ClmHeads {
         let zc = self.project_candidate(cand_emb, scratch)?;
         Ok(self.score(&zs, &zc))
     }
+}
+
+fn trace(label: &str, stage: &str, values: &[f32]) {
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        &format!("clm.{label}.{stage}"),
+        None,
+        &[values.len()],
+        values,
+    ));
+    #[cfg(not(feature = "parity-trace"))]
+    let _ = (label, stage, values);
 }
 
 fn load_head(source: &dyn TensorSource, cfg: &ClmConfig, head: &str) -> Result<Head, String> {

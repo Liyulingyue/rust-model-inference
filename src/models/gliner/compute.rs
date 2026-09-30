@@ -66,6 +66,14 @@ pub struct EncoderConfig {
 }
 
 /// `make_log_bucket_position` for a single signed offset.
+///
+/// The reference is
+/// `log_pos = ceil(ln(|rel| / mid) / ln((max_position - 1) / mid) * (mid - 1)) + mid`,
+/// then `bucket = log_pos * sign(rel)`. The `ceil` is load-bearing: without it
+/// the `as i32` truncation drops every log-bucket offset by one. That is
+/// invisible for sequences shorter than `mid + 1` (the raw-`rel` branch always
+/// wins there) and only shows up once some `|t - s| >= mid + 1`, which is why
+/// the short golden fixtures did not catch it.
 fn relative_bucket(rel: i32, mid: usize, max_position: usize) -> i32 {
     let abs_pos = if rel > -(mid as i32) && rel < mid as i32 {
         (mid - 1) as f32
@@ -77,9 +85,12 @@ fn relative_bucket(rel: i32, mid: usize, max_position: usize) -> i32 {
         // when the first arm fired, so the `ln(0)` below is never reached.
         return rel;
     }
-    let log_pos = (abs_pos / mid as f32).ln() / ((max_position - 1) as f32 / mid as f32).ln()
-        * (mid - 1) as f32
+    let log_pos = ((abs_pos / mid as f32).ln() / ((max_position - 1) as f32 / mid as f32).ln()
+        * (mid - 1) as f32)
+        .ceil()
         + mid as f32;
+    // `log_pos` is integral after the ceil, so `sign * log_pos` is integral too
+    // and the cast is exact for both signs.
     (log_pos * rel.signum() as f32) as i32
 }
 
@@ -533,6 +544,47 @@ mod tests {
         assert_eq!(relative_bucket(-511, 128, 512), -255);
         let beyond = relative_bucket(4096, 128, 512);
         assert!(beyond >= 255, "far offsets clamp, got {beyond}");
+    }
+
+    /// The log bucket is `ceil(...) + mid`, not `trunc(...) + mid`. The two
+    /// differ by one everywhere except the exact-ratio boundary, and the
+    /// near-band branch masks the difference for any sequence shorter than
+    /// `mid + 1` tokens — so this only fires for long inputs.
+    #[test]
+    fn log_bucket_applies_the_reference_ceil() {
+        // ceil(ln(200/128) / ln(511/128) * 127) + 128 = 41 + 128 = 169.
+        // A truncating implementation returns 168.
+        assert_eq!(relative_bucket(200, 128, 512), 169);
+        assert_eq!(relative_bucket(-200, 128, 512), -169);
+        assert_eq!(relative_bucket(129, 128, 512), 129);
+        assert_eq!(relative_bucket(150, 128, 512), 143);
+        assert_eq!(relative_bucket(255, 128, 512), 192);
+        assert_eq!(relative_bucket(300, 128, 512), 207);
+        // The log bucket itself is *not* capped at mid - 1: rel = 512 gives
+        // ceil(ln(4)/ln(511/128) * 127) + 128 = 256. `position_index_table`
+        // clamps it into the table range, which is what the "far offsets"
+        // test below pins.
+        assert_eq!(relative_bucket(512, 128, 512), 256);
+        assert_eq!(relative_bucket(-512, 128, 512), -256);
+    }
+
+    /// A long sequence must reach the log regime at all; otherwise the ceil
+    /// test above would pass vacuously on a near-bucket-only table.
+    #[test]
+    fn long_sequences_reach_the_log_bucket_regime() {
+        let table = position_index_table(400, 256, 512, 256);
+        // query 399, key 0: rel = 399, well past the mid+1 = 129 threshold.
+        assert!(
+            table[399 * 400] > 256,
+            "expected a log bucket, got {}",
+            table[399 * 400]
+        );
+        // And the symmetric entry uses the mirrored offset.
+        assert!(
+            table[399] < 256,
+            "expected a mirrored log bucket, got {}",
+            table[399]
+        );
     }
 
     #[test]

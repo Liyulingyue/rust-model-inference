@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{JevMode, JevQuestionInput, JevResult};
+use crate::core::scratchpad::{KvFormat, KvLifecycle};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
@@ -56,10 +57,19 @@ fn embed(
     if token_ids.is_empty() {
         return Err(format!("empty input: {text:?}"));
     }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids("clm.tokens", &token_ids));
     let positions = qwen_text_positions(token_ids.len());
     let capacity = token_ids.len() + 4;
-    let mut session = Qwen3Session::new(model, capacity).map_err(|e| format!("session: {e}"))?;
-    session
+    let kv_format = if crate::ops::scalar_mode() {
+        KvFormat::F32
+    } else {
+        KvFormat::F16
+    };
+    let mut session =
+        Qwen3Session::new_with_kv_state(model, capacity, kv_format, KvLifecycle::Ephemeral)
+            .map_err(|e| format!("session: {e}"))?;
+    let mut embedding = session
         .forward_last_hidden(
             Qwen3Input {
                 token_ids: &token_ids,
@@ -69,7 +79,23 @@ fn embed(
             },
             token_ids.len(),
         )
-        .map_err(|e| format!("forward: {e}"))
+        .map_err(|e| format!("forward: {e}"))?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "clm.embedding.pooled",
+        None,
+        &[embedding.len()],
+        &embedding,
+    ));
+    crate::models::qwen3::embedding::l2_normalize_embedding(&mut embedding)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "clm.embedding.final",
+        None,
+        &[embedding.len()],
+        &embedding,
+    ));
+    Ok(embedding)
 }
 
 /// Score with an already-loaded encoder + heads.  The server keeps both
