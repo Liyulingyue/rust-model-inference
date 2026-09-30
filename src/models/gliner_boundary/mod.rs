@@ -23,10 +23,12 @@
 pub mod forward;
 pub mod loader;
 pub mod marginals;
+pub mod proposer;
 
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
 pub use marginals::{BoundaryMarginals, BoundaryQueryHead};
+pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
 
 use crate::core::tensor::TensorSource;
 

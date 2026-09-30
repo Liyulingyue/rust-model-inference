@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use super::forward::BoundaryEncoder;
 use super::marginals::BoundaryQueryHead;
+use super::proposer::BoundaryProposer;
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
 pub struct BoundaryModel<'a> {
@@ -47,6 +48,7 @@ pub struct BoundaryModel<'a> {
     pub classifier_3_bias: Vec<f32>,
     pub boundary: BoundaryEncoder<'a>,
     pub query_head: BoundaryQueryHead<'a>,
+    pub proposer: BoundaryProposer<'a>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -124,6 +126,9 @@ impl<'a> BoundaryModel<'a> {
         // 7. BoundaryQueryHead weights (per-query marginals over boundary positions)
         let query_head = BoundaryQueryHead::load(source, n_embd)?;
 
+        // 8. BoundaryProposer weights (endpoint projections + rotary).
+        let proposer = BoundaryProposer::load(source, n_embd)?;
+
         Ok(Self {
             config,
             tokenizer,
@@ -134,6 +139,7 @@ impl<'a> BoundaryModel<'a> {
             classifier_3_bias,
             boundary,
             query_head,
+            proposer,
         })
     }
 }
