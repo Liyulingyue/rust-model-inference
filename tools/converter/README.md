@@ -35,7 +35,32 @@ converter/
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
-| `yue2/convert_yue2.py` | 流式导出 `yue2` BF16 主模型和 `yue2_vae` F32 decoder；固定协议/tokenizer metadata，原子写入并读回校验 |
+| `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
+
+## yue2 量化支持现状
+
+VAE 恒为 F32，仅主模型可量化。只有 338 个 transformer 投影 + 2 个
+`time_embedder` 矩阵参与量化；1-D norm、两个 184704 宽的词表矩阵以及
+position / bridge 查表保持 BF16（loader 走 `load_f32_tensor`，且对量化误差最敏感）。
+
+| `--quant` | 体积 | 张量 | 转换耗时 | Rust 端加载 | 验证 |
+|---|---|---|---|---|---|
+| `bf16` (default) | 7.26 GB | 628 × BF16 | 零拷贝 | ✅ | 10.24 s 音频，peak 0.86 |
+| `f32` | 12.91 GB | 394 F32 + 234 BF16 | 快速 | ✅ | 用于排查量化误差 |
+| `q8_0` | 4.61 GB | 394 Q8_0 + 234 BF16 | 25 s | ✅ | ABC 11 → 31.5 tok/s；24 s 成品音频 |
+| `q4_0` | 3.20 GB | 394 Q4_0 + 234 BF16 | ~50 s | ✅ | 类型往返校验通过 |
+| `q4_k_m` | ~3.2 GB | 混合 Q4_K / Q6_K | **数小时** | ✅ | 见下 |
+| `q6_k` | 3.93 GB | 394 Q6_K + 234 BF16 | **数小时** | ✅ | 见下 |
+
+体积为按张量精确计算值（量化目标 394 个 / 2.82 B 参数，其余 0.81 B 保持 BF16）；
+`q8_0` 的 4.61 GB 与实测导出 4.62 GB 一致。
+
+`q4_k_m` 对 `v_proj` / `down_proj` 用 6-bit block，其余 4-bit，与 Edge0 的策略一致。
+
+> **K-quant 暂不可用**：`quantize_q4_k` 量化单个 6144×2048 矩阵约需 97 s，完整导出
+> 数小时。类型与解码链路已打通且可往返校验，但 block search 需批量化之后才能实用。
+
+本机样例音频见 `models/YuE2-gguf/samples/`（`/models/` 已被 `.gitignore` 忽略，不随仓库分发）。
 
 ## breeze 量化支持现状
 
