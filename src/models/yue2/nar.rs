@@ -593,6 +593,9 @@ fn causal_prefix_attention(
     v: &[f32],
     output: &mut [f32],
 ) {
+    if legacy_attention() {
+        return causal_prefix_attention_legacy(config, pool, q, k, v, output);
+    }
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
     let head_dim = config.head_dim;
@@ -638,7 +641,7 @@ fn causal_prefix_attention(
                 if row < 512 {
                     let inverse_sum = flash_softmax(scores);
                     result.fill(0.0);
-                    crate::ops::attention_value::attention_value_reduce(
+                    value_reduce_block(
                         v, scores, result, 0, kv_width, kv_offset, rows, head_dim,
                     );
                     for value in result.iter_mut() {
@@ -663,7 +666,7 @@ fn causal_prefix_attention(
                             *value *= rescale;
                         }
                     }
-                    crate::ops::attention_value::attention_value_reduce(
+                    value_reduce_block(
                         v, block, result, start * kv_width, kv_width, kv_offset, block.len(), head_dim,
                     );
                     running_max = next_max;
@@ -925,6 +928,450 @@ fn project_qkv_rows(
     }
 }
 
+/// Bit-exact vectorized value reduction, matching the original scalar form.
+///
+/// The NAR needs both speed and *bit-identical* results: it feeds an
+/// autoregressive-free but bf16-rounded stack where a 1-ULP change flips a bf16
+/// rounding decision and the perturbation compounds across 28 layers and every
+/// NAR step. Two properties of the original hand-written loop therefore have to
+/// be preserved exactly:
+///
+///   1. each KV block accumulates into a *fresh* zeroed accumulator which is
+///      then added to the output once, so the additions associate as
+///      `out + ((0 + s0*v0) + s1*v1) + ...` rather than
+///      `((out + s0*v0) + s1*v1) + ...`; and
+///   2. the product is rounded before the accumulate, i.e. multiply and add are
+///      separate operations, not an FMA.
+///
+/// `crate::ops::attention_value::attention_value_reduce` satisfies neither: it
+/// contracts with `vfmaq_f32` and folds each block straight into the caller's
+/// output. This variant is vectorized over the head dimension (which is
+/// independent per lane) while keeping the token loop strictly sequential.
+/// Two-segment variant: tokens `0..n_first` come from `values_first`, the rest
+/// from `values_second`, but both land in the *same* accumulator.
+///
+/// The prefix KV and the latent KV are separate allocations, so a 512-wide KV
+/// block can straddle the boundary between them. Reducing each segment into its
+/// own accumulator and adding both to the output associates the additions as
+/// `(out + head) + tail`, while the original single loop produces
+/// `out + (head + tail)`. Those round differently, which is enough to change a
+/// bf16 rounding decision downstream. One accumulator reproduces the original.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn value_reduce_block2(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if crate::ops::has_neon() && head_width >= 4 {
+        // SAFETY: NEON availability is checked, and both segments are bounded
+        // by the caller to stay inside their slices.
+        unsafe {
+            value_reduce_block2_neon(
+                values_first,
+                base_first,
+                values_second,
+                base_second,
+                n_first,
+                scores,
+                output,
+                row_stride,
+                head_offset,
+                n_tokens,
+                head_width,
+            );
+        }
+        return;
+    }
+    value_reduce_block2_scalar(
+        values_first,
+        base_first,
+        values_second,
+        base_second,
+        n_first,
+        scores,
+        output,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn value_reduce_block2_neon(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let (values, base) = if token < n_first {
+                (values_first, base_first)
+            } else {
+                (values_second, base_second)
+            };
+            let local = if token < n_first { token } else { token - n_first };
+            let start = base + local * row_stride + head_offset + dim;
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, base) = if token < n_first {
+                (values_first, base_first)
+            } else {
+                (values_second, base_second)
+            };
+            let local = if token < n_first { token } else { token - n_first };
+            let start = base + local * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn value_reduce_block2_scalar(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, base) = if token < n_first {
+                (values_first, base_first)
+            } else {
+                (values_second, base_second)
+            };
+            let local = if token < n_first { token } else { token - n_first };
+            sum += scores[token] * values[base + local * row_stride + head_offset + dim];
+        }
+        output[dim] += sum;
+    }
+}
+
+#[inline]
+fn value_reduce_block(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        if crate::ops::has_neon() && head_width >= 4 && n_tokens > 0 {
+            // SAFETY: NEON is available per `has_neon`, and every load below is
+            // bounded by `base + n_tokens * row_stride + head_offset + head_width`
+            // which the caller guarantees is within `values`.
+            unsafe {
+                value_reduce_block_neon(
+                    values,
+                    scores,
+                    output,
+                    base,
+                    row_stride,
+                    head_offset,
+                    n_tokens,
+                    head_width,
+                );
+            }
+            return;
+        }
+    }
+    value_reduce_block_scalar(
+        values,
+        scores,
+        output,
+        base,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn value_reduce_block_neon(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        // Fresh accumulator per block, and a separate multiply so the product is
+        // rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[inline]
+fn value_reduce_block_scalar(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * values[start];
+        }
+        output[dim] += sum;
+    }
+}
+
+/// Escape hatch for A/B-ing the NAR attention rewrite.
+///
+/// The rewrite in [`hybrid_attention`] and [`causal_prefix_attention`] moved the
+/// value reduction onto `attention_value_reduce`, which contracts with FMA where
+/// the previous hand-written loops rounded product and sum separately, and added
+/// row-level pool parallelism. Parallelism is provably neutral (row partitioning
+/// cannot reorder arithmetic within a row, and
+/// `nar_attention_parity_tests` pins that across thread counts), but the FMA
+/// change is a real rounding-mode difference that compounds over NAR steps.
+///
+/// Set `RMI_YUE2_LEGACY_ATTN=1` to restore the original scalar form so the two
+/// can be compared on identical inputs. Remove once the rewrite is settled.
+fn legacy_attention() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| std::env::var_os("RMI_YUE2_LEGACY_ATTN").is_some())
+}
+
+/// Original pre-rewrite value reduction: `sum += s * v`, two roundings, and no
+/// pool parallelism. Kept verbatim so `RMI_YUE2_LEGACY_ATTN=1` reproduces the
+/// exact arithmetic the optimized path replaced.
+fn hybrid_attention_legacy(
+    config: &super::YuE2Config,
+    _pool: &crate::core::thread_pool::ComputePool,
+    q: &[f32],
+    prefix: &(Vec<f32>, Vec<f32>),
+    nar_k: &[f32],
+    nar_v: &[f32],
+    output: &mut [f32],
+) {
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let prefix_len = prefix.0.len() / kv_width;
+    let nar_len = nar_k.len() / kv_width;
+    let total_len = prefix_len + nar_len;
+    let group_size = config.q_heads / config.kv_heads;
+    let scale = (config.head_dim as f32).sqrt().recip();
+    let mut scores = vec![0.0; total_len];
+    for row in 0..nar_len {
+        for head in 0..config.q_heads {
+            let kv_offset = (head / group_size) * config.head_dim;
+            let q_start = row * q_width + head * config.head_dim;
+            let value_at = |position: usize, dimension: usize| {
+                if position < prefix_len {
+                    prefix.1[position * kv_width + kv_offset + dimension]
+                } else {
+                    nar_v[(position - prefix_len) * kv_width + kv_offset + dimension]
+                }
+            };
+            for (position, score) in scores.iter_mut().enumerate() {
+                let key = if position < prefix_len {
+                    &prefix.0[position * kv_width + kv_offset
+                        ..position * kv_width + kv_offset + config.head_dim]
+                } else {
+                    let position = position - prefix_len;
+                    &nar_k[position * kv_width + kv_offset
+                        ..position * kv_width + kv_offset + config.head_dim]
+                };
+                *score = dot(&q[q_start..q_start + config.head_dim], key) * scale;
+            }
+            let result = &mut output[q_start..q_start + config.head_dim];
+            if total_len <= 512 {
+                let inverse_sum = softmax(&mut scores);
+                for (dimension, value) in result.iter_mut().enumerate() {
+                    let mut sum = 0.0f32;
+                    for position in 0..total_len {
+                        sum += scores[position] * value_at(position, dimension);
+                    }
+                    *value = bf16(sum * inverse_sum);
+                }
+                continue;
+            }
+            result.fill(0.0);
+            let mut running_max = f32::NEG_INFINITY;
+            let mut running_sum = 0.0f32;
+            for start in (0..total_len).step_by(512) {
+                let end = (start + 512).min(total_len);
+                let block = &mut scores[start..end];
+                let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let next_max = running_max.max(block_max);
+                let block_sum = flash_exp_sum(block, next_max);
+                let rescale = (running_max - next_max).exp();
+                running_sum = rescale.mul_add(running_sum, block_sum);
+                if start > 0 {
+                    for value in result.iter_mut() {
+                        *value *= rescale;
+                    }
+                }
+                for (dimension, value) in result.iter_mut().enumerate() {
+                    let mut sum = 0.0f32;
+                    for offset in 0..block.len() {
+                        sum += block[offset] * value_at(start + offset, dimension);
+                    }
+                    *value += sum;
+                }
+                running_max = next_max;
+            }
+            let inverse_sum = running_sum.recip();
+            for value in result.iter_mut() {
+                *value = bf16(*value * inverse_sum);
+            }
+        }
+    }
+}
+
+/// Original pre-rewrite causal kernel, single threaded, two-rounding reduction.
+fn causal_prefix_attention_legacy(
+    config: &super::YuE2Config,
+    _pool: &crate::core::thread_pool::ComputePool,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    output: &mut [f32],
+) {
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let rows = k.len() / kv_width;
+    let group_size = config.q_heads / config.kv_heads;
+    let scale = (config.head_dim as f32).sqrt().recip();
+    let mut scores = vec![0.0; rows];
+    for row in 0..rows {
+        for head in 0..config.q_heads {
+            let kv_offset = (head / group_size) * config.head_dim;
+            let q_start = row * q_width + head * config.head_dim;
+            for (position, score) in scores.iter_mut().enumerate() {
+                let key = &k[position * kv_width + kv_offset
+                    ..position * kv_width + kv_offset + config.head_dim];
+                *score = if position <= row {
+                    dot(&q[q_start..q_start + config.head_dim], key) * scale
+                } else {
+                    f32::NEG_INFINITY
+                };
+            }
+            if row < 512 {
+                let inverse_sum = flash_softmax(&mut scores);
+                for dimension in 0..config.head_dim {
+                    let mut sum = 0.0f32;
+                    for position in 0..rows {
+                        sum += scores[position] * v[position * kv_width + kv_offset + dimension];
+                    }
+                    output[q_start + dimension] = bf16(sum * inverse_sum);
+                }
+                continue;
+            }
+            let result = &mut output[q_start.. q_start + config.head_dim];
+            result.fill(0.0);
+            let mut running_max = f32::NEG_INFINITY;
+            let mut running_sum = 0.0f32;
+            for start in (0..=row).step_by(512) {
+                let end = (start + 512).min(rows);
+                let block = &mut scores[start..end];
+                let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let next_max = running_max.max(block_max);
+                let block_sum = flash_exp_sum(block, next_max);
+                let rescale = (running_max - next_max).exp();
+                running_sum = rescale.mul_add(running_sum, block_sum);
+                if start > 0 {
+                    for value in result.iter_mut() {
+                        *value *= rescale;
+                    }
+                }
+                for (dimension, value) in result.iter_mut().enumerate() {
+                    let mut sum = 0.0f32;
+                    for offset in 0..block.len() {
+                        sum += block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                    }
+                    *value += sum;
+                }
+                running_max = next_max;
+            }
+            let inverse_sum = running_sum.recip();
+            for value in result.iter_mut() {
+                *value = bf16(*value * inverse_sum);
+            }
+        }
+    }
+}
+
 /// Prefix+latent attention for one NAR layer.
 ///
 /// `prefix` holds the AR semantic prefix keys/values and `nar_k`/`nar_v` the
@@ -946,6 +1393,9 @@ fn hybrid_attention(
     nar_v: &[f32],
     output: &mut [f32],
 ) {
+    if legacy_attention() {
+        return hybrid_attention_legacy(config, pool, q, prefix, nar_k, nar_v, output);
+    }
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
     let head_dim = config.head_dim;
@@ -1024,21 +1474,24 @@ fn hybrid_attention(
                             *value *= rescale;
                         }
                     }
-                    if start < prefix_len {
-                        let n_prefix = (end.min(prefix_len)) - start;
-                        crate::ops::attention_value::attention_value_reduce(
-                            prefix_v, block, out, start * kv_width, kv_width, kv_offset,
-                            n_prefix, head_dim,
-                        );
-                    }
-                    if end > prefix_len {
-                        let n_nar = end - prefix_len.max(start);
-                        let nar_block = &mut block[prefix_len.max(start) - start..];
-                        crate::ops::attention_value::attention_value_reduce(
-                            nar_v, nar_block, out, (prefix_len.max(start) - prefix_len) * kv_width,
-                            kv_width, kv_offset, n_nar, head_dim,
-                        );
-                    }
+                    // One accumulator across the prefix/latent boundary: a KV
+                    // block that straddles it must not be reduced as two sums.
+                    let n_prefix = end.min(prefix_len).saturating_sub(start);
+                    let n_nar = (end - start) - n_prefix;
+                    value_reduce_block2(
+                        prefix_v,
+                        start * kv_width,
+                        nar_v,
+                        0,
+                        n_prefix,
+                        block,
+                        out,
+                        kv_width,
+                        kv_offset,
+                        end - start,
+                        head_dim,
+                    );
+                    debug_assert_eq!(n_prefix + n_nar, end - start);
                     running_max = next_max;
                 }
                 let inverse_sum = running_sum.recip();

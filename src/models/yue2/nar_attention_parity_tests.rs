@@ -51,8 +51,9 @@ fn queries(rows: usize, config: &YuE2Config) -> Vec<f32> {
     (0..rows * q_width).map(|_| draw(&mut state, 8192.0)).collect()
 }
 
-/// The pre-optimization value reduction: two roundings per product.
-fn scalar_value_reduce(
+/// The pre-optimization value reduction, verbatim: a fresh accumulator per
+/// invocation, separate multiply and add, then one add into the output.
+fn legacy_value_reduce(
     values: &[f32],
     scores: &[f32],
     row_stride: usize,
@@ -72,16 +73,21 @@ fn scalar_value_reduce(
 }
 
 #[test]
-fn attention_value_reduce_matches_the_two_rounding_scalar_form() {
+fn value_reduce_block_is_bitwise_identical_to_the_scalar_form() {
+    // This is the invariant the whole NAR rewrite rests on. The optimized
+    // attention is only acceptable if its value reduction reproduces the
+    // original arithmetic exactly; the FMA-contracting shared kernel did not,
+    // and the difference compounded through 28 bf16-rounded layers until the
+    // rendered audio was no longer musical.
     let config = config();
     let head_dim = config.head_dim;
     let kv_width = config.kv_heads * head_dim;
     let mut state = 99001u32;
-    for n_tokens in [7usize, 64, 511, 512, 513, 1025] {
+    for n_tokens in [1usize, 7, 64, 128, 511, 512, 513, 1025, 1566] {
         let values: Vec<f32> = (0..n_tokens * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
         let scores: Vec<f32> = (0..n_tokens).map(|_| draw(&mut state, 4.0)).collect();
         for head in [0usize, config.kv_heads - 1] {
-            let expected = scalar_value_reduce(
+            let expected = legacy_value_reduce(
                 &values,
                 &scores,
                 kv_width,
@@ -89,8 +95,14 @@ fn attention_value_reduce_matches_the_two_rounding_scalar_form() {
                 n_tokens,
                 head_dim,
             );
+            // Non-zero starting output exercises the `out += acc` step, which is
+            // where a block-association mistake would show up.
             let mut actual = vec![0.0f32; head_dim];
-            crate::ops::attention_value::attention_value_reduce(
+            for (index, slot) in actual.iter_mut().enumerate() {
+                *slot = draw(&mut state, 512.0) * (index as f32 + 1.0);
+            }
+            let seed_output = actual.clone();
+            super::value_reduce_block(
                 &values,
                 &scores,
                 &mut actual,
@@ -100,19 +112,14 @@ fn attention_value_reduce_matches_the_two_rounding_scalar_form() {
                 n_tokens,
                 head_dim,
             );
-            let mut max_diff = 0.0f32;
-            for (a, e) in actual.iter().zip(&expected) {
-                max_diff = max_diff.max((a - e).abs());
+            for (index, value) in actual.iter().enumerate() {
+                assert_eq!(
+                    value.to_bits(),
+                    (seed_output[index] + expected[index]).to_bits(),
+                    "n_tokens={n_tokens} head={head} dim={index}: value reduce \
+                     diverged from the scalar form"
+                );
             }
-            // FMA rounds once where the old form rounded twice, so the two are
-            // allowed to differ by a few ULP but must agree far more closely
-            // than the signal itself, and must never diverge in sign structure.
-            let scale = expected.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
-            assert!(
-                max_diff <= scale * 1e-6,
-                "n_tokens={n_tokens} head={head}: value reduce drifted \
-                 (max_diff={max_diff}, scale={scale})"
-            );
         }
     }
 }
@@ -186,4 +193,56 @@ fn causal_prefix_attention_is_stable_across_pool_widths() {
         }
     }
     assert!(single.iter().all(|value| value.is_finite()));
+}
+
+/// The invariant that decides whether the rewrite is shippable: on identical
+/// inputs the optimized attention must equal the legacy scalar kernels
+/// bit-for-bit, not merely to some tolerance.
+#[test]
+fn optimized_attention_matches_legacy_bitwise() {
+    let config = config();
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let pool = crate::core::thread_pool::ComputePool::new(4);
+
+    // hybrid: 600-token prefix + 40 latent rows, i.e. total_len 640, which is
+    // past the 512 KV block boundary so the blocked path with rescale is used.
+    let nar_rows = 40usize;
+    let prefix_rows = 600usize;
+    let mut state = 13579u32;
+    let q = queries(nar_rows, &config);
+    let nar_k: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect();
+    let nar_v: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
+    let prefix = (
+        (0..prefix_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect::<Vec<f32>>(),
+        (0..prefix_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect::<Vec<f32>>(),
+    );
+    let mut optimized = vec![0.0f32; nar_rows * q_width];
+    super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
+    let mut legacy = vec![0.0f32; nar_rows * q_width];
+    super::hybrid_attention_legacy(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut legacy);
+    for (index, (a, b)) in optimized.iter().zip(&legacy).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "hybrid_attention element {index}: optimized {a} vs legacy {b}"
+        );
+    }
+
+    // causal: 700 rows crosses the 512 block boundary and the row<512 branch.
+    let rows = 700usize;
+    let q: Vec<f32> = queries(rows, &config);
+    let k: Vec<f32> = (0..rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect();
+    let v: Vec<f32> = (0..rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
+    let mut optimized = vec![0.0f32; rows * q_width];
+    super::causal_prefix_attention(&config, &pool, &q, &k, &v, &mut optimized);
+    let mut legacy = vec![0.0f32; rows * q_width];
+    super::causal_prefix_attention_legacy(&config, &pool, &q, &k, &v, &mut legacy);
+    for (index, (a, b)) in optimized.iter().zip(&legacy).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "causal_prefix_attention element {index}: optimized {a} vs legacy {b}"
+        );
+    }
 }
