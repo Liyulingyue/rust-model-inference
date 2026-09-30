@@ -500,6 +500,15 @@ fn run_attention_block(
     boundary_dim: usize,
     text_lengths: &[usize],
 ) {
+    // Pre-compute the validity mask for this batch so the softmax can
+    // exclude invalid keys.
+    let mask: Vec<bool> = (0..batch * boundary_len)
+        .map(|idx| {
+            let b = idx / boundary_len;
+            let i = idx % boundary_len;
+            i <= text_lengths[b]
+        })
+        .collect();
     let num_heads = block.num_heads;
     let head_dim = boundary_dim / num_heads;
     let total = batch * boundary_len * boundary_dim;
@@ -544,7 +553,9 @@ fn run_attention_block(
                     &qkv[qkv_base + 2 * boundary_dim + head_offset..][..head_dim],
                 );
             }
-            // attention scores (boundary_len, boundary_len)
+            // attention scores (boundary_len, boundary_len) — masked with
+            // the boundary validity mask + a diagonal self-attend fallback
+            // so padding rows still have at least one legal key.
             let mut scores = vec![0.0f32; boundary_len * boundary_len];
             let scale = 1.0 / (head_dim as f32).sqrt();
             for i in 0..boundary_len {
@@ -554,6 +565,16 @@ fn run_attention_block(
                         s += q[i * head_dim + kk] * k[j * head_dim + kk];
                     }
                     scores[i * boundary_len + j] = s * scale;
+                }
+            }
+            // Apply mask + diagonal (matches `BoundaryAttentionBlock.forward`).
+            for i in 0..boundary_len {
+                for j in 0..boundary_len {
+                    let valid = mask[b * boundary_len + j]
+                        || (i == j && mask[b * boundary_len + i]);
+                    if !valid {
+                        scores[i * boundary_len + j] = f32::NEG_INFINITY;
+                    }
                 }
             }
             // softmax per row
