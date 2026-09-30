@@ -35,21 +35,17 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 这族 **encoder + tokenizer 与 Decide 完全相同**，理论上能用现有 GGUF 转换器 + 推理代码重新吃一份。差异只剩权重。开工前需要验证 schema prompt 是否兼容（2.5 引入了 `<|context_start|>` 等新增 token，pre-2.5 v1 可能没有）。
 
-### ✅ 1. `fastino/gliner2-large-v1` — DeBERTa-v3-large（已完成）
+### ✅ 1. `fastino/gliner2-large-v1` — DeBERTa-v3-large（已完成，含 byte-exact oracle）
 - **架构族**：SpanExtractor（无 `architecture` 字段），`max_width=8`、`counting_layer=count_lstm`、`model_type=extractor`、DeBERTa-v3-large
 - **flag 决策**：✅ 共用 `--gliner2-decide`
 - **路由**：✅ `/v1/jev/score`
 - **架构位置**：✅ `src/models/gliner/`（同目录同代码）—— 零新代码
 - **改动**：
   - `tools/converter/gliner/convert_gliner.py`：把 `EXPECTED_CONFIG` 拆成严格（`model_name`）和可选（`architecture`/`config_version`/`token_pooling`），pre-2.5 缺字段也算合法
-  - 新增 `tests/gliner2_large_v1.rs`：6 个 env-gated 烟测覆盖合同 / refund / 多任务 / examples / 长文本 / marker 位置
-- **验证**：6/6 通过（debug 模式 ~5min，release 会快一个数量级）。输出与 Decide 在 4 个 fixture 上语义一致：
-  - "Refund please" → `refund`
-  - "Battery dies, but the keyboard is excellent" → `mixed` + `battery`/`keyboard`/`camera`
-  - "I need a refund" + prompt "Choose the route" + example → `refund`
-  - "great great..." → `positive`
-- **未做 byte-exact oracle**：现有 `tests/gliner2_classify_parity.rs` 的 golden 是 Decide 用 `transformers==4.48.1` 生成的；large-v1 的 `transformers_version=4.54.0`，`disentangled_attention_bias` 在小版本之间动过 → 重新生成 fixture 需要跑 GLiNER2 参考实现 + `transformers==4.54.0`，再加 oracle 测试。当前的烟测已经足够证明"同型不同权重"成立，byte-exact 留给后续
-- **commit**：（commit hash 待补）
+  - `tests/gliner2_large_v1.rs`：6 个 env-gated 烟测覆盖合同 / refund / 多任务 / examples / 长文本 / marker 位置
+  - `tests/gliner2_large_v1_parity.rs`：6 个 case 的 byte-exact oracle，最大 logit delta **2.193e-5**（threshold 1e-4 余量 ~4.5×）
+  - `tests/fixtures/gliner2-large-v1/classify-golden.json`：dump_golden.py 用 `transformers==4.48.1` + 同 microsoft/deberta-v3-large config 生成（与 Decide oracle 完全同一条 oracle 链）
+- **commit**：`f6619df` (smoke) + 后续 oracle commit
 
 ### 2. `fastino/gliner2-base-v1` — DeBERTa-v3-base
 - 同上但 encoder 维度更小（768 hidden / 12 layers / 12 heads）
