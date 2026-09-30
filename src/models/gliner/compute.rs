@@ -85,8 +85,7 @@ fn relative_bucket(rel: i32, mid: usize, max_position: usize) -> i32 {
         // when the first arm fired, so the `ln(0)` below is never reached.
         return rel;
     }
-    let log_pos = ((abs_pos / mid as f32).ln()
-        / ((max_position - 1) as f32 / mid as f32).ln()
+    let log_pos = ((abs_pos / mid as f32).ln() / ((max_position - 1) as f32 / mid as f32).ln()
         * (mid - 1) as f32)
         .ceil()
         + mid as f32;
@@ -575,9 +574,17 @@ mod tests {
     fn long_sequences_reach_the_log_bucket_regime() {
         let table = position_index_table(400, 256, 512, 256);
         // query 399, key 0: rel = 399, well past the mid+1 = 129 threshold.
-        assert!(table[399 * 400] > 256, "expected a log bucket, got {}", table[399 * 400]);
+        assert!(
+            table[399 * 400] > 256,
+            "expected a log bucket, got {}",
+            table[399 * 400]
+        );
         // And the symmetric entry uses the mirrored offset.
-        assert!(table[399] < 256, "expected a mirrored log bucket, got {}", table[399]);
+        assert!(
+            table[399] < 256,
+            "expected a mirrored log bucket, got {}",
+            table[399]
+        );
     }
 
     #[test]
