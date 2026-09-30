@@ -116,11 +116,44 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **验证**：5/5 通过。**不验证 byte-exact**：Rust 还没有 BoundaryExtractor forward
 - **未做**（明确范围）：boundary detection forward、pair scoring、relation decoding、record decoding——这些需要 Rust 实现 ≥1000 行才能输出第一组 logits。参考实现 `target/gliner2-oracle/gliner2/models/boundary/` 有 8149 行 Python
 
-### 🟡 5.2 BoundaryExtractor Rust forward（待开工）
-- **范围**：实现 `boundary_head.boundary_proposer` + `boundary_head.pair_scorer` + `boundary_head.shared_pool_scorer` 三个子模块的 forward；relations/records/counts/abstention 各自一模块
-- **工作量**：~1000 行最小可用 forward（仅 boundary detection），~3000 行完整 forward（含 relations + records + count + abstention）
-- **byte-exact oracle**：与 Decide 同一套机制（GLiNER2 参考实现 + `transformers==4.48.1`）生成 golden fixture，但 boundary forward 涉及 top-K / sparse sampling / rotary position embeddings，复杂得多
-- **本会话不做**：留给下次或独立分支
+### ✅ 5.2.1 BoundaryEncoder.forward + byte-exact oracle（commit `d725de8` + `b678b95`）
+- **范围**：`gliner2.models.boundary.encoding.BoundaryEncoder.forward` 的 Rust 端口（encoding.py:185-205）
+- **实现**：
+  - `src/models/gliner_boundary/loader.rs`：`BoundaryModel::from_source`，复用 `gliner::compute::encode`（DeBERTa forward），独立加载 classifier.0+3（GeLU 而非 ReLU）
+  - `src/models/gliner_boundary/forward.rs`：shift left/right + 左/右 projection + concat + output_projection + LayerNorm + 2 attention blocks + 1 refinement block + mask
+- **GGUF converter fix**：`convert_boundary.py` 的 vocab_size 计算少算 [MASK]（在 SPM vocab 内 id=128000），修了 `base = len(pieces) + 1`
+- **byte-exact oracle**：通过 `tools/oracle/gliner_boundary/dump_boundary_encoder.py` 生成 golden，Rust 端 `tests/gliner2_5_base_v1_boundary_encoder_parity.rs` 比对
+- **max delta**：**1.907e-6**（release-fast），与 Decide 的 7.2e-6 / large-v1 的 2.193e-5 同量级（F32 累加顺序差）
+- **发现一个真 bug**：softmax 缺 validity mask。oracle 首次跑出 0.224 delta，加 mask + 对角线 OR 后通过
+- **commit**：`d725de8` (loader + forward + smoke) + `b678b95` (oracle + fixture)
+
+### 🔴 5.2.2 BoundaryProposer + PairScorer（待开工）
+- **范围**：实现 `boundary_head.boundary_proposer` + `boundary_head.pair_scorer` forward；查询/键投影 + sparse top-K 选取 starts/ends + 可选 rotary endpoint embeddings + 端点兼容 + inside evidence + length features
+- **工作量**：~1500 行 Rust（最小可用），~3000 行完整（含 content pooler + score_start_states/score_end_states）
+- **byte-exact oracle**：与 5.2.1 同套机制，但涉及 sparse sampling（top-K 索引依赖数值精度），需测试 rotary base = 10000 是否被正确实现
+- **风险**：这是 BoundaryExtractor forward 中最难的部分
+
+### 🟡 5.2.3 relations + records + count + abstention（待开工）
+- **范围**：relation_scorer（head/tail projection + biaffine + mlp）、record_decoder（candidate/field/instance projection + key/value attention）、count_head（scalar projection）、null_projection（scalar projection）
+- **工作量**：~1000 行 Rust
+- **byte-exact oracle**：与 5.2.1 同套机制，每个子模块单独 fixture
+- **价值**：生产用途（一次推理多任务）；学术上 boundary + relation 是最常用的
+
+### 🟢 5.2.4 flag + CLI + HTTP 路由（待开工）
+- **范围**：新增 `--gliner2-boundary` flag，路由 `/v1/gliner2/boundary` 或 `/v1/jev/boundary`
+- **工作量**：~200 行（参考 `--gliner2-decide` 与 `/v1/jev/score` 的现有实现）
+- **前置**：5.2.2 + 5.2.3 中至少一个子模块可用
+
+### 📊 5.2 阶段总结
+| Phase | 范围 | 状态 | commit |
+|---|---|---|---|
+| 5.1 | GGUF converter + smoke | ✅ | `b0f58d3` |
+| 5.2.1 | BoundaryEncoder forward + oracle | ✅ | `d725de8` + `b678b95` |
+| 5.2.2 | Proposer + PairScorer | 🔴 待开工 | — |
+| 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
+| 5.2.4 | CLI / HTTP wiring | 🟢 待开工 | — |
+
+边界编码（Phase 5.2.1）已完成且 byte-exact。剩余部分（5.2.2-5.2.4）加在一起约 2700 行 Rust + 测试 + oracle，估计需要 2-3 个独立会话。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
