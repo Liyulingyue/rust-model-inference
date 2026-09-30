@@ -525,7 +525,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
             let scales_off = boff + 4;
             let qs_off = boff + 4 + K_SCALE_SIZE;
 
-            let mut j = 0usize;
+            // ``q`` walks the 128-byte nibble payload four bytes-at-a-time in
+            // 32-byte groups, while each group also advances the output by 64
+            // values (32 from the low nibbles plus 32 from the high ones).
+            // Advancing both by 32 re-read the previous group and left
+            // sub-blocks 5..8 undecoded.
+            let mut q_off = 0usize;
+            let mut out_off = 0usize;
             let mut is = 0usize;
             while is < 8 {
                 let (sc1, m1) = get_scale_min_k4(is, &data[scales_off..scales_off + K_SCALE_SIZE]);
@@ -539,12 +545,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
 
                 let block_out = out_base + bi * QK_K;
                 for l in 0..32 {
-                    let ql = data[qs_off + j + l];
-                    out[block_out + j + l] = d1 * (ql & 0xF) as f32 - m1_eff;
-                    out[block_out + j + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
+                    let ql = data[qs_off + q_off + l];
+                    out[block_out + out_off + l] = d1 * (ql & 0xF) as f32 - m1_eff;
+                    out[block_out + out_off + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
                 }
 
-                j += 32;
+                q_off += 32;
+                out_off += 64;
                 is += 2;
             }
         }

@@ -30,6 +30,7 @@ import math
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,12 +40,15 @@ from tools.converter.edge0.mlx_affine import (
     bf16_to_f32,
     dequantize_matrix,
 )
+from tools.converter.utils.kquants import quantize_k
 from tools.converter.utils.gguf import (
     GGML_BF16,
     GGML_F16,
     GGML_F32,
     GGML_I32,
     GGML_Q4_0,
+    GGML_Q4K,
+    GGML_Q6K,
     GGML_Q8_0,
     GgufWriter,
     gguf_dims,
@@ -92,21 +96,41 @@ TOP = {
 DTYPES = {"U32": GGML_I32, "BF16": GGML_BF16, "F16": GGML_F16}
 
 #: ``--quant`` choices, mapped to the GGML type the expanded matrices take.
-#: ``None`` keeps the lossless I32 pass-through.
+#: ``None`` keeps the lossless I32 pass-through.  ``q4_k_m`` is a per-tensor mix
+#: so it is handled separately by :func:`target_for`.
 QUANT_MODES = {
     "lossless": None,
     "f32": GGML_F32,
     "f16": GGML_F16,
     "q8_0": GGML_Q8_0,
+    "q6_k": GGML_Q6K,
+    "q4_k": GGML_Q4K,
     "q4_0": GGML_Q4_0,
+    "q4_k_m": None,
 }
 QUANT_SUFFIX = {
     "lossless": "lossless",
     "f32": "F32",
     "f16": "F16",
     "q8_0": "Q8_0",
+    "q6_k": "Q6_K",
+    "q4_k": "Q4_K",
     "q4_0": "Q4_0",
+    "q4_k_m": "Q4_K_M",
 }
+
+#: Tensors ``q4_k_m`` promotes to Q6_K.  These carry the routed expert outputs
+#: and the attention value projection, whose error propagates into every
+#: downstream residual stream, so they get the extra 2.06 bits.  The choice
+#: follows llama.cpp's LLM_TENSOR_MAP, which promotes the same two tensors.
+Q6_K_STEMS = {
+    "attn_v",
+    "ffn_down",
+    "ffn_down_exps",
+}
+#: Tensors ``q4_k_m`` keeps at 8 bits.  The routers pick which experts run, so
+#: a flipped logit changes the whole trajectory rather than adding noise.
+Q8_0_STEMS = {"ffn_gate_inp", "ffn_shared_gate"}
 #: Files this converter always reads from the source checkpoint.
 LORA_SHARD = "lora_edge0_35b.safetensors"
 
@@ -196,6 +220,25 @@ def is_packed_matrix(entry: TensorEntry) -> bool:
     return entry.dtype == "U32" and entry.mapped.endswith(".weight")
 
 
+def target_for(name: str, mode: str) -> int | None:
+    """Resolve the GGML type a given matrix takes under ``mode``.
+
+    Most modes are a single type, but ``q4_k_m`` mirrors llama.cpp's mixed
+    recipe: routers stay at 8 bits because a flipped logit reroutes the whole
+    forward pass, the value and down projections are promoted to Q6_K because
+    their error lands in every residual stream, and everything else takes Q4_K.
+    """
+    if mode != "q4_k_m":
+        return QUANT_MODES[mode]
+    stem = name[: -len(".weight")] if name.endswith(".weight") else name
+    leaf = stem.rsplit(".", 1)[-1]
+    if leaf in Q8_0_STEMS:
+        return GGML_Q8_0
+    if leaf in Q6_K_STEMS:
+        return GGML_Q6K
+    return GGML_Q4K
+
+
 def encoded_nbytes(ggml_type: int, elements: int) -> int:
     """Byte length of ``elements`` values stored as ``ggml_type``."""
     if ggml_type == GGML_Q8_0:
@@ -206,6 +249,10 @@ def encoded_nbytes(ggml_type: int, elements: int) -> int:
         if elements % 32:
             raise ValueError(f"Q4_0 needs a multiple of 32 elements, got {elements}")
         return (elements // 32) * 18
+    if ggml_type in (GGML_Q4K, GGML_Q6K):
+        if elements % 256:
+            raise ValueError(f"k-quant needs a multiple of 256 elements, got {elements}")
+        return (elements // 256) * {GGML_Q4K: 144, GGML_Q6K: 210}[ggml_type]
     return elements * {GGML_F32: 4, GGML_F16: 2, GGML_BF16: 2, GGML_I32: 4}[ggml_type]
 
 
@@ -244,8 +291,13 @@ def expand_matrix(
     return dequantize_matrix(packed, scales, biases, (n_out, n_in), bits)
 
 
-def reencode(values: np.ndarray, ggml_type: int) -> bytes:
-    """Encode an F32 matrix into the GGML payload for ``ggml_type``."""
+def reencode(values: np.ndarray, ggml_type: int, label: str = "") -> bytes:
+    """Encode an F32 matrix into the GGML payload for ``ggml_type``.
+
+    The k-quants run a 20-candidate scale search per value, which is orders of
+    magnitude slower than the closed-form formats, so they report progress per
+    chunk; ``label`` names the tensor being converted.
+    """
     flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
     if ggml_type == GGML_F32:
         return flat.tobytes()
@@ -255,7 +307,34 @@ def reencode(values: np.ndarray, ggml_type: int) -> bytes:
         return quantize_q8_0(flat)
     if ggml_type == GGML_Q4_0:
         return quantize_q4_0(flat)
+    if ggml_type in (GGML_Q4K, GGML_Q6K):
+        name = "q4_k" if ggml_type == GGML_Q4K else "q6_k"
+        return quantize_k(name, flat, _progress_reporter(label, name))
     raise ValueError(f"unsupported re-encode target {ggml_type}")
+
+
+def _progress_reporter(label: str, name: str):
+    """A ``progress(done, total)`` callback that prints a rate and ETA."""
+    state = {"start": None}
+
+    def report(done: int, total: int) -> None:
+        if state["start"] is None:
+            state["start"] = time.monotonic()
+            print(
+                f"  {label} [{name}]: {total} super-blocks",
+                flush=True,
+            )
+            return
+        elapsed = time.monotonic() - state["start"]
+        rate = done / elapsed if elapsed > 0 else 0.0
+        remaining = (total - done) / rate if rate > 0 else float("inf")
+        print(
+            f"  {label} [{name}]: {done}/{total} blocks "
+            f"({100.0 * done / total:5.1f}%) {rate:6.1f} blk/s eta {remaining / 60:6.1f} min",
+            flush=True,
+        )
+
+    return report
 
 
 def emit_packed(
@@ -392,7 +471,6 @@ def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
 
 
 def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossless") -> None:
-    ggml_type = QUANT_MODES[mode]
     writer = GgufWriter(output.with_suffix(output.suffix + ".part"))
     add_metadata(writer, model_dir, mode)
     entries = [TensorEntry(*rest) for rest in tensors(model_dir)]
@@ -403,7 +481,9 @@ def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossle
     skipped = 0
     count = 0
     total = 0
+    kinds: dict[int, int] = {}
     for entry in entries:
+        ggml_type = target_for(entry.mapped, mode)
         if ggml_type is not None and entry.mapped.endswith(tuple(companions)):
             if entry.dtype == "BF16":
                 skipped += 1
@@ -416,6 +496,7 @@ def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossle
             except KeyError as exc:
                 raise ValueError(f"{entry.mapped}: missing affine companion {exc}") from exc
             emit_packed(writer, entry, scales, biases, ggml_type)
+            kinds[ggml_type] = kinds.get(ggml_type, 0) + 1
         else:
             writer.add_tensor_chunks(
                 entry.mapped, DTYPES[entry.dtype], gguf_dims(entry.shape), entry.nbytes,
@@ -426,9 +507,11 @@ def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossle
     if mode == "lossless":
         print(f"validated {count} lossless tensors; payload {total:,} bytes", flush=True)
     else:
+        names = {v: k for k, v in QUANT_MODES.items() if v is not None}
+        mix = " ".join(f"{names.get(t, t)}x{n}" for t, n in sorted(kinds.items()))
         print(
-            f"validated {count} tensors in {mode}; dropped {skipped} affine companions; "
-            f"payload {total:,} bytes",
+            f"validated {count} tensors in {mode} [{mix}]; dropped {skipped} affine "
+            f"companions; payload {total:,} bytes",
             flush=True,
         )
     if check_only:
