@@ -27,8 +27,12 @@ ARCH = "gliner2"
 # Added on top of the 128000 SentencePiece pieces; ids 128000..128010 in
 # `tokenizer_config.json`. [MASK] leads because GLiNER2 appends its ten schema
 # markers after whatever the base tokenizer already declared.
-EXPECTED_CONFIG = {"architecture": "span", "model_name": "microsoft/deberta-v3-large",
-                   "token_pooling": "first", "config_version": 3}
+EXPECTED_CONFIG = {"model_name": "microsoft/deberta-v3-large"}
+# Pre-2.5 configs (e.g. fastino/gliner2-large-v1) omit `architecture`,
+# `config_version`, and `token_pooling`; the field is present only from
+# gliner2.5 onwards. Same encoder + head contract, just an older config schema.
+EXPECTED_CONFIG_OPTIONAL = {"architecture": "span", "config_version": 3,
+                            "token_pooling": "first"}
 
 # microsoft/deberta-v3-large, as resolved by `AutoConfig.from_pretrained` inside
 # `SpanExtractorModel._load_encoder`. `position_buckets * 2` is the row count of
@@ -152,6 +156,9 @@ def validate_config(config: dict) -> None:
     for key, value in EXPECTED_CONFIG.items():
         if config.get(key) != value:
             raise ValueError(f"Unsupported config {key}: {config.get(key)!r}; expected {value!r}")
+    for key, value in EXPECTED_CONFIG_OPTIONAL.items():
+        if config.get(key) not in (value, None):
+            raise ValueError(f"Unsupported config {key}: {config.get(key)!r}; expected {value!r} or missing")
 
 
 def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int]:
@@ -314,7 +321,7 @@ def convert(model_dir: Path, output: Path) -> None:
     writer.add_meta(f"{ARCH}.vocab_size", vocab_size)
     writer.add_meta(f"{ARCH}.classifier.intermediate_size", ENCODER["hidden_size"] * 2)
     writer.add_meta(f"{ARCH}.classifier.activation", "relu")
-    writer.add_meta(f"{ARCH}.source_architecture", json.dumps({k: config[k] for k in EXPECTED_CONFIG}))
+    writer.add_meta(f"{ARCH}.source_architecture", json.dumps({k: config.get(k) for k in EXPECTED_CONFIG | EXPECTED_CONFIG_OPTIONAL}))
     writer.add_meta(f"{ARCH}.source_config", json.dumps(ENCODER))
     writer.add_meta("tokenizer.ggml.model", "hf-json" if fast_json is not None else "spm")
     writer.add_meta("tokenizer.ggml.vocab_size", vocab_size)

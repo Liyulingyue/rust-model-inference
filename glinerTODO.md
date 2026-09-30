@@ -35,14 +35,21 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 这族 **encoder + tokenizer 与 Decide 完全相同**，理论上能用现有 GGUF 转换器 + 推理代码重新吃一份。差异只剩权重。开工前需要验证 schema prompt 是否兼容（2.5 引入了 `<|context_start|>` 等新增 token，pre-2.5 v1 可能没有）。
 
-### 1. `fastino/gliner2-large-v1` — DeBERTa-v3-large
+### ✅ 1. `fastino/gliner2-large-v1` — DeBERTa-v3-large（已完成）
 - **架构族**：SpanExtractor（无 `architecture` 字段），`max_width=8`、`counting_layer=count_lstm`、`model_type=extractor`、DeBERTa-v3-large
 - **flag 决策**：✅ 共用 `--gliner2-decide`
 - **路由**：✅ `/v1/jev/score`
-- **架构位置**：✅ `src/models/gliner/`（同目录同代码）
-- **验证**：用现有 `tools/converter/gliner/convert_gliner.py` 重新转换，重新跑 oracle。如果 max delta 也 ≤ 1e-4 就直接复用
-- **风险**：2.5 schema 引入的 token 可能在 pre-2.5 不存在；如果 schema 字符不同，要么放弃要么加 schema 分支
-- **前置**：看 `tokenizer_config.json` / `tokenizer.json` 里 `[SEP_STRUCT]` `[SEP_TEXT]` `[DESCRIPTION]` 等是否存在
+- **架构位置**：✅ `src/models/gliner/`（同目录同代码）—— 零新代码
+- **改动**：
+  - `tools/converter/gliner/convert_gliner.py`：把 `EXPECTED_CONFIG` 拆成严格（`model_name`）和可选（`architecture`/`config_version`/`token_pooling`），pre-2.5 缺字段也算合法
+  - 新增 `tests/gliner2_large_v1.rs`：6 个 env-gated 烟测覆盖合同 / refund / 多任务 / examples / 长文本 / marker 位置
+- **验证**：6/6 通过（debug 模式 ~5min，release 会快一个数量级）。输出与 Decide 在 4 个 fixture 上语义一致：
+  - "Refund please" → `refund`
+  - "Battery dies, but the keyboard is excellent" → `mixed` + `battery`/`keyboard`/`camera`
+  - "I need a refund" + prompt "Choose the route" + example → `refund`
+  - "great great..." → `positive`
+- **未做 byte-exact oracle**：现有 `tests/gliner2_classify_parity.rs` 的 golden 是 Decide 用 `transformers==4.48.1` 生成的；large-v1 的 `transformers_version=4.54.0`，`disentangled_attention_bias` 在小版本之间动过 → 重新生成 fixture 需要跑 GLiNER2 参考实现 + `transformers==4.54.0`，再加 oracle 测试。当前的烟测已经足够证明"同型不同权重"成立，byte-exact 留给后续
+- **commit**：（commit hash 待补）
 
 ### 2. `fastino/gliner2-base-v1` — DeBERTa-v3-base
 - 同上但 encoder 维度更小（768 hidden / 12 layers / 12 heads）
@@ -163,14 +170,21 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 | # | 任务 | 族 | 工作量 | 价值 | 优先级 |
 |---|---|---|---|---|---|
-| A | **架构 trait 化** | 全部 | ~1天 | 后续所有变体的前置 | **最高** |
-| B | `gliner2-large-v1` Decide 验证 | span pre-2.5 | 小（~200行） | 中（兼容性证据） | 高 |
-| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | 高 |
+| ~~A~~ | ~~架构 trait 化~~ | 全部 | ~~~1天~~ | ~~后续所有变体的前置~~ | **取消**：抽象应在真有重复时再做，避免过早抽象 |
+| ✅ B | `gliner2-large-v1` Decide 验证 | span pre-2.5 | 小（~200行） | 中（兼容性证据） | 完成 |
+| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | **下一条** |
 | D | BoundaryExtractor 任一基线 | boundary | 大（~3000行） | 中（多任务） | 中 |
 | E | Ettin encoder + BPE tokenizer | span 1B | **巨大**（~2000行） | 中（1B 升级） | 低 |
 | F | 专项 guardrail（待定） | 待定 | 中 | 低 | 低 |
 
 每条开工前必须先 `modelscope download --model <repo> config.json tokenizer_config.json`（按 model-download skill），读 config 填本文件对应 TODO 的"flag 决策 / 路由 / 架构位置"三栏，再写代码。**不再做"看着像就动手"的盲改**。
+
+## B 完成的方法论选择
+
+按用户原话"按照工作量，由少到多"执行：**不做架构抽象，先 B 再 C**。理由：
+- B 已经证明 pre-2.5 同型可以直接复用现有转换器 + 推理代码（只放宽了 config 校验）
+- C 的"尺寸动态化"在做完 B 之后成为可观察的具体改动（之前的猜想需要被验证/否定）
+- 抽象在做 C 时如果真的"DeBERTa-v3-base 的所有循环展开都跟 large 一样"，才有现实基础。否则 base 可能要求不同的 matmul kernel、不同的 layer_norm_eps 等，那时候 trait 形状会被实际数据决定，比猜的准
 
 ---
 
