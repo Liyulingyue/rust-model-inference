@@ -2,6 +2,7 @@
 
 | 模型                          | 版本       | 任务类型             | 参考实现                              | 参考推理权重 | 备注     |
 |-------------------------------|------------|----------------------|---------------------------------------|--------------|----------|
+| Audio8-ASR-Infinite | merged v2 | 流式中英 ASR | 官方实现 @ `c8ba8eea829be0339e8d7757f8ca52dac06e1e32` | 本地 BF16 GGUF | Experimental：真实 Mel 的前 4 个音频/文本组在标量路径逐位对齐，含 4 组完整 logits；WAV 前端尚无独立标量逐位证明，超过 1500 个音频帧明确拒绝。[复现说明](../tools/converter/audio8/README.md)。 |
 | Breeze-TTS-2                  | 3.5B          | TTS、指令控制、参考音频声音克隆 | 原始开发                             | https://huggingface.co/EvoAwaken-Workshop/Breeze-TTS-2-gguf | √ |
 | dots.tts-base                 | base       | TTS                  | 原始开发 @ `32407a5`                  | https://huggingface.co/EvoAwaken-Workshop/dots-tts-base-gguf | 待核验 |
 | dots.tts-edit                 | tts        | TTS                  | 原始开发 @ `32407a5`                  |              | 待核验 |

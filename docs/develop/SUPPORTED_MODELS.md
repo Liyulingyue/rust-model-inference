@@ -19,6 +19,7 @@
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Audio8-ASR-Infinite | `audio8_asr_infinite` | 80 ms 时钟、480 ms 延迟的中英 ASR | 单个 BF16 GGUF；16 kHz PCM16 WAV | merged v2 的 938 个 BF16 张量、Qwen2 tokenizer、Voxtral 音频塔和 AdaRMS 文本解码 | `Experimental` | GGUF SHA-256 `1cfe353b4aa074cc3951385052b7e3a074152db4b1d20932fbab1e13195e17c4`；Darwin arm64 上真实 Mel 前 32 帧的 4 个音频/文本组与独立 C 标量参考 257 个 checkpoint 及 4 组完整 logits 原始 F32 位一致；4 秒演示语音与官方 `c8ba8ee` 均输出“一个两个半年，”。WAV→Mel 尚无独立标量逐位证明；音频塔超过 1500 帧明确拒绝。[复现说明](../../tools/converter/audio8/README.md)。 |
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
 | EmbeddingGemma-300M | `gemma-embedding` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | 2026-09-28 通过真实 CLI（`rust-model-inference --embedding`）与 HTTP `/v1/embeddings` 完成 768 维输出，二者 bit 一致；`tests/embeddinggemma_300m.rs` 4/4 覆盖 metadata 契约（24 层 / 768 维 / 3 head / 1 kv head / head_dim 256 / SWA 512 / 双 RoPE base）、SPM tokenizer 无 BOS、张量清单（4 norm + 2 QK-norm + 2 dense）、语义排序（相关 0.823 > 相关主题 0.573 > 无关 0.293）。**未**做 llama.cpp 位级 oracle 对齐；每次调用重新加载权重，无 session 复用。 |
@@ -86,7 +87,7 @@
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`audio8_asr_infinite`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx`、`audio8_asr_infinite` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 

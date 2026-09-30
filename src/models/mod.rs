@@ -1,3 +1,4 @@
+pub mod audio8;
 pub mod bert_family;
 pub mod breeze;
 pub mod chat_template;

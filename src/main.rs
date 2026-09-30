@@ -52,7 +52,12 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         // qwen3 covers Fun-ASR-Nano (qwen3-0.6b LLM + funasr encoder mmproj);
         // qwen3vl covers Qwen3-Audio ASR; qwen2 covers VibeVoice ASR;
         // sensevoice-small and paraformer are standalone ASR models.
-        "qwen3" | "qwen3vl" | "qwen2" | "sensevoice-small" | "paraformer" => Ok(AudioRoute::Asr),
+        "qwen3"
+        | "qwen3vl"
+        | "qwen2"
+        | "sensevoice-small"
+        | "paraformer"
+        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
@@ -726,6 +731,10 @@ mod tests {
     #[test]
     fn architecture_aware_audio_dispatch_preserves_asr() {
         assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(
+            dispatch_audio_arch("audio8_asr_infinite").unwrap(),
+            AudioRoute::Asr
+        );
         assert_eq!(dispatch_audio_arch("gemma4").unwrap(), AudioRoute::Gemma4);
         assert!(dispatch_audio_arch("llama").is_err());
     }
