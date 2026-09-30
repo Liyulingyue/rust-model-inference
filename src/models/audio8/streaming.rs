@@ -8,6 +8,7 @@ use super::mel::compute_voxtral_log_mel;
 use super::text::{Audio8TextDecoder, Audio8TextSession};
 use super::{time_condition, Audio8Encoder, Audio8State, TEXT_WIDTH};
 use crate::core::tokenizer::BPETokenizer;
+use crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any;
 use std::collections::VecDeque;
 
 pub const SAMPLE_RATE: usize = 16_000;
@@ -91,7 +92,38 @@ impl Default for Schedule {
     }
 }
 
+/// Decode a 16 kHz mono PCM stream from raw WAV bytes, with channel
+/// downmix and `linear_resample` for non-16 kHz sources. Used by both the
+/// CLI (`--audio` path) and the HTTP `/v1/audio/transcriptions` endpoint
+/// so the audio contract is identical across entry points.
+pub fn decode_samples(wav_bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let decoded = decode_pcm16_wav_any(wav_bytes).map_err(|error| format!("{error:?}"))?;
+    let samples = if decoded.channels == 1 {
+        decoded.samples
+    } else {
+        decoded
+            .samples
+            .chunks(decoded.channels as usize)
+            .map(|channels| channels.iter().sum::<f32>() / channels.len() as f32)
+            .collect()
+    };
+    if samples.is_empty() {
+        return Err("Audio8 WAV contains no audio".into());
+    }
+    let samples = if decoded.sample_rate as usize == SAMPLE_RATE {
+        samples
+    } else {
+        crate::models::funasr::model::linear_resample(
+            &samples,
+            decoded.sample_rate as usize,
+            SAMPLE_RATE,
+        )
+    };
+    Ok(samples)
+}
+
 /// Audio8 tokenizer specials resolved once per model load.
+#[derive(Clone)]
 pub struct SpecialTokens {
     pub bos: u32,
     pub eos: u32,
