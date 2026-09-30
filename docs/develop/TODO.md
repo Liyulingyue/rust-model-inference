@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-017) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-018) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -902,6 +902,83 @@ jina_audio / qwen3_tts 都有完整的 `dump_*.py` + `fixtures/` + `compare.py`�
 
 在触发前，`docs/MODEL_LIST.md` 对应行的口径保持"语义验证 + CLI/HTTP bit 一致"，**不写**
 "逐位对齐 llama.cpp"。
+
+### TODO-018: server 的两池超售 + jina-v5-omni image 路径 CLI/HTTP 1 ULP 分歧
+
+核对 jina-embeddings-v5-omni 的 image 路径时发现两件事，都还没修。共同背景是
+`src/core/thread_pool.rs:45-72` 记录的双池设计：LLM 走 `ComputePool`（显式分区、
+无 work-stealing），vision/audio/qwen35 走 **rayron 全局池**（`into_par_iter` / `par_chunks_mut`）。
+文档说两池靠 `src/main.rs:130` 的 `init_rayon_global_pool(n)` 对齐线程数，且
+"never run concurrently ... so oversubscription is not an issue"。
+
+#### 1. server 从不调用 `init_rayon_global_pool` → 线程数不可控 + 与 ComputePool 超售
+
+CLI 在 main.rs 解析 `--threads` 后就建好 rayron 池；**`src/app/server/mod.rs::run_server`
+完全没有这一步**。于是 HTTP 进程里第一个用 rayron 的请求会懒建池，线程数取 rayron
+自己的默认（本机 `num_cpus`=18），而 ComputePool 是 `resolve_thread_count(--threads, 18)`
+= clamp 到 `DEFAULT_THREAD_CAP=8`。
+
+在 CLI 里这无害（vision 与 LLM 不并发）。在 server 里并发请求可以让 vision（rayron）
+与 LLM（ComputePool）真正重叠，于是 18+8 个线程抢 8 核。
+
+曾试过在 server 里补 `init_rayon_global_pool(8)`（2 行），**已撤回**，原因是：
+  (a) 它不解决第 2 条的分歧（实测差异数仍是 153/1024，一点没变）；
+  (b) 它只把超售从 18+8=26 降到 8+8=16，没有消掉超售本身；
+  (c) `rayon::ThreadPoolBuilder::build_global` 只能成功一次，若别处先建了池则我的
+      调用静默失效，属于脆弱写法。
+根治手段是第 3 条。
+
+#### 2. jina-v5-omni image 路径：CLI 与 HTTP 差 ~1 ULP，根因未明
+
+现象（Q8_0 文本 + F16 vision mmproj，`models/apple.png`，prompt
+`Represent this image for retrieval.`）：**153/1024 个元素在 `%.9f` 文本层不同**，
+max abs diff 5.0e-10（中位 |v|=0.0185 → f32 ULP≈1.11e-9，即亚 ULP），且 **HTTP 系统性
+略大**。
+
+已排除（每条都有实测）：
+- rayron 线程数：server 补 `init_rayon_global_pool(8)` 后差异不变；
+- `--threads`：CLI 0/1/2/4/8/12/16/18 输出全同；`DEFAULT_THREAD_CAP=8`，故 HTTP 的
+  `threads=0` 与 CLI 的 8 实际同值；
+- `--max-context`：2048 vs 8192 全同；
+- 图片路径 / 扩展名：png 与同内容 .jpg 结果 md5 相同；
+- 渲染差异：Python `%.9f` 与 Rust `{:.9}` 在全部 1024 个值上完全一致；
+- **vision 编码器**：`omni.vision.normalized`（3,268,608 B）与 `omni.vision.projected`
+  （1,089,536 B）在 CLI/HTTP **逐字节相同**；
+- token IDs：274 个完全相同。
+
+因此分歧必在 vision projection 注入之后的 **LLM embedding 计算**内
+（`src/models/qwen3/embedding.rs`）。该文件**完全不用 rayron**，只调 `dot_f32` /
+`softmax_inplace`，并发放进 `ComputePool`（两侧线程数都是 8）。
+
+两侧各自**完全确定**：CLI 连跑 5 次 md5 相同；同一 server 连发 4 次相同；两个不同
+server 实例也相同。
+
+矛盾点：`embedding.final` trace 曾被观测到 CLI/HTTP 逐位相同（4096 B），但同时
+HTTP JSON 与其 trace 1024/1024 位一致、CLI 文本与其 trace 0/1024 不一致 —— 三个测量
+无法同时为真，说明至少一个是错的，目前**未能定位是哪个**。
+
+影响：需要跨 CLI/HTTP **bit 复现** image embedding 的场景会踩到（当前所有 BERT/Gemma
+encoder 都是 0 差异，只有这条 image 路径不是）。sub-ULP，对检索排序无实际影响。
+
+触发条件：有人报告跨入口 image embedding 不一致；或要把 jina-v5-omni image 纳入
+位级 oracle 对照。
+
+下一步诊断建议：在同一次运行内把 CLI 文本、CLI `embedding.final` trace、HTTP JSON、
+HTTP `embedding.final` trace 四份都落盘再比（避免跨 run 污染），若 trace 仍相等而
+文本不等，则查 `print_embedding` 与 trace 写出点之间是否有二次 normalize。
+
+#### 3. vision 迁到 ComputePool（`thread_pool.rs` 已登记的优选方向）
+
+`src/core/thread_pool.rs:66-72`：未来统一方向是"把 audio/vision/qwen35 迁到
+ComputePool，不是把 LLM 迁去 rayron"。迁移面：
+- rayron 用点：`src/models/qwen3/vision/mod.rs` 3 处（1094 attention 的
+  `into_par_iter`、213/278 两个 `par_chunks_mut`）、`src/models/qwen35/vision/mod.rs` 1 处；
+- 需要穿 `pool` 的公共 API：`encode_pair` / `encode_image`（13 个调用点，分布在
+  `app/qwen_drive.rs`、`app/omni.rs`、`app/text/multimodal.rs`、`app/text/vision.rs`）
+  与 `VisionEncoder::from_source` / `VisionEncoder35::from_source`（10 个构造点）；
+- 迁移后 rayron 依赖可整体从 Cargo.toml 移除，第 1 条的"两池对齐"问题随之消失。
+
+注意：**这一条不修第 2 条**（vision 输出已证逐位相同）。它是第 1 条的根治手段。
 
 ---
 
