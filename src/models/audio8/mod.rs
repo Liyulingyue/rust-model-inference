@@ -1,6 +1,7 @@
 //! Audio8 ASR Infinite: Voxtral Realtime audio tower and frame projector.
 
 pub mod mel;
+pub mod streaming;
 pub mod text;
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
