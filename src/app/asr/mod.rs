@@ -1,10 +1,12 @@
 //! ASR CLI dispatcher and model-specific sub-pipelines.
 //!
-//! Dispatches based on mmproj architecture:
+//! Dispatches by model or mmproj architecture:
+//! - `audio8_asr_infinite` → dedicated Audio8 pipeline
 //! - `vibevoice_asr` → VibeVoice ASR streaming pipeline
 //! - `funasr-sensevoice-encoder` → Fun-ASR-Nano pipeline
 //! - default → Qwen3-VL ASR pipeline
 
+mod audio8;
 mod funasr;
 mod vibevoice;
 
@@ -31,7 +33,14 @@ pub fn run_asr_cli(
         let probe = open_or_exit(model_path, ComponentRole::Llm);
         let is_sensevoice = crate::models::funasr::sensevoice::is_sensevoice(probe.as_ref());
         let is_paraformer = crate::models::funasr::paraformer::is_paraformer(probe.as_ref());
+        let is_audio8 = probe
+            .metadata("general.architecture")
+            .and_then(|value| value.to_string_val())
+            == Some("audio8_asr_infinite");
         drop(probe);
+        if is_audio8 {
+            return audio8::run_audio8_cli(options);
+        }
         if is_sensevoice {
             return funasr::run_sensevoice_cli(options);
         }
