@@ -66,15 +66,31 @@ router 为 8-bit），不是原始 BF16。所以这里的 `--quant` 语义与 br
 | `--quant` | 输出张量类型 | payload | 用途 | Rust 端加载 |
 |---|---|---|---|---|
 | `lossless` (default) | packed U32 → GGUF I32 | 19.0 GB | 架构对齐，oracle 逐位验证 | ✅ `MlxAffineKernel` |
-| `f32` | 全部矩阵 → F32 | 129 GiB | affine 展开的最高保真参考 | ❌ |
-| `f16` | 全部矩阵 → F16 | 64.6 GiB | 通用 GGML 消费者 | ❌ |
-| `q8_0` | 全部矩阵 → Q8_0 | 34.3 GiB | 通用 GGML 消费者 | ❌ |
-| `q4_0` | 全部矩阵 → Q4_0 | 18.2 GiB | 通用 GGML 消费者 | ❌ |
+| `f32` | 全部矩阵 → F32 | 129 GiB | affine 展开的最高保真参考 | ✅ 但内存不足时不可用 |
+| `f16` | 全部矩阵 → F16 | 64.6 GiB | 通用 GGML 消费者 | ✅ |
+| `q8_0` | 全部矩阵 → Q8_0 | 34.3 GiB | 通用 GGML 消费者 | ✅ |
+| `q4_0` | 全部矩阵 → Q4_0 | 18.2 GiB | 通用 GGML 消费者 | ✅ |
 
 `lossless` 保持字节完全一致，因此是唯一能跑 scalar oracle 的格式。其他模式把
 affine group 展开成 F32 后重新编码，`scales`/`biases` 随之合并进矩阵、不再单独
 输出；norm、SSM 参数和 LoRA 仍保留源精度。metadata 记录 `edge0.quant.mode`，
 `edge0.quant.group_size` 只在 `lossless` 下出现。
+
+`load_affine` 按张量类型分派：I32 走 `load_packed`（`MlxAffineKernel`），F32/F16/
+Q8_0/Q4_0 走 `load_expanded`（通用量化 kernel，按 expert 步长切片）。所以除
+`lossless` 外的所有模式都能被 Rust 加载推理。
+
+**实测（`Hello`，greedy，官方参考 `[9419, 0, 2500, 628]`）：**
+
+| 模式 | 文件大小 | 生成速度（8 线程） | token IDs |
+|---|---|---|---|
+| `lossless` | 19 GB | 0.1 t/s | ✅ 逐位一致 |
+| `q4_0` | 18.2 GB | **22.9 t/s** | ✅ 逐位一致 |
+| `q8_0` | 34.3 GB | 16.8 t/s | ✅ 逐位一致 |
+| `f16` | 64.6 GB | 8.7 t/s | ✅ 逐位一致 |
+
+`q4_0` 与 `lossless` 体积相同，但因 lossless 需要逐元素反量化 affine group，
+实测快 **229×**。这是推荐的生产格式。`f32` 需要 129 GiB，本机内存不足。
 
 反量化公式（`mlx_affine.py` 与 `src/ops/kernel/mlx_affine.rs` 必须一致）：
 
@@ -82,10 +98,6 @@ affine group 展开成 F32 后重新编码，`scales`/`biases` 随之合并进�
 value(row, col) = bf16(scales[group]) * q + bf16(biases[group])
 group           = row * (n_in // 64) + col // 64
 ```
-
-**Rust 端只支持 `lossless`**：`Edge0Model` 的 loader 假定 I32 + BF16 companions
-三元组，且 `MlxAffineKernel` 只懂 MLX affine。其他模式产出的文件需要新增 kernel
-与 loader 分支后才能推理。
 
 ## utils 现状（`converter/utils/gguf.py`）
 

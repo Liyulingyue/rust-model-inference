@@ -217,8 +217,11 @@ impl<'a> HybridTrunk<'a> {
             .iter()
             .map(|value| *value as usize)
             .collect::<Vec<_>>();
+        // The lossless export stores packed 4-bit codes, so the embedding is
+        // one eighth as wide; the expanded modes store whole values instead.
+        let expanded = crate::models::edge0::weights::is_expanded(source);
         let expected = vec![
-            if edge0 {
+            if edge0 && !expanded {
                 config.n_embd / 8
             } else {
                 config.n_embd
@@ -250,6 +253,7 @@ impl<'a> HybridTrunk<'a> {
             load_weight(source, name).ok_or("Missing output weight")?
         };
         if edge0
+            && !expanded
             && (
                 tok_embd.n_in,
                 tok_embd.n_out,
@@ -263,6 +267,24 @@ impl<'a> HybridTrunk<'a> {
             )
         {
             return Err("Edge0 embedding or output shape mismatch".into());
+        }
+        // Every mode, packed or expanded, must present the same logical matrix,
+        // so the expanded path checks the widths the kernel will actually use.
+        if edge0
+            && expanded
+            && (
+                tok_embd.n_in,
+                tok_embd.n_out,
+                output_weight.n_in,
+                output_weight.n_out,
+            ) != (
+                config.n_embd,
+                config.vocab_size,
+                config.n_embd,
+                config.vocab_size,
+            )
+        {
+            return Err("Edge0 expanded embedding or output shape mismatch".into());
         }
 
         let n_layers_impl = config.n_layer_impl();
