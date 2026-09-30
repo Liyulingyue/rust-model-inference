@@ -1,6 +1,6 @@
 # 模型支持清单
 
-> 更新于 2026-09-28，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
+> 更新于 2026-09-30，DreamX-Creator 代码基线为 `1178200`。本清单以主 CLI `rust-model-inference` 为准。
 
 相同的 `general.architecture` 只表示会进入同一条代码路径，不代表任意同架构 GGUF 都已确认可用。未在“具体型号”表中出现的模型，应先按 `Supported` 或 `Experimental` 看待，不能默认视为 `Verified`。
 
@@ -21,6 +21,7 @@
 |---|---|---|---|---|---|---|
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
+| CLM-v0.1-8B | `clm` 双头 + `qwen3` 编码器 | 文本候选评分 | F32 双头 GGUF、Qwen3-8B BF16 GGUF | F32 + BF16 | `Verified`（标量路径） | 两组真实文本评分的 token IDs、32,768 个编码器 F32 值、34,818 个双头 F32 值逐位一致；官方 vLLM、加速路径与其他量化未对齐。[哈希与复现](../../tools/oracle/clm/README.md)。 |
 | EmbeddingGemma-300M | `gemma-embedding` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | 2026-09-28 通过真实 CLI（`rust-model-inference --embedding`）与 HTTP `/v1/embeddings` 完成 768 维输出，二者 bit 一致；`tests/embeddinggemma_300m.rs` 4/4 覆盖 metadata 契约（24 层 / 768 维 / 3 head / 1 kv head / head_dim 256 / SWA 512 / 双 RoPE base）、SPM tokenizer 无 BOS、张量清单（4 norm + 2 QK-norm + 2 dense）、语义排序（相关 0.823 > 相关主题 0.573 > 无关 0.293）。**未**做 llama.cpp 位级 oracle 对齐；每次调用重新加载权重，无 session 复用。 |
 | jina-embeddings-v2-base-en | `jina-bert-v2` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | 2026-09-28 真实 CLI 与 HTTP `/v1/embeddings` 完成 768 维输出，二者 bit 一致；`tests/jina_v2_base_en.rs` 4/4 覆盖 metadata 契约、WordPiece tokenizer（pinned token ids `[101,2054,…,102]`）、张量清单、语义排序（0.973 > 0.957 > 0.803）。每调用重新加载权重，无 session 复用；未做 llama.cpp 位级 oracle 对齐。 |
 | nomic-embed-text-v1.5 | `nomic-bert` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | 2026-09-28 真实 CLI（`rust-model-inference --embedding`）与 HTTP `/v1/embeddings` 完成 768 维输出，二者 bit 一致（首 4 维 0.014156 / 0.018568 / -0.400383 / -0.044526）；`tests/nomic_embed_text_v1_5.rs` 5/5 覆盖 metadata 契约（含 `rope.freq_base=1000`）、WordPiece tokenizer、fused QKV 张量清单、变体区分、语义排序（0.951 > 0.924 > 0.666）。BERT 家族第三变体：fused `attn_qkv`、无任何投影 bias、SwiGLU、RoPE(interleaved, freq_base=1000)。未做 llama.cpp 位级 oracle 对齐；未覆盖 f16/其它量化档。 |

@@ -884,9 +884,8 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 /// `docs/develop/SERVER_BACKEND_SELECTION.md`.
 fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
     let model = options.model.display();
-    let reranker = format!(
-        "{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)"
-    );
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
     if let Some(head) = &options.clm_head {
         return Some(format!(
             "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
