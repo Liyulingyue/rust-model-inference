@@ -19,6 +19,7 @@
 
 | 型号 | GGUF architecture | 能力 | 所需组件 | 已验证格式 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Audio8-ASR-Infinite | `audio8_asr_infinite` | 80 ms 时钟、480 ms 延迟的中英 ASR | 单个 BF16 GGUF；16 kHz PCM16 WAV | merged v2 的 938 个 BF16 张量、Qwen2 tokenizer、Voxtral 音频塔和 AdaRMS 文本解码 | `Experimental` | GGUF SHA-256 `1cfe353b4aa074cc3951385052b7e3a074152db4b1d20932fbab1e13195e17c4`；Darwin arm64 上真实 Mel 前 32 帧的 4 个音频/文本组与独立 C 标量参考 257 个 checkpoint 及 4 组完整 logits 原始 F32 位一致；4 秒演示语音与官方 `c8ba8ee` 均输出“一个两个半年，”。WAV→Mel 尚无独立标量逐位证明；音频塔超过 1500 帧明确拒绝。[复现说明](../../tools/converter/audio8/README.md)。 |
 | Qwen3-0.6B | `qwen3` | 文本生成 | 无 | Q8_0 | `Verified` | README 主路径和真实模型推理；其他 Qwen3 尺寸不自动继承此状态。 |
 | Qwen3-Embedding-0.6B | `qwen3` | 文本 Embedding | `--embedding` | Q8_0 | `Verified` | [`tests/embedding_parity.rs`](tests/embedding_parity.rs) 覆盖 pinned llama.cpp 向量和位级对照。 |
 | CLM-v0.1-8B | `clm` 双头 + `qwen3` 编码器 | 文本候选评分 | F32 双头 GGUF、Qwen3-8B BF16 GGUF | F32 + BF16 | `Verified`（标量路径） | 两组真实文本评分的 token IDs、32,768 个编码器 F32 值、34,818 个双头 F32 值逐位一致；官方 vLLM、加速路径与其他量化未对齐。[哈希与复现](../../tools/oracle/clm/README.md)。 |
@@ -47,6 +48,7 @@
 | LFM2.5-1.2B-Instruct | `lfm2` | 文本生成 | 无 | Q8_0 | `Verified` | `docs/TODO.md` 记录 8/8 greedy token 与 llama.cpp 一致。 |
 | LFM2-8B-A1B | `lfm2moe` | MoE 文本生成 | 无 | Q8_0 | `Verified` | 真实 GGUF 可完整生成；与 llama.cpp 前 6 个生成 token 一致，随后在 MoE 近平局处可能分叉。 |
 | Laya multilingual | `laya` | 多语言 choice / score / noul 决策 | 内嵌 tokenizer 与决策头；请求 JSON | F32 GGUF | `Verified` | 固定 HF revision `e4e9ddf21a7b1903b7acffd8814ad4307bf63a67`、官方 Laya `4066d5d5fbf08b66c6757ddeedbd797bd7655bc0`；官方计算图使用独立 C 标量算子，与禁用自动向量化/FMA 的 Rust CLI 对齐。5 个请求、195 个 checkpoint 的 token IDs、marker、shape 及全部中间/最终 logits F32 原始位一致，覆盖三种任务、单候选、结构化输入、160-token 局部注意力边界；未验证加速或量化路径。入口 `--laya-request <json>`；[复现说明](../../tools/oracle/laya/README.md)。 |
+| GLiNER2.5-Decide | `gliner2` | 分类 / 决策 | 内嵌 `tokenizer.json` 与分类头；请求指定标签 | F32 GGUF | `Verified` | 394 个张量载荷与原 Safetensors 逐字节一致；固定 GLiNER2 `55656fb`，4 个请求的 token IDs、120 个检查点和 6,919,181 个 F32 原始位在 `RMI_SCALAR=1` 下逐位一致。覆盖多任务、描述、示例和 142-token 相对位置分桶边界；SIMD、FMA、BLAS、Accelerate、量化路径未对齐。入口 `--jev --gliner2-decide` 与 `/v1/jev/score`；[复现说明](../../tools/oracle/gliner/README.md)。 |
 | Spark-X2.5-1.7B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 中英文和算术冒烟通过；尚未完成 XFllama.cpp token 级 Oracle 对齐。 |
 | Spark-X2.5-4B | `spark2_5` | 文本生成、thinking | 无 | BF16 | `Verified` | 真实 GGUF 冒烟通过；当前 CPU 路径较慢，尚未完成严格 Oracle 对齐。 |
 | Gemma 4 E2B | `gemma4` | 文本、图像、音频、图像+音频 | 任意媒体输入都需要 F16 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | [`tests/gemma4_reference.rs`](tests/gemma4_reference.rs) 覆盖 pinned llama.cpp、文本及各媒体组合；不支持视频，要求 greedy 解码。 |
@@ -88,7 +90,7 @@
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`edge0`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`edge0`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`audio8_asr_infinite`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx`、`audio8_asr_infinite` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 

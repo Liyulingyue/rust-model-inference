@@ -192,7 +192,7 @@ fn matches_the_reference_stack() {
 }
 
 #[test]
-fn rejects_a_foreign_architecture() {
+fn loads_embedded_json_tokenizer_twice() {
     let path = std::path::Path::new(GGUF);
     if !path.exists() {
         panic!("missing {GGUF}");
@@ -203,5 +203,5 @@ fn rejects_a_foreign_architecture() {
     let second = GlinerModel::from_source(source.as_ref()).expect("load gliner2 again");
     assert_eq!(first.config().n_layer, 24);
     assert_eq!(second.config().n_layer, 24);
-    assert_eq!(first.tokenizer().len(), 128000);
+    assert!(first.tokenizer().is_none()); // The supplied checkpoint embeds tokenizer.json.
 }

@@ -39,7 +39,7 @@
 
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
-use crate::ops::{gelu_erf_inplace, layer_norm, softmax_inplace};
+use crate::ops::{dot_f32, gelu_erf_inplace, layer_norm, softmax_inplace};
 use std::sync::Arc;
 
 use super::weights::{LayerWeights, ModelWeights};
@@ -170,6 +170,12 @@ pub fn matmul_into(
     debug_assert_eq!(input.len(), n_in);
     debug_assert_eq!(output.len(), n_out);
     if let Some(rows) = weight.kernel.f32_slice() {
+        if crate::ops::scalar_mode() {
+            for (index, row) in rows.chunks_exact(n_in).take(n_out).enumerate() {
+                output[index] = dot_f32(row, input, n_in);
+            }
+            return;
+        }
         let output_ptr = output.as_mut_ptr();
         pool.compute(|ith, nth| {
             // Same disjointness contract as `quantize_and_matmul_with_scratch`:
@@ -370,6 +376,7 @@ pub fn encode(
         );
         slot.copy_from_slice(&normed);
     }
+    trace("gliner.embeddings", None, &[n_tokens, d], &hidden);
 
     let hd = config.head_dim;
     // `scale_factor = 1 + |pos_att_type|`; all three terms share the scale.
@@ -389,7 +396,7 @@ pub fn encode(
     let mut ffn = vec![0.0f32; config.n_ff];
     let mut scores = vec![0.0f32; n_tokens];
 
-    for layer in &weights.layers {
+    for (layer_index, layer) in weights.layers.iter().enumerate() {
         matmul_rows(&layer.attn_q, &rel_table, d, d, &mut pos_query, &pool);
         matmul_rows(&layer.attn_k, &rel_table, d, d, &mut pos_key, &pool);
         add_bias_rows(&mut pos_query, d, &layer.attn_q_bias);
@@ -422,6 +429,18 @@ pub fn encode(
             d,
             &pool,
         );
+        if layer_index == 0 {
+            trace("gliner.q", None, &[n_tokens, d], &q);
+            trace("gliner.k", None, &[n_tokens, d], &k);
+            trace("gliner.v", None, &[n_tokens, d], &v);
+        }
+        let scalar = crate::ops::scalar_mode();
+        let divisor = ((hd * 3) as f32).sqrt();
+        let scaled_k: Vec<f32> = if scalar {
+            k.iter().map(|&value| value / divisor).collect()
+        } else {
+            Vec::new()
+        };
 
         // Bidirectional attention; batch is always 1 so no key is masked.
         for t in 0..n_tokens {
@@ -431,25 +450,45 @@ pub fn encode(
                 for s in 0..n_tokens {
                     let query = &q[t * d + head_offset..t * d + head_offset + hd];
                     let key = &k[s * d + head_offset..s * d + head_offset + hd];
-                    let mut score = dot(query, key);
                     let c2p = position_table[row_base + s] * d + head_offset;
-                    let c2p_raw = dot(query, &pos_key[c2p..c2p + hd]);
-                    score += c2p_raw;
                     let p2c = position_table[row_base + s] * d + head_offset;
-                    let p2c_raw = dot(key, &pos_query[p2c..p2c + hd]);
-                    score += p2c_raw;
-                    scores[s] = score * scale;
+                    if scalar {
+                        let content = dot_f32(
+                            query,
+                            &scaled_k[s * d + head_offset..s * d + head_offset + hd],
+                            hd,
+                        );
+                        let relative = dot_f32(query, &pos_key[c2p..c2p + hd], hd) / divisor
+                            + dot_f32(key, &pos_query[p2c..p2c + hd], hd) / divisor;
+                        scores[s] = content + relative;
+                    } else {
+                        let mut score = dot(query, key);
+                        score += dot(query, &pos_key[c2p..c2p + hd]);
+                        score += dot(key, &pos_query[p2c..p2c + hd]);
+                        scores[s] = score * scale;
+                    }
                 }
                 softmax_inplace(&mut scores[..n_tokens]);
                 let out_base = t * d + head_offset;
                 for i in 0..hd {
-                    let mut acc = 0.0f32;
-                    for s in 0..n_tokens {
-                        acc += v[s * d + head_offset + i] * scores[s];
+                    if scalar {
+                        let mut acc = 0.0f64;
+                        for s in 0..n_tokens {
+                            acc += f64::from(v[s * d + head_offset + i] * scores[s]);
+                        }
+                        context[out_base + i] = acc as f32;
+                    } else {
+                        let mut acc = 0.0f32;
+                        for s in 0..n_tokens {
+                            acc += v[s * d + head_offset + i] * scores[s];
+                        }
+                        context[out_base + i] = acc;
                     }
-                    context[out_base + i] = acc;
                 }
             }
+        }
+        if layer_index == 0 {
+            trace("gliner.context", None, &[n_tokens, d], &context);
         }
 
         // Attention output projection, then the ST-transposed residual:
@@ -499,8 +538,16 @@ pub fn encode(
             );
             hidden[t * d..(t + 1) * d].copy_from_slice(&normed);
         }
+        trace("gliner.layer", Some(layer_index), &[n_tokens, d], &hidden);
     }
     Ok(hidden)
+}
+
+fn trace(name: &str, layer: Option<usize>, shape: &[usize], values: &[f32]) {
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(name, layer, shape, values));
+    #[cfg(not(feature = "parity-trace"))]
+    let _ = (name, layer, shape, values);
 }
 
 /// `dense(x) + bias` for every row of a `[n_tokens, n_in]` batch.

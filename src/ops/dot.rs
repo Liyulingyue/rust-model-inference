@@ -414,7 +414,7 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
     debug_assert!(b.len() >= n * 2);
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
-        if std::arch::is_aarch64_feature_detected!("neon") && n >= 4 {
+        if has_neon() && n >= 4 {
             return unsafe { dot_bf16_f32_neon(a, b, n) };
         }
     }
@@ -1510,6 +1510,21 @@ mod tests {
         let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
         let denom = scalar.abs().max(1.0);
         assert!((simd - scalar).abs() / denom < 1e-5);
+    }
+
+    #[cfg(feature = "parity-trace")]
+    #[test]
+    fn dot_bf16_f32_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let n = 256usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let actual = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let expected = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        assert_eq!(actual.to_bits(), expected.to_bits());
     }
 
     #[test]

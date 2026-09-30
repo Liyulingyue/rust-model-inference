@@ -5,11 +5,8 @@ hidden state at each ``[L]`` marker. Only that path is converted: the NER
 heads (``span_rep``, ``count_embed``, ``count_pred``) never run in
 ``classify_text`` and are dropped.
 
-The SentencePiece vocabulary rides along in GGUF metadata so the GGUF stays
-self-contained: ``tokenizer.ggml.tokens`` / ``tokenizer.ggml.scores`` follow the
-llama.cpp spelling, and ``gliner2.spm.*`` carries what an SPM tokenizer needs
-that llama.cpp keeps out of band (the compiled ``nmt_nfkc`` charsmap, the piece
-types, and the normalizer flags).
+The GGUF is self-contained: it embeds the checkpoint's ``tokenizer.json`` when
+present, or the SentencePiece vocabulary and normalizer from ``spm.model``.
 """
 from __future__ import annotations
 
@@ -177,6 +174,16 @@ def added_tokens(tokenizer_config: dict, spm_pieces: list[str]) -> dict[str, int
     return declared
 
 
+def fast_tokenizer_pieces(fast: dict) -> list[str]:
+    model = fast.get("model", {})
+    if model.get("type") != "Unigram" or len(model.get("vocab", [])) != 128000:
+        raise ValueError("unsupported tokenizer.json Unigram vocabulary")
+    declared = {entry["content"]: entry["id"] for entry in fast.get("added_tokens", [])}
+    if any(declared.get(token) != index for index, token in enumerate(SPECIAL_TOKENS, 128000)):
+        raise ValueError("tokenizer.json added token IDs differ from GLiNER2")
+    return [entry[0] for entry in model["vocab"]]
+
+
 def tensor_contracts(vocab_size: int) -> dict[str, tuple]:
     d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
     # `create_mlp(input_dim=hidden, intermediate_dims=[hidden * 2], output_dim=1)`.
@@ -251,10 +258,22 @@ def convert(model_dir: Path, output: Path) -> None:
         raise ValueError(f"Expected DebertaV2Tokenizer, got {tokenizer_config.get('tokenizer_class')!r}")
     if tokenizer_config.get("vocab_type") != "spm" or tokenizer_config.get("do_lower_case"):
         raise ValueError("Expected a case-sensitive SentencePiece tokenizer")
-    spm = parse_spm((model_dir / "spm.model").read_bytes())
-    if spm["normalizer"].get("name") != "nmt_nfkc":
-        raise ValueError(f"Unsupported normalizer {spm['normalizer'].get('name')!r}")
-    added = added_tokens(tokenizer_config, spm["pieces"])
+    tokenizer_json_path = model_dir / "tokenizer.json"
+    fast_json = (
+        tokenizer_json_path.read_text()
+        if tokenizer_json_path.exists() and not (model_dir / "spm.model").exists()
+        else None
+    )
+    fast = json.loads(fast_json) if fast_json is not None else None
+    if fast is not None:
+        pieces = fast_tokenizer_pieces(fast)
+        spm = None
+    else:
+        spm = parse_spm((model_dir / "spm.model").read_bytes())
+        if spm["normalizer"].get("name") != "nmt_nfkc":
+            raise ValueError(f"Unsupported normalizer {spm['normalizer'].get('name')!r}")
+        pieces = spm["pieces"]
+    added = added_tokens(tokenizer_config, pieces)
     vocab_size = max(added.values()) + 1
     contracts = tensor_contracts(vocab_size)
     sources = source_contracts(vocab_size)
@@ -273,9 +292,7 @@ def convert(model_dir: Path, output: Path) -> None:
         if shape != contracts[name]:
             raise ValueError(f"Invalid shape for {key}: {shape} != {contracts[name]}")
 
-    tokens = list(spm["pieces"]) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
-    scores = list(spm["scores"]) + [0.0] * len(added)
-    types = list(spm["types"]) + [4] * len(added)  # USER_DEFINED
+    tokens = list(pieces) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
     if len(tokens) != vocab_size:
         raise ValueError(f"vocab mismatch: {len(tokens)} tokens vs {vocab_size} ids")
 
@@ -299,19 +316,26 @@ def convert(model_dir: Path, output: Path) -> None:
     writer.add_meta(f"{ARCH}.classifier.activation", "relu")
     writer.add_meta(f"{ARCH}.source_architecture", json.dumps({k: config[k] for k in EXPECTED_CONFIG}))
     writer.add_meta(f"{ARCH}.source_config", json.dumps(ENCODER))
-    writer.add_meta("tokenizer.ggml.model", "spm")
+    writer.add_meta("tokenizer.ggml.model", "hf-json" if fast_json is not None else "spm")
     writer.add_meta("tokenizer.ggml.vocab_size", vocab_size)
-    writer.add_meta("tokenizer.ggml.tokens", tokens)
-    writer.add_meta("tokenizer.ggml.scores", scores)
-    writer.add_meta("tokenizer.ggml.token_type", [3 if t in (1, 2, 3) else 4 if t == 6 else 1 for t in types])
+    if fast_json is not None:
+        writer.add_meta(f"{ARCH}.tokenizer_json", fast_json)
+        writer.add_meta(f"{ARCH}.tokenizer_sha256", hashlib.sha256(fast_json.encode()).hexdigest())
+    else:
+        scores = list(spm["scores"]) + [0.0] * len(added)
+        types = list(spm["types"]) + [4] * len(added)  # USER_DEFINED
+        writer.add_meta("tokenizer.ggml.tokens", tokens)
+        writer.add_meta("tokenizer.ggml.scores", scores)
+        writer.add_meta("tokenizer.ggml.token_type", [3 if t in (1, 2, 3) else 4 if t == 6 else 1 for t in types])
     writer.add_meta(f"{ARCH}.special_tokens", [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])])
-    writer.add_meta(f"{ARCH}.spm.piece_count", len(spm["pieces"]))
-    writer.add_meta(f"{ARCH}.spm.piece_types", types)
-    writer.add_meta(f"{ARCH}.spm.charsmap_b64", base64.b64encode(spm["normalizer"]["charsmap"]).decode())
-    for flag in ("byte_fallback", "add_dummy_prefix", "remove_extra_whitespaces",
-                 "escape_whitespaces", "treat_whitespace_as_suffix"):
-        writer.add_meta(f"{ARCH}.spm.{flag}", bool(spm["normalizer"][flag]))
-    writer.add_meta(f"{ARCH}.spm.normalizer", spm["normalizer"]["name"])
+    if spm is not None:
+        writer.add_meta(f"{ARCH}.spm.piece_count", len(spm["pieces"]))
+        writer.add_meta(f"{ARCH}.spm.piece_types", types)
+        writer.add_meta(f"{ARCH}.spm.charsmap_b64", base64.b64encode(spm["normalizer"]["charsmap"]).decode())
+        for flag in ("byte_fallback", "add_dummy_prefix", "remove_extra_whitespaces",
+                     "escape_whitespaces", "treat_whitespace_as_suffix"):
+            writer.add_meta(f"{ARCH}.spm.{flag}", bool(spm["normalizer"][flag]))
+        writer.add_meta(f"{ARCH}.spm.normalizer", spm["normalizer"]["name"])
     with source.path.open("rb") as stream:
         writer.add_meta(f"{ARCH}.source_sha256", hashlib.file_digest(stream, "sha256").hexdigest())
 
