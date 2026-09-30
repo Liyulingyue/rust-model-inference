@@ -22,9 +22,11 @@
 
 pub mod forward;
 pub mod loader;
+pub mod marginals;
 
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
+pub use marginals::{BoundaryMarginals, BoundaryQueryHead};
 
 use crate::core::tensor::TensorSource;
 

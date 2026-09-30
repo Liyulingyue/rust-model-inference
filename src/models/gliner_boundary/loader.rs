@@ -30,6 +30,7 @@ use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
 use super::forward::BoundaryEncoder;
+use super::marginals::BoundaryQueryHead;
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
 pub struct BoundaryModel<'a> {
@@ -45,6 +46,7 @@ pub struct BoundaryModel<'a> {
     pub classifier_3: Weight<'a>,
     pub classifier_3_bias: Vec<f32>,
     pub boundary: BoundaryEncoder<'a>,
+    pub query_head: BoundaryQueryHead<'a>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -119,6 +121,9 @@ impl<'a> BoundaryModel<'a> {
         // 6. BoundaryEncoder weights
         let boundary = BoundaryEncoder::load(source, n_embd)?;
 
+        // 7. BoundaryQueryHead weights (per-query marginals over boundary positions)
+        let query_head = BoundaryQueryHead::load(source, n_embd)?;
+
         Ok(Self {
             config,
             tokenizer,
@@ -128,6 +133,7 @@ impl<'a> BoundaryModel<'a> {
             classifier_3,
             classifier_3_bias,
             boundary,
+            query_head,
         })
     }
 }

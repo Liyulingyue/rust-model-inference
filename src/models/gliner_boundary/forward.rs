@@ -21,8 +21,8 @@ use crate::ops::kernel::{QuantizedTensor, Weight};
 pub struct BoundaryEncoding {
     /// `[B, L + 1, boundary_dim]` row-major.
     pub states: Vec<f32>,
-    /// `[B, L + 1]` boundary validity mask (`i <= text_length[b]`).
-    pub mask: Vec<bool>,
+    /// `[B][L + 1]` boundary validity mask (per-batch row).
+    pub mask: Vec<Vec<bool>>,
     pub boundary_dim: usize,
     pub seq_len: usize,
     pub batch: usize,
@@ -409,13 +409,15 @@ impl<'a> BoundaryEncoder<'a> {
         }
 
         // 6. mask: zero out padding boundary rows
-        let mut mask = vec![false; batch * boundary_len];
+        let mut mask: Vec<Vec<bool>> = Vec::with_capacity(batch);
         for b in 0..batch {
+            let mut row = vec![false; boundary_len];
             for i in 0..boundary_len {
                 if i <= text_lengths[b] {
-                    mask[b * boundary_len + i] = true;
+                    row[i] = true;
                 }
             }
+            mask.push(row);
         }
         for b in 0..batch {
             for i in 0..boundary_len {
