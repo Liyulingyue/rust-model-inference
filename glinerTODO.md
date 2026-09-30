@@ -106,6 +106,22 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **预计工作量**：~3000 行新代码（boundary head forward + relation head + record head + 多个 loss-style 推理路径 + GGUF 转换 + 端到端 oracle）
 - **优先级**：中。生产价值高（一次推理多任务），但实现成本高
 
+### 🟡 5.1 `fastino/gliner2.5-base-v1` GGUF 打包（已完成 converter + smoke）
+- **改动**：
+  - `tools/converter/gliner/convert_boundary.py`（独立脚本，处理 `architecture="boundary"` 模型，硬编码 DeBERTa-v3-base dims）：生成 `gliner2.5-base-v1-f32.gguf`，747 MB，包含 202 encoder tensors + 132 bundled heads（boundary_head 102 + relation_scorer 12 + record_decoder 18）
+  - `tests/gliner2_5_base_v1_smoke.rs`：5 个 env-gated 测试覆盖 metadata / encoder dims / encoder tensor shapes / bundled heads / tokenizer
+- **GGUF metadata 写入**：`gliner2.variant=boundary`、`gliner2.classifier.last_layer_index=3`（区别于 Decide 的 2）、`gliner2.boundary.bundled_heads`、`gliner2.boundary.bundled_tensor_count`
+- **bundled heads 命名空间**：保留原始 safetensors key（`boundary_head.boundary_encoder.bos_state` 等），未来 BoundaryExtractor Rust forward 可直接消费，不需要再做 name map
+- **classifier 层索引差异**：base-v1 用 `classifier.0` + `classifier.3`（中间 GeLU + dropout），Decide 用 `classifier.0` + `classifier.2`（中间 ReLU）。GGUF metadata 标记 `last_layer_index=3` 让 Rust loader 区分
+- **验证**：5/5 通过。**不验证 byte-exact**：Rust 还没有 BoundaryExtractor forward
+- **未做**（明确范围）：boundary detection forward、pair scoring、relation decoding、record decoding——这些需要 Rust 实现 ≥1000 行才能输出第一组 logits。参考实现 `target/gliner2-oracle/gliner2/models/boundary/` 有 8149 行 Python
+
+### 🟡 5.2 BoundaryExtractor Rust forward（待开工）
+- **范围**：实现 `boundary_head.boundary_proposer` + `boundary_head.pair_scorer` + `boundary_head.shared_pool_scorer` 三个子模块的 forward；relations/records/counts/abstention 各自一模块
+- **工作量**：~1000 行最小可用 forward（仅 boundary detection），~3000 行完整 forward（含 relations + records + count + abstention）
+- **byte-exact oracle**：与 Decide 同一套机制（GLiNER2 参考实现 + `transformers==4.48.1`）生成 golden fixture，但 boundary forward 涉及 top-K / sparse sampling / rotary position embeddings，复杂得多
+- **本会话不做**：留给下次或独立分支
+
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
 - 工作量同 #5（同一族代码，encoder 切换即可）
