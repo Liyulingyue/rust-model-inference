@@ -488,18 +488,20 @@ fn main() {
             ),
             None => {
                 app::run_or_exit(Err("--gliner2-boundary needs --gliner2-schema, e.g. \
-                     '{\"entities\":[\"person\",\"location\"]}'"
+                     '{\"entities\":[\"person\",\"location\"]}' or \
+                 '{\"classifications\":[{\"task\":\"topic\",\"labels\":[\"a\",\"b\"]}]}'"
                     .to_string()));
                 unreachable!()
             }
         };
-        let tasks = app::unwrap_or_exit(
+        let (tasks, kinds) = app::unwrap_or_exit(
             app::parse_boundary_schema(&schema)
                 .map_err(|error| format!("--gliner2-schema: {error}")),
         );
         app::run_or_exit(app::run_gliner2_boundary(
             source,
             &tasks,
+            &kinds,
             &context,
             options.threads,
             None,

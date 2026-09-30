@@ -47,6 +47,15 @@ pub struct BoundaryModel<'a> {
     pub classifier_0_bias: Vec<f32>,
     pub classifier_3: Weight<'a>,
     pub classifier_3_bias: Vec<f32>,
+    /// `boundary_head.null_projection` — one scalar per extractive query; the
+    /// reference drops a query's spans when its sigmoid clears
+    /// `abstention_threshold` (`engine.py:269`).
+    pub null_projection: Weight<'a>,
+    pub null_projection_bias: Vec<f32>,
+    /// `boundary_head.count_head` — per-query count log-rate, only consumed when
+    /// `adaptive_threshold` is on.
+    pub count_head: Weight<'a>,
+    pub count_head_bias: Vec<f32>,
     pub boundary: BoundaryEncoder<'a>,
     pub query_head: BoundaryQueryHead<'a>,
     pub proposer: BoundaryProposer<'a>,
@@ -132,6 +141,11 @@ impl<'a> BoundaryModel<'a> {
         let classifier_0_bias = load_vec(source, "classifier.0.bias", classifier_intermediate)?;
         let classifier_3 = load_weight(source, "classifier.3.weight", classifier_intermediate, 1)?;
         let classifier_3_bias = load_vec(source, "classifier.3.bias", 1)?;
+        let null_projection =
+            load_weight(source, "boundary_head.null_projection.weight", n_embd, 1)?;
+        let null_projection_bias = load_vec(source, "boundary_head.null_projection.bias", 1)?;
+        let count_head = load_weight(source, "boundary_head.count_head.weight", n_embd, 1)?;
+        let count_head_bias = load_vec(source, "boundary_head.count_head.bias", 1)?;
 
         // 6. Settings. Read before the heads, since they size themselves from
         //    it (`boundary_attention_window` in particular changes the encoder
@@ -172,6 +186,10 @@ impl<'a> BoundaryModel<'a> {
             classifier_0_bias,
             classifier_3,
             classifier_3_bias,
+            null_projection,
+            null_projection_bias,
+            count_head,
+            count_head_bias,
             boundary,
             query_head,
             proposer,

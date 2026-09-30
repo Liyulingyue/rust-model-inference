@@ -40,6 +40,7 @@ cargo test --profile release-fast --test gliner2_5_base_v1_shared_pool_scorer_pa
 | `dump_document_candidate_pool.py` | `document-candidate-pool-golden.json` | `gliner2_5_base_v1_document_candidate_pool_parity` | 2.622e-6 |
 | `dump_shared_pool_scorer.py` | `shared-pool-scorer-golden.json` | `gliner2_5_base_v1_shared_pool_scorer_parity` | 1.526e-5 |
 | `dump_extract_spans_end_to_end.py` | `extract-spans-e2e-golden.json` | `gliner2_5_base_v1_extract_spans_e2e_parity` | 2.813e-5, `input_ids` exact |
+| `dump_classification_and_query_heads.py` | `classification-head-golden.json` | `gliner2_5_base_v1_classification_head_parity` | 9.060e-6 |
 
 `dump_score_explicit_spans_full.py` builds the reference `BoundaryHead`
 directly from the checkpoint (`BoundaryHeadSettings(**config["boundary_head"])`,
@@ -82,7 +83,17 @@ download from ModelScope), because the reference loads the stock encoder and
 then overwrites it from the checkpoint. Using the stock encoder produces logits
 around -15 and no extractions at all — silently, with no error.
 
+## Markers
+
+The child marker is chosen by the schema's task type, and the mapping is easy to
+get wrong: **classifications use `[L]`, the same token Decide uses — `[C]`
+belongs to `json_structures`.** The reference reads it in
+`processor.py:893-904` / `1124-1188`. Getting it backwards routes a
+classification group's markers into the document pool, where they are scored as
+span queries, so the model emits spans nobody asked for and reports nothing
+wrong. `src/models/gliner/prompt.rs` has a unit test pinning all four mappings.
+
 ## What is not covered yet
 
-No fixture for the entity classification head (`classifier.0` + ReLU +
-`classifier.3`, `[C]` markers), relations, records, count or abstention.
+No fixture for relations (`[R]`), records (`record_decoder`) or
+`json_structures` (`[C]`).

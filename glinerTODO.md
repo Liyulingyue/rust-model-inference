@@ -190,13 +190,24 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   - 负例 "nothing here should extract cleanly" → 0 span
 - **已知 artifact**（与 reference 一致，非移植问题）：`"Apple Inc."` 会被抽成 `apple inc .`，因为 reference 的 word splitter 把句末 `.` 当成一个独立的词
 
-### 🟢 5.2.4b 分类头 + relations + records + HTTP 路由（待开工）
+### ✅ 5.2.4b-1 分类头 + null_projection + count_head
+- **范围**：`[L]` marker → `cls_marker_indices` → `classifier.0` + ReLU + `classifier.3`；`null_projection`（abstention）；`count_head`
+- **实现**：
+  - `prompt.rs`：`BoundaryTaskKind`（Entities=`[E]` / Classification=**`[L]`** / JsonStructure=`[C]` / Relation=`[R]`）+ `build_mixed_boundary_prompt`，两套路由分开返回
+  - `extract.rs`：`classify_group` / `query_heads` / `apply_abstention`；`run_mixed_extraction` 统一返回 spans + classifications + query heads
+  - `adapters/gliner2_boundary.rs`：`parse_boundary_schema` 支持 `classifications` 列表（含 `label_descriptions` / `multi_label` / `cls_threshold`），CLI 两组同时输出
+- **oracle**：`dump_classification_and_query_heads.py`，max delta **9.060e-6**，chosen labels 完全一致
+- **关键纠正**：**classification 用的是 `[L]` 不是 `[C]`**。`[C]` 属于 `json_structures`（processor.py:1124-1188）。搞反的话 classification 的 marker 会被路由进 document pool，变成"抽取"出一堆没人要的 span，而且**不报错**
+- **自己引入又抓到的 regression**：`build_with_child_marker` 在重构时把 `child_marker` 参数忽略了，`kinds=None` 默认成 `Entities`，导致 **Decide 路径的 `[L]` 全部变成 `[E]`**。所有 boundary fixture 全绿（因为 boundary 路径显式传 `kinds`），只有跑 `gliner2_large_v1_parity` 才暴露。已修 + 加了 `the_two_prompt_families_use_their_own_child_marker` 单测锁住
+- **性能坑**：`classify_state` 原本每次调用都新建 `ComputePool`，而 pool worker 空闲时是**忙等**（thread_pool.rs:382）。一次 extraction 两个 pool，并发跑就把机器打满（12 核上 48 个自旋线程）。改成直接算（1.2M MAC，不需要 pool），测试从 82s → 3.2s。**这是引擎的既有特性，不是 boundary 引入的**，但 server 阶段要注意并发请求的 oversubscription
+
+### 🟢 5.2.4b-2 relations + records + HTTP 路由（待开工）
 - **范围**：
-  1. entity 分类：`[C]` marker → `cls_marker_indices` → `classifier.0` + ReLU + `classifier.3`，阈值 `classification_temperature` / `abstention_threshold`
-  2. relations（`relation_scorer`）、records（`record_decoder`，需要 `candidate_states`，已经返回了）
-  3. count_head / null_projection（两个 query→scalar 的投影，最便宜）
-  4. HTTP 路由 `/v1/jev/boundary`
-- **前置**：5.2.4a ✅
+  1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
+  2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
+  3. HTTP 路由 `/v1/jev/boundary`
+  4. `json_structures`（`[C]` marker + 嵌套结构解码）
+- **前置**：5.2.4b-1 ✅
 
 ### 📊 5.2 阶段总结
 | Phase | 范围 | 状态 | commit |
@@ -208,20 +219,22 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | ✅ | 本次 |
 | 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
 | 5.2.4a | 真实入口 + `--gliner2-boundary` | ✅ | 本次 |
-| 5.2.4b | 分类头 + relations + records + HTTP | 🟢 待开工 | — |
+| 5.2.4b-1 | 分类头 + null/count head | ✅ | 本次 |
+| 5.2.4b-2 | relations + records + json_structures + HTTP | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
 
 **5.2.4a 已完成：模型可以真的跑了。** `--gliner2-boundary` 从 CLI 端到端出 span，输出与 reference 逐位一致（`input_ids` 相等、pair-logit delta 2.813e-5、span 完全相同）。
 
-**仍然没有的**：
-- entity 分类解码（`classifier.0` + ReLU + `classifier.3`）——需要 `[C]` marker 路由
-- relations / records / count / abstention
-- HTTP 路由
-- 只支持单个 extractive group（`[E]`）；`child_marker` 是调用方传的，没有按 task type 推断
+**现在支持的**：extractive spans（`[E]`）+ classification（`[L]`）+ abstention（`null_projection`）+ count log-rate（`count_head`），两组可以同时出现在一个 schema 里。
 
-11 个 boundary 测试文件 / 28 个测试全绿。
+**仍然没有的**：
+- relations（`[R]`）/ records（`record_decoder`）/ `json_structures`（`[C]`）
+- HTTP 路由
+- `overlap_policy` 解码（`glinerTODO.md` 记的 `overlap_policy = "flat"`，`decode_spans` 目前只做 threshold + 排序，没做 span 冲突消解）
+
+12 个 boundary 测试文件 / 30 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
