@@ -831,6 +831,15 @@ pub mod capability {
    - 验证方法：取 jina-omni + llama.cpp fork + 一段 >30s 音频（e.g. 60s），分别跑两端的最终 embedding，断言 cos ≥ 0.99 + max abs diff 在量化噪声内（Q8_0 文本 + F16 mmproj 路径下应该是 ~1e-3）
    - 触发条件：commit `9717d17` 之后任何 jina v5 改动、Q4_K / Q5_K / Q6_K 等不同量化、新 mmproj 版本
 
+**2026-10-01 per-chunk oracle 实跑结果**（commit `fe4b99c` 之前 / 之后）：
+- **mel extraction**：✅ 与 llama.cpp bitwise-aligned（max abs diff 0.378 主要来自帧 2999 末尾 40 个 reflect-vs-zero 反射差异，符合预期）
+- **位置嵌入**：❌→✅ commit `5c0d1c0`（msi-new8 之前一版）发现 `token % self.config.window` bug，固定到 `token`（1500 个唯一 pos）后修好
+- **conv1d 输出**：❌ 当前 cos = 0.18 与 oracle，差值幅度~3（pre-GELU）。bias/weight/mel/layout 全部一致，怀疑是 `conv1d_same_f16` 内部 `dot_f16_f16_bytes` 或 patch 构建逻辑有精度级 bug，深入需要逐元素对照
+- **下游**：因为 conv1d 已经分歧，整条编码路径余下 N 层 transformer 输出根本没法 bitwise 对齐
+
+调试现场保留在 `/tmp/audio-fix-test/`（`our-trace-conv1.jsonl.*`）和 `/tmp/rmi-jina-audio-conv1d-oracle.f32`，
+下次继续走 conv1d patch 构造 / `dot_f16_f16_bytes_avx2` 路径定位。
+
 **当前不做**：
 - 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
 - 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
