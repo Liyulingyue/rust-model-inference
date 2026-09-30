@@ -6,6 +6,11 @@ Rust 的 `Edge0Model` 独立持有 MoE 权重，与 Qwen3.5 共用 attention/SSM
 
 转换器保留全部 2377 个张量的原始字节（19,551,119,616 字节 payload），将 U32 packed words 放进 `general.architecture=edge0` 的 GGUF I32 张量；这是本仓库专用格式。已生成文件 `Edge0-35B-A3B-preview-lossless.gguf` 的 SHA-256 是 `50c6c1ce5faef36d5e72d565fa4a27a04801aa243a0d4a5c3f5c4337a408ec7d`。
 
+**只有 `lossless` 模式可以跑下面的 oracle。** 转换器还支持 `--quant f32/f16/q8_0/q4_0`，
+它们先把 affine group 展开成 F32 再重新编码成通用 GGML 类型，输出不再包含
+`scales`/`biases`，Rust 端也无法加载（`Edge0Model` 只认 I32 + BF16 三元组）。
+详见 `tools/converter/README.md#edge0-量化支持现状`。
+
 ```sh
 MODEL=/path/to/Edge0-35B-A3B-preview
 PYTHON=/path/to/repo/.venv/bin/python

@@ -8,8 +8,11 @@
 ```
 converter/
 ├── breeze/       ← 原版与扩展精度转换器
+├── clm/          ← Contrastive-LM 投影头转换器和测试
 ├── dots/         ← dots writer、转换器和测试
 ├── dreamx/       ← DreamX 转换器和测试
+├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
+├── gliner/       ← GLiNER 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
@@ -23,8 +26,11 @@ converter/
 |---|---|
 | `breeze/convert_breeze_plain.py` | 原版未量化导出 |
 | `breeze/convert_breeze.py` | 支持 `--quant bf16/f16/f32/q8_0/q4_0/q4_mixed` 和 `--codec-quant f32/q8_0` |
+| `clm/convert_clm.py` | CLM 投影头 F32 导出 |
 | `dots/convert_dots_tts.py` | dots 专用 writer 与 BF16/Q8_0 导出 |
 | `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
+| `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
+| `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::value` 对齐） |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
@@ -50,6 +56,36 @@ converter/
 
 这些张量走 `core::tensor::load_f32_tensor`（仅 F32/BF16）。量化它们会破坏
 loader；除非 `load_f32_tensor` 也扩到接受 Q 类型，否则永远保留源 dtype。
+
+## edge0 量化支持现状
+
+Edge0-35B 的源 checkpoint **已经是 MLX 4-bit affine 量化**（`group_size=64`，
+router 为 8-bit），不是原始 BF16。所以这里的 `--quant` 语义与 breeze 相反：
+除 `lossless` 外都是**第二次**有重量化。
+
+| `--quant` | 输出张量类型 | payload | 用途 | Rust 端加载 |
+|---|---|---|---|---|
+| `lossless` (default) | packed U32 → GGUF I32 | 19.0 GB | 架构对齐，oracle 逐位验证 | ✅ `MlxAffineKernel` |
+| `f32` | 全部矩阵 → F32 | 129 GiB | affine 展开的最高保真参考 | ❌ |
+| `f16` | 全部矩阵 → F16 | 64.6 GiB | 通用 GGML 消费者 | ❌ |
+| `q8_0` | 全部矩阵 → Q8_0 | 34.3 GiB | 通用 GGML 消费者 | ❌ |
+| `q4_0` | 全部矩阵 → Q4_0 | 18.2 GiB | 通用 GGML 消费者 | ❌ |
+
+`lossless` 保持字节完全一致，因此是唯一能跑 scalar oracle 的格式。其他模式把
+affine group 展开成 F32 后重新编码，`scales`/`biases` 随之合并进矩阵、不再单独
+输出；norm、SSM 参数和 LoRA 仍保留源精度。metadata 记录 `edge0.quant.mode`，
+`edge0.quant.group_size` 只在 `lossless` 下出现。
+
+反量化公式（`mlx_affine.py` 与 `src/ops/kernel/mlx_affine.rs` 必须一致）：
+
+```
+value(row, col) = bf16(scales[group]) * q + bf16(biases[group])
+group           = row * (n_in // 64) + col // 64
+```
+
+**Rust 端只支持 `lossless`**：`Edge0Model` 的 loader 假定 I32 + BF16 companions
+三元组，且 `MlxAffineKernel` 只懂 MLX affine。其他模式产出的文件需要新增 kernel
+与 loader 分支后才能推理。
 
 ## utils 现状（`converter/utils/gguf.py`）
 
@@ -83,6 +119,9 @@ PYTHONPATH=. python3 -m unittest \
   tools.converter.vibevoice.test_convert_vibevoice_asr_original \
   tools.converter.vibevoice.test_convert_vibevoice_asr \
   tools.converter.yue2.test_convert_yue2
+
+# edge0 的反量化测试是 pytest 风格（用 parametrize），单独跑
+PYTHONPATH=. python3 -m pytest tools/converter/edge0/test_convert_edge0.py
 ```
 
 ## 不变原则

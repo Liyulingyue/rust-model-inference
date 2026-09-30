@@ -1,25 +1,56 @@
-"""Losslessly wrap Edge0-35B MLX-affine weights and LoRA in a GGUF container.
+"""Wrap Edge0-35B MLX-affine weights and LoRA in a GGUF container.
 
-The packed U32 words are stored as GGUF I32 with identical bytes. The scales,
-biases, and LoRA remain BF16/F16. This is an Edge0 GGUF, not a llama.cpp model.
+``--quant lossless`` (the default) stores the packed U32 words as GGUF I32
+with identical bytes, keeping scales, biases and LoRA at BF16/F16.  This is
+the format the Rust ``MlxAffineKernel`` consumes and the one the scalar oracle
+verifies against, so it must stay byte-exact.
+
+The other modes first expand the MLX affine groups back to F32 and then
+re-encode the learned matrices into an ordinary GGML type, so the result
+becomes readable by stock llama.cpp tooling.  These are a second, lossy
+quantization pass: the source codes are 4-bit, so any output below F32 throws
+away information the MLX checkpoint no longer has.  Norms, biases, the router
+and the LoRA adapters always keep their source precision, matching how
+``convert_breeze.py`` protects tensors the loader pins to a fixed type.
+
+    lossless  pass the packed U32 words through unchanged (default)
+    f32       expand the affine groups to F32
+    f16       expand the affine groups to F16
+    q8_0      expand to F32, then per-32 Q8_0 blocks
+    q4_0      expand to F32, then per-32 Q4_0 blocks
+
+This is an Edge0 GGUF, not a llama.cpp model.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
 from pathlib import Path
 
+import numpy as np
+
+from tools.converter.edge0.mlx_affine import (
+    MLX_GROUP_SIZE,
+    bf16_to_f32,
+    dequantize_matrix,
+)
 from tools.converter.utils.gguf import (
     GGML_BF16,
     GGML_F16,
+    GGML_F32,
     GGML_I32,
+    GGML_Q4_0,
+    GGML_Q8_0,
     GgufWriter,
     gguf_dims,
     open_safetensors,
+    quantize_q4_0,
+    quantize_q8_0,
 )
 
 
@@ -60,6 +91,25 @@ TOP = {
 }
 DTYPES = {"U32": GGML_I32, "BF16": GGML_BF16, "F16": GGML_F16}
 
+#: ``--quant`` choices, mapped to the GGML type the expanded matrices take.
+#: ``None`` keeps the lossless I32 pass-through.
+QUANT_MODES = {
+    "lossless": None,
+    "f32": GGML_F32,
+    "f16": GGML_F16,
+    "q8_0": GGML_Q8_0,
+    "q4_0": GGML_Q4_0,
+}
+QUANT_SUFFIX = {
+    "lossless": "lossless",
+    "f32": "F32",
+    "f16": "F16",
+    "q8_0": "Q8_0",
+    "q4_0": "Q4_0",
+}
+#: Files this converter always reads from the source checkpoint.
+LORA_SHARD = "lora_edge0_35b.safetensors"
+
 
 def gguf_name(name: str) -> str:
     for source, target in TOP.items():
@@ -88,13 +138,17 @@ def chunks(path: Path, offset: int, length: int):
             length -= len(data)
 
 
+def read_bytes(path: Path, offset: int, length: int) -> bytes:
+    return b"".join(chunks(path, offset, length))
+
+
 def tensors(model_dir: Path):
     index = json.loads((model_dir / "model.safetensors.index.json").read_text())
     shard_names = sorted(set(index["weight_map"].values()))
     if len(shard_names) != 4:
         raise ValueError(f"expected four Edge0 shards, got {shard_names}")
     seen = set()
-    for shard_name in shard_names + ["lora_edge0_35b.safetensors"]:
+    for shard_name in shard_names + [LORA_SHARD]:
         source = open_safetensors(model_dir / shard_name)
         for name, info in source.header.items():
             if name == "__metadata__":
@@ -111,14 +165,171 @@ def tensors(model_dir: Path):
             if dtype not in DTYPES or start < 0 or end < start or source.data_offset + end > source.file_size:
                 raise ValueError(f"invalid tensor {name} in {shard_name}")
             nbytes = end - start
-            if nbytes != (4 if dtype == "U32" else 2) * __import__("math").prod(shape):
+            if nbytes != (4 if dtype == "U32" else 2) * math.prod(shape):
                 raise ValueError(f"invalid tensor size for {name}")
-            yield mapped, DTYPES[dtype], gguf_dims(shape), source.path, source.data_offset + start, nbytes
+            yield mapped, dtype, shape, source.path, source.data_offset + start, nbytes
     if len(seen) != len(index["weight_map"]) + 620:
         raise ValueError("Edge0 tensor or LoRA inventory is incomplete")
 
 
-def add_metadata(writer: GgufWriter, model_dir: Path) -> None:
+class TensorEntry:
+    """One source tensor, kept addressable so the affine triplets can pair up."""
+
+    def __init__(self, mapped: str, dtype: str, shape: tuple[int, ...], path: Path, offset: int, nbytes: int):
+        self.mapped = mapped
+        self.dtype = dtype
+        self.shape = shape
+        self.path = path
+        self.offset = offset
+        self.nbytes = nbytes
+
+    def read(self) -> bytes:
+        return read_bytes(self.path, self.offset, self.nbytes)
+
+
+def is_packed_matrix(entry: TensorEntry) -> bool:
+    """True for the U32 ``*.weight`` tensors that carry MLX affine codes.
+
+    Every other tensor (norms, SSM state params, the BF16 ``scales``/
+    ``biases`` companions and the F16 LoRA adapters) keeps its source bytes.
+    """
+    return entry.dtype == "U32" and entry.mapped.endswith(".weight")
+
+
+def encoded_nbytes(ggml_type: int, elements: int) -> int:
+    """Byte length of ``elements`` values stored as ``ggml_type``."""
+    if ggml_type == GGML_Q8_0:
+        if elements % 32:
+            raise ValueError(f"Q8_0 needs a multiple of 32 elements, got {elements}")
+        return (elements // 32) * 34
+    if ggml_type == GGML_Q4_0:
+        if elements % 32:
+            raise ValueError(f"Q4_0 needs a multiple of 32 elements, got {elements}")
+        return (elements // 32) * 18
+    return elements * {GGML_F32: 4, GGML_F16: 2, GGML_BF16: 2, GGML_I32: 4}[ggml_type]
+
+
+def matrix_axes(entry: TensorEntry, scales: TensorEntry) -> tuple[int, int, int, int, int]:
+    """Resolve ``(n_out, n_in, packed_cols, bits, experts)`` for one matrix.
+
+    The safetensors axes run opposite to GGUF, so on a packed matrix the last
+    axis is the packed width, the one before it the output rows, and an
+    optional leading axis the expert index.  The BF16 companions follow the
+    same row axis but end in the group count.
+    """
+    if entry.shape[-2] != scales.shape[-2]:
+        raise ValueError(f"{entry.mapped}: row axis {entry.shape[-2]} != scales {scales.shape[-2]}")
+    n_out = entry.shape[-2]
+    groups = scales.shape[-1]
+    n_in = groups * MLX_GROUP_SIZE
+    packed_cols = entry.shape[-1]
+    if packed_cols * 32 % n_in:
+        raise ValueError(f"{entry.mapped}: packed width {packed_cols} does not match {n_in} inputs")
+    bits = packed_cols * 32 // n_in
+    experts = entry.shape[0] if len(entry.shape) == 3 else 1
+    if bits not in (4, 8):
+        raise ValueError(f"{entry.mapped}: unsupported MLX affine bit width {bits}")
+    return n_out, n_in, packed_cols, bits, experts
+
+
+def expand_matrix(
+    packed: np.ndarray,
+    scales: np.ndarray,
+    biases: np.ndarray,
+    n_out: int,
+    n_in: int,
+    bits: int,
+) -> np.ndarray:
+    """Dequantize one MLX affine matrix into an F32 ``(n_out, n_in)`` array."""
+    return dequantize_matrix(packed, scales, biases, (n_out, n_in), bits)
+
+
+def reencode(values: np.ndarray, ggml_type: int) -> bytes:
+    """Encode an F32 matrix into the GGML payload for ``ggml_type``."""
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if ggml_type == GGML_F32:
+        return flat.tobytes()
+    if ggml_type == GGML_F16:
+        return flat.astype(np.float16).tobytes()
+    if ggml_type == GGML_Q8_0:
+        return quantize_q8_0(flat)
+    if ggml_type == GGML_Q4_0:
+        return quantize_q4_0(flat)
+    raise ValueError(f"unsupported re-encode target {ggml_type}")
+
+
+def emit_packed(
+    writer: GgufWriter,
+    entry: TensorEntry,
+    scales: TensorEntry,
+    biases: TensorEntry,
+    ggml_type: int | None,
+) -> None:
+    """Write one affine matrix in the requested mode.
+
+    ``lossless`` streams the original U32 words.  Every other mode expands to
+    F32, re-encodes, and drops the now-redundant ``scales``/``biases``
+    companions.  Expert-stacked tensors are emitted one expert at a time so a
+    500 MB F32 intermediate never materialises.
+    """
+    name = entry.mapped
+    if ggml_type is None:
+        writer.add_tensor_chunks(
+            name, GGML_I32, gguf_dims(entry.shape), entry.nbytes,
+            lambda e=entry: chunks(e.path, e.offset, e.nbytes),
+        )
+        return
+
+    n_out, n_in, _packed_cols, bits, experts = matrix_axes(entry, scales)
+    values_per_word = 32 // bits
+    row_bytes = (n_in // values_per_word) * 4
+    matrix_bytes = n_out * row_bytes
+    # Each expert owns a contiguous slice of the companions, so the byte
+    # stride is the element count times the BF16 element size.
+    scale_values = n_out * (n_in // MLX_GROUP_SIZE)
+    scale_stride = scale_values * 2
+    per_expert = n_out * n_in
+
+    if experts > 1:
+        # GGUF keeps the expert axis last, matching the lossless layout.
+        out_dims = (n_in, n_out, experts)
+        payload = encoded_nbytes(ggml_type, per_expert) * experts
+
+        def expert_chunks(
+            e=entry, s=scales, b=biases, n=experts, mb=matrix_bytes, sb=scale_stride
+        ):
+            raw_packed = e.read()
+            raw_scale, raw_bias = s.read(), b.read()
+            for index in range(n):
+                lo = index * mb
+                so = index * sb
+                yield reencode(
+                    expand_matrix(
+                        np.frombuffer(raw_packed[lo : lo + mb], dtype=np.uint8).reshape(n_out, row_bytes),
+                        bf16_to_f32(raw_scale[so : so + sb]),
+                        bf16_to_f32(raw_bias[so : so + sb]),
+                        n_out,
+                        n_in,
+                        bits,
+                    ),
+                    ggml_type,
+                )
+
+        writer.add_tensor_chunks(name, ggml_type, out_dims, payload, expert_chunks)
+        return
+
+    matrix = expand_matrix(
+        np.frombuffer(entry.read(), dtype=np.uint8).reshape(n_out, row_bytes),
+        bf16_to_f32(scales.read()),
+        bf16_to_f32(biases.read()),
+        n_out,
+        n_in,
+        bits,
+    )
+    writer.add_tensor(name, ggml_type, (n_in, n_out), reencode(matrix, ggml_type))
+
+
+def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
     config = json.loads((model_dir / "config.json").read_text())
     text = config["text_config"]
     quant = config["quantization"]
@@ -129,7 +340,9 @@ def add_metadata(writer: GgufWriter, model_dir: Path) -> None:
         raise ValueError("unsupported Edge0-35B model contract")
     writer.add_meta("general.architecture", "edge0")
     writer.add_meta("general.name", "Edge0-35B-A3B-preview")
-    writer.add_meta("edge0.quant.group_size", 64)
+    writer.add_meta("edge0.quant.mode", mode)
+    if mode == "lossless":
+        writer.add_meta("edge0.quant.group_size", 64)
     writer.add_meta("edge0.expert_count", 256)
     writer.add_meta("edge0.expert_used_count", 4)
     writer.add_meta("edge0.expert_feed_forward_length", text["moe_intermediate_size"])
@@ -178,23 +391,52 @@ def add_metadata(writer: GgufWriter, model_dir: Path) -> None:
     writer.add_meta("tokenizer.chat_template", (model_dir / "chat_template.jinja").read_text())
 
 
-def convert(model_dir: Path, output: Path, check_only: bool) -> None:
+def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossless") -> None:
+    ggml_type = QUANT_MODES[mode]
     writer = GgufWriter(output.with_suffix(output.suffix + ".part"))
-    add_metadata(writer, model_dir)
+    add_metadata(writer, model_dir, mode)
+    entries = [TensorEntry(*rest) for rest in tensors(model_dir)]
+    by_name = {entry.mapped: entry for entry in entries}
+    # The expanded modes fold each affine group into the matrix itself, so the
+    # per-group scale/bias tensors are no longer part of the output.
+    companions = {".scales", ".biases"}
+    skipped = 0
     count = 0
     total = 0
-    for name, dtype, shape, source, offset, length in tensors(model_dir):
-        writer.add_tensor_chunks(name, dtype, shape, length,
-                                 lambda source=source, offset=offset, length=length: chunks(source, offset, length))
+    for entry in entries:
+        if ggml_type is not None and entry.mapped.endswith(tuple(companions)):
+            if entry.dtype == "BF16":
+                skipped += 1
+                continue
+        if is_packed_matrix(entry):
+            stem = entry.mapped[: -len(".weight")]
+            try:
+                scales = by_name[stem + ".scales"]
+                biases = by_name[stem + ".biases"]
+            except KeyError as exc:
+                raise ValueError(f"{entry.mapped}: missing affine companion {exc}") from exc
+            emit_packed(writer, entry, scales, biases, ggml_type)
+        else:
+            writer.add_tensor_chunks(
+                entry.mapped, DTYPES[entry.dtype], gguf_dims(entry.shape), entry.nbytes,
+                lambda e=entry: chunks(e.path, e.offset, e.nbytes),
+            )
         count += 1
-        total += length
-    print(f"validated {count} lossless tensors; payload {total:,} bytes", flush=True)
+        total += _payload_nbytes(entry, ggml_type, by_name)
+    if mode == "lossless":
+        print(f"validated {count} lossless tensors; payload {total:,} bytes", flush=True)
+    else:
+        print(
+            f"validated {count} tensors in {mode}; dropped {skipped} affine companions; "
+            f"payload {total:,} bytes",
+            flush=True,
+        )
     if check_only:
         return
     if output.exists() or writer.path.exists():
         raise FileExistsError(output)
     if shutil.disk_usage(output.parent).free < total + (64 << 20):
-        raise OSError("not enough free space for lossless GGUF")
+        raise OSError("not enough free space for the Edge0 GGUF")
     try:
         writer.write()
         os.replace(writer.path, output)
@@ -204,12 +446,33 @@ def convert(model_dir: Path, output: Path, check_only: bool) -> None:
     print(output, flush=True)
 
 
+def _payload_nbytes(entry: TensorEntry, ggml_type: int | None, by_name: dict[str, TensorEntry]) -> int:
+    """Bytes this tensor contributes to the output, in the active mode."""
+    if ggml_type is None or not is_packed_matrix(entry):
+        return entry.nbytes
+    stem = entry.mapped[: -len(".weight")]
+    n_out, n_in, _packed_cols, _bits, experts = matrix_axes(
+        entry, by_name[stem + ".scales"]
+    )
+    return encoded_nbytes(ggml_type, n_out * n_in) * experts
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("model_dir", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--quant",
+        choices=sorted(QUANT_MODES),
+        default="lossless",
+        help="output precision; 'lossless' passes the MLX affine codes through unchanged",
+    )
     args = parser.parse_args()
     if not args.check and args.out is None:
         parser.error("--out is required unless --check is set")
-    convert(args.model_dir, args.out or args.model_dir / "Edge0.gguf", args.check)
+    suffix = QUANT_SUFFIX[args.quant]
+    default_out = args.model_dir / f"Edge0-35B-A3B-preview-{suffix}.gguf"
+    convert(args.model_dir, args.out or default_out, args.check, args.quant)
