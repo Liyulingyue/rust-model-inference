@@ -110,7 +110,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **改动**：
   - `tools/converter/gliner/convert_boundary.py`（独立脚本，处理 `architecture="boundary"` 模型，硬编码 DeBERTa-v3-base dims）：生成 `gliner2.5-base-v1-f32.gguf`，747 MB，包含 202 encoder tensors + 132 bundled heads（boundary_head 102 + relation_scorer 12 + record_decoder 18）
   - `tests/gliner2_5_base_v1_smoke.rs`：5 个 env-gated 测试覆盖 metadata / encoder dims / encoder tensor shapes / bundled heads / tokenizer
-- **GGUF metadata 写入**：`gliner2.variant=boundary`、`gliner2.classifier.last_layer_index=3`（区别于 Decide 的 2）、`gliner2.boundary.bundled_heads`、`gliner2.boundary.bundled_tensor_count`
+- **GGUF metadata 写入**：`gliner2.variant=boundary`、`gliner2.classifier.last_layer_index=3`（区别于 Decide 的 2）、`gliner2.boundary.bundled_heads`、`gliner2.boundary.bundled_tensor_count`，以及 `config.json` 里 `boundary_head` 整块转写出的 `gliner2.boundary.*` flag / dim / 温度 / 阈值（`boundary_dim` / `pair_dim` / `content_dim` / `use_inside_evidence` / `enable_span_content` / `content_soft_max_pool` / `query_conditioned_inside_weight` / `endpoint_difference_features` / `enable_rotary_endpoints` / `multihead_pair_compat_heads` / `rotary_base` / `candidate_pool` / 各 head 的 enable 与阈值）
 - **bundled heads 命名空间**：保留原始 safetensors key（`boundary_head.boundary_encoder.bos_state` 等），未来 BoundaryExtractor Rust forward 可直接消费，不需要再做 name map
 - **classifier 层索引差异**：base-v1 用 `classifier.0` + `classifier.3`（中间 GeLU + dropout），Decide 用 `classifier.0` + `classifier.2`（中间 ReLU）。GGUF metadata 标记 `last_layer_index=3` 让 Rust loader 区分
 - **验证**：5/5 通过。**不验证 byte-exact**：Rust 还没有 BoundaryExtractor forward
@@ -127,11 +127,35 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **发现一个真 bug**：softmax 缺 validity mask。oracle 首次跑出 0.224 delta，加 mask + 对角线 OR 后通过
 - **commit**：`d725de8` (loader + forward + smoke) + `b678b95` (oracle + fixture)
 
-### 🔴 5.2.2 BoundaryProposer + PairScorer（待开工）
-- **范围**：实现 `boundary_head.boundary_proposer` + `boundary_head.pair_scorer` forward；查询/键投影 + sparse top-K 选取 starts/ends + 可选 rotary endpoint embeddings + 端点兼容 + inside evidence + length features
-- **工作量**：~1500 行 Rust（最小可用），~3000 行完整（含 content pooler + score_start_states/score_end_states）
-- **byte-exact oracle**：与 5.2.1 同套机制，但涉及 sparse sampling（top-K 索引依赖数值精度），需测试 rotary base = 10000 是否被正确实现
-- **风险**：这是 BoundaryExtractor forward 中最难的部分
+### ✅ 5.2.2a BoundaryProposer.score_explicit_pairs + PairScorer（全 feature，byte-exact）
+- **范围**：`SparseBoundaryProposer.score_explicit_pairs` + `SparseBoundaryPairScorer.forward`（scoring.py:177）完整 feature 集合
+- **实现**：
+  - `proposer.rs`：`RotaryBoundaryEmbedding` + `score_explicit_pairs`（marginal-free compat prior），max delta **2.384e-7**（`6eafe4e`）
+  - `marginals.rs`：`BoundaryQueryHead.forward`（start/end marginals + inside prefix），max delta start 3.338e-6 / end 1.431e-6 / prefix 2.861e-6（`f3d6643`）
+  - `content_pooler.rs`（新）：`SpanContentPooler`，prefix-sum 均值池化 + LayerNorm
+  - `pair_scorer.rs`：`SparseBoundaryPairScorer` 全 feature——endpoint compat、endpoint difference、start/end marginal、prior、span content（pooler + query projection + bias）、inside evidence（query-conditioned weight）、length features、`MASK_LOGIT`
+  - `spans.rs`：`score_spans` 组合 API
+- **feature flag 从 GGUF metadata 读**：`convert_boundary.py` 现在把 `config.json` 的 `boundary_head` 整块转写进 `gliner2.boundary.*`（flag / dim / 温度 / 阈值），并在转换时用 `check_pair_scorer_shapes` 交叉校验 tensor shape 与 setting 是否一致。Rust loader 缺 metadata 直接报错要求重转，不再猜默认值——之前 limited 版本就是靠默认值蒙混过关的
+- **byte-exact oracle**：`tools/oracle/gliner_boundary/dump_score_explicit_spans_full.py` 直接从 checkpoint 的 config + safetensors 构造 reference `BoundaryHead`（`load_state_dict(strict=True)`）并调 `BoundaryHead.score_explicit_spans`，flag 全部来自 checkpoint
+- **max delta**：**5.722e-6**
+- **抓到的两个真 bug**：
+  1. `endpoint_difference_projection` 的输入宽度是 `2 * pair_dim`（`cat(s-e, |s-e|)`），Rust 端按 `pair_dim` 取行，读取了拼接向量的前半段
+  2. `content_pooler.build_prefix` 的原地 cumsum 写成了**倒序**；倒序时 row j-1 还没累加完，row j 只拿到最后两项。这个 bug 只在 span 不从 0 起始时暴露，delta 只有 ~0.2~1.3，非常容易误判成 F32 噪声
+- **commit**：`1d98e37`（score_spans）+ 本次（全 feature + metadata 转写）
+- **删除**：`dump_pair_scorer_limited.py` / `pair_scorer_limited_parity.rs` / `pair-scorer-limited-golden.json`。limited config 不是任何已发布 checkpoint 的真实配置，留着只会诱导「默认值够用」的错觉
+
+### 🔴 5.2.2b 文档级推理路径：DocumentCandidatePool + SharedPoolScorer（**待开工，下一个**）
+- **关键发现**：`gliner2.5-base-v1` 的 `candidate_pool = "shared"`，所以**普通推理根本不走 `SparseBoundaryPairScorer`**
+  - `model.py:396-466`：`DocumentCandidatePool`（`pool.py:107`）建候选 + `SharedPoolScorer`（`pool.py:446`）打分，然后 `pair_logits = pooled_logits.transpose(1, 2)`
+  - `SparseBoundaryPairScorer` 只在 `score_explicit_spans` 里被调用，也就是：entity 分类（`engine.py:692`，`choice_pairs = [(i, i+1)]`）、entity 属性（`engine.py:435`）、joint-IE
+  - 也就是说 5.2.2a 做完的是**分类/属性打分**这条线，`SharedPoolScorer` 才是 span 抽取的主线
+- **参考实现规模**：`DocumentCandidatePool` 约 340 行 + `SharedPoolScorer` 约 190 行 Python（含 `OverlapBiasedCandidateAttention` / `EvidenceConditionedQueryAttention`；base-v1 的 `candidate_attention_layers=0`、`query_attention_layers=0`，所以 base-v1 用不到这两个 attention）
+- **GGUF 权重**（已 bundled，132 个 tensor 内）：
+  - `boundary_head.shared_pool_builder.{start,end}_projection` (128×128)
+  - `boundary_head.shared_pool_scorer.{start,end,query,length,prior,content}_projection`、`candidate_norm`、`film`、`film_output.{0,3}`、`content_pooler.*`
+  - 注意 `shared_pool_scorer.content_pooler` 是**另一份** content pooler，参数和 `pair_scorer.content_pooler` 不同名也不同值，不能复用
+- **byte-exact oracle**：与 5.2.2a 同套机制。注意 `SharedPoolScorer` 的 inside evidence 同样要 `+ inside_prefix_mean * width` 还原
+- **风险**：sparse top-K 候选选取依赖数值精度（`boundary_top_k_alpha=0.08` 动态 bucket），是这条线的主要难点
 
 ### 🟡 5.2.3 relations + records + count + abstention（待开工）
 - **范围**：relation_scorer（head/tail projection + biaffine + mlp）、record_decoder（candidate/field/instance projection + key/value attention）、count_head（scalar projection）、null_projection（scalar projection）
@@ -139,21 +163,27 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **byte-exact oracle**：与 5.2.1 同套机制，每个子模块单独 fixture
 - **价值**：生产用途（一次推理多任务）；学术上 boundary + relation 是最常用的
 
-### 🟢 5.2.4 flag + CLI + HTTP 路由（待开工）
-- **范围**：新增 `--gliner2-boundary` flag，路由 `/v1/gliner2/boundary` 或 `/v1/jev/boundary`
-- **工作量**：~200 行（参考 `--gliner2-decide` 与 `/v1/jev/score` 的现有实现）
-- **前置**：5.2.2 + 5.2.3 中至少一个子模块可用
+### 🟢 5.2.4 entity 分类解码 + flag + CLI + HTTP 路由（待开工）
+- **范围**：
+  1. entity 分类：schema prompt → `choice_states` → `classifier.0` + ReLU + `classifier.3`，阈值 `classification_temperature` / `abstention_threshold`
+  2. `--gliner2-boundary` flag，路由 `/v1/jev/boundary`
+  3. 真实入口：token IDs → tokenizer → `compute::encode` → query prompt builder → `score_spans`。**目前所有 boundary 测试都从 `text_states` / `query_states` 开始，没有一条真实 tokenizer→encoder→decode 的端到端路径**
+- **工作量**：~400 行（解码 + 路由）
+- **前置**：5.2.2b
 
 ### 📊 5.2 阶段总结
 | Phase | 范围 | 状态 | commit |
 |---|---|---|---|
 | 5.1 | GGUF converter + smoke | ✅ | `b0f58d3` |
 | 5.2.1 | BoundaryEncoder forward + oracle | ✅ | `d725de8` + `b678b95` |
-| 5.2.2 | Proposer + PairScorer | 🔴 待开工 | — |
+| 5.2.1b | BoundaryQueryHead + oracle | ✅ | `f3d6643` |
+| 5.2.2a | score_explicit_pairs + PairScorer（全 feature） | ✅ | `6eafe4e` + `1d98e37` + 本次 |
+| 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | 🔴 待开工 | — |
 | 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
-| 5.2.4 | CLI / HTTP wiring | 🟢 待开工 | — |
+| 5.2.4 | entity 分类解码 + CLI / HTTP | 🟢 待开工 | — |
 
-边界编码（Phase 5.2.1）已完成且 byte-exact。剩余部分（5.2.2-5.2.4）加在一起约 2700 行 Rust + 测试 + oracle，估计需要 2-3 个独立会话。
+已完成：boundary encoder、per-query marginals、显式 span 的 compat prior、完整 pair scorer，全部 byte-exact（1e-6 量级）。这条线覆盖 entity 分类与属性打分。
+**下一块是主线**：`candidate_pool="shared"` 意味着 span 抽取本身走 `DocumentCandidatePool` + `SharedPoolScorer`，约 700 行 Python 参考实现，7 个 boundary 测试文件目前仍然全部从中间层状态起步。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

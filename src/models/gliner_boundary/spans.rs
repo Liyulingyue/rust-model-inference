@@ -1,27 +1,31 @@
-//! Final classifier pass + top-level `score_spans` API for
+//! `score_spans` — the top-level span-conditioned scoring API for
 //! BoundaryExtractor.
 //!
 //! Chains the pieces that each got their own byte-exact oracle:
-//!  1. `BoundaryEncoder.forward`               — text → boundary states
-//!  2. `BoundaryQueryHead.forward`             — per-query marginals
-//!  3. `BoundaryProposer::score_explicit_pairs` — compatibility prior
-//!  4. `PairScorer.forward`                    — per-candidate score
+//!  1. `BoundaryEncoder.forward` — text → boundary states
+//!  2. `BoundaryQueryHead.forward` — per-query marginals + inside prefix
+//!     (mean-centered, with the mean carried separately)
+//!  3. `BoundaryProposer::score_explicit_pairs` — marginal-free compat prior
+//!  4. `PairScorer.forward` — per-candidate score
 //!
-//! For span extraction the pair score IS the final output — the caller
-//! thresholds / top-Ks the per-candidate logits. The `classifier.0` +
-//! `classifier.3` MLP belongs to the *classification* head (label-set
-//! scoring), which shares the classifier with SpanExtractor and is
-//! driven by the schema-prompt machinery (`prompt::encode_token` in
-//! `models/gliner/`). That path is wired in the CLI/HTTP turn; this
-//! module exposes the span-extraction surface.
+//! This mirrors `BoundaryExtractor.score_explicit_spans`
+//! (`boundary/model.py:274`), which is the span-conditioned entry point used
+//! by the reference engine to score caller-supplied spans: the entity
+//! classification step (`engine.py`, `choice_pairs = [(i, i + 1)]`), the
+//! entity-attribute step, and joint-IE. For span extraction the pair score IS
+//! the output — the caller thresholds or top-Ks the per-candidate logits.
 //!
-//! Known limitation: this chain uses the LIMITED pair scorer (no span
-//! content, no inside evidence, no endpoint difference) — see
-//! `pair_scorer.rs`. Gliner2.5-base-v1's published config enables all
-//! three, so the span scores are missing those contributions until the
-//! SpanContentPooler lands. Tracked in glinerTODO.md Phase 5.2.3.
+//! Two things are deliberately *not* here:
+//!  - the `classifier.0` + `classifier.3` MLP, which consumes hidden-size
+//!    `choice_states` / `group_embs` from the schema-prompt machinery
+//!    (`models/gliner/`) rather than boundary states, and
+//!  - the document-level candidate path. `gliner2.5-base-v1` sets
+//!    `candidate_pool = "shared"`, so ordinary inference goes through
+//!    `DocumentCandidatePool` + `SharedPoolScorer` (`boundary/pool.py`)
+//!    rather than this pair scorer. See `glinerTODO.md`.
 
 use super::loader::BoundaryModel;
+use super::pair_scorer::PairScoreInputs;
 
 /// One scored candidate span.
 #[derive(Clone, Debug)]
@@ -34,10 +38,9 @@ pub struct ScoredSpan {
 
 /// Score explicit `(start, end)` candidates for every query in the batch.
 ///
-/// `indices` is `[B, Q, C, 2]` flat; returns `[B, Q, C]` final logits.
-/// Invalid candidates (`valid_mask[b][q][c] == false`) carry
-/// `MASK_LOGIT` from the pair scorer so downstream softmax / top-K
-/// can't pick them.
+/// `indices` is `[B, Q, C, 2]` flat; `valid_mask` is `[B, Q, C]`. Invalid
+/// candidates carry `MASK_LOGIT` from the pair scorer so downstream softmax /
+/// top-K cannot pick them.
 pub fn score_spans(
     model: &BoundaryModel<'_>,
     text_states: &[f32],
@@ -54,7 +57,7 @@ pub fn score_spans(
     let encoding = model.boundary.forward(text_states, text_mask);
     let boundary_len = text_mask.first().map_or(0, |row| row.len()) + 1;
 
-    // 2. per-query marginals.
+    // 2. per-query marginals + inside evidence prefix.
     let marginals = model.query_head.forward(
         &encoding.states,
         &encoding.mask,
@@ -77,32 +80,35 @@ pub fn score_spans(
         valid_mask,
     );
 
-    // 4. pair score (limited: no span content / inside evidence /
-    //    endpoint difference).
+    // 4. pair score.
     let text_lengths: Vec<usize> = text_mask
         .iter()
         .map(|row| row.iter().filter(|m| **m).count())
         .collect();
-    let pair_scores = model.pair_scorer.forward(
-        &encoding.states,
+    let scores = model.pair_scorer.forward(&PairScoreInputs {
+        boundary_states: &encoding.states,
         boundary_len,
         query_states,
+        start_logits: &marginals.start_logits,
+        end_logits: &marginals.end_logits,
+        compat_logits: &compat,
+        indices,
+        valid_mask,
+        inside_prefix: &marginals.inside_prefix,
+        inside_prefix_mean: &marginals.inside_prefix_mean,
+        text_states,
+        text_mask,
+        text_lengths: &text_lengths,
         batch,
         q_count,
         c,
-        &marginals.start_logits,
-        &marginals.end_logits,
-        &compat,
-        indices,
-        &text_lengths,
-        valid_mask,
-    );
+    });
 
     (0..batch * q_count * c)
         .map(|idx| ScoredSpan {
             start: indices[idx * 2],
             end: indices[idx * 2 + 1],
-            logit: pair_scores[idx],
+            logit: scores[idx],
         })
         .collect()
 }

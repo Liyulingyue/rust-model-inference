@@ -25,12 +25,11 @@ The active classifier layer indices differ from Decide
 ``classifier.0.*`` and ``classifier.3.*`` to match the source and
 preserves the index so future code can detect the boundary variant.
 
-Only the encoder is exposed to the Rust code right now; boundary
-detection + pair scoring are not implemented in Rust (see
-``glinerTODO.md``). The bundled ``boundary_head`` /
-``relation_scorer`` / ``record_decoder`` weights live in the GGUF
-for forward compatibility — when the Rust forward catches up, those
-tensors are already in place.
+The ``boundary_head`` settings block from ``config.json`` is transcribed
+into flat ``gliner2.boundary.*`` metadata (flags, dims, temperatures) and
+cross-checked against the bundled head tensor shapes, so the Rust loader
+selects feature sources from the checkpoint instead of guessing them.
+See ``src/models/gliner_boundary/`` for the consumer.
 
 Run with:
     models/.venv/bin/python -m tools.converter.gliner.convert_boundary \\
@@ -230,6 +229,198 @@ def encoder_source_contracts():
     return mapping
 
 
+# ---------------------------------------------------------------------------
+# ``boundary_head`` settings -> GGUF metadata
+# ---------------------------------------------------------------------------
+
+# Scalars the Rust BoundaryExtractor loader must read instead of guessing.
+# Everything here comes straight from the checkpoint's ``boundary_head``
+# block; the Rust side (``src/models/gliner_boundary/``) keys off the same
+# names. Booleans select which optional feature sources exist (span content
+# pooler, inside evidence, endpoint difference, query-conditioned inside
+# weight), so a loader that invents defaults instead of reading them will
+# silently drop contributions — the exact failure mode this block prevents.
+BOUNDARY_FLAG_KEYS = (
+    "use_inside_evidence",
+    "enable_span_content",
+    "content_soft_max_pool",
+    "query_conditioned_inside_weight",
+    "endpoint_difference_features",
+    "enable_rotary_endpoints",
+    "reranker_endpoint_compat",
+    "bidirectional_proposals",
+    "enable_relations",
+    "enable_records",
+    "enable_count_head",
+    "enable_abstention",
+)
+BOUNDARY_INT_KEYS = (
+    "boundary_dim",
+    "pair_dim",
+    "content_dim",
+    "record_dim",
+    "multihead_pair_compat_heads",
+    "candidate_budget",
+    "pool_size",
+    "start_top_k",
+    "end_top_k",
+    "ends_per_start",
+    "starts_per_end",
+    "end_block_size",
+    "boundary_top_k_max",
+    "boundary_top_k_bucket",
+    "pool_boundary_top_k",
+    "min_pool_per_query",
+    "record_instance_queries",
+    "relation_heads_per_type",
+    "relation_tails_per_type",
+    "relation_pair_cap",
+    "boundary_attention_layers",
+    "boundary_attention_heads",
+    "boundary_refinement_layers",
+    "candidate_attention_layers",
+    "query_attention_layers",
+)
+BOUNDARY_FLOAT_KEYS = (
+    "rotary_base",
+    "dropout",
+    "boundary_ffn_multiplier",
+    "boundary_top_k_alpha",
+    "classification_temperature",
+    "pair_temperature",
+    "record_temperature",
+    "relation_temperature",
+    "abstention_threshold",
+    "relation_argument_proposal_threshold",
+    "record_anchor_threshold",
+    "record_anchor_proposal_threshold",
+    "record_field_threshold",
+)
+BOUNDARY_STR_KEYS = ("candidate_pool",)
+BOUNDARY_INT_KEYS_REQUIRED = (
+    "boundary_dim",
+    "pair_dim",
+    "content_dim",
+    "multihead_pair_compat_heads",
+)
+BOUNDARY_FLAG_KEYS_REQUIRED = (
+    "use_inside_evidence",
+    "enable_span_content",
+    "content_soft_max_pool",
+    "query_conditioned_inside_weight",
+    "endpoint_difference_features",
+    "enable_rotary_endpoints",
+    "reranker_endpoint_compat",
+)
+
+
+def boundary_settings_metadata(settings: dict) -> dict:
+    """Transcribe the ``boundary_head`` block into flat GGUF metadata values.
+
+    Raises on a missing or wrongly typed key rather than defaulting: a silent
+    default here is how the Rust loader ends up running a limited scorer on a
+    checkpoint whose published config enables every feature.
+    """
+    if not isinstance(settings, dict):
+        raise ValueError(f"config.json boundary_head must be an object, got {type(settings)!r}")
+    out: dict = {}
+    for key in BOUNDARY_FLAG_KEYS:
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, bool):
+            raise ValueError(f"boundary_head.{key} must be a bool, got {value!r}")
+        out[key] = value
+    for key in BOUNDARY_INT_KEYS:
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"boundary_head.{key} must be an int, got {value!r}")
+        out[key] = value
+    for key in BOUNDARY_FLOAT_KEYS:
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"boundary_head.{key} must be a number, got {value!r}")
+        out[key] = float(value)
+    for key in BOUNDARY_STR_KEYS:
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, str):
+            raise ValueError(f"boundary_head.{key} must be a string, got {value!r}")
+        out[key] = value
+    missing = [k for k in BOUNDARY_INT_KEYS_REQUIRED + BOUNDARY_FLAG_KEYS_REQUIRED
+               if k not in out]
+    if missing:
+        raise ValueError(f"config.json boundary_head is missing required settings: {missing}")
+    if out["multihead_pair_compat_heads"] <= 0 or out["pair_dim"] % out["multihead_pair_compat_heads"]:
+        raise ValueError(
+            f"pair_dim {out['pair_dim']} is not divisible by "
+            f"multihead_pair_compat_heads {out['multihead_pair_compat_heads']}"
+        )
+    return out
+
+
+def check_pair_scorer_shapes(settings: dict, shapes: dict, hidden_size: int) -> None:
+    """Cross-check the pair-scorer tensor shapes against the declared settings.
+
+    ``SparseBoundaryPairScorer`` only instantiates the optional sub-modules
+    when the matching flag is set, so a checkpoint whose config disagrees with
+    its own state dict would otherwise fail at inference time (or, worse, drop
+    a feature). Doing it here keeps the mismatch at conversion time.
+    """
+    d = settings["boundary_dim"]
+    pair = settings["pair_dim"]
+    content = settings["content_dim"]
+    content_out = content * (2 if settings["content_soft_max_pool"] else 1)
+    heads = settings["multihead_pair_compat_heads"]
+    gate_out = pair // 2 if settings["enable_rotary_endpoints"] else pair
+
+    def require(name: str, shape: tuple) -> None:
+        actual = shapes.get(name)
+        if actual is None:
+            raise ValueError(f"settings require {name} but the checkpoint does not carry it")
+        if actual != shape:
+            raise ValueError(f"{name} has shape {actual}, settings imply {shape}")
+
+    def forbid(name: str, why: str) -> None:
+        if name in shapes:
+            raise ValueError(f"{why} but the checkpoint carries {name}")
+
+    require("boundary_head.pair_scorer.start_endpoint_projection.weight", (pair, d))
+    require("boundary_head.pair_scorer.end_endpoint_projection.weight", (pair, d))
+    require("boundary_head.pair_scorer.query_gate.weight", (gate_out, hidden_size))
+    require("boundary_head.pair_scorer.compat_mix.weight", (1, heads))
+    require("boundary_head.pair_scorer.length_query_projection.weight", (3, hidden_size))
+    if settings["query_conditioned_inside_weight"]:
+        require("boundary_head.pair_scorer.inside_weight.weight", (1, hidden_size))
+    else:
+        forbid("boundary_head.pair_scorer.inside_weight.weight",
+               "query_conditioned_inside_weight is false")
+    if settings["endpoint_difference_features"]:
+        require("boundary_head.pair_scorer.endpoint_difference_projection.weight", (1, 2 * pair))
+    else:
+        forbid("boundary_head.pair_scorer.endpoint_difference_projection.weight",
+               "endpoint_difference_features is false")
+    if settings["enable_span_content"]:
+        require("boundary_head.pair_scorer.content_pooler.value_projection.weight",
+                (content, hidden_size))
+        require("boundary_head.pair_scorer.content_pooler.layer_norm.weight", (content_out,))
+        require("boundary_head.pair_scorer.content_query_projection.weight",
+                (content_out, hidden_size))
+        require("boundary_head.pair_scorer.content_bias.weight", (1, content_out))
+    else:
+        for name in (
+            "boundary_head.pair_scorer.content_pooler.value_projection.weight",
+            "boundary_head.pair_scorer.content_query_projection.weight",
+            "boundary_head.pair_scorer.content_bias.weight",
+        ):
+            forbid(name, "enable_span_content is false")
+
+
 def tensor_contracts():
     d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
     wide = d * 2
@@ -337,6 +528,16 @@ def convert(model_dir: Path, output: Path) -> None:
         if shape != contracts[name]:
             raise ValueError(f"Invalid shape for {key}: {shape} != {contracts[name]}")
 
+    # The pair scorer's optional sub-modules exist only when their flag is set
+    # (``SparseBoundaryPairScorer.__init__``), so verify the checkpoint's own
+    # shapes agree with the settings we are about to write into the GGUF.
+    boundary_settings = boundary_settings_metadata(config["boundary_head"])
+    check_pair_scorer_shapes(
+        boundary_settings,
+        {name: tuple(source.header[name]["shape"]) for name in bundled},
+        ENCODER["hidden_size"],
+    )
+
     tokens = list(pieces) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
     # ``vocab_size`` and ``len(tokens)`` can differ by 1 when ``[MASK]`` is part
     # of the SPM pieces (boundary-family checkpoints ship MASK in the SPM
@@ -372,6 +573,8 @@ def convert(model_dir: Path, output: Path) -> None:
     writer.add_meta(f"{ARCH}.variant", "boundary")
     writer.add_meta(f"{ARCH}.boundary.bundled_heads", json.dumps(BUNDLED_HEAD_PREFIXES))
     writer.add_meta(f"{ARCH}.boundary.bundled_tensor_count", len(bundled))
+    for key, value in boundary_settings.items():
+        writer.add_meta(f"{ARCH}.boundary.{key}", value)
     writer.add_meta(f"{ARCH}.source_architecture", json.dumps({
         k: config[k] for k in ("architecture", "model_name", "config_version", "token_pooling")
         if k in config

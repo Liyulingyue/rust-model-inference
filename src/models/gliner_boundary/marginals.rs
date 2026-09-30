@@ -25,9 +25,15 @@ pub struct BoundaryMarginals<'a> {
     pub start_logits: Vec<f32>,
     /// `[B, Q, L + 1]` per-query end logits over boundaries.
     pub end_logits: Vec<f32>,
-    /// `[B, Q, L + 1]` cumulative sum of inside logits. prefix[j] -
-    /// prefix[i] equals the sum of inside logits over `[i, j)`.
+    /// `[B, Q, L + 1]` cumulative sum of mean-centered inside logits.
+    /// `prefix[j] - prefix[i]` is the centered sum over `[i, j)`.
     pub inside_prefix: Vec<f32>,
+    /// `[B, Q]` mean that was subtracted before the cumulative sum. The
+    /// reference carries it separately and restores it in interval scoring
+    /// (``scoring.interval_prefix_score``'s ``mean`` argument), which
+    /// recovers the raw interval sum without letting the running cumsum
+    /// drift on long sequences.
+    pub inside_prefix_mean: Vec<f32>,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -301,33 +307,39 @@ impl<'a> BoundaryQueryHead<'a> {
             }
         }
 
-        // 4. Inside prefix: cumulative sum over tokens after mean-centering
-        // (matches the reference's ``inside_mean`` subtraction; F32 cumsum
-        // would otherwise drift on long sequences). Masked positions
-        // contribute zero so the prefix difference over [i, j) is the sum
-        // of real inside scores minus ``j - i`` * mean.
+        // 4. Inside prefix: cumulative sum over tokens after mean-centering.
+        //    Matches ``heads.BoundaryQueryHead.forward``: masked positions
+        //    contribute zero, the mean is taken over the positions that
+        //    survive ``text_mask & query_mask`` and is returned separately so
+        //    interval scoring can restore the raw sum. Keeping the mean out of
+        //    the cumsum is what stops a long document from accumulating a
+        //    large constant offset.
         let mut inside_prefix = vec![0.0f32; batch * q_count * (seq_len + 1)];
+        let mut inside_prefix_mean = vec![0.0f32; batch * q_count];
         for b in 0..batch {
             for q in 0..q_count {
-                // Compute the mean over valid tokens.
+                let prefix_base = b * q_count * (seq_len + 1) + q * (seq_len + 1);
+                let logit_base = b * q_count * seq_len + q * seq_len;
+                if !query_mask[b][q] {
+                    inside_prefix_mean[b * q_count + q] = 0.0;
+                    continue;
+                }
                 let mut sum = 0.0f32;
                 let mut count = 0usize;
                 for i in 0..seq_len {
-                    let il = inside_logits[b * q_count * seq_len + q * seq_len + i];
-                    if text_mask[b][i] && il > MASK_LOGIT * 0.5 {
-                        sum += il;
+                    if text_mask[b][i] {
+                        sum += inside_logits[logit_base + i];
                         count += 1;
                     }
                 }
                 let mean = if count == 0 { 0.0 } else { sum / count as f32 };
+                inside_prefix_mean[b * q_count + q] = mean;
 
                 let mut running = 0.0f32;
-                let prefix_base = b * q_count * (seq_len + 1) + q * (seq_len + 1);
-                inside_prefix[prefix_base] = running;
+                inside_prefix[prefix_base] = 0.0;
                 for i in 0..seq_len {
-                    let il = inside_logits[b * q_count * seq_len + q * seq_len + i];
-                    if text_mask[b][i] && il > MASK_LOGIT * 0.5 {
-                        running += il - mean;
+                    if text_mask[b][i] {
+                        running += inside_logits[logit_base + i] - mean;
                     }
                     inside_prefix[prefix_base + i + 1] = running;
                 }
@@ -338,6 +350,7 @@ impl<'a> BoundaryQueryHead<'a> {
             start_logits,
             end_logits,
             inside_prefix,
+            inside_prefix_mean,
             _marker: std::marker::PhantomData,
         }
     }
