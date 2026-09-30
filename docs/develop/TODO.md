@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-016) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-017) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -843,6 +843,65 @@ pub mod capability {
 4. 跑现有 `jina_audio_projection_matches_llama_cpp_bits` 对 30s 单块
 5. 新增 `jina_audio_projection_matches_llama_cpp_bits_concat`（#[ignore]）跑 60s 跨块拼接
 6. 把对照数据 commit 到 `tools/oracle/jina_audio/`（或外置 datum）
+
+### TODO-017: BERT 家族 + EmbeddingGemma encoder — llama.cpp 位级 oracle 未做
+
+`src/models/bert_family/`（bert / jina-bert-v2 / jina-bert-v3 / nomic-bert / nomic-bert-moe）
+与 `src/models/gemma_embedding/` 共 7 个 arch，全部**只做了语义验证，没做 llama.cpp 位级 oracle**。
+
+每个测试文件自己都写明了这一点，例如 `tests/jina_v2_base_en.rs`：
+
+> Oracle: local read-only `references/llama.cpp/src/models/bert.cpp`.
+> bit-level parity with llama.cpp requires the oracle binary and is tracked separately.
+
+而 `tools/oracle/` 下**没有** `bert/` 也没有 `gemma_embedding/` 目录——对比 gliner2 / clm / laya /
+jina_audio / qwen3_tts 都有完整的 `dump_*.py` + `fixtures/` + `compare.py`。
+
+| arch | 上游源文件（本地 `references/llama.cpp` 存在） | 现有验证 |
+|---|---|---|
+| `bert` | `src/models/bert.cpp` | 语义 + 元数据 + 张量清单 |
+| `jina-bert-v2` | `src/models/bert.cpp` + `jina-bert-v2.cpp` | 同上 + WPM pinned ids + 语义排序 |
+| `nomic-bert` | `src/models/bert.cpp` | 同上 |
+| `nomic-bert-moe` | `src/models/bert.cpp` + `nomic-bert-moe.cpp` | 同上 + MoE 张量清单 |
+| `bge-m3` | `src/models/bert.cpp` | 同上 |
+| `gemma-embedding` | `src/models/gemma-embedding.cpp` | 同上 + 语义排序 |
+
+已验证的部分（2026-09-30 对 `jina-embeddings-v2-base-en` 复核）：4/4 集成测试通过、CLI 与 HTTP
+输出 768/768 元素 `%.9f` 文本完全一致、线程数 1/4/8/0 输出确定、L2 范数 1.000000、语义排序正确。
+**这些都不等价于"与 llama.cpp 逐位一致"。**
+
+#### 为什么值得做
+
+这个区域已经出过两个只有 oracle 能早发现的真 bug，都是 port 完成后靠别暴露的：
+
+1. **`attn_proj` 从未加回 `hidden`**（PR #125 记）：每层对 `inpL` 都是恒等映射，attention stack
+   整体空转。jina-bert-v2 / nomic-bert / bert 三个变体全中，只是前两个 ERSS 相似度够高掩盖了；
+   bge-small 因 CLS pooling 直接输出退化（相似度全 ~1.0）才暴露。修复后 rel→unrel 差距
+   jina 0.170→0.417、nomic 0.258→0.443。
+2. **MoE `per_expert_bytes` 算成 44 应为 34**（nomic-embed-text-v2-moe）：每个 expert 多读
+   0.73 MB，第二个 expert 之后产出 NaN。
+
+共同点：都能被一个位级 oracle 在 port 当天抓住，而不是等用户撞上。
+
+#### 需要的产出
+
+1. `tools/oracle/bert/` 与 `tools/oracle/gemma_embedding/`：`dump_golden.py`（从 llama.cpp
+   `llama-embedding` dump 向量 + token ids）、`fixtures/*.json`（覆盖每个变体的开关组合：
+   ALiBi vs pos_embd、GELU vs geglu vs SwiGLU、mean vs CLS vs last pooling、fused vs split QKV、
+   MoE 偶奇层）、`compare.py`（严格查 token ids / 形状 / F32 原始位，报告首个分叉）。
+2. 复用 `tools/oracle/shared/` 的 llama.cpp 构建 recipe（标量、单线程、关 Accelerate/
+   Flash Attention），与 gliner2 的 `scalar.c` 模式一致。
+3. 每个 arch 至少一条 `#[ignore]` 的 `matches_llama_cpp_bits` 测试，`RMI_*` 环境变量 gating。
+
+#### 触发条件（满足任一才启动）
+
+- 改动 `src/models/bert_family/` 或 `src/models/gemma_embedding/` 的任何数值路径；
+- 换量化档（目前 7 个 arch 只有 Q8_0 验证过）；
+- 用户报告 embedding 与官方实现不一致；
+- 新接 BERT 家族变体（如 `jina-bert-v3`，源文件已在但没接）。
+
+在触发前，`docs/MODEL_LIST.md` 对应行的口径保持"语义验证 + CLI/HTTP bit 一致"，**不写**
+"逐位对齐 llama.cpp"。
 
 ---
 
