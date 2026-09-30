@@ -269,12 +269,26 @@ def _q4k_batch(blocks: np.ndarray) -> np.ndarray:
     weights = avg[..., None] + np.abs(xd)
     scales, mins, _ = _qkx2_batch(blocks, weights)
 
+    # Normalize the eight sub-scales against the block maximum.  A sub-block
+    # whose scale came out at or below zero (possible when the search degenerates
+    # on a constant run) has no 6-bit representation, so the reference's
+    # ``63 / max`` would divide by ~0 and produce values far outside int64.
+    # Clamp before the reciprocal and treat the degenerate sub-block as zero,
+    # which is what the all-zero-code path reconstructs anyway.
     max_scale = scales.max(axis=1)
     max_min = mins.max(axis=1)
-    inv_scale = np.where(max_scale > 0.0, 63.0 / np.where(max_scale == 0.0, 1.0, max_scale), 0.0)
-    inv_min = np.where(max_min > 0.0, 63.0 / np.where(max_min == 0.0, 1.0, max_min), 0.0)
-    ls = np.minimum(63, _nearest_int(inv_scale[:, None] * scales)).astype(np.int64)
-    lm = np.minimum(63, _nearest_int(inv_min[:, None] * mins)).astype(np.int64)
+    degenerate_scale = ~(max_scale > 0.0)
+    degenerate_min = ~(max_min > 0.0)
+    safe_max_scale = np.where(degenerate_scale, 1.0, max_scale)
+    safe_max_min = np.where(degenerate_min, 1.0, max_min)
+    ratios = np.where(degenerate_scale[:, None], 0.0, 63.0 * scales / safe_max_scale[:, None])
+    min_ratios = np.where(degenerate_min[:, None], 0.0, 63.0 * mins / safe_max_min[:, None])
+    ls = np.clip(_nearest_int(np.nan_to_num(ratios, nan=0.0, posinf=63.0, neginf=0.0)), 0, 63)
+    lm = np.clip(_nearest_int(np.nan_to_num(min_ratios, nan=0.0, posinf=63.0, neginf=0.0)), 0, 63)
+    ls = ls.astype(np.int64)
+    lm = lm.astype(np.int64)
+    max_scale = np.where(degenerate_scale, 0.0, max_scale)
+    max_min = np.where(degenerate_min, 0.0, max_min)
 
     # ``get_scale_min_k4`` layout: scales 0..3 in the low six bits of bytes 0..3,
     # scales 4..7 in the low nibble of bytes 8..11 plus the top two bits of the

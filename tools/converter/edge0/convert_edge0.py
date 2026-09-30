@@ -392,6 +392,7 @@ def emit_packed(
                         bits,
                     ),
                     ggml_type,
+                    f"{name} expert {index}",
                 )
 
         writer.add_tensor_chunks(name, ggml_type, out_dims, payload, expert_chunks)
@@ -405,7 +406,7 @@ def emit_packed(
         n_in,
         bits,
     )
-    writer.add_tensor(name, ggml_type, (n_in, n_out), reencode(matrix, ggml_type))
+    writer.add_tensor(name, ggml_type, (n_in, n_out), reencode(matrix, ggml_type, name))
 
 
 def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
@@ -482,6 +483,11 @@ def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossle
     count = 0
     total = 0
     kinds: dict[int, int] = {}
+    # The k-quants run a per-value scale search, so a full conversion takes tens
+    # of minutes; report which tensor is in flight and how far along we are.
+    packed_total = sum(1 for e in entries if is_packed_matrix(e))
+    packed_done = 0
+    started = time.monotonic()
     for entry in entries:
         ggml_type = target_for(entry.mapped, mode)
         if ggml_type is not None and entry.mapped.endswith(tuple(companions)):
@@ -495,6 +501,13 @@ def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossle
                 biases = by_name[stem + ".biases"]
             except KeyError as exc:
                 raise ValueError(f"{entry.mapped}: missing affine companion {exc}") from exc
+            packed_done += 1
+            if ggml_type in (GGML_Q4K, GGML_Q6K):
+                print(
+                    f"[{packed_done}/{packed_total}] {entry.mapped} "
+                    f"({time.monotonic() - started:.0f}s elapsed)",
+                    flush=True,
+                )
             emit_packed(writer, entry, scales, biases, ggml_type)
             kinds[ggml_type] = kinds.get(ggml_type, 0) + 1
         else:
