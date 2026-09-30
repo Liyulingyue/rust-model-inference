@@ -105,21 +105,15 @@ ggml-org 在 ModelScope 上共 195 个 repo，**encoder 相关的权重全部在
 与 partial `n_rot`，需先拍板是否接受「非 ggml-org 的第三方 Q4_K_M」；
 **出现任何异常（元数据不符 / 张量布局古怪 / 输出可疑）就直接撤，不要硬推。**
 
-### `jina-reranker-v1-turbo-en`（待接，且验证深度有限）
+### `jina-reranker-v1-turbo-en`（已接 embedding，rerank 打分待补）
 
-74MB / F16 / `arch=jina-bert-v2` / `tokenizer.ggml.model="gpt2"`（BPE）/ 6 层 /
-384 维 / mean pooling。已下载到 `models/jina-reranker-v1-turbo-en-GGUF/`。
-它是第三个「arch 与 tokenizer 错配」的真实样本，`0897baa` 的按
-`tokenizer.ggml.model` 分发正好覆盖它（否则会被塞进 WordPiece 然后报错）。
+2026-09-30：embedding 路径已通，rerank 打分头**未**触达 — 见 SUPPORTED_MODELS.md 该行的 `Experimental` 标注与 `docs/MODEL_LIST.md` 的对应长行。
 
-**但验证深度有限**：reranker 靠 `[CLS]` 过 `cls.weight` 投影出一个 logit 来打分，
-而这个 GGUF 的 102 个张量是 6×16 + 6 个 top-level，**没有 `cls.weight` / `cls.bias` /
-`cls_out`**。所以本仓库只能验到「加载 + 输出合理 embedding」，
-**无法复现它的相关性排序**。接之前先想清楚要验什么。
+具体：
 
-`nomic-bert-moe` 已落地过一次 MoE 路由（router logits → top-k → softmax →
-per-expert `expert @ x → gelu → @ down`），`qwen3moe` 等大权重 MoE 可复用同一形状，
-届时主要差异在专家张量的切分方式。
+- 接入代码量：~30 行（`src/core/tokenizer/mod.rs` 新增 3 个 pre_type 字符串映射到 `LlamaBpe`，以及 1 行错误消息措辞更新）+ 1 个新测试文件 5 个测试。
+- 验证深度：embedding 端到端通（CLI + HTTP 384 维 bit 一致，L2-归一化，无 NaN/Inf，超长 prompt 报错含 8192 context_length）。**rerank 打分未做** —— `cls.weight [384]` + `cls.bias [1]` 在张量清单里被检测存在但 `compute_embedding` 不读。
+- 待办（单独 PR）：`compute_rerank_score(source, query, document, n_threads) -> f32` 函数 + `--rerank` CLI 入口，目标是 `(query, document)` 拼接后过 `compute_embedding` 再乘 `cls.weight` 加 `cls.bias`，拿到 scalar logit，然后 sigmoid；用 3-5 组已知正负样本验证相关性排序方向。CLI 输出可借鉴 `--jev` 的 `--jev-context` + `--jev-question` + `--jev-option` 形状，但语义是 rerank 而不是 decision。
 
 ## D. 经典 / SSM / 小模型（有兴趣再接）
 
