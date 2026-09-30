@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use super::forward::BoundaryEncoder;
 use super::marginals::BoundaryQueryHead;
+use super::pair_scorer::PairScorer;
 use super::proposer::BoundaryProposer;
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
@@ -49,6 +50,7 @@ pub struct BoundaryModel<'a> {
     pub boundary: BoundaryEncoder<'a>,
     pub query_head: BoundaryQueryHead<'a>,
     pub proposer: BoundaryProposer<'a>,
+    pub pair_scorer: PairScorer<'a>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -129,6 +131,10 @@ impl<'a> BoundaryModel<'a> {
         // 8. BoundaryProposer weights (endpoint projections + rotary).
         let proposer = BoundaryProposer::load(source, n_embd)?;
 
+        // 9. PairScorer weights (endpoint projections + query gate +
+        //    compat_mix + length_query_projection + optional rotary).
+        let pair_scorer = PairScorer::load(source, n_embd)?;
+
         Ok(Self {
             config,
             tokenizer,
@@ -140,6 +146,7 @@ impl<'a> BoundaryModel<'a> {
             boundary,
             query_head,
             proposer,
+            pair_scorer,
         })
     }
 }
