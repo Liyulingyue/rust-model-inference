@@ -38,6 +38,7 @@
 | Qwen3.5-0.8B | `qwen35` | 文本、图像 | 图像需要 mmproj | Q8_0 LLM + F16 mmproj | `Verified` | 已有真实图文运行记录；未声明其他量化格式。 |
 | Qwen3.5-2B | `qwen35` | 文本；图像路径已接入 | 图像需要匹配 mmproj | 实测 GGUF，量化后缀未固化 | `Verified` | `docs/TODO.md` 记录真实冒烟回归；未单独记录图像 Oracle。 |
 | Qwen3.8-27B | `qwen35` | 文本、图像 | 图像需要 mmproj | 测试指定的 GGUF + mmproj | `Verified` | [`tests/qwen35_reference.rs`](tests/qwen35_reference.rs) 覆盖 pinned llama.cpp lossless checkpoints 和图像冒烟。Qwen3.8 是独立型号，不是 Qwen3-8B。 |
+| Edge0-35B-A3B-preview | `edge0` | 文本生成 | 无；GGUF 已包含 LoRA | 本地无损 Edge0 GGUF：4/8-bit MLX affine、BF16 scales/biases、F16 LoRA | `Verified`（标量 CPU 文本） | 真实 40 层 GGUF 的四步 greedy IDs `[9419, 0, 2500, 628]` 与官方一致，4 组 tokenizer ID 一致。固定文本样本的 13 个 prompt token 与 3 个生成输入，全部 40 层输出及最终 logits 共 5,316,608 个 F32 值从原始权重独立复算并逐位一致；另验证首 token 的 567,585 个内部 F32 值及 4 个专家 ID。官方 MLX 仅作 token 对照。无视觉权重，prerouter 未接入，使用实际 router；[文件哈希与复现](../../tools/oracle/edge0/README.md)。 |
 | Qwen-Drive-1.0-4B（规划） | `qwen35` + `qwen_drive_planner` | 三视角多帧直接规划、推理后规划 | `clip` mmproj；SFT 或 RL planner | BF16 VLM + BF16 mmproj + BF16 planner | `Verified` | 固定官方 commit `28091c1`；Tokenizer、规划算子/checkpoint/trajectory 使用原始 F32 words 严格比较，支持 SFT/RL 与 direct/reasoning 四种入口；[命令与 GGUF 哈希](../../tools/oracle/qwen_drive/README.md)。 |
 | NeoHorse-1-4B | `qwen35` | 文本生成 | 无 | BF16 / F16 / Q8_0 / Q4_K_M / Q5_K_M | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 逐位一致；Q4/Q5 使用标量量化 Oracle，默认重排路径不保证逐位一致。GGUF 不含 NFC metadata；[哈希、边界与命令](../../tools/converter/neohorse/README.md#neohorse-1-4b-官方-gguf-对比)。 |
 | NeoHorse-1-9B | `qwen35` | 文本生成 | 无 | BF16 GGUF + NFC metadata | `Verified` | ARM64 单线程 CPU、F32 KV、4 步 greedy 的 checkpoint 和 logits 与固定 llama.cpp 逐位一致；Tokenizer 对齐发布版本。发布权重不含 MTP；[转换、哈希与验证命令](../../tools/converter/neohorse/README.md)。 |
@@ -89,7 +90,7 @@
 
 ## 架构注册表
 
-主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`audio8_asr_infinite`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx`、`audio8_asr_infinite` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
+主模型代码当前认识这些 architecture：`qwen2`、`qwen2vl`、`qwen3`、`qwen3vl`、`qwen3vlmoe`、`qwen35`、`edge0`、`qwen3tts`、`llama`、`granite`、`hunyuan-dense`、`pig`、`lfm2`、`lfm2moe`、`nanbeige`、`gemma4`、`spark2_5`、`dreamx`、`laya`、`audio8_asr_infinite`、`funasr-sensevoice-encoder`。其中 `gemma4`、`spark2_5`、`dreamx`、`audio8_asr_infinite` 和 `funasr-sensevoice-encoder` 使用各自的专用配置加载路径；`clip` 和 `funasr-sensevoice-encoder` 是 mmproj 组件架构，不是可独立生成的主模型。
 
 服务端只覆盖其中较窄的一组运行模式。具体限制见 [README 的“服务端模式”](README.md#服务端模式)；模型是否出现在本清单，不代表它已经支持服务端流式输出或请求级动态媒体输入。
 

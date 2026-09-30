@@ -1,6 +1,6 @@
-//! High-level inference state for a `Qwen35Model`.
+//! High-level inference state for the shared hybrid trunk.
 //!
-//! `Qwen35Model` only owns weights and config. `Qwen35Session` wraps a
+//! `Qwen35Model` only owns weights and config. `HybridSession` wraps a
 //! reference to a model with the per-request state (KV cache, scratchpad,
 //! thread pool) and exposes the standard forward API:
 //!   - `embed_tokens`: lookup token embeddings
@@ -13,11 +13,12 @@
 //! Existing call sites that use `Qwen35Model::forward` directly keep working;
 //! `Session::step` is additive.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::config::Qwen35Config;
 use super::scratch::Qwen35Scratchpad;
-use super::weights::Qwen35Model;
+use super::weights::{HybridTrunk, Qwen35Model};
 use crate::core::prefill::{
     checked_prefill_batch_size, prefill_chunks, DEFAULT_PREFILL_BATCH_SIZE,
 };
@@ -42,7 +43,7 @@ impl Qwen35DenseKvSnapshot {
     }
 }
 
-/// Per-request inference state for a `Qwen35Model`.
+/// Per-request inference state for Qwen3.5 or Edge0.
 ///
 /// Holds:
 /// - the KV cache for dense attention layers
@@ -52,8 +53,9 @@ impl Qwen35DenseKvSnapshot {
 ///
 /// Construction validates the model is loaded (no extra work) and allocates
 /// the cache and scratchpad sized for `model.config.n_ctx`.
-pub struct Qwen35Session<'a, 'm> {
-    model: &'a mut Qwen35Model<'m>,
+pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
+    model: &'a mut M,
+    source_lifetime: PhantomData<&'m ()>,
     capacity: usize,
     kv_cache: KvCache,
     scratch: Qwen35Scratchpad,
@@ -75,6 +77,91 @@ pub struct Qwen35Session<'a, 'm> {
     gpu_failure_for_test: Option<String>,
     #[cfg(test)]
     fail_cpu_chunk_after_row: Option<usize>,
+}
+
+pub type Qwen35Session<'a, 'm> = HybridSession<'a, 'm, Qwen35Model<'m>>;
+
+/// Shared session operations for the Qwen3.5 and Edge0 hybrid trunks.
+pub trait HybridTrunkModel<'m> {
+    fn trunk(&self) -> &HybridTrunk<'m>;
+    fn forward_at(
+        &mut self,
+        n_tokens: usize,
+        base_position: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut Qwen35Scratchpad,
+        pool: &ComputePool,
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String>;
+    fn forward_chunk(
+        &mut self,
+        n_tokens: usize,
+        base_position: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut Qwen35Scratchpad,
+        conv_states: &mut [Vec<f32>],
+        ssm_states: &mut [Vec<f32>],
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        if conv_states.len() != scratch.conv_states.len()
+            || ssm_states.len() != scratch.ssm_states.len()
+        {
+            return Err("Qwen3.5 recurrent state layer count mismatch".into());
+        }
+        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        let result = self.forward_at(
+            n_tokens,
+            base_position,
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+        );
+        for (persistent, working) in scratch.conv_states.iter_mut().zip(conv_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        for (persistent, working) in scratch.ssm_states.iter_mut().zip(ssm_states.iter_mut()) {
+            std::mem::swap(persistent, working);
+        }
+        result
+    }
+    #[cfg(feature = "vulkan")]
+    fn supports_vulkan(&self) -> bool;
+}
+
+impl<'m> HybridTrunkModel<'m> for HybridTrunk<'m> {
+    fn trunk(&self) -> &HybridTrunk<'m> {
+        self
+    }
+    fn forward_at(
+        &mut self,
+        n_tokens: usize,
+        base_position: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut Qwen35Scratchpad,
+        pool: &ComputePool,
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        Qwen35Model::forward_at(
+            self,
+            n_tokens,
+            base_position,
+            kv_cache,
+            scratch,
+            pool,
+            positions,
+        )
+    }
+    #[cfg(feature = "vulkan")]
+    fn supports_vulkan(&self) -> bool {
+        true
+    }
 }
 
 pub(super) fn required_token_count(
@@ -133,26 +220,22 @@ pub(super) fn dense_kv_chunk_is_finite(
     true
 }
 
-impl<'a, 'm> Qwen35Session<'a, 'm> {
+impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
     /// Build a session with cache and scratch sized for `model.config.n_ctx`.
     /// `pool` is shared across sessions (typical) so a single `Arc<ComputePool>`
     /// is sufficient.
-    pub fn new(
-        model: &'a mut Qwen35Model<'m>,
-        capacity: usize,
-        pool: Arc<ComputePool>,
-    ) -> Result<Self, String> {
+    pub fn new(model: &'a mut M, capacity: usize, pool: Arc<ComputePool>) -> Result<Self, String> {
         Self::new_with_prefill_batch_size(model, capacity, DEFAULT_PREFILL_BATCH_SIZE, pool)
     }
 
     pub fn new_with_prefill_batch_size(
-        model: &'a mut Qwen35Model<'m>,
+        model: &'a mut M,
         capacity: usize,
         prefill_batch_size: usize,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let prefill_batch_size = checked_prefill_batch_size(Some(prefill_batch_size))?;
-        let cfg = &model.config;
+        let cfg = &model.trunk().config;
         if capacity == 0 || capacity > cfg.n_ctx {
             return Err(format!(
                 "Qwen3.5 session capacity {capacity} must be within 1..={}",
@@ -162,12 +245,13 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         let kv_cache = KvCache::new_f32(cfg.n_layer_impl(), capacity, cfg.n_embd_gqa());
         let scratch = Qwen35Scratchpad::new(cfg, capacity.min(prefill_batch_size));
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match (!crate::core::thread_pool::gpu_matmul_disabled())
-            .then(crate::ops::get_vulkan_context)
-            .flatten()
+        let (gpu, full_model_gpu_failed) = match (model.supports_vulkan()
+            && !crate::core::thread_pool::gpu_matmul_disabled())
+        .then(crate::ops::get_vulkan_context)
+        .flatten()
         {
             Some(context) => match Qwen35VulkanSession::try_new_rows(
-                model,
+                model.trunk(),
                 capacity,
                 capacity.min(prefill_batch_size),
                 context,
@@ -184,6 +268,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         };
         Ok(Self {
             model,
+            source_lifetime: PhantomData,
             capacity,
             kv_cache,
             scratch,
@@ -204,9 +289,9 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     }
 
     pub fn config(&self) -> &Qwen35Config {
-        &self.model.config
+        &self.model.trunk().config
     }
-    pub fn model(&self) -> &Qwen35Model<'a> {
+    pub fn model(&self) -> &M {
         self.model
     }
     pub fn kv_cache(&self) -> &KvCache {
@@ -229,7 +314,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
             ));
         }
         let len = tokens
-            .checked_mul(self.model.config.n_embd)
+            .checked_mul(self.model.trunk().config.n_embd)
             .ok_or_else(|| "Qwen3.5 hidden length overflow".to_string())?;
         self.scratch
             .normed_buf
@@ -247,7 +332,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
                 self.processed_tokens
             ));
         }
-        let cfg = &self.model.config;
+        let cfg = &self.model.trunk().config;
         let head_dim = cfg.n_embd_head();
         let kv_heads = cfg.n_head_kv;
         let kv_width = kv_heads
@@ -322,7 +407,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     /// to free the previous prompt's attention state. Does NOT reallocate
     /// (just zeros in place).
     pub fn reset(&mut self) {
-        let cfg = &self.model.config;
+        let cfg = &self.model.trunk().config;
         self.kv_cache = KvCache::new_f32(cfg.n_layer_impl(), self.capacity, cfg.n_embd_gqa());
         let mut fresh = Qwen35Scratchpad::new(cfg, self.capacity.min(self.prefill_batch_size));
         std::mem::swap(&mut self.scratch, &mut fresh);
@@ -345,11 +430,11 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
     /// Look up a single token's embedding row. Returns an error if the token
     /// id exceeds the embedding table.
     pub fn embed_token(&self, token_id: u32) -> Result<Vec<f32>, String> {
-        self.model.embed_tokens(&[token_id])
+        self.model.trunk().embed_tokens(&[token_id])
     }
 
     pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {
-        self.model.embed_tokens(token_ids)
+        self.model.trunk().embed_tokens(token_ids)
     }
 
     /// Run one forward pass over pre-computed embeddings of shape
@@ -365,9 +450,10 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
         n_tokens: usize,
         positions: &[[usize; 4]],
     ) -> Result<Vec<f32>, String> {
-        let n_embd = self.model.config.n_embd;
+        let n_embd = self.model.trunk().config.n_embd;
         #[cfg(feature = "vulkan")]
-        let kv_stride = self.model.config.n_embd_head() * self.model.config.n_head_kv;
+        let kv_stride =
+            self.model.trunk().config.n_embd_head() * self.model.trunk().config.n_head_kv;
         if n_tokens == 0 {
             return Err("Qwen3.5 step requires at least one token".into());
         }
@@ -429,7 +515,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
                         gpu.forward_chunk(chunk_embeddings, base, chunk_positions, rows)
                     }
                     .map_err(|error| error.to_string())?;
-                    if result.logits.len() != self.model.config.vocab_size
+                    if result.logits.len() != self.model.trunk().config.vocab_size
                         || result.logits.iter().any(|value| !value.is_finite())
                     {
                         return Err("invalid Qwen3.5 Vulkan logits".into());
@@ -516,7 +602,7 @@ impl<'a, 'm> Qwen35Session<'a, 'm> {
                 if logits.iter().any(|value| !value.is_finite())
                     || !dense_kv_chunk_is_finite(
                         &self.kv_cache,
-                        &self.model.config,
+                        &self.model.trunk().config,
                         self.capacity,
                         base,
                         rows,
