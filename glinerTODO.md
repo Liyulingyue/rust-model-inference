@@ -170,13 +170,33 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **byte-exact oracle**：与 5.2.1 同套机制，每个子模块单独 fixture
 - **价值**：生产用途（一次推理多任务）；学术上 boundary + relation 是最常用的
 
-### 🟢 5.2.4 entity 分类解码 + flag + CLI + HTTP 路由（待开工）
+### ✅ 5.2.4a 真实入口 + CLI flag（已可运行）
+- **范围**：tokenizer → prompt builder（`[E]` marker）→ `compute::encode` → word/marker gather → `score_document_candidates` → `sigmoid` + threshold + 解码，加上 `--gliner2-boundary`
+- **实现**：
+  - `prompt.rs`：`build_boundary_prompt_with`（与 Decide 共用 token 流，只多返回 word 路由和 query 路由；`EncodedPrompt` 加了 `words` / `text_word_first_positions` / `query_positions` / `query_names`）
+  - `extract.rs`（新）：`run_extraction` / `extract_spans` / `decode_spans` / `gather_states`，span 偏移是**词**下标
+  - `adapters/gliner2_boundary.rs`：`parse_boundary_schema`（reference 的 `{"entities": [...]}` / `{"entities": {...}}` + `entity_descriptions`）+ CLI 输出
+- **端到端 oracle**：`dump_extract_spans_end_to_end.py` 是本目录**第一个不从 synthetic `text_states` 起步**的 oracle。它跑 reference `SchemaTransformer` → **独立的** `transformers` DeBERTa-v3-base（权重取自 checkpoint 的 `encoder.*`，即微调后的）→ reference `BoundaryHead` → `decode_candidates`
+  - max pair-logit delta **2.813e-5**，span 与 reference 完全一致
+  - `input_ids` / word 路由 / query 路由**逐位相等**
+- **三个只有真正跑起来才暴露的坑**：
+  1. **encoder 必须用微调后的权重**。reference `from_pretrained` 会用 checkpoint 的 `encoder.*` 覆盖 `microsoft/deberta-v3-base`；用原始权重时所有 pair logit 都在 -15 附近，模型什么都抽不出来——而且**不会报错**，只是结果为空
+  2. **预处理入口选错**。`transform_and_format` 看起来是"main preprocessing entry point"，但它**不**调 `_normalize_text`；真实推理走 `collate_fn_inference` → `_collate_batch`，会补句末 `.`。少一个词，后面所有下标全错
+  3. **classification 的 schema parser 不能复用**。`parse_schema` 会把 `entity_descriptions` 当成第二个 task，query 数量翻倍且一半是描述
+- **实测**（`--gliner2-boundary`，本机 1.8s/条）：
+  - "Ada Lovelace worked with Charles Babbage in London." → person: `ada lovelace` / `charles babbage`，location: `london`
+  - "Marie Curie moved to Paris and later to the Curie Institute." → person: `marie curie`，organization: `curie institute`，location: `paris`
+  - "Apple Inc. ... Tim Cook ... Cupertino ..." → person: `tim cook`，organization: `apple inc .`，location: `cupertino`
+  - 负例 "nothing here should extract cleanly" → 0 span
+- **已知 artifact**（与 reference 一致，非移植问题）：`"Apple Inc."` 会被抽成 `apple inc .`，因为 reference 的 word splitter 把句末 `.` 当成一个独立的词
+
+### 🟢 5.2.4b 分类头 + relations + records + HTTP 路由（待开工）
 - **范围**：
-  1. entity 分类：schema prompt → `choice_states` → `classifier.0` + ReLU + `classifier.3`，阈值 `classification_temperature` / `abstention_threshold`
-  2. `--gliner2-boundary` flag，路由 `/v1/jev/boundary`
-  3. 真实入口：token IDs → tokenizer → `compute::encode` → query prompt builder → `score_spans`。**目前所有 boundary 测试都从 `text_states` / `query_states` 开始，没有一条真实 tokenizer→encoder→decode 的端到端路径**
-- **工作量**：~400 行（解码 + 路由）
-- **前置**：5.2.2b
+  1. entity 分类：`[C]` marker → `cls_marker_indices` → `classifier.0` + ReLU + `classifier.3`，阈值 `classification_temperature` / `abstention_threshold`
+  2. relations（`relation_scorer`）、records（`record_decoder`，需要 `candidate_states`，已经返回了）
+  3. count_head / null_projection（两个 query→scalar 的投影，最便宜）
+  4. HTTP 路由 `/v1/jev/boundary`
+- **前置**：5.2.4a ✅
 
 ### 📊 5.2 阶段总结
 | Phase | 范围 | 状态 | commit |
@@ -187,18 +207,21 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.2a | score_explicit_pairs + PairScorer（全 feature） | ✅ | `6eafe4e` + `1d98e37` + 本次 |
 | 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | ✅ | 本次 |
 | 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
-| 5.2.4 | entity 分类解码 + CLI / HTTP | 🟢 待开工 | — |
+| 5.2.4a | 真实入口 + `--gliner2-boundary` | ✅ | 本次 |
+| 5.2.4b | 分类头 + relations + records + HTTP | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
 
-**仍然没有的（重要）**：
-- 真实 tokenizer → `compute::encode` → query prompt builder → decode 的端到端路径。所有测试都从 `text_states` / `query_states` 起步
-- entity 分类解码（`classifier.0` + ReLU + `classifier.3`）
-- relations / records / count / abstention
-- CLI / HTTP 路由
+**5.2.4a 已完成：模型可以真的跑了。** `--gliner2-boundary` 从 CLI 端到端出 span，输出与 reference 逐位一致（`input_ids` 相等、pair-logit delta 2.813e-5、span 完全相同）。
 
-下一步按 5.2.4 走：先补真实入口（复用 Decide 的 tokenizer + `prompt::encode_token`），把「能跑」和「跑得对」接上，再做解码。
+**仍然没有的**：
+- entity 分类解码（`classifier.0` + ReLU + `classifier.3`）——需要 `[C]` marker 路由
+- relations / records / count / abstention
+- HTTP 路由
+- 只支持单个 extractive group（`[E]`）；`child_marker` 是调用方传的，没有按 task type 推断
+
+11 个 boundary 测试文件 / 28 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

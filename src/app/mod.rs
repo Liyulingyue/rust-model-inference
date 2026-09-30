@@ -37,6 +37,7 @@ pub use jev::{
     schema_from_questions, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
     JevQuestionInput, JevResult, LabelSet,
 };
+pub use jev::{parse_boundary_schema, run_gliner2_boundary};
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
 pub use qwen_drive::run_qwen_drive_cli;

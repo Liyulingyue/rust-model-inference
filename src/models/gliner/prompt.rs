@@ -27,6 +27,13 @@ use std::sync::OnceLock;
 pub const P_TOKEN: &str = "[P]";
 /// `SchemaTransformer.L_TOKEN`.
 pub const L_TOKEN: &str = "[L]";
+/// `SchemaTransformer.E_TOKEN` — the child marker for extractive (`entities`)
+/// schema groups, i.e. one query per field.
+pub const E_TOKEN: &str = "[E]";
+/// `SchemaTransformer.C_TOKEN` — the child marker for classification groups.
+pub const C_TOKEN: &str = "[C]";
+/// `SchemaTransformer.R_TOKEN` — the child marker for relation groups.
+pub const R_TOKEN: &str = "[R]";
 /// `SchemaTransformer.SEP_TEXT`.
 pub const SEP_TEXT: &str = "[SEP_TEXT]";
 /// `SchemaTransformer.SEP_STRUCT`.
@@ -359,6 +366,14 @@ impl Task {
 
     /// `SchemaTransformer._transform_schema`.
     pub fn schema_tokens(&self) -> Vec<String> {
+        self.schema_tokens_with(L_TOKEN)
+    }
+
+    /// The reference's `_transform_schema` layout with an explicit child
+    /// marker: `[L]` for classification (Decide), `[E]` for extractive entities,
+    /// `[R]` for relations. The rest of the token stream is identical, so this
+    /// is the only thing that distinguishes the two prompt families.
+    pub fn schema_tokens_with(&self, child_marker: &str) -> Vec<String> {
         let mut prompt = match &self.prompt {
             Some(text) => format!("{}: {text}", self.name),
             None => self.name.clone(),
@@ -380,7 +395,7 @@ impl Task {
             "(".to_string(),
         ];
         for label in &self.labels {
-            tokens.push(L_TOKEN.to_string());
+            tokens.push(child_marker.to_string());
             tokens.push(label.name.clone());
         }
         tokens.push(")".to_string());
@@ -402,7 +417,25 @@ pub struct TaskMarkers {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedPrompt {
     pub input_ids: Vec<u32>,
+    /// Per task: the `[P]` group marker followed by one row per child marker.
+    /// The classification head reads this with `.skip(1)`.
     pub markers: Vec<TaskMarkers>,
+    /// The text, lowercased and split into words. Span indices the boundary
+    /// path reports are offsets into this list, so the caller needs it to turn
+    /// a span back into text.
+    pub words: Vec<String>,
+    /// Subword index of the first subword of each entry of `words`
+    /// (`token_pooling = "first"`). `_encode_core` gathers `text_states` here.
+    /// Kept 1:1 with `words`: a word that tokenizes to nothing still gets a
+    /// placeholder row, because dropping it would shift every later index.
+    pub text_word_first_positions: Vec<usize>,
+    /// Subword index of each child marker, `[P]` dropped, tasks in order. This
+    /// is `schema_special_positions[group][1:]` flattened, which is what
+    /// `_encode_core` routes into `query_states` — the group marker itself is
+    /// not scored.
+    pub query_positions: Vec<usize>,
+    /// Field name per entry of `query_positions`.
+    pub query_names: Vec<String>,
 }
 
 /// Every token the reference registers in `_added_tokens_encoder`, with its id.
@@ -491,10 +524,51 @@ pub fn build_prompt(
 }
 
 /// The same schema builder with the checkpoint's `tokenizer.json` encoder.
+pub fn build_boundary_prompt(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
+    spm: &crate::core::sentencepiece::SentencePieceTokenizer,
+) -> Result<EncodedPrompt, String> {
+    build_boundary_prompt_with(tasks, text, child_marker, |part| {
+        Ok(encode_token(part, spm))
+    })
+}
+
+/// The same schema builder with the checkpoint's `tokenizer.json` encoder.
 pub fn build_prompt_with(
     tasks: &[Task],
     text: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    build_with_child_marker(tasks, text, L_TOKEN, encode, false)
+}
+
+/// Prompt assembly for the boundary architecture, with an explicit child
+/// marker ([E] / [C] / [R]).
+///
+/// Identical token stream to [`build_prompt_with`] — the reference's
+/// `_format_input_with_mapping` does not know about architectures — but it also
+/// reports the two routing index sets `_encode_core` gathers from
+/// `last_hidden_state`: the text words and the query markers. Passing
+/// `require_query_count` checks that every task produced one query per field,
+/// which is the same mis-alignment guard the classification path applies to its
+/// label count.
+pub fn build_boundary_prompt_with(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
+    encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
+    build_with_child_marker(tasks, text, child_marker, encode, true)
+}
+
+fn build_with_child_marker(
+    tasks: &[Task],
+    text: &str,
+    child_marker: &str,
     mut encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+    check_query_count: bool,
 ) -> Result<EncodedPrompt, String> {
     for task in tasks {
         task.validate()?;
@@ -503,7 +577,10 @@ pub fn build_prompt_with(
         return Err("no classification task was given".into());
     }
 
-    let schema_tokens: Vec<Vec<String>> = tasks.iter().map(Task::schema_tokens).collect();
+    let schema_tokens: Vec<Vec<String>> = tasks
+        .iter()
+        .map(|task| task.schema_tokens_with(child_marker))
+        .collect();
     // Combined token stream: every schema followed by [SEP_STRUCT], then the
     // final [SEP_STRUCT] popped, then [SEP_TEXT] and the text words.
     let mut combined: Vec<String> = Vec::new();
@@ -516,8 +593,9 @@ pub fn build_prompt_with(
         }
     }
     combined.push(SEP_TEXT.to_string());
-    let text_tokens = split_words(&normalize_text(text));
-    combined.extend(text_tokens.iter().cloned());
+    let words = split_words(&normalize_text(text));
+    combined.extend(words.iter().cloned());
+    let sep_index = combined.len() - 1 - words.len();
 
     // Which combined-token indices are structural markers, per task. The
     // reference computes this on the un-popped stream, where every struct is
@@ -530,18 +608,18 @@ pub fn build_prompt_with(
         if tokens.len() > 1 {
             slots.push(offset + 1); // [P]
         }
-        // range(4, len(struct) - 2, 2) is every [L].
+        // range(4, len(struct) - 2, 2) is every child marker.
         let mut cursor = 4;
         while cursor + 2 < tokens.len() {
             slots.push(offset + cursor);
             cursor += 2;
         }
+        marker_orig.push(slots);
         if index + 1 < schema_tokens.len() {
             offset += tokens.len() + 1; // tokens plus [SEP_STRUCT]
         } else {
             offset += tokens.len();
         }
-        marker_orig.push(slots);
     }
 
     let mut input_ids: Vec<u32> = Vec::new();
@@ -552,6 +630,7 @@ pub fn build_prompt_with(
             labels: task.labels.iter().map(|l| l.name.clone()).collect(),
         });
     }
+    let mut text_word_first_positions: Vec<usize> = Vec::with_capacity(words.len());
     for (orig_index, token) in combined.iter().enumerate() {
         let sub = encode(token)?;
         let base = input_ids.len();
@@ -561,6 +640,46 @@ pub fn build_prompt_with(
                 markers[task_index].positions.push(base);
             }
         }
+        // One entry per text word, recorded at the word's first subword even if
+        // the word produced no subwords at all — that is what keeps word indices
+        // and subword positions aligned 1:1.
+        if orig_index > sep_index {
+            text_word_first_positions.push(base);
+        }
+    }
+
+    if check_query_count {
+        let expected: usize = tasks.iter().map(|task| task.labels.len()).sum();
+        let mut query_positions = Vec::with_capacity(expected);
+        let mut query_names = Vec::with_capacity(expected);
+        for (task_index, task) in tasks.iter().enumerate() {
+            let found = markers[task_index].positions.len();
+            if found != task.labels.len() + 1 {
+                return Err(format!(
+                    "task {:?}: {} markers for {} fields",
+                    task.name,
+                    found,
+                    task.labels.len()
+                ));
+            }
+            // `[P]` is not routed; `schema_special_positions[group][1:]` is.
+            for (label, position) in task
+                .labels
+                .iter()
+                .zip(markers[task_index].positions.iter().skip(1))
+            {
+                query_positions.push(*position);
+                query_names.push(label.name.clone());
+            }
+        }
+        return Ok(EncodedPrompt {
+            input_ids,
+            markers,
+            words,
+            text_word_first_positions,
+            query_positions,
+            query_names,
+        });
     }
 
     for (task_index, task) in tasks.iter().enumerate() {
@@ -576,7 +695,14 @@ pub fn build_prompt_with(
             ));
         }
     }
-    Ok(EncodedPrompt { input_ids, markers })
+    Ok(EncodedPrompt {
+        input_ids,
+        markers,
+        words,
+        text_word_first_positions,
+        query_positions: Vec::new(),
+        query_names: Vec::new(),
+    })
 }
 
 #[cfg(test)]

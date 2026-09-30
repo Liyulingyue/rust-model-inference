@@ -294,6 +294,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 }
             }
             "--gliner2-decide" => options.gliner2_decide = true,
+            "--gliner2-boundary" => options.gliner2_boundary = true,
             "--gliner2-schema" => {
                 if i + 1 < args.len() {
                     options.gliner2_schema = Some(args[i + 1].clone());

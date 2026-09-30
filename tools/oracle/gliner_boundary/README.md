@@ -39,6 +39,7 @@ cargo test --profile release-fast --test gliner2_5_base_v1_shared_pool_scorer_pa
 | `dump_boundary_attention_window.py` | `boundary-attention-window-golden.json` | `gliner2_5_base_v1_boundary_attention_window_parity` | exact mask |
 | `dump_document_candidate_pool.py` | `document-candidate-pool-golden.json` | `gliner2_5_base_v1_document_candidate_pool_parity` | 2.622e-6 |
 | `dump_shared_pool_scorer.py` | `shared-pool-scorer-golden.json` | `gliner2_5_base_v1_shared_pool_scorer_parity` | 1.526e-5 |
+| `dump_extract_spans_end_to_end.py` | `extract-spans-e2e-golden.json` | `gliner2_5_base_v1_extract_spans_e2e_parity` | 2.813e-5, `input_ids` exact |
 
 `dump_score_explicit_spans_full.py` builds the reference `BoundaryHead`
 directly from the checkpoint (`BoundaryHeadSettings(**config["boundary_head"])`,
@@ -67,9 +68,21 @@ solely to cover that: it pins the mask for `n = 8` (band inactive) and
 The pool and scorer fixtures use a 24-token case as well, which is long enough
 for a 25 x 25 Cartesian pairing pass and a full 192-slot pool.
 
+## The end-to-end oracle
+
+`dump_extract_spans_end_to_end.py` is the exception: it is the only one that
+does not start from synthetic `text_states`. It runs the real
+`SchemaTransformer`, a `transformers` DeBERTa-v3-base whose weights are the
+checkpoint's *fine-tuned* `encoder.*`, the reference `BoundaryHead`, and
+`decode_candidates` — then compares against the Rust tokenizer, prompt builder,
+encoder, gather, pool, scorer and decode in one shot.
+
+It needs `models/deberta-v3-base` (a separate `microsoft/deberta-v3-base`
+download from ModelScope), because the reference loads the stock encoder and
+then overwrites it from the checkpoint. Using the stock encoder produces logits
+around -15 and no extractions at all — silently, with no error.
+
 ## What is not covered yet
 
-Every fixture starts from synthetic `text_states` / `query_states`. There is
-no tokenizer → encoder → decode end-to-end oracle yet, and no fixture for the
-entity classification head (`classifier.0` + ReLU + `classifier.3`) or for
-relations / records / count / abstention.
+No fixture for the entity classification head (`classifier.0` + ReLU +
+`classifier.3`, `[C]` markers), relations, records, count or abstention.
