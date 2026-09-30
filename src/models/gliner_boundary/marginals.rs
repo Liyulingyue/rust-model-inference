@@ -164,7 +164,11 @@ impl<'a> BoundaryQueryHead<'a> {
         query_mask: &[Vec<bool>],
     ) -> BoundaryMarginals<'a> {
         let batch = boundary_mask.len();
-        let boundary_len = if batch == 0 { 0 } else { boundary_mask[0].len() };
+        let boundary_len = if batch == 0 {
+            0
+        } else {
+            boundary_mask[0].len()
+        };
         let seq_len = if batch == 0 { 0 } else { text_mask[0].len() };
         let q_count = if batch == 0 { 0 } else { query_mask[0].len() };
         let q_dim = if batch * q_count == 0 {
@@ -185,16 +189,20 @@ impl<'a> BoundaryQueryHead<'a> {
         for b in 0..batch {
             for i in 0..boundary_len {
                 apply_linear_full(
-                    &boundary_states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &boundary_states[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                     &self.start_boundary,
                     &self.start_boundary_bias,
-                    &mut start_b[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &mut start_b[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                 );
                 apply_linear_full(
-                    &boundary_states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &boundary_states[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                     &self.end_boundary,
                     &self.end_boundary_bias,
-                    &mut end_b[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &mut end_b[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                 );
             }
             for i in 0..seq_len {
@@ -207,12 +215,24 @@ impl<'a> BoundaryQueryHead<'a> {
             }
             for q in 0..q_count {
                 let q_row = &query_states[b * q_count * q_dim + q * q_dim..][..q_dim];
-                apply_linear_full(q_row, &self.start_query, &self.start_query_bias,
-                    &mut start_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim]);
-                apply_linear_full(q_row, &self.end_query, &self.end_query_bias,
-                    &mut end_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim]);
-                apply_linear_full(q_row, &self.inside_query, &self.inside_query_bias,
-                    &mut inside_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim]);
+                apply_linear_full(
+                    q_row,
+                    &self.start_query,
+                    &self.start_query_bias,
+                    &mut start_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim],
+                );
+                apply_linear_full(
+                    q_row,
+                    &self.end_query,
+                    &self.end_query_bias,
+                    &mut end_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim],
+                );
+                apply_linear_full(
+                    q_row,
+                    &self.inside_query,
+                    &self.inside_query_bias,
+                    &mut inside_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim],
+                );
             }
         }
 
@@ -227,7 +247,8 @@ impl<'a> BoundaryQueryHead<'a> {
                 let eb = &end_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim];
                 let ib = &inside_q[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim];
                 for i in 0..boundary_len {
-                    let br = &start_b[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+                    let br = &start_b[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim];
                     let mut s = 0.0f32;
                     for kk in 0..boundary_dim {
                         s += br[kk] * sb[kk];
@@ -235,7 +256,8 @@ impl<'a> BoundaryQueryHead<'a> {
                     start_logits[b * q_count * boundary_len + q * boundary_len + i] = s * scale;
                 }
                 for i in 0..boundary_len {
-                    let br = &end_b[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+                    let br = &end_b[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim];
                     let mut s = 0.0f32;
                     for kk in 0..boundary_dim {
                         s += br[kk] * eb[kk];
@@ -243,7 +265,8 @@ impl<'a> BoundaryQueryHead<'a> {
                     end_logits[b * q_count * boundary_len + q * boundary_len + i] = s * scale;
                 }
                 for i in 0..seq_len {
-                    let br = &inside_t[b * seq_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+                    let br =
+                        &inside_t[b * seq_len * boundary_dim + i * boundary_dim..][..boundary_dim];
                     let mut s = 0.0f32;
                     for kk in 0..boundary_dim {
                         s += br[kk] * ib[kk];
@@ -355,12 +378,7 @@ fn load_weight<'a>(
     )))
 }
 
-fn apply_linear_full(
-    input: &[f32],
-    weight: &Weight<'_>,
-    bias: &[f32],
-    output: &mut [f32],
-) {
+fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
     if let Some(rows) = weight.kernel.f32_slice() {
         let n_in = input.len();
         let n_out = output.len();
@@ -369,7 +387,9 @@ fn apply_linear_full(
             output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
         }
     } else {
-        weight.kernel.forward(input, output, weight.n_in, weight.n_out);
+        weight
+            .kernel
+            .forward(input, output, weight.n_in, weight.n_out);
         for (out, b) in output.iter_mut().zip(bias.iter()) {
             *out += *b;
         }

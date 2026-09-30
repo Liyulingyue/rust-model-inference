@@ -47,7 +47,9 @@ fn loaded_model() -> Option<(Box<dyn std::any::Any>, BoundaryModel<'static>)> {
 
 #[test]
 fn boundary_encoder_runs_on_real_input() {
-    let Some((_anchor, model)) = loaded_model() else { return };
+    let Some((_anchor, model)) = loaded_model() else {
+        return;
+    };
     // Encode a single sample of 6 valid tokens; remaining 2 are padding.
     let hidden_size = model.config.n_embd;
     let seq_len = 8;
@@ -64,12 +66,17 @@ fn boundary_encoder_runs_on_real_input() {
     assert_eq!(encoding.boundary_dim, 128); // base-v1 boundary_dim
     let expected_len = encoding.boundary_len();
     assert_eq!(encoding.states.len(), expected_len * encoding.boundary_dim);
-    assert_eq!(encoding.mask.len(), expected_len);
+    // `mask` is now `[B][L+1]` — one row per batch.
+    assert_eq!(encoding.mask.len(), 1);
+    let mask = &encoding.mask[0];
+    assert_eq!(mask.len(), expected_len);
     // Boundary validity: index <= text_length, so indices 0..=6 valid, 7 invalid.
-    assert!(encoding.mask[..=6].iter().all(|&m| m));
-    assert!(!encoding.mask[7]);
+    assert!(mask[..=6].iter().all(|&m| m));
+    assert!(!mask[7]);
     // Padding row must be zeroed.
-    assert!(encoding.states[7 * encoding.boundary_dim..].iter().all(|&v| v == 0.0));
+    assert!(encoding.states[7 * encoding.boundary_dim..]
+        .iter()
+        .all(|&v| v == 0.0));
     // All valid rows must be finite (no NaN / Inf).
     for i in 0..=6 {
         assert!(
@@ -94,7 +101,9 @@ impl BoundaryEncodingExt for rust_model_inference::models::gliner_boundary::Boun
 
 #[test]
 fn boundary_metadata_pins_base_v1_dims() {
-    let Some((_anchor, model)) = loaded_model() else { return };
+    let Some((_anchor, model)) = loaded_model() else {
+        return;
+    };
     assert_eq!(model.config.n_embd, 768);
     assert_eq!(model.config.n_layer, 12);
     assert_eq!(model.config.n_head, 12);

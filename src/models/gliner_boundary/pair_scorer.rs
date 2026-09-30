@@ -91,10 +91,12 @@ impl<'a> PairScorer<'a> {
         let multihead_pair_compat_heads = source
             .tensor_info("boundary_head.pair_scorer.compat_mix.weight")
             .map(|info| info.dims[0] as usize)
-            .or_else(|| source
-                .metadata("gliner2.boundary.multihead_pair_compat_heads")
-                .and_then(|v| v.to_u64())
-                .map(|v| v as usize))
+            .or_else(|| {
+                source
+                    .metadata("gliner2.boundary.multihead_pair_compat_heads")
+                    .and_then(|v| v.to_u64())
+                    .map(|v| v as usize)
+            })
             .unwrap_or(1);
         if pair_dim % multihead_pair_compat_heads != 0 {
             return Err(format!(
@@ -150,11 +152,7 @@ impl<'a> PairScorer<'a> {
             multihead_pair_compat_heads,
             1,
         )?;
-        let compat_mix_bias = load_vec(
-            source,
-            "boundary_head.pair_scorer.compat_mix.bias",
-            1,
-        )?;
+        let compat_mix_bias = load_vec(source, "boundary_head.pair_scorer.compat_mix.bias", 1)?;
         let length_query = load_weight(
             source,
             "boundary_head.pair_scorer.length_query_projection.weight",
@@ -218,8 +216,7 @@ impl<'a> PairScorer<'a> {
                         [..self.boundary_dim],
                     &self.start_endpoint,
                     &self.start_endpoint_bias,
-                    &mut start_all
-                        [b * boundary_len * self.pair_dim + i * self.pair_dim..]
+                    &mut start_all[b * boundary_len * self.pair_dim + i * self.pair_dim..]
                         [..self.pair_dim],
                 );
                 apply_linear_full(
@@ -228,8 +225,7 @@ impl<'a> PairScorer<'a> {
                         [..self.boundary_dim],
                     &self.end_endpoint,
                     &self.end_endpoint_bias,
-                    &mut end_all
-                        [b * boundary_len * self.pair_dim + i * self.pair_dim..]
+                    &mut end_all[b * boundary_len * self.pair_dim + i * self.pair_dim..]
                         [..self.pair_dim],
                 );
             }
@@ -269,8 +265,7 @@ impl<'a> PairScorer<'a> {
         valid_mask: &[bool],
     ) -> Vec<f32> {
         // 1. Project endpoints.
-        let (start_all, end_all) =
-            self.project_endpoints(boundary_states, boundary_len, batch);
+        let (start_all, end_all) = self.project_endpoints(boundary_states, boundary_len, batch);
 
         // 2. Query gate (sigmoid) and gate-scaled start/end dot products
         //    reduced by multihead pair compat + compat_mix.
@@ -357,8 +352,10 @@ impl<'a> PairScorer<'a> {
                     if start_idx >= boundary_len || end_idx >= boundary_len {
                         continue;
                     }
-                    let s_logit = start_logits[b * q_count * boundary_len + q * boundary_len + start_idx];
-                    let e_logit = end_logits[b * q_count * boundary_len + q * boundary_len + end_idx];
+                    let s_logit =
+                        start_logits[b * q_count * boundary_len + q * boundary_len + start_idx];
+                    let e_logit =
+                        end_logits[b * q_count * boundary_len + q * boundary_len + end_idx];
                     score[b * q_count * c + q * c + ci] =
                         compat_per_cand[b * q_count * c + q * c + ci] + s_logit + e_logit;
                 }
@@ -390,9 +387,8 @@ impl<'a> PairScorer<'a> {
                     let tl = text_lengths.get(b).copied().unwrap_or(1).max(1) as f32;
                     let f2 = safe_length / tl;
                     let f3 = 1.0 / safe_length.sqrt();
-                    let contrib = f1 * length_coeff[0]
-                        + f2 * length_coeff[1]
-                        + f3 * length_coeff[2];
+                    let contrib =
+                        f1 * length_coeff[0] + f2 * length_coeff[1] + f3 * length_coeff[2];
                     score[b * q_count * c + q * c + ci] += contrib;
                 }
             }
@@ -478,12 +474,7 @@ fn load_weight<'a>(
     )))
 }
 
-fn apply_linear_full(
-    input: &[f32],
-    weight: &Weight<'_>,
-    bias: &[f32],
-    output: &mut [f32],
-) {
+fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
     if let Some(rows) = weight.kernel.f32_slice() {
         let n_in = input.len();
         let n_out = output.len();
@@ -492,7 +483,9 @@ fn apply_linear_full(
             output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
         }
     } else {
-        weight.kernel.forward(input, output, weight.n_in, weight.n_out);
+        weight
+            .kernel
+            .forward(input, output, weight.n_in, weight.n_out);
         for (out, b) in output.iter_mut().zip(bias.iter()) {
             *out += *b;
         }

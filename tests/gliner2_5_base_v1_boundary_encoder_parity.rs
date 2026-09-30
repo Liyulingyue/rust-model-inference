@@ -59,7 +59,9 @@ impl BoundaryEncodingExt for BoundaryEncoding {
 
 #[test]
 fn matches_the_reference_stack() {
-    let Some((_anchor, model)) = loaded_model() else { return };
+    let Some((_anchor, model)) = loaded_model() else {
+        return;
+    };
     let raw = std::fs::read_to_string(FIXTURE)
         .unwrap_or_else(|_| panic!("missing {FIXTURE}; regenerate with dump_boundary_encoder.py"));
     let fixture: serde_json::Value =
@@ -67,7 +69,9 @@ fn matches_the_reference_stack() {
 
     let hidden_size = model.config.n_embd;
     let seq_len = fixture["config"]["seq_len"].as_u64().expect("seq_len") as usize;
-    let valid_tokens = fixture["config"]["valid_tokens"].as_u64().expect("valid_tokens") as usize;
+    let valid_tokens = fixture["config"]["valid_tokens"]
+        .as_u64()
+        .expect("valid_tokens") as usize;
 
     // Deterministic text_states mirroring the Python dump.
     let mut text_states: Vec<f32> = Vec::with_capacity(seq_len * hidden_size);
@@ -83,16 +87,21 @@ fn matches_the_reference_stack() {
     let encoding = model.boundary.forward(&text_states, &text_mask);
 
     // Mask equality first (cheap gate; if wrong, the projection is wrong).
+    // `encoding.mask` is `[B][L+1]`; the fixture flattens it to a single
+    // row for the B=1 case.
     let want_mask: Vec<bool> = fixture["mask"]
         .as_array()
         .expect("mask")
         .iter()
         .map(|v| v.as_bool().expect("mask element"))
         .collect();
-    assert_eq!(want_mask, &encoding.mask[..want_mask.len()],
+    let got_mask: Vec<bool> = encoding.mask.iter().flatten().copied().collect();
+    assert_eq!(
+        want_mask,
+        &got_mask[..want_mask.len()],
         "boundary mask differs from the reference ({} vs {})",
         want_mask.iter().filter(|m| **m).count(),
-        encoding.mask.iter().filter(|m| **m).count(),
+        got_mask.iter().filter(|m| **m).count(),
     );
 
     // States equality.
@@ -102,9 +111,13 @@ fn matches_the_reference_stack() {
         .iter()
         .map(|v| v.as_f64().expect("state element") as f32)
         .collect();
-    assert_eq!(want_states.len(), encoding.states.len(),
+    assert_eq!(
+        want_states.len(),
+        encoding.states.len(),
         "states length {} != expected {}",
-        encoding.states.len(), want_states.len());
+        encoding.states.len(),
+        want_states.len()
+    );
     let mut max_delta: f32 = 0.0f32;
     let mut first_diff: Option<(usize, f32, f32)> = None;
     for (i, (got, want)) in encoding.states.iter().zip(want_states.iter()).enumerate() {

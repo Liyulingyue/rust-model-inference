@@ -362,7 +362,12 @@ def convert(model_dir: Path, output: Path) -> None:
     writer.add_meta(f"{ARCH}.hidden_act", ENCODER["hidden_act"])
     writer.add_meta(f"{ARCH}.vocab_size", vocab_size)
     writer.add_meta(f"{ARCH}.classifier.intermediate_size", ENCODER["hidden_size"] * 2)
-    writer.add_meta(f"{ARCH}.classifier.activation", "gelu")
+    # The reference hardcodes `activation="relu"` in
+    # `BoundaryExtractorModel.__init__`'s `create_mlp` call
+    # (gliner2/models/boundary/model.py:1163). Decide's classifier also
+    # uses relu (layer index 2 there); the boundary variant's
+    # LayerNorm-free MLP puts the final linear at index 3.
+    writer.add_meta(f"{ARCH}.classifier.activation", "relu")
     writer.add_meta(f"{ARCH}.classifier.last_layer_index", 3)  # boundary classifier lives at index 3
     writer.add_meta(f"{ARCH}.variant", "boundary")
     writer.add_meta(f"{ARCH}.boundary.bundled_heads", json.dumps(BUNDLED_HEAD_PREFIXES))

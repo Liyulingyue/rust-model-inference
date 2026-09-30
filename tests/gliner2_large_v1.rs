@@ -33,8 +33,7 @@ fn load_model() -> Option<(Box<dyn std::any::Any>, GlinerModel<'static>)> {
     let source = open_model_source(&path, ComponentRole::Llm).expect("open gliner2 gguf");
     // The model holds a `&'a TensorSource`. Leak the source to 'static for
     // the test's lifetime; the OS reclaims the bytes on process exit.
-    let leaked: &'static dyn rust_model_inference::core::tensor::TensorSource =
-        Box::leak(source);
+    let leaked: &'static dyn rust_model_inference::core::tensor::TensorSource = Box::leak(source);
     let model = GlinerModel::from_source(leaked).expect("load gliner2 large-v1");
     Some((Box::new(()), model))
 }
@@ -43,8 +42,16 @@ fn case_intent() -> Task {
     Task::new(
         "intent",
         vec![
-            Label { name: "refund".into(), description: None, examples: Vec::new() },
-            Label { name: "other".into(), description: None, examples: Vec::new() },
+            Label {
+                name: "refund".into(),
+                description: None,
+                examples: Vec::new(),
+            },
+            Label {
+                name: "other".into(),
+                description: None,
+                examples: Vec::new(),
+            },
         ],
     )
 }
@@ -54,7 +61,11 @@ fn case_sentiment() -> Task {
         "sentiment",
         ["positive", "negative", "mixed", "neutral"]
             .into_iter()
-            .map(|name| Label { name: name.into(), description: None, examples: Vec::new() })
+            .map(|name| Label {
+                name: name.into(),
+                description: None,
+                examples: Vec::new(),
+            })
             .collect(),
     )
 }
@@ -63,9 +74,21 @@ fn case_aspects() -> Task {
     let mut task = Task::new(
         "aspects",
         vec![
-            Label { name: "battery".into(), description: Some("power life".into()), examples: Vec::new() },
-            Label { name: "keyboard".into(), description: Some("typing feel".into()), examples: Vec::new() },
-            Label { name: "camera".into(), description: Some("image quality".into()), examples: Vec::new() },
+            Label {
+                name: "battery".into(),
+                description: Some("power life".into()),
+                examples: Vec::new(),
+            },
+            Label {
+                name: "keyboard".into(),
+                description: Some("typing feel".into()),
+                examples: Vec::new(),
+            },
+            Label {
+                name: "camera".into(),
+                description: Some("image quality".into()),
+                examples: Vec::new(),
+            },
         ],
     );
     task.multi_label = true;
@@ -75,7 +98,9 @@ fn case_aspects() -> Task {
 
 #[test]
 fn contract_loads_with_pre_2_5_relaxed_config() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     // Decide is 24x1024x16; large-v1 should match (same encoder).
     assert_eq!(model.config().n_layer, 24);
     assert_eq!(model.config().n_embd, 1024);
@@ -87,27 +112,38 @@ fn contract_loads_with_pre_2_5_relaxed_config() {
 
 #[test]
 fn refund_classifier_picks_refund() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     let tasks = vec![case_intent()];
     let text = "Refund please";
     let encoded = model.encode_prompt(&tasks, text).expect("encode");
     let hidden = model.forward(&encoded.input_ids, 0).expect("forward");
-    let results = model.score_prompt(&tasks, &encoded, &hidden).expect("score");
+    let results = model
+        .score_prompt(&tasks, &encoded, &hidden)
+        .expect("score");
     assert_eq!(results.len(), 1);
     let scores = &results[0].scores;
     assert_eq!(scores.len(), 2);
-    assert!(scores[0].logit > scores[1].logit, "refund should outrank other");
+    assert!(
+        scores[0].logit > scores[1].logit,
+        "refund should outrank other"
+    );
     assert_eq!(results[0].selected, vec!["refund".to_string()]);
 }
 
 #[test]
 fn multitask_routes_sentiment_and_aspects() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     let text = "Battery dies, but the keyboard is excellent";
     let tasks = vec![case_sentiment(), case_aspects()];
     let encoded = model.encode_prompt(&tasks, text).expect("encode");
     let hidden = model.forward(&encoded.input_ids, 0).expect("forward");
-    let results = model.score_prompt(&tasks, &encoded, &hidden).expect("score");
+    let results = model
+        .score_prompt(&tasks, &encoded, &hidden)
+        .expect("score");
     assert_eq!(results.len(), 2);
 
     let sentiment = &results[0];
@@ -131,21 +167,29 @@ fn multitask_routes_sentiment_and_aspects() {
 
 #[test]
 fn example_conditioning_changes_selection() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     let mut task = case_intent();
     task.prompt = Some("Choose the route".into());
-    task.labels[0].examples.push(("Refund now".into(), "refund".into()));
+    task.labels[0]
+        .examples
+        .push(("Refund now".into(), "refund".into()));
     let tasks = vec![task];
     let text = "I need a refund";
     let encoded = model.encode_prompt(&tasks, text).expect("encode");
     let hidden = model.forward(&encoded.input_ids, 0).expect("forward");
-    let results = model.score_prompt(&tasks, &encoded, &hidden).expect("score");
+    let results = model
+        .score_prompt(&tasks, &encoded, &hidden)
+        .expect("score");
     assert_eq!(results[0].selected, vec!["refund".to_string()]);
 }
 
 #[test]
 fn long_position_context_still_picks_positive() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     // Shorter than `tools/oracle/gliner/fixtures/long-position.json` because
     // debug-mode forward over 24 layers × the full sequence is slow; the
     // exercise is "long-enough context + softmax path", not "max length".
@@ -154,26 +198,39 @@ fn long_position_context_still_picks_positive() {
         "intent",
         ["positive", "negative"]
             .into_iter()
-            .map(|name| Label { name: name.into(), description: None, examples: Vec::new() })
+            .map(|name| Label {
+                name: name.into(),
+                description: None,
+                examples: Vec::new(),
+            })
             .collect(),
     )];
     let encoded = model.encode_prompt(&tasks, &text).expect("encode");
     let hidden = model.forward(&encoded.input_ids, 0).expect("forward");
-    let results = model.score_prompt(&tasks, &encoded, &hidden).expect("score");
+    let results = model
+        .score_prompt(&tasks, &encoded, &hidden)
+        .expect("score");
     assert_eq!(results[0].selected, vec!["positive".to_string()]);
     assert!(results[0].scores.iter().all(|s| s.logit.is_finite()));
 }
 
 #[test]
 fn inputs_match_the_pinned_schema_marker_positions() {
-    let Some((_anchor, model)) = load_model() else { return };
+    let Some((_anchor, model)) = load_model() else {
+        return;
+    };
     let tasks = vec![case_intent()];
     let text = "Refund please";
     let encoded = model.encode_prompt(&tasks, text).expect("encode");
     let markers = &encoded.markers[0].positions;
     // One [P] (system prompt row) + one [L] per label. For "refund / other"
     // that's 3 marker rows. Decide pins the same shape.
-    assert_eq!(markers.len(), 3, "expected [P] + 2 [L] rows, got {:?}", markers);
+    assert_eq!(
+        markers.len(),
+        3,
+        "expected [P] + 2 [L] rows, got {:?}",
+        markers
+    );
     assert!(
         markers[0] < markers[1] && markers[1] < markers[2],
         "markers must be in declaration order: {:?}",

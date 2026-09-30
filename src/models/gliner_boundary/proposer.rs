@@ -42,20 +42,13 @@ pub struct BoundaryProposer<'a> {
 }
 
 impl<'a> BoundaryProposer<'a> {
-    pub fn load(
-        source: &'a dyn TensorSource,
-        hidden_size: usize,
-    ) -> Result<Self, String> {
+    pub fn load(source: &'a dyn TensorSource, hidden_size: usize) -> Result<Self, String> {
         let boundary_dim = source
-            .tensor_info(
-                "boundary_head.boundary_proposer.start_pair_projection.weight",
-            )
+            .tensor_info("boundary_head.boundary_proposer.start_pair_projection.weight")
             .ok_or("missing boundary_head.boundary_proposer.start_pair_projection.weight")?
             .dims[0] as usize;
         let q_dim = source
-            .tensor_info(
-                "boundary_head.boundary_proposer.start_query_projection.weight",
-            )
+            .tensor_info("boundary_head.boundary_proposer.start_query_projection.weight")
             .ok_or("missing boundary_head.boundary_proposer.start_query_projection.weight")?
             .dims[0] as usize;
         let _ = hidden_size;
@@ -205,8 +198,7 @@ impl<'a> BoundaryProposer<'a> {
                     &self.start_query_bias,
                     &mut gate[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim],
                 );
-                for v in &mut gate[b * q_count * boundary_dim + q * boundary_dim..]
-                    [..boundary_dim]
+                for v in &mut gate[b * q_count * boundary_dim + q * boundary_dim..][..boundary_dim]
                 {
                     *v = 1.0 / (1.0 + (-*v).exp()); // sigmoid
                 }
@@ -220,7 +212,8 @@ impl<'a> BoundaryProposer<'a> {
                     for k in 0..boundary_dim {
                         expanded[b * q_count * 2 * boundary_dim + q * 2 * boundary_dim + 2 * k] =
                             gate[b * q_count * boundary_dim + q * boundary_dim + k];
-                        expanded[b * q_count * 2 * boundary_dim + q * 2 * boundary_dim + 2 * k + 1] =
+                        expanded
+                            [b * q_count * 2 * boundary_dim + q * 2 * boundary_dim + 2 * k + 1] =
                             gate[b * q_count * boundary_dim + q * boundary_dim + k];
                     }
                 }
@@ -251,11 +244,10 @@ impl<'a> BoundaryProposer<'a> {
                     };
                     let gate_base = b * q_count * gate_stride + q * gate_stride;
                     for k in 0..boundary_dim {
-                        let s = start_all[b * boundary_len * boundary_dim
-                            + start_idx * boundary_dim
-                            + k];
-                        let e = end_all
-                            [b * boundary_len * boundary_dim + end_idx * boundary_dim + k];
+                        let s = start_all
+                            [b * boundary_len * boundary_dim + start_idx * boundary_dim + k];
+                        let e =
+                            end_all[b * boundary_len * boundary_dim + end_idx * boundary_dim + k];
                         let g = gate[gate_base + k];
                         dot += s * e * g;
                     }
@@ -306,8 +298,7 @@ impl RotaryBoundaryEmbedding {
                     let angle = (i as f32) * self.inv_freq[k];
                     let cos = angle.cos();
                     let sin = angle.sin();
-                    let even_idx =
-                        b * seq_len * dim + i * dim + 2 * k;
+                    let even_idx = b * seq_len * dim + i * dim + 2 * k;
                     let odd_idx = even_idx + 1;
                     let even = states[even_idx];
                     let odd = states[odd_idx];
@@ -354,12 +345,7 @@ fn load_weight<'a>(
     )))
 }
 
-fn apply_linear_full(
-    input: &[f32],
-    weight: &Weight<'_>,
-    bias: &[f32],
-    output: &mut [f32],
-) {
+fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
     if let Some(rows) = weight.kernel.f32_slice() {
         let n_in = input.len();
         let n_out = output.len();
@@ -368,7 +354,9 @@ fn apply_linear_full(
             output[out_index] = crate::ops::dot_f32(row, input, n_in) + bias[out_index];
         }
     } else {
-        weight.kernel.forward(input, output, weight.n_in, weight.n_out);
+        weight
+            .kernel
+            .forward(input, output, weight.n_in, weight.n_out);
         for (out, b) in output.iter_mut().zip(bias.iter()) {
             *out += *b;
         }

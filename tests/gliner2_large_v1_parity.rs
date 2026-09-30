@@ -113,7 +113,11 @@ fn matches_the_reference_stack() {
 
     let value = fixture();
     let cases = value["cases"].as_array().expect("cases");
-    assert!(cases.len() >= 6, "fixture looks truncated: {} cases", cases.len());
+    assert!(
+        cases.len() >= 6,
+        "fixture looks truncated: {} cases",
+        cases.len()
+    );
 
     for case in cases {
         let text = case["text"].as_str().expect("text");
@@ -203,9 +207,7 @@ fn input_ids_match_decide_byte_for_byte() {
     // the same (text, schema). This is a strong cross-variant regression:
     // if anyone touches the SentencePiece path / added-token mapping and
     // one variant drifts, this test fires before the per-variant goldens do.
-    let decide_path = std::path::Path::new(
-        "tests/fixtures/gliner2-decide/classify-golden.json",
-    );
+    let decide_path = std::path::Path::new("tests/fixtures/gliner2-decide/classify-golden.json");
     let large_path = std::path::Path::new(FIXTURE);
     if !decide_path.exists() || !large_path.exists() {
         return;

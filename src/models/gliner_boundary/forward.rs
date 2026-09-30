@@ -148,9 +148,7 @@ impl<'a> BoundaryEncoder<'a> {
             if source.tensor_info(&qkv_name).is_none() {
                 break;
             }
-            let head_dim = boundary_dim
-                / attention_num_heads(source, attn_index)
-                    .unwrap_or(4);
+            let head_dim = boundary_dim / attention_num_heads(source, attn_index).unwrap_or(4);
             // The qkv projection is `(3 * boundary_dim, boundary_dim)`.
             // We don't actually need head_dim here — the loader just reads
             // the weight matrix. The forward picks num_heads from config
@@ -330,14 +328,16 @@ impl<'a> BoundaryEncoder<'a> {
             // left[b, 1..len+1] = text_states[b, 0..len]
             let left_body = &mut left[b * boundary_len * hidden_size + hidden_size..];
             for i in 0..len {
-                left_body[i * hidden_size..(i + 1) * hidden_size]
-                    .copy_from_slice(&text_states[b * seq_len * hidden_size + i * hidden_size..][..hidden_size]);
+                left_body[i * hidden_size..(i + 1) * hidden_size].copy_from_slice(
+                    &text_states[b * seq_len * hidden_size + i * hidden_size..][..hidden_size],
+                );
             }
             // right[b, 0..len] = text_states[b, 0..len]
             let right_body = &mut right[b * boundary_len * hidden_size..];
             for i in 0..len {
-                right_body[i * hidden_size..(i + 1) * hidden_size]
-                    .copy_from_slice(&text_states[b * seq_len * hidden_size + i * hidden_size..][..hidden_size]);
+                right_body[i * hidden_size..(i + 1) * hidden_size].copy_from_slice(
+                    &text_states[b * seq_len * hidden_size + i * hidden_size..][..hidden_size],
+                );
             }
             // right[b, len] = eos_state (per-sample at the sample's final
             // valid boundary index, mirroring `shift_right_with_eos`).
@@ -355,13 +355,15 @@ impl<'a> BoundaryEncoder<'a> {
                     &left[b * boundary_len * hidden_size + i * hidden_size..][..hidden_size],
                     &self.left_projection,
                     &self.left_bias,
-                    &mut left_p[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &mut left_p[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                 );
                 apply_linear_full(
                     &right[b * boundary_len * hidden_size + i * hidden_size..][..hidden_size],
                     &self.right_projection,
                     &self.right_bias,
-                    &mut right_p[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &mut right_p[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                 );
             }
         }
@@ -381,7 +383,8 @@ impl<'a> BoundaryEncoder<'a> {
                     &combined,
                     &self.output_projection,
                     &self.output_bias,
-                    &mut states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+                    &mut states[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim],
                 );
             }
         }
@@ -393,14 +396,27 @@ impl<'a> BoundaryEncoder<'a> {
                 let base = b * boundary_len * boundary_dim + i * boundary_dim;
                 let row = states[base..base + boundary_dim].to_vec();
                 let mut out = vec![0.0f32; boundary_dim];
-                crate::ops::layer_norm(&row, &self.layer_norm.weight, &self.layer_norm.bias, 1e-5, &mut out);
+                crate::ops::layer_norm(
+                    &row,
+                    &self.layer_norm.weight,
+                    &self.layer_norm.bias,
+                    1e-5,
+                    &mut out,
+                );
                 states[base..base + boundary_dim].copy_from_slice(&out);
             }
         }
 
         // 4. attention blocks
         for block in &self.attention_blocks {
-            run_attention_block(&mut states, block, batch, boundary_len, boundary_dim, &text_lengths);
+            run_attention_block(
+                &mut states,
+                block,
+                batch,
+                boundary_len,
+                boundary_dim,
+                &text_lengths,
+            );
         }
 
         // 5. refinement blocks (SwiGLU)
@@ -422,7 +438,8 @@ impl<'a> BoundaryEncoder<'a> {
         for b in 0..batch {
             for i in 0..boundary_len {
                 if i > text_lengths[b] {
-                    let row = &mut states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+                    let row = &mut states[b * boundary_len * boundary_dim + i * boundary_dim..]
+                        [..boundary_dim];
                     for v in row.iter_mut() {
                         *v = 0.0;
                     }
@@ -481,9 +498,8 @@ fn load_weight<'a>(
 /// QKV bias tensor to declare `3 * boundary_dim`. If a future variant
 /// diverges here, this loader will trip on a shape mismatch.
 fn attention_num_heads(source: &dyn TensorSource, attn_index: usize) -> Option<usize> {
-    let qkv_bias_name = format!(
-        "boundary_head.boundary_encoder.attention_blocks.{attn_index}.qkv_projection.bias"
-    );
+    let qkv_bias_name =
+        format!("boundary_head.boundary_encoder.attention_blocks.{attn_index}.qkv_projection.bias");
     source.tensor_info(&qkv_bias_name).map(|info| {
         // QKV bias is `(3 * boundary_dim,)`. We don't know num_heads from
         // here; default 4 (boundary_attention_heads config default).
@@ -519,14 +535,16 @@ fn run_attention_block(
     let mut qkv = vec![0.0f32; batch * boundary_len * 3 * boundary_dim];
     for b in 0..batch {
         for i in 0..boundary_len {
-            let row_in = &states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+            let row_in =
+                &states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
             let normed = apply_norm_static(row_in, &block.norm.weight, &block.norm.bias, 1e-5);
             // qkv_projection: (3 * boundary_dim, boundary_dim), bias: (3 * boundary_dim,)
             apply_linear_full(
                 &normed,
                 &block.qkv_projection,
                 &block.qkv_bias,
-                &mut qkv[b * boundary_len * 3 * boundary_dim + i * 3 * boundary_dim..][..3 * boundary_dim],
+                &mut qkv[b * boundary_len * 3 * boundary_dim + i * 3 * boundary_dim..]
+                    [..3 * boundary_dim],
             );
         }
     }
@@ -545,15 +563,12 @@ fn run_attention_block(
                 let qkv_base = b * boundary_len * 3 * boundary_dim + i * 3 * boundary_dim;
                 // q at index 0, k at boundary_dim, v at 2 * boundary_dim
                 let head_offset = head * head_dim;
-                q[i * head_dim..(i + 1) * head_dim].copy_from_slice(
-                    &qkv[qkv_base + head_offset..][..head_dim],
-                );
-                k[i * head_dim..(i + 1) * head_dim].copy_from_slice(
-                    &qkv[qkv_base + boundary_dim + head_offset..][..head_dim],
-                );
-                v[i * head_dim..(i + 1) * head_dim].copy_from_slice(
-                    &qkv[qkv_base + 2 * boundary_dim + head_offset..][..head_dim],
-                );
+                q[i * head_dim..(i + 1) * head_dim]
+                    .copy_from_slice(&qkv[qkv_base + head_offset..][..head_dim]);
+                k[i * head_dim..(i + 1) * head_dim]
+                    .copy_from_slice(&qkv[qkv_base + boundary_dim + head_offset..][..head_dim]);
+                v[i * head_dim..(i + 1) * head_dim]
+                    .copy_from_slice(&qkv[qkv_base + 2 * boundary_dim + head_offset..][..head_dim]);
             }
             // attention scores (boundary_len, boundary_len) — masked with
             // the boundary validity mask + a diagonal self-attend fallback
@@ -572,8 +587,8 @@ fn run_attention_block(
             // Apply mask + diagonal (matches `BoundaryAttentionBlock.forward`).
             for i in 0..boundary_len {
                 for j in 0..boundary_len {
-                    let valid = mask[b * boundary_len + j]
-                        || (i == j && mask[b * boundary_len + i]);
+                    let valid =
+                        mask[b * boundary_len + j] || (i == j && mask[b * boundary_len + i]);
                     if !valid {
                         scores[i * boundary_len + j] = f32::NEG_INFINITY;
                     }
@@ -616,8 +631,14 @@ fn run_attention_block(
     let mut updated = vec![0.0f32; total];
     for b in 0..batch {
         for i in 0..boundary_len {
-            let row_in = &output[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
-            apply_linear_full(row_in, &block.output_projection, &block.output_bias, &mut updated[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim]);
+            let row_in =
+                &output[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+            apply_linear_full(
+                row_in,
+                &block.output_projection,
+                &block.output_bias,
+                &mut updated[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim],
+            );
         }
     }
     for b in 0..batch {
@@ -642,7 +663,8 @@ fn run_refinement_block(
     let mut updated = vec![0.0f32; total];
     for b in 0..batch {
         for i in 0..boundary_len {
-            let row_in = &states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
+            let row_in =
+                &states[b * boundary_len * boundary_dim + i * boundary_dim..][..boundary_dim];
             let normed = apply_norm_static(row_in, &block.norm.weight, &block.norm.bias, 1e-5);
             // input_projection: (2 * hidden_dim, boundary_dim)
             let mut gate_value = vec![0.0f32; 2 * block.hidden_dim];
@@ -660,7 +682,12 @@ fn run_refinement_block(
             }
             // output_projection: (boundary_dim, hidden_dim)
             let mut out = vec![0.0f32; boundary_dim];
-            apply_linear_full(&gate_value[..hidden_dim], &block.output_projection, &block.output_bias, &mut out);
+            apply_linear_full(
+                &gate_value[..hidden_dim],
+                &block.output_projection,
+                &block.output_bias,
+                &mut out,
+            );
             for kk in 0..boundary_dim {
                 updated[b * boundary_len * boundary_dim + i * boundary_dim + kk] = out[kk];
             }
@@ -669,7 +696,8 @@ fn run_refinement_block(
     for b in 0..batch {
         for i in 0..boundary_len {
             for kk in 0..boundary_dim {
-                states[b * boundary_len * boundary_dim + i * boundary_dim + kk] += updated[b * boundary_len * boundary_dim + i * boundary_dim + kk];
+                states[b * boundary_len * boundary_dim + i * boundary_dim + kk] +=
+                    updated[b * boundary_len * boundary_dim + i * boundary_dim + kk];
             }
         }
     }
@@ -681,12 +709,7 @@ fn apply_norm_static(input: &[f32], weight: &[f32], bias: &[f32], eps: f32) -> V
     out
 }
 
-fn apply_linear_full(
-    input: &[f32],
-    weight: &Weight<'_>,
-    bias: &[f32],
-    output: &mut [f32],
-) {
+fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &mut [f32]) {
     if let Some(rows) = weight.kernel.f32_slice() {
         let n_in = input.len();
         let n_out = output.len();
@@ -696,7 +719,9 @@ fn apply_linear_full(
         }
     } else {
         // Quantized path. Use Kernel::forward with a pre-allocated output.
-        weight.kernel.forward(input, output, weight.n_in, weight.n_out);
+        weight
+            .kernel
+            .forward(input, output, weight.n_in, weight.n_out);
         for (out, b) in output.iter_mut().zip(bias.iter()) {
             *out += *b;
         }

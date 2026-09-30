@@ -52,20 +52,27 @@ trait BoundaryEncodingExt {
     fn boundary_len(&self) -> usize;
 }
 impl BoundaryEncodingExt for BoundaryEncoding {
-    fn boundary_len(&self) -> usize { self.seq_len + 1 }
+    fn boundary_len(&self) -> usize {
+        self.seq_len + 1
+    }
 }
 
 #[test]
 fn matches_the_reference_stack() {
-    let Some((_anchor, model)) = loaded_model() else { return };
-    let raw = std::fs::read_to_string(FIXTURE)
-        .unwrap_or_else(|_| panic!("missing {FIXTURE}; regenerate with dump_pair_scorer_limited.py"));
+    let Some((_anchor, model)) = loaded_model() else {
+        return;
+    };
+    let raw = std::fs::read_to_string(FIXTURE).unwrap_or_else(|_| {
+        panic!("missing {FIXTURE}; regenerate with dump_pair_scorer_limited.py")
+    });
     let fixture: serde_json::Value =
         serde_json::from_str(&raw).expect("parse pair-scorer-limited-golden.json");
 
     let hidden_size = model.config.n_embd;
     let seq_len = fixture["config"]["seq_len"].as_u64().expect("seq_len") as usize;
-    let valid_tokens = fixture["config"]["valid_tokens"].as_u64().expect("valid_tokens") as usize;
+    let valid_tokens = fixture["config"]["valid_tokens"]
+        .as_u64()
+        .expect("valid_tokens") as usize;
     let q_count = fixture["config"]["q_count"].as_u64().expect("q_count") as usize;
     let c_count = fixture["config"]["c_count"].as_u64().expect("c_count") as usize;
     let batch: usize = 1;

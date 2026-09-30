@@ -21,9 +21,7 @@
 //! loading here so the classifier branch can diverge, and to avoid
 //! pulling Decide's ``classifier.2.*`` requirement into the loader API.
 
-use crate::core::tensor::{
-    load_f32_tensor, MetaValue, TensorInfo, TensorSource, GGMLType,
-};
+use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorInfo, TensorSource};
 use crate::models::gliner::compute::EncoderConfig;
 use crate::models::gliner::weights::{LayerWeights, Norm};
 use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -83,12 +81,10 @@ impl<'a> BoundaryModel<'a> {
             ));
         }
         let bucket_size = meta_usize(source, "gliner2.relative_attention.bucket_size")?;
-        let max_relative =
-            meta_usize(source, "gliner2.relative_attention.max_relative_positions")?;
+        let max_relative = meta_usize(source, "gliner2.relative_attention.max_relative_positions")?;
         let norm_rel_embeddings = meta_bool(source, "gliner2.norm_rel_embeddings")?;
         let vocab_size = meta_usize(source, "gliner2.vocab_size")?;
-        let classifier_intermediate =
-            meta_usize(source, "gliner2.classifier.intermediate_size")?;
+        let classifier_intermediate = meta_usize(source, "gliner2.classifier.intermediate_size")?;
         if classifier_intermediate != n_embd * 2 {
             return Err(format!(
                 "classifier.intermediate_size {classifier_intermediate} != n_embd * 2 ({n_embd} * 2)"
@@ -117,7 +113,12 @@ impl<'a> BoundaryModel<'a> {
         let encoder = load_encoder(source, n_layer, n_embd, n_head, n_ff, bucket_size * 2)?;
 
         // 5. Boundary classifier (layers 0 and 3)
-        let classifier_0 = load_weight(source, "classifier.0.weight", n_embd, classifier_intermediate)?;
+        let classifier_0 = load_weight(
+            source,
+            "classifier.0.weight",
+            n_embd,
+            classifier_intermediate,
+        )?;
         let classifier_0_bias = load_vec(source, "classifier.0.bias", classifier_intermediate)?;
         let classifier_3 = load_weight(source, "classifier.3.weight", classifier_intermediate, 1)?;
         let classifier_3_bias = load_vec(source, "classifier.3.bias", 1)?;
@@ -290,18 +291,10 @@ fn load_encoder<'a>(
     // classifier_2 fields. We never read them — the real classifier lives
     // at index 3 in BoundaryModel. Build two separate stubs because
     // ``Weight`` is not ``Copy``.
-    let stub_0 = Weight::from_quantized(QuantizedTensor::from_bytes(
-        &[0u8; 4],
-        GGMLType::F32,
-        1,
-        1,
-    ));
-    let stub_2 = Weight::from_quantized(QuantizedTensor::from_bytes(
-        &[0u8; 4],
-        GGMLType::F32,
-        1,
-        1,
-    ));
+    let stub_0 =
+        Weight::from_quantized(QuantizedTensor::from_bytes(&[0u8; 4], GGMLType::F32, 1, 1));
+    let stub_2 =
+        Weight::from_quantized(QuantizedTensor::from_bytes(&[0u8; 4], GGMLType::F32, 1, 1));
 
     Ok(crate::models::gliner::weights::ModelWeights {
         token_embd,
