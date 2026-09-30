@@ -413,6 +413,7 @@ Worker 的 `my_epoch` 必须从 `0` 初始化，**不能**读 `inner.epoch.load(
 
 * [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — 模型 `trunk/` + sibling 目录结构与依赖方向
 * [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"矩阵
+* [`SERVER_BACKEND_SELECTION.md`](SERVER_BACKEND_SELECTION.md) — server 的 `Backend` 选择：哪些靠 flag、哪些靠 GGUF 元数据探测，以及新增后端时怎么判断
 * [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + Ephemeral/Timed/Persistent 生命周期
 * [`GGUFRS.md`](GGUFRS.md) — `.ggufrs` 物理布局
 * [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md) — "标量为底 + 后端注册表"原则

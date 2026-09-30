@@ -96,6 +96,12 @@ impl JevScorer for LlamaJevScorer {
             )
         } else if self.arch == "nanbeige" {
             format!("{system}\n\n{payload}\n\nAnswer:")
+        } else if self.arch == "exaone" {
+            // EXAONE-3.5 instruct template: `[|user|]{payload}[|endofturn|]\n[|assistant|]`
+            // (matches ChatTemplate::Exaone / the CLI's llama_turn_text).
+            format!(
+                "[|system|]{system}[|endofturn|]\n[|user|]{payload}[|endofturn|]\n[|assistant|]"
+            )
         } else if self.arch == "phi3" {
             // Phi-3 / Phi-4: single-turn `<|user|>…<|end|><|assistant|>`
             // with no system role. `payload` already folds system +

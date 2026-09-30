@@ -28,6 +28,17 @@ pub struct CliOptions {
     pub output: Option<PathBuf>,
     pub model: PathBuf,
     pub mmproj: Option<PathBuf>,
+    /// CLM projection-head GGUF. Pairs with `--model` (the encoder) and
+    /// only means anything together with `--jev`.
+    pub clm_head: Option<PathBuf>,
+    /// Score with a GLiNER2.5-Decide encoder+head model instead of a
+    /// label-logit scorer. Pairs with `--model` and `--jev`; the model
+    /// itself carries the classifier, so there is no side-car flag.
+    pub gliner2_decide: bool,
+    /// `classify_text`-shaped task mapping, e.g.
+    /// `{"intent":["a","b"],"aspects":{"labels":[...],"multi_label":true}}`.
+    /// Defaults to one task built from `--jev-question` + `--jev-option`.
+    pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,

@@ -29,11 +29,13 @@ pub use diffusion::{
     write_png_atomically, QwenImage21Request,
 };
 pub use jev::{
-    build_grouped_payload, build_grouped_system, build_jev_inputs, image_supported_arch,
-    jev_payload_json, jev_system_prompt, prepare_jev_grouped_questions, prepare_jev_questions,
-    run_jev_decision, run_jev_decision_data, run_jev_grouped_decision,
-    run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
-    JevQuestionInput, JevResult,
+    build_grouped_payload, build_grouped_system, build_jev_inputs, gliner2_schema,
+    image_supported_arch, jev_payload_json, jev_system_prompt, load_gliner2_source, parse_schema,
+    prepare_jev_grouped_questions, prepare_jev_questions, run_clm_decision, run_clm_scoring,
+    run_gliner2_decision, run_gliner2_scoring, run_jev_decision, run_jev_decision_data,
+    run_jev_grouped_decision, run_jev_grouped_decision_data, schema_from_label_sets,
+    schema_from_questions, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
+    JevQuestionInput, JevResult, LabelSet,
 };
 pub use media::{validate_mmproj_capabilities, MediaKind, ProjectorFamily};
 pub use omni::run_omni_embedding;
@@ -75,7 +77,7 @@ pub fn compute_embedding(
         "gemma-embedding" => {
             crate::models::gemma_embedding::compute_embedding(source, prompt, n_threads_arg)
         }
-        "bert" | "jina-bert-v2" => {
+        "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
             crate::models::bert_family::compute_embedding(source, prompt, n_threads_arg)
         }
         _ => qwen3_compute_embedding(source, prompt, n_threads_arg),
@@ -98,13 +100,15 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
-        "bert" | "jina-bert-v2" => crate::models::bert_family::run_embedding(
-            source,
-            prompt,
-            n_threads_arg,
-            kv_format,
-            output,
-        ),
+        "bert" | "jina-bert-v2" | "nomic-bert" | "nomic-bert-moe" => {
+            crate::models::bert_family::run_embedding(
+                source,
+                prompt,
+                n_threads_arg,
+                kv_format,
+                output,
+            )
+        }
         _ => qwen3_run_embedding(source, prompt, n_threads_arg, kv_format, output),
     }
 }
@@ -128,6 +132,18 @@ pub fn open_or_exit(path: &Path, role: ComponentRole) -> Box<dyn TensorSource> {
         );
         std::process::exit(1);
     })
+}
+
+/// Unwrap a startup-time value or exit with the usual error prefix, for the
+/// call sites inside a `match` that already returned.
+pub fn unwrap_or_exit<T>(result: Result<T, String>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Inference error: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn run_or_exit(result: Result<(), String>) {

@@ -1,5 +1,6 @@
 pub mod api;
 mod rerank;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -50,6 +51,36 @@ enum Backend {
     Asr(AsrBackend),
     Tts(TtsBackend),
     Rerank(RerankBackend),
+    Clm(ClmBackend),
+    Gliner2(Gliner2Backend),
+}
+
+/// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
+/// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
+/// caller-supplied label set, so it exposes the JEV score route and nothing
+/// else.  The SentencePiece tokenizer is built once here; the model itself is
+/// zero-copy views over the mapping and is cheap to rebuild per request.
+struct Gliner2Backend {
+    source: Box<dyn TensorSource>,
+    tokenizer: crate::core::sentencepiece::SentencePieceTokenizer,
+    n_threads: usize,
+}
+
+/// CLM backend: a Qwen3 encoder plus the projection-head GGUF named by
+/// `--clm-head`.  Scores candidates by cosine in projection space, so it
+/// exposes the JEV score route and nothing else.
+struct ClmBackend {
+    /// Kept so the JEV plumbing can hand out an `Arc<dyn TensorSource>`
+    /// the same way it does for `TextBackend`.
+    source: Arc<dyn TensorSource>,
+    /// Leaked for the same reason as `RerankBackend::model`:
+    /// `Qwen3Session` wants a `&'static` model.
+    model: Arc<&'static Qwen3Model>,
+    /// Owned, no borrow: the loader copies the weights out.
+    heads: crate::models::clm::ClmHeads,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
 }
 
 struct RerankBackend {
@@ -98,6 +129,7 @@ unsafe impl Sync for TextBackend {}
 
 struct EmbeddingBackend {
     source: Arc<dyn TensorSource>,
+    mmproj_path: Option<PathBuf>,
 }
 
 struct AsrBackend {
@@ -134,9 +166,32 @@ struct ModelInfo {
 struct EmbeddingRequest {
     #[serde(default)]
     model: Option<String>,
-    input: serde_json::Value,
+    /// Text inputs for the text-only embedding path. Optional when
+    /// `audio`/`image`/`video` is present (multimodal path).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
     #[serde(default)]
     encoding_format: Option<String>,
+    /// Optional base64-encoded audio bytes for multimodal embedding
+    /// (jina-v5-omni / qwen3-omni with audio mmproj). When present,
+    /// the server routes through `run_omni_embedding` instead of the
+    /// text-only path. The byte payload may be raw audio (decoded by
+    /// `ffmpeg` via the same WAV/MP3/FLAC/OGG/M4A/OPUS path as the
+    /// CLI `--audio` flag).
+    #[serde(default)]
+    audio: Option<String>,
+    /// Same as `Optional base64-encoded image for multimodal
+    /// embedding. Accepts raw image bytes (jpg/png/webp/...).
+    #[serde(default)]
+    image: Option<String>,
+    /// Optional base64-encoded video bytes. Decoded by ffprobe/ffmpeg.
+    #[serde(default)]
+    video: Option<String>,
+    /// Optional prompt string used as the LLM-side system turn for
+    /// multimodal embedding (e.g. "Query: ..." vs "Respond this
+    /// document ..."). Defaults to "" when omitted.
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -236,9 +291,130 @@ async fn embeddings(
         )
             .into_response();
     };
+    // Multimodal path: any of audio/image/video routes the request
+    // through `run_omni_embedding`, which needs mmproj + a temp file
+    // path for the media blob. mmproj is required here (matching the
+    // CLI `--mmproj` requirement).
+    let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
+    if has_media {
+        let Some(mmproj_path) = backend.mmproj_path.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Multimodal embedding requires --mmproj on server startup".into(),
+                }),
+            )
+                .into_response();
+        };
+        let media_count = usize::from(req.audio.is_some())
+            + usize::from(req.image.is_some())
+            + usize::from(req.video.is_some());
+        if media_count != 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Exactly one of audio/image/video may be set per request".into(),
+                }),
+            )
+                .into_response();
+        }
+        let media_b64 = req
+            .audio
+            .as_ref()
+            .or(req.image.as_ref())
+            .or(req.video.as_ref())
+            .cloned()
+            .unwrap();
+        let ext = if req.audio.is_some() {
+            "wav"
+        } else if req.image.is_some() {
+            "jpg"
+        } else {
+            "mp4"
+        };
+        let prompt = req.prompt.unwrap_or_default();
+        let source = backend.source.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            let temp_path = std::env::temp_dir().join(format!(
+                "rmi-media-{}.{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+                ext
+            ));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(media_b64.trim())
+                .map_err(|error| format!("Invalid base64 media payload: {error}"))?;
+            std::fs::write(&temp_path, &bytes)
+                .map_err(|error| format!("Failed to write media temp file: {error}"))?;
+            let image_path = if req.image.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let video_path = if req.video.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let audio_path = if req.audio.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let result = crate::app::run_omni_embedding(
+                source.as_ref(),
+                &mmproj_path,
+                image_path,
+                video_path,
+                audio_path,
+                &prompt,
+                0,
+            );
+            let _ = std::fs::remove_file(&temp_path);
+            let embedding = result?;
+            Ok::<_, String>(EmbeddingObject {
+                object: "embedding".to_string(),
+                embedding,
+                index: 0,
+            })
+        })
+        .await
+        {
+            Ok(Ok(object)) => vec![object],
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("embedding worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let total_tokens: usize = result.len();
+        let response = EmbeddingResponse {
+            object: "list".to_string(),
+            data: result,
+            model: state.model_name.clone(),
+            usage: EmbeddingUsage {
+                prompt_tokens: total_tokens,
+                total_tokens,
+            },
+        };
+        return (StatusCode::OK, Json(response)).into_response();
+    }
     let inputs: Result<Vec<String>, String> = match req.input {
-        serde_json::Value::String(text) => Ok(vec![text]),
-        serde_json::Value::Array(items) => items
+        Some(serde_json::Value::String(text)) => Ok(vec![text]),
+        Some(serde_json::Value::Array(items)) => items
             .into_iter()
             .map(|item| {
                 item.as_str()
@@ -246,7 +422,8 @@ async fn embeddings(
                     .ok_or_else(|| "embedding input must be string or array of strings".to_string())
             })
             .collect(),
-        _ => Err("embedding input must be string or array of strings".into()),
+        Some(_) => Err("embedding input must be string or array of strings".into()),
+        None => Err("embedding input is required when audio/image/video are not set".into()),
     };
     let inputs = match inputs {
         Ok(value) => value,
@@ -657,14 +834,36 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         let source = open_or_exit(&options.model, ComponentRole::Llm);
         return Ok(Arc::new(Backend::Embedding(EmbeddingBackend {
             source: Arc::from(source),
+            mmproj_path: options.mmproj.clone(),
         })));
     }
     // Cross-encoder rerank detection: a GGUF that carries
     // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
     // rerank model. Detected by metadata peek BEFORE the full Text
     // build (which would load unrelated multimodal state).
+    //
+    // This is the only metadata-probed backend in this function; the others are
+    // flag-driven. Why they differ — and why adding a probe is usually the wrong
+    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) {
+        // The probe outranks the flag-driven backends below, so a caller
+        // who explicitly selected one of them would have it silently
+        // dropped (their flag ignored, the rerank backend served).
+        // Error out instead: the model file and the flag disagree, and
+        // neither resolution is obviously what the caller wanted.
+        if let Some(error) = rerank_probe_flag_conflict(options) {
+            return Err(error);
+        }
         return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
+    }
+    // CLM is opted into rather than detected: the encoder is an ordinary
+    // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
+    // that makes it a CLM backend.
+    if options.clm_head.is_some() {
+        return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
+    }
+    if options.gliner2_decide {
+        return Ok(Arc::new(Backend::Gliner2(build_gliner2(options)?)));
     }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
 }
@@ -674,6 +873,42 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 /// `<arch>.pooling_type = 4` AND a `cls.output.weight` tensor is
 /// present. Done as a quick metadata probe without holding the file
 /// open.
+/// When the rerank metadata probe fires, the caller may still have
+/// explicitly selected a different backend with a flag. The probe
+/// outranks those backends in `build_backend`, so honoring it would
+/// silently drop the flag. Returns the error message to surface
+/// instead, or `None` when the flags are compatible with rerank.
+///
+/// Pure function of `CliOptions` so the dispatch table can be unit
+/// tested without a GGUF on disk. See
+/// `docs/develop/SERVER_BACKEND_SELECTION.md`.
+fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
+    let model = options.model.display();
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
+    if let Some(head) = &options.clm_head {
+        return Some(format!(
+            "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
+             would be dropped. Pass a plain Qwen3 encoder as --model instead",
+            head.display()
+        ));
+    }
+    if options.gliner2_decide {
+        return Some(format!(
+            "--gliner2-decide selects the GLiNER2 backend, but {reranker}; the probe wins \
+             and the flag would be dropped. GLiNER2 needs a DeBERTa GGUF as --model"
+        ));
+    }
+    if let Some(mmproj) = &options.mmproj {
+        return Some(format!(
+            "--mmproj selects multimodal chat, but {reranker}; the probe wins and {} would \
+             be dropped. Pass a chat-capable Qwen3 GGUF as --model instead",
+            mmproj.display()
+        ));
+    }
+    None
+}
+
 fn is_rerank_gguf(path: &std::path::Path) -> bool {
     use crate::MetaValue;
     let loader = match crate::GGUFLoader::from_file(path) {
@@ -719,6 +954,71 @@ fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
         tokenizer,
         prefill_batch_size,
         context_length,
+    })
+}
+
+fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(Arc::clone(&source), Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    let arch = model.config().architecture.clone();
+    if arch != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
+        ));
+    }
+    // TODO(clm): the heads are encoder-locked, so a quantised base encoder
+    // shifts every score -- functionally fine, but not comparable to the
+    // paper's numbers.  Warn here instead of refusing, since a low-memory
+    // setup may legitimately want a Q4_K_M encoder.
+    let context_length = model.config().n_ctx;
+
+    let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
+    let head_source: Box<dyn TensorSource> = open_or_exit(&head_path, ComponentRole::Llm);
+    let heads = crate::models::clm::ClmHeads::from_source(head_source.as_ref())
+        .map_err(|e| format!("load CLM heads from {}: {e}", head_path.display()))?;
+    if model.config().n_embd != heads.encoder_dim() {
+        return Err(format!(
+            "encoder hidden size {} does not match the CLM heads (expected {})",
+            model.config().n_embd,
+            heads.encoder_dim()
+        ));
+    }
+
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(ClmBackend {
+        source,
+        model: Arc::new(model),
+        heads,
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
+}
+
+fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
+    let (source, tokenizer) = crate::app::load_gliner2_source(&options.model)?;
+    // Validate the whole contract once at startup rather than per request.
+    crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+        source.as_ref(),
+        tokenizer.clone(),
+    )
+    .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
+    Ok(Gliner2Backend {
+        source,
+        tokenizer,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
     })
 }
 
@@ -1026,6 +1326,8 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
+        Backend::Clm(_) => "clm",
+        Backend::Gliner2(_) => "gliner2",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1044,7 +1346,10 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
-        Backend::Embedding(_) => router.route("/v1/embeddings", post(embeddings)),
+        Backend::Embedding(_) => router.route(
+            "/v1/embeddings",
+            post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
         Backend::Asr(_) => router
             .route(
                 "/v1/audio/transcriptions",
@@ -1053,6 +1358,15 @@ pub fn run_server() {
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
+        // CLM scores by cosine, so only the single-question route applies.
+        // Grouped does a per-group softmax that has no cosine analogue,
+        // and the image routes need a vision encoder the heads never saw.
+        // GLiNER2 and CLM both score a caller-supplied label set on one
+        // encoder pass, so the single-question route covers them; grouped mode
+        // (per-group softmax) and the image routes do not apply.
+        Backend::Clm(_) | Backend::Gliner2(_) => {
+            router.route("/v1/jev/score", post(api::jev_score))
+        }
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 
@@ -1095,7 +1409,15 @@ mod tests {
 
 #[cfg(test)]
 mod server_mode_tests {
-    use super::{reject_unsupported_server_modes, CliOptions};
+    use super::{reject_unsupported_server_modes, rerank_probe_flag_conflict, CliOptions};
+    use std::path::PathBuf;
+
+    fn options_with(model: &str) -> CliOptions {
+        CliOptions {
+            model: PathBuf::from(model),
+            ..CliOptions::default()
+        }
+    }
 
     #[test]
     fn dreamx_is_rejected_before_backend_construction() {
@@ -1107,5 +1429,60 @@ mod server_mode_tests {
         assert!(reject_unsupported_server_modes(&options)
             .unwrap_err()
             .contains("--dreamx"));
+    }
+
+    #[test]
+    fn rerank_probe_conflict_is_silent_for_plain_rerank_invocation() {
+        // The documented happy path: no other backend flag, so the probe
+        // owns the dispatch and nothing is dropped.
+        assert!(rerank_probe_flag_conflict(&options_with("Qwen3-Reranker.gguf")).is_none());
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_clm_head() {
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(error.contains("heads.gguf"), "{error}");
+        assert!(error.contains("Qwen3-Reranker.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_gliner2_decide() {
+        let options = CliOptions {
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--gliner2-decide"), "{error}");
+        assert!(error.contains("DeBERTa"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_mmproj() {
+        let options = CliOptions {
+            mmproj: Some(PathBuf::from("vision.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--mmproj"), "{error}");
+        assert!(error.contains("vision.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_reports_first_conflicting_flag_only() {
+        // clm_head is checked first; a caller who set both should still
+        // get one actionable message rather than a concatenated wall.
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(!error.contains("--gliner2-decide"), "{error}");
     }
 }

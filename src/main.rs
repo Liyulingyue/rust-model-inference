@@ -6,14 +6,14 @@ use rust_model_inference::format::ggufrs::ComponentRole;
 use rust_model_inference::models::diffusion::qwen_image_2_1::{
     matches_signature, DEFAULT_LATENT_SIDE, DEFAULT_TIMESTEP,
 };
+use rust_model_inference::models::qwen3::embedding::print_embedding;
 use rust_model_inference::open_model_source;
 use rust_model_inference::ops;
 use rust_model_inference::DreamXConfig;
 use rust_model_inference::MetaValue;
 use rust_model_inference::TensorSource;
 
-const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]";
-
+const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     DreamX,
@@ -318,7 +318,8 @@ fn main() {
     }
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
-        app::run_or_exit(app::run_omni_embedding(
+        let started = std::time::Instant::now();
+        let embedding = match app::run_omni_embedding(
             source.as_ref(),
             explicit_mmproj.expect("validated media embedding mmproj"),
             image,
@@ -326,8 +327,18 @@ fn main() {
             audio,
             prompt,
             options.threads,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Inference error: {error}");
+                std::process::exit(1);
+            }
+        };
+        print_embedding(
+            &embedding,
             options.embedding_output,
-        ));
+            started.elapsed().as_millis(),
+        );
         return;
     }
 
@@ -418,6 +429,67 @@ fn main() {
             options.effective_max_context(),
             options.effective_repetition_penalty(),
         ));
+    } else if options.jev && options.gliner2_decide {
+        // GLiNER2.5-Decide: the encoder and the classifier live in one GGUF, so
+        // --model alone selects it. The task mapping comes from
+        // --gliner2-schema, or from --jev-question + --jev-option so the plain
+        // A/B/C shell still works. `build_jev_inputs` is not used: it insists
+        // on a --jev-question, which --gliner2-schema does not need.
+        let context = match options.jev_context.clone() {
+            Some(context) => context,
+            None => {
+                app::run_or_exit(Err("--jev requires --jev-context <text>".into()));
+                unreachable!()
+            }
+        };
+        if options.gliner2_schema.is_none() && options.jev_questions.is_empty() {
+            app::run_or_exit(Err(
+                "--gliner2-decide needs --gliner2-schema, or at least one --jev-option".to_string(),
+            ));
+        }
+        let questions: Vec<app::JevQuestionInput> = options
+            .jev_questions
+            .iter()
+            .map(|question| app::JevQuestionInput {
+                text: question.text.clone(),
+                options: question.options.clone(),
+            })
+            .collect();
+        let schema = app::unwrap_or_exit(app::gliner2_schema(&options, &questions));
+        let tasks = app::unwrap_or_exit(
+            app::parse_schema(&schema).map_err(|error| format!("--gliner2-schema: {error}")),
+        );
+        app::run_or_exit(app::run_gliner2_decision(
+            source,
+            &tasks,
+            &context,
+            options.threads,
+            options.jev_output_json,
+        ));
+    } else if options.jev && options.clm_head.is_some() {
+        // CLM: one encoder + a projection-head file, scored by cosine
+        // instead of a label logit.  Same --jev flag family, so the
+        // surface does not fork.
+        let head = options.clm_head.clone().unwrap();
+        match app::build_jev_inputs(&options) {
+            Ok(Some(app::JevInputs::Grouped {
+                context, questions, ..
+            })) => app::run_or_exit(Err(
+                "--clm-head does not support --jev-multi / --jev-block".to_string()
+            )),
+            Ok(Some(app::JevInputs::Single {
+                context, questions, ..
+            })) => app::run_or_exit(app::run_clm_decision(
+                source,
+                &head,
+                &context,
+                &questions,
+                options.threads,
+                options.jev_output_json,
+            )),
+            Ok(None) => app::run_or_exit(Err("--jev requires --jev-context".into())),
+            Err(e) => app::run_or_exit(Err(e)),
+        }
     } else if options.jev {
         match app::build_jev_inputs(&options) {
             Ok(Some(app::JevInputs::Grouped {
@@ -464,6 +536,18 @@ fn main() {
                 return;
             }
         }
+        return;
+    } else if options.embedding && prompt.is_empty() {
+        // An empty `--prompt` under `--embedding` used to fall through this
+        // whole chain into `run_interactive`, which then blocked on stdin and
+        // exited 0 having printed nothing but the interactive banner. An
+        // embedding model has no interactive mode, so make it an error instead
+        // of a silent mode switch.
+        app::run_or_exit(Err(
+            "--embedding requires a non-empty --prompt (interactive mode is not \
+             available for embedding models)"
+                .into(),
+        ));
         return;
     } else if !prompt.is_empty() {
         if matches!(arch, "qwen35" | "edge0") {

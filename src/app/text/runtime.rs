@@ -153,6 +153,10 @@ pub fn build_text_runtime(
         Ok(Box::new(HybridTextRuntime::new(options)?))
     } else if arch == "lfm2moe" {
         Ok(Box::new(Lfm2MoeTextRuntime::new(options)?))
+    } else if arch == "falcon-h1" {
+        Ok(Box::new(
+            crate::models::falcon_h1::runtime::FalconH1TextRuntime::new(options)?,
+        ))
     } else {
         Err(format!("No TextRuntime adapter for architecture {arch}"))
     }

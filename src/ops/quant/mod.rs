@@ -62,18 +62,23 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
 pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
+    // AVX2 path requires n % QK_K == 0 (uses 256-wide SIMD lanes); fall back
+    // to scalar for non-block-aligned inputs (GLM-4 ffn_down is 13696 =
+    // 53*256 + 128, ffn_gate/up are aligned but ffn_down is not). The
+    // scalar path zero-pads the partial tail per commit bb81dd1.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         return unsafe { quantize_row_q8_k_avx2(x) };
     }
     quantize_row_q8_k_scalar(x)
 }
 
 pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     debug_assert!(buf.len() >= nb);
+    // Same dispatch: AVX2 requires block-aligned lengths.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         unsafe { quantize_row_q8_k_avx2_into(x, buf) };
         return;
     }

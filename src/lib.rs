@@ -21,7 +21,7 @@ pub use core::model::ModelGraph;
 pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32, KvLifecycle};
 pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 pub use core::thread_pool::ComputePool;
-pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
+pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder, UgmError, UgmTokenizer};
 pub use core::traits::{ExecContext, Layer, ModelConfig};
 pub use format::ggufrs::{
     export_ggufrs, open_model_source, ComponentInfo, ComponentRole, ExportOptions, GgufrsError,

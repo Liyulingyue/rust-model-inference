@@ -1,7 +1,7 @@
 # TODO — RustModelInference Roadmap
 
 This document merges the legacy `docs/TODO.md` (deep-dive format with
-TODO-001…TODO-011…TODO-012…TODO-013) and the roadmap-style `docs/develop/TODO.md`
+TODO-001…TODO-016) and the roadmap-style `docs/develop/TODO.md`
 (checklist of upcoming work). The bottom half carries the detailed
 investigation notes; the top half carries the at-a-glance priority list.
 
@@ -637,6 +637,212 @@ HTTP 路径**已经完整**（PR #118 + `da6bbcb` + 后续）—— 缺的是 CL
 - `src/app/cli/parse.rs` — 加 `--system` CLI flag
 - `src/main.rs` — interactive dispatch 把 `options.thinking` 透传
 - `tests/cli_history.rs`（新）— 多轮 history 一致性测试
+
+---
+
+### TODO-014: Falcon-H1 Q4_K_M 加载 panic — ✅ 已修复 (2026-09-29)
+
+#### 现象
+
+`unsloth/Falcon-H1-1.5B-Instruct-GGUF` 的 **Q4_K_M**（以及任何把 `attn_v` /
+`ffn_down` 打成 Q6_K 的量化：Q5_K_M / Q6_K / UD-* 等）在 prefill 阶段 panic：
+
+```
+thread 'main' panicked at src/ops/kernel/q6_k.rs:79
+range start index 1290240 out of range for slice of length 430080
+```
+
+`430080 = 256 rows × 1680 B` 正是 `blk.0.attn_v.weight`（dims `[2048, 256]` Q6_K）
+的真实体积，而 kernel 却按 `n_out = 1024` 切分行索引（`out_idx = 768` × 4 线程）。
+Q8_0 模型不受影响，因为 unsloth 在该量化下把所有 attn 张量都打成 Q8_0。
+
+#### 根因
+
+Falcon-H1 的 attention 是 **GQA**，三个维度的 head 数不同：
+
+| 张量 | GGUF dims | 语义 | 代码里当时的值 |
+|---|---|---|---|
+| `attn_q.weight` | [2048, **1024**] | `n_head * head_dim_k` (8×128) | 1024 ✓ |
+| `attn_k.weight` | [2048, **256**] | `n_head_kv * head_dim_k` (2×128) | 256 ✓ |
+| `attn_v.weight` | [2048, **256**] | `n_head_kv * head_dim_v` (2×128) | **1024 ✗** |
+| `attn_output.weight` | [**1024**, 2048] | `n_head * head_dim_v` (concat 后) | **256 ✗** |
+
+`forward.rs` 当时把 `n_attn_v` 定义成 `n_head * head_dim_v`（=1024，
+"concat 输出"维度），并用它同时驱动：
+
+1. V matmul 的 `n_out`（应为 256 → 越界 panic），
+2. V KV-cache / f16 cache 的行 stride（应为 256），
+3. `w_o` matmul 的 `n_in`（应为 1024）。
+
+`weights.rs::load_weight` 用的是 `n_head_kv * n_embd_head_v`（=256，正确），
+所以维度校验通过、加载不报错，直到 forward 时 kernel 才越界。
+
+#### 修复
+
+`src/models/falcon_h1/trunk/forward.rs` 把 `n_attn_v` 拆成两个名字：
+
+- `n_attn_v_kv = n_head_kv * head_dim_v` — V projection 输出、V cache、
+  `v_f16_storage` stride、`v_col` 索引；
+- `n_attn_o = n_head * head_dim_v` — `attn_out` 缓冲区、`w_o` matmul 的 `n_in`。
+
+`n_attn_q` / `n_attn_kv` 不变。`FalconH1Scratch::new` 的 `v` / `v_buf` /
+`attn_out` 分配分别改用 `n_attn_v_kv` 与 `n_attn_o`。
+
+#### 验证
+
+本地 `Falcon-H1-1.5B-Instruct-Q4_K_M.gguf`，8 线程，`--max-context 512`，greedy：
+
+| prompt | 输出 |
+|---|---|
+| `What is the capital of France? Answer with just the city name.` | `Paris` |
+| `What is 2+2? Answer with just the number.` | `4` |
+| `Name one color in the rainbow.` | `Red` |
+| `用中文回答：什么是机器学习？` | 中文 ML 解释（流畅，未截断） |
+
+速度 26–28 t/s prompt、24–25 t/s generation。lib 测试 934 passed /
+19 failed（= 之前修完 3 条 baseline 后的水平，无新增）。
+
+#### 遗留 / 后续
+
+- **未做** bitwise llama.cpp oracle 对比（Q4_K_M 精度基线）。`tests/falcon_h1_q8.rs`
+  目前只 gate 在 Q8_0 模型上；Q4_K_M 若要纳入 sentinel，需要新增
+  `RMI_FALCON_H1_Q4K_M_MODEL` env 并记录 golden。
+- Q4_K_M 的 `ffn_down` 也是 Q6_K，已随本次修复一同跑通。
+- **3B 变体已实测**（2026-09-29，`Falcon-H1-3B-Instruct-Q4_K_M.gguf`）：config
+   `n_embd=2560 / n_head=10 / n_head_kv=2 / head_dim=128` → `group_size=5`
+   （1.5B 是 4），`attn_v`/`ffn_down` 同为 Q6_K。同一修复代码零改动跑通，
+   Paris / 4 / red / 中文 ML 四例全对，13-14 t/s @ 8 线程。
+
+---
+
+### TODO-015: arch 接入的"公共层报到"问题 — 设计记录，暂不实施
+
+#### 起因
+
+`Falcon-H1` 适配 CLI 后用 `/v1/chat/completions` 失败：
+
+```
+Architecture "falcon-h1" is not supported by the server text endpoints
+```
+
+排查发现一个 arch 要为**三个公共入口各报到一次**，且漏了不报错：
+
+| 入口 | 位置 | falcon 状态 |
+|---|---|---|
+| CLI | `src/app/text/generation.rs` `} else if arch ==` | ✅ 已接 |
+| HTTP runtime | `src/app/text/runtime.rs::build_text_runtime` | ❌ 无 adapter |
+| HTTP prompt | `src/app/server/api/tools.rs::is_qwen35` / `llama_family` | ❌ 无分支 |
+| JEV | `src/app/jev/single.rs` `match &*arch` | ❌ 落进 `other => Err` |
+
+维护者的比喻：**公共层是"插口/门牌"，用户只面对任务（传文本/图片 → 拿结果），不关心里面是谁**。而当前 registry 全是 `match arch`——**按施工队组织，不按门牌组织**，导致：
+
+1. 新 arch 不知道该去哪几处报到（falcon 漏了 2 处，且静默）；
+2. 不支持某能力的 arch（如 TTS）要"证明自己不该在 JEV 里"，需要维护
+   "故意不支持"白名单；
+3. 同一个能力在三个入口重复出现。
+
+#### 三层拆解（讨论结论）
+
+| 层 | 现状 | 是否要动 |
+|---|---|---|
+| **执行接口** | `TextRuntime` / `JevScorer` trait 已存在且健康（JEV 9/9 trunks 统一走 trait，TODO-014 之后仍成立） | 不用动 |
+| **公共 API** | HTTP 的 `/v1/chat/completions` / `/v1/audio/speech` 本来就是按任务分、不关心背后 arch | 已经对了 |
+| **登记处** | 3 个手写 `match arch`，新 arch 报到 3 次、漏了不报错 | **唯一真痛点** |
+
+关键认知：用户问"falcon 为什么 HTTP 不能用"，答案是 **adapter 没写**（工作量问题），
+不是"架构缺插口"——接口在，只是没插。
+
+#### 评估过的方案
+
+**A. distributed slice（`inventory` crate）+ capability 门牌**
+
+```rust
+pub mod capability {
+    #[distributed_slice] pub static TEXT_GENERATE: [CapabilityFactory];
+    #[distributed_slice] pub static JEV: [CapabilityFactory];
+    #[distributed_slice] pub static TTS: [CapabilityFactory];
+    // ...
+}
+// trunk 内自己挂门；不写就是不支持 → TTS 天然不进 JEV，无需白名单
+// 公共层写完永久冻结
+```
+
+- 语义最干净："不声明 = 不支持"，新 arch 零公共层改动。
+- **否决（现在）**：为"省 30 行 registry"引入 linker-magic 依赖不值；且
+  I/O 组合仍在快速扩张（chat: 纯文本 → +图 → +音频/视频；omni 会把
+  chat/score/embed 的边界糊掉），**预定义 capability slot 是在流沙上钉钉子**——
+  真到 omni 那天，是 I/O 抽象重塑 capability，不是反过来。
+
+**B. Plugin trait + 单注册表（~500 LOC 重构）**
+- 否决：公共层仍要每 arch 加一行；且 TTS 不支持 JEV 要靠 `default fn` 或按
+  capability 拆 4 个 trait，比 A 更脏。
+
+**C. loader arch 列表提成 `SUPPORTED_ARCHES` const + coverage 测试（~80 LOC）**
+- **设计已定稿，暂不实施**。见下。
+
+#### TODO-015 的落地设计（将来启用时直接用）
+
+1. `src/core/loader.rs`：把 `model_config_from_source` 里的 `matches!(...)`
+   改成 `pub const SUPPORTED_ARCHES: &[&str]` + `contains`。新 arch 必须先加进
+   const → 测试自动覆盖它。
+2. `tests/arch_coverage.rs`（或 lib test `arch_coverage`）：遍历 `SUPPORTED_ARCHES`，
+   断言每个 arch 在 CLI / HTTP / JEV 三个 dispatch 都有**显式**答案
+   （`Supported` 或在带原因注释的"故意不支持"白名单里）。
+3. CI 加**独立 job**（不能并进 `cargo test --lib`——那 19 个 pre-existing
+   failures 会把它染红）：
+   ```yaml
+   arch-coverage:
+     steps:
+       - run: cargo test --profile release-fast --lib arch_coverage
+   ```
+
+效果：falcon 这类"静默漏注册"以后 CI 立刻红；本地
+`cargo test --lib arch_coverage` 秒级回报。零新依赖、零架构改动。
+
+#### 触发条件（满足任一才启动实施）
+
+- arch 数量 > 25，或
+- 新 arch 接入频率 > 每月 1 个（"报到 3 次"成为真瓶颈），或
+- omni 模型（原生统一多模态 I/O）落地——届时 I/O 抽象自然重塑 capability 定义，
+  **那时做 A 才是顺势而为**，今天钉死的 slot 只会碍事。
+
+在触发前，处理方式是：**新 arch 接入时手工检查三处 dispatch + 补实现**
+（正如本次给 falcon 补 HTTP/JEV）。
+
+---
+
+### TODO-016: Jina v5 Omni audio encoder — oracle 验证待补
+
+本仓库 `encode_audio()` 已按 jina-ai `feat-v5-omni` llama.cpp fork 设计切 30 s Whisper 块（见 commit `9717d17`），但**未跑过 llama.cpp 端的逐位对照**：
+
+1. **per-chunk byte-equal 对齐 llama.cpp `b96806d`**
+   - 现存 `tests/jina_audio_projection_matches_llama_cpp_bits`（#[ignore]）已经覆盖单 30 s 块的 750 × 1024 投影 F32 对照，但每次跑需要：
+     - `LLAMA_DIR` 是固定 commit `b96806d96061049a5b574269b049bf6241d63d46` 的独立副本
+     - 应用 `tools/oracle/jina_audio/mtmd-audio-projection.patch` + `tools/oracle/qwen35/qwen35-scalar-softmax.patch`
+     - `cmake -B build-rmi-jina-audio -DGGML_ACCELERATE=OFF -DGGML_METAL=OFF -DCMAKE_CXX_FLAGS=-DRMI_QWEN35_SCALAR_SOFTMAX`
+     - 跑 `llama-mtmd-cli` dump oracle F32，再跑 `cargo test ... -- --ignored`
+   - macOS ARM CPU / 单线程 / 标量 softmax / 关 Flash Attention 的严格 CPU 路径
+   - 触发条件：新增 jina v5 audio encoder 任何改动时必跑
+
+2. **跨块拼接 oracle 对齐**
+   - 上一步只覆盖单个 30 s 块。我们的 `encode_audio()` 把多个 30 s 块的 post-conv tokens 拼给 LLM，让 LLM cross-attend 跨块融合
+   - 上游 `feat-v5-omni` fork 也是同样设计（mtmd split 30s + LLM cross-attend），所以两边的最终 LLM embedding 应等价
+   - 当前只在仓库端跑过 30s / 60s / 90s 端到端语义验证（cos 关系正确），**未跟 llama.cpp 跨块拼接对比**
+   - 验证方法：取 jina-omni + llama.cpp fork + 一段 >30s 音频（e.g. 60s），分别跑两端的最终 embedding，断言 cos ≥ 0.99 + max abs diff 在量化噪声内（Q8_0 文本 + F16 mmproj 路径下应该是 ~1e-3）
+   - 触发条件：commit `9717d17` 之后任何 jina v5 改动、Q4_K / Q5_K / Q6_K 等不同量化、新 mmproj 版本
+
+**当前不做**：
+- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
+- 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
+- 触发再做：第二条等用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+
+**实施步骤**（任一触发条件满足时）：
+1. `cd $LLAMA_DIR && git checkout b96806d` 起固定 commit
+2. apply 现有两个 patch
+3. cmake + build（macOS ARM / Linux x86_64 各一次）
+4. 跑现有 `jina_audio_projection_matches_llama_cpp_bits` 对 30s 单块
+5. 新增 `jina_audio_projection_matches_llama_cpp_bits_concat`（#[ignore]）跑 60s 跨块拼接
+6. 把对照数据 commit 到 `tools/oracle/jina_audio/`（或外置 datum）
 
 ---
 

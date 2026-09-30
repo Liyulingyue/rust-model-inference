@@ -472,6 +472,22 @@ fn llama_turn_text(
         }
         return format!("{role}\n{content}\n");
     }
+    if arch == "exaone" {
+        // EXAONE-3.5 instruct control tokens. A system turn is not
+        // expressible in the single-turn CLI shape (which only ever
+        // passes one user message), so it maps to the user turn here;
+        // multi-turn history renders as repeated
+        // `[|user|]...[|endofturn|]` blocks plus a final `[|assistant|]`.
+        // Same markers `ChatTemplate::Exaone` uses.
+        if role == "assistant" {
+            if content.is_empty() {
+                // Generation prompt: bare marker, no end-of-turn.
+                return "[|assistant|]".to_string();
+            }
+            return format!("[|assistant|]{content}[|endofturn|]\n");
+        }
+        return format!("[|user|]{content}[|endofturn|]\n");
+    }
     if is_minicpm5 {
         // MiniCPM5 ChatML; thinking=false emits an empty reasoning block.
         if thinking {
@@ -480,6 +496,20 @@ fn llama_turn_text(
         return format!(
             "{IM_START_MARK}{role}\n{content}{IM_END_MARK}\n{IM_START_MARK}assistant\n{THINK_MARK}\n\n{THINK_END_MARK}\n\n"
         );
+    }
+    if arch == "phi3" {
+        // Phi-3 / Phi-4 instruct chat template:
+        // `<|user|>…<|end|>` for the user turn and bare `<|assistant|>`
+        // for the generation prompt. The outer caller appends the
+        // assistant turn when `turns.len() == 1`, producing
+        // `<|user|>{prompt}<|end|><|assistant|>` byte-equal to the CLI's
+        // `build_prompt_tokens` phi3 branch. Multi-turn is rejected
+        // upstream (`llama_supports_multiturn` for `phi3` is false), so
+        // we never render more than one user turn here.
+        if role == "assistant" {
+            return "<|assistant|>".to_string();
+        }
+        return format!("<|user|>{content}<|end|>");
     }
     format!("user\n{content}\nassistant\n{THINK_MARK}\n")
 }

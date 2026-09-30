@@ -231,7 +231,7 @@ fn pool_embedding_rows(
     }
 }
 
-fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
+pub(crate) fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err("Embedding contains a non-finite value".into());
     }

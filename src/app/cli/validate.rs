@@ -15,6 +15,19 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     {
         return Err("--qwen-timestep must be finite".into());
     }
+    if options.gliner2_decide {
+        if !options.jev {
+            return Err("--gliner2-decide requires --jev".into());
+        }
+        if options.clm_head.is_some() {
+            return Err("--gliner2-decide and --clm-head select different backends".into());
+        }
+        if options.gliner2_schema.is_some() && options.jev_multi {
+            return Err("--gliner2-schema cannot be combined with --jev-multi".into());
+        }
+    } else if options.gliner2_schema.is_some() {
+        return Err("--gliner2-schema requires --gliner2-decide".into());
+    }
     if options.laya_request.is_some() {
         if options.model.as_os_str().is_empty() {
             return Err("--laya-request requires --model".into());

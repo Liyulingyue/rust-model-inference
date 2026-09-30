@@ -407,6 +407,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
             | "falcon-h1"
@@ -415,6 +416,8 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "gemma-embedding"
             | "bert"
             | "jina-bert-v2"
+            | "nomic-bert"
+            | "nomic-bert-moe"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -581,7 +584,11 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                     None => 0,
                 },
             }
-        } else if arch == "bert" || arch == "jina-bert-v2" {
+        } else if arch == "bert"
+            || arch == "jina-bert-v2"
+            || arch == "nomic-bert"
+            || arch == "nomic-bert-moe"
+        {
             // Standard BERT is plain multi-head attention with no GQA, so the
             // converted GGUF omits `attention.head_count_kv` entirely
             // (`references/llama.cpp/src/models/bert.cpp` reads n_embd_gqa as

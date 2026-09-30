@@ -5,6 +5,8 @@ use unicode_categories::UnicodeCategories;
 
 use crate::core::tensor::{MetaValue, MetaValueType};
 
+pub mod ugm;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeOptions {
     pub add_special: bool,
@@ -277,7 +279,7 @@ impl BPETokenizer {
         let mut token_types = vec![TokenType::Normal; tokens.len()];
         let mut merge_ranks = HashMap::new();
 
-        for (rank, merge) in include_str!("../models/diffusion/z_image/qwen_merges.txt")
+        for (rank, merge) in include_str!("../../models/diffusion/z_image/qwen_merges.txt")
             .lines()
             .enumerate()
         {
@@ -1616,9 +1618,17 @@ impl Tokenizer for SPMTokenizer {
     }
 }
 
-/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to either the
-/// BPE (`gpt2`, `gemma4`) or SentencePiece (`llama`) implementation. Returns
-/// a trait object so callers can stay agnostic.
+/// Read `tokenizer.ggml.model` from GGUF metadata and dispatch to the
+/// right implementation. Returns a trait object so callers can stay
+/// agnostic. The set of supported model strings:
+///
+///   * `gpt2` / `gemma4`        — BPE
+///   * `llama`                  — SentencePiece (SPM)
+///   * `bert`                   — WordPiece (separate construction
+///                                function, `WPMTokenizer`)
+///   * `t5`                     — SentencePiece unigram with a
+///                                precompiled XCDA normalization map
+///                                (`UgmTokenizer`)
 pub fn load_tokenizer(
     get_meta: impl Fn(&str) -> Option<MetaValue>,
 ) -> Result<Box<dyn Tokenizer>, String> {
@@ -1626,6 +1636,9 @@ pub fn load_tokenizer(
         Some(MetaValue::String(value)) if value == "llama" => {
             Ok(Box::new(SPMTokenizer::from_gguf_metadata(get_meta)?))
         }
+        Some(MetaValue::String(value)) if value == "t5" => Ok(Box::new(
+            ugm::UgmTokenizer::from_gguf_metadata(get_meta).map_err(|e| e.to_string())?,
+        )),
         _ => Ok(Box::new(BPETokenizer::from_gguf_metadata(get_meta)?)),
     }
 }
@@ -2614,7 +2627,14 @@ impl WPMTokenizer {
         let cls_id = optional_token_id(
             get_meta("tokenizer.ggml.cls_token_id"),
             "tokenizer.ggml.cls_token_id",
-        )?;
+        )?
+        // `tokenizer.ggml.cls_token_id` is deprecated — current llama.cpp no
+        // longer reads it at all. For the bert family the `[CLS]` id lives in
+        // `special_bos_id`, whose model-type default is 101
+        // (`llama-vocab.cpp:1982-1996`), so that is the fallback. Without it a
+        // GGUF that omits the key (nomic-embed-text-v1.5 does) leaves
+        // `cls_id = None` and `[CLS]` leaks back out of `decode`.
+        .or(bos_id);
         validate_token_id(bos_id, n_tokens, "tokenizer.ggml.bos_token_id")?;
         validate_token_id(unk_id, n_tokens, "tokenizer.ggml.unknown_token_id")?;
         validate_token_id(sep_id, n_tokens, "tokenizer.ggml.sep_token_id")?;
@@ -2790,10 +2810,20 @@ impl WPMTokenizer {
                     i = next;
                 }
                 None => {
-                    // llama.cpp discards the whole word on the first missed
-                    // position; mirror that instead of falling back to UNK.
+                    // `llama-vocab.cpp:829-831`: on the first missed position
+                    // the oracle does `output.resize(current_tokens); break;`
+                    // — it rolls the word back and stops scanning it, but it
+                    // does NOT return. Control falls through to the check
+                    // below, where `current_tokens == output.size()` is now
+                    // true, so the word becomes exactly one `[UNK]`.
+                    //
+                    // Rust's `return` here would skip that check and drop the
+                    // word entirely, which is what this did until
+                    // 2026-09-29: `"🎉🎊"` tokenized to `[CLS, SEP]` and
+                    // `"hello 🎉 world"` to `hello world`, silently losing the
+                    // out-of-vocabulary word instead of emitting `[UNK]`.
                     output.truncate(before);
-                    return;
+                    break;
                 }
             }
         }
@@ -2815,3 +2845,97 @@ fn is_combining_mark(value: char) -> bool {
     use unicode_categories::UnicodeCategories;
     value.is_mark_nonspacing() || value.is_mark_enclosing()
 }
+
+#[cfg(test)]
+mod wpm_unk_tests {
+    use super::{EncodeOptions, WPMTokenizer};
+
+    /// Minimal WordPiece vocab covering the ASCII leaves plus the two marker
+    /// tokens, so the out-of-vocabulary path can be exercised without a GGUF.
+    fn tokenizer() -> WPMTokenizer {
+        let tokens: Vec<String> = [
+            "[UNK]", "[CLS]", "[SEP]", "▁hello", "▁world", "hello", "world",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let token_to_id = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), i as u32))
+            .collect();
+        WPMTokenizer {
+            max_token_len: tokens.iter().map(|t| t.len()).max().unwrap_or(0),
+            tokens,
+            token_to_id,
+            bos_id: Some(1),
+            unk_id: Some(0),
+            cls_id: Some(1),
+            sep_id: Some(2),
+            add_bos: true,
+            add_eos: true,
+            add_sep: true,
+            lowercase: true,
+            strip_accents: false,
+        }
+    }
+
+    fn encode(text: &str) -> Vec<u32> {
+        tokenizer().encode(
+            text,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    }
+
+    #[test]
+    fn a_word_with_no_matching_piece_becomes_a_single_unk() {
+        // `llama-vocab.cpp:829-833`: the oracle rolls the word back with
+        // `output.resize(current_tokens)` then *falls through* to the
+        // `current_tokens == output.size()` check and pushes exactly one
+        // `token_unk()`. Our version used to `return` there, dropping the word
+        // entirely, so "🎉🎊" came out as just [CLS, SEP].
+        let unk = 0u32;
+        let cls = 1u32;
+        let sep = 2u32;
+        assert_eq!(encode("🎉🎊"), vec![cls, unk, sep]);
+    }
+
+    #[test]
+    fn an_oov_word_between_matching_words_still_gets_an_unk() {
+        // hello (matches) + 🎉 (no match -> one UNK) + world (matches). Before
+        // the fix this was `[CLS, ▁hello, ▁world, SEP]`, silently losing the
+        // emoji instead of emitting [UNK].
+        assert_eq!(encode("hello 🎉 world"), vec![1, 3, 0, 4, 2]);
+    }
+
+    #[test]
+    fn a_partially_matching_word_collapses_to_one_unk() {
+        // "hello🎉" has a matching prefix then an unmatchable character. The
+        // oracle truncates the partial match and emits one UNK for the whole
+        // word, not a mix of real tokens plus UNK.
+        assert_eq!(encode("hello🎉"), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn whitespace_only_and_empty_inputs_produce_no_unk() {
+        // Whitespace never forms a word in the first place
+        // (`llama-vocab.cpp:849-853` skips empty words), so neither case has
+        // anything to fall back to.
+        assert_eq!(encode("   "), vec![1, 2]);
+        assert_eq!(encode(""), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_fully_matching_word_gets_no_extra_unk() {
+        assert_eq!(encode("hello"), vec![1, 3, 2]);
+        assert_eq!(encode("hello world"), vec![1, 3, 4, 2]);
+    }
+}
+
+/// Re-export the UGM (SentencePiece unigram) tokenizer at the same flat
+/// path level as BPE/SPM/WPM. `load_tokenizer` above routes
+/// `tokenizer.ggml.model = "t5"` GGUFs here.
+pub use ugm::{UgmError, UgmTokenizer};
