@@ -58,11 +58,11 @@ enum Backend {
 /// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
 /// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
 /// caller-supplied label set, so it exposes the JEV score route and nothing
-/// else.  The SentencePiece tokenizer is built once here; the model itself is
+/// else.  The tokenizer is built once here; the model itself is
 /// zero-copy views over the mapping and is cheap to rebuild per request.
 struct Gliner2Backend {
     source: Box<dyn TensorSource>,
-    tokenizer: crate::core::sentencepiece::SentencePieceTokenizer,
+    tokenizer: crate::models::gliner::ModelTokenizer,
     n_threads: usize,
 }
 

@@ -2,7 +2,9 @@ import unittest
 
 from tools.converter.gliner.convert_gliner import (
     ENCODER,
+    SPECIAL_TOKENS,
     added_tokens,
+    fast_tokenizer_pieces,
     parse_spm,
     source_contracts,
     tensor_contracts,
@@ -73,6 +75,19 @@ class ContractTest(unittest.TestCase):
 
 
 class AddedTokenTest(unittest.TestCase):
+    def test_fast_json_preserves_added_ids_and_rejects_drift(self):
+        fast = {
+            "model": {"type": "Unigram", "vocab": [[f"piece{i}", 0.0] for i in range(128000)]},
+            "added_tokens": [
+                {"content": token, "id": 128000 + i}
+                for i, token in enumerate(SPECIAL_TOKENS)
+            ],
+        }
+        self.assertEqual(len(fast_tokenizer_pieces(fast)), 128000)
+        fast["added_tokens"][7]["id"] += 1
+        with self.assertRaisesRegex(ValueError, "added token IDs"):
+            fast_tokenizer_pieces(fast)
+
     def test_appends_after_the_spm_vocab(self):
         added = added_tokens(TOKENIZER_CONFIG, spm_of(128000))
         self.assertEqual(added["[P]"], 128003)

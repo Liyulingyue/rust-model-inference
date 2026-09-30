@@ -54,24 +54,34 @@ pub struct TaskResult {
 pub struct GlinerModel<'a> {
     source: &'a dyn TensorSource,
     config: EncoderConfig,
-    spm: SentencePieceTokenizer,
+    tokenizer: ModelTokenizer,
     weights: weights::ModelWeights<'a>,
+}
+
+#[derive(Clone)]
+pub enum ModelTokenizer {
+    SentencePiece(SentencePieceTokenizer),
+    Json(tokenizers::Tokenizer),
+}
+
+impl From<SentencePieceTokenizer> for ModelTokenizer {
+    fn from(tokenizer: SentencePieceTokenizer) -> Self {
+        Self::SentencePiece(tokenizer)
+    }
 }
 
 impl<'a> GlinerModel<'a> {
     /// Load from a GGUF produced by `tools/converter/gliner/convert_gliner.py`.
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
-        let spm = load_spm(source)?;
-        Self::from_source_with_tokenizer(source, spm)
+        Self::from_source_with_tokenizer(source, load_tokenizer(source)?)
     }
 
-    /// Same as [`GlinerModel::from_source`], reusing an already-built
-    /// tokenizer. Rebuilding it costs a 128k-piece trie, which a server pays
-    /// once at startup rather than per request.
+    /// Reuse the server's tokenizer while building zero-copy weight views.
     pub fn from_source_with_tokenizer(
         source: &'a dyn TensorSource,
-        spm: SentencePieceTokenizer,
+        tokenizer: impl Into<ModelTokenizer>,
     ) -> Result<Self, String> {
+        let tokenizer = tokenizer.into();
         let arch = meta_str(source, "general.architecture")?;
         if arch != ARCH {
             return Err(format!("expected {ARCH} architecture, got {arch:?}"));
@@ -107,15 +117,21 @@ impl<'a> GlinerModel<'a> {
             norm_rel_embeddings: meta_bool(source, &key("norm_rel_embeddings"))?,
             vocab_size: meta_usize(source, &key("vocab_size"))?,
         };
-        if meta_str(source, "tokenizer.ggml.model")? != "spm" {
-            return Err("gliner2 requires a SentencePiece tokenizer".into());
-        }
-        if spm.len() + 11 != config.vocab_size {
-            return Err(format!(
-                "vocab_size {} does not match {} SentencePiece pieces plus 11 added tokens",
-                config.vocab_size,
-                spm.len()
-            ));
+        match &tokenizer {
+            ModelTokenizer::SentencePiece(spm) => {
+                if meta_str(source, "tokenizer.ggml.model")? != "spm"
+                    || spm.len() + 11 != config.vocab_size
+                {
+                    return Err("GLiNER SentencePiece vocabulary mismatch".into());
+                }
+            }
+            ModelTokenizer::Json(fast) => {
+                if meta_str(source, "tokenizer.ggml.model")? != "hf-json"
+                    || fast.get_vocab_size(true) != config.vocab_size
+                {
+                    return Err("GLiNER tokenizer.json vocabulary mismatch".into());
+                }
+            }
         }
         let classifier_intermediate = meta_usize(source, &key("classifier.intermediate_size"))?;
         let weights = weights::load_weights(
@@ -132,7 +148,7 @@ impl<'a> GlinerModel<'a> {
         Ok(Self {
             source,
             config,
-            spm,
+            tokenizer,
             weights,
         })
     }
@@ -141,13 +157,27 @@ impl<'a> GlinerModel<'a> {
         &self.config
     }
 
-    pub fn tokenizer(&self) -> &SentencePieceTokenizer {
-        &self.spm
+    pub fn tokenizer(&self) -> Option<&SentencePieceTokenizer> {
+        match &self.tokenizer {
+            ModelTokenizer::SentencePiece(spm) => Some(spm),
+            ModelTokenizer::Json(_) => None,
+        }
     }
 
     /// `SchemaTransformer` output for `tasks` and `text`.
     pub fn encode_prompt(&self, tasks: &[Task], text: &str) -> Result<EncodedPrompt, String> {
-        prompt::build_prompt(tasks, text, &self.spm)
+        match &self.tokenizer {
+            ModelTokenizer::SentencePiece(spm) => prompt::build_prompt(tasks, text, spm),
+            ModelTokenizer::Json(fast) => prompt::build_prompt_with(tasks, text, |part| {
+                let encoding = fast
+                    .encode(part, false)
+                    .map_err(|error| error.to_string())?;
+                if encoding.get_ids().is_empty() {
+                    return Err(format!("tokenizer returned no IDs for {part:?}"));
+                }
+                Ok(encoding.get_ids().to_vec())
+            }),
+        }
     }
 
     /// Hidden states for an already-encoded prompt.
@@ -163,6 +193,11 @@ impl<'a> GlinerModel<'a> {
         n_threads_arg: usize,
     ) -> Result<Vec<TaskResult>, String> {
         let encoded = self.encode_prompt(tasks, text)?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::token_ids(
+            "gliner.token_ids",
+            &encoded.input_ids,
+        ));
         let hidden = self.forward(&encoded.input_ids, n_threads_arg)?;
         self.score_prompt(tasks, &encoded, &hidden)
     }
@@ -193,6 +228,8 @@ impl<'a> GlinerModel<'a> {
         ));
         let mut scratch: Vec<f32> = Vec::new();
         let mut results = Vec::with_capacity(tasks.len());
+        #[cfg(feature = "parity-trace")]
+        let mut trace_logits = Vec::new();
         for (task, markers) in tasks.iter().zip(&encoded.markers) {
             // `embs[1:]` drops the `[P]` prompt row; the rest are the labels.
             let mut logits = Vec::with_capacity(task.labels.len());
@@ -203,6 +240,8 @@ impl<'a> GlinerModel<'a> {
                     &mut scratch,
                 )?);
             }
+            #[cfg(feature = "parity-trace")]
+            trace_logits.extend_from_slice(&logits);
             let scores = decode(task, &logits);
             let selected = select(task, &scores);
             results.push(TaskResult {
@@ -212,6 +251,13 @@ impl<'a> GlinerModel<'a> {
                 multi_label: task.multi_label,
             });
         }
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "gliner.logits",
+            None,
+            &[trace_logits.len()],
+            &trace_logits,
+        ));
         Ok(results)
     }
 
@@ -384,13 +430,23 @@ fn meta_bool(source: &dyn TensorSource, name: &str) -> Result<bool, String> {
     }
 }
 
-/// Rebuild the SentencePiece tokenizer from the GGUF metadata the converter
-/// wrote: pieces, scores, types, the compiled charsmap, and the flags.
-///
-/// `tokenizer.ggml.tokens` / `.scores` / `spm.piece_types` all run to
-/// `vocab_size` — the SentencePiece pieces followed by the eleven added GLiNER
-/// tokens — so everything is cut back to `spm.piece_count` first. The added
-/// tokens never reach the lattice: `prompt::encode_token` resolves them by name.
+/// Load the tokenizer embedded by the converter, preferring tokenizer.json.
+pub fn load_tokenizer(source: &dyn TensorSource) -> Result<ModelTokenizer, String> {
+    if let Some(json) = source
+        .metadata("gliner2.tokenizer_json")
+        .and_then(MetaValue::to_string_val)
+    {
+        let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+            .map_err(|error| format!("invalid GLiNER tokenizer.json: {error}"))?;
+        Ok(ModelTokenizer::Json(tokenizer))
+    } else {
+        Ok(ModelTokenizer::SentencePiece(load_spm(source)?))
+    }
+}
+
+/// Rebuild SentencePiece from its GGUF pieces, scores, types and normalizer.
+/// The eleven added GLiNER tokens never reach the lattice: `prompt::encode_token`
+/// resolves them by name.
 pub fn load_spm(source: &dyn TensorSource) -> Result<SentencePieceTokenizer, String> {
     let piece_count = meta_usize(source, &key("spm.piece_count"))?;
     let pieces = meta_bytes_array(source, piece_count)?;
