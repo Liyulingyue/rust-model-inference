@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use crate::app::cli::CliOptions;
 use crate::app::jev::{JevMode, JevQuestionInput, JevResult};
-use crate::core::sentencepiece::SentencePieceTokenizer;
 use crate::core::tensor::TensorSource;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
 use crate::models::gliner::prompt::Task;
@@ -274,9 +273,9 @@ pub fn run_gliner2_decision(
 /// once the tokenizer is cached.
 pub fn load_gliner2_source(
     path: &std::path::Path,
-) -> Result<(Box<dyn TensorSource>, SentencePieceTokenizer), String> {
+) -> Result<(Box<dyn TensorSource>, crate::models::gliner::ModelTokenizer), String> {
     let source = open_model_source(path, ComponentRole::Llm)
         .map_err(|e| format!("open gliner2 model ({}): {e}", path.display()))?;
-    let spm = crate::models::gliner::load_spm(source.as_ref())?;
-    Ok((source, spm))
+    let tokenizer = crate::models::gliner::load_tokenizer(source.as_ref())?;
+    Ok((source, tokenizer))
 }

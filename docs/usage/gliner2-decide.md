@@ -13,21 +13,18 @@ label 集合在**调用时**传进去，不是模型里烤死的。ModelScope �
 ## 1. 准备
 
 ```bash
-# 1) 权重 + tokenizer
+# 1) 权重 + tokenizer.json
 models/.venv/bin/modelscope download --model fastino/GLiNER2.5-Decide \
-    model.safetensors config.json --local-dir ./GLiNER2.5-Decide
-models/.venv/bin/modelscope download --model fastino/gliner2-large-v1 \
-    spm.model tokenizer_config.json special_tokens_map.json \
-    --local-dir ./GLiNER2.5-Decide
+    model.safetensors config.json encoder_config/config.json tokenizer.json tokenizer_config.json \
+    --local-dir models/GLiNER2.5-Decide
 
-# 2) 转 GGUF（F32，1.75GB）
-models/.venv/bin/python tools/converter/gliner/convert_gliner.py \
+# 2) 转 GGUF（F32，1,752,447,104 bytes；已有输出时拒绝覆盖）
+./.venv/bin/python -m tools.converter.gliner.convert_gliner \
     models/GLiNER2.5-Decide models/GLiNER2.5-Decide/gliner2-decide-f32.gguf
 ```
 
-SentencePiece 词表、piece score、piece type、`nmt_nfkc` charsmap 和三个
-normalizer flag 全部**内嵌进 GGUF metadata**，所以跑起来只需要一个 `.gguf`，
-不需要 `spm.model` 边车文件。
+当前发布目录没有 `spm.model`，转换器会把 `tokenizer.json` 内嵌进 GGUF；
+若目录含 `spm.model`，则沿用 SentencePiece metadata 路径。运行时都只需 GGUF。
 
 ## 2. 命令行
 
@@ -107,7 +104,7 @@ sigmoid、否则 softmax）和 `temperature`（默认 1.0，除在 logit 上）�
 ```bash
 ./target/release/rust-model-server \
   --model models/GLiNER2.5-Decide/gliner2-decide-f32.gguf \
-  --gliner2-decide --host 0.0.0.0 --port 8080 --threads 8
+  --jev --gliner2-decide --host 0.0.0.0 --port 8080 --threads 8
 ```
 
 启动日志打 `mode=gliner2`。**只注册 `/v1/jev/score`**，其余一律 404。
@@ -157,7 +154,7 @@ curl http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' -d '
 - **分类行就是 `[L]` marker 自己的隐状态**，`embs[1:]` 丢掉 `[P]` prompt 行。
 - **描述和 few-shot 总是同时进 prompt。** 推理时 `example_mode == "both"`。
 - **text 先补句末标点**（`_normalize_text`：空串→`.`，不以 `.!?` 结尾→追加 `.`），
-  然后按 GLiNER 自己的 word splitter 切词并小写，再逐词送 SentencePiece。
+  然后按 GLiNER 自己的 word splitter 切词并小写，再逐词送模型的 tokenizer。
 
 单头、单 label 的完整序列长这样：
 
@@ -226,7 +223,8 @@ c2p_pos = p2c_pos = clamp(bucket + 256, 0, 511)
 ## 6. Tokenizer
 
 `DebertaV2Tokenizer` + SentencePiece **unigram**，大小写敏感，128000 个 piece。
-Rust 侧实现在 `src/core/sentencepiece.rs`，包含：
+当前 GGUF 直接嵌入发布的 `tokenizer.json`，Rust 用既有 `tokenizers` 依赖加载。
+`spm.model` 格式仍走 `src/core/sentencepiece.rs`，包含：
 
 - `nmt_nfkc` normalizer（Darts double-array 查表 + dummy prefix / 空白折叠 /
   空白转 `▁`）
@@ -263,8 +261,10 @@ cargo test --profile release-fast --test gliner2_cli
 生成脚本在 `tools/oracle/gliner2/`，复现步骤见
 [`tools/oracle/gliner2/README.md`](../../tools/oracle/gliner2/README.md)。
 
-实测 6 个 case 全部对齐，**最大 logit 偏差 7.2e-6**（F32 累加顺序差），所以
-测试阈值定在 1e-4。
+既有 6 个 case 在默认计算路径上的 logit 容差为 `1e-4`。本次另以 F32
+标量路径对官方实现完成 4 个请求、120 个检查点、6,919,181 个 F32 值的
+原始位逐位对齐；SIMD、FMA、BLAS、Accelerate 和量化路径不在该结论内。
+[输入、GGUF 哈希和复现命令](../../tools/oracle/gliner/README.md)。
 
 ## 8. 性能
 
