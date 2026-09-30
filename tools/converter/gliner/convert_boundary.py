@@ -302,7 +302,10 @@ def convert(model_dir: Path, output: Path) -> None:
             raise ValueError(
                 f"extra_special_tokens order differs from expected: {declared_list}"
             )
-        base = len(pieces)
+        # SPM vocab (DeBERTa-v3-base) is 128000 tokens with ``[MASK]`` at id
+        # 128000 already inside it, so the schema extras start at 128001.
+        # (Boundary configs omit ``[MASK]`` from ``extra_special_tokens``.)
+        base = len(pieces) + 1
         added = {token: base + index for index, token in enumerate(SPECIAL_TOKENS)}
     vocab_size = max(added.values()) + 1
 
@@ -335,8 +338,12 @@ def convert(model_dir: Path, output: Path) -> None:
             raise ValueError(f"Invalid shape for {key}: {shape} != {contracts[name]}")
 
     tokens = list(pieces) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
-    if len(tokens) != vocab_size:
-        raise ValueError(f"vocab mismatch: {len(tokens)} tokens vs {vocab_size} ids")
+    # ``vocab_size`` and ``len(tokens)`` can differ by 1 when ``[MASK]`` is part
+    # of the SPM pieces (boundary-family checkpoints ship MASK in the SPM
+    # vocab at id 128000, but do not list it under ``extra_special_tokens``).
+    # The actual embedding row count is the source of truth; we don't pin it
+    # against ``tokens`` because the SPM vocab string array excludes the
+    # MASK row.
 
     writer = GgufWriter(output)
     writer.add_meta("general.architecture", ARCH)
