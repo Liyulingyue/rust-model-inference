@@ -21,11 +21,15 @@ fn encode_vision(
     mmproj_path: &Path,
     image_path: Option<&Path>,
     video_path: Option<&Path>,
+    threads: usize,
 ) -> Result<(MediaKind, Vec<f32>, Vec<usize>), String> {
     let mmproj = open_model_source(mmproj_path, ComponentRole::Mmproj)
         .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?;
-    let mut encoder = VisionEncoder::from_source(mmproj.as_ref())
-        .map_err(|error| format!("Failed to load vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder::from_source(
+        mmproj.as_ref(),
+        std::sync::Arc::new(ComputePool::new(threads.max(1))),
+    )
+    .map_err(|error| format!("Failed to load vision encoder: {error}"))?;
     encoder.precompute();
     let mut frames = if let Some(path) = image_path {
         vec![crate::app::media::decode_image(path)?]
@@ -154,7 +158,7 @@ pub fn run_omni_embedding(
         let rows = media.len() / 1024;
         (kind, media, vec![rows])
     } else {
-        encode_vision(mmproj_path, image_path, video_path)?
+        encode_vision(mmproj_path, image_path, video_path, threads)?
     };
     let rows = media.len() / 1024;
     if rows == 0 || media.len() % 1024 != 0 {

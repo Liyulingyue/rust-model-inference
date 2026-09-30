@@ -328,12 +328,12 @@ fn run_rust_vision(mmproj: &Path, artifacts: &Path) -> PathBuf {
                 .and_then(rust_model_inference::MetaValue::to_string_val),
             Some("clip")
         );
-        let mut encoder = VisionEncoder::from_source(&source)?;
+        let pool =
+            std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
+        let mut encoder = VisionEncoder::from_source(&source, std::sync::Arc::clone(&pool))?;
         encoder.precompute();
         let pixels = vec![1.0f32; 256 * 256 * 3];
         let mut scratch = VisionScratchpad::new(&encoder.config);
-        let pool =
-            std::sync::Arc::new(rust_model_inference::core::thread_pool::ComputePool::new(1));
         encoder.encode_image(&pixels, 256, 256, &mut scratch, &pool)?;
         #[cfg(feature = "parity-trace")]
         {
