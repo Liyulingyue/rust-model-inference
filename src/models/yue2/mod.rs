@@ -92,10 +92,32 @@ impl YuE2Model {
             abc: options.abc,
             semantic: options.semantic,
         };
-        let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
+        // A full generation is four long CPU stages (two autoregressive
+        // samplers, a NAR diffusion solve and the VAE decode), so report each
+        // transition; without this the CLI looks hung for minutes at a time.
+        let started = std::time::Instant::now();
+        let mut stage = |name: &str| {
+            eprintln!(
+                "[yue2] +{:.1}s {name} (max_tokens abc={} semantic={}, steps={})",
+                started.elapsed().as_secs_f64(),
+                options.abc.max_tokens,
+                options.semantic.max_tokens,
+                options.steps,
+            );
+        };
+        stage("building ABC prefix");        let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
+        stage("ABC sampling");
         let abc_ids = self.generate_abc(&prefix, options.abc, request.seed)?;
+        eprintln!("[yue2] +{:.1}s ABC done: {} tokens", started.elapsed().as_secs_f64(), abc_ids.len());
+        stage("building semantic prefix");
         let prefix = protocol.semantic_prefix(self.tokenizer(), request, &abc_ids)?;
+        stage("semantic sampling");
         let semantic_ids = self.generate_semantic(&prefix, options.semantic, request.seed)?;
+        eprintln!(
+            "[yue2] +{:.1}s semantic done: {} tokens",
+            started.elapsed().as_secs_f64(),
+            semantic_ids.len()
+        );
         let codec_ids = semantic_ids
             .iter()
             .map(|&token| {
@@ -108,14 +130,22 @@ impl YuE2Model {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let latent_frames = codec_ids.len();
+        eprintln!("[yue2] +{:.1}s NAR: {latent_frames} latent frames", started.elapsed().as_secs_f64());
         let chunks = song_chunks(&prefix, &codec_ids, request.seed, self.config().context)?;
+        let chunk_total = chunks.len();
         let latent_len = latent_frames
             .checked_mul(self.config().latent_channels)
             .ok_or("YuE2 latent length overflow")?;
         let mut latents = Vec::with_capacity(latent_len);
-        for chunk in chunks {
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            eprintln!(
+                "[yue2] +{:.1}s NAR chunk {}/{chunk_total}",
+                started.elapsed().as_secs_f64(),
+                index + 1,
+            );
             latents.extend(YuE2NarSession::new(self, chunk)?.solve(options.steps)?);
         }
+        stage("NAR done");
         if latents.len() != latent_len {
             return Err("YuE2 NAR produced the wrong latent shape".into());
         }
@@ -126,7 +156,9 @@ impl YuE2Model {
         {
             return Err("YuE2 NAR produced invalid frame-major latents".into());
         }
+        stage("VAE decode");
         let channel_major_audio = vae.decode_tiled(&latents, latent_frames, 1024, 16)?;
+        stage("done");
         if channel_major_audio.is_empty()
             || channel_major_audio.len() % 2 != 0
             || channel_major_audio.iter().any(|value| !value.is_finite())

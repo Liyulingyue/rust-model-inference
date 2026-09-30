@@ -7,17 +7,27 @@ import json
 import math
 import os
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
+
+import numpy as np
 
 from tools.converter.utils.gguf import (
     GGML_BF16,
     GGML_F32,
+    GGML_Q4K,
+    GGML_Q6K,
+    GGML_Q4_0,
+    GGML_Q8_0,
     GgufWriter,
     gguf_dims,
     open_safetensors,
+    quantize_q4_0,
+    quantize_q8_0,
     read_gguf_directory,
 )
+from tools.converter.utils.kquants import quantize_q4_k, quantize_q6_k
 
 
 EOD = 151643
@@ -189,6 +199,120 @@ def _chunks(path: Path, absolute_start: int, length: int) -> Iterable[bytes]:
             yield chunk
 
 
+# --- Quantization modes -----------------------------------------------------
+#
+# ``bf16`` is the pass-through default: the payload bytes are sliced straight out
+# of the safetensors file, so the conversion is a copy with no math.  Every other
+# mode has to decode BF16 -> f32, re-quantize, and therefore materializes the
+# matrix in memory.  The block-quantized encoders are ported from
+# ``ggml-quants.c`` (see ``tools/converter/utils/kquants.py``).
+#
+# Only the 2-D projections listed in ``MATRIX_WIDTHS`` are ever quantized.  The
+# 1-D norms, biases and the two vocab-sized embedding matrices stay BF16: they
+# are either tiny (norms) or extremely sensitive to quantization error relative
+# to their role as a lookup table (embeddings), and the Rust loader reads them
+# through ``load_f32_tensor`` anyway.
+QUANT_MODES = ("bf16", "f32", "q8_0", "q4_0", "q4_k_m", "q6_k")
+
+# Per-layer 2-D projections, mirrored from the authoritative shape table in
+# `src/models/yue2/ar.rs` (`YuE2Model::validate_shapes`).  The 1-D norms and
+# biases are deliberately absent: the loader reads them through
+# `load_f32_tensor`, so they stay BF16.
+_LAYER_MATRIX_SUFFIXES: tuple[str, ...] = (
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+    "self_attn.o_proj.weight",
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
+)
+
+# Global matrices that are ordinary matmuls and worth quantizing.  The two
+# vocab-sized matrices (`embed_tokens`, `lm_head`) and the position/bridge
+# lookup tables are left in BF16: they are read as tables rather than as dense
+# projections, and the transformer projections already account for essentially
+# all of the decoder FLOPs.
+_GLOBAL_MATRIX_NAMES: tuple[str, ...] = (
+    "time_embedder.mlp.0.weight",
+    "time_embedder.mlp.2.weight",
+)
+
+# Smallest block any supported encoder needs.
+_MIN_BLOCK_ELEMENTS = {"q8_0": 32, "q4_0": 32, "q4_k_m": 256, "q6_k": 256}
+
+
+def _quantizable_names(layers: int) -> set[str]:
+    """Every tensor name the requested mode is allowed to quantize."""
+    names = set(_GLOBAL_MATRIX_NAMES)
+    for layer in range(layers):
+        for stream in ("", "nar_"):
+            for suffix in _LAYER_MATRIX_SUFFIXES:
+                names.add(f"model.layers.{layer}.{stream}{suffix}")
+    return names
+
+
+def _read_payload(source, start: int, length: int) -> bytes:
+    """Read one tensor payload out of the safetensors file."""
+    with source.path.open("rb") as handle:
+        handle.seek(source.data_offset + start)
+        payload = handle.read(length)
+    if len(payload) != length:
+        raise ValueError(f"{source.path}: truncated payload at offset {start}")
+    return payload
+
+
+def _bf16_bytes_to_f32(raw: bytes) -> "np.ndarray":
+    """Decode a little-endian BF16 payload into float32.
+
+    BF16 is the top half of an IEEE-754 binary32, so widening is a shift rather
+    than a conversion.
+    """
+    values = np.frombuffer(raw, dtype="<u2")
+    return (values.astype(np.uint32) << 16).view(np.float32)
+
+
+def _f32_bytes_to_bf16(values: "np.ndarray") -> bytes:
+    """Round float32 to BF16 with round-to-nearest-even.
+
+    ``(x + 0x7fff + lsb) >> 16`` is the standard RNE rounding shift; the explicit
+    NaN guard keeps quiet NaNs from being flushed to infinity.
+    """
+    bits = np.ascontiguousarray(values, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    nan = (bits & 0x7FFFFFFF) > 0x7F800000
+    lsb = (bits >> 16) & 1
+    rounded = (bits + 0x7FFF + lsb) >> 16
+    rounded = np.where(nan, (bits >> 16) | 0x0040, rounded)
+    return rounded.astype("<u2").tobytes()
+
+
+def _quantize_matrix(values: "np.ndarray", mode: str) -> tuple[int, bytes]:
+    """Return ``(ggml_type, payload)`` for one 2-D matrix in ``mode``."""
+    if mode == "f32":
+        return GGML_F32, np.ascontiguousarray(values, dtype=np.float32).tobytes()
+    if mode == "q8_0":
+        return GGML_Q8_0, quantize_q8_0(values)
+    if mode == "q4_0":
+        return GGML_Q4_0, quantize_q4_0(values)
+    if mode == "q4_k_m":
+        return GGML_Q4K, quantize_q4_k(values)
+    if mode == "q6_k":
+        return GGML_Q6K, quantize_q6_k(values)
+    raise ValueError(f"unknown quantization mode {mode!r}")
+
+
+def _k_m_type_for(name: str) -> int:
+    """Per-tensor type for the `q4_k_m` mixed mode.
+
+    The attention value projections and the FFN down projections carry the most
+    visible error, so they get the 6-bit blocks; everything else takes 4-bit.
+    This mirrors the Edge0 `--quant q4_k_m` policy.
+    """
+    if name.endswith("v_proj.weight") or name.endswith("down_proj.weight"):
+        return GGML_Q6K
+    return GGML_Q4K
+
+
 def _write_atomic(
     output: Path,
     overwrite: bool,
@@ -196,6 +320,10 @@ def _write_atomic(
     source,
     entries: list[tuple[str, tuple[int, ...], int, int]],
     ggml_type: int,
+    *,
+    quant: str = "bf16",
+    quantizable: set[str] | None = None,
+    progress=None,
 ) -> None:
     if output.exists() and not overwrite:
         raise FileExistsError(output)
@@ -204,21 +332,54 @@ def _write_atomic(
     os.close(descriptor)
     temporary = Path(temporary_name)
     expected_tensors = {}
+    block = _MIN_BLOCK_ELEMENTS.get(quant, 32)
     try:
         writer = GgufWriter(temporary)
         for key, value in metadata.items():
             writer.add_meta(key, value)
-        for name, shape, start, end in entries:
+        total = len(entries)
+        for index, (name, shape, start, end) in enumerate(entries):
             dims = gguf_dims(shape)
             nbytes = end - start
-            writer.add_tensor_chunks(
-                name,
-                ggml_type,
-                dims,
-                nbytes,
-                lambda start=start, nbytes=nbytes: _chunks(source.path, source.data_offset + start, nbytes),
-            )
-            expected_tensors[name] = (ggml_type, dims)
+            if quant == "bf16" or quantizable is None or name not in quantizable:
+                # Pass-through: the payload already has the on-disk layout, so
+                # slice it out of the safetensors file instead of decoding it.
+                writer.add_tensor_chunks(
+                    name,
+                    ggml_type,
+                    dims,
+                    nbytes,
+                    lambda start=start, nbytes=nbytes: _chunks(
+                        source.path, source.data_offset + start, nbytes
+                    ),
+                )
+                expected_tensors[name] = (ggml_type, dims)
+            else:
+                if len(shape) != 2:
+                    raise ValueError(f"{name}: only 2-D tensors can be quantized, got {shape}")
+                n_in = shape[1]
+                if n_in % block != 0:
+                    raise ValueError(
+                        f"{name}: n_in={n_in} is not a multiple of the {quant} block size "
+                        f"{block}; refusing to quantize"
+                    )
+                values = _bf16_bytes_to_f32(_read_payload(source, start, nbytes))
+                if quant == "q4_k_m":
+                    # The mixed mode picks 6-bit for some tensors and 4-bit for
+                    # others, so the single-type encoder cannot be used.
+                    tensor_type = _k_m_type_for(name)
+                    payload = (
+                        quantize_q6_k(values)
+                        if tensor_type == GGML_Q6K
+                        else quantize_q4_k(values)
+                    )
+                else:
+                    tensor_type, payload = _quantize_matrix(values, quant)
+                del values
+                writer.add_tensor(name, tensor_type, dims, payload)
+                expected_tensors[name] = (tensor_type, dims)
+            if progress is not None and (index + 1) % 8 == 0:
+                progress(index + 1, total, name)
         writer.write()
         actual_metadata, actual_tensors = read_gguf_directory(temporary)
         if actual_metadata != metadata:
@@ -234,7 +395,12 @@ def _write_atomic(
         temporary.unlink(missing_ok=True)
 
 
-def convert_main(model_dir: Path, output: Path, overwrite: bool = False) -> None:
+def convert_main(
+    model_dir: Path,
+    output: Path,
+    overwrite: bool = False,
+    quant: str = "bf16",
+) -> None:
     model_dir, output = Path(model_dir), Path(output)
     if output.exists() and not overwrite:
         raise FileExistsError(output)
@@ -305,9 +471,31 @@ def convert_main(model_dir: Path, output: Path, overwrite: bool = False) -> None
         "yue2.semantic.min_tokens": 200,
         "yue2.semantic.max_tokens": 9000,
         "yue2.tensor_count": len(entries),
+        "yue2.quant.mode": quant,
         **tokenizer_metadata(model_dir / "qwen.tiktoken"),
     }
-    _write_atomic(output, overwrite, metadata, source, entries, GGML_BF16)
+    layers = int(config["num_hidden_layers"])
+    quantizable = None if quant == "bf16" else _quantizable_names(layers)
+
+    started = time.monotonic()
+
+    def report(done: int, total: int, name: str) -> None:
+        print(
+            f"  [{quant}] {done}/{total} tensors  {time.monotonic() - started:6.1f}s  {name}",
+            flush=True,
+        )
+
+    _write_atomic(
+        output,
+        overwrite,
+        metadata,
+        source,
+        entries,
+        GGML_BF16,
+        quant=quant,
+        quantizable=quantizable,
+        progress=report if quant != "bf16" else None,
+    )
 
 
 def convert_vae(vae_dir: Path, output: Path, overwrite: bool = False) -> None:
@@ -358,9 +546,20 @@ def main() -> None:
     parser.add_argument("--vae-dir", type=Path, required=True)
     parser.add_argument("--main-out", type=Path, required=True)
     parser.add_argument("--vae-out", type=Path, required=True)
+    parser.add_argument(
+        "--quant",
+        choices=QUANT_MODES,
+        default="bf16",
+        help=(
+            "main-model weight format. bf16 is a zero-copy pass-through of the "
+            "source payload; the other modes decode BF16 to f32 and re-quantize the "
+            "transformer projections (1-D norms, the vocab embeddings and the "
+            "position/bridge tables always stay BF16). The VAE is always F32."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    convert_main(args.model_dir, args.main_out, args.overwrite)
+    convert_main(args.model_dir, args.main_out, args.overwrite, args.quant)
     convert_vae(args.vae_dir, args.vae_out, args.overwrite)
     for label, path in (("main", args.main_out), ("vae", args.vae_out)):
         _metadata, tensors = read_gguf_directory(path)
