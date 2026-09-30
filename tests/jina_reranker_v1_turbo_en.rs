@@ -45,8 +45,8 @@
 //! `docs/develop/MODEL_ADAPT_PLAN.md` §"jina-reranker-v1-turbo-en" this PR
 //! only verifies "加载 + 输出合理 embedding", not reranker ranking.
 
-use rust_model_inference::GGUFLoader;
 use rust_model_inference::models::bert_family::compute_embedding;
+use rust_model_inference::GGUFLoader;
 
 fn loader() -> Option<GGUFLoader> {
     let path = std::env::var_os("RMI_JINA_RERANKER_V1_TURBO_MODEL")?;
@@ -145,10 +145,7 @@ fn contract_loads_and_pins_jina_reranker_metadata() {
         2,
         "SEP id == EOS id == 2 (typo key 'seperator' is what GGUF ships)"
     );
-    assert_eq!(
-        pick(&loader, "tokenizer.ggml.padding_token_id"),
-        1
-    );
+    assert_eq!(pick(&loader, "tokenizer.ggml.padding_token_id"), 1);
 }
 
 #[test]
@@ -190,7 +187,10 @@ fn tensor_inventory_has_102_tensors_and_the_cls_head() {
     //   ffn_down.{weight, bias}    [1536, 384] / [384]
     //   layer_output_norm.{weight, bias} [384] / [384]
     for l in 0..6 {
-        assert_eq!(shape(&format!("blk.{l}.attn_q.weight")), Some(vec![384, 384]));
+        assert_eq!(
+            shape(&format!("blk.{l}.attn_q.weight")),
+            Some(vec![384, 384])
+        );
         assert_eq!(shape(&format!("blk.{l}.attn_v.bias")), Some(vec![384]));
         assert_eq!(
             shape(&format!("blk.{l}.ffn_gate.weight")),
@@ -240,7 +240,10 @@ fn bpe_tokenizer_with_jina_v1_en_pre_wraps_with_bos_and_eos() {
     let ids = encode("hello world");
     assert_eq!(ids.first().copied(), Some(0), "first token must be <s>=0");
     assert_eq!(ids.last().copied(), Some(2), "last token must be </s>=2");
-    assert!(ids.len() >= 3, "encoded seq must contain at least [BOS, ..., EOS]");
+    assert!(
+        ids.len() >= 3,
+        "encoded seq must contain at least [BOS, ..., EOS]"
+    );
 
     // The byte-level GPT-2 BPE folds the leading space into a `Ġ` byte;
     // `hello world` should tokenize to non-empty byte tokens (we don't pin
