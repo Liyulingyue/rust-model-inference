@@ -555,7 +555,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if arch == "qwen35" {
+        if matches!(arch, "qwen35" | "edge0") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -646,7 +646,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if arch == "qwen35" {
+        if matches!(arch, "qwen35" | "edge0") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,
