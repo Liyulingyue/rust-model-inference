@@ -201,6 +201,14 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **自己引入又抓到的 regression**：`build_with_child_marker` 在重构时把 `child_marker` 参数忽略了，`kinds=None` 默认成 `Entities`，导致 **Decide 路径的 `[L]` 全部变成 `[E]`**。所有 boundary fixture 全绿（因为 boundary 路径显式传 `kinds`），只有跑 `gliner2_large_v1_parity` 才暴露。已修 + 加了 `the_two_prompt_families_use_their_own_child_marker` 单测锁住
 - **性能坑**：`classify_state` 原本每次调用都新建 `ComputePool`，而 pool worker 空闲时是**忙等**（thread_pool.rs:382）。一次 extraction 两个 pool，并发跑就把机器打满（12 核上 48 个自旋线程）。改成直接算（1.2M MAC，不需要 pool），测试从 82s → 3.2s。**这是引擎的既有特性，不是 boundary 引入的**，但 server 阶段要注意并发请求的 oversubscription
 
+### ✅ 5.2.4b-1a overlap_policy 解码
+- **范围**：`resolve_overlaps`（`inference/overlap.py:56`）。base-v1 的 `overlap_policy = "flat"` → canonical `disallow` = **最大总分不重叠集**（加权区间调度），不是贪心
+- **实现**：`overlap.rs`（新）+ `decode_spans` 接上 `boundary_overlap_policy`
+- **oracle**：`dump_overlap_resolution.py` 29 个 case，纯函数不需要 GGUF，**全 case 逐位一致**
+- **抓到的真问题**：**之前的 e2e oracle 用错了 reference 的解码阶段**。`decode_candidates` 只做 threshold + 排序，`_decode_entities` 之后才跑 `_resolve_spans(..., policy)`。也就是说我的 e2e fixture 比的是**中间结果**，而 Rust 端也没做 resolution——两边一起错，看起来是绿的
+- **修法**：oracle 现在同时 dump `spans`（中间）和 `resolved_spans`（最终），并加 threshold=0.02 的 case 强制产生重叠（默认 threshold 下模型太自信，**同一个 field 不会有重叠 span**，resolution 阶段等于没被测到）。现在 29 个候选 → `flat` 收敛到 3，`allow` 保留 14
+- **fixture 里专门留了一个贪心必错的 case**：三条交叉 span，中间那条分最高（0.5）但会挡住两边；贪心拿 0.5，最优是 0.55 + 0.45 = 1.0。除了这个 case 之外的所有 case 贪心都能过
+
 ### 🟢 5.2.4b-2 relations + records + HTTP 路由（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
@@ -220,6 +228,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
 | 5.2.4a | 真实入口 + `--gliner2-boundary` | ✅ | 本次 |
 | 5.2.4b-1 | 分类头 + null/count head | ✅ | 本次 |
+| 5.2.4b-1a | overlap_policy 解码 | ✅ | 本次 |
 | 5.2.4b-2 | relations + records + json_structures + HTTP | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
@@ -232,9 +241,10 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 **仍然没有的**：
 - relations（`[R]`）/ records（`record_decoder`）/ `json_structures`（`[C]`）
 - HTTP 路由
-- `overlap_policy` 解码（`glinerTODO.md` 记的 `overlap_policy = "flat"`，`decode_spans` 目前只做 threshold + 排序，没做 span 冲突消解）
+- per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
+- `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-12 个 boundary 测试文件 / 30 个测试全绿。
+13 个 boundary 测试文件 / 34 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

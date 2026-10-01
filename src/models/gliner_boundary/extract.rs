@@ -32,6 +32,9 @@ use crate::models::gliner::prompt::{self, BoundaryTaskKind, EncodedPrompt, Task,
 use crate::ops::kernel::Weight;
 
 use super::loader::BoundaryModel;
+use super::overlap::{
+    normalize_overlap_policy, resolve_overlaps, OverlapPolicy, ScoredSpan as OverlapSpan,
+};
 use super::spans::{score_document_candidates, DocumentCandidateBatch};
 
 /// One extracted span for one schema field.
@@ -292,6 +295,7 @@ pub fn decode_spans(
     field_names: &[String],
     pair_temperature: f32,
     threshold: f32,
+    overlap_policy: Option<OverlapPolicy>,
 ) -> Vec<ExtractedSpan> {
     let temperature = if pair_temperature > 0.0 {
         pair_temperature
@@ -327,12 +331,39 @@ pub fn decode_spans(
                 logit,
             });
         }
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then(a.start.cmp(&b.start))
-                .then(a.end.cmp(&b.end))
-        });
+        if let Some(policy) = overlap_policy {
+            // Thresholding leaves overlapping candidates in; the reference then
+            // resolves them (`engine.py:36` -> `resolve_overlaps`). Skipping
+            // this reports "apple inc" and "apple" as two spans of the same
+            // field, which reads as a bug in the model rather than in the
+            // decoder.
+            let scored: Vec<OverlapSpan> = hits
+                .iter()
+                .map(|hit| OverlapSpan {
+                    score: hit.score,
+                    start: hit.start,
+                    end: hit.end,
+                })
+                .collect();
+            let keep = resolve_overlaps(&scored, policy);
+            let mut kept: Vec<ExtractedSpan> =
+                keep.into_iter().map(|index| hits[index].clone()).collect();
+            // `resolve_overlaps` returns ranked order already; re-sorting would
+            // be a no-op but hides the contract, so assert it instead.
+            debug_assert!(kept.windows(2).all(|pair| {
+                pair[0].score > pair[1].score
+                    || (pair[0].score == pair[1].score
+                        && (pair[0].start, pair[0].end) <= (pair[1].start, pair[1].end))
+            }));
+            hits = kept;
+        } else {
+            hits.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then(a.start.cmp(&b.start))
+                    .then(a.end.cmp(&b.end))
+            });
+        }
         out.extend(hits);
     }
     out
@@ -360,7 +391,19 @@ pub fn extract_spans(
         &fields,
         model.settings.pair_temperature,
         threshold.unwrap_or(0.5),
+        Some(boundary_overlap_policy(model)?),
     ))
+}
+
+/// The checkpoint's overlap policy, canonicalized.
+///
+/// `_resolved_overlap_policy` (`inference/runtime.py:400`) resolves an explicit
+/// per-sample override through `normalize_overlap_policy`, and otherwise falls
+/// back to the architecture default — `disallow` for the boundary variant. An
+/// unknown name is an error rather than a silent "keep everything", so a
+/// mis-transcribed setting cannot quietly double-report overlapping spans.
+pub fn boundary_overlap_policy(model: &BoundaryModel<'_>) -> Result<OverlapPolicy, String> {
+    normalize_overlap_policy(Some(model.settings.overlap_policy.as_str()), "disallow")
 }
 
 /// Drop a whole query's spans when its abstention logit clears the threshold.

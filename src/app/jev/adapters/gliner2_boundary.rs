@@ -15,8 +15,8 @@ use std::sync::Arc;
 use crate::core::tensor::TensorSource;
 use crate::models::gliner::prompt::{BoundaryTaskKind, Label, Task};
 use crate::models::gliner_boundary::extract::{
-    apply_abstention, decode_spans, run_mixed_extraction, ClassificationResult, ExtractedSpan,
-    Extraction,
+    apply_abstention, boundary_overlap_policy, decode_spans, run_mixed_extraction,
+    ClassificationResult, ExtractedSpan, Extraction,
 };
 use crate::models::gliner_boundary::BoundaryModel;
 
@@ -201,12 +201,13 @@ pub fn extract(
 ) -> Result<Extraction, String> {
     let mut result = run_mixed_extraction(model, text, tasks, kinds, n_threads_arg)?;
     if !result.query_names.is_empty() {
-        result.spans = crate::models::gliner_boundary::extract::decode_spans(
+        result.spans = decode_spans(
             &result.candidates,
             &result.words,
             &result.query_names,
             model.settings.pair_temperature,
             threshold.unwrap_or(0.5),
+            Some(boundary_overlap_policy(model)?),
         );
         apply_abstention(
             &mut result.spans,

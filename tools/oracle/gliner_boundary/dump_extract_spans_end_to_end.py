@@ -51,6 +51,7 @@ from transformers import AutoModel, AutoTokenizer  # noqa: E402
 
 from common import build_head, dump_json, fixture_dir  # noqa: E402
 from gliner2.processor import SchemaTransformer  # noqa: E402
+from gliner2.models.boundary.engine import _resolve_spans  # noqa: E402
 from gliner2.models.boundary.model import decode_candidates  # noqa: E402
 
 ENCODER_DIR = REPO_ROOT / "models" / "deberta-v3-base"
@@ -72,17 +73,29 @@ SCHEMA = {
         "location": "a city, country or other place",
     },
 }
+# `policy` is base-v1's `boundary_head.overlap_policy`. The last three cases
+# drop the threshold so overlapping candidates survive thresholding and the
+# resolver actually has to choose between them; at the default threshold the
+# model is confident enough that no two spans of one field overlap, which would
+# leave the resolution stage untested end to end.
 CASES = [
-    ("Ada Lovelace worked with Charles Babbage in London.",
-     0.5),
-    ("Marie Curie moved to Paris and later to the Curie Institute.",
-     0.3),
-    ("nothing here should extract cleanly",
-     0.5),
+    ("Ada Lovelace worked with Charles Babbage in London.", 0.5, "flat"),
+    ("Marie Curie moved to Paris and later to the Curie Institute.", 0.3, "flat"),
+    ("nothing here should extract cleanly", 0.5, "flat"),
+    ("Marie Curie worked with Pierre Curie in Paris.", 0.02, "flat"),
+    ("Dr. John Smith Jr. visited New York City and Boston.", 0.02, "flat"),
+    ("Marie Curie worked with Pierre Curie in Paris.", 0.02, "allow"),
 ]
 
 
-def run_case(processor, encoder, head, text: str, threshold: float) -> dict:
+def _grouped_for_policy(candidates, threshold):
+    """`_group_scored_candidates` output: (sample, query) -> [(score, start, end)]."""
+    from gliner2.models.boundary.model import _group_scored_candidates
+
+    return _group_scored_candidates(candidates, threshold=threshold)
+
+
+def run_case(processor, encoder, head, text: str, threshold: float, policy: str) -> dict:
     # `_collate_batch` is the inference entry point (`collate_fn_inference` and
     # `transform_record` both funnel into it) and it calls `_normalize_text`,
     # which appends a "." when the text does not already end in sentence
@@ -126,7 +139,19 @@ def run_case(processor, encoder, head, text: str, threshold: float) -> dict:
             return_candidates=True,
         )
     candidates = out.candidates
-    grouped = decode_candidates(candidates, threshold=threshold)
+    # `decode_candidates` is only the *threshold + sort* half of the engine's
+    # decode. `_decode_entities` then runs `_resolve_spans(..., policy)` on the
+    # survivors, and for base-v1 the policy is "flat" (canonical "disallow"),
+    # i.e. maximum-total-score non-overlapping. Both stages are recorded so a
+    # regression in either one is visible.
+    decoded = decode_candidates(candidates, threshold=threshold)
+    resolved = [
+        [
+            _resolve_spans([(score, start, end) for score, start, end in scored], policy)
+            for scored in sample
+        ]
+        for sample in _grouped_for_policy(candidates, threshold)
+    ]
 
     return {
         "text": text,
@@ -142,7 +167,12 @@ def run_case(processor, encoder, head, text: str, threshold: float) -> dict:
             spec["field_name"] for spec in _ext_specs(batch.schema_tokens_list[0])
         ],
         "pair_logits": candidates.pair_logits[0].flatten().tolist(),
-        "spans": grouped[0],
+        "spans": decoded[0],
+        "resolved_spans": [
+            [[score, start, end] for score, start, end in query]
+            for query in resolved[0]
+        ],
+        "overlap_policy": policy,
     }
 
 
@@ -224,11 +254,18 @@ def main() -> None:
             raise ValueError(f"{token}: tokenizer id {actual} != {index}")
 
     head = build_head()
-    cases = [run_case(processor, encoder, head, text, threshold) for text, threshold in CASES]
+    cases = [
+        run_case(processor, encoder, head, text, threshold, policy)
+        for text, threshold, policy in CASES
+    ]
     dump_json(args.out, {"schema": SCHEMA, "threshold_default": 0.5, "cases": cases})
     for case in cases:
-        found = sum(len(row) for row in case["spans"])
-        print(f"  {case['text']!r}: {found} span(s) across {len(case['query_names'])} queries")
+        raw = sum(len(row) for row in case["spans"])
+        kept = sum(len(row) for row in case["resolved_spans"])
+        print(
+            f"  {case['text']!r} @{case['threshold']} {case['overlap_policy']}: "
+            f"{raw} -> {kept} span(s) across {len(case['query_names'])} queries"
+        )
 
 
 if __name__ == "__main__":

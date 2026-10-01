@@ -22,6 +22,10 @@
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner::prompt::{Label, Task, E_TOKEN};
+use rust_model_inference::models::gliner_boundary::extract::decode_spans;
+use rust_model_inference::models::gliner_boundary::overlap::{
+    normalize_overlap_policy, OverlapPolicy,
+};
 use rust_model_inference::models::gliner_boundary::{extract_spans, run_extraction, BoundaryModel};
 
 const GGUF: &str = "models/gliner2.5-base-v1/gliner2.5-base-v1-f32.gguf";
@@ -174,23 +178,80 @@ fn logits_and_spans_match_the_reference() {
             worst = worst.max((got - want).abs());
         }
 
-        let got = extract_spans(&model, text, &tasks, E_TOKEN, 0, Some(threshold))
-            .expect("extract spans");
-        // `decode_candidates` drops the score, so the golden is (start, end)
-        // pairs in the reference's sort order.
+        // Resolve overlaps the way the engine does, so this compares the
+        // reference's *final* output rather than the threshold-and-sort
+        // intermediate `decode_candidates` returns. `extract_spans` applies the
+        // checkpoint's own policy, so re-resolve from the raw candidates when
+        // the fixture asks for a different one.
+        let policy = normalize_overlap_policy(
+            case.get("overlap_policy").and_then(|v| v.as_str()),
+            model.settings.overlap_policy.as_str(),
+        )
+        .expect("normalize the fixture's overlap policy");
+        let words: Vec<String> = case["text_words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let names: Vec<String> = case["query_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let got = decode_spans(
+            &batch,
+            &words,
+            &names,
+            model.settings.pair_temperature,
+            threshold,
+            Some(policy),
+        );
+
+        // `resolved_spans` is the engine's final output: threshold, sort, then
+        // `_resolve_spans` under the policy. `spans` is the pre-resolution
+        // intermediate, kept in the fixture so a regression in either stage is
+        // visible instead of the two cancelling out.
         let mut want: Vec<(String, usize, usize)> = Vec::new();
-        for (query_index, spans) in case["spans"].as_array().unwrap().iter().enumerate() {
+        for (query_index, spans) in case["resolved_spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             let field = case["query_names"][query_index].as_str().unwrap();
             for span in spans.as_array().unwrap() {
-                let pair = span.as_array().unwrap();
-                assert_eq!(pair.len(), 2, "a decoded span is a (start, end) pair");
+                let row = span.as_array().unwrap();
+                assert_eq!(row.len(), 3, "a resolved span is (score, start, end)");
                 want.push((
                     field.to_string(),
-                    pair[0].as_u64().unwrap() as usize,
-                    pair[1].as_u64().unwrap() as usize,
+                    row[1].as_u64().unwrap() as usize,
+                    row[2].as_u64().unwrap() as usize,
                 ));
             }
         }
+        // The intermediate must be a superset of the resolved set: resolution
+        // only ever removes candidates.
+        let raw_count: usize = case["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_array().unwrap().len())
+            .sum();
+        assert!(
+            want.len() <= raw_count,
+            "case {case_index}: resolution produced {} spans from {raw_count} candidates",
+            want.len()
+        );
+        if policy == OverlapPolicy::Allow {
+            assert_eq!(
+                want.len(),
+                raw_count,
+                "case {case_index}: `allow` must keep every distinct candidate"
+            );
+        }
+
         assert_eq!(
             got.len(),
             want.len(),
@@ -229,6 +290,53 @@ fn logits_and_spans_match_the_reference() {
         worst < 1e-2,
         "max pair-logit delta {worst} exceeds threshold 1e-2"
     );
+}
+
+/// The resolver has to be exercised in the full pipeline, not just in the unit
+/// table. At the default threshold this model is confident enough that no two
+/// spans of one field overlap, so the fixture carries low-threshold cases whose
+/// candidates do overlap — otherwise `resolved_spans` would equal `spans`
+/// everywhere and the resolution stage would be untested.
+#[test]
+fn the_fixture_exercises_overlap_resolution() {
+    let fixture = fixture();
+    let mut collapsed = 0usize;
+    let mut allowed = 0usize;
+    for case in fixture["cases"].as_array().unwrap() {
+        let raw: usize = case["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_array().unwrap().len())
+            .sum();
+        let resolved: usize = case["resolved_spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_array().unwrap().len())
+            .sum();
+        assert!(
+            resolved <= raw,
+            "resolution may only remove candidates, got {raw} -> {resolved}"
+        );
+        match case["overlap_policy"].as_str().unwrap() {
+            "allow" => {
+                assert_eq!(resolved, raw, "`allow` must not remove anything");
+                allowed += 1;
+            }
+            _ => {
+                if resolved < raw {
+                    collapsed += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        collapsed > 0,
+        "no fixture case has overlapping candidates, so resolve_overlaps is untrained \
+         end to end"
+    );
+    assert!(allowed > 0, "no fixture case exercises the `allow` policy");
 }
 
 /// The fixture is only meaningful if the reference actually found spans, and
