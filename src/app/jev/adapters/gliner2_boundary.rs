@@ -97,11 +97,15 @@ pub fn parse_boundary_schema(
     let mut kinds = Vec::new();
     // The group order *is* the contract, in two ways at once: it fixes which
     // marker index each field lands on, and it fixes the extractive query ids,
-    // which the relation head reads as head/tail role slots. `_transform_record`
-    // emits json_structures, then entities, then relations, then classifications
-    // (`processor.py:893-904`), so a mixed schema must put the entity queries
-    // *before* the relation roles. Parsing relations first silently handed the
-    // relation roles ids 0 and 1 and pushed the entity queries after them.
+    // which the relation head reads as head/tail role slots and the record head
+    // as anchor/field slots. `_transform_record` emits json_structures, then
+    // entities, then relations, then classifications (`processor.py:893-904`).
+    // Parsing relations first silently handed the relation roles ids 0 and 1 and
+    // pushed the entity queries after them.
+    for task in parse_json_structure_groups(object)? {
+        tasks.push(task);
+        kinds.push(BoundaryTaskKind::JsonStructure);
+    }
     if object.contains_key("entities") {
         tasks.push(parse_entities_group(object)?);
         kinds.push(BoundaryTaskKind::Entities);
@@ -121,7 +125,8 @@ pub fn parse_boundary_schema(
     }
     if tasks.is_empty() {
         return Err(
-            "gliner2 boundary schema needs \"entities\", \"relations\" or \"classifications\""
+            "gliner2 boundary schema needs one of \"entities\", \"json_structures\", \
+             \"relations\" or \"classifications\""
                 .into(),
         );
     }
@@ -280,6 +285,93 @@ fn parse_entities_group(
         })
         .collect();
     Ok(Task::new("entities", labels))
+}
+
+/// Parse the reference's `"json_structures"` groups into `[C]` tasks.
+///
+/// `_process_json_structures` (`processor.py:921-1022`) reads a list of
+/// single-key objects whose value is one occurrence's field list, and unions
+/// the fields across occurrences **in first-seen order**. That order is the
+/// contract and the reference keeps it deliberately: routing it through a `set`
+/// made schema prompts depend on `PYTHONHASHSEED`, which would change both the
+/// query order and the decoded values across otherwise identical processes.
+/// Only the keys reach the prompt; the per-occurrence values are training
+/// targets.
+///
+/// Unlike an entities group, `json_descriptions[parent]` is a **field →
+/// description map**, not a single description string.
+///
+/// A group named in `record_metadata` with a `mode` is a *record* rather than a
+/// legacy structure; that is decided later, by `compile_record_specs`, so the
+/// task shape is identical either way.
+fn parse_json_structure_groups(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<Task>, String> {
+    let Some(structures) = object.get("json_structures") else {
+        return Ok(Vec::new());
+    };
+    let items = structures
+        .as_array()
+        .ok_or("\"json_structures\" must be a list of {structure_name: [field, ...]}")?;
+    let descriptions = object.get("json_descriptions").and_then(|v| v.as_object());
+
+    // Union the fields per group, keeping declaration order. The reference uses
+    // a dict keyed by parent, so two entries naming the same parent merge into
+    // one group; a `Vec` in first-seen order does the same without relying on
+    // hash order.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for item in items {
+        let map = item
+            .as_object()
+            .ok_or("each json_structures entry must be an object of {name: [fields]}")?;
+        if map.is_empty() {
+            return Err("each json_structures entry must name a structure".into());
+        }
+        for (name, occurrences) in map {
+            let fields = occurrences.as_array().ok_or_else(|| {
+                format!("json_structures[{name:?}] must be a list of field names")
+            })?;
+            let entry = groups.entry(name.clone()).or_insert_with(|| {
+                order.push(name.clone());
+                Vec::new()
+            });
+            for field in fields {
+                let name = field.as_str().ok_or_else(|| {
+                    format!("json_structures[{name:?}] field names must be strings")
+                })?;
+                if !entry.iter().any(|seen| seen == name) {
+                    entry.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut tasks = Vec::with_capacity(order.len());
+    for name in order {
+        let fields = &groups[&name];
+        if fields.is_empty() {
+            // The reference skips an empty field set rather than emitting a
+            // group with no `[C]` children, which would have no query at all.
+            continue;
+        }
+        let group_descriptions = descriptions.and_then(|map| map.get(&name));
+        let labels = fields
+            .iter()
+            .map(|field| {
+                let mut label = Label::new(field.clone());
+                label.description = group_descriptions
+                    .and_then(|value| value.as_object())
+                    .and_then(|map| map.get(field))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                label
+            })
+            .collect();
+        tasks.push(Task::new(name, labels));
+    }
+    Ok(tasks)
 }
 
 /// Run one extraction with an already-loaded model, applying abstention.

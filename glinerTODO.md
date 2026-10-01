@@ -321,7 +321,26 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   会依赖 `PYTHONHASHSEED`
 - **oracle**：`dump_record_specs.py`，16 个 case（含 7 个 error case 记 message）
 
-### 🟢 5.2.4b-3 `[C]` prompt 路由 + `RecordHead.forward_group` + `decode_group`（待开工）
+### ✅ 5.2.4b-1h `[C]` json_structures schema 解析 + prompt 路由
+- **新** `parse_json_structure_groups`：`{"json_structures": [{"parent": [fields]}],
+  "json_descriptions": {"parent": {"field": "desc"}}}`，输出 `[C]` Task
+- **field 顺序 = 所有 occurrence 的 key 并集按首次出现顺序**。reference 特意没走
+  set（那样会依赖 `PYTHONHASHSEED`，同时改掉 query 顺序和解码值）。两个 entry 命名
+  同一个 parent 会**合并成一个 group**
+- **`json_descriptions[parent]` 是 field → description 的 map**（relations 那边的 group
+  description 是纯字符串）。当成字符串读会静默丢掉所有 description 并让后面所有 marker
+  index 位移——单测专门盯这个
+- **空 group 被跳过**（而不是产出一个没有 `[C]` child 的 group，那个 group 一个 query
+  都没有）。若 schema 里只有空 group → 报「needs one of ...」而不是返回空成功
+- **parser 不看 `record_metadata`**：同一个 schema 加不加 record 标注必须产出**完全相同**
+  的 prompt，否则 query id 会变。单测断言 `bare == annotated`
+- **抓到我自己的排序错误**：我先写了 entities → json_structures，但
+  `_transform_record` 是 **json_structures 最先**。单测直接把这个抓出来了
+
+### 🟢 5.2.4b-3 `RecordHead.forward_group` + `decode_group` + 端到端（待开工）
+
+已就位的前置：`candidate_states`（768）、LSA（匈牙利）、`RecordSpec` 编译、`[C]` 路由。
+剩下的就是 head 本身 + decode + 接进 extract/CLI/HTTP。
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -346,7 +365,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
 | 5.2.4b-1e | `candidate_encoder` / `candidate_states` | ✅ | `2cd425b` |
 | 5.2.4b-1f | LSA（匈牙利）solver | ✅ | `b446a98` |
-| 5.2.4b-1g | `record_metadata` + `RecordSpec` 编译 | ✅ | 本次 |
+| 5.2.4b-1g | `record_metadata` + `RecordSpec` 编译 | ✅ | `ebf0c39` |
+| 5.2.4b-1h | `[C]` json_structures schema + prompt 路由 | ✅ | 本次 |
 | 5.2.4b-2/3 | json_structures（`[C]`）+ record head | 🟡 已勘察 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
@@ -362,7 +382,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-18 个 boundary 测试文件 / 53 个测试全绿。
+19 个 boundary 测试文件 / 62 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
