@@ -252,6 +252,7 @@ BOUNDARY_FLAG_KEYS = (
     "adaptive_threshold",
     "hard_negative_keep_all_when_absent",
     "directional_relation_states",
+    "relation_biaffine_content",
     "enable_relations",
     "enable_records",
     "enable_count_head",
@@ -313,6 +314,10 @@ BOUNDARY_INT_KEYS_REQUIRED = (
 )
 BOUNDARY_FLAG_KEYS_REQUIRED = (
     "use_inside_evidence",
+    # The relation scorer's *architecture* depends on this one: with it off the
+    # three content projections are absent, so a loader that invents the flag
+    # would look for weights that are not there (or skip weights that are).
+    "relation_biaffine_content",
     "enable_span_content",
     "content_soft_max_pool",
     "query_conditioned_inside_weight",
@@ -429,6 +434,57 @@ def check_pair_scorer_shapes(settings: dict, shapes: dict, hidden_size: int) -> 
             forbid(name, "enable_span_content is false")
 
 
+
+def check_relation_scorer_shapes(settings: dict, shapes: dict, hidden_size: int) -> None:
+    """Cross-check ``relation_scorer``'s shapes against the declared settings.
+
+    Kept apart from :func:`check_pair_scorer_shapes` on purpose. That function's
+    local ``d`` is ``boundary_dim`` (128 for base-v1), but the relation scorer
+    is built on the *encoder* hidden size (768) — it consumes text states and
+    relation query states, not boundary states. Sharing one scope made the two
+    widths a one-character mistake apart.
+    """
+    h = hidden_size
+    # ``directional_relation_states`` is the one setting that changes a *shape*
+    # rather than a computation: the relation query state is the concatenation
+    # of the two role states instead of their mean, so the gate projection and
+    # the content linear widen from ``h`` to ``2h``. A checkpoint that disagrees
+    # with its own flag cannot be loaded unambiguously.
+    relation_dim = 2 * h if settings["directional_relation_states"] else h
+
+    def require(name: str, shape: tuple) -> None:
+        actual = shapes.get(name)
+        if actual is None:
+            raise ValueError(f"settings require {name} but the checkpoint does not carry it")
+        if actual != shape:
+            raise ValueError(f"{name} has shape {actual}, settings imply {shape}")
+
+    def forbid(name: str, why: str) -> None:
+        if name in shapes:
+            raise ValueError(f"{why} but the checkpoint carries {name}")
+
+    # Four endpoint states + the relation query + order + normalized distance.
+    require("relation_scorer.mlp.0.weight", (h, 4 * h + relation_dim + 2))
+    require("relation_scorer.mlp.0.bias", (h,))
+    # ``nn.Sequential(Linear, GELU, Dropout, Linear)``: Dropout occupies an
+    # index, so the output linear is ``mlp.3``, not ``mlp.2``.
+    require("relation_scorer.mlp.3.weight", (1, h))
+    require("relation_scorer.mlp.3.bias", (1,))
+    if settings["relation_biaffine_content"]:
+        require("relation_scorer.head_content_projection.weight", (h, h))
+        require("relation_scorer.tail_content_projection.weight", (h, h))
+        require("relation_scorer.relation_content_gate.weight", (h, relation_dim))
+        require("relation_scorer.content_linear.weight", (1, 2 * h + relation_dim))
+    else:
+        for name in (
+            "relation_scorer.head_content_projection.weight",
+            "relation_scorer.tail_content_projection.weight",
+            "relation_scorer.relation_content_gate.weight",
+            "relation_scorer.content_linear.weight",
+        ):
+            forbid(name, "relation_biaffine_content is false")
+
+
 def tensor_contracts():
     d, f = ENCODER["hidden_size"], ENCODER["intermediate_size"]
     wide = d * 2
@@ -540,11 +596,9 @@ def convert(model_dir: Path, output: Path) -> None:
     # (``SparseBoundaryPairScorer.__init__``), so verify the checkpoint's own
     # shapes agree with the settings we are about to write into the GGUF.
     boundary_settings = boundary_settings_metadata(config["boundary_head"])
-    check_pair_scorer_shapes(
-        boundary_settings,
-        {name: tuple(source.header[name]["shape"]) for name in bundled},
-        ENCODER["hidden_size"],
-    )
+    bundled_shapes = {name: tuple(source.header[name]["shape"]) for name in bundled}
+    check_pair_scorer_shapes(boundary_settings, bundled_shapes, ENCODER["hidden_size"])
+    check_relation_scorer_shapes(boundary_settings, bundled_shapes, ENCODER["hidden_size"])
 
     tokens = list(pieces) + [token for token, _ in sorted(added.items(), key=lambda kv: kv[1])]
     # ``vocab_size`` and ``len(tokens)`` can differ by 1 when ``[MASK]`` is part

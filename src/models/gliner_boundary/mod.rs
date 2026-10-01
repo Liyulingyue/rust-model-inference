@@ -29,6 +29,7 @@ pub mod overlap;
 pub mod pair_scorer;
 pub mod pool;
 pub mod proposer;
+pub mod relations;
 pub mod settings;
 pub mod spans;
 
@@ -45,6 +46,10 @@ pub use overlap::{
 };
 pub use pair_scorer::{PairScoreInputs, PairScorer, PairScorerFeatures};
 pub use pool::{DocumentCandidatePool, PooledCandidates};
+pub use relations::{
+    generate_typed_relation_pairs, RelationCandidates, RelationPair, RelationProposalSettings,
+    RelationTypeSpec, SparseRelationScorer,
+};
 pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
 pub use settings::BoundarySettings;
 pub use spans::{score_document_candidates, score_spans, DocumentCandidateBatch, ScoredSpan};

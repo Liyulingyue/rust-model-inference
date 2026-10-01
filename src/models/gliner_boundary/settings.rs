@@ -66,6 +66,23 @@ pub struct BoundarySettings {
     pub classification_temperature: f32,
     pub abstention_threshold: f32,
 
+    // --- `TypedRelationPairGenerator` + `SparseRelationScorer` ---
+    /// Width of the relation query state: `2 * hidden_size` when the two role
+    /// states are concatenated (`directional_relation_states`), else `hidden_size`.
+    pub directional_relation_states: bool,
+    /// The three content projections and the content linear are only present
+    /// when this is set. It is a *shape* switch, not just a feature switch.
+    pub relation_biaffine_content: bool,
+    /// Per relation type, how many head-typed and tail-typed mentions survive
+    /// the top-k, and how many of their cross product are scored.
+    pub relation_heads_per_type: usize,
+    pub relation_tails_per_type: usize,
+    pub relation_pair_cap: usize,
+    /// A mention only qualifies as a relation argument at or above this
+    /// probability. base-v1 uses 0.2, not the reference default of 0.0.
+    pub relation_argument_proposal_threshold: f32,
+    pub relation_temperature: f32,
+
     // --- task enables ---
     pub enable_relations: bool,
     pub enable_records: bool,
@@ -121,11 +138,33 @@ impl BoundarySettings {
             classification_temperature: required_f32(source, "classification_temperature")?,
             abstention_threshold: required_f32(source, "abstention_threshold")?,
 
+            directional_relation_states: required_flag(source, "directional_relation_states")?,
+            relation_biaffine_content: required_flag(source, "relation_biaffine_content")?,
+            relation_heads_per_type: required_usize(source, "relation_heads_per_type")?,
+            relation_tails_per_type: required_usize(source, "relation_tails_per_type")?,
+            relation_pair_cap: required_usize(source, "relation_pair_cap")?,
+            relation_argument_proposal_threshold: required_f32(
+                source,
+                "relation_argument_proposal_threshold",
+            )?,
+            relation_temperature: required_f32(source, "relation_temperature")?,
+
             enable_relations: required_flag(source, "enable_relations")?,
             enable_records: required_flag(source, "enable_records")?,
             enable_count_head: required_flag(source, "enable_count_head")?,
             enable_abstention: required_flag(source, "enable_abstention")?,
         })
+    }
+
+    /// The relation query-state width, which the scorer's input layer is
+    /// built against. `directional_relation_states` is the only setting that
+    /// changes a *shape* rather than a computation.
+    pub fn relation_query_dim(&self, hidden_size: usize) -> usize {
+        if self.directional_relation_states {
+            2 * hidden_size
+        } else {
+            hidden_size
+        }
     }
 
     /// True when ordinary inference goes through the shared document pool

@@ -12,7 +12,8 @@
 //!   = "gelu"``); the Decide loader's hardcoded relu check doesn't apply.
 //! - boundary_head.*: BOS / EOS states, left/right projections,
 //!   output projection, layer norm, attention blocks, refinement blocks.
-//! - relation_scorer.* / record_decoder.*: bundled but not loaded yet
+//! - relation_scorer.*: loaded (gated on `enable_relations`)
+//! - record_decoder.*: bundled but not loaded yet
 //!   (Phase 7 in ``glinerTODO.md``).
 //!
 //! The encoder side of the GGUF is byte-compatible with Decide's
@@ -32,6 +33,7 @@ use super::marginals::BoundaryQueryHead;
 use super::pair_scorer::PairScorer;
 use super::pool::{DocumentCandidatePool, SharedPoolScorer};
 use super::proposer::BoundaryProposer;
+use super::relations::SparseRelationScorer;
 use super::settings::BoundarySettings;
 
 /// Loaded BoundaryExtractor weights + cached `EncoderConfig`.
@@ -68,6 +70,10 @@ pub struct BoundaryModel<'a> {
     /// `pair_scorer` then only serve `score_explicit_spans`.
     pub pool_builder: DocumentCandidatePool<'a>,
     pub pool_scorer: SharedPoolScorer<'a>,
+    /// `relation_scorer` — the `[R]` head. `None` only when the checkpoint sets
+    /// `enable_relations = false`, in which case the tensors are absent too and
+    /// a relation schema is rejected at the prompt rather than here.
+    pub relation_scorer: Option<SparseRelationScorer<'a>>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -177,6 +183,19 @@ impl<'a> BoundaryModel<'a> {
             settings.min_pool_per_query,
         )?;
         let pool_scorer = SharedPoolScorer::load(source, n_embd, &settings)?;
+        // The relation scorer is 12 tensors whose widths depend on
+        // `directional_relation_states`, so it is loaded only when the
+        // checkpoint says the head exists.
+        let relation_scorer = if settings.enable_relations {
+            Some(SparseRelationScorer::load(
+                source,
+                n_embd,
+                settings.relation_query_dim(n_embd),
+                settings.relation_biaffine_content,
+            )?)
+        } else {
+            None
+        };
 
         Ok(Self {
             config,
@@ -197,6 +216,7 @@ impl<'a> BoundaryModel<'a> {
             settings,
             pool_builder,
             pool_scorer,
+            relation_scorer,
         })
     }
 }

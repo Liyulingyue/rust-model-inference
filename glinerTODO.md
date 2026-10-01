@@ -216,7 +216,18 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **测试**：`tests/gliner2_5_base_v1_boundary_http.rs`，真起 server + curl，3 个测试。覆盖路由分发、raw schema、响应形状、mixed 抽取+分类、threshold override、`/v1/jev/score` 必须 404、四条 400 错误路径
 - **threshold override 的测试用 0.02**：默认 threshold 下同 field 无重叠，threshold 被忽略也看不出来
 
-### 🟢 5.2.4b-2 relations + records + json_structures（待开工）
+### ✅ 5.2.4b-1c relation head（generator + scorer + oracle）
+- **实现**：`relations.rs`（新）—— `TypedRelationPairGenerator`（typed+capped top-k）和 `SparseRelationScorer`（local feature MLP + biaffine content）
+- **base-v1 设置**：`heads_per_relation=32`、`tails_per_relation=32`、`pair_cap=64`、**`argument_threshold=0.2`**（reference dataclass 默认是 0.0！）、`relation_temperature=1.0`、`directional_relation_states=true` → relation query 宽度 1536、`relation_biaffine_content=true`
+- **converter 补了两处**：`relation_biaffine_content` 之前**没有**转写（loader 会读不到）；新增 `check_relation_scorer_shapes`，12 个 tensor 全部交叉校验。**单独一个函数**而不是塞进 `check_pair_scorer_shapes`——后者的局部 `d` 是 `boundary_dim`(128)，relation scorer 用的是 encoder hidden(768)，共用一个 scope 两者只差一个字符
+- **`mlp.3` 不是 `mlp.2`**：`nn.Sequential(Linear, GELU, Dropout, Linear)` 里 Dropout 占一个 index
+- **抓到的三个坑**：
+  1. **argument 概率不除 temperature**：span decode 用 `sigmoid(logits/pair_temperature)`，但 generator 内部重新算 `sigmoid(pair_logits)`。base-v1 的 `pair_temperature=1.0` 两者相等，**任何 fixture 都测不出来**——仍然照抄，否则换 `pair_temperature≠1` 的 checkpoint 会静默地用不同阈值筛 argument
+  2. **padding slot 会污染 pair top-k**：reference 把 `pair_valid = hvalid & tvalid` mask 掉，所以「真 head × padded tail」被丢弃；我第一版靠 score=0 推断 validity，会让这些 0 分 pair 在**文档 argument 不够时**挤掉真 pair。`valid` 是承重字段
+  3. **mention 排序是 `(start, end)` 字典序**，不是分数序；它存在只是给后面的 score sort 一个确定 tie-break。两次 stable argsort（先 end 后 start）== 一次 stable sort on `(start,end)`
+- **oracle**：`dump_relations.py`，4 个 case，pair 集合和 logit 都对齐（TOLERANCE 2.0e-4）。case 覆盖：同分 mention（同 span 不同 query / 相邻 span）、padding + threshold 边界（logit 恰好等于 `logitit(0.2)`，reference 用 `>=`）、same-span 自剔除、named/dead spec
+
+### 🟢 5.2.4b-2 relation prompt + schema + decode + HTTP（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -237,7 +248,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1 | 分类头 + null/count head | ✅ | 本次 |
 | 5.2.4b-1a | overlap_policy 解码 | ✅ | 本次 |
 | 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
-| 5.2.4b-2 | relations + records + json_structures | 🟢 待开工 | — |
+| 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
+| 5.2.4b-2 | relation prompt + schema + decode；records + json_structures | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
@@ -247,7 +259,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 **现在支持的**：extractive spans（`[E]`）+ classification（`[L]`）+ abstention（`null_projection`）+ count log-rate（`count_head`），两组可以同时出现在一个 schema 里。
 
 **仍然没有的**：
-- relations（`[R]`）/ records（`record_decoder`）/ `json_structures`（`[C]`）
+- relation 的 `[R]` prompt 路由 / schema 解析 / decode（head 本身已就绪）
+- records（`record_decoder`）/ `json_structures`（`[C]`）
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
