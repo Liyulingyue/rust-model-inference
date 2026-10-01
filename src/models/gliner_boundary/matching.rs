@@ -146,10 +146,12 @@ pub fn linear_sum_assignment(cost: &[Vec<f64>]) -> Result<(Vec<usize>, Vec<usize
         }
     }
 
+    // `p` is 1-indexed, so column j lives at `p[j]`; iterate over the slice and
+    // recover j from the enumerate offset rather than indexing `p` by hand.
     let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(n.min(m));
-    for j in 1..=m {
-        if p[j] != 0 {
-            pairs.push((p[j] - 1, j - 1));
+    for (offset, &row) in p.iter().enumerate().take(m + 1).skip(1) {
+        if row != 0 {
+            pairs.push((row - 1, offset - 1));
         }
     }
     pairs.sort_unstable();
