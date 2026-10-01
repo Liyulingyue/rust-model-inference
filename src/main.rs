@@ -202,6 +202,12 @@ fn main() {
     }
 
     if let Some(z_image_options) = z_image_options {
+        // Has to happen here, not at the shared `enable_gpu()` below: this
+        // branch returns before reaching it, and the DiT's projections only
+        // reach the Vulkan backend once the flag is set.
+        if options.gpu {
+            ops::enable_gpu();
+        }
         let diffusion: Arc<dyn TensorSource> =
             Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
         let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
