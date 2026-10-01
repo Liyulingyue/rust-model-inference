@@ -1505,9 +1505,265 @@ pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f
     }
     crate::ops::rope::rope_neox_inplace_with_table(values, head_dim, &cos, &sin);
 }
-
 pub(super) fn dot(left: &[f32], right: &[f32]) -> f32 {
     crate::ops::dot_f32(left, right, left.len())
+}
+
+/// Bit-exact vectorized value reduction shared by the NAR attention kernels and
+/// the AR single-token decode. Lives here rather than in `nar.rs` because
+/// `attention_head` in this file needs it too and `nar` already depends on `ar`.
+///
+/// Two-segment variant: tokens `0..n_first` come from `values_first`, the rest
+/// from `values_second`, but both land in the *same* accumulator.
+///
+/// The prefix KV and the latent KV are separate allocations, so a 512-wide KV
+/// block can straddle the boundary between them. Reducing each segment into its
+/// own accumulator and adding both to the output associates the additions as
+/// `(out + head) + tail`, while the original single loop produces
+/// `out + (head + tail)`. Those round differently, which is enough to change a
+/// bf16 rounding decision downstream. One accumulator reproduces the original.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn value_reduce_block2(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if crate::ops::has_neon() && head_width >= 4 {
+        // SAFETY: NEON availability is checked, and both segments are bounded
+        // by the caller to stay inside their slices.
+        unsafe {
+            value_reduce_block2_neon(
+                values_first,
+                base_first,
+                values_second,
+                base_second,
+                n_first,
+                scores,
+                output,
+                row_stride,
+                head_offset,
+                n_tokens,
+                head_width,
+            );
+        }
+        return;
+    }
+    value_reduce_block2_scalar(
+        values_first,
+        base_first,
+        values_second,
+        base_second,
+        n_first,
+        scores,
+        output,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn value_reduce_block2_neon(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn value_reduce_block2_scalar(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            sum += scores[token] * values[start];
+        }
+        output[dim] += sum;
+    }
+}
+
+#[inline]
+/// `base` is an **element** offset into `values` (the kernel computes
+/// `base + token * row_stride + head_offset + dim`), not a row index. Passing a
+/// row number silently reads the wrong elements, which is why the NAR call sites
+/// pass `start * kv_width`.
+pub(super) fn value_reduce_block(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        if crate::ops::has_neon() && head_width >= 4 && n_tokens > 0 {
+            // SAFETY: NEON is available per `has_neon`, and every load below is
+            // bounded by `base + n_tokens * row_stride + head_offset + head_width`
+            // which the caller guarantees is within `values`.
+            unsafe {
+                value_reduce_block_neon(
+                    values,
+                    scores,
+                    output,
+                    base,
+                    row_stride,
+                    head_offset,
+                    n_tokens,
+                    head_width,
+                );
+            }
+            return;
+        }
+    }
+    value_reduce_block_scalar(
+        values,
+        scores,
+        output,
+        base,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+pub(super) unsafe fn value_reduce_block_neon(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        // Fresh accumulator per block, and a separate multiply so the product is
+        // rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[inline]
+pub(super) fn value_reduce_block_scalar(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * values[start];
+        }
+        output[dim] += sum;
+    }
 }
 
 pub(super) fn attention_head(
@@ -1526,13 +1782,28 @@ pub(super) fn attention_head(
     }
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
-        for (dimension, value) in output.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            for cached_position in 0..scores.len() {
-                sum += scores[cached_position]
-                    * value_cache[cached_position * kv_width + kv_start + dimension];
-            }
-            *value = half::bf16::from_f32(sum * inverse_sum).to_f32();
+        // The scalar form iterated dimension-outer, so consecutive reads of
+        // `value_cache` were `kv_width` floats apart and every access landed on a
+        // fresh cache line. `value_reduce_block` walks tokens outer and the head
+        // dimension inner, which is the contiguous order, and it reproduces the
+        // original arithmetic exactly: a fresh zeroed accumulator per call, a
+        // separate multiply and add rather than an FMA, and one add into
+        // `output` at the end. This is the same kernel the NAR attention uses
+        // and it is pinned bit-exact by
+        // `nar::attention_parity_tests::optimized_attention_matches_legacy_bitwise`.
+        output.fill(0.0);
+        value_reduce_block(
+            value_cache,
+            scores,
+            output,
+            0,
+            kv_width,
+            kv_start,
+            scores.len(),
+            output.len(),
+        );
+        for value in output.iter_mut() {
+            *value = half::bf16::from_f32(*value * inverse_sum).to_f32();
         }
         return;
     }
@@ -1553,14 +1824,19 @@ pub(super) fn attention_head(
                 *value *= rescale;
             }
         }
-        for (dimension, value) in output.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            for offset in 0..block.len() {
-                sum +=
-                    block[offset] * value_cache[(start + offset) * kv_width + kv_start + dimension];
-            }
-            *value += sum;
-        }
+        // Same contiguous, bit-exact reduction as the short path above, applied
+        // per KV block so the streaming max/rescale arithmetic is untouched.
+        // `base` is an element offset, not a row index.
+        value_reduce_block(
+            value_cache,
+            block,
+            output,
+            start * kv_width,
+            kv_width,
+            kv_start,
+            block.len(),
+            output.len(),
+        );
         running_max = next_max;
     }
     let inverse_sum = running_sum.recip();
