@@ -2478,16 +2478,30 @@ pub(crate) fn silu_mul_rows(
         let r_end = (r_start + per_thread).min(n_ff);
         for row in 0..rows {
             unsafe {
-                let g = std::slice::from_raw_parts_mut(
+                let g = std::slice::from_raw_parts(
                     gate_ptr.add(row * n_ff + r_start),
                     r_end - r_start,
                 );
-                let u =
-                    std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
+                let u = std::slice::from_raw_parts_mut(
+                    up_ptr.add(row * n_ff + r_start) as *mut f32,
+                    r_end - r_start,
+                );
+                // Exact SiLU via libm `exp` — matches llama.cpp. The
+                // approximate-exp variant is only used on the decode
                 // Exact SiLU via libm `exp` — matches llama.cpp. The
                 // approximate-exp variant is only used on the decode
                 // path where it was already the pre-existing convention.
-                silu_mul_inplace(u, g);
+                //
+                // Args: `silu_mul_inplace(gate, up)` writes
+                // `up[i] *= silu(gate[i])`. The first arg is the
+                // multiplier source (read-only), the second is the
+                // destination (mut, overwritten with silu(gate)*up).
+                // Earlier revisions of this helper swapped the args,
+                // producing the wrong tensor — `silu(UP) * GATE`
+                // rather than `silu(GATE) * UP`. Swapped back: pass
+                // `g` (gate buffer, read-only here) and `u` (up
+                // buffer, the destination).
+                silu_mul_inplace(g, u);
             }
         }
     });
