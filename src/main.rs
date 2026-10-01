@@ -52,7 +52,12 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         // qwen3 covers Fun-ASR-Nano (qwen3-0.6b LLM + funasr encoder mmproj);
         // qwen3vl covers Qwen3-Audio ASR; qwen2 covers VibeVoice ASR;
         // sensevoice-small and paraformer are standalone ASR models.
-        "qwen3" | "qwen3vl" | "qwen2" | "sensevoice-small" | "paraformer" => Ok(AudioRoute::Asr),
+        "qwen3"
+        | "qwen3vl"
+        | "qwen2"
+        | "sensevoice-small"
+        | "paraformer"
+        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
@@ -550,7 +555,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if arch == "qwen35" {
+        if matches!(arch, "qwen35" | "edge0") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -641,7 +646,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if arch == "qwen35" {
+        if matches!(arch, "qwen35" | "edge0") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,
@@ -726,6 +731,10 @@ mod tests {
     #[test]
     fn architecture_aware_audio_dispatch_preserves_asr() {
         assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(
+            dispatch_audio_arch("audio8_asr_infinite").unwrap(),
+            AudioRoute::Asr
+        );
         assert_eq!(dispatch_audio_arch("gemma4").unwrap(), AudioRoute::Gemma4);
         assert!(dispatch_audio_arch("llama").is_err());
     }

@@ -1,14 +1,17 @@
+pub mod audio8;
 pub mod bert_family;
 pub mod breeze;
 pub mod chat_template;
 pub mod clm;
 pub mod diffusion;
 pub mod dots;
+pub mod edge0;
 pub mod falcon_h1;
 pub mod funasr;
 pub mod gemma4;
 pub mod gemma_embedding;
 pub mod gliner;
+pub mod hybrid;
 pub mod laya;
 pub mod lfm2;
 pub mod lfm25;
