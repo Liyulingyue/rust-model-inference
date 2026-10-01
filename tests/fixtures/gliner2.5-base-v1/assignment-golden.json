@@ -1,0 +1,599 @@
+{
+ "cases": [
+  {
+   "name": "unique_2x2",
+   "rows": 2,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     2.0
+    ],
+    [
+     2.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 2.0,
+   "max_finite_abs": 2.0,
+   "error": null
+  },
+  {
+   "name": "unique_3x3",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     9.0,
+     1.0,
+     5.0
+    ],
+    [
+     2.0,
+     8.0,
+     3.0
+    ],
+    [
+     4.0,
+     6.0,
+     7.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    1,
+    2,
+    0
+   ],
+   "total": 8.0,
+   "max_finite_abs": 9.0,
+   "error": null
+  },
+  {
+   "name": "ties_all_equal_2x2",
+   "rows": 2,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     1.0
+    ],
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 2.0,
+   "max_finite_abs": 1.0,
+   "error": null
+  },
+  {
+   "name": "ties_all_equal_3x3",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     5.0,
+     5.0,
+     5.0
+    ],
+    [
+     5.0,
+     5.0,
+     5.0
+    ],
+    [
+     5.0,
+     5.0,
+     5.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    0,
+    1,
+    2
+   ],
+   "total": 15.0,
+   "max_finite_abs": 5.0,
+   "error": null
+  },
+  {
+   "name": "ties_all_equal_4x4",
+   "rows": 4,
+   "cols": 4,
+   "cost": [
+    [
+     2.0,
+     2.0,
+     2.0,
+     2.0
+    ],
+    [
+     2.0,
+     2.0,
+     2.0,
+     2.0
+    ],
+    [
+     2.0,
+     2.0,
+     2.0,
+     2.0
+    ],
+    [
+     2.0,
+     2.0,
+     2.0,
+     2.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "col_ind": [
+    0,
+    1,
+    2,
+    3
+   ],
+   "total": 8.0,
+   "max_finite_abs": 2.0,
+   "error": null
+  },
+  {
+   "name": "diagonal_wins",
+   "rows": 2,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     2.0
+    ],
+    [
+     2.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 2.0,
+   "max_finite_abs": 2.0,
+   "error": null
+  },
+  {
+   "name": "ties_disjoint_optimal",
+   "rows": 2,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     1.0
+    ],
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 2.0,
+   "max_finite_abs": 1.0,
+   "error": null
+  },
+  {
+   "name": "ties_contested_column",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     0.0,
+     5.0,
+     5.0
+    ],
+    [
+     0.0,
+     5.0,
+     5.0
+    ],
+    [
+     9.0,
+     0.0,
+     9.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    0,
+    2,
+    1
+   ],
+   "total": 5.0,
+   "max_finite_abs": 9.0,
+   "error": null
+  },
+  {
+   "name": "ties_plateau_tail",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     0.0,
+     1.0,
+     1.0
+    ],
+    [
+     4.0,
+     1.0,
+     1.0
+    ],
+    [
+     4.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    0,
+    1,
+    2
+   ],
+   "total": 2.0,
+   "max_finite_abs": 4.0,
+   "error": null
+  },
+  {
+   "name": "ties_identical_rows",
+   "rows": 3,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     3.0
+    ],
+    [
+     1.0,
+     3.0
+    ],
+    [
+     0.5,
+     0.5
+    ]
+   ],
+   "row_ind": [
+    0,
+    2
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 1.5,
+   "max_finite_abs": 3.0,
+   "error": null
+  },
+  {
+   "name": "wide_2x4",
+   "rows": 2,
+   "cols": 4,
+   "cost": [
+    [
+     4.0,
+     1.0,
+     9.0,
+     9.0
+    ],
+    [
+     9.0,
+     9.0,
+     2.0,
+     3.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    1,
+    2
+   ],
+   "total": 3.0,
+   "max_finite_abs": 9.0,
+   "error": null
+  },
+  {
+   "name": "tall_4x2",
+   "rows": 4,
+   "cols": 2,
+   "cost": [
+    [
+     4.0,
+     9.0
+    ],
+    [
+     1.0,
+     9.0
+    ],
+    [
+     9.0,
+     2.0
+    ],
+    [
+     9.0,
+     3.0
+    ]
+   ],
+   "row_ind": [
+    1,
+    2
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 3.0,
+   "max_finite_abs": 9.0,
+   "error": null
+  },
+  {
+   "name": "wide_1x3",
+   "rows": 1,
+   "cols": 3,
+   "cost": [
+    [
+     3.0,
+     1.0,
+     2.0
+    ]
+   ],
+   "row_ind": [
+    0
+   ],
+   "col_ind": [
+    1
+   ],
+   "total": 1.0,
+   "max_finite_abs": 3.0,
+   "error": null
+  },
+  {
+   "name": "tall_3x1",
+   "rows": 3,
+   "cols": 1,
+   "cost": [
+    [
+     3.0
+    ],
+    [
+     1.0
+    ],
+    [
+     2.0
+    ]
+   ],
+   "row_ind": [
+    1
+   ],
+   "col_ind": [
+    0
+   ],
+   "total": 1.0,
+   "max_finite_abs": 3.0,
+   "error": null
+  },
+  {
+   "name": "square_with_ties_3x3",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     1.0,
+     1.0,
+     8.0
+    ],
+    [
+     1.0,
+     1.0,
+     8.0
+    ],
+    [
+     8.0,
+     8.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    0,
+    1,
+    2
+   ],
+   "total": 3.0,
+   "max_finite_abs": 8.0,
+   "error": null
+  },
+  {
+   "name": "empty_0x3",
+   "rows": 0,
+   "cols": 0,
+   "cost": [],
+   "row_ind": [],
+   "col_ind": [],
+   "total": 0.0,
+   "max_finite_abs": 1.0,
+   "error": null
+  },
+  {
+   "name": "empty_3x0",
+   "rows": 3,
+   "cols": 0,
+   "cost": [
+    [],
+    [],
+    []
+   ],
+   "row_ind": [],
+   "col_ind": [],
+   "total": 0.0,
+   "max_finite_abs": 1.0,
+   "error": null
+  },
+  {
+   "name": "single_cell",
+   "rows": 1,
+   "cols": 1,
+   "cost": [
+    [
+     7.5
+    ]
+   ],
+   "row_ind": [
+    0
+   ],
+   "col_ind": [
+    0
+   ],
+   "total": 7.5,
+   "max_finite_abs": 7.5,
+   "error": null
+  },
+  {
+   "name": "infinite_row",
+   "rows": 3,
+   "cols": 3,
+   "cost": [
+    [
+     "inf",
+     "inf",
+     "inf"
+    ],
+    [
+     1.0,
+     2.0,
+     3.0
+    ],
+    [
+     3.0,
+     2.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1,
+    2
+   ],
+   "col_ind": [
+    1,
+    0,
+    2
+   ],
+   "total": "inf",
+   "max_finite_abs": 3.0,
+   "error": null
+  },
+  {
+   "name": "mixed_infinities",
+   "rows": 3,
+   "cols": 2,
+   "cost": [
+    [
+     0.0,
+     "inf"
+    ],
+    [
+     "inf",
+     0.0
+    ],
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "row_ind": [
+    0,
+    1
+   ],
+   "col_ind": [
+    0,
+    1
+   ],
+   "total": 0.0,
+   "max_finite_abs": 1.0,
+   "error": null
+  },
+  {
+   "name": "nan_cell_is_rejected",
+   "rows": 2,
+   "cols": 2,
+   "cost": [
+    [
+     1.0,
+     "nan"
+    ],
+    [
+     2.0,
+     3.0
+    ]
+   ],
+   "row_ind": [],
+   "col_ind": [],
+   "total": 0.0,
+   "max_finite_abs": 3.0,
+   "error": "cost_matrix contains NaN"
+  }
+ ]
+}

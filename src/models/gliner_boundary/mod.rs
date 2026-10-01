@@ -26,6 +26,7 @@ pub mod extract;
 pub mod forward;
 pub mod loader;
 pub mod marginals;
+pub mod matching;
 pub mod overlap;
 pub mod pair_scorer;
 pub mod pool;
@@ -43,6 +44,7 @@ pub use extract::{
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
 pub use marginals::{BoundaryMarginals, BoundaryQueryHead};
+pub use matching::linear_sum_assignment;
 pub use overlap::{
     normalize_overlap_policy, resolve_overlaps, OverlapPolicy, ScoredSpan as ScoredOverlapSpan,
 };

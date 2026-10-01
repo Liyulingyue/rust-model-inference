@@ -258,17 +258,28 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - `anchorless`：`instance_embed` 当 instance 状态，过 `object_head`；阈值用
   `object_threshold` 而不是 `anchor_threshold`
 
-**最大的坑：`decode_group` 用 `scipy.optimize.linear_sum_assignment`（匈牙利算法）**
-做 exclusive scalar field 的**全局联合分配**，不是贪心。reference 的注释直接说明
-为什么：贪心让 object 最高的 instance 先抢它最喜欢的候选，会把后面的 instance 逼到
-无关 span 上。所以：
-- 需要自己实现 LSA，且 `rows <= cols`（后面拼了 `row_count` 列的 absent 列保证）
+**最大的坑：`decode_group` 用匈牙利算法做 exclusive scalar field 的全局联合分配**，
+不是贪心。reference 自己的注释说明为什么：贪心让 object 最高的 instance 先抢它最喜欢
+的候选，会把后面的 instance 逼到无关 span 上。
+
+**✅ LSA 已移植**（`a` 待补 commit 号，`matching.rs`）：
+- **不需要自己从零写**：reference 自带一个确定性 O(n²m) Jonker-Volgenant solver
+  (`training/matching.py:22`)，只在 scipy 存在时才走 scipy（且 scipy 那条路会加
+  **sub-ULP 字典序 offset** 来 break tie）。我们移植**内部那个**，因为它才是被指定的
+  那个：本身确定、无浮点扰动、结果不依赖「某个依赖装没装」。oracle venv 没有 scipy，
+  所以 reference 走的就是内部路径
+- **tie-break 是输出的一部分**：最优解**经常不唯一**（两个候选同分 → 两个同价最优解），
+  返回哪个决定每个 record field 绑哪个 span。所以 oracle **只断言 `(row, col)` 对**，
+  **不断言总代价**——任何 solver 都能通过总代价检查，包括返回明显不同 span 的
+- `minv[j] < delta` 是**严格**比较 → 同分取最小列下标；最后按列扫描再按 row 排序
+- 21 个 case，含全等矩阵（2x2/3x3/4x4）、**争夺同一列**、代价平台、相同行、
+  两种矩形方向、empty、单元、**全 inf 行**（转成大哨兵而不是失败）、**NaN 直接报错**
+
+**剩下的坑**（`decode_group` 内部，还没实现）：
 - `allows_absent = false` 时 diagonal 是个标量 `max(candidate_cost) + 50.0`
   **broadcast 到所有行**（不是逐行 max），这个 `+50` 语义不能改成逐行
 - `invalid_cost = max(candidate_cost.max(), diagonal.max()) + 1000.0`
-- list field 走 sigmoid + 每候选取 argmax row（不是 LSA）
-- **匈牙利算法是纯函数，可以单独做 oracle**，但需要手算的小 case 来 pin tie-break
-  （LSA 的最优解往往不唯一，`scipy` 返回哪一个必须对齐，否则 span 全错）
+- list field 走 sigmoid + 每候选取 argmax row（**不走** LSA）
 
 **还没确认的**：
 - `RecordSpec` 的编译逻辑（`query_id` 怎么分配、`anchor_query_id` 怎么定）
@@ -312,7 +323,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
 | 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
 | 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
-| 5.2.4b-1e | `candidate_encoder` / `candidate_states` | ✅ | 本次 |
+| 5.2.4b-1e | `candidate_encoder` / `candidate_states` | ✅ | `2cd425b` |
+| 5.2.4b-1f | LSA（匈牙利）solver | ✅ | 本次 |
 | 5.2.4b-2/3 | json_structures（`[C]`）+ record head | 🟡 已勘察 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
@@ -328,7 +340,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-16 个 boundary 测试文件 / 44 个测试全绿。
+17 个 boundary 测试文件 / 48 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
