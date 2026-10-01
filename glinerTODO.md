@@ -406,7 +406,28 @@ bug 的那个矩阵本身。
 softmax `width`，导致后面 `probs[matrix_row * width + ...]` 全部用错宽度 → 越界。
 改名 `matrix_width`。
 
-### 🟢 5.2.4b-3 records 端到端 oracle（待开工）
+### ✅ 5.2.4b-1k records 端到端 oracle（补上唯一没验的接缝）
+- **新** `dump_records_end_to_end.py`（9 case）+ `gliner2_5_base_v1_records_e2e_parity.rs`（2 测试）
+- **验的是接缝**：head fixture 喂的是**我自己编的** `candidate_states` 公式，它验的是
+  head 的算术，不是 pool→head 的交接。端到端这里状态来自 checkpoint 真实的
+  `candidate_encoder`、候选来自真实 pool（这个长度下每 query 66 个有效槽）、field query
+  id 来自真实 prompt 路由
+- **为什么两个 oracle 都要**：一个一列的 cost 矩阵错位和一个 `width` shadowing 都是
+  **过了 head fixture**、只在真实形状 + reference 下才暴露的
+- case 覆盖：natural / latent / anchorless、`exclusive` 抢占（marie curie 拿 paris、
+  pierre curie 拿不到）、`zero_or_more`、entities+records mixed（钉住 record field 的
+  query id 在 entity 之后）、负例、threshold 0.02
+- **额外断言**：exclusive 字段全局只绑定一次（不只是「和 reference 一致」，而是「分配本身对」）
+
+**顺带修的 parser bug（e2e 才暴露）**：`json_structures[parent]` 的形状。Rust 侧原来
+只接受「field 名列表」，但 reference 的 `_process_json_structures` 是
+`for field_name in occ`——`occ` 是 `{field: span}` **dict**，字段名是它的 key
+（value 是训练 target，不进 prompt）。现在两种都接受：dict（单次出现的简写）和
+list-of-dict。同时 oracle 用 `error_policy="raise"` 而非 `"fallback"`——`fallback`
+会把 malformed schema 静默替换成 dummy `[E] entity`，症状变成「没有 record」而不是
+schema 错误本身。
+
+### 🟢 5.2.4b-4 `[C]` legacy 路径（无 `record_metadata`）审一遍（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -448,7 +469,7 @@ softmax `width`，导致后面 `probs[matrix_row * width + ...]` 全部用错宽
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-20 个 boundary 测试文件 / 66 个测试全绿（**0 ignored**）。
+21 个 boundary 测试文件 / 68 个测试全绿（**0 ignored**）。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

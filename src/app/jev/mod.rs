@@ -33,6 +33,7 @@ pub use adapters::gliner2::{
 };
 pub use adapters::gliner2_boundary::{
     extract as run_gliner2_boundary_extract, parse_boundary_schema, run_gliner2_boundary,
+    BoundaryDecodeOptions,
 };
 pub use clm::{run_clm_decision, run_clm_scoring};
 pub use grouped::{

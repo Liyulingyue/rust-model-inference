@@ -311,8 +311,9 @@ fn parse_entities_group(
 /// Parse the reference's `"json_structures"` groups into `[C]` tasks.
 ///
 /// `_process_json_structures` (`processor.py:921-1022`) reads a list of
-/// single-key objects whose value is one occurrence's field list, and unions
-/// the fields across occurrences **in first-seen order**. That order is the
+/// single-key objects whose value is a list of *occurrences*, unions the field
+/// names across them **in first-seen order**, and keeps only the keys — each
+/// occurrence is a `{field: gold_span}` dict whose values are training targets. That order is the
 /// contract and the reference keeps it deliberately: routing it through a `set`
 /// made schema prompts depend on `PYTHONHASHSEED`, which would change both the
 /// query order and the decoded values across otherwise identical processes.
@@ -351,19 +352,44 @@ fn parse_json_structure_groups(
             return Err("each json_structures entry must name a structure".into());
         }
         for (name, occurrences) in map {
-            let fields = occurrences.as_array().ok_or_else(|| {
-                format!("json_structures[{name:?}] must be a list of field names")
-            })?;
+            // Each element of `json_structures[parent]` is one *occurrence* of the
+            // structure. The reference iterates `for field_name in occ` where `occ`
+            // is a `{field: gold_span}` dict (`processor.py:956`), so the field
+            // names are that dict's **keys** — the values are training targets and
+            // never reach the prompt. A bare string is accepted too, since that is
+            // the same thing without the unused span values.
+            // The reference tolerates a bare `{field: span}` dict here as a single
+            // occurrence (`occ = {"name": ..., "employer": ...}`), so accept that
+            // shorthand alongside the documented list form.
+            let single: Vec<serde_json::Value> = match occurrences {
+                serde_json::Value::Array(items) => items.clone(),
+                serde_json::Value::Object(_) => vec![occurrences.clone()],
+                _ => {
+                    return Err(format!(
+                        "json_structures[{name:?}] must be a list of occurrences"
+                    ))
+                }
+            };
+            let occurrences = &single;
             let entry = groups.entry(name.clone()).or_insert_with(|| {
                 order.push(name.clone());
                 Vec::new()
             });
-            for field in fields {
-                let name = field.as_str().ok_or_else(|| {
-                    format!("json_structures[{name:?}] field names must be strings")
-                })?;
-                if !entry.iter().any(|seen| seen == name) {
-                    entry.push(name.to_string());
+            for occurrence in occurrences {
+                let fields: Vec<String> = match occurrence {
+                    serde_json::Value::Object(map) => map.keys().cloned().collect(),
+                    serde_json::Value::String(field) => vec![field.clone()],
+                    other => {
+                        return Err(format!(
+                            "json_structures[{name:?}] occurrence must be a {{field: span}} \
+                             object or a field name, got {other}"
+                        ))
+                    }
+                };
+                for field in fields {
+                    if !entry.contains(&field) {
+                        entry.push(field);
+                    }
                 }
             }
         }
@@ -453,6 +479,21 @@ fn print_classifications(results: &[ClassificationResult]) {
     }
 }
 
+/// Caller-supplied knobs for one boundary extraction.
+///
+/// Grouped so the CLI and HTTP entry points do not have to thread three
+/// separate `Option`s in a fixed order, which is exactly the kind of positional
+/// contract that gets one argument silently transposed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoundaryDecodeOptions<'a> {
+    /// Span and relation score threshold; `None` is the checkpoint default.
+    pub threshold: Option<f32>,
+    /// The schema's top-level `record_metadata`. `None` means every
+    /// `json_structures` group keeps the legacy structure path.
+    pub record_metadata: Option<&'a serde_json::Value>,
+    pub output_json: bool,
+}
+
 /// Load the boundary GGUF and run extraction once. CLI only.
 pub fn run_gliner2_boundary(
     source: Arc<dyn TensorSource>,
@@ -460,11 +501,14 @@ pub fn run_gliner2_boundary(
     kinds: &[BoundaryTaskKind],
     context: &str,
     n_threads_arg: usize,
-    threshold: Option<f32>,
-    record_metadata: Option<&serde_json::Value>,
-    output_json: bool,
+    decode: BoundaryDecodeOptions<'_>,
 ) -> Result<(), String> {
     let started = std::time::Instant::now();
+    let BoundaryDecodeOptions {
+        threshold,
+        record_metadata,
+        output_json,
+    } = decode;
     if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
         return Err("--gliner2-boundary needs a gliner2 boundary variant GGUF \
              (gliner2.variant = \"boundary\")"
