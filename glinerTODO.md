@@ -235,7 +235,50 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **`run_mixed_extraction` 加了 `relation_threshold: Option<f32>`**：reference 的 `_decode_relations` 收的是和 span 路径同一个 `threshold`，不是硬编码
 - **oracle**：`dump_relations_end_to_end.py`，5 个 case（真实 text + relation schema → edges），含 mixed schema、threshold 0.02、负例。query routing / word list / edge 全部对齐（2.0e-4）
 
-### 🟢 5.2.4b-2 records + json_structures（待开工）
+### 🟡 5.2.4b-2 records + json_structures（已勘察，未开工）
+
+勘察结论（`records.py` 1421 行，但只有 ~310 行是推理路径）：
+
+**推理只需要两个函数**（其余全是 loss）：
+- `RecordHead.forward_group`（`records.py:572-698`，~130 行）
+- `decode_group`（`records.py:714-893`，~180 行）
+
+**18 个 tensor**，与 safetensors 完全对应（`record_dim=128`、`instance_queries=32`）：
+`inst_proj` / `field_proj` / `cand_proj`（768→128）、`null_embed`(128)、
+`object_head` / `latent_seed_head`（768→1）、`instance_embed`(32×768)、
+`q_proj` / `k_proj`（768→128）、`v_proj`（768→768）。
+（`record_decode.py` 只有 8 行，是 re-export；`RecordSetDecoder`、
+`FieldAssignmentScorer`、`create_anchor_instances` **推理不调用**——文件头
+自己写了 "low-level primitives"，只有训练/其他入口用。）
+
+**三种 instance 模式**，由 `record_metadata.<parent>.mode` 选：
+- `natural`：`inst_states` 就是 anchor field 的候选状态，`object_logits` 就是 anchor
+  候选的 `pair_logits`（不经过 `object_head`！）
+- `latent`：所有 field 的候选都进 `latent_seed_head` 评分当 seed
+- `anchorless`：`instance_embed` 当 instance 状态，过 `object_head`；阈值用
+  `object_threshold` 而不是 `anchor_threshold`
+
+**最大的坑：`decode_group` 用 `scipy.optimize.linear_sum_assignment`（匈牙利算法）**
+做 exclusive scalar field 的**全局联合分配**，不是贪心。reference 的注释直接说明
+为什么：贪心让 object 最高的 instance 先抢它最喜欢的候选，会把后面的 instance 逼到
+无关 span 上。所以：
+- 需要自己实现 LSA，且 `rows <= cols`（后面拼了 `row_count` 列的 absent 列保证）
+- `allows_absent = false` 时 diagonal 是个标量 `max(candidate_cost) + 50.0`
+  **broadcast 到所有行**（不是逐行 max），这个 `+50` 语义不能改成逐行
+- `invalid_cost = max(candidate_cost.max(), diagonal.max()) + 1000.0`
+- list field 走 sigmoid + 每候选取 argmax row（不是 LSA）
+- **匈牙利算法是纯函数，可以单独做 oracle**，但需要手算的小 case 来 pin tie-break
+  （LSA 的最优解往往不唯一，`scipy` 返回哪一个必须对齐，否则 span 全错）
+
+**还没确认的**：
+- `RecordSpec` 的编译逻辑（`query_id` 怎么分配、`anchor_query_id` 怎么定）
+- `_process_json_structures`（`processor.py:921-1022`）的 `json_descriptions` /
+  `record_metadata` schema 形状
+- `candidate_states` 我们已经有（`DocumentCandidateBatch.candidate_states`，
+  `[B, C, pair_dim]`）—— 但 records 要的宽度是 `hidden_size`(768)，
+  **`pair_dim`(128) 不够**，需要确认 reference 的 `candidate_states` 宽度
+
+### 🟢 5.2.4b-3 json_structures（`[C]`，待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -258,7 +301,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
 | 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
 | 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
-| 5.2.4b-2 | records + json_structures | 🟢 待开工 | — |
+| 5.2.4b-2 | records（`record_decoder`） | 🟡 已勘察 | — |
+| 5.2.4b-3 | json_structures（`[C]`） | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
@@ -268,7 +312,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 **现在支持的**：extractive spans（`[E]`）+ classification（`[L]`）+ abstention（`null_projection`）+ count log-rate（`count_head`），两组可以同时出现在一个 schema 里。
 
 **仍然没有的**：
-- records（`record_decoder`，18 个 tensor）/ `json_structures`（`[C]`）
+- records（`record_decoder`，18 个 tensor，**需要匈牙利算法**）/ `json_structures`（`[C]`）
 - `relation_metadata.<type>.threshold` per-type override（现在统一用 caller 的 threshold）
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
