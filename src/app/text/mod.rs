@@ -118,6 +118,9 @@ mod tests {
 
     #[test]
     fn qwen_media_positions_expand_grid_rows_and_audio_rows() {
+        // Text tokens take [next, 0, 0, 0] (matches upstream's
+        // legacy-batch 1D position path through the M-RoPE 4-tensor —
+        // see docs/usage/qwen3.md §3 for why).
         assert_eq!(
             build_qwen3_media_positions(&[10, 99, 99, 99, 99, 11], 99, &[(2, 2)]).unwrap(),
             vec![
@@ -126,12 +129,15 @@ mod tests {
                 [1, 1, 2, 0],
                 [1, 2, 1, 0],
                 [1, 2, 2, 0],
-                [3, 3, 3, 0]
+                [3, 0, 0, 0]
             ]
         );
+        // Audio path: pad tokens keep [next, next, next, 0] (matches
+        // upstream `set_position_mrope_1d`); only the trailing text
+        // token switches to [next, 0, 0, 0].
         assert_eq!(
             build_qwen3_media_positions(&[10, 99, 99, 11], 99, &[]).unwrap(),
-            vec![[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 3, 3, 0]]
+            vec![[0, 0, 0, 0], [1, 1, 1, 0], [2, 2, 2, 0], [3, 0, 0, 0]]
         );
         assert!(build_qwen3_media_positions(&[99, 99], 99, &[(1, 1)]).is_err());
     }

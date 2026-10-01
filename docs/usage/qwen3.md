@@ -69,23 +69,27 @@ cargo run --release --bin rust-model-inference -- \
 在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
 LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
 n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
-**现状（2026-10-01 切片定位）**：
 
-- 视觉编码 + LLM forward 都跑通；token_ids、positions、embeddings 注入
-  都已用 `eprintln!` 切片验证无误（`src/app/text/multimodal.rs` + `vision.rs`
-  调试期间打印过几百行，每一行都对）。
-- **4 核 CPU + 7.5 GiB RAM 下只能稳定跑小图**：128×128 PNG → 16 个 vision
-  token → 文本生成 OK（"The image is a simple, abstract composition..."）；
-  256×256 起 → 256 个 vision token → LLM forward 后立刻吐 `<|im_end|>` /
-  `<|im_start|>` 等控制 token, 文本输出为空。
-- 即便把 vision rows 全部 zero 掉、或者把 `embeddings` 改成 `None`
-  让 LLM 用自己的 token embedding 占位，512×512 仍不输出 — 所以 bug **不在
-  视觉 encoder 输出或 position 注入**，而是 multimodal session 在 vision token
-  数 ≥ 某个阈值时的更深交互（怀疑是 `n_deepstack_layers=3` 但传了
-  `deepstack_embeddings: None` 的不匹配，但未能在这次会话内确认）。
+**现状（2026-10-01 修通后）**：
+
+- 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
+  都能产出准确的图像描述（"This image is a simple, abstract
+  composition of two overlapping circular shapes..."）。
+- **修复**：multimodal 流中 text token 的 M-RoPE 位置从
+  `[next, next, next, 0]` 改成 `[next, 0, 0, 0]` —— 即只把 T 轴当作
+  真正的 1D 位置，H/W/E 轴保持 0 (M-RoPE identity)。
+  改前 256×256 起 LLM 在最后位置预测 `<|im_end|>` 文本为空；改后 ≥256 image
+  文本生成正常。
+- 根因：upstream llama.cpp (`tools/mtmd/mtmd-helper-common.h` 的
+  `set_position_normal`) 走的是 1D legacy path，compat layer 只填
+  `token.pos[0]`，H/W/E 留 0；而我们的 `build_qwen3_media_positions`
+  原本把所有 4 个轴都填 `next`，H/W 多出来的 rotation 会在大 image grid
+  (`next = base + max(grid_h, grid_w) ≥ 12` 时) 累积，导致 LLM 在
+  最后位置 logits 偏向 `<|im_end|>` / ``。
+- **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
+  静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
+  这个偏置不明显，输出正常。
 - 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
-- **温度 ≥ 0.7 时（512×512）偶尔能跑通**（会触发 tool-call 然后描述图像），
-  但结果非确定性、温度 ≤ 0.6 全部失败。
 
 限制：
 
