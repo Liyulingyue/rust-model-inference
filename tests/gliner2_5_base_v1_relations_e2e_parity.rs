@@ -80,7 +80,7 @@ fn run_case(
         kinds.iter().any(|k| *k == BoundaryTaskKind::Relation),
         "the fixture cases all declare relation groups"
     );
-    run_mixed_extraction(model, text, &tasks, &kinds, 0, Some(threshold)).expect("extract")
+    run_mixed_extraction(model, text, &tasks, &kinds, 0, Some(threshold), None).expect("extract")
 }
 
 #[test]

@@ -34,6 +34,7 @@ use super::marginals::BoundaryQueryHead;
 use super::pair_scorer::PairScorer;
 use super::pool::{DocumentCandidatePool, SharedPoolScorer};
 use super::proposer::BoundaryProposer;
+use super::record_head::RecordHead;
 use super::relations::SparseRelationScorer;
 use super::settings::BoundarySettings;
 
@@ -75,6 +76,10 @@ pub struct BoundaryModel<'a> {
     /// `enable_relations = false`, in which case the tensors are absent too and
     /// a relation schema is rejected at the prompt rather than here.
     pub relation_scorer: Option<SparseRelationScorer<'a>>,
+    /// `record_decoder` — the record head. `None` when the checkpoint sets
+    /// `enable_records = false`, in which case the tensors are absent too and a
+    /// `[C]` schema is rejected rather than silently producing no records.
+    pub record_head: Option<RecordHead<'a>>,
     /// `candidate_encoder` — projects the two endpoint boundary states to
     /// `hidden_size` for the record head's `candidate_states`. Gated on
     /// `enable_records` because the reference only constructs it then, so a
@@ -204,6 +209,16 @@ impl<'a> BoundaryModel<'a> {
             None
         };
 
+        let record_head = if settings.enable_records {
+            Some(RecordHead::load(
+                source,
+                n_embd,
+                settings.record_dim,
+                settings.record_instance_queries,
+            )?)
+        } else {
+            None
+        };
         let candidate_encoder = if settings.enable_records {
             Some(CandidateEncoder::load(
                 source,
@@ -234,6 +249,7 @@ impl<'a> BoundaryModel<'a> {
             pool_builder,
             pool_scorer,
             relation_scorer,
+            record_head,
             candidate_encoder,
         })
     }

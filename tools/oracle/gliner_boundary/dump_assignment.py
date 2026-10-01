@@ -31,6 +31,15 @@ of equal-cost rows. These are the cases that catch a solver with a different
 tie-break.
 ``shape``: rectangular both ways, since the solver transposes a tall matrix and
 has to swap the roles back.
+``record_*``
+    The shape the record decoder actually builds: a ``candidate_count``-wide real
+    block with a ``rows``-wide ABSENT block appended, only each row's *own* absent
+    slot carrying the cheap diagonal. This is the one place the decoder's tie-break
+    is exercised, and it is where the port shipped a real bug — the diagonal was
+    written into the real block, silently overwriting a real candidate cost and
+    leaving the row's own absent slot at the invalid cost. Nothing errored; the
+    solver just returned a valid matching of a different problem. Every matrix above
+    lacked this shape, so none of them could catch it.
 ``edge``: empty, single cell, a fully infinite row (which the reference turns
 into a large finite sentinel rather than failing), and a NaN cell (which it
 rejects outright — an optimality comparison against NaN is meaningless, so a
@@ -153,6 +162,46 @@ CASES = [
     },
     # NaN is rejected outright, not propagated: an optimality test against NaN
     # is meaningless, so a silent answer here would be worse than an error.
+    # The record decoder's shape: a `candidate_count`-wide real block with a
+    # `rows`-wide ABSENT block appended, where only each row's own absent slot is
+    # the cheap diagonal. This is where the `disallow` solver's tie-break actually
+    # gets exercised — the port shipped a real bug here (the diagonal written into
+    # the *real* block instead of the absent one), and no matrix above had this
+    # shape, so none of them caught it.
+    {
+        "name": "record_absent_block_4x8",
+        "cost": [
+            [0.0, 15.942384720, 15.942384720, 15.942384720,
+             65.942382812, 1065.942382812, 1065.942382812, 1065.942382812],
+            [15.942384720, 15.942384720, 15.942384720, -0.0,
+             1065.942382812, 65.942382812, 1065.942382812, 1065.942382812],
+            [15.942384720, 15.942384720, 15.942384720, -0.0,
+             1065.942382812, 1065.942382812, 65.942382812, 1065.942382812],
+            [15.942384720, 15.942384720, 15.942384720, 65.942382812,
+             1065.942382812, 1065.942382812, 1065.942382812, 65.942382812],
+        ],
+    },
+    {
+        "name": "record_absent_block_3x6",
+        "cost": [
+            [1.0, 4.0, 4.0, 9.0, 59.0, 1009.0],
+            [4.0, 1.0, 4.0, 59.0, 9.0, 1009.0],
+            [4.0, 4.0, 1.0, 1009.0, 59.0, 9.0],
+        ],
+    },
+    # 6 instances, 3 candidates: more rows than columns, so some rows must take an
+    # ABSENT slot. `latent_seeds_every_field`'s shape.
+    {
+        "name": "record_more_rows_than_candidates",
+        "cost": [
+            [0.0, 3.0, 3.0, 53.0, 1053.0, 1053.0, 1053.0, 1053.0, 1053.0],
+            [3.0, 0.0, 3.0, 1053.0, 53.0, 1053.0, 1053.0, 1053.0, 1053.0],
+            [3.0, 3.0, 0.0, 1053.0, 1053.0, 53.0, 1053.0, 1053.0, 1053.0],
+            [3.0, 3.0, 3.0, 1053.0, 1053.0, 1053.0, 53.0, 1053.0, 1053.0],
+            [3.0, 3.0, 3.0, 1053.0, 1053.0, 1053.0, 1053.0, 53.0, 1053.0],
+            [3.0, 3.0, 3.0, 1053.0, 1053.0, 1053.0, 1053.0, 1053.0, 53.0],
+        ],
+    },
     {
         "name": "nan_cell_is_rejected",
         "cost": [[1.0, NAN], [2.0, 3.0]],

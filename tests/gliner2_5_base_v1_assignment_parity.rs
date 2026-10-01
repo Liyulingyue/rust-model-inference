@@ -161,6 +161,13 @@ fn the_fixture_keeps_its_discriminating_cases() {
         "single_cell",
         "infinite_row",
         "nan_cell_is_rejected",
+        // The record decoder's shape. `record_absent_block_4x8` is the exact
+        // matrix that exposed a real bug: the diagonal was written into the real
+        // candidate block, overwriting a real cost. No other matrix here has that
+        // shape, so nothing else could have caught it.
+        "record_absent_block_4x8",
+        "record_absent_block_3x6",
+        "record_more_rows_than_candidates",
     ] {
         assert!(
             names.contains(&required),

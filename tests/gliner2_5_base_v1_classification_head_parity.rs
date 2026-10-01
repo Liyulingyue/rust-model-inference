@@ -204,6 +204,7 @@ fn logits_probabilities_and_choices_match() {
             &kinds,
             0,
             None,
+            None,
         )
         .expect("run mixed extraction");
 

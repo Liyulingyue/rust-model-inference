@@ -368,7 +368,45 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   2 个解出 0 条记录，但**测试照样绿**——「head 和 reference 在「无」上达成一致」
   和「一致」长得一模一样。现在有测试守着不让任何 case 掉到 0
 
-### 🟢 5.2.4b-3 records 接进 extract/CLI/HTTP + 端到端 oracle（待开工）
+### ✅ 5.2.4b-1j records 接进 extract/CLI/HTTP —— 并修掉 LSA 的 cost 矩阵 bug
+- `run_mixed_extraction` 多收一个 `record_metadata: Option<&Value>`（schema 顶层 key）。
+  没有它 `compile_record_specs` 永远返回空，**每条 json_structures 都静默走 legacy 路径**
+- `Extraction` 加 `records`；CLI 打文本 / `--jev-output json` 打 `records`；
+  HTTP `/v1/jev/boundary` 响应加 `records`
+- `BoundarySettings` 读 `record_anchor_threshold` / `record_anchor_proposal_threshold` /
+  `record_field_threshold` / `record_temperature`；`BoundaryModel` 持有
+  `record_head: Option<RecordHead>`（按 `enable_records` gate）
+- **手工验证语义正确**：`Marie Curie worked with Pierre Curie in Paris.` →
+  marie curie→paris，pierre curie **拿不到 paris**（exclusive，Paris 已分配）。这正是
+  贪心会搞错、必须全局分配的场景
+
+**🔴 抓到的真 bug（`decode_group` 的 cost 矩阵）**：
+```
+cost[row * width + row] = diagonal[row];          // ❌
+cost[row * width + candidate_count + row] = ...;  // ✅
+```
+ABSENT 块的对角线要落在**第 `candidate_count + row` 列**，我写成了第 `row` 列 ——
+**落进真实候选块里，静默覆盖了一个真实 cost**，同时该行自己的 absent 槽留在
+`invalid_cost`。**不报错**，solver 只是老老实实解了另一个问题的最优解。
+
+**定位方法值得记下来**：把 Rust 构造的矩阵 dump 出来，喂给 **reference 自己的
+solver**：
+- reference solver 在**我的**矩阵上给出**我的**答案 → 矩阵错，solver 对
+- reference solver 在我的矩阵上给出 **reference** 的答案 → solver 错
+
+一次跑就二分出了责任方。修之前矩阵 row0 = `[65.94, 15.94, ...]`，reference 是
+`[0.0, 15.94, ..., 65.94, 1065, ...]`，一眼看出整体错位一列。
+
+**为什么 21 个 solver oracle case 全绿**：它们全是手工小矩阵，**没有一个是这个
+形状**（真实块 + `rows` 宽的 ABSENT 块，只有对角那个便宜）。已补 3 个
+`record_*` case 进 `dump_assignment.py`，`record_absent_block_4x8` 就是抓到这个
+bug 的那个矩阵本身。
+
+顺带发现：修对角线时我引入的 `let width = candidate_count + rows` **shadow 了**已有的
+softmax `width`，导致后面 `probs[matrix_row * width + ...]` 全部用错宽度 → 越界。
+改名 `matrix_width`。
+
+### 🟢 5.2.4b-3 records 端到端 oracle（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -410,7 +448,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-20 个 boundary 测试文件 / 66 个测试全绿。
+20 个 boundary 测试文件 / 66 个测试全绿（**0 ignored**）。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

@@ -74,18 +74,25 @@ def build_record_head(settings):
     return head
 
 
-# The synthetic candidate states need a scale that actually exercises the head.
-# The shared document sits in roughly [-2, 0], so with scale 1 every
-# `latent_seed_head` logit lands near -0.7 and *no* latent instance clears the
-# 0.5 threshold — the fixture silently degenerated to "0 records" twice, which
-# would have left the whole latent and assignment path untested while still
-# passing. At scale 3 the seed probs spread across the threshold on both sides.
+# The synthetic candidate states need a scale and offset that actually exercise
+# the head, and both values were chosen by measurement rather than taste. The
+# shared document sits in roughly [-2, 0], so a naive mean lands every
+# `latent_seed_head` logit well below the 0.5 threshold and *no* latent instance
+# survives — the fixture then decodes zero records while still passing, because
+# "the head agreed with the reference on nothing" is indistinguishable from
+# agreement. That happened twice, once before the states became query-independent
+# and once after, which is why `the_fixture_keeps_its_discriminating_cases` now
+# fails if any case drops to zero records.
 #
-# The Rust test rebuilds these from the same formula, so it has to be written down
-# exactly; `tests/gliner2_5_base_v1_record_head_parity.rs` carries the same two
-# constants and a test asserts they still produce records.
-CANDIDATE_STATE_SCALE = 3.0
-CANDIDATE_STATE_OFFSET = 1.0
+# At these values the seed probabilities come out around [0.33, 0.63, 0.90]: two
+# of three clear the threshold, so both the selecting and the rejecting branch
+# are exercised. `scale=3.0` pushes all three below (0.11 / 0.13 / 0.38), and
+# `scale=1.0, off=1.0` leaves only one above.
+#
+# The Rust test rebuilds these from the same formula, so both constants are part
+# of the contract and appear in `tests/gliner2_5_base_v1_record_head_parity.rs`.
+CANDIDATE_STATE_SCALE = 1.0
+CANDIDATE_STATE_OFFSET = 2.0
 
 
 def states(seq_len: int) -> torch.Tensor:
@@ -97,24 +104,25 @@ def states(seq_len: int) -> torch.Tensor:
 def build_case(case: dict):
     """A `[1, Q, C]` candidate batch with 768-wide candidate states.
 
-    The states are a *per-candidate* function of the document so two candidates
-    never share a state, and so the fixture alone determines them.
+    The state depends on the *slot* only, never on the query or on that query's
+    span. The real pool's `candidate_states` are query-independent: the pool is
+    built per document, and `to_candidate_batch` reaches `[B, Q, C, H]` with an
+    `expand`, a broadcast view whose values do not depend on `q`. Deriving the
+    synthetic state from a per-query span would produce a fixture the production
+    candidate-major layout cannot represent at all, and `main` asserts the
+    query-independence so a future edit cannot reintroduce it.
     """
     q_count, c_count = case["q_count"], case["c_count"]
     doc = states(case["seq_len"])[0]
     indices = torch.tensor(case["candidates"], dtype=torch.long).view(1, q_count, c_count, 2)
     candidate_states = torch.zeros(1, q_count, c_count, HIDDEN_SIZE)
-    for q in range(q_count):
-        for c in range(c_count):
-            start = int(indices[0, q, c, 0])
-            end = int(indices[0, q, c, 1])
-            # Average the covered words, then offset by the slot so distinct
-            # candidates get distinct vectors.
-            span = doc[start : max(end, start + 1)]
-            candidate_states[0, q, c] = (
-                span.mean(dim=0) * CANDIDATE_STATE_SCALE
-                + CANDIDATE_STATE_OFFSET * ((q * 7 + c * 3) % 5)
-            )
+    seq_len = case["seq_len"]
+    for c in range(c_count):
+        mid = 1 + (c * 2) % max(seq_len - 2, 1)
+        span = doc[mid : min(mid + 2, seq_len)]
+        state = span.mean(dim=0) * CANDIDATE_STATE_SCALE + CANDIDATE_STATE_OFFSET * (c % 5)
+        for q in range(q_count):
+            candidate_states[0, q, c] = state
     return CandidateTensorBatch(
         indices=indices,
         proposal_logits=torch.zeros(1, q_count, c_count),
@@ -399,6 +407,19 @@ def main() -> None:
             decode_kwargs.update(case["decode"])
             decoded = decode_group(group, **decode_kwargs)
 
+        # Assert the property the candidate-major layout depends on, so a future
+        # edit that makes the synthetic states query-dependent fails here rather
+        # than as a confusing mismatch in the Rust test.
+        for q in range(case["q_count"]):
+            for c in range(case["c_count"]):
+                if not torch.equal(
+                    candidates.candidate_states[0, q, c],
+                    candidates.candidate_states[0, 0, c],
+                ):
+                    raise ValueError(
+                        f"{case['name']}: candidate_states differ across queries "
+                        f"at slot {c}, but the production layout is candidate-major"
+                    )
         records.append({
             "name": case["name"],
             "seq_len": case["seq_len"],

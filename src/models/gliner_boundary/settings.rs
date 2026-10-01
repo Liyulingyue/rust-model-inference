@@ -86,6 +86,13 @@ pub struct BoundarySettings {
     /// probability. base-v1 uses 0.2, not the reference default of 0.0.
     pub relation_argument_proposal_threshold: f32,
     pub relation_temperature: f32,
+    // --- record decode ---
+    /// Gates instances in `natural` / `latent` mode.
+    pub record_anchor_threshold: f32,
+    /// Gates instances in `anchorless` mode, which have no anchor to score.
+    pub record_anchor_proposal_threshold: f32,
+    pub record_field_threshold: f32,
+    pub record_temperature: f32,
 
     // --- task enables ---
     pub enable_relations: bool,
@@ -153,6 +160,14 @@ impl BoundarySettings {
                 "relation_argument_proposal_threshold",
             )?,
             relation_temperature: required_f32(source, "relation_temperature")?,
+
+            record_anchor_threshold: required_f32(source, "record_anchor_threshold")?,
+            record_anchor_proposal_threshold: required_f32(
+                source,
+                "record_anchor_proposal_threshold",
+            )?,
+            record_field_threshold: required_f32(source, "record_field_threshold")?,
+            record_temperature: required_f32(source, "record_temperature")?,
 
             enable_relations: required_flag(source, "enable_relations")?,
             enable_records: required_flag(source, "enable_records")?,

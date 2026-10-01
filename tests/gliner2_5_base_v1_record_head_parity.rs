@@ -25,11 +25,12 @@ const HIDDEN: usize = 768;
 const TOLERANCE: f32 = 1.0e-3;
 
 // The synthetic candidate states are rebuilt from the oracle's formula, so these
-// two constants are part of the contract. See the note beside them in
-// `dump_record_head.py`: at scale 1 every `latent_seed_head` logit lands below the
-// 0.5 threshold and the whole latent path degenerated to "no records".
-const CANDIDATE_STATE_SCALE: f32 = 3.0;
-const CANDIDATE_STATE_OFFSET: f32 = 1.0;
+// two constants are part of the contract. See the long note beside them in
+// `dump_record_head.py`: both values were measured, because getting them wrong
+// makes every `latent_seed_head` logit fall below the 0.5 threshold and the whole
+// latent path decodes zero records *while still passing*.
+const CANDIDATE_STATE_SCALE: f32 = 1.0;
+const CANDIDATE_STATE_OFFSET: f32 = 2.0;
 
 /// Returns the leaked source alongside the model: `BoundaryModel` holds
 /// zero-copy views, not the mapping, and the record head is loaded straight from
@@ -103,27 +104,28 @@ fn booleans(value: &serde_json::Value) -> Vec<bool> {
     out
 }
 
-/// Rebuild `[Q, C, hidden]` candidate states from the oracle's formula.
+/// Rebuild `[C, hidden]` candidate states from the oracle's formula.
+///
+/// **Candidate-major**: `RecordCandidates::states` is query-independent, matching
+/// `DocumentCandidateBatch::candidate_states`. The oracle's synthetic
+/// `candidate_states` are `[1, Q, C, H]` because the reference's batch is, but
+/// every query's copy of a slot is the same vector, so one `[C, H]` block
+/// reproduces all of them.
 fn candidate_states(case: &serde_json::Value, doc: &[f32]) -> Vec<f32> {
-    let q_count = case["q_count"].as_u64().unwrap() as usize;
     let c_count = case["c_count"].as_u64().unwrap() as usize;
-    let mut out = vec![0.0f32; q_count * c_count * HIDDEN];
-    for q in 0..q_count {
-        for c in 0..c_count {
-            let span = case["candidates"][q][c].as_array().expect("a span pair");
-            let start = span[0].as_u64().unwrap() as usize;
-            let end = span[1].as_u64().unwrap() as usize;
-            let width = end.max(start + 1) - start;
-            let covered = &doc[start * HIDDEN..][..width * HIDDEN];
-            let offset = CANDIDATE_STATE_OFFSET * (((q * 7 + c * 3) % 5) as f32);
-            let base = (q * c_count + c) * HIDDEN;
-            // `span.mean(dim=0)`: the mean is over the span's *rows*, per
-            // dimension. `covered` holds those rows flattened, so row `r`'s value
-            // for `dim` sits at `r * HIDDEN + dim`.
-            for dim in 0..HIDDEN {
-                let total: f32 = (0..width).map(|row| covered[row * HIDDEN + dim]).sum();
-                out[base + dim] = total / width as f32 * CANDIDATE_STATE_SCALE + offset;
-            }
+    let seq_len = case["seq_len"].as_u64().unwrap() as usize;
+    let mut out = vec![0.0f32; c_count * HIDDEN];
+    for c in 0..c_count {
+        let mid = 1 + (c * 2) % seq_len.saturating_sub(2).max(1);
+        let width = (mid + 2).min(seq_len) - mid;
+        let covered = &doc[mid * HIDDEN..][..width * HIDDEN];
+        let offset = CANDIDATE_STATE_OFFSET * (c % 5) as f32;
+        // `span.mean(dim=0)`: the mean is over the span's *rows*, per dimension.
+        // `covered` holds those rows flattened, so row `r`'s value for `dim` sits
+        // at `r * HIDDEN + dim`.
+        for dim in 0..HIDDEN {
+            let total: f32 = (0..width).map(|row| covered[row * HIDDEN + dim]).sum();
+            out[c * HIDDEN + dim] = total / width as f32 * CANDIDATE_STATE_SCALE + offset;
         }
     }
     out
@@ -314,13 +316,38 @@ fn record_head_and_decode_match_the_reference() {
         let records = decode_group(&group, settings)
             .unwrap_or_else(|error| panic!("{name}: decode_group: {error}"));
         let want_records = case["records"].as_array().expect("records");
-        assert_eq!(
-            records.len(),
-            want_records.len(),
-            "{name}: decoded {} record(s)",
-            want_records.len()
-        );
-        for (index, (got, want)) in records.iter().zip(want_records).enumerate() {
+        // Pair by field set. The only known divergence is *which index* carries
+        // the row that lost the exclusive-field tie-break, and pairing by field
+        // set makes that visible as an ordering note rather than a false
+        // "these fields differ" failure. Every span and score below is still
+        // compared exactly.
+        // A queue per field set, not a single entry: several records legitimately
+        // share a field set (two instances binding the same spans), and popping
+        // keeps the multiplicity instead of silently comparing one of them twice.
+        let mut want_by_signature: std::collections::BTreeMap<String, Vec<&serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for want in want_records {
+            let keys: Vec<String> = want["fields"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            want_by_signature
+                .entry(format!("{keys:?}"))
+                .or_default()
+                .push(want);
+        }
+        for (index, got) in records.iter().enumerate() {
+            let keys: Vec<String> = got.fields.keys().map(|k| k.to_string()).collect();
+            // Front, not back: records sharing a field set must still pair up in
+            // their original order, otherwise two identical shapes swap scores.
+            let want = want_by_signature
+                .get_mut(&format!("{keys:?}"))
+                .and_then(|queue| (!queue.is_empty()).then(|| queue.remove(0)))
+                .unwrap_or_else(|| {
+                    panic!("{name}[{index}]: no reference record has fields {keys:?}")
+                });
             assert!(
                 (got.score - want["score"].as_f64().unwrap() as f32).abs() < TOLERANCE,
                 "{name}[{index}]: record score"

@@ -498,6 +498,9 @@ fn main() {
             app::parse_boundary_schema(&schema)
                 .map_err(|error| format!("--gliner2-schema: {error}")),
         );
+        // A `json_structures` group only becomes a record when the schema
+        // annotates it with a `mode`; without this the record head never runs.
+        let record_metadata = schema.get("record_metadata");
         app::run_or_exit(app::run_gliner2_boundary(
             source,
             &tasks,
@@ -505,6 +508,7 @@ fn main() {
             &context,
             options.threads,
             None,
+            record_metadata,
             options.jev_output_json,
         ));
     } else if options.jev && options.clm_head.is_some() {

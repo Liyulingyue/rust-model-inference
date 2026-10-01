@@ -101,8 +101,16 @@ pub struct RecordCandidates<'a> {
     /// `[Q, C]`. Already ANDed with `query_mask`, so an inactive query's
     /// candidates arrive here as invalid.
     pub valid_mask: &'a [bool],
-    /// `[Q, C, hidden_size]` — the `candidate_encoder` output, not the scorer's
+    /// `[C, hidden_size]` — the `candidate_encoder` output, not the scorer's
     /// internal `pair_dim` features.
+    ///
+    /// **Candidate-major, unlike the three fields above**, and deliberately so.
+    /// The reference's `to_candidate_batch` reaches `[B, Q, C, H]` with an
+    /// `expand`, a broadcast view whose values do not depend on `q`, and
+    /// `DocumentCandidateBatch` keeps the narrower `[B, C, H]`. Indexing this one
+    /// query-major reads past the end of the buffer, or silently reads another
+    /// query's candidates — so the asymmetry is spelled out here rather than left
+    /// to be inferred from the three neighbours.
     pub states: &'a [f32],
     pub q_count: usize,
     pub c_count: usize,
@@ -209,10 +217,10 @@ impl<'a> RecordHead<'a> {
                     .spans
                     .push(vec![indices[flat * 2], indices[flat * 2 + 1]]);
                 entry.pair_logits.push(pair_logits[flat]);
-                let base = flat * self.hidden_size;
+                let state_base = slot * self.hidden_size;
                 entry
                     .states
-                    .extend_from_slice(&candidate_states[base..][..self.hidden_size]);
+                    .extend_from_slice(&candidate_states[state_base..][..self.hidden_size]);
             }
             field_candidates.push(entry);
         }
@@ -550,22 +558,32 @@ pub fn decode_group(
             }
             let invalid_cost = max_candidate_cost.max(max_diagonal) + 1_000.0;
             // `row_count` extra columns so every row has a slot to fall into;
-            // only the diagonal one is cheap enough to win.
-            let mut cost = vec![0.0f32; rows * (candidate_count + rows)];
+            // only the diagonal one is cheap enough to win. The diagonal lives at
+            // column `candidate_count + row` — inside the *absent* block. Writing it
+            // at plain `row` lands it in the real-candidate block, where it
+            // silently overwrites a real cost and leaves the row's own absent slot
+            // at `invalid_cost`. Nothing errors; the matrix is simply a different
+            // problem, and the solver returns a valid matching of it.
+            // `matrix_width` is 1 more than `width` times `rows`: the `rows`
+            // absent columns appended to the `candidate_count` real ones. Named
+            // distinctly from `width` (the softmax width) because shadowing it here
+            // silently reinterprets every later `probs[...]` index.
+            let matrix_width = candidate_count + rows;
+            let mut cost = vec![0.0f32; rows * matrix_width];
             for row in 0..rows {
                 for column in 0..candidate_count {
-                    cost[row * (candidate_count + rows) + column] =
+                    cost[row * matrix_width + column] =
                         candidate_cost[row * candidate_count + column];
                 }
-                for column in candidate_count..candidate_count + rows {
-                    cost[row * (candidate_count + rows) + column] = invalid_cost;
+                for column in candidate_count..matrix_width {
+                    cost[row * matrix_width + column] = invalid_cost;
                 }
-                cost[row * (candidate_count + rows) + row] = diagonal[row];
+                cost[row * matrix_width + candidate_count + row] = diagonal[row];
             }
             let matrix: Vec<Vec<f64>> = (0..rows)
                 .map(|row| {
-                    (0..candidate_count + rows)
-                        .map(|column| cost[row * (candidate_count + rows) + column] as f64)
+                    (0..matrix_width)
+                        .map(|column| cost[row * matrix_width + column] as f64)
                         .collect()
                 })
                 .collect();

@@ -1224,6 +1224,9 @@ pub(super) async fn jev_boundary(
         &kinds,
         boundary.n_threads,
         req.threshold,
+        // A `json_structures` group only becomes a record when the schema
+        // annotates it with a `mode`.
+        req.schema.get("record_metadata"),
     ) {
         Ok(result) => result,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1279,6 +1282,35 @@ pub(super) async fn jev_boundary(
             })
         })
         .collect();
+    let records: Vec<serde_json::Value> = result
+        .records
+        .iter()
+        .map(|record| {
+            json!({
+                "task": record.task,
+                "mode": record.mode,
+                "score": record.score,
+                "anchor_span": record.anchor_span.map(|(start, end)| json!([start, end])),
+                "fields": record
+                    .fields
+                    .iter()
+                    .map(|(query_id, spans)| {
+                        (
+                            query_id.to_string(),
+                            json!(spans
+                                .iter()
+                                .map(|(start, end)| json!({
+                                    "start": start,
+                                    "end": end,
+                                    "text": result.words[*start..*end].join(" "),
+                                }))
+                                .collect::<Vec<_>>()),
+                        )
+                    })
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            })
+        })
+        .collect();
     let spans: Vec<serde_json::Value> = result
         .spans
         .iter()
@@ -1299,6 +1331,7 @@ pub(super) async fn jev_boundary(
         "overlap_policy": overlap_policy,
         "spans": spans,
         "relations": relations,
+        "records": records,
         "classifications": classifications,
         "query_heads": heads,
     }))

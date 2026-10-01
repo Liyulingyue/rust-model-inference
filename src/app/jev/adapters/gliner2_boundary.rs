@@ -54,11 +54,32 @@ struct RelationJson {
     tail_end: usize,
 }
 
+/// One record's field -> spans, as emitted by `--jev-output json`.
+type RecordFieldsJson = std::collections::BTreeMap<String, Vec<RecordSpanJson>>;
+
+/// One span inside a record field.
+#[derive(Debug, serde::Serialize)]
+struct RecordSpanJson {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// One decoded record, as emitted by `--jev-output json`.
+#[derive(Debug, serde::Serialize)]
+struct RecordJson {
+    task: String,
+    mode: String,
+    score: f32,
+    fields: RecordFieldsJson,
+}
+
 /// The whole JSON payload for `--jev-output json`.
 #[derive(Debug, serde::Serialize)]
 struct BoundaryJson {
     spans: Vec<SpanJson>,
     relations: Vec<RelationJson>,
+    records: Vec<RecordJson>,
     classifications: Vec<ClassJson>,
 }
 
@@ -388,8 +409,17 @@ pub fn extract(
     kinds: &[BoundaryTaskKind],
     n_threads_arg: usize,
     threshold: Option<f32>,
+    record_metadata: Option<&serde_json::Value>,
 ) -> Result<Extraction, String> {
-    let mut result = run_mixed_extraction(model, text, tasks, kinds, n_threads_arg, threshold)?;
+    let mut result = run_mixed_extraction(
+        model,
+        text,
+        tasks,
+        kinds,
+        n_threads_arg,
+        threshold,
+        record_metadata,
+    )?;
     if !result.query_names.is_empty() {
         result.spans = decode_spans(
             &result.candidates,
@@ -431,6 +461,7 @@ pub fn run_gliner2_boundary(
     context: &str,
     n_threads_arg: usize,
     threshold: Option<f32>,
+    record_metadata: Option<&serde_json::Value>,
     output_json: bool,
 ) -> Result<(), String> {
     let started = std::time::Instant::now();
@@ -451,7 +482,15 @@ pub fn run_gliner2_boundary(
         model.settings.pool_size,
         tasks.iter().map(|task| task.labels.len()).sum::<usize>(),
     );
-    let result = extract(&model, context, tasks, kinds, n_threads_arg, threshold)?;
+    let result = extract(
+        &model,
+        context,
+        tasks,
+        kinds,
+        n_threads_arg,
+        threshold,
+        record_metadata,
+    )?;
     let spans = &result.spans;
     let elapsed = started.elapsed().as_millis();
 
@@ -479,6 +518,32 @@ pub fn run_gliner2_boundary(
                     tail: relation.tail_text.clone(),
                     tail_start: relation.tail_start,
                     tail_end: relation.tail_end,
+                })
+                .collect(),
+            records: result
+                .records
+                .iter()
+                .map(|record| {
+                    let mut fields: RecordFieldsJson = std::collections::BTreeMap::new();
+                    for (query_id, spans) in &record.fields {
+                        fields.insert(
+                            query_id.to_string(),
+                            spans
+                                .iter()
+                                .map(|(start, end)| RecordSpanJson {
+                                    start: *start,
+                                    end: *end,
+                                    text: result.words[*start..*end].join(" "),
+                                })
+                                .collect(),
+                        );
+                    }
+                    RecordJson {
+                        task: record.task.clone(),
+                        mode: record.mode.clone(),
+                        score: record.score,
+                        fields,
+                    }
                 })
                 .collect(),
             classifications: result
@@ -535,11 +600,30 @@ pub fn run_gliner2_boundary(
             );
         }
     }
+    if !result.records.is_empty() {
+        let mut current = String::new();
+        for record in &result.records {
+            if record.task != current {
+                current = record.task.clone();
+                println!("{current} ({} mode):", record.mode);
+            }
+            println!("  p={:.4}", record.score);
+            for (query_id, bound) in &record.fields {
+                let text = bound
+                    .iter()
+                    .map(|(start, end)| result.words[*start..*end].join(" "))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                println!("    field {query_id}: {text}");
+            }
+        }
+    }
     print_classifications(&result.classifications);
     println!(
-        "({elapsed} ms, {} span(s), {} relation(s), {} classification(s))",
+        "({elapsed} ms, {} span(s), {} relation(s), {} record(s), {} classification(s))",
         spans.len(),
         result.relations.len(),
+        result.records.len(),
         result.classifications.len()
     );
     Ok(())

@@ -26,6 +26,8 @@
 //! all come from one group would silently mis-route, so the marker is chosen by
 //! the caller rather than inferred.
 
+use std::collections::BTreeMap;
+
 use crate::core::tensor::TensorSource;
 use crate::models::gliner::compute;
 use crate::models::gliner::prompt::{self, BoundaryTaskKind, EncodedPrompt, Task, C_TOKEN};
@@ -35,6 +37,10 @@ use super::loader::BoundaryModel;
 use super::overlap::{
     normalize_overlap_policy, resolve_overlaps, OverlapPolicy, ScoredSpan as OverlapSpan,
 };
+use super::record_head::{
+    decode_group, FieldCandidates, RecordCandidates, RecordDecodeSettings, RecordGroup, RecordHead,
+};
+use super::record_spec::{compile_record_specs, LayoutQuery, RecordSpec};
 use super::relations::{
     self, ExtractedRelation, RelationCandidates, RelationDecodeSettings, RelationProposalSettings,
     RelationStates, RelationTypeSpec,
@@ -139,6 +145,9 @@ pub struct Extraction {
     /// Decoded relation edges, in pair order. Empty when the schema declared no
     /// relation group.
     pub relations: Vec<ExtractedRelation>,
+    /// Decoded records, one entry per compiled record group in schema order.
+    /// Empty unless a `[C]` group carried a `mode` in `record_metadata`.
+    pub records: Vec<ExtractedRecord>,
     /// `null_projection` / `count_head` per extractive query.
     pub query_heads: QueryHeads,
     /// The normalized, lowercased word list the spans index into.
@@ -162,6 +171,10 @@ pub fn run_mixed_extraction(
     // where `_decode_relations` receives the same `threshold` as the span path.
     // `None` is the reference's 0.5 default.
     relation_threshold: Option<f32>,
+    // The schema's top-level `record_metadata`. `None` means the caller did not
+    // supply one, which is the same as `{}`: no group compiles, so every
+    // `json_structures` group keeps the legacy structure path.
+    record_metadata: Option<&serde_json::Value>,
 ) -> Result<Extraction, String> {
     if tasks.is_empty() {
         return Err("extraction needs at least one schema task".into());
@@ -206,6 +219,7 @@ pub fn run_mixed_extraction(
         spans: Vec::new(),
         classifications: Vec::new(),
         relations: Vec::new(),
+        records: Vec::new(),
         query_heads: QueryHeads {
             null_logits: Vec::new(),
             count_log_rates: Vec::new(),
@@ -280,6 +294,24 @@ pub fn run_mixed_extraction(
         }
     }
 
+    // Records: a `[C]` group carrying a `mode` in `record_metadata` compiles to a
+    // record spec; one without keeps the legacy structure path and produces
+    // nothing here. Records read the same pool candidates the span path does, plus
+    // the `candidate_encoder` states, so this runs alongside the relation stage.
+    if !encoded.query_positions.is_empty() {
+        let text_states = gather_states(&hidden, &encoded.text_word_first_positions, hidden_size);
+        let query_states = gather_states(&hidden, &encoded.query_positions, hidden_size);
+        extractions.records = score_records(
+            model,
+            &query_states,
+            tasks,
+            kinds,
+            &encoded.query_names,
+            &extractions.candidates,
+            record_metadata,
+        )?;
+    }
+
     // Classification groups: score every `[L]` marker state with the shared
     // classifier, in schema order. `multi_label` comes from the task, and the
     // reference resolves each group's config by task name, so position and name
@@ -331,6 +363,154 @@ pub fn run_mixed_extraction(
     }
 
     Ok(extractions)
+}
+
+/// Compile and decode every record group in the schema.
+///
+/// The query layout is rebuilt from `tasks` / `kinds` rather than carried in, for
+/// the same reason the relation specs are: the group order fixes the query ids,
+/// and deriving both from the same place is what keeps them agreeing. A
+/// `json_structures` group without a `mode` compiles to no spec, so it silently
+/// keeps the legacy structure path — see `record_spec.rs`.
+fn score_records(
+    model: &BoundaryModel<'_>,
+    query_states: &[f32],
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    query_names: &[String],
+    candidates: &DocumentCandidateBatch,
+    record_metadata: Option<&serde_json::Value>,
+) -> Result<Vec<ExtractedRecord>, String> {
+    let metadata = record_metadata
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !tasks
+        .iter()
+        .zip(kinds)
+        .any(|(_, kind)| *kind == BoundaryTaskKind::JsonStructure)
+    {
+        return Ok(Vec::new());
+    }
+    let Some(head) = model.record_head.as_ref() else {
+        // `enable_records = false`: the spec compiler would have to be told the
+        // head exists, so this is a schema/weights mismatch rather than a
+        // silently empty result.
+        return Err(
+            "schema declares a json_structures group but the checkpoint sets \
+                    enable_records = false"
+                .into(),
+        );
+    };
+    let layout = record_query_layout(tasks, kinds, query_names)?;
+    let specs = compile_record_specs(&layout, &metadata, &BTreeMap::new())?;
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let c_count = candidates.pool_size;
+    let decode = RecordDecodeSettings {
+        anchor_threshold: model.settings.record_anchor_threshold,
+        object_threshold: model.settings.record_anchor_proposal_threshold,
+        field_threshold: model.settings.record_field_threshold,
+        temperature: model.settings.record_temperature,
+    };
+    let mut out = Vec::new();
+    for spec in specs.values() {
+        let group = build_record_group(
+            head,
+            spec,
+            query_states,
+            query_names.len(),
+            candidates,
+            c_count,
+        )?;
+        for record in decode_group(&group, decode)? {
+            out.push(ExtractedRecord {
+                task: spec.task_name.clone(),
+                mode: spec.mode.clone(),
+                fields: record.fields,
+                field_scores: record.field_scores,
+                anchor_span: record.anchor_span,
+                score: record.score,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// `RecordHead::forward_group` with the pool's candidate batch.
+///
+/// Split out so `score_records` stays readable; the `candidates` are the same
+/// `[B, 1, ...]` slices the span path produced, with `q_count` queries.
+fn build_record_group(
+    head: &RecordHead<'_>,
+    spec: &RecordSpec,
+    query_states: &[f32],
+    q_count: usize,
+    candidates: &DocumentCandidateBatch,
+    c_count: usize,
+) -> Result<RecordGroup, String> {
+    head.forward_group(
+        spec,
+        query_states,
+        &RecordCandidates {
+            indices: &candidates.indices,
+            pair_logits: &candidates.pair_logits,
+            valid_mask: &candidates.valid_mask,
+            states: &candidates.candidate_states,
+            q_count,
+            c_count,
+        },
+    )
+}
+
+/// The query layout `compile_record_specs` binds field names to query ids.
+///
+/// Only `json_structures` groups become queries here, and each field's
+/// `role_index` is its position within its group — which is what makes the
+/// compiled specs independent of the caller's field order.
+fn record_query_layout(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    query_names: &[String],
+) -> Result<Vec<LayoutQuery>, String> {
+    let mut queries = Vec::new();
+    let mut query_id = 0usize;
+    for (task_index, (task, kind)) in tasks.iter().zip(kinds).enumerate() {
+        if *kind == BoundaryTaskKind::Classification {
+            continue;
+        }
+        for (role_index, field) in task.labels.iter().enumerate() {
+            if query_id >= query_names.len() {
+                return Err(format!(
+                    "task {:?} field {:?} has no routed query; {} queries were routed",
+                    task.name,
+                    field.name,
+                    query_names.len()
+                ));
+            }
+            if query_names[query_id] != field.name {
+                return Err(format!(
+                    "task {:?} field {:?} routed to query {query_id} named {:?}",
+                    task.name, field.name, query_names[query_id]
+                ));
+            }
+            queries.push(LayoutQuery {
+                query_id,
+                task_index,
+                task_type: match kind {
+                    BoundaryTaskKind::Entities => "entities".to_string(),
+                    BoundaryTaskKind::Relation => "relations".to_string(),
+                    BoundaryTaskKind::JsonStructure => "json_structures".to_string(),
+                    BoundaryTaskKind::Classification => "classifications".to_string(),
+                },
+                task_name: task.name.clone(),
+                role_index,
+                role_name: field.name.clone(),
+            });
+            query_id += 1;
+        }
+    }
+    Ok(queries)
 }
 
 /// Build the relation specs, and the group names they came from.
@@ -404,7 +584,7 @@ pub fn run_extraction(
         };
         tasks.len()
     ];
-    let result = run_mixed_extraction(model, text, tasks, &kinds, n_threads_arg, None)?;
+    let result = run_mixed_extraction(model, text, tasks, &kinds, n_threads_arg, None, None)?;
     Ok((result.candidates, result.words))
 }
 
@@ -572,6 +752,22 @@ pub fn load(path: &std::path::Path) -> Result<Box<dyn TensorSource>, String> {
 // ---------------------------------------------------------------------------
 // Classification head
 // ---------------------------------------------------------------------------
+
+/// One decoded record group (`_decode_records` in `engine.py:1285-1320`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedRecord {
+    /// The `json_structures` group name.
+    pub task: String,
+    /// `natural` | `latent` | `anchorless`.
+    pub mode: String,
+    /// Field query id -> the spans bound to it.
+    pub fields: BTreeMap<usize, Vec<(usize, usize)>>,
+    pub field_scores: BTreeMap<usize, Vec<f32>>,
+    /// Set for `natural` mode: the span the instance seeded from.
+    pub anchor_span: Option<(usize, usize)>,
+    /// `sigmoid(object logit / record_temperature)`.
+    pub score: f32,
+}
 
 /// One classification group's decoded result.
 ///
