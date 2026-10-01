@@ -20,6 +20,7 @@
 //! relation scorer / record decoder are tracked in ``glinerTODO.md`` and
 //! will follow in subsequent commits.
 
+pub mod candidate_encoder;
 pub mod content_pooler;
 pub mod extract;
 pub mod forward;
@@ -33,6 +34,7 @@ pub mod relations;
 pub mod settings;
 pub mod spans;
 
+pub use candidate_encoder::CandidateEncoder;
 pub use content_pooler::SpanContentPooler;
 pub use extract::{
     boundary_overlap_policy, decode_spans, encode_boundary_prompt, extract_spans, run_extraction,

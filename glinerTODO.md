@@ -278,7 +278,18 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   `[B, C, pair_dim]`）—— 但 records 要的宽度是 `hidden_size`(768)，
   **`pair_dim`(128) 不够**，需要确认 reference 的 `candidate_states` 宽度
 
-### 🟢 5.2.4b-3 json_structures（`[C]`，待开工）
+### ✅ 5.2.4b-1e `candidate_encoder` / `candidate_states`（records 的前置）
+- **新** `candidate_encoder.rs`：`Linear(2*boundary_dim, hidden_size)`，**无激活**
+- **改名**：旧的 `candidate_states` → `pool_candidate_features`（scorer 内部特征）
+- **oracle**：`dump_shared_pool_scorer.py` 新增 `candidate_state_rows`（768 宽），
+  与 `candidate_rows`（128 宽）并列，两个都验
+- **保持 `[B, C, H]` 而不是 `[B, Q, C, H]`**：reference 的 `to_candidate_batch` 用
+  `expand` 得到的，值不依赖 `q`，物化那个轴要白花 `q_count` 倍内存
+- **无效 slot 必须精确为 0**（不是「很小」）：reference 是
+  `.masked_fill(~mask, 0.0)`，padding slot 的端点是池填充的残留值，真状态漏进去
+  会污染 record head 的 assignment 分数
+
+### 🟢 5.2.4b-3 json_structures（`[C]`）+ record head 实现（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -301,8 +312,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
 | 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
 | 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
-| 5.2.4b-2 | records（`record_decoder`） | 🟡 已勘察 | — |
-| 5.2.4b-3 | json_structures（`[C]`） | 🟢 待开工 | — |
+| 5.2.4b-1e | `candidate_encoder` / `candidate_states` | ✅ | 本次 |
+| 5.2.4b-2/3 | json_structures（`[C]`）+ record head | 🟡 已勘察 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。

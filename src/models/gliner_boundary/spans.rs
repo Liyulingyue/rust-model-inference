@@ -134,10 +134,21 @@ pub struct DocumentCandidateBatch {
     pub pair_logits: Vec<f32>,
     /// `[B, Q, C]`. False for padding and for inactive queries.
     pub valid_mask: Vec<bool>,
-    /// `[B, C, pair_dim]` contextual candidate states. Feeds the record head's
-    /// `candidate_encoder`; `None` would be equivalent to
-    /// `candidate_attention_layers = 0` plus no records.
+    /// `[B, C, hidden_size]` the record head's `candidate_states`.
+    ///
+    /// Query-independent, and deliberately *not* `[B, Q, C, H]`: the reference's
+    /// `to_candidate_batch` reaches that shape with `expand`, a broadcast view
+    /// whose values do not depend on `q`. Materializing the axis would cost
+    /// `q_count` times the memory for an identical value per slot.
     pub candidate_states: Vec<f32>,
+    /// `[B, C, pair_dim]` `SharedPoolScorer`'s **internal** candidate vector
+    /// (`start_rep + end_rep + length_proj + prior`).
+    ///
+    /// Not the reference's `candidate_states` despite the obvious name: that one
+    /// is `candidate_encoder`'s `hidden_size`-wide output and lives in the field
+    /// above. This one exists only to produce `pair_logits`; nothing downstream
+    /// consumes it, and it is kept because the pool parity fixture pins it.
+    pub pool_candidate_features: Vec<f32>,
     /// `C`, the padded pool width.
     pub pool_size: usize,
 }
@@ -152,8 +163,10 @@ pub struct DocumentCandidateBatch {
 ///  4. `SharedPoolScorer` — score the pool against all queries
 ///
 /// `indices` / `valid_mask` / `pair_logits` are returned transposed to
-/// `[B, Q, C]`; `candidate_states` stays `[B, C, pair_dim]` because the
-/// reference keeps it candidate-major.
+/// `[B, Q, C]`, matching `to_candidate_batch`'s `pair_logits.transpose(1, 2)`.
+/// `candidate_states` and `pool_candidate_features` stay candidate-major
+/// (`[B, C, ...]`) because the reference keeps them that way and only broadcasts
+/// the query axis away.
 pub fn score_document_candidates(
     model: &BoundaryModel<'_>,
     text_states: &[f32],
@@ -169,6 +182,7 @@ pub fn score_document_candidates(
             pair_logits: Vec::new(),
             valid_mask: Vec::new(),
             candidate_states: Vec::new(),
+            pool_candidate_features: Vec::new(),
             pool_size: model.settings.pool_size,
         };
     }
@@ -193,7 +207,7 @@ pub fn score_document_candidates(
         .iter()
         .map(|row| row.iter().filter(|m| **m).count())
         .collect();
-    let (pair_logits, candidate_states) = model.pool_scorer.forward(
+    let (pair_logits, pool_candidate_features) = model.pool_scorer.forward(
         &SharedPoolInputs {
             boundary_states: &encoding.states,
             query_states,
@@ -229,11 +243,33 @@ pub fn score_document_candidates(
         }
     }
 
+    // `model.py:441-447`: the public `candidate_states` the record head reads,
+    // built from the *pooled* endpoints (not the scorer's internal features) and
+    // zeroed wherever the pool slot is padding.
+    let candidate_states = match model.candidate_encoder.as_ref() {
+        Some(encoder) => {
+            let n = encoding.states.len() / batch / model.settings.boundary_dim.max(1);
+            let mut starts = Vec::with_capacity(batch * c);
+            let mut ends = Vec::with_capacity(batch * c);
+            let mut valid = Vec::with_capacity(batch * c);
+            for b in 0..batch {
+                for slot in 0..c {
+                    starts.push(pooled.indices[(b * c + slot) * 2]);
+                    ends.push(pooled.indices[(b * c + slot) * 2 + 1]);
+                    valid.push(pooled.mask[b * c + slot]);
+                }
+            }
+            encoder.forward(&encoding.states, n, &starts, &ends, &valid)
+        }
+        None => Vec::new(),
+    };
+
     DocumentCandidateBatch {
         indices,
         pair_logits: transposed,
         valid_mask,
         candidate_states,
+        pool_candidate_features,
         pool_size: c,
     }
 }

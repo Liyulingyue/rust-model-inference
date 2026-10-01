@@ -87,6 +87,23 @@ def run_case(head, case: dict) -> dict:
             inside_prefix_mean=marginals.inside_prefix_mean,
         )
 
+    # `BoundaryHead.forward` builds the *public* `candidate_states` separately
+    # from the scorer's internal `candidate` (`model.py:441-447`): it projects the
+    # two endpoint boundary states through `candidate_encoder`
+    # (`Linear(2 * boundary_dim, hidden_size)`, no activation) and zeroes invalid
+    # slots. The two tensors have different widths — the scorer's is `pair_dim`,
+    # this one is `hidden_size` — and conflating them is what made our
+    # `DocumentCandidateBatch::candidate_states` a misnomer.
+    from gliner2.models.boundary.indexing import gather_rows
+
+    pooled_candidate_states = None
+    if head.candidate_encoder is not None:
+        ps = gather_rows(encoding.states, pooled.indices[..., 0])
+        pe = gather_rows(encoding.states, pooled.indices[..., 1])
+        pooled_candidate_states = head.candidate_encoder(
+            torch.cat((ps, pe), -1)
+        ).masked_fill(~pooled.mask.unsqueeze(-1), 0.0)
+
     valid = pooled.mask[0].nonzero().flatten().tolist()
     sampled = valid[:CANDIDATE_SAMPLE]
     return {
@@ -102,9 +119,16 @@ def run_case(head, case: dict) -> dict:
         "pool_compat_logits": pooled.compat_logits.flatten().tolist(),
         "pair_logits": pair_logits.flatten().tolist(),
         "candidate_slots": sampled,
+        # The scorer's internal, `pair_dim`-wide candidate vector.
         "candidate_rows": [
             candidate[0, slot].tolist() for slot in sampled
         ],
+        # The public `candidate_states`: `hidden_size`-wide, for the record head.
+        "candidate_state_rows": [
+            pooled_candidate_states[0, slot].tolist() for slot in sampled
+        ]
+        if pooled_candidate_states is not None
+        else None,
     }
 
 

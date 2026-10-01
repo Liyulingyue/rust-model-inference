@@ -200,6 +200,7 @@ pub fn run_mixed_extraction(
             pair_logits: Vec::new(),
             valid_mask: Vec::new(),
             candidate_states: Vec::new(),
+            pool_candidate_features: Vec::new(),
             pool_size: model.settings.pool_size,
         },
         spans: Vec::new(),

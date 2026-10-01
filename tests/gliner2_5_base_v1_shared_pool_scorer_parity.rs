@@ -52,6 +52,23 @@ fn f32s(value: &serde_json::Value) -> Vec<f32> {
         .collect()
 }
 
+/// `candidate_state_rows` is stored per sampled slot, so it needs row-aware
+/// reading rather than the flat `f32s`.
+fn f32_rows(value: &serde_json::Value) -> Vec<Vec<f32>> {
+    value
+        .as_array()
+        .expect("a list of rows")
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .expect("each row is a flat number array")
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect()
+        })
+        .collect()
+}
+
 fn usize_list(value: &serde_json::Value) -> Vec<usize> {
     value
         .as_array()
@@ -333,8 +350,61 @@ fn the_top_level_api_returns_the_per_query_order() {
         }
     }
     assert_eq!(
-        batch.candidate_states.len(),
+        batch.pool_candidate_features.len(),
         c * model.pool_scorer.pair_dim,
-        "candidate states stay candidate-major"
+        "the scorer's internal candidate vector stays candidate-major"
     );
+
+    // The public `candidate_states` the record head consumes: `hidden_size`
+    // wide, from `candidate_encoder(cat(start_state, end_state))`, zeroed on
+    // invalid slots. Sampled slots only, matching the fixture.
+    let hidden = model.config.n_embd;
+    assert_eq!(
+        batch.candidate_states.len(),
+        c * hidden,
+        "candidate_states is hidden_size wide, not pair_dim"
+    );
+    let slots: Vec<usize> = case["candidate_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let want_states = f32_rows(&case["candidate_state_rows"]);
+    assert_eq!(
+        want_states.len(),
+        slots.len(),
+        "one candidate_state row per sampled slot"
+    );
+    for (row, &slot) in slots.iter().enumerate() {
+        assert_eq!(
+            want_states[row].len(),
+            hidden,
+            "candidate_state row width should be hidden_size"
+        );
+        for dim in 0..hidden {
+            let got = batch.candidate_states[slot * hidden + dim];
+            let want = want_states[row][dim];
+            assert!(
+                (got - want).abs() < 1e-3,
+                "candidate_states[{slot}][{dim}] = {got}, reference {want}"
+            );
+        }
+    }
+
+    // An invalid slot must be exactly zero, not merely small: the reference
+    // zeroes it, and a leaked projection there would reach the record head's
+    // assignment scores.
+    for (slot, &valid) in pool_mask.iter().enumerate() {
+        if valid {
+            continue;
+        }
+        for dim in 0..hidden {
+            assert_eq!(
+                batch.candidate_states[slot * hidden + dim],
+                0.0,
+                "candidate_states[{slot}][{dim}] should be masked to zero"
+            );
+        }
+    }
 }

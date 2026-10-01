@@ -28,6 +28,7 @@ use crate::models::gliner::weights::{LayerWeights, Norm};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
+use super::candidate_encoder::CandidateEncoder;
 use super::forward::BoundaryEncoder;
 use super::marginals::BoundaryQueryHead;
 use super::pair_scorer::PairScorer;
@@ -74,6 +75,11 @@ pub struct BoundaryModel<'a> {
     /// `enable_relations = false`, in which case the tensors are absent too and
     /// a relation schema is rejected at the prompt rather than here.
     pub relation_scorer: Option<SparseRelationScorer<'a>>,
+    /// `candidate_encoder` — projects the two endpoint boundary states to
+    /// `hidden_size` for the record head's `candidate_states`. Gated on
+    /// `enable_records` because the reference only constructs it then, so a
+    /// checkpoint without records has no such tensor.
+    pub candidate_encoder: Option<CandidateEncoder<'a>>,
 }
 
 impl<'a> BoundaryModel<'a> {
@@ -198,6 +204,16 @@ impl<'a> BoundaryModel<'a> {
             None
         };
 
+        let candidate_encoder = if settings.enable_records {
+            Some(CandidateEncoder::load(
+                source,
+                n_embd,
+                settings.boundary_dim,
+            )?)
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             tokenizer,
@@ -218,6 +234,7 @@ impl<'a> BoundaryModel<'a> {
             pool_builder,
             pool_scorer,
             relation_scorer,
+            candidate_encoder,
         })
     }
 }
