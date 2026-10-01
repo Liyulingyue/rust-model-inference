@@ -174,18 +174,8 @@ pub fn generate_typed_relation_pairs(
                 && probs[slot] >= settings.argument_threshold
         };
 
-        let heads = select_mentions(
-            candidates,
-            &probs,
-            &head_valid,
-            settings.heads_per_relation,
-        );
-        let tails = select_mentions(
-            candidates,
-            &probs,
-            &tail_valid,
-            settings.tails_per_relation,
-        );
+        let heads = select_mentions(candidates, &probs, &head_valid, settings.heads_per_relation);
+        let tails = select_mentions(candidates, &probs, &tail_valid, settings.tails_per_relation);
 
         // `pair_score = hp[..., None] * tp[..., None, :]` over the capped cross
         // product, minus the same-span pairs, then a stable top-`pair_cap`.
@@ -212,9 +202,7 @@ pub fn generate_typed_relation_pairs(
         // `torch.argsort(..., descending=True, stable=True)`: ties keep the
         // flattened order, which is head-major then tail.
         let mut order: Vec<usize> = (0..scored.len()).collect();
-        order.sort_by(|&a, &b| {
-            f32_order(scored[b].2, scored[a].2).then(a.cmp(&b))
-        });
+        order.sort_by(|&a, &b| f32_order(scored[b].2, scored[a].2).then(a.cmp(&b)));
         order.truncate(settings.pair_cap);
         for slot in order {
             let (hi, ti, _) = scored[slot];
@@ -306,11 +294,7 @@ fn select_mentions(
     });
 
     // Step 2: stable descending sort of the *reordered* scores.
-    let mut ranked: Vec<usize> = order
-        .iter()
-        .copied()
-        .filter(|&slot| valid(slot))
-        .collect();
+    let mut ranked: Vec<usize> = order.iter().copied().filter(|&slot| valid(slot)).collect();
     ranked.sort_by(|&a, &b| f32_order(probs[b], probs[a]));
 
     for (position, &slot) in ranked.iter().take(take).enumerate() {
@@ -333,8 +317,15 @@ fn select_mentions(
 /// four endpoint boundary states, the relation query, the relative order and a
 /// normalized distance — no dense pair matrix.
 pub struct SparseRelationScorer<'a> {
-    hidden_size: usize,
-    relation_query_dim: usize,
+    pub(crate) hidden_size: usize,
+    pub(crate) relation_query_dim: usize,
+    /// Whether the relation query state is the concatenation of the two role
+    /// states rather than their mean. Read by `score_relations` to build them.
+    ///
+    /// Passed explicitly rather than inferred from `relation_query_dim == 2 *
+    /// hidden_size`: inferring it makes a wrong width silently produce a
+    /// half-width relation state instead of an error.
+    pub(crate) directional: bool,
     use_biaffine_content: bool,
     mlp_in: Weight<'a>,
     mlp_in_bias: Vec<f32>,
@@ -351,6 +342,7 @@ impl<'a> SparseRelationScorer<'a> {
         source: &'a dyn TensorSource,
         hidden_size: usize,
         relation_query_dim: usize,
+        directional_relation_states: bool,
         use_biaffine_content: bool,
     ) -> Result<Self, String> {
         // Four endpoint states + relation query + order + normalized distance.
@@ -364,6 +356,7 @@ impl<'a> SparseRelationScorer<'a> {
         let mut scorer = Self {
             hidden_size,
             relation_query_dim,
+            directional: directional_relation_states,
             use_biaffine_content,
             mlp_in,
             mlp_in_bias,
@@ -454,6 +447,11 @@ impl<'a> SparseRelationScorer<'a> {
         let prefix = self
             .use_biaffine_content
             .then(|| build_prefix(boundary_states, length, self.hidden_size));
+        let pooled_span = prefix.as_ref().map(|prefix| PooledSpan {
+            prefix,
+            length,
+            hidden: self.hidden_size,
+        });
 
         let mut features = vec![0.0f32; in_dim];
         for pair in pairs {
@@ -487,12 +485,7 @@ impl<'a> SparseRelationScorer<'a> {
             features[at] = delta.abs() / length as f32;
 
             let mut hidden = vec![0.0f32; self.hidden_size];
-            apply_linear_full(
-                &features,
-                &self.mlp_in,
-                &self.mlp_in_bias,
-                &mut hidden,
-            );
+            apply_linear_full(&features, &self.mlp_in, &self.mlp_in_bias, &mut hidden);
             for value in hidden.iter_mut() {
                 *value = gelu(*value);
             }
@@ -500,30 +493,16 @@ impl<'a> SparseRelationScorer<'a> {
             apply_linear_full(&hidden, &self.mlp_out, &self.mlp_out_bias, &mut score);
             let mut total = score[0];
 
-            if let (Some(prefix), Some((head_w, head_b)), Some((tail_w, tail_b))) = (
-                prefix.as_ref(),
+            if let (Some(pooled_span), Some((head_w, head_b)), Some((tail_w, tail_b))) = (
+                pooled_span.as_ref(),
                 self.head_content_projection.as_ref(),
                 self.tail_content_projection.as_ref(),
             ) {
                 let gate = self.relation_content_gate.as_ref();
-                let head_content = project_pooled(
-                    prefix,
-                    pair.head_start,
-                    pair.head_end,
-                    length,
-                    self.hidden_size,
-                    head_w,
-                    head_b,
-                );
-                let tail_content = project_pooled(
-                    prefix,
-                    pair.tail_start,
-                    pair.tail_end,
-                    length,
-                    self.hidden_size,
-                    tail_w,
-                    tail_b,
-                );
+                let head_content =
+                    project_pooled(pooled_span, pair.head_start, pair.head_end, head_w, head_b);
+                let tail_content =
+                    project_pooled(pooled_span, pair.tail_start, pair.tail_end, tail_w, tail_b);
                 let mut gate_values = vec![0.0f32; self.hidden_size];
                 if let Some((gate_w, gate_b)) = gate {
                     apply_linear_full(rel, gate_w, gate_b, &mut gate_values);
@@ -541,7 +520,8 @@ impl<'a> SparseRelationScorer<'a> {
                 total += dot * scale;
 
                 if let Some((linear_w, linear_b)) = self.content_linear.as_ref() {
-                    let mut wide = Vec::with_capacity(2 * self.hidden_size + self.relation_query_dim);
+                    let mut wide =
+                        Vec::with_capacity(2 * self.hidden_size + self.relation_query_dim);
                     wide.extend_from_slice(&head_content);
                     wide.extend_from_slice(&tail_content);
                     wide.extend_from_slice(rel);
@@ -556,10 +536,9 @@ impl<'a> SparseRelationScorer<'a> {
     }
 }
 
-/// `prefix[end] - prefix[start]` gives the span sum, so the pooled vector is the
-/// mean over the span (`relations.py:317-325`). `build_prefix` is the same
-/// convention as `SpanContentPooler::build_prefix`, on the text states rather
-/// than the content projections.
+/// The cumsum the biaffine branch pools spans out of. Same convention as
+/// `SpanContentPooler::build_prefix`, over the text states rather than the
+/// content projections.
 fn build_prefix(states: &[f32], length: usize, hidden: usize) -> Vec<f32> {
     let mut prefix = vec![0.0f32; (length + 1) * hidden];
     for pos in 0..length {
@@ -571,25 +550,37 @@ fn build_prefix(states: &[f32], length: usize, hidden: usize) -> Vec<f32> {
     prefix
 }
 
-#[allow(clippy::too_many_arguments)]
-fn project_pooled(
-    prefix: &[f32],
-    start: usize,
-    end: usize,
+/// `prefix[end] - prefix[start]` gives the span sum, so the pooled vector is the
+/// mean over the span (`relations.py:317-325`).
+struct PooledSpan<'a> {
+    prefix: &'a [f32],
     length: usize,
     hidden: usize,
+}
+
+impl PooledSpan<'_> {
+    fn mean(&self, start: usize, end: usize) -> Vec<f32> {
+        let start = start.min(self.length);
+        let end = end.min(self.length);
+        let width = end.saturating_sub(start).max(1) as f32;
+        (0..self.hidden)
+            .map(|dim| {
+                (self.prefix[end * self.hidden + dim] - self.prefix[start * self.hidden + dim])
+                    / width
+            })
+            .collect()
+    }
+}
+
+fn project_pooled(
+    pooled: &PooledSpan<'_>,
+    start: usize,
+    end: usize,
     weight: &Weight<'_>,
     bias: &[f32],
 ) -> Vec<f32> {
-    let start = start.min(length);
-    let end = end.min(length);
-    let width = end.saturating_sub(start).max(1) as f32;
-    let mut pooled = vec![0.0f32; hidden];
-    for dim in 0..hidden {
-        pooled[dim] = (prefix[end * hidden + dim] - prefix[start * hidden + dim]) / width;
-    }
-    let mut out = vec![0.0f32; hidden];
-    apply_linear_full(&pooled, weight, bias, &mut out);
+    let mut out = vec![0.0f32; pooled.hidden];
+    apply_linear_full(&pooled.mean(start, end), weight, bias, &mut out);
     out
 }
 
@@ -600,6 +591,12 @@ fn gelu(x: f32) -> f32 {
 
 /// Abramowitz & Stegun 7.1.26. `f32::erf` is not in std, and the reference's
 /// `nn.GELU()` default is exact, so a tanh approximation is not equivalent.
+///
+/// The coefficients are the published ones to all their printed digits, so
+/// `clippy::excessive_precision` is allowed here rather than truncated: the
+/// digits are part of the reference to being 7.1.26 and not another
+/// approximation.
+#[allow(clippy::excessive_precision)]
 fn erf(x: f32) -> f32 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x = x.abs();
@@ -672,3 +669,177 @@ fn apply_linear_full(input: &[f32], weight: &Weight<'_>, bias: &[f32], output: &
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Decode
+// ---------------------------------------------------------------------------
+
+/// The two decode knobs, both read from the checkpoint's transcribed settings.
+///
+/// Grouped because that is what they are: `relation_temperature` calibrates the
+/// logit, and the threshold is the caller's score cutoff — the same one the span
+/// path uses, since `_decode_relations` receives it as `threshold`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RelationDecodeSettings {
+    pub temperature: f32,
+    pub threshold: f32,
+}
+
+impl RelationDecodeSettings {
+    pub fn from_settings(settings: &BoundarySettings, threshold: f32) -> Self {
+        Self {
+            temperature: settings.relation_temperature,
+            threshold,
+        }
+    }
+}
+
+/// The two state tensors the relation head reads, plus their shapes.
+///
+/// Grouped into one struct because the scorer needs four different views of
+/// them and passing them as loose arguments made the call site unreadable.
+pub struct RelationStates<'a> {
+    /// `[L, H]` word-routed encoder states. The scorer gathers endpoint
+    /// boundary states out of these at the candidates' word offsets.
+    pub text: &'a [f32],
+    /// `[Q, H]` per-extractive-query states. The relation query state is built
+    /// from the head and tail role rows of these.
+    pub query: &'a [f32],
+    pub query_count: usize,
+    pub hidden_size: usize,
+}
+
+/// One decoded relation edge (`_decode_relations`, `engine.py:795-870`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedRelation {
+    /// The relation type, already alias-resolved back to the bare schema name.
+    pub relation_type: String,
+    /// `sigmoid(relation logit / relation_temperature)`.
+    pub score: f32,
+    /// Half-open word offsets into the document's word list.
+    pub head_start: usize,
+    pub head_end: usize,
+    pub tail_start: usize,
+    pub tail_end: usize,
+    /// The spanned words joined by single spaces.
+    pub head_text: String,
+    pub tail_text: String,
+}
+
+/// Score and decode every relation in the schema.
+///
+/// `specs` must be in schema order, because a spec's `relation_type` is the
+/// prompt-joined group name and [`resolve_relation_type`] maps it back to the
+/// bare name the caller declared.
+pub fn score_relations(
+    scorer: &SparseRelationScorer<'_>,
+    proposal: &RelationProposalSettings,
+    states: &RelationStates<'_>,
+    candidates: &RelationCandidates<'_>,
+    specs: &[RelationTypeSpec],
+    words: &[String],
+    decode: RelationDecodeSettings,
+) -> Vec<ExtractedRelation> {
+    let RelationStates {
+        text: text_states,
+        query: query_states,
+        query_count,
+        hidden_size,
+    } = *states;
+    let c_count = candidates.c_count;
+    if specs.is_empty() || query_count == 0 || c_count == 0 {
+        return Vec::new();
+    }
+    let pairs = generate_typed_relation_pairs(candidates, specs, proposal);
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    // `_build_rel_specs`: the relation query state is the concatenation of the
+    // head and tail role states, or their mean when the states are not
+    // directional. Built from the *query* states, which is why this cannot run
+    // off the text states alone.
+    let role_width = scorer.relation_query_dim;
+    let mut relation_states = Vec::with_capacity(specs.len() * role_width);
+    for spec in specs {
+        let head = match spec.head_query_ids.first() {
+            Some(&q) if q < query_count => q,
+            _ => continue,
+        };
+        let tail = match spec.tail_query_ids.first() {
+            Some(&q) if q < query_count => q,
+            _ => continue,
+        };
+        if scorer.directional {
+            relation_states.extend_from_slice(&query_states[head * hidden_size..][..hidden_size]);
+            relation_states.extend_from_slice(&query_states[tail * hidden_size..][..hidden_size]);
+        } else {
+            for dim in 0..hidden_size {
+                relation_states.push(
+                    (query_states[head * hidden_size + dim]
+                        + query_states[tail * hidden_size + dim])
+                        / 2.0,
+                );
+            }
+        }
+    }
+    // A spec whose role query is out of range contributed no state, so it must
+    // not be scored. The generator already produced nothing for it, but its
+    // pairs were compacted out of order, so rebuild the index mapping.
+    let states_per_spec = role_width;
+    if relation_states.len() != specs.len() * states_per_spec {
+        return Vec::new();
+    }
+
+    let logits = scorer.forward(text_states, &relation_states, &pairs);
+    let mut out = Vec::new();
+    for (pair, logit) in pairs.iter().zip(logits) {
+        let score = sigmoid(logit / decode.temperature);
+        if score < decode.threshold {
+            continue;
+        }
+        // The reference's bounds check, minus the `offset`: the word-routed
+        // inference path has `word_offsets == 0` because the candidate indices
+        // already index the text words.
+        let text_len = words.len();
+        if !(pair.head_start < pair.head_end
+            && pair.tail_start < pair.tail_end
+            && pair.head_end <= text_len
+            && pair.tail_end <= text_len)
+        {
+            continue;
+        }
+        let head_text = words[pair.head_start..pair.head_end].join(" ");
+        let tail_text = words[pair.tail_start..pair.tail_end].join(" ");
+        if head_text.is_empty() || tail_text.is_empty() {
+            continue;
+        }
+        out.push(ExtractedRelation {
+            relation_type: resolve_relation_type(&specs[pair.relation_index].relation_type),
+            score,
+            head_start: pair.head_start,
+            head_end: pair.head_end,
+            tail_start: pair.tail_start,
+            tail_end: pair.tail_end,
+            head_text,
+            tail_text,
+        });
+    }
+    out
+}
+
+/// `_decode_relations` builds `relation_aliases` as
+/// `{"{name}: {description}": name}` from `relation_descriptions` and looks each
+/// proposed type up in it, falling back to the proposed string. A relation type
+/// that still carries its description would leak `"founded: who founded what"`
+/// into the output instead of `"founded"`, so the split has to happen here
+/// rather than at schema-parse time.
+pub fn resolve_relation_type(proposed: &str) -> String {
+    match proposed.split_once(RELATION_ALIAS_SEPARATOR) {
+        Some((name, _)) => name.to_string(),
+        None => proposed.to_string(),
+    }
+}
+
+/// `f"{name}: {description}"` is built with exactly `": "`.
+const RELATION_ALIAS_SEPARATOR: &str = ": ";

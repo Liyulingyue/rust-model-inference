@@ -35,7 +35,15 @@ use super::loader::BoundaryModel;
 use super::overlap::{
     normalize_overlap_policy, resolve_overlaps, OverlapPolicy, ScoredSpan as OverlapSpan,
 };
+use super::relations::{
+    self, ExtractedRelation, RelationCandidates, RelationDecodeSettings, RelationProposalSettings,
+    RelationStates, RelationTypeSpec,
+};
 use super::spans::{score_document_candidates, DocumentCandidateBatch};
+
+/// The reference's default score threshold, used when the caller does not pass
+/// one (`_group_scored_candidates`'s `threshold: float = 0.5`).
+const DEFAULT_SCORE_THRESHOLD: f32 = 0.5;
 
 /// One extracted span for one schema field.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +136,9 @@ pub struct Extraction {
     pub spans: Vec<ExtractedSpan>,
     /// One entry per classification group, in schema order.
     pub classifications: Vec<ClassificationResult>,
+    /// Decoded relation edges, in pair order. Empty when the schema declared no
+    /// relation group.
+    pub relations: Vec<ExtractedRelation>,
     /// `null_projection` / `count_head` per extractive query.
     pub query_heads: QueryHeads,
     /// The normalized, lowercased word list the spans index into.
@@ -147,6 +158,10 @@ pub fn run_mixed_extraction(
     tasks: &[Task],
     kinds: &[BoundaryTaskKind],
     n_threads_arg: usize,
+    // The score threshold relations are decoded at, matching the reference,
+    // where `_decode_relations` receives the same `threshold` as the span path.
+    // `None` is the reference's 0.5 default.
+    relation_threshold: Option<f32>,
 ) -> Result<Extraction, String> {
     if tasks.is_empty() {
         return Err("extraction needs at least one schema task".into());
@@ -189,6 +204,7 @@ pub fn run_mixed_extraction(
         },
         spans: Vec::new(),
         classifications: Vec::new(),
+        relations: Vec::new(),
         query_heads: QueryHeads {
             null_logits: Vec::new(),
             count_log_rates: Vec::new(),
@@ -206,6 +222,61 @@ pub fn run_mixed_extraction(
             query_heads(model, &query_states, encoded.query_names.len(), hidden_size)?;
         extractions.candidates =
             score_document_candidates(model, &text_states, &text_mask, &query_states, &query_mask);
+    }
+
+    // Relations reuse the mention candidates the pool already produced, so this
+    // stage runs inside the `query_positions` branch: it needs the same
+    // word-gathered text states and per-query states.
+    if !encoded.query_positions.is_empty() {
+        let text_states = gather_states(&hidden, &encoded.text_word_first_positions, hidden_size);
+        let query_states = gather_states(&hidden, &encoded.query_positions, hidden_size);
+        let (specs, spec_names) = relation_specs(tasks, kinds)?;
+        if !specs.is_empty() {
+            let scorer = model.relation_scorer.as_ref().ok_or_else(|| {
+                format!(
+                    "schema declares relation group(s) {spec_names:?} but the checkpoint \
+                     sets enable_relations = false"
+                )
+            })?;
+            if spec_names.len() != encoded.query_names.len()
+                && specs
+                    .iter()
+                    .flat_map(|spec| spec.head_query_ids.iter().chain(&spec.tail_query_ids))
+                    .any(|&q| q >= encoded.query_names.len())
+            {
+                return Err(format!(
+                    "relation group(s) {spec_names:?} name queries past the {} routed",
+                    encoded.query_names.len()
+                ));
+            }
+            let states = RelationStates {
+                text: &text_states,
+                query: &query_states,
+                query_count: encoded.query_names.len(),
+                hidden_size,
+            };
+            let candidates = RelationCandidates {
+                indices: &extractions.candidates.indices,
+                pair_logits: &extractions.candidates.pair_logits,
+                valid_mask: &extractions.candidates.valid_mask,
+                q_count: encoded.query_names.len(),
+                c_count: extractions.candidates.pool_size,
+            };
+            extractions.relations = relations::score_relations(
+                scorer,
+                &RelationProposalSettings::from_settings(&model.settings),
+                &states,
+                &candidates,
+                &specs,
+                &extractions.words,
+                // `_decode_relations` falls back to the caller's threshold when
+                // `relation_metadata` carries no per-type override.
+                RelationDecodeSettings::from_settings(
+                    &model.settings,
+                    relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+                ),
+            );
+        }
     }
 
     // Classification groups: score every `[L]` marker state with the shared
@@ -261,6 +332,59 @@ pub fn run_mixed_extraction(
     Ok(extractions)
 }
 
+/// Build the relation specs, and the group names they came from.
+///
+/// The reference assigns extractive query ids in schema-group order, counting
+/// each group's fields and skipping classification groups entirely
+/// (`_build_rel_specs`, `model.py:1449-1502`). A relation group contributes a
+/// spec only when it has at least two fields, and the first two are the head and
+/// tail roles.
+///
+/// The `relation_type` is the *prompt-joined* group name — `"founded: who
+/// founded what"` when the schema gives a description — because that is what
+/// `_schema_group_name` recovers from the `[P]` token and what
+/// `_decode_relations`'s alias table is keyed on. The bare name is recovered at
+/// decode time, not here.
+fn relation_specs(
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+) -> Result<(Vec<RelationTypeSpec>, Vec<String>), String> {
+    let mut specs = Vec::new();
+    let mut names = Vec::new();
+    let mut query_cursor = 0usize;
+    for (task, kind) in tasks.iter().zip(kinds) {
+        if matches!(kind, BoundaryTaskKind::Classification) {
+            // Classification groups emit no extractive query, so they consume no
+            // ids — but they do consume positions in the prompt, which is why
+            // this cannot be a plain enumerate over the task index.
+            continue;
+        }
+        let field_count = task.labels.len();
+        if *kind == BoundaryTaskKind::Relation {
+            if field_count >= 2 {
+                let prompt = match &task.prompt {
+                    Some(text) => format!("{}: {text}", task.name),
+                    None => task.name.clone(),
+                };
+                specs.push(RelationTypeSpec::two_role(
+                    prompt,
+                    query_cursor,
+                    query_cursor + 1,
+                ));
+                names.push(task.name.clone());
+            } else {
+                return Err(format!(
+                    "relation group {:?} declares {} field(s); the reference needs a head \
+                     and a tail, so at least 2",
+                    task.name, field_count
+                ));
+            }
+        }
+        query_cursor += field_count;
+    }
+    Ok((specs, names))
+}
+
 /// Run the whole pipeline for a single extractive group.
 ///
 /// Kept as the common case's shorthand: one `[E]` group, no classification.
@@ -279,7 +403,7 @@ pub fn run_extraction(
         };
         tasks.len()
     ];
-    let result = run_mixed_extraction(model, text, tasks, &kinds, n_threads_arg)?;
+    let result = run_mixed_extraction(model, text, tasks, &kinds, n_threads_arg, None)?;
     Ok((result.candidates, result.words))
 }
 
@@ -390,7 +514,7 @@ pub fn extract_spans(
         &words,
         &fields,
         model.settings.pair_temperature,
-        threshold.unwrap_or(0.5),
+        threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
         Some(boundary_overlap_policy(model)?),
     ))
 }

@@ -592,7 +592,8 @@ pub enum BoundaryTaskKind {
     /// `[C]` — `json_structures`. Routed like `Entities` but decoded by the
     /// structure decoder, which is not implemented yet.
     JsonStructure,
-    /// `[R]` — relation roles, scored by `relation_scorer` (not implemented).
+    /// `[R]` — relation roles, scored by `relation_scorer`. The group's first
+    /// two fields are the head and tail roles.
     Relation,
 }
 
@@ -612,8 +613,17 @@ impl BoundaryTaskKind {
     /// routed as queries and scored for spans), but its decode is a nested
     /// structure rather than a flat span list, so it is left out rather than
     /// half-supported.
+    /// Whether this group's `[L]`-position children are boundary queries rather
+    /// than classifier choices.
+    ///
+    /// The reference's split is on the task *type* being `"classifications"`
+    /// (`processor.py:712-719`), so it is everything-else that goes to the
+    /// query side — not just `Entities`. Matching only `Entities` routed
+    /// `[C]` and `[R]` children to the classifier, which then failed the
+    /// "routed but not consumed" check with a message that pointed at the
+    /// classification head rather than at the routing.
     pub fn yields_boundary_queries(self) -> bool {
-        matches!(self, Self::Entities)
+        !matches!(self, Self::Classification)
     }
 }
 

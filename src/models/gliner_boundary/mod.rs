@@ -36,7 +36,7 @@ pub mod spans;
 pub use content_pooler::SpanContentPooler;
 pub use extract::{
     boundary_overlap_policy, decode_spans, encode_boundary_prompt, extract_spans, run_extraction,
-    ExtractedSpan,
+    run_mixed_extraction, ExtractedSpan, Extraction,
 };
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
@@ -46,11 +46,12 @@ pub use overlap::{
 };
 pub use pair_scorer::{PairScoreInputs, PairScorer, PairScorerFeatures};
 pub use pool::{DocumentCandidatePool, PooledCandidates};
+pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
 pub use relations::{
-    generate_typed_relation_pairs, RelationCandidates, RelationPair, RelationProposalSettings,
+    generate_typed_relation_pairs, score_relations, ExtractedRelation, RelationCandidates,
+    RelationDecodeSettings, RelationPair, RelationProposalSettings, RelationStates,
     RelationTypeSpec, SparseRelationScorer,
 };
-pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
 pub use settings::BoundarySettings;
 pub use spans::{score_document_candidates, score_spans, DocumentCandidateBatch, ScoredSpan};
 

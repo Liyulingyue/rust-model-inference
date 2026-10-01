@@ -1248,6 +1248,22 @@ pub(super) async fn jev_boundary(
             })
         })
         .collect();
+    let relations: Vec<serde_json::Value> = result
+        .relations
+        .iter()
+        .map(|relation| {
+            json!({
+                "relation": relation.relation_type,
+                "score": relation.score,
+                "head": relation.head_text,
+                "head_start": relation.head_start,
+                "head_end": relation.head_end,
+                "tail": relation.tail_text,
+                "tail_start": relation.tail_start,
+                "tail_end": relation.tail_end,
+            })
+        })
+        .collect();
     let classifications: Vec<serde_json::Value> = result
         .classifications
         .iter()
@@ -1282,6 +1298,7 @@ pub(super) async fn jev_boundary(
         "context": req.context,
         "overlap_policy": overlap_policy,
         "spans": spans,
+        "relations": relations,
         "classifications": classifications,
         "query_heads": heads,
     }))

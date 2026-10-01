@@ -191,6 +191,7 @@ impl<'a> BoundaryModel<'a> {
                 source,
                 n_embd,
                 settings.relation_query_dim(n_embd),
+                settings.directional_relation_states,
                 settings.relation_biaffine_content,
             )?)
         } else {

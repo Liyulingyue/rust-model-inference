@@ -227,7 +227,15 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   3. **mention 排序是 `(start, end)` 字典序**，不是分数序；它存在只是给后面的 score sort 一个确定 tie-break。两次 stable argsort（先 end 后 start）== 一次 stable sort on `(start,end)`
 - **oracle**：`dump_relations.py`，4 个 case，pair 集合和 logit 都对齐（TOLERANCE 2.0e-4）。case 覆盖：同分 mention（同 span 不同 query / 相邻 span）、padding + threshold 边界（logit 恰好等于 `logitit(0.2)`，reference 用 `>=`）、same-span 自剔除、named/dead spec
 
-### 🟢 5.2.4b-2 relation prompt + schema + decode + HTTP（待开工）
+### ✅ 5.2.4b-1d relation `[R]` prompt + schema + decode + CLI/HTTP
+- **schema 形状**（reference `_process_relations`）：`{"relations": [{"founded_by": {"head": <span>, "tail": <span>}}], "relation_descriptions": {...}}`。value 是 gold span，**只有 field name 进 prompt**；第一个 field 是 head、第二个是 tail，所以顺序就是方向
+- **`parse_boundary_schema` 的 group 顺序改对了**：之前是 classifications → relations → entities，reference 的 `_transform_record` 是 json_structures → entities → relations → classifications。entity query 的 id 必须在 relation role slot **之前**，否则 head/tail 拿到 0/1 而 entity 被挤到后面。e2e fixture 的 mixed case 专门盯这个
+- **抓到一个 routing bug**：`yields_boundary_queries()` 之前只匹配 `Entities`，所以 `[C]`/`[R]` 的 child 被路由到 classifier，报错是 "4 classification choices routed but 0 consumed"——指向 classification head 而不指向 routing，很难查。reference 的判据是 `task_types == "classifications"`，即**其余全部**走 query 侧
+- **relation type 字符串**：`_schema_group_name` 取的是 prompt-joined 形式（`"worked_in: who worked in which place"`），`_decode_relations` 的 alias 表再映射回裸名。所以 `RelationTypeSpec` 存 joined 形式，decode 时 `resolve_relation_type` 按 `": "` 切回。description 泄漏进输出只有 fixture 带 `relation_descriptions` 才看得见
+- **`run_mixed_extraction` 加了 `relation_threshold: Option<f32>`**：reference 的 `_decode_relations` 收的是和 span 路径同一个 `threshold`，不是硬编码
+- **oracle**：`dump_relations_end_to_end.py`，5 个 case（真实 text + relation schema → edges），含 mixed schema、threshold 0.02、负例。query routing / word list / edge 全部对齐（2.0e-4）
+
+### 🟢 5.2.4b-2 records + json_structures（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -249,7 +257,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1a | overlap_policy 解码 | ✅ | 本次 |
 | 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
 | 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
-| 5.2.4b-2 | relation prompt + schema + decode；records + json_structures | 🟢 待开工 | — |
+| 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
+| 5.2.4b-2 | records + json_structures | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
@@ -259,12 +268,12 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 **现在支持的**：extractive spans（`[E]`）+ classification（`[L]`）+ abstention（`null_projection`）+ count log-rate（`count_head`），两组可以同时出现在一个 schema 里。
 
 **仍然没有的**：
-- relation 的 `[R]` prompt 路由 / schema 解析 / decode（head 本身已就绪）
-- records（`record_decoder`）/ `json_structures`（`[C]`）
+- records（`record_decoder`，18 个 tensor）/ `json_structures`（`[C]`）
+- `relation_metadata.<type>.threshold` per-type override（现在统一用 caller 的 threshold）
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-14 个 boundary 测试文件 / 37 个测试全绿。
+16 个 boundary 测试文件 / 44 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

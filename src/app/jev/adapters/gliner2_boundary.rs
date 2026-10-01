@@ -41,10 +41,24 @@ struct ClassJson {
     choice_label: Option<String>,
 }
 
+/// One relation edge, as emitted by `--jev-output json`.
+#[derive(Debug, serde::Serialize)]
+struct RelationJson {
+    relation: String,
+    score: f32,
+    head: String,
+    head_start: usize,
+    head_end: usize,
+    tail: String,
+    tail_start: usize,
+    tail_end: usize,
+}
+
 /// The whole JSON payload for `--jev-output json`.
 #[derive(Debug, serde::Serialize)]
 struct BoundaryJson {
     spans: Vec<SpanJson>,
+    relations: Vec<RelationJson>,
     classifications: Vec<ClassJson>,
 }
 
@@ -81,6 +95,21 @@ pub fn parse_boundary_schema(
         .ok_or("gliner2 boundary schema must be a JSON object")?;
     let mut tasks = Vec::new();
     let mut kinds = Vec::new();
+    // The group order *is* the contract, in two ways at once: it fixes which
+    // marker index each field lands on, and it fixes the extractive query ids,
+    // which the relation head reads as head/tail role slots. `_transform_record`
+    // emits json_structures, then entities, then relations, then classifications
+    // (`processor.py:893-904`), so a mixed schema must put the entity queries
+    // *before* the relation roles. Parsing relations first silently handed the
+    // relation roles ids 0 and 1 and pushed the entity queries after them.
+    if object.contains_key("entities") {
+        tasks.push(parse_entities_group(object)?);
+        kinds.push(BoundaryTaskKind::Entities);
+    }
+    for task in parse_relation_groups(object)? {
+        tasks.push(task);
+        kinds.push(BoundaryTaskKind::Relation);
+    }
     if let Some(classifications) = object.get("classifications") {
         let items = classifications
             .as_array()
@@ -90,14 +119,83 @@ pub fn parse_boundary_schema(
             kinds.push(BoundaryTaskKind::Classification);
         }
     }
-    if object.contains_key("entities") {
-        tasks.push(parse_entities_group(object)?);
-        kinds.push(BoundaryTaskKind::Entities);
-    }
     if tasks.is_empty() {
-        return Err("gliner2 boundary schema needs \"entities\" or \"classifications\"".into());
+        return Err(
+            "gliner2 boundary schema needs \"entities\", \"relations\" or \"classifications\""
+                .into(),
+        );
     }
     Ok((tasks, kinds))
+}
+
+/// Parse the reference's `"relations"` group into `[R]` tasks.
+///
+/// The reference's `_process_relations` (`processor.py:1074-1120`) reads
+/// `schema["relations"]` as a list of single-key objects whose value maps a
+/// *role field name* to its gold span, and takes `list(value.keys())` as the
+/// field list — the spans are training targets, not part of the prompt. The
+/// group name is the key, and `relation_descriptions` supplies the prompt.
+///
+/// The field order is the contract: the first two fields become the head and
+/// tail roles, so reordering them swaps the relation's direction.
+fn parse_relation_groups(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<Task>, String> {
+    let Some(relations) = object.get("relations") else {
+        return Ok(Vec::new());
+    };
+    let items = relations
+        .as_array()
+        .ok_or("\"relations\" must be a list of {relation_name: {\"head\": ..., \"tail\": ...}}")?;
+    let descriptions = object
+        .get("relation_descriptions")
+        .and_then(|v| v.as_object());
+    let mut tasks = Vec::with_capacity(items.len());
+    for item in items {
+        let map = item
+            .as_object()
+            .ok_or("each relation must be an object of {relation_name: {field: span}}")?;
+        if map.len() != 1 {
+            return Err(format!(
+                "each relation entry must name exactly one relation type, got {} keys",
+                map.len()
+            ));
+        }
+        let (name, roles) = map.iter().next().expect("len checked");
+        let fields: Vec<String> = roles
+            .as_object()
+            .ok_or_else(|| format!("relation {name:?} must map role names to spans, got {roles}"))?
+            .keys()
+            .cloned()
+            .collect();
+        if fields.len() < 2 {
+            return Err(format!(
+                "relation {name:?} declares {} role(s); the reference reads the first two as \
+                 head and tail, so it needs at least 2",
+                fields.len()
+            ));
+        }
+        let labels = fields
+            .iter()
+            .map(|field| {
+                let mut label = Label::new(field);
+                // Relation roles carry no description of their own: the
+                // description belongs to the relation type and becomes the
+                // group prompt, which `_schema_group_name` later splits off.
+                label.description = None;
+                label
+            })
+            .collect();
+        let mut task = Task::new(name, labels);
+        if let Some(description) = descriptions
+            .and_then(|map| map.get(name))
+            .and_then(|value| value.as_str())
+        {
+            task.prompt = Some(description.to_string());
+        }
+        tasks.push(task);
+    }
+    Ok(tasks)
 }
 
 fn parse_classification_group(item: &serde_json::Value) -> Result<Task, String> {
@@ -199,7 +297,7 @@ pub fn extract(
     n_threads_arg: usize,
     threshold: Option<f32>,
 ) -> Result<Extraction, String> {
-    let mut result = run_mixed_extraction(model, text, tasks, kinds, n_threads_arg)?;
+    let mut result = run_mixed_extraction(model, text, tasks, kinds, n_threads_arg, threshold)?;
     if !result.query_names.is_empty() {
         result.spans = decode_spans(
             &result.candidates,
@@ -277,6 +375,20 @@ pub fn run_gliner2_boundary(
                     text: span.text.clone(),
                 })
                 .collect(),
+            relations: result
+                .relations
+                .iter()
+                .map(|relation| RelationJson {
+                    relation: relation.relation_type.clone(),
+                    score: relation.score,
+                    head: relation.head_text.clone(),
+                    head_start: relation.head_start,
+                    head_end: relation.head_end,
+                    tail: relation.tail_text.clone(),
+                    tail_start: relation.tail_start,
+                    tail_end: relation.tail_end,
+                })
+                .collect(),
             classifications: result
                 .classifications
                 .iter()
@@ -312,10 +424,30 @@ pub fn run_gliner2_boundary(
             );
         }
     }
+    if !result.relations.is_empty() {
+        let mut current = String::new();
+        for relation in &result.relations {
+            if relation.relation_type != current {
+                current = relation.relation_type.clone();
+                println!("{current}:");
+            }
+            println!(
+                "  [{}..{}] -> [{}..{}] p={:.4} {} -> {}",
+                relation.head_start,
+                relation.head_end,
+                relation.tail_start,
+                relation.tail_end,
+                relation.score,
+                relation.head_text,
+                relation.tail_text
+            );
+        }
+    }
     print_classifications(&result.classifications);
     println!(
-        "({elapsed} ms, {} span(s), {} classification(s))",
+        "({elapsed} ms, {} span(s), {} relation(s), {} classification(s))",
         spans.len(),
+        result.relations.len(),
         result.classifications.len()
     );
     Ok(())

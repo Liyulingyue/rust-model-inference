@@ -13,8 +13,7 @@
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner_boundary::relations::{
-    generate_typed_relation_pairs, RelationCandidates, RelationProposalSettings,
-    RelationTypeSpec,
+    generate_typed_relation_pairs, RelationCandidates, RelationProposalSettings, RelationTypeSpec,
 };
 use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
@@ -40,9 +39,8 @@ fn loaded_model() -> Option<(Box<dyn std::any::Any>, BoundaryModel<'static>)> {
 }
 
 fn fixture() -> serde_json::Value {
-    let raw = std::fs::read_to_string(FIXTURE).unwrap_or_else(|_| {
-        panic!("missing {FIXTURE}; regenerate with dump_relations.py")
-    });
+    let raw = std::fs::read_to_string(FIXTURE)
+        .unwrap_or_else(|_| panic!("missing {FIXTURE}; regenerate with dump_relations.py"));
     serde_json::from_str(&raw).expect("parse relations-golden.json")
 }
 
@@ -173,10 +171,26 @@ fn typed_relation_pairs_match_the_reference() {
                 specs[pair.relation_index].relation_type, relation_type,
                 "{name}[{index}]: relation type"
             );
-            assert_eq!(pair.head_start, want[0].as_u64().unwrap() as usize, "{name}[{index}] head_start");
-            assert_eq!(pair.head_end, want[1].as_u64().unwrap() as usize, "{name}[{index}] head_end");
-            assert_eq!(pair.tail_start, want[2].as_u64().unwrap() as usize, "{name}[{index}] tail_start");
-            assert_eq!(pair.tail_end, want[3].as_u64().unwrap() as usize, "{name}[{index}] tail_end");
+            assert_eq!(
+                pair.head_start,
+                want[0].as_u64().unwrap() as usize,
+                "{name}[{index}] head_start"
+            );
+            assert_eq!(
+                pair.head_end,
+                want[1].as_u64().unwrap() as usize,
+                "{name}[{index}] head_end"
+            );
+            assert_eq!(
+                pair.tail_start,
+                want[2].as_u64().unwrap() as usize,
+                "{name}[{index}] tail_start"
+            );
+            assert_eq!(
+                pair.tail_end,
+                want[3].as_u64().unwrap() as usize,
+                "{name}[{index}] tail_end"
+            );
             assert!(
                 (pair.head_prob - want[4].as_f64().unwrap() as f32).abs() < TOLERANCE,
                 "{name}[{index}] head_prob {} vs {}",
@@ -195,7 +209,6 @@ fn typed_relation_pairs_match_the_reference() {
                 "{name}[{index}]: a same-span pair survived the generator"
             );
         }
-
     }
 }
 
@@ -263,7 +276,8 @@ fn relation_scorer_logits_match_the_reference() {
                 relation_states.extend_from_slice(&states[tail * hidden..][..hidden]);
             } else {
                 for dim in 0..hidden {
-                    relation_states.push((states[head * hidden + dim] + states[tail * hidden + dim]) / 2.0);
+                    relation_states
+                        .push((states[head * hidden + dim] + states[tail * hidden + dim]) / 2.0);
                 }
             }
         }

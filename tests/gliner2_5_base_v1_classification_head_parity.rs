@@ -197,9 +197,15 @@ fn logits_probabilities_and_choices_match() {
 
     for (index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
         let (tasks, kinds) = tasks_of(case);
-        let result =
-            run_mixed_extraction(&model, case["text"].as_str().unwrap(), &tasks, &kinds, 0)
-                .expect("run mixed extraction");
+        let result = run_mixed_extraction(
+            &model,
+            case["text"].as_str().unwrap(),
+            &tasks,
+            &kinds,
+            0,
+            None,
+        )
+        .expect("run mixed extraction");
 
         let want_classification_groups = kinds
             .iter()
