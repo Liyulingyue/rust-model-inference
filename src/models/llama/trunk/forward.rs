@@ -338,11 +338,24 @@ pub fn run_inference(
             .and_then(|v| v.to_string_val())
             .map(|s| s.to_ascii_lowercase().contains("mistral"))
             .unwrap_or(false);
+        // Zephyr detection: `general.name` containing "zephyr" covers
+        // TheBloke's conversions (`huggingfaceh4_zephyr-7b-alpha`), but
+        // other publishers (mradermacher, MaziyarPanahi) rewrite
+        // `general.name` to "`.`" / `"hub"` and rely on the embedded
+        // `tokenizer.chat_template` to carry the model identity. Fall
+        // back to that: Zephyr's template is the only llama-arch template
+        // that uses `<|user|>` / `<|assistant|>` as the user-turn and
+        // generation-prompt markers.
         let is_zephyr = source
             .metadata("general.name")
             .and_then(|v| v.to_string_val())
             .map(|s| s.to_ascii_lowercase().contains("zephyr"))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                .unwrap_or(false);
 
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
@@ -453,6 +466,8 @@ const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");
 fn llama_turn_text(
     arch: &str,
     is_minicpm5: bool,
+    is_mistral: bool,
+    is_zephyr: bool,
     has_chatml_template: bool,
     role: &str,
     content: &str,
@@ -511,15 +526,50 @@ fn llama_turn_text(
         }
         return format!("<|user|>{content}<|end|>");
     }
+    if is_mistral {
+        // Mistral-Instruct uses `[INST] {user} [/INST]` for the user turn
+        // and an empty assistant turn (generation begins right after
+        // `[/INST]`). The closing wrapper `[/INST]` is part of the user
+        // turn, not a separator, so the model is asked to produce the
+        // first assistant token directly. Tokenizer BOS (id=1) is emitted
+        // via `add_special=true` so we don't prepend it manually.
+        // (Ref: llama.cpp `llama_chat_apply_template_internal` Mistral
+        // branch; mistralai/Mistral-7B-Instruct-v0.3 tokenizer config.)
+        if role == "assistant" {
+            return String::new();
+        }
+        return format!("[INST] {content} [/INST]");
+    }
+    if is_zephyr {
+        // Zephyr-7B uses `<|user|>\n{content}</s>\n<|assistant|>\n` for
+        // the user turn and `<|assistant|>\n` for the assistant
+        // generation prompt, mirroring HuggingFaceH4's tokenizer
+        // `chat_template`. The trailing `\n` matters: Zephyr expects the
+        // assistant marker on its own line.
+        if role == "assistant" {
+            return "<|assistant|>\n".to_string();
+        }
+        return format!("<|user|>\n{content}</s>\n<|assistant|>\n");
+    }
     format!("user\n{content}\nassistant\n{THINK_MARK}\n")
 }
 
 /// True when `arch`'s template can express more than one turn.
-fn llama_supports_multiturn(arch: &str, is_minicpm5: bool) -> bool {
+fn llama_supports_multiturn(
+    arch: &str,
+    is_minicpm5: bool,
+    is_mistral: bool,
+    is_zephyr: bool,
+) -> bool {
     if arch == "k2-horizon" {
         return false;
     }
     if is_minicpm5 {
+        return true;
+    }
+    // Mistral/Zephyr repeat `[INST]…[/INST]`/`<|user|>…<|assistant|>`
+    // blocks for each turn, so multi-turn is expressible here.
+    if is_mistral || is_zephyr {
         return true;
     }
     // nanbeige (ChatML template) and granite (start_of_role) do.
@@ -551,7 +601,22 @@ pub fn build_prompt_tokens_from_turns(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("minicpm"))
         .unwrap_or(false);
-    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5) {
+    let is_mistral = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("mistral"))
+        .unwrap_or(false);
+    let is_zephyr = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+        .unwrap_or(false)
+        || source
+            .metadata("tokenizer.chat_template")
+            .and_then(|v| v.to_string_val())
+            .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+            .unwrap_or(false);
+    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5, is_mistral, is_zephyr) {
         return Err(format!(
             "multi-turn chat is unsupported for architecture {arch:?}; only a single user turn is rendered"
         ));
@@ -565,6 +630,8 @@ pub fn build_prompt_tokens_from_turns(
         prompt_text.push_str(&llama_turn_text(
             &arch,
             is_minicpm5,
+            is_mistral,
+            is_zephyr,
             has_chatml_template,
             role,
             content,
@@ -586,6 +653,8 @@ pub fn build_prompt_tokens_from_turns(
             prompt_text.push_str(&llama_turn_text(
                 &arch,
                 is_minicpm5,
+                is_mistral,
+                is_zephyr,
                 has_chatml_template,
                 "assistant",
                 "",
@@ -2593,6 +2662,21 @@ pub fn build_prompt_tokens(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("minicpm"))
         .unwrap_or(false);
+    let is_mistral = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("mistral"))
+        .unwrap_or(false);
+    let is_zephyr = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+        .unwrap_or(false)
+        || source
+            .metadata("tokenizer.chat_template")
+            .and_then(|v| v.to_string_val())
+            .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+            .unwrap_or(false);
 
     let prompt_text = if arch == "k2-horizon" {
         format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
@@ -2625,14 +2709,28 @@ pub fn build_prompt_tokens(
         // 151332. Both are special tokens, recognised as single ids
         // because `parse_special=true`.
         format!("[gMASK]<sop><|user|>\n{prompt}<|assistant|>\n")
+    } else if is_mistral {
+        // Mistral-Instruct single-turn template: `[INST] {prompt} [/INST]`.
+        // Tokenizer BOS is emitted via `add_special=true`; the literal
+        // `[INST]`/`[/INST]` are recognised as single SentencePiece
+        // special tokens (id 3 / 4) when `parse_special=true`.
+        format!("[INST] {prompt} [/INST]")
+    } else if is_zephyr {
+        // Zephyr-7B single-turn template:
+        // `<|user|>\n{prompt}</s>\n<|assistant|>\n`. Trailing `\n` matters.
+        format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
     } else {
         format!("user\n{prompt}\nassistant\n<think>\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
-    // Granite/MiniCPM5/Phi-3/Phi-4 all ship `add_bos_token=false`, so
-    // `encode()` does not emit BOS via `add_special=true`. Match the CLI
-    // path (run_inference_tokens below) by always prepending BOS manually.
-    let add_special = arch == "nanbeige";
+    // Mistral/Zephyr ship `add_bos_token=true`, so let the tokenizer emit
+    // BOS via `add_special=true` and recognise the literal control tokens
+    // via `parse_special=true`. Granite/MiniCPM5/Phi-3/Phi-4/GLM-4/Llama
+    // all ship `add_bos_token=false`, so encode() does not emit BOS via
+    // `add_special=true`; for those we set `add_special=false` and
+    // prepend BOS manually below. Nanbeige (base) uses the tokenizer's
+    // own add_bos setting.
+    let add_special = arch == "nanbeige" || is_mistral || is_zephyr;
     let mut body = tokenizer.encode(
         &prompt_text,
         EncodeOptions {
