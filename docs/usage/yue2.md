@@ -37,6 +37,7 @@ VAE 固定为 F32，只有主模型可以量化：
 | `f32` | 12.91 GB | 便于排查量化误差 |
 | `q8_0` | 4.61 GB，394 Q8_0 + 234 BF16，约 25 s | ⚠ **不要用于完整生成**，见下 |
 | `q4_0` | 3.20 GB，约 50 s | ⚠ 同上，误差更大 |
+| `ar_q8_0` | 5.94 GB（196 AR + 198 BF16），约 100 s | **AR 专用量化**，见 §2.2 |
 | `q4_k_m` | ~3.2 GB | 类型链路已通，但导出需数小时 |
 | `q6_k` | 3.93 GB | 同上 |
 
@@ -68,6 +69,35 @@ Q8_0 的量化质量本身是正常的：逐张量反量化后 SNR 约 **45 dB**
 > **K-quant 目前不可用。** `quantize_q4_k` 量化单个 6144×2048 矩阵需要约 97 s，
 > 完整导出会耗时数小时。类型与解码链路都已打通并可往返校验，但 block search
 > 需要批量化之后才能实际使用。
+
+### 2.2 `ar_q8_0`：只量化自回归那一半
+
+这是唯一在音质与速度之间取得平衡的量化模式。AR 和 NAR 读的是两组不同的
+safetensors 张量（`self_attn` / `mlp` vs `nar_self_attn` / `nar_mlp`），
+所以可以只压前者：
+
+```bash
+./.venv/bin/python -m tools.converter.yue2.convert_yue2 \
+  --model-dir models/YuE2-3B --vae-dir models/YuE2-VAE \
+  --main-out models/YuE2-gguf/yue2-ar_q8_0.gguf \
+  --vae-out  models/YuE2-gguf/yue2_vae.gguf \
+  --quant ar_q8_0
+```
+
+实测（960 latent 帧，BF16 之外全部如此）：
+
+| | 效果 |
+|---|---|
+| AR 阶段 | 261.4s → 206.2s（**-21%**） |
+| 端到端 | 846.9s → 740.3s（**-13%**） |
+| 体积 | 7.26 GB → 5.94 GB |
+
+**输出是另一首曲子，不是劣化版。** AR 的 token 轨迹会变，旋律保留但音色变化。
+NAR 权重是纯 BF16，所以扩散流完全不受影响 —— 这正是与 `q8_0` 全量量化的区别。
+
+注：`time_embedder.mlp.{0,2}` 名字里没有 `nar_` 前缀，但只在
+`src/models/yue2/nar.rs` 的 `time_embedding()` 里被使用，因此按 NAR 处理，
+`ar_q8_0` 确实把整个非自回归半边留在了 BF16。
 
 ## 3. 推理
 
