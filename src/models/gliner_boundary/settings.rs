@@ -23,6 +23,10 @@ pub struct BoundarySettings {
     pub pair_dim: usize,
     pub content_dim: usize,
     pub record_dim: usize,
+    /// How many instance queries the record head's `instance_embed` table has.
+    /// Transcribed since the beginning but unread until the head was ported, which
+    /// is why `RecordHead::load` had no way to size the table.
+    pub record_instance_queries: usize,
     pub multihead_pair_compat_heads: usize,
     pub rotary_base: f32,
 
@@ -105,6 +109,7 @@ impl BoundarySettings {
             pair_dim: required_usize(source, "pair_dim")?,
             content_dim: required_usize(source, "content_dim")?,
             record_dim: required_usize(source, "record_dim")?,
+            record_instance_queries: required_usize(source, "record_instance_queries")?,
             multihead_pair_compat_heads: required_usize(source, "multihead_pair_compat_heads")?,
             rotary_base: required_f32(source, "rotary_base")?,
 

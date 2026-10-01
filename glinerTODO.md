@@ -337,10 +337,38 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **抓到我自己的排序错误**：我先写了 entities → json_structures，但
   `_transform_record` 是 **json_structures 最先**。单测直接把这个抓出来了
 
-### 🟢 5.2.4b-3 `RecordHead.forward_group` + `decode_group` + 端到端（待开工）
+### ✅ 5.2.4b-1i `RecordHead.forward_group` + `decode_group`（18 个 tensor）
+- **新** `record_head.rs`：三种 mode（`natural` / `latent` / `anchorless`）+
+  `_assign_logits`（instance/field 投影**先相加**再点积）+ `_anchorless_states`
+  （`instance_embed` + 一次 attention over 全部候选）+ `decode_group`
+- **`natural` 的 object logits 是 anchor 候选的 `pair_logits` 直通**，不过
+  `object_head`。这是最容易漏的一处，单测直接断言 `object_logits == anchor pair_logits`
+- **`anchorless` 用 `object_threshold` 而不是 `anchor_threshold`**（它没有 anchor）。
+  case 里把两个阈值设成 0.99 / 0.1，用错必然选出不���的实例集
+- **exclusive scalar field 走 LSA 全局分配**；`allows_absent = false`（`required_one`）
+  时 absent 列是 `max(candidate_cost) + 50.0` 这个**标量 broadcast 到每一行**，
+  不是逐行 max——改成逐行会让「候选便宜的行」逃掉「候选贵的行」被迫接的分配。
+  `invalid_cost = max(...) + 1000.0`，再拼 `row_count` 个 absent 列保证每行有落点
+- **list field 不走 LSA**：exclusive 的每个候选取 argmax row 归给那一个 instance；
+  非 exclusive 的逐候选取 threshold
+- **抓到的 bug**：
+  1. **non-exclusive scalar 遇到 null 列时 reference 是 `continue` 不是 `break`**。
+     `required_one` 字段要「跳过 null 列取下一个候选」，我 break 了 → 字段空掉，
+     而这**正是 cardinality 禁止的 ABSENT 结果**，看起来像「没抽到东西」
+  2. **LSA 返回的 (row, col) 是成对的**，我按循环下标去索引 `assigned_cols`，
+     应该是 `assigned_rows[i]` 配 `assigned_cols[i]`
+  3. **latent/anchorless 的记录顺序是 dict 插入序**，我返回 BTreeMap 的 key 序
+- **`instance_embed` 的 dims 是 relabel 不是 transpose**：converter 只改了 shape
+  标注（`(in, out)`），**字节仍是 checkpoint 的 row-major**。按 dims 读会得到一个
+  32 行全被打乱的表；而表是 `randn * 0.02`，每行几乎一样，logit 只差 ~0.01——
+  **松 tolerance 会盖住，且没有任何结构暗示这是置换**。所以专门加了
+  `anchorless_without_candidates_isolates_instance_embed`（候选全 invalid → 跳过
+  attention → 只剩 `object_head(instance_embed)`）
+- **fixture 静默失效过一次**：synthetic candidate states 尺度不够时 11 个 case 里
+  2 个解出 0 条记录，但**测试照样绿**——「head 和 reference 在「无」上达成一致」
+  和「一致」长得一模一样。现在有测试守着不让任何 case 掉到 0
 
-已就位的前置：`candidate_states`（768）、LSA（匈牙利）、`RecordSpec` 编译、`[C]` 路由。
-剩下的就是 head 本身 + decode + 接进 extract/CLI/HTTP。
+### 🟢 5.2.4b-3 records 接进 extract/CLI/HTTP + 端到端 oracle（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -382,7 +410,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-19 个 boundary 测试文件 / 62 个测试全绿。
+20 个 boundary 测试文件 / 66 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

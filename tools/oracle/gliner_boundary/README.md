@@ -46,6 +46,7 @@ cargo test --profile release-fast --test gliner2_5_base_v1_shared_pool_scorer_pa
 | `dump_relations_end_to_end.py` | `relations-e2e-golden.json` | `gliner2_5_base_v1_relations_e2e_parity` | 2.0e-4 |
 | `dump_assignment.py` | `assignment-golden.json` | `gliner2_5_base_v1_assignment_parity` | exact (pure fn) |
 | `dump_record_specs.py` | `record-specs-golden.json` | `gliner2_5_base_v1_record_specs_parity` | exact (pure fn) |
+| `dump_record_head.py` | `record-head-golden.json` | `gliner2_5_base_v1_record_head_parity` | 1.0e-3 |
 
 `dump_score_explicit_spans_full.py` builds the reference `BoundaryHead`
 directly from the checkpoint (`BoundaryHeadSettings(**config["boundary_head"])`,
