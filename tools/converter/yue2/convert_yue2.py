@@ -212,13 +212,34 @@ def _chunks(path: Path, absolute_start: int, length: int) -> Iterable[bytes]:
 # are either tiny (norms) or extremely sensitive to quantization error relative
 # to their role as a lookup table (embeddings), and the Rust loader reads them
 # through ``load_f32_tensor`` anyway.
-QUANT_MODES = ("bf16", "f32", "q8_0", "q4_0", "q4_k_m", "q6_k")
+# `ar_q8_0` quantizes only the autoregressive half and leaves the NAR half in
+# BF16. The NAR acoustic stream is a flow-matching diffusion solve that
+# amplifies weight noise every step: with every projection at Q8_0 (SNR 45 dB,
+# 0.54% relative error) the render is still musical at 1 step but turns to noise
+# at 4 and 32 steps, while the same weights in BF16 are fine. Keeping NAR in
+# BF16 avoids that, at the cost of the AR tokens changing -- a different take
+# rather than a corrupted one.
+QUANT_MODES = ("bf16", "f32", "q8_0", "ar_q8_0", "q4_0", "q4_k_m", "q6_k")
+
+# Per-mode scope: which per-layer projection stream the mode is allowed to touch.
+_QUANT_STREAMS = {
+    "bf16": (),
+    "f32": ("", "nar_"),
+    "q8_0": ("", "nar_"),
+    "ar_q8_0": ("",),
+    "q4_0": ("", "nar_"),
+    "q4_k_m": ("", "nar_"),
+    "q6_k": ("", "nar_"),
+}
 
 # Per-layer 2-D projections, mirrored from the authoritative shape table in
 # `src/models/yue2/ar.rs` (`YuE2Model::validate_shapes`).  The 1-D norms and
 # biases are deliberately absent: the loader reads them through
 # `load_f32_tensor`, so they stay BF16.
-_LAYER_MATRIX_SUFFIXES: tuple[str, ...] = (
+# Suffixes are relative to the layer base, so the AR stream (no prefix) and the
+# NAR stream (`nar_` prefix) read different safetensors tensors and can be
+# quantized independently. See `QUANT_MODES` for why that matters.
+_AR_LAYER_MATRIX_SUFFIXES: tuple[str, ...] = (
     "self_attn.q_proj.weight",
     "self_attn.k_proj.weight",
     "self_attn.v_proj.weight",
@@ -228,12 +249,22 @@ _LAYER_MATRIX_SUFFIXES: tuple[str, ...] = (
     "mlp.down_proj.weight",
 )
 
+_NAR_LAYER_MATRIX_SUFFIXES: tuple[str, ...] = tuple(
+    f"nar_{suffix}" for suffix in _AR_LAYER_MATRIX_SUFFIXES
+)
+
 # Global matrices that are ordinary matmuls and worth quantizing.  The two
 # vocab-sized matrices (`embed_tokens`, `lm_head`) and the position/bridge
 # lookup tables are left in BF16: they are read as tables rather than as dense
 # projections, and the transformer projections already account for essentially
 # all of the decoder FLOPs.
-_GLOBAL_MATRIX_NAMES: tuple[str, ...] = (
+#
+# These belong to the NAR stream despite having no `nar_` in their name: the
+# time embedding is only ever consumed by `velocity()` (see
+# `time_embedding` in `src/models/yue2/nar.rs`), never by the AR decode.  They
+# are listed under the NAR scope so `ar_q8_0` really does leave the whole
+# non-autoregressive half in BF16.
+_NAR_GLOBAL_MATRIX_NAMES: tuple[str, ...] = (
     "time_embedder.mlp.0.weight",
     "time_embedder.mlp.2.weight",
 )
@@ -242,13 +273,23 @@ _GLOBAL_MATRIX_NAMES: tuple[str, ...] = (
 _MIN_BLOCK_ELEMENTS = {"q8_0": 32, "q4_0": 32, "q4_k_m": 256, "q6_k": 256}
 
 
-def _quantizable_names(layers: int) -> set[str]:
-    """Every tensor name the requested mode is allowed to quantize."""
-    names = set(_GLOBAL_MATRIX_NAMES)
+def _quantizable_names(layers: int, streams: tuple[str, ...] = ("", "nar_")) -> set[str]:
+    """Every tensor name the requested mode is allowed to quantize.
+
+    `streams` selects which of the two per-layer projections are in scope:
+    `""` is the autoregressive half (`self_attn` / `mlp`) and `"nar_"` is the
+    non-autoregressive half (`nar_self_attn` / `nar_mlp`).
+    """
+    names: set[str] = set()
+    suffixes = _AR_LAYER_MATRIX_SUFFIXES if "" in streams else ()
+    nar_suffixes = _NAR_LAYER_MATRIX_SUFFIXES if "nar_" in streams else ()
+    if "nar_" in streams:
+        names.update(_NAR_GLOBAL_MATRIX_NAMES)
     for layer in range(layers):
-        for stream in ("", "nar_"):
-            for suffix in _LAYER_MATRIX_SUFFIXES:
-                names.add(f"model.layers.{layer}.{stream}{suffix}")
+        for suffix in suffixes:
+            names.add(f"model.layers.{layer}.{suffix}")
+        for suffix in nar_suffixes:
+            names.add(f"model.layers.{layer}.{suffix}")
     return names
 
 
@@ -332,7 +373,7 @@ def _write_atomic(
     os.close(descriptor)
     temporary = Path(temporary_name)
     expected_tensors = {}
-    block = _MIN_BLOCK_ELEMENTS.get(quant, 32)
+    block = _MIN_BLOCK_ELEMENTS.get(quant.replace("ar_", ""), 32)
     try:
         writer = GgufWriter(temporary)
         for key, value in metadata.items():
@@ -364,7 +405,11 @@ def _write_atomic(
                         f"{block}; refusing to quantize"
                     )
                 values = _bf16_bytes_to_f32(_read_payload(source, start, nbytes))
-                if quant == "q4_k_m":
+                if quant == "ar_q8_0":
+                    # Same encoder as `q8_0`; only the set of tensors differs,
+                    # which is decided by `_quantizable_names`.
+                    tensor_type, payload = _quantize_matrix(values, "q8_0")
+                elif quant == "q4_k_m":
                     # The mixed mode picks 6-bit for some tensors and 4-bit for
                     # others, so the single-type encoder cannot be used.
                     tensor_type = _k_m_type_for(name)
@@ -475,7 +520,8 @@ def convert_main(
         **tokenizer_metadata(model_dir / "qwen.tiktoken"),
     }
     layers = int(config["num_hidden_layers"])
-    quantizable = None if quant == "bf16" else _quantizable_names(layers)
+    streams = _QUANT_STREAMS[quant]
+    quantizable = None if not streams else _quantizable_names(layers, streams)
 
     started = time.monotonic()
 
