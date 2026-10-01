@@ -192,13 +192,28 @@ fn require_tensor(
     Ok(())
 }
 
+/// A 2-D projection the reader can execute: either the quantized kernel or the
+/// F16 one. The dispatch happens in [`linear_into_scaled_impl`], so the loader
+/// should not pin one dtype here -- F16 additionally gives an unquantized
+/// model, which is the whole point of exporting one.
+fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<(), String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != dims {
+        return Err(format!("Invalid {name} dimensions"));
+    }
+    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+        return Err(format!(
+            "Invalid {name} type: expected F16 or Q8_0, got {:?}",
+            info.ggml_type
+        ));
+    }
+    Ok(())
+}
+
 fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
-    require_tensor(
-        source,
-        "model.embed_tokens.weight",
-        &[2560, 151936],
-        GGMLType::Q8_0,
-    )?;
+    require_matrix(source, "model.embed_tokens.weight", &[2560, 151936])?;
     for layer in 0..36 {
         let prefix = format!("model.layers.{layer}");
         for (suffix, dims) in [
@@ -210,7 +225,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             ("self_attn.q_proj.weight", [2560, 4096]),
             ("self_attn.v_proj.weight", [2560, 1024]),
         ] {
-            require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::Q8_0)?;
+            require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         for (suffix, dims) in [
             ("input_layernorm.weight", 2560),
@@ -254,8 +269,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         require_tensor(source, name, &dims, GGMLType::F16)?;
     }
     for layer in 0..2 {
-        validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
-        validate_refiner(source, &format!("noise_refiner.{layer}"), true)?;
+        validate_refiner(source, &format!("context_refiner.{layer}"), false)?;        validate_refiner(source, &format!("noise_refiner.{layer}"), true)?;
     }
     for layer in 0..30 {
         let prefix = format!("layers.{layer}");
@@ -273,7 +287,9 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             ("feed_forward.w2.weight", [10240, 3840]),
             ("feed_forward.w3.weight", [3840, 10240]),
         ] {
-            require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::Q8_0)?;
+            // The reader dispatches on the stored dtype, so both the quantized
+            // kernel and the F16 kernel are valid here. Accept either.
+            require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         validate_transformer_vectors(source, &prefix)?;
     }
@@ -286,12 +302,7 @@ fn validate_refiner(
     has_adaln: bool,
 ) -> Result<(), String> {
     if has_adaln {
-        require_tensor(
-            source,
-            &format!("{prefix}.adaLN_modulation.0.weight"),
-            &[256, 15360],
-            GGMLType::F16,
-        )?;
+        require_matrix(source, &format!("{prefix}.adaLN_modulation.0.weight"), &[256, 15360])?;
         require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
@@ -306,7 +317,7 @@ fn validate_refiner(
         ("feed_forward.w2.weight", [10240, 3840]),
         ("feed_forward.w3.weight", [3840, 10240]),
     ] {
-        require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::F16)?;
+        require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
     }
     validate_transformer_vectors(source, prefix)
 }
@@ -479,6 +490,12 @@ pub(crate) struct Q8Scratch {
     scaled: Vec<f32>,
     force_f32_row: Vec<f32>,
     f16_input: Vec<u16>,
+    /// Per-thread F16 staging buffers, indexed by `ith`. `forward_scaled_rows`
+    /// converts the input row into f16 itself, and the pool runs the rows
+    /// concurrently, so each worker needs its own buffer -- but they are
+    /// allocated once here and reused across every call, the way `f16_input`
+    /// is, rather than a fresh `Vec` per worker per matmul.
+    f16_inputs: Vec<Vec<u16>>,
     values: Vec<u8>,
     scales: Vec<f32>,
 }
@@ -489,6 +506,7 @@ impl Q8Scratch {
             scaled: Vec::new(),
             force_f32_row: Vec::new(),
             f16_input: Vec::new(),
+            f16_inputs: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
         }
@@ -613,14 +631,38 @@ fn linear_into_scaled_impl(
         return Err(format!("Invalid {name} byte length"));
     }
     match info.ggml_type {
-        GGMLType::F16 => F16Kernel::new(bytes).forward_scaled(
-            input,
-            output,
-            n_in,
-            n_out,
-            scale,
-            &mut q8.f16_input,
-        ),
+        GGMLType::F16 => {
+            // `F16Kernel::forward_scaled` always runs `forward_scaled_rows` with
+            // ith=0/nth=1, i.e. a single thread, while the Q8_0 branch below
+            // fans out over the pool. Row-partition it here so F16 weights get
+            // the same parallelism -- otherwise an F16 model is one thread for
+            // a whole DiT step.
+            let weight_ptr = bytes.as_ptr() as usize;
+            let weight_len = bytes.len();
+            let input_ptr = input.as_ptr() as usize;
+            let input_len = input.len();
+            let output_ptr = output.as_mut_ptr() as usize;
+            let output_len = output.len();
+            let scale_copy = scale;
+            let threads = pool.n_threads();
+            if q8.f16_inputs.len() < threads {
+                q8.f16_inputs.resize_with(threads, Vec::new);
+            }
+            let staging = &q8.f16_inputs[..threads];
+            let staging_ptr = staging.as_ptr() as usize;
+            pool.compute(move |ith, nth| {
+                let weight = unsafe {
+                    std::slice::from_raw_parts(weight_ptr as *const u8, weight_len)
+                };
+                let values =
+                    unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
+                let buffer = unsafe { &mut *((staging_ptr as *mut Vec<u16>).add(ith)) };
+                F16Kernel::new(weight)
+                    .forward_scaled_rows(values, out, n_in, n_out, scale_copy, buffer, ith, nth);
+            });
+        }
         GGMLType::Q8_0 => {
             if scale == 1.0 {
                 q8.prepare(input, n_in)?;
@@ -864,34 +906,63 @@ mod tests {
         let source = TestSource::f16_matrix("w", &[2, 2], [1.0, 2.0, 3.0, 4.0]);
         let mut scratch = Q8Scratch::new(2);
         let mut output = [0.0; 2];
+        let pool = ComputePool::new(2);
 
         linear_into(
-            &source,
-            "w",
-            2,
-            2,
-            &[5.0, 6.0],
-            &mut output,
-            &mut scratch,
-            &ComputePool::new(1),
+            &source, "w", 2, 2, &[5.0, 6.0], &mut output, &mut scratch, &pool,
         )
         .unwrap();
-        let input_ptr = scratch.f16_input.as_ptr();
+        // A DiT step runs 30 layers x 4 projections x 2 (pre-NAR and in-loop),
+        // so the F16 staging buffers have to survive across calls instead of
+        // being reallocated per matmul.
+        assert_eq!(scratch.f16_inputs.len(), 2);
+        let pointers: Vec<*const u16> = scratch.f16_inputs.iter().map(|b| b.as_ptr()).collect();
+        assert!(pointers.iter().all(|p| !p.is_null()));
         linear_into(
-            &source,
-            "w",
-            2,
-            2,
-            &[5.0, 6.0],
-            &mut output,
-            &mut scratch,
-            &ComputePool::new(1),
+            &source, "w", 2, 2, &[5.0, 6.0], &mut output, &mut scratch, &pool,
         )
         .unwrap();
 
         assert_eq!(output, [17.0, 39.0]);
-        assert_eq!(scratch.f16_input.as_ptr(), input_ptr);
-        assert_eq!(scratch.f16_input.len(), 2);
+        let after: Vec<*const u16> = scratch.f16_inputs.iter().map(|b| b.as_ptr()).collect();
+        assert_eq!(after, pointers);
+        assert_eq!(scratch.f16_inputs[0].len(), 2);
+    }
+
+    #[test]
+    fn f16_linear_matches_across_thread_counts() {
+        // Row partitioning must not change the result: the pool hands each
+        // worker a private staging buffer, and both halves have to agree with
+        // the single-threaded path to the last bit.
+        let source = TestSource::f16_matrix("w", &[2, 2], [1.5, -2.0, 3.0, 1.0]);
+        let input = [1.0, 2.0];
+        let mut single = [0.0; 2];
+        let mut parallel = [0.0; 2];
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &input,
+            &mut single,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &input,
+            &mut parallel,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(4),
+        )
+        .unwrap();
+
+        assert_eq!(single, parallel);
+        assert_eq!(single, [-2.5, 5.0]);
     }
 
     #[test]
