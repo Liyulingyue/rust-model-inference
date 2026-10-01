@@ -416,7 +416,10 @@ mod tests {
     fn expanded_types_cover_the_modes_the_converter_can_write() {
         // Everything the converter emits for --quant f32/f16/q8_0/q4_0.
         for ty in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0, GGMLType::Q4_0] {
-            assert!(EXPANDED_TYPES.contains(&ty), "{ty:?} must route to the generic kernels");
+            assert!(
+                EXPANDED_TYPES.contains(&ty),
+                "{ty:?} must route to the generic kernels"
+            );
         }
         // The lossless layout must keep going through MlxAffineKernel.
         assert!(!EXPANDED_TYPES.contains(&GGMLType::I32));

@@ -915,7 +915,9 @@ fn batched_matmul_matches_the_per_row_path() {
     let weight = YuE2Weight::from_quantized_bytes(owned, GGMLType::Q8_0, n_in, n_out);
 
     let pool = crate::core::thread_pool::ComputePool::new(4);
-    let input: Vec<f32> = (0..n_rows * n_in).map(|_| draw(&mut state, 512.0)).collect();
+    let input: Vec<f32> = (0..n_rows * n_in)
+        .map(|_| draw(&mut state, 512.0))
+        .collect();
 
     let mut per_row = vec![0.0f32; n_rows * n_out];
     let mut q8 = vec![0u8; n_in];
@@ -994,21 +996,44 @@ fn per_row_and_direct_kernel_agree_for_one_row() {
     let mut q8 = vec![0u8; n_in];
     let mut scales = vec![0.0f32; blocks];
     let mut q8k = vec![
-        crate::ops::quant::BlockQ8K { d: 0.0, qs: [0; 256], bsums: [0; 16] };
+        crate::ops::quant::BlockQ8K {
+            d: 0.0,
+            qs: [0; 256],
+            bsums: [0; 16]
+        };
         n_in.div_ceil(256)
     ];
-    weight.matmul(&input, &mut via_matmul, &pool, &mut q8, &mut scales, &mut q8k);
+    weight.matmul(
+        &input,
+        &mut via_matmul,
+        &pool,
+        &mut q8,
+        &mut scales,
+        &mut q8k,
+    );
 
     let mut direct = vec![0.0f32; n_out];
-    weight.kernel().kernel.forward_prequantized(&q8, &scales, &mut direct, n_in, n_out, 0, 1);
+    weight
+        .kernel()
+        .kernel
+        .forward_prequantized(&q8, &scales, &mut direct, n_in, n_out, 0, 1);
 
     let mut worst = (0.0f32, 0usize);
     for (index, (a, b)) in via_matmul.iter().zip(&direct).enumerate() {
         let d = (a - b).abs();
-        if d > worst.0 { worst = (d, index); }
+        if d > worst.0 {
+            worst = (d, index);
+        }
     }
-    println!("matmul vs direct kernel: max|diff|={} at {}", worst.0, worst.1);
-    assert_eq!(worst.0.to_bits(), 0.0f32.to_bits(), "per-row matmul and direct kernel disagree");
+    println!(
+        "matmul vs direct kernel: max|diff|={} at {}",
+        worst.0, worst.1
+    );
+    assert_eq!(
+        worst.0.to_bits(),
+        0.0f32.to_bits(),
+        "per-row matmul and direct kernel disagree"
+    );
 }
 
 /// The cached RoPE table must produce exactly what the uncached per-call
@@ -1032,12 +1057,8 @@ fn cached_rope_matches_uncached_computation() {
         super::ar::rope(&mut cached, position, head_dim, base);
 
         // Exactly what the original implementation did on every call.
-        let (mut cos, mut sin) = crate::ops::rope::rope_sin_cos_sleef_table_with_threads(
-            &[position],
-            head_dim,
-            base,
-            1,
-        );
+        let (mut cos, mut sin) =
+            crate::ops::rope::rope_sin_cos_sleef_table_with_threads(&[position], head_dim, base, 1);
         for value in cos.iter_mut().chain(&mut sin) {
             *value = half::bf16::from_f32(*value).to_f32();
         }

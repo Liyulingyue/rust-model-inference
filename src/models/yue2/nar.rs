@@ -1,9 +1,8 @@
 use crate::ops::quant::BlockQ8K;
 
 use super::ar::{
-    RowScratch,
-    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax,
-    value_reduce_block, value_reduce_block2, YuE2AttentionWeights, YuE2MlpWeights, YuE2Weight,
+    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax, value_reduce_block,
+    value_reduce_block2, RowScratch, YuE2AttentionWeights, YuE2MlpWeights, YuE2Weight,
 };
 use super::protocol::{CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END, VOCAB_SIZE};
 use super::YuE2Model;
@@ -211,8 +210,8 @@ impl<'model> YuE2NarSession<'model> {
         let mut x = vec![0.0; nar_len * hidden];
         let mut activation = vec![0.0; nar_len * config.latent_channels];
         for row in 0..nar_len {
-            let latent_row = &mut activation
-                [row * config.latent_channels..(row + 1) * config.latent_channels];
+            let latent_row =
+                &mut activation[row * config.latent_channels..(row + 1) * config.latent_channels];
             latent_row.fill(0.0);
             if (1..=frames).contains(&row) {
                 let start = (row - 1) * config.latent_channels;
@@ -618,7 +617,8 @@ fn causal_prefix_attention(
             return;
         }
         // SAFETY: slot `ith` is touched only by pool thread `ith`.
-        let mut scores = unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
+        let mut scores =
+            unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
         for row in row_start..row_end {
             for head in 0..config.q_heads {
                 let kv_offset = (head / group_size) * head_dim;
@@ -627,7 +627,10 @@ fn causal_prefix_attention(
                 };
                 for position in 0..rows {
                     let key = unsafe {
-                        std::slice::from_raw_parts(k_ptr.add(position * kv_width + kv_offset), head_dim)
+                        std::slice::from_raw_parts(
+                            k_ptr.add(position * kv_width + kv_offset),
+                            head_dim,
+                        )
                     };
                     scores[position] = if position <= row {
                         dot(q_row, key) * scale
@@ -636,14 +639,15 @@ fn causal_prefix_attention(
                     };
                 }
                 let result = unsafe {
-                    std::slice::from_raw_parts_mut(output_ptr.add(row * q_width + head * head_dim), head_dim)
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(row * q_width + head * head_dim),
+                        head_dim,
+                    )
                 };
                 if row < 512 {
                     let inverse_sum = flash_softmax(scores);
                     result.fill(0.0);
-                    value_reduce_block(
-                        v, scores, result, 0, kv_width, kv_offset, rows, head_dim,
-                    );
+                    value_reduce_block(v, scores, result, 0, kv_width, kv_offset, rows, head_dim);
                     for value in result.iter_mut() {
                         *value = bf16(*value * inverse_sum);
                     }
@@ -667,7 +671,14 @@ fn causal_prefix_attention(
                         }
                     }
                     value_reduce_block(
-                        v, block, result, start * kv_width, kv_width, kv_offset, block.len(), head_dim,
+                        v,
+                        block,
+                        result,
+                        start * kv_width,
+                        kv_width,
+                        kv_offset,
+                        block.len(),
+                        head_dim,
                     );
                     running_max = next_max;
                 }
@@ -1090,7 +1101,7 @@ fn causal_prefix_attention_legacy(
                 }
                 continue;
             }
-            let result = &mut output[q_start.. q_start + config.head_dim];
+            let result = &mut output[q_start..q_start + config.head_dim];
             result.fill(0.0);
             let mut running_max = f32::NEG_INFINITY;
             let mut running_sum = 0.0f32;
@@ -1110,7 +1121,8 @@ fn causal_prefix_attention_legacy(
                 for (dimension, value) in result.iter_mut().enumerate() {
                     let mut sum = 0.0f32;
                     for offset in 0..block.len() {
-                        sum += block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                        sum +=
+                            block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
                     }
                     *value += sum;
                 }
@@ -1180,11 +1192,14 @@ fn hybrid_attention(
             return;
         }
         // SAFETY: slot `ith` belongs to exactly this pool thread.
-        let mut scores_row = unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
+        let mut scores_row =
+            unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
         for row in row_start..row_end {
             for head in 0..config.q_heads {
                 let kv_offset = (head / group_size) * head_dim;
-                let q_row = unsafe { std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim) };
+                let q_row = unsafe {
+                    std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim)
+                };
                 for position in 0..prefix_len {
                     let key = unsafe {
                         std::slice::from_raw_parts(
@@ -1205,7 +1220,10 @@ fn hybrid_attention(
                 }
 
                 let out = unsafe {
-                    std::slice::from_raw_parts_mut(output_ptr.add(row * q_width + head * head_dim), head_dim)
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(row * q_width + head * head_dim),
+                        head_dim,
+                    )
                 };
                 if scores_len <= 512 {
                     // The short path is not just a blocked path with one block:
@@ -1310,13 +1328,7 @@ fn linear_bias_rows(
     debug_assert_eq!(input.len() % n_in, 0);
     debug_assert_eq!(output.len(), input.len() / n_in * n_out);
     weight
-        .matmul_rows(
-            input,
-            output,
-            &model.pool,
-            &mut scratch.rows,
-            Some(bias),
-        )
+        .matmul_rows(input, output, &model.pool, &mut scratch.rows, Some(bias))
         .expect("linear_bias_rows shape is checked by the caller");
 }
 

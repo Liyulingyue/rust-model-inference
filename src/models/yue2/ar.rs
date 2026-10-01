@@ -75,7 +75,6 @@ impl RowScratch {
             }
         }
     }
-
 }
 
 impl YuE2Weight {
@@ -212,10 +211,7 @@ impl YuE2Weight {
         bias: Option<&[f32]>,
     ) -> Result<(), String> {
         let n_rows = input.len() / self.n_in;
-        if input.len() % self.n_in != 0
-            || output.len() != n_rows * self.n_out
-            || n_rows == 0
-        {
+        if input.len() % self.n_in != 0 || output.len() != n_rows * self.n_out || n_rows == 0 {
             return Err("YuE2 batched matmul got inconsistent row counts".into());
         }
         if let Some(bias) = bias {
@@ -289,26 +285,19 @@ impl YuE2Weight {
                 (q8.as_mut_slice(), scales.as_mut_slice())
             };
             for row in start..end {
-                let activation = unsafe {
-                    std::slice::from_raw_parts(input_ptr.add(row * n_in), n_in)
-                };
+                let activation =
+                    unsafe { std::slice::from_raw_parts(input_ptr.add(row * n_in), n_in) };
                 crate::ops::quantize_q8_0_into(activation, n_in, q8, scales);
-                let out = unsafe {
-                    std::slice::from_raw_parts_mut(output_ptr.add(row * n_out), n_out)
-                };
-                weight.kernel.forward_prequantized(
-                    q8,
-                    scales,
-                    out,
-                    n_in,
-                    n_out,
-                    0,
-                    1,
-                );
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr.add(row * n_out), n_out) };
+                weight
+                    .kernel
+                    .forward_prequantized(q8, scales, out, n_in, n_out, 0, 1);
                 if let Some(bias_ptr) = bias_ptr {
-                    for (value, &offset) in out.iter_mut().zip(unsafe {
-                        std::slice::from_raw_parts(bias_ptr, n_out)
-                    }) {
+                    for (value, &offset) in out
+                        .iter_mut()
+                        .zip(unsafe { std::slice::from_raw_parts(bias_ptr, n_out) })
+                    {
                         *value += offset;
                     }
                 }

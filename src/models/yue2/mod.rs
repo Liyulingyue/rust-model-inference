@@ -105,10 +105,15 @@ impl YuE2Model {
                 options.steps,
             );
         };
-        stage("building ABC prefix");        let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
+        stage("building ABC prefix");
+        let prefix = protocol.abc_prefix(self.tokenizer(), request)?;
         stage("ABC sampling");
         let abc_ids = self.generate_abc(&prefix, options.abc, request.seed)?;
-        eprintln!("[yue2] +{:.1}s ABC done: {} tokens", started.elapsed().as_secs_f64(), abc_ids.len());
+        eprintln!(
+            "[yue2] +{:.1}s ABC done: {} tokens",
+            started.elapsed().as_secs_f64(),
+            abc_ids.len()
+        );
         stage("building semantic prefix");
         let prefix = protocol.semantic_prefix(self.tokenizer(), request, &abc_ids)?;
         stage("semantic sampling");
@@ -130,7 +135,10 @@ impl YuE2Model {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let latent_frames = codec_ids.len();
-        eprintln!("[yue2] +{:.1}s NAR: {latent_frames} latent frames", started.elapsed().as_secs_f64());
+        eprintln!(
+            "[yue2] +{:.1}s NAR: {latent_frames} latent frames",
+            started.elapsed().as_secs_f64()
+        );
         let chunks = song_chunks(&prefix, &codec_ids, request.seed, self.config().context)?;
         let chunk_total = chunks.len();
         let latent_len = latent_frames

@@ -1559,8 +1559,8 @@ mod tests {
                                 .try_into()
                                 .expect("weight slice has uneven bytes"),
                         );
-                        ascending[offset] = crate::ops::bf16_to_f32(bits)
-                            .mul_add(input[index], ascending[offset]);
+                        ascending[offset] =
+                            crate::ops::bf16_to_f32(bits).mul_add(input[index], ascending[offset]);
                     }
                 }
                 chunk_index += 1;
