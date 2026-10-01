@@ -69,9 +69,28 @@ cargo run --release --bin rust-model-inference -- \
 在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
 LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
 n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
-**现状**：视觉编码 + LLM forward 在 4 核 CPU 上端到端跑通，但 LLM 立刻生成 `<|im_end|>`（token 151644），
-说明视觉 embedding 注入 / M-RoPE positions 还有 bug（不是这次能修的）。
-文本-only 路径在 4 核上约 4 tok/s。
+**现状（2026-10-01 切片定位）**：
+
+- 视觉编码 + LLM forward 都跑通；token_ids、positions、embeddings 注入
+  都已用 `eprintln!` 切片验证无误（`src/app/text/multimodal.rs` + `vision.rs`
+  调试期间打印过几百行，每一行都对）。
+- **4 核 CPU + 7.5 GiB RAM 下只能稳定跑小图**：128×128 PNG → 16 个 vision
+  token → 文本生成 OK（"The image is a simple, abstract composition..."）；
+  256×256 起 → 256 个 vision token → LLM forward 后立刻吐 `<|im_end|>` /
+  `<|im_start|>` 等控制 token, 文本输出为空。
+- 即便把 vision rows 全部 zero 掉、或者把 `embeddings` 改成 `None`
+  让 LLM 用自己的 token embedding 占位，512×512 仍不输出 — 所以 bug **不在
+  视觉 encoder 输出或 position 注入**，而是 multimodal session 在 vision token
+  数 ≥ 某个阈值时的更深交互（怀疑是 `n_deepstack_layers=3` 但传了
+  `deepstack_embeddings: None` 的不匹配，但未能在这次会话内确认）。
+- 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
+- **温度 ≥ 0.7 时（512×512）偶尔能跑通**（会触发 tool-call 然后描述图像），
+  但结果非确定性、温度 ≤ 0.6 全部失败。
+
+限制：
+
+- 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
+- 音频必须是 16 kHz PCM16 WAV。
 
 限制：
 
