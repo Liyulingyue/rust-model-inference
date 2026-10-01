@@ -31,6 +31,7 @@ pub mod overlap;
 pub mod pair_scorer;
 pub mod pool;
 pub mod proposer;
+pub mod record_spec;
 pub mod relations;
 pub mod settings;
 pub mod spans;
@@ -51,6 +52,10 @@ pub use overlap::{
 pub use pair_scorer::{PairScoreInputs, PairScorer, PairScorerFeatures};
 pub use pool::{DocumentCandidatePool, PooledCandidates};
 pub use proposer::{BoundaryProposer, RotaryBoundaryEmbedding};
+pub use record_spec::{
+    compile_record_specs, default_cardinality, normalize_record_metadata, FieldCardinality,
+    LayoutQuery, NormalizedRecordConfig, RecordFieldSpec, RecordSpec,
+};
 pub use relations::{
     generate_typed_relation_pairs, score_relations, ExtractedRelation, RelationCandidates,
     RelationDecodeSettings, RelationPair, RelationProposalSettings, RelationStates,

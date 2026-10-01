@@ -300,7 +300,28 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   `.masked_fill(~mask, 0.0)`，padding slot 的端点是池填充的残留值，真状态漏进去
   会污染 record head 的 assignment 分数
 
-### 🟢 5.2.4b-3 json_structures（`[C]`）+ record head 实现（待开工）
+### ✅ 5.2.4b-1g `record_metadata` 归一化 + `RecordSpec` 编译
+- **新** `record_spec.rs`：`FieldCardinality` / `default_cardinality` /
+  `normalize_record_metadata` / `compile_record_specs`。纯函数，**不需要模型**
+- **确认 `RECORD_TASK_TYPES = ("json_structures",)`**：`json_structures` group 带
+  `mode` → record spec；不带 → legacy structure 路径。所以「未标注」是个**有意义
+  的状态而不是默认值**，而且这是整个 feature 里**唯一的静默路径**——`_compile` 跳过
+  而不报错。哪天它开始编译出 spec，所有未标注的 group 语义就静默变了，所以专门有
+  fixture case + 独立测试盯着
+- **validation 才是重点**：每条规则都拦下一个「否则会在更晚、更难懂的地方炸」的 schema。
+  `natural` 缺 anchor / `latent` **带** anchor（不是忽略而是报错，因为设了它说明调用方
+  以为自己写的是 natural record）/ cardinality 不在 enum 里 / anchor 指向不存在的
+  field
+- **cardinality 默认**：anchor 字段一律 `required_one`（没 anchor 的 instance 不算
+  instance），`dtype == "str"` → `optional_one`，其余 → `zero_or_more`。
+  `is_scalar` / `allows_absent` 是 decoder 分两条路的依据，所以单独测了 enum 定义
+- **schema 形状**：`json_descriptions[parent]` 是 **field → description 的 map**
+  （relations 那边的 group description 是纯字符串，这里不一样）。field 顺序是所有
+  occurrence 的 key 并集按首次出现顺序——reference 特意没走 set，因为那样 schema prompt
+  会依赖 `PYTHONHASHSEED`
+- **oracle**：`dump_record_specs.py`，16 个 case（含 7 个 error case 记 message）
+
+### 🟢 5.2.4b-3 `[C]` prompt 路由 + `RecordHead.forward_group` + `decode_group`（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -324,7 +345,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4b-1c | relation head（generator + scorer） | ✅ | 本次 |
 | 5.2.4b-1d | relation `[R]` prompt + schema + decode + CLI/HTTP | ✅ | 本次 |
 | 5.2.4b-1e | `candidate_encoder` / `candidate_states` | ✅ | `2cd425b` |
-| 5.2.4b-1f | LSA（匈牙利）solver | ✅ | 本次 |
+| 5.2.4b-1f | LSA（匈牙利）solver | ✅ | `b446a98` |
+| 5.2.4b-1g | `record_metadata` + `RecordSpec` 编译 | ✅ | 本次 |
 | 5.2.4b-2/3 | json_structures（`[C]`）+ record head | 🟡 已勘察 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
@@ -340,7 +362,7 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-17 个 boundary 测试文件 / 48 个测试全绿。
+18 个 boundary 测试文件 / 53 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
