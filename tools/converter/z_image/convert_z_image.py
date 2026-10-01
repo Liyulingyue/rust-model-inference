@@ -90,17 +90,17 @@ class Component:
         self.matrix_type = _MATRIX_TYPES[outtype]
         self.entries: list[tuple[str, int, tuple[int, ...], bytes]] = []
 
-    def _matrix_ggml_type(self, keep_f16: bool) -> int:
-        if self.outtype == "f32":
+    def _matrix_ggml_type(self, keep_f16: bool, force_q8_0: bool = False) -> int:
+        if self.outtype == "f32" and not force_q8_0:
             return GGML_F32
-        if self.outtype == "f16" or keep_f16:
+        if (self.outtype == "f16" or keep_f16) and not force_q8_0:
             return GGML_F16
         return GGML_Q8_0
 
-    def _matrix_raw(self, values: np.ndarray, keep_f16: bool) -> bytes:
-        if self.outtype == "f32":
+    def _matrix_raw(self, values: np.ndarray, keep_f16: bool, force_q8_0: bool = False) -> bytes:
+        if self.outtype == "f32" and not force_q8_0:
             return values.tobytes()
-        if self.outtype == "f16" or keep_f16:
+        if (self.outtype == "f16" or keep_f16) and not force_q8_0:
             return f32_to_f16(values.tobytes())
         return quantize_q8_0(values)
 
@@ -117,7 +117,14 @@ class Component:
         )
 
     def matrix(
-        self, name: str, weight: np.ndarray, n_in: int, n_out: int, *, keep_f16: bool = False
+        self,
+        name: str,
+        weight: np.ndarray,
+        n_in: int,
+        n_out: int,
+        *,
+        keep_f16: bool = False,
+        force_q8_0: bool = False,
     ) -> None:
         """2-D weight declared as [n_in, n_out], payload written in torch order.
 
@@ -135,9 +142,9 @@ class Component:
         self.entries.append(
             (
                 name,
-                self._matrix_ggml_type(keep_f16),
+                self._matrix_ggml_type(keep_f16, force_q8_0),
                 (n_in, n_out),
-                self._matrix_raw(payload, keep_f16),
+                self._matrix_raw(payload, keep_f16, force_q8_0),
             )
         )
 
@@ -211,25 +218,31 @@ def _block_tensors(
     *,
     modulated: bool,
     keep_f16: bool,
+    is_refiner: bool,
 ) -> None:
     """Emit one transformer block under the reader's names.
 
-    `keep_f16` pins the block's matrices to F16; the reference export does this
-    for the two refiner stacks and not for the main 30.
+    The dtypes are fixed by `validate_dit` in src/models/diffusion/z_image/
+    mod.rs and do not follow --outtype: the 30 main layers must be Q8_0 and both
+    refiner stacks F16, because the main stack's matmul goes through the
+    quantized kernel while the refiners run once per step and stay in F16.
     """
+    stack_keep = keep_f16 and is_refiner
     component.matrix(
         f"{prefix}.attention.qkv.weight",
         _fused_qkv(checkpoint, prefix),
         HIDDEN,
         QKV_WIDTH,
-        keep_f16=keep_f16,
+        keep_f16=stack_keep,
+        force_q8_0=not is_refiner,
     )
     component.matrix(
         f"{prefix}.attention.out.weight",
         checkpoint.get(f"{prefix}.attention.to_out.0.weight"),
         HIDDEN,
         HIDDEN,
-        keep_f16=keep_f16,
+        keep_f16=stack_keep,
+        force_q8_0=not is_refiner,
     )
     for suffix, (n_in, n_out) in (
         ("feed_forward.w1.weight", (HIDDEN, FFN_WIDTH)),
@@ -237,7 +250,14 @@ def _block_tensors(
         ("feed_forward.w3.weight", (HIDDEN, FFN_WIDTH)),
     ):
         torch_name = f"{prefix}.{suffix}"
-        component.matrix(torch_name, checkpoint.get(torch_name), n_in, n_out, keep_f16=keep_f16)
+        component.matrix(
+            torch_name,
+            checkpoint.get(torch_name),
+            n_in,
+            n_out,
+            keep_f16=stack_keep,
+            force_q8_0=not is_refiner,
+        )
 
     for reader_suffix, source_suffix in (
         ("attention_norm1.weight", "attention_norm1.weight"),
@@ -253,12 +273,23 @@ def _block_tensors(
         )
 
     if modulated:
-        name = f"{prefix}.adaLN_modulation.0.weight"
+        # `validate_dit` in src/models/diffusion/z_image/mod.rs hard-codes the
+        # per-stack dtypes: the 30 main layers must be Q8_0, while a refiner's
+        # adaLN projection must be F16. The two disagree even though both go
+        # through the same `linear_into_ggml` at run time, so the split is
+        # enforced here rather than derived from --outtype.
+        force_q8_0 = not is_refiner
         component.matrix(
-            name, checkpoint.get(name), TIME_WIDTH, ADALN_WIDTH, keep_f16=keep_f16
+            f"{prefix}.adaLN_modulation.0.weight",
+            checkpoint.get(f"{prefix}.adaLN_modulation.0.weight"),
+            TIME_WIDTH,
+            ADALN_WIDTH,
+            force_q8_0=force_q8_0,
         )
-        bias_name = f"{prefix}.adaLN_modulation.0.bias"
-        component.vector(bias_name, checkpoint.get(bias_name))
+        component.vector(
+            f"{prefix}.adaLN_modulation.0.bias",
+            checkpoint.get(f"{prefix}.adaLN_modulation.0.bias"),
+        )
 
 
 def convert_dit(model_dir: Path, out_path: Path, outtype: str) -> int:
@@ -309,9 +340,17 @@ def convert_dit(model_dir: Path, out_path: Path, outtype: str) -> int:
                 f"{prefix}.{index}",
                 modulated=modulated,
                 keep_f16=True,
+                is_refiner=True,
             )
     for index in range(MAIN_LAYERS):
-        _block_tensors(component, checkpoint, f"layers.{index}", modulated=True, keep_f16=False)
+        _block_tensors(
+            component,
+            checkpoint,
+            f"layers.{index}",
+            modulated=True,
+            keep_f16=False,
+            is_refiner=False,
+        )
 
     component.matrix(
         "final_layer.linear.weight",
