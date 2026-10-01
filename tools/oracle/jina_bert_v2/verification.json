@@ -3,7 +3,7 @@
   "model_bytes": 146218816,
   "oracle_commit": "b96806d96061049a5b574269b049bf6241d63d46",
   "oracle_binary_sha256": "6b0aa7a5a066d9ab54206ebe94a08c073d19a91a480407ec5f97ab233e520944",
-  "rust_binary_sha256": "a061e37a6995c54bb0956eb4b149fcfebdcbd9a1111a07637f4f46db4e2c25ab",
+  "rust_binary_sha256": "87d520af87007f7a088f5776297cac602882454335552be6b2d4b8bbe86abb76",
   "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
   "threads": 1,
   "fixtures": [

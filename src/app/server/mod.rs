@@ -23,6 +23,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::format::ggufrs::ComponentRole;
 use crate::format::wav::encode_wav_pcm16_channels;
+use crate::models::audio8::streaming as audio8_streaming;
 use crate::models::qwen3::asr::model::{
     open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
 };
@@ -49,6 +50,7 @@ enum Backend {
     Text(TextBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
+    Audio8(Audio8Backend),
     Tts(TtsBackend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
@@ -58,11 +60,11 @@ enum Backend {
 /// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
 /// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
 /// caller-supplied label set, so it exposes the JEV score route and nothing
-/// else.  The SentencePiece tokenizer is built once here; the model itself is
+/// else.  The tokenizer is built once here; the model itself is
 /// zero-copy views over the mapping and is cheap to rebuild per request.
 struct Gliner2Backend {
     source: Box<dyn TensorSource>,
-    tokenizer: crate::core::sentencepiece::SentencePieceTokenizer,
+    tokenizer: crate::models::gliner::ModelTokenizer,
     n_threads: usize,
 }
 
@@ -134,6 +136,19 @@ struct EmbeddingBackend {
 
 struct AsrBackend {
     runtime: Arc<AsrRuntime>,
+}
+
+/// Audio8 ASR backend: a single-model Voxtral-Realtime GGUF that bundles the
+/// audio tower and Qwen2 text decoder. Same wiring as `RerankBackend` —
+/// encoder/decoder are leaked to `'static` so per-request
+/// `StreamingTranscriber`s can borrow from them for the server lifetime.
+struct Audio8Backend {
+    encoder: Arc<&'static crate::models::audio8::Audio8Encoder>,
+    decoder: Arc<&'static crate::models::audio8::text::Audio8TextDecoder>,
+    tokenizer: Arc<BPETokenizer>,
+    specials: crate::models::audio8::streaming::SpecialTokens,
+    language: &'static str,
+    max_tokens: usize,
 }
 
 struct TtsBackend {
@@ -481,15 +496,6 @@ async fn transcriptions(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let Backend::Asr(backend) = state.model.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Server is not running an ASR model".into(),
-            }),
-        )
-            .into_response();
-    };
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut language: Option<String> = None;
     let mut prompt: Option<String> = None;
@@ -562,53 +568,14 @@ async fn transcriptions(
                 .into_response();
         }
     };
-    let options = TranscriptionOptions {
-        language: language.clone(),
-        prompt: prompt.clone(),
-        max_new_tokens: 256,
-    };
-    let runtime = backend.runtime.clone();
-    let transcription =
-        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorResponse {
-                        error: error.to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("asr worker failed: {error}"),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-    let response = TranscriptionResponse {
-        text: transcription.text,
-    };
-    (StatusCode::OK, Json(response)).into_response()
+    let _ = prompt;
+    do_transcribe(&state, wav, language).await
 }
 
 async fn transcriptions_json(
     State(state): State<AppState>,
     Json(req): Json<TranscriptionRequest>,
 ) -> impl IntoResponse {
-    let Backend::Asr(backend) = state.model.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Server is not running an ASR model".into(),
-            }),
-        )
-            .into_response();
-    };
     let input = match req.input.as_deref() {
         Some(value) => value,
         None => {
@@ -633,38 +600,102 @@ async fn transcriptions_json(
                 .into_response();
         }
     };
-    let options = TranscriptionOptions {
-        language: req.language.clone(),
-        prompt: req.prompt.clone(),
-        max_new_tokens: 256,
-    };
-    let runtime = backend.runtime.clone();
-    let transcription =
-        match tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                return (
+    do_transcribe(&state, wav, req.language).await
+}
+
+/// Shared transcription worker: branches on backend type so a single
+/// call site covers Qwen3-VL ASR (`AsrRuntime`) and Voxtral Realtime
+/// (`StreamingTranscriber`). Audio8 ignores `prompt`; the Qwen3 path
+/// accepts it as the decoder prompt context.
+async fn do_transcribe(
+    state: &AppState,
+    wav: Vec<u8>,
+    language: Option<String>,
+) -> axum::response::Response {
+    match state.model.as_ref() {
+        Backend::Asr(backend) => {
+            let options = TranscriptionOptions {
+                language: language.clone(),
+                prompt: None,
+                max_new_tokens: 256,
+            };
+            let runtime = backend.runtime.clone();
+            let wav = wav;
+            let result =
+                tokio::task::spawn_blocking(move || runtime.transcribe_wav(&wav, &options)).await;
+            match result {
+                Ok(Ok(value)) => (
+                    StatusCode::OK,
+                    Json(TranscriptionResponse { text: value.text }),
+                )
+                    .into_response(),
+                Ok(Err(error)) => (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(ErrorResponse {
                         error: error.to_string(),
                     }),
                 )
-                    .into_response();
-            }
-            Err(error) => {
-                return (
+                    .into_response(),
+                Err(error) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: format!("asr worker failed: {error}"),
                     }),
                 )
-                    .into_response();
+                    .into_response(),
             }
-        };
-    let response = TranscriptionResponse {
-        text: transcription.text,
-    };
-    (StatusCode::OK, Json(response)).into_response()
+        }
+        Backend::Audio8(backend) => {
+            let encoder = backend.encoder.clone();
+            let decoder = backend.decoder.clone();
+            let specials = backend.specials.clone();
+            let tokenizer = backend.tokenizer.clone();
+            let max_tokens = backend.max_tokens;
+            let default_language = backend.language.to_string();
+            let language = language.unwrap_or(default_language);
+            let result = tokio::task::spawn_blocking(move || {
+                let samples = audio8_streaming::decode_samples(&wav)?;
+                let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
+                let language_token = specials.language(&language)?;
+                let mut transcriber = audio8_streaming::StreamingTranscriber::new(
+                    &*encoder,
+                    &*decoder,
+                    stream,
+                    specials,
+                    language_token,
+                    max_tokens,
+                )?;
+                while transcriber.next_chunk()?.is_some() {}
+                let visible = transcriber.finish();
+                Ok::<_, String>(tokenizer.decode(&visible, false))
+            })
+            .await;
+            match result {
+                Ok(Ok(text)) => {
+                    (StatusCode::OK, Json(TranscriptionResponse { text })).into_response()
+                }
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("audio8 worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server is not running an ASR model".into(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn speech(
@@ -828,6 +859,15 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     if options.audio.is_some() {
+        // ASR disambiguation: Audio8 ships the audio tower in the LLM GGUF
+        // (no `--mmproj`), so the right backend depends on the file's
+        // `general.architecture`. Probed here so a single `--audio` flag
+        // covers both Qwen3-VL ASR and Voxtral Realtime. See
+        // docs/develop/SERVER_BACKEND_SELECTION.md for why this is a probe
+        // rather than a flag.
+        if is_audio8_gguf(&options.model) {
+            return Ok(Arc::new(Backend::Audio8(build_audio8(options)?)));
+        }
         return Ok(Arc::new(Backend::Asr(build_asr(options)?)));
     }
     if options.embedding {
@@ -884,9 +924,8 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
 /// `docs/develop/SERVER_BACKEND_SELECTION.md`.
 fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
     let model = options.model.display();
-    let reranker = format!(
-        "{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)"
-    );
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
     if let Some(head) = &options.clm_head {
         return Some(format!(
             "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
@@ -931,6 +970,21 @@ fn is_rerank_gguf(path: &std::path::Path) -> bool {
         return false;
     }
     loader.tensor_info("cls.output.weight").is_some()
+}
+
+/// Returns `true` when the GGUF at `name` is an `audio8_asr_infinite`
+/// model (Voxtral Realtime bundled with its Qwen2 text decoder). The
+/// probe fires only inside the `options.audio.is_some()` branch, so it
+/// cannot collide with chat / rerank / GLiNER2 dispatches.
+fn is_audio8_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .is_some_and(|arch| arch == "audio8_asr_infinite")
 }
 
 fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
@@ -1165,6 +1219,40 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
     })
 }
 
+fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
+    if options.mmproj.is_some() {
+        return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
+    }
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let encoder = crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source))?;
+    let decoder_source = Arc::clone(&source);
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })?);
+    let decoder = crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source)?;
+    // Validate the whole contract once at startup rather than per request.
+    let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
+    let language = options.language.as_deref().unwrap_or("zh");
+    if !matches!(language, "zh" | "en") {
+        return Err("Audio8 --language must be zh or en".into());
+    }
+    let language: &'static str = if language == "en" { "en" } else { "zh" };
+    let max_tokens = options.max_tokens.unwrap_or(512);
+    // Pin the encoder and decoder in `Box::leak` so per-request
+    // `StreamingTranscriber`s can hold a borrow for the server lifetime.
+    let encoder: &'static crate::models::audio8::Audio8Encoder = Box::leak(Box::new(encoder));
+    let decoder: &'static crate::models::audio8::text::Audio8TextDecoder =
+        Box::leak(Box::new(decoder));
+    Ok(Audio8Backend {
+        encoder: Arc::new(encoder),
+        decoder: Arc::new(decoder),
+        tokenizer,
+        specials,
+        language,
+        max_tokens,
+    })
+}
+
 fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
     let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
     let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
@@ -1325,6 +1413,7 @@ pub fn run_server() {
         Backend::Text(_) => "text",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::Audio8(_) => "audio8",
         Backend::Tts(_) => "tts",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
@@ -1351,7 +1440,7 @@ pub fn run_server() {
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
-        Backend::Asr(_) => router
+        Backend::Asr(_) | Backend::Audio8(_) => router
             .route(
                 "/v1/audio/transcriptions",
                 post(transcriptions).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),

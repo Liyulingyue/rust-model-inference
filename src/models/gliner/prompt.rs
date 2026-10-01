@@ -487,6 +487,15 @@ pub fn build_prompt(
     text: &str,
     spm: &crate::core::sentencepiece::SentencePieceTokenizer,
 ) -> Result<EncodedPrompt, String> {
+    build_prompt_with(tasks, text, |part| Ok(encode_token(part, spm)))
+}
+
+/// The same schema builder with the checkpoint's `tokenizer.json` encoder.
+pub fn build_prompt_with(
+    tasks: &[Task],
+    text: &str,
+    mut encode: impl FnMut(&str) -> Result<Vec<u32>, String>,
+) -> Result<EncodedPrompt, String> {
     for task in tasks {
         task.validate()?;
     }
@@ -544,7 +553,7 @@ pub fn build_prompt(
         });
     }
     for (orig_index, token) in combined.iter().enumerate() {
-        let sub = encode_token(token, spm);
+        let sub = encode(token)?;
         let base = input_ids.len();
         input_ids.extend_from_slice(&sub);
         for (task_index, slots) in marker_orig.iter().enumerate() {

@@ -6,7 +6,7 @@ use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvState};
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use crate::ops::quant::BlockQ8K;
 
 use super::config::YuE2Config;
@@ -22,6 +22,61 @@ pub(super) struct YuE2Weight {
     n_out: usize,
 }
 
+/// GGML types the YuE2 converter can emit for a 2-D projection.
+///
+/// `bf16` keeps the raw bytes so `matmul` can use the widening NEON dot.
+/// Everything else goes through the block-quantized `Weight` path, which needs
+/// `n_in` to be a whole number of blocks. The converter only ever quantizes
+/// matrices whose `n_in` is one of the architecture widths (2048 / 6144), so
+/// this is checked here rather than trusted.
+const MATRIX_TYPES: [GGMLType; 5] = [
+    GGMLType::BF16,
+    GGMLType::F16,
+    GGMLType::F32,
+    GGMLType::Q8_0,
+    GGMLType::Q4_0,
+];
+
+/// Reusable per-thread staging buffers for [`YuE2Weight::matmul_rows`].
+///
+/// One instance is owned by the NAR session, so the Q8_0 activation buffer is
+/// allocated once per generation instead of once per projection per step.
+pub(super) struct RowScratch {
+    /// One Q8_0 activation buffer per pool thread. Sharing a single buffer
+    /// across threads is a data race: a thread quantizes its row and then
+    /// consumes the payload, and another thread can overwrite it in between.
+    slots: Vec<(Vec<u8>, Vec<f32>)>,
+    threads: usize,
+}
+
+impl RowScratch {
+    pub(super) fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            threads: 0,
+        }
+    }
+
+    /// Ensure at least `threads` slots, each large enough for the widest input
+    /// seen so far. The NAR reuses one scratch across matrices of differing
+    /// `n_in` (2048 / 1024 / 6144), so the buffers must grow, not just fill in.
+    fn reserve_threads(&mut self, threads: usize, q8_len: usize, scale_len: usize) {
+        self.threads = threads;
+        if self.slots.len() < threads {
+            self.slots
+                .resize_with(threads, || (vec![0u8; q8_len], vec![0.0f32; scale_len]));
+        }
+        for (q8, scales) in &mut self.slots {
+            if q8.len() < q8_len {
+                q8.resize(q8_len, 0);
+            }
+            if scales.len() < scale_len {
+                scales.resize(scale_len, 0.0);
+            }
+        }
+    }
+}
+
 impl YuE2Weight {
     fn load(
         source: &dyn TensorSource,
@@ -29,6 +84,25 @@ impl YuE2Weight {
         n_in: usize,
         n_out: usize,
     ) -> Result<Self, String> {
+        let info = source
+            .tensor_info(name)
+            .ok_or_else(|| format!("Missing tensor info: {name}"))?;
+        if !MATRIX_TYPES.contains(&info.ggml_type) {
+            return Err(format!(
+                "YuE2 weight {name} has unsupported type {:?}; expected one of the \
+                 converter-emitted matrix types",
+                info.ggml_type
+            ));
+        }
+        if matches!(info.ggml_type, GGMLType::Q8_0 | GGMLType::Q4_0)
+            && n_in % info.ggml_type.type_traits().0 != 0
+        {
+            return Err(format!(
+                "YuE2 weight {name} has n_in={n_in}, which is not a whole number of \
+                 {:?} blocks; the converter must not quantize this matrix",
+                info.ggml_type
+            ));
+        }
         let bytes = source
             .tensor_slice(name)
             .ok_or_else(|| format!("Missing tensor data: {name}"))?;
@@ -36,14 +110,40 @@ impl YuE2Weight {
         Ok(Self {
             fast: Weight::from_quantized(QuantizedTensor::from_bytes(
                 bytes,
-                GGMLType::BF16,
+                info.ggml_type,
                 n_in,
                 n_out,
             )),
-            bf16: Some(bytes),
+            bf16: (info.ggml_type == GGMLType::BF16).then_some(bytes),
             n_in,
             n_out,
         })
+    }
+
+    /// Test-only accessor for the underlying kernel, so parity tests can call
+    /// the same kernel entry the batched path uses.
+    #[cfg(test)]
+    pub(super) fn kernel(&self) -> &crate::ops::kernel::Weight<'static> {
+        &self.fast
+    }
+
+    /// Test-only constructor for a quantized weight, so parity tests can
+    /// exercise the block-quantized `matmul_rows` path rather than the BF16 one.
+    #[cfg(test)]
+    pub(super) fn from_quantized_bytes(
+        bytes: &'static [u8],
+        ggml_type: crate::core::tensor::GGMLType,
+        n_in: usize,
+        n_out: usize,
+    ) -> Self {
+        Self {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes, ggml_type, n_in, n_out,
+            )),
+            bf16: None,
+            n_in,
+            n_out,
+        }
     }
 
     #[cfg(test)]
@@ -91,6 +191,119 @@ impl YuE2Weight {
         }
         self.fast
             .quantize_and_matmul_with_scratch(input, q8k, q8, scales, output, pool);
+    }
+
+    /// Batched `n_rows x n_in @ n_in x n_out` used by the NAR passes.
+    ///
+    /// The single-row `matmul` quantizes the activation on the calling thread and
+    /// then hands the *output* rows to `pool.compute`.  The NAR evaluates all
+    /// ~258 latent positions at once, so calling that per row meant 258
+    /// single-threaded quantizations and 258 pool barriers for every projection,
+    /// which dominated the NAR solve.  Here the whole batch is quantized once
+    /// (also inside the pool) and each thread owns a contiguous slice of the
+    /// *input* rows, so the weight tile it streams stays hot in cache.
+    pub(super) fn matmul_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        pool: &ComputePool,
+        scratch: &mut RowScratch,
+        bias: Option<&[f32]>,
+    ) -> Result<(), String> {
+        let n_rows = input.len() / self.n_in;
+        if input.len() % self.n_in != 0 || output.len() != n_rows * self.n_out || n_rows == 0 {
+            return Err("YuE2 batched matmul got inconsistent row counts".into());
+        }
+        if let Some(bias) = bias {
+            if bias.len() != self.n_out {
+                return Err("YuE2 batched matmul bias width mismatch".into());
+            }
+        }
+        if self.bf16.is_some() {
+            for row in 0..n_rows {
+                self.matmul_bf16(
+                    &input[row * self.n_in..(row + 1) * self.n_in],
+                    bias,
+                    &mut output[row * self.n_out..(row + 1) * self.n_out],
+                    pool,
+                );
+            }
+            return Ok(());
+        }
+        if self.fast.ggml_type == crate::core::tensor::GGMLType::F32 {
+            // F32 weights consume raw activations; handing them Q8_0 bytes would
+            // silently produce zeros because the F32 kernel's `forward_prepared`
+            // only takes the f32 path when `input_f32` is populated.
+            for row in 0..n_rows {
+                self.fast.kernel.forward_prepared(
+                    &input[row * self.n_in..(row + 1) * self.n_in],
+                    &[],
+                    &[],
+                    None,
+                    &mut output[row * self.n_out..(row + 1) * self.n_out],
+                    self.n_in,
+                    self.n_out,
+                    0,
+                    1,
+                );
+                if let Some(bias) = bias {
+                    for (value, &offset) in output[row * self.n_out..(row + 1) * self.n_out]
+                        .iter_mut()
+                        .zip(bias)
+                    {
+                        *value += offset;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Per-thread Q8_0 staging. This MUST be one buffer per pool thread: a
+        // thread quantizes its activation and then immediately consumes it, so a
+        // shared buffer lets a second thread overwrite the payload in between and
+        // silently produces a different result (observed as ~12% error).
+        let q8_stride = self.n_in;
+        let scale_stride = self.n_in.div_ceil(32);
+        scratch.reserve_threads(pool.n_threads().max(1), q8_stride, scale_stride);
+        let weight = &self.fast;
+        let n_in = self.n_in;
+        let n_out = self.n_out;
+        let input_ptr = input.as_ptr();
+        let output_ptr = output.as_mut_ptr();
+        let bias_ptr = bias.map(|bias| bias.as_ptr());
+        let slots_ptr = scratch.slots.as_mut_ptr();
+        let slot_count = scratch.slots.len();
+        pool.compute(|ith, nth| {
+            let (start, end) = crate::ops::kernel::bf16::BF16Kernel::row_range(n_rows, ith, nth);
+            if start == end {
+                return;
+            }
+            // SAFETY: slot `ith` belongs to exactly this pool thread, and
+            // `start..end` is disjoint from every other thread's rows.
+            let (q8, scales) = unsafe {
+                let (q8, scales) = &mut *slots_ptr.add(ith.min(slot_count - 1));
+                (q8.as_mut_slice(), scales.as_mut_slice())
+            };
+            for row in start..end {
+                let activation =
+                    unsafe { std::slice::from_raw_parts(input_ptr.add(row * n_in), n_in) };
+                crate::ops::quantize_q8_0_into(activation, n_in, q8, scales);
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr.add(row * n_out), n_out) };
+                weight
+                    .kernel
+                    .forward_prequantized(q8, scales, out, n_in, n_out, 0, 1);
+                if let Some(bias_ptr) = bias_ptr {
+                    for (value, &offset) in out
+                        .iter_mut()
+                        .zip(unsafe { std::slice::from_raw_parts(bias_ptr, n_out) })
+                    {
+                        *value += offset;
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -395,6 +608,7 @@ impl YuE2Model {
         let mut logits = session.prefill(prefix)?.to_vec();
         let mut rng = Mt19937::new(seed);
         let mut output = Vec::with_capacity(sampling.max_tokens);
+        let sampling_started = std::time::Instant::now();
         for step in 0..sampling.max_tokens {
             let token = sample_phase_token(&logits, &output, sampling, step, phase, &mut rng)?;
             if token == phase.end_token() {
@@ -403,6 +617,18 @@ impl YuE2Model {
             output.push(token);
             if step + 1 < sampling.max_tokens {
                 logits = session.prefill(&[token])?.to_vec();
+            }
+            // Single-token decode over a 3B AR pass is seconds per step on
+            // CPU, so emit a periodic rate log instead of a silent stall.
+            if output.len() % 16 == 0 || step + 1 == sampling.max_tokens {
+                let elapsed = sampling_started.elapsed().as_secs_f64();
+                eprintln!(
+                    "[yue2:{}] {} tokens in {:.1}s ({:.2} tok/s)",
+                    phase.short_name(),
+                    output.len(),
+                    elapsed,
+                    output.len() as f64 / elapsed.max(f64::MIN_POSITIVE),
+                );
             }
         }
         #[cfg(feature = "parity-trace")]
@@ -876,7 +1102,14 @@ fn preflight(source: &dyn TensorSource, config: &YuE2Config) -> Result<(), Strin
         ("time_embedder.mlp.2.bias", vec![config.hidden]),
         ("latent_pos_embed.pe", vec![config.hidden, config.context]),
     ] {
-        require_bf16(source, name, &dims)?;
+        // Both time-embedder matrices are quantized by the converter; the rest
+        // of this table (vocab embeddings, bridge projections, position table,
+        // and every 1-D norm/bias) must stay BF16.
+        if name.starts_with("time_embedder.mlp.") && name.ends_with(".weight") {
+            require_quantizable(source, name, &dims)?;
+        } else {
+            require_bf16(source, name, &dims)?;
+        }
     }
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
@@ -906,13 +1139,66 @@ fn preflight(source: &dyn TensorSource, config: &YuE2Config) -> Result<(), Strin
             ("nar_mlp.up_proj.weight", vec![config.hidden, config.ffn]),
             ("nar_mlp.down_proj.weight", vec![config.ffn, config.hidden]),
         ] {
-            require_bf16(source, &format!("{base}.{suffix}"), &dims)?;
+            // The projections may carry a quantized type; the norms may not.
+            if is_matrix_suffix(suffix) {
+                require_quantizable(source, &format!("{base}.{suffix}"), &dims)?;
+            } else {
+                require_bf16(source, &format!("{base}.{suffix}"), &dims)?;
+            }
         }
     }
     Ok(())
 }
 
+/// True for the per-layer 2-D projections the converter is allowed to quantize.
+fn is_matrix_suffix(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "self_attn.q_proj.weight"
+            | "self_attn.k_proj.weight"
+            | "self_attn.v_proj.weight"
+            | "self_attn.o_proj.weight"
+            | "mlp.gate_proj.weight"
+            | "mlp.up_proj.weight"
+            | "mlp.down_proj.weight"
+            | "nar_self_attn.q_proj.weight"
+            | "nar_self_attn.k_proj.weight"
+            | "nar_self_attn.v_proj.weight"
+            | "nar_self_attn.o_proj.weight"
+            | "nar_mlp.gate_proj.weight"
+            | "nar_mlp.up_proj.weight"
+            | "nar_mlp.down_proj.weight"
+    )
+}
+
 fn require_bf16(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Result<(), String> {
+    require_type(source, name, dims, &[GGMLType::BF16])
+}
+
+/// Shape check that also accepts a quantized matrix type.
+///
+/// The converter only re-encodes the transformer projections; everything else
+/// (1-D norms, the vocab embeddings, the position/bridge tables) must still be
+/// BF16 because the loader reads those through `load_f32_tensor`. `QUANTIZABLE`
+/// is the same tensor set the converter applies its `--quant` modes to, so a
+/// checkpoint that has, say, a Q8_0 `mlp.gate_proj.weight` loads while a Q8_0
+/// `model.norm.weight` is still rejected.
+fn require_quantizable(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[usize],
+) -> Result<(), String> {
+    let mut allowed = vec![GGMLType::BF16];
+    allowed.extend_from_slice(&MATRIX_TYPES);
+    require_type(source, name, dims, &allowed)
+}
+
+fn require_type(
+    source: &dyn TensorSource,
+    name: &str,
+    dims: &[usize],
+    allowed: &[GGMLType],
+) -> Result<(), String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
@@ -923,9 +1209,9 @@ fn require_bf16(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Result
             info.dims
         ));
     }
-    if info.ggml_type != GGMLType::BF16 {
+    if !allowed.contains(&info.ggml_type) {
         return Err(format!(
-            "Invalid tensor {name} type {:?}; expected BF16",
+            "Invalid tensor {name} type {:?}; expected one of {allowed:?}",
             info.ggml_type
         ));
     }
@@ -1039,6 +1325,13 @@ impl Phase {
         match self {
             Self::Abc => "yue2.abc.generated_ids",
             Self::Semantic => "yue2.semantic.generated_ids",
+        }
+    }
+
+    fn short_name(self) -> &'static str {
+        match self {
+            Self::Abc => "abc",
+            Self::Semantic => "semantic",
         }
     }
 
@@ -1193,17 +1486,338 @@ pub(super) fn rms_norm_heads(values: &mut [f32], weight: &[f32], head_dim: usize
     }
 }
 
-pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f32) {
-    let (mut cos, mut sin) =
-        crate::ops::rope::rope_sin_cos_sleef_table_with_threads(&[position], head_dim, base, 1);
-    for value in cos.iter_mut().chain(&mut sin) {
-        *value = half::bf16::from_f32(*value).to_f32();
-    }
-    crate::ops::rope::rope_neox_inplace_with_table(values, head_dim, &cos, &sin);
+/// Cached sin/cos tables for a single (head_dim, base) pair, extended lazily.
+///
+/// `rope` is called twice per layer per token and each call used to rebuild the
+/// whole table from scratch: `head_dim / 2` `powf` calls plus `head_dim` scalar
+/// SLEEF sin/cos evaluations and two heap allocations. Positions only ever grow
+/// during a generation, so keeping the tables and appending is exactly equivalent
+/// -- every cached entry is the value the original call would have produced,
+/// since the values are still computed by the same function.
+struct RopeTable {
+    head_dim: usize,
+    base: f32,
+    cos: Vec<f32>,
+    sin: Vec<f32>,
 }
 
+impl RopeTable {
+    fn new(head_dim: usize, base: f32) -> Self {
+        Self {
+            head_dim,
+            base,
+            cos: Vec::new(),
+            sin: Vec::new(),
+        }
+    }
+
+    /// Ensure rows `0..=position` are present and return their range.
+    fn range(&mut self, position: usize, head_dim: usize, base: f32) -> (usize, usize) {
+        if self.head_dim != head_dim || self.base != base {
+            *self = Self::new(head_dim, base);
+        }
+        let stride = self.head_dim;
+        let have = self.cos.len() / stride.max(1);
+        if position < have {
+            return (position * stride, (position + 1) * stride);
+        }
+        // Grow to the requested position in one batch so a long generation does
+        // not re-extend on every token.
+        let want = position + 1;
+        let (mut cos, mut sin) = crate::ops::rope::rope_sin_cos_sleef_table_with_threads(
+            &(have..want).collect::<Vec<usize>>(),
+            self.head_dim,
+            self.base,
+            1,
+        );
+        // The YuE2 contract rounds the table through bf16 before the rotation.
+        for value in cos.iter_mut().chain(&mut sin) {
+            *value = half::bf16::from_f32(*value).to_f32();
+        }
+        self.cos.append(&mut cos);
+        self.sin.append(&mut sin);
+        (position * stride, (position + 1) * stride)
+    }
+}
+
+pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f32) {
+    use std::sync::{Mutex, OnceLock};
+    static TABLE: OnceLock<Mutex<RopeTable>> = OnceLock::new();
+    let cell = TABLE.get_or_init(|| Mutex::new(RopeTable::new(head_dim, base)));
+    // Hold the lock for the whole call: the rotation reads the table slices
+    // while this guard owns them, so a concurrent `rope` on another thread
+    // cannot reallocate the vectors out from under the reader.
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // `range` is a no-op for a matching (head_dim, base); a different
+    // architecture in the same process rebuilds instead of silently returning
+    // a table for the wrong width or base.
+    let (start, end) = guard.range(position, head_dim, base);
+    crate::ops::rope::rope_neox_inplace_with_table(
+        values,
+        head_dim,
+        &guard.cos[start..end],
+        &guard.sin[start..end],
+    );
+}
 pub(super) fn dot(left: &[f32], right: &[f32]) -> f32 {
     crate::ops::dot_f32(left, right, left.len())
+}
+
+/// Bit-exact vectorized value reduction shared by the NAR attention kernels and
+/// the AR single-token decode. Lives here rather than in `nar.rs` because
+/// `attention_head` in this file needs it too and `nar` already depends on `ar`.
+///
+/// Two-segment variant: tokens `0..n_first` come from `values_first`, the rest
+/// from `values_second`, but both land in the *same* accumulator.
+///
+/// The prefix KV and the latent KV are separate allocations, so a 512-wide KV
+/// block can straddle the boundary between them. Reducing each segment into its
+/// own accumulator and adding both to the output associates the additions as
+/// `(out + head) + tail`, while the original single loop produces
+/// `out + (head + tail)`. Those round differently, which is enough to change a
+/// bf16 rounding decision downstream. One accumulator reproduces the original.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn value_reduce_block2(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if crate::ops::has_neon() && head_width >= 4 {
+        // SAFETY: NEON availability is checked, and both segments are bounded
+        // by the caller to stay inside their slices.
+        unsafe {
+            value_reduce_block2_neon(
+                values_first,
+                base_first,
+                values_second,
+                base_second,
+                n_first,
+                scores,
+                output,
+                row_stride,
+                head_offset,
+                n_tokens,
+                head_width,
+            );
+        }
+        return;
+    }
+    value_reduce_block2_scalar(
+        values_first,
+        base_first,
+        values_second,
+        base_second,
+        n_first,
+        scores,
+        output,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn value_reduce_block2_neon(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn value_reduce_block2_scalar(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            sum += scores[token] * values[start];
+        }
+        output[dim] += sum;
+    }
+}
+
+#[inline]
+/// `base` is an **element** offset into `values` (the kernel computes
+/// `base + token * row_stride + head_offset + dim`), not a row index. Passing a
+/// row number silently reads the wrong elements, which is why the NAR call sites
+/// pass `start * kv_width`.
+pub(super) fn value_reduce_block(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    debug_assert!(n_tokens > 0);
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    {
+        if crate::ops::has_neon() && head_width >= 4 && n_tokens > 0 {
+            // SAFETY: NEON is available per `has_neon`, and every load below is
+            // bounded by `base + n_tokens * row_stride + head_offset + head_width`
+            // which the caller guarantees is within `values`.
+            unsafe {
+                value_reduce_block_neon(
+                    values,
+                    scores,
+                    output,
+                    base,
+                    row_stride,
+                    head_offset,
+                    n_tokens,
+                    head_width,
+                );
+            }
+            return;
+        }
+    }
+    value_reduce_block_scalar(
+        values,
+        scores,
+        output,
+        base,
+        row_stride,
+        head_offset,
+        n_tokens,
+        head_width,
+    );
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+pub(super) unsafe fn value_reduce_block_neon(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::aarch64::*;
+    let mut dim = 0;
+    while dim + 4 <= head_width {
+        // Fresh accumulator per block, and a separate multiply so the product is
+        // rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc = vdupq_n_f32(0.0);
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = vdupq_n_f32(scores[token]);
+            let v = vld1q_f32(values.as_ptr().add(start));
+            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+        }
+        let out = vld1q_f32(output.as_ptr().add(dim));
+        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
+        dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+#[inline]
+pub(super) fn value_reduce_block_scalar(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    for dim in 0..head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * values[start];
+        }
+        output[dim] += sum;
+    }
 }
 
 pub(super) fn attention_head(
@@ -1222,13 +1836,28 @@ pub(super) fn attention_head(
     }
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
-        for (dimension, value) in output.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            for cached_position in 0..scores.len() {
-                sum += scores[cached_position]
-                    * value_cache[cached_position * kv_width + kv_start + dimension];
-            }
-            *value = half::bf16::from_f32(sum * inverse_sum).to_f32();
+        // The scalar form iterated dimension-outer, so consecutive reads of
+        // `value_cache` were `kv_width` floats apart and every access landed on a
+        // fresh cache line. `value_reduce_block` walks tokens outer and the head
+        // dimension inner, which is the contiguous order, and it reproduces the
+        // original arithmetic exactly: a fresh zeroed accumulator per call, a
+        // separate multiply and add rather than an FMA, and one add into
+        // `output` at the end. This is the same kernel the NAR attention uses
+        // and it is pinned bit-exact by
+        // `nar::attention_parity_tests::optimized_attention_matches_legacy_bitwise`.
+        output.fill(0.0);
+        value_reduce_block(
+            value_cache,
+            scores,
+            output,
+            0,
+            kv_width,
+            kv_start,
+            scores.len(),
+            output.len(),
+        );
+        for value in output.iter_mut() {
+            *value = half::bf16::from_f32(*value * inverse_sum).to_f32();
         }
         return;
     }
@@ -1249,14 +1878,19 @@ pub(super) fn attention_head(
                 *value *= rescale;
             }
         }
-        for (dimension, value) in output.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            for offset in 0..block.len() {
-                sum +=
-                    block[offset] * value_cache[(start + offset) * kv_width + kv_start + dimension];
-            }
-            *value += sum;
-        }
+        // Same contiguous, bit-exact reduction as the short path above, applied
+        // per KV block so the streaming max/rescale arithmetic is untouched.
+        // `base` is an element offset, not a row index.
+        value_reduce_block(
+            value_cache,
+            block,
+            output,
+            start * kv_width,
+            kv_width,
+            kv_start,
+            block.len(),
+            output.len(),
+        );
         running_max = next_max;
     }
     let inverse_sum = running_sum.recip();

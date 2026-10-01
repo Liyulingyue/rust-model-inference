@@ -1,6 +1,8 @@
-//! GGUF → Qwen35Model weight loading.
+//! GGUF → shared hybrid trunk weight loading.
 //!
-//! `Qwen35Model::from_source` reads a GGUF `TensorSource` and builds
+//! `Qwen35Model::from_source` accepts Qwen3.5 only. `Edge0Model` loads the
+//! same attention/SSM trunk and keeps its MoE weights in `models::edge0`.
+//! The shared loader reads a GGUF `TensorSource` and builds
 //! `Qwen35LayerWeights` rows, one per layer. Recurrent (Mamba) layers only
 //! fill the SSM field group; dense (attention) layers only fill the
 //! attention field group — see `config.is_recurrent`.
@@ -13,6 +15,7 @@ use super::config::Qwen35Config;
 use super::util::f16_at;
 use crate::core::tensor::GGMLType;
 use crate::core::tensor::TensorSource;
+use crate::models::edge0::weights::load_affine;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::Qwen35VulkanSession;
@@ -50,13 +53,10 @@ pub struct Qwen35LayerWeights<'a> {
     pub ffn_down: Weight<'a>,
 }
 
-/// Loaded Qwen3.5 model weights + parsed config.
+/// Shared Qwen3.5/Edge0 attention and SSM weights + parsed config.
 ///
-/// `from_source` is defined in `weights.rs`. `forward` and friends are
-/// defined in `forward.rs`. This struct is the source of truth shared by
-/// `Qwen35Session` and the existing `app/text.rs` / `bin/server.rs`
-/// call sites.
-pub struct Qwen35Model<'a> {
+/// Qwen3.5 exposes this as `Qwen35Model`; Edge0 composes it with MoE weights.
+pub struct HybridTrunk<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Weight<'a>,
     pub output_norm: Vec<f32>,
@@ -68,6 +68,9 @@ pub struct Qwen35Model<'a> {
     #[cfg(feature = "vulkan")]
     pub(crate) gpu: Option<Qwen35VulkanSession>,
 }
+
+/// Qwen3.5 uses the shared hybrid trunk without architecture-specific weights.
+pub type Qwen35Model<'a> = HybridTrunk<'a>;
 
 // Convenience alias so that `impl Qwen35Model { fn from_source(...) }` in
 // `weights.rs` and `impl Qwen35Model { fn forward(...) }` in `forward.rs`
@@ -91,6 +94,13 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
     };
 
     match ti.ggml_type {
+        GGMLType::I32 => match load_affine(source, name, None) {
+            Ok(weight) => Some(weight),
+            Err(error) => {
+                eprintln!("WARNING: {error}");
+                None
+            }
+        },
         GGMLType::F32
         | GGMLType::F16
         | GGMLType::BF16
@@ -177,10 +187,28 @@ pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(
     }
 }
 
-impl<'a> Qwen35Model<'a> {
+impl<'a> HybridTrunk<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(|value| value.to_string_val());
+        if arch == Some("edge0") {
+            return Err("Edge0 architecture requires Edge0Model::from_source".into());
+        }
+        if arch != Some("qwen35") {
+            return Err(format!(
+                "Qwen35Model requires general.architecture=qwen35, got {arch:?}"
+            ));
+        }
         let config = Qwen35Config::from_source(source)?;
+        Self::load_trunk(source, config, false)
+    }
 
+    pub(crate) fn load_trunk(
+        source: &'a dyn TensorSource,
+        config: Qwen35Config,
+        edge0: bool,
+    ) -> Result<Self, String> {
         let token_info = source
             .tensor_info("token_embd.weight")
             .ok_or("Missing token_embd.weight")?;
@@ -189,7 +217,17 @@ impl<'a> Qwen35Model<'a> {
             .iter()
             .map(|value| *value as usize)
             .collect::<Vec<_>>();
-        let expected = vec![config.n_embd, config.vocab_size];
+        // The lossless export stores packed 4-bit codes, so the embedding is
+        // one eighth as wide; the expanded modes store whole values instead.
+        let expanded = crate::models::edge0::weights::is_expanded(source);
+        let expected = vec![
+            if edge0 && !expanded {
+                config.n_embd / 8
+            } else {
+                config.n_embd
+            },
+            config.vocab_size,
+        ];
         if actual != expected {
             return Err(format!(
                 "token_embd.weight shape mismatch: expected {expected:?}, got {actual:?}, dtype={:?}",
@@ -214,6 +252,40 @@ impl<'a> Qwen35Model<'a> {
             };
             load_weight(source, name).ok_or("Missing output weight")?
         };
+        if edge0
+            && !expanded
+            && (
+                tok_embd.n_in,
+                tok_embd.n_out,
+                output_weight.n_in,
+                output_weight.n_out,
+            ) != (
+                config.n_embd,
+                config.vocab_size,
+                config.n_embd,
+                config.vocab_size,
+            )
+        {
+            return Err("Edge0 embedding or output shape mismatch".into());
+        }
+        // Every mode, packed or expanded, must present the same logical matrix,
+        // so the expanded path checks the widths the kernel will actually use.
+        if edge0
+            && expanded
+            && (
+                tok_embd.n_in,
+                tok_embd.n_out,
+                output_weight.n_in,
+                output_weight.n_out,
+            ) != (
+                config.n_embd,
+                config.vocab_size,
+                config.n_embd,
+                config.vocab_size,
+            )
+        {
+            return Err("Edge0 expanded embedding or output shape mismatch".into());
+        }
 
         let n_layers_impl = config.n_layer_impl();
         let mut layers = Vec::with_capacity(n_layers_impl);
@@ -263,6 +335,14 @@ impl<'a> Qwen35Model<'a> {
             } else {
                 (None, None, None, None, None, None, None, None, None)
             };
+            let mut ssm_a = ssm_a;
+            if edge0 {
+                if let Some(values) = &mut ssm_a {
+                    for value in values {
+                        *value = -value.exp();
+                    }
+                }
+            }
 
             let ffn_gate = load_weight(source, &format!("blk.{}.ffn_gate.weight", i))
                 .ok_or_else(|| format!("Missing blk.{}.ffn_gate.weight", i))?;

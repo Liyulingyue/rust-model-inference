@@ -411,6 +411,19 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "exaone" => PreTokenizer::LlamaBpe,
+                // jina-v1-en / jina-v2-code / roberta-bpe all map to standard
+                // GPT-2 byte-level BPE in llama.cpp
+                // (`llama-vocab.cpp:2239-2245`) with `add_sep = true`. For our
+                // BPETokenizer that maps to `LlamaBpe` (the same regex
+                // LlamaBpe uses) plus `add_bos = add_eos = true`, which the
+                // GGUF ships via `tokenizer.ggml.add_bos_token` /
+                // `tokenizer.ggml.add_eos_token`; the SEP token itself is
+                // identical to the EOS token (`seperator_token_id = 2` in
+                // jina-reranker-v1-turbo-en), so `add_eos` does the right thing
+                // without a separate `add_sep` arm.
+                Some(MetaValue::String(value)) if value == "jina-v1-en" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "jina-v2-code" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "roberta-bpe" => PreTokenizer::LlamaBpe,
                 Some(MetaValue::String(value)) if value == "falcon-h1" => {
                     force_add_bos = true;
                     PreTokenizer::LlamaBpe
@@ -427,7 +440,7 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "glm4" => PreTokenizer::Minicpm5,
                 Some(MetaValue::String(value)) => {
                     return Err(format!(
-                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, k2-horizon, minicpm5, gpt-4o, or glm4"
+                        "Unsupported tokenizer.ggml.pre {value:?}; expected qwen2 or qwen35, hunyuan, hunyuan-dense, lfm2, llama-bpe, pixtral, falcon-h1, exaone, jina-v1-en, jina-v2-code, roberta-bpe, k2-horizon, minicpm5, gpt-4o, or glm4"
                     ));
                 }
                 _ => return Err("Missing or invalid tokenizer.ggml.pre".into()),

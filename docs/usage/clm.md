@@ -10,7 +10,7 @@ CLM（Contrastive Language Model）不是生成模型。它在冻结的 Qwen3-8B
 score(state, candidate) = logit_scale * cos(state_head(e_s), action_head(e_c))
 ```
 
-其中 `e_s` / `e_c` 是 Qwen3-8B 的 **last-token pooling** 隐状态，两个头各自
+其中 `e_s` / `e_c` 是 Qwen3-8B 的 **last-token pooling + L2 归一化**隐状态，两个头各自
 L2-normalize 之后点乘。`logit_scale = min(exp(4.6132), 100) = 100`。
 
 ModelScope 上的 `CLM_v0.1-8B.pt` 只有 **75 MB** —— 只含两个头，不含 encoder。
@@ -144,12 +144,11 @@ curl http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' -d '
 
 ## 5. 精度
 
-- **head 本身**逐位对过参考 torch forward（`models/CLM-v0.1-8B/golden.json`，
-  `cargo test --lib models::clm`）。
-- **端到端**排序与参考客户端一致，但绝对分数不完全对齐
-  （README 0.94/0.06，本地同两个分数算出来 ~0.97/0.03）。参考客户端经 vLLM
-  做 embedding，prompt 处理与 tokenizer 细节不同。CLM 是 encoder-locked 的，
-  这部分差异要消掉得把 encoder 侧也逐位对齐，目前没做。
+- 固定 BF16 Qwen3-8B GGUF 与 F32 CLM 双头，两组真实文本评分的 token IDs、
+  pooled/final embedding 的 32,768 个 F32 值，以及投影头与最终 logit 的
+  34,818 个 F32 值，在标量路径上逐位一致。最终 logit 位模式为
+  `0x415a1e78`、`0x41b29eb4`。[文件哈希和复现命令](../../tools/oracle/clm/README.md)。
+- 官方 vLLM、NEON/FMA/BLAS/Accelerate、默认加速路径和其他量化 GGUF 未做逐位验证。
 
 ## 6. 源码索引
 
@@ -183,7 +182,7 @@ src/app/jev/clm.rs 里 context / question 拼成 state 的那段是纯字符串�
 要做的话缓存 key 必须含 encoder + heads 的身份，否则换模型后会读到另一个
 头的投影。
 
-### 3. encoder 精度没有检查（build_clm）
+### 3. encoder 量化类型没有限制（build_clm）
 
 CLM 是 encoder-locked。拿 Q4_K_M 的 Qwen3-8B 启动照样起、照样出分，只是
 分数整体偏移、不能跟论文数字比。倾向 warn 而不是拒，因为低内存环境想跑着

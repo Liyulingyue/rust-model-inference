@@ -24,6 +24,7 @@ pub mod f16;
 pub mod f32;
 pub mod iq4_nl;
 pub mod iq4_xs;
+pub mod mlx_affine;
 pub mod q1_0;
 pub mod q2_k;
 pub mod q3_k;
@@ -374,7 +375,9 @@ impl<'a> Weight<'a> {
         let n_in = input.len();
         let n_out = self.n_out;
         let (input_q8, input_scales, q8_k) = match self.ggml_type {
-            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 => (&[][..], &[][..], None),
+            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::I32 => {
+                (&[][..], &[][..], None)
+            }
             GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 | GGMLType::Q1_0 => {
                 let blocks = n_in.div_ceil(32);
                 crate::ops::quantize_q8_0_into(

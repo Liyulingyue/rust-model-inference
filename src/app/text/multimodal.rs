@@ -9,11 +9,13 @@ use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::format::ggufrs::{open_model_source, ComponentRole};
+use crate::models::hybrid::HybridTextModel;
 use crate::models::qwen3::vision::{
     qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
     VisionScratchpad as VisionScratchpad3vl,
 };
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen35::trunk::HybridSession;
 use crate::models::qwen35::vision::{
     qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
     VisionScratchpad as VisionScratchpad35,
@@ -96,14 +98,24 @@ pub fn run_qwen3_family_multimodal(
         };
         let (grid_w, grid_h) = match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
-                let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 if is_video {
                     encoder.config.image_min_pixels = encoder.config.video_min_pixels;
                     encoder.config.image_max_pixels = encoder.config.video_max_pixels;
@@ -114,13 +126,23 @@ pub fn run_qwen3_family_multimodal(
         };
         let (mean, std) = match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
-                let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let encoder = VisionEncoder35::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 (encoder.config.image_mean, encoder.config.image_std)
             }
         };
@@ -138,8 +160,13 @@ pub fn run_qwen3_family_multimodal(
         };
         match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
-                let mut encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 let mut scratch = VisionScratchpad3vl::new(&encoder.config);
@@ -180,8 +207,13 @@ pub fn run_qwen3_family_multimodal(
                 }
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
                 if is_video {
                     encoder.config.image_min_pixels = encoder.config.video_min_pixels;
@@ -400,14 +432,24 @@ pub fn run_qwen3_family_multimodal_logits(
         };
         let (grid_w, grid_h) = match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
-                let encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 (grid.image_width(), grid.image_height())
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 if is_video {
                     encoder.config.image_min_pixels = encoder.config.video_min_pixels;
                     encoder.config.image_max_pixels = encoder.config.video_max_pixels;
@@ -429,8 +471,13 @@ pub fn run_qwen3_family_multimodal_logits(
         }
         match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
-                let mut encoder = VisionEncoder3vl::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
                 let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
                 let mut scratch = VisionScratchpad3vl::new(&encoder.config);
@@ -465,8 +512,13 @@ pub fn run_qwen3_family_multimodal_logits(
                 }
             }
             crate::app::media::ProjectorFamily::Qwen25Omni => {
-                let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
-                    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
                 encoder.precompute();
                 if is_video {
                     encoder.config.image_min_pixels = encoder.config.video_min_pixels;
@@ -626,8 +678,13 @@ pub fn run_qwen35_family_multimodal_logits(
         let first = frames.first().ok_or("media produced no frames")?;
         (first.width() as usize, first.height() as usize)
     };
-    let mut encoder = VisionEncoder35::from_source(mmproj.as_ref())
-        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder35::from_source(
+        mmproj.as_ref(),
+        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+            n_threads_arg.max(1),
+        )),
+    )
+    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
     encoder.precompute();
     if is_video {
         encoder.config.image_min_pixels = encoder.config.video_min_pixels;
@@ -910,9 +967,12 @@ pub(super) fn run_multimodal_with_video_ref(
             max_context,
         );
     }
-    if arch != "qwen35" && arch != "qwen3vl" {
+    if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
+        return Err("Edge0-35B preview contains no vision weights; text input only".into());
+    }
+    if arch != "qwen35" && arch != "qwen3vl" && arch != "edge0" {
         return Err(format!(
-            "Only qwen35 and qwen3vl architectures are supported for multimodal, got: {arch}"
+            "Only qwen35, qwen3vl, and edge0 architectures are supported for multimodal, got: {arch}"
         ));
     }
 
@@ -936,8 +996,13 @@ pub(super) fn run_multimodal_with_video_ref(
             })?;
 
         if arch == "qwen3vl" {
-            let mut encoder = VisionEncoder3vl::from_source(mmproj_source.as_ref())
-                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+            let mut encoder = VisionEncoder3vl::from_source(
+                mmproj_source.as_ref(),
+                std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                    n_threads_arg.max(1),
+                )),
+            )
+            .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
             encoder.precompute();
             println!(
                 "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
@@ -1036,13 +1101,14 @@ pub(super) fn run_multimodal_with_video_ref(
         );
     }
 
-    let mut llm = Qwen35Model::from_source(llm_source)
-        .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
+    let mut llm = HybridTextModel::from_source(llm_source)
+        .map_err(|error| format!("Failed to parse hybrid text model: {error}"))?;
     let model_name = llm_source
         .metadata("general.name")
         .and_then(|value| value.to_string_val())
-        .unwrap_or("Qwen3.5-family");
-    println!("{model_name} model loaded: {} layers, n_embd={}, n_head={}, n_ff={}, rope_freq_base={}, rope_sections={:?}, rope_dim_count={}", llm.config.n_layer, llm.config.n_embd, llm.config.n_head, llm.config.n_ff, llm.config.rope_freq_base, llm.config.rope_dimension_sections, llm.config.rope_dimension_count);
+        .unwrap_or("hybrid-text");
+    let config = &llm.trunk().config;
+    println!("{model_name} model loaded: {} layers, n_embd={}, n_head={}, n_ff={}, rope_freq_base={}, rope_sections={:?}, rope_dim_count={}", config.n_layer, config.n_embd, config.n_head, config.n_ff, config.rope_freq_base, config.rope_dimension_sections, config.rope_dimension_count);
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -1094,7 +1160,7 @@ pub(super) fn run_multimodal_with_video_ref(
     let projected_count = if vis_embeddings.is_empty() {
         0
     } else {
-        let projection_dim = llm.config.n_embd;
+        let projection_dim = config.n_embd;
         if vis_embeddings.len() % projection_dim != 0 {
             return Err("Projected vision embeddings are not row aligned".into());
         }
@@ -1122,14 +1188,14 @@ pub(super) fn run_multimodal_with_video_ref(
         prompt_tokens
     );
 
-    let max_seq = (prompt_tokens.len() + max_tokens).min(llm.config.n_ctx);
+    let max_seq = (prompt_tokens.len() + max_tokens).min(config.n_ctx);
     let prompt_embd = inject_vision_embeddings(
-        &llm,
+        llm.trunk(),
         &prompt_tokens,
         image_token_id,
         vis_embeddings,
         n_vis_tokens,
-        llm.config.n_embd,
+        config.n_embd,
     )?;
     #[cfg(feature = "parity-trace")]
     {
@@ -1149,12 +1215,12 @@ pub(super) fn run_multimodal_with_video_ref(
         ));
         crate::parity_trace::report(crate::parity_trace::bool_values(
             "qwen35.layer_is_recurrent",
-            &llm.config.is_recurrent,
+            &config.is_recurrent,
         ));
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "qwen35.embedding",
             None,
-            &[prompt_tokens.len(), llm.config.n_embd],
+            &[prompt_tokens.len(), config.n_embd],
             &prompt_embd,
         ));
     }
@@ -1165,7 +1231,7 @@ pub(super) fn run_multimodal_with_video_ref(
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
     eprintln!("compute pool: {} threads", pool.n_threads());
-    let mut session = Qwen35Session::new_with_prefill_batch_size(
+    let mut session = HybridSession::new_with_prefill_batch_size(
         &mut llm,
         max_seq,
         prefill_batch_size,

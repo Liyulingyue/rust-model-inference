@@ -82,13 +82,13 @@ RMI_JINA_V2_BASE_EN_MODEL="$JINA_MODEL" \
   cargo test --profile release-fast --features parity-trace --test jina_v2_base_en
 ```
 
-Regression results (2026-10-01): all 4 real-model Jina integration tests,
-6 WordPiece tests, 12 BERT-family unit tests and the scalar GELU bit test pass.
-The CLI also returns a 768-dimensional embedding with tracing disabled.
-The full test command stops at library tests: 1,015 passed, 30 failed and 71
-ignored. An exported clean `60882a0` baseline, rebuilt with the same flags,
-has the **same 30 failing tests** (1,014 passed, 71 ignored); this change adds
-the passing WordPiece normalization test. Other integration suites were not
-reached by that full run. Modified Rust files and `git diff --check` pass;
-repository-wide formatting still reports existing differences in
-`src/app/server/mod.rs` and `src/models/gliner/compute.rs`.
+Regression results after integrating main `d8c41b3` (2026-10-01): tokenizer
+26 passed / 2 ignored; BERT family 12 passed; GLiNER 23 passed; scalar GELU
+bit test and all 4 real-model Jina integration tests passed. The ordinary
+CLI returns a 768-dimensional embedding with tracing disabled.
+Repository-wide `cargo fmt --all -- --check` and `git diff --check` pass.
+
+Before integrating main, the full test command stopped at library tests:
+1,015 passed, 30 failed and 71 ignored. A rebuilt clean `60882a0` baseline had
+the **same 30 failing tests** (1,014 passed, 71 ignored). The full suite was
+not repeated after integrating main; the relevant tests above were rerun.

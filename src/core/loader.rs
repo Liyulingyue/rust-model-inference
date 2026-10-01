@@ -397,6 +397,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "edge0"
             | "qwen3tts"
             | "llama"
             | "exaone"
@@ -538,7 +539,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" || arch == "nanbeige" {
+    let n_embd_head = if arch == "qwen35" || arch == "edge0" || arch == "nanbeige" {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
@@ -706,6 +707,27 @@ const KNOWN_QWEN3VL_2B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensio
     n_embd_head_k: 128,
     n_embd_head_v: 128,
     n_ff: 6144,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
+/// `qwen3vl`-arch GGUF for `Qwen3-VL-4B-Instruct` (Qwen/Qwen3-VL-4B-Instruct-GGUF
+/// Q4_K_M, SHA-256 not yet pinned). LLM backbone is the Qwen3-4B dense trunk
+/// (`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8, head_dim=128, n_ff=9728`),
+/// frequency base `5_000_000.0`, norm epsilon `1e-6`, M-RoPE sections
+/// `[24, 20, 20, 0]`. Note: Qwen3 deliberately has `n_embd_head != n_embd /
+/// n_head` (here `32 * 128 = 4096 != 2560`) — there is an explicit output
+/// projection that compresses back. Verified end-to-end 2026-10-01 (see
+/// `tests/qwen3_vl_4b.rs`).
+const KNOWN_QWEN3VL_4B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 2560,
+    n_layer: 36,
+    n_head: 32,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 9728,
     n_ctx: 262_144,
     norm_eps_bits: 1e-6_f32.to_bits(),
     freq_base_bits: 5_000_000_f32.to_bits(),
@@ -884,6 +906,8 @@ pub(crate) fn check_qwen3_allowed_dimensions(
     };
     if matches(allowed)
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_2B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_2B_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
     {
         Ok(())
     } else {

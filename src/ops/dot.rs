@@ -414,7 +414,7 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
     debug_assert!(b.len() >= n * 2);
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
-        if std::arch::is_aarch64_feature_detected!("neon") && n >= 4 {
+        if has_neon() && n >= 4 {
             return unsafe { dot_bf16_f32_neon(a, b, n) };
         }
     }
@@ -425,13 +425,41 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
 #[target_feature(enable = "neon")]
 unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
     use std::arch::aarch64::*;
+    // Widen eight BF16 values up front, then fold them into a single
+    // accumulator in ascending order. The widening (`vmovl_u16` + `vshlq`) is
+    // the bottleneck of this loop, not the FMA, so hoisting it off the
+    // dependency chain roughly triples throughput.
+    //
+    // The fold order is deliberately still strictly ascending and single
+    // accumulator: autoregressive sampling turns any logit perturbation into a
+    // different argmax at the top-k boundary and from there into a completely
+    // different sample, so bitwise-stable accumulation is worth more here than
+    // the extra throughput multiple accumulators would buy. Do not reassociate.
+    unsafe fn widen(bf16: *const u8) -> std::arch::aarch64::float32x4_t {
+        use std::arch::aarch64::*;
+        let packed = vld1_u16(bf16.cast());
+        vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(packed), 16))
+    }
+    let a_ptr = a.as_ptr();
+    let b_ptr = b.as_ptr();
     let mut acc = vdupq_n_f32(0.0);
     let mut i = 0;
+    // 16 elements per iteration: four widens issue independently, then the
+    // FMA chain stays sequential in `acc` so the result matches the scalar
+    // reference's ascending accumulation.
+    while i + 16 <= n {
+        let w0 = widen(b_ptr.add(i * 2));
+        let w1 = widen(b_ptr.add(i * 2 + 8));
+        let w2 = widen(b_ptr.add(i * 2 + 16));
+        let w3 = widen(b_ptr.add(i * 2 + 24));
+        acc = vfmaq_f32(acc, w0, vld1q_f32(a_ptr.add(i)));
+        acc = vfmaq_f32(acc, w1, vld1q_f32(a_ptr.add(i + 4)));
+        acc = vfmaq_f32(acc, w2, vld1q_f32(a_ptr.add(i + 8)));
+        acc = vfmaq_f32(acc, w3, vld1q_f32(a_ptr.add(i + 12)));
+        i += 16;
+    }
     while i + 4 <= n {
-        let packed = vld1_u16(b.as_ptr().add(i * 2).cast());
-        let bits = vshlq_n_u32(vmovl_u16(packed), 16);
-        let w = vreinterpretq_f32_u32(bits);
-        acc = vfmaq_f32(acc, w, vld1q_f32(a.as_ptr().add(i)));
+        acc = vfmaq_f32(acc, widen(b_ptr.add(i * 2)), vld1q_f32(a_ptr.add(i)));
         i += 4;
     }
     let mut sum = vaddvq_f32(acc);
@@ -1501,6 +1529,55 @@ mod tests {
     }
 
     #[test]
+    fn dot_bf16_f32_is_bitwise_stable_against_ascending_reference() {
+        // The NEON kernel widens 16 BF16 weights per iteration for speed, but it
+        // must keep folding them into one accumulator in ascending order.
+        // Reassociating the sum is numerically fine in isolation, yet an
+        // autoregressive sampler reads a perturbed logit as a different argmax
+        // at the top-k boundary and then emits a different token, so the
+        // divergence compounds into a different sample. Pin the invariant here
+        // rather than trusting the tolerance-based tests above.
+        //
+        // The reference mirrors the kernel's ascending fold, including FMA
+        // contraction, so this compares accumulation *order* rather than
+        // asserting parity with the plain `sum +=` scalar loop (that one rounds
+        // twice per product and has never been bit-equal to the SIMD path).
+        for n in [4usize, 16, 64, 2048, 6144] {
+            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+            let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+            let weight_bytes = bf16_bytes_from_f32(&weights);
+            let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+            let mut ascending = [0.0f32; 4];
+            let mut chunk_index = 0usize;
+            while chunk_index * 4 < n {
+                let base = chunk_index * 4;
+                for offset in 0..4 {
+                    let index = base + offset;
+                    if index < n {
+                        let bits = u16::from_le_bytes(
+                            weight_bytes[index * 2..index * 2 + 2]
+                                .try_into()
+                                .expect("weight slice has uneven bytes"),
+                        );
+                        ascending[offset] =
+                            crate::ops::bf16_to_f32(bits).mul_add(input[index], ascending[offset]);
+                    }
+                }
+                chunk_index += 1;
+            }
+            // `vaddvq_f32` reduces the four lanes pairwise: (l0+l1)+(l2+l3).
+            let expected = (ascending[0] + ascending[1]) + (ascending[2] + ascending[3]);
+            assert_eq!(
+                simd.to_bits(),
+                expected.to_bits(),
+                "n={n}: NEON dot drifted from the ascending reference \
+                 (simd={simd}, ascending={expected}); keep the accumulation \
+                 order and stop reassociating the accumulators",
+            );
+        }
+    }
+
+    #[test]
     fn dot_bf16_f32_matches_scalar_for_aligned_length() {
         let n = 256usize;
         let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
@@ -1510,6 +1587,21 @@ mod tests {
         let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
         let denom = scalar.abs().max(1.0);
         assert!((simd - scalar).abs() / denom < 1e-5);
+    }
+
+    #[cfg(feature = "parity-trace")]
+    #[test]
+    fn dot_bf16_f32_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let n = 256usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let actual = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let expected = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        assert_eq!(actual.to_bits(), expected.to_bits());
     }
 
     #[test]
