@@ -11,7 +11,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{EncodeOptions, WPMTokenizer};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
-    embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm_nrot, softmax_inplace,
+    dot_f32, embedding_lookup, gelu_ggml_f16_inplace, layer_norm, rope_norm_nrot, softmax_inplace,
 };
 use std::sync::Arc;
 
@@ -179,7 +179,7 @@ fn silu_inplace(values: &mut [f32]) {
 }
 
 fn l2_normalize(values: &mut [f32]) -> Result<(), String> {
-    let sum: f64 = values.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+    let sum: f64 = values.iter().map(|v| f64::from(*v * *v)).sum();
     if !sum.is_finite() || sum <= 0.0 {
         return Err("embedding has zero or non-finite norm".into());
     }
@@ -396,6 +396,10 @@ pub fn run_embedding_tokens(
     let pool = Arc::new(ComputePool::new(n_threads));
 
     let n_tokens = token_ids.len();
+    #[cfg(feature = "parity-trace")]
+    if crate::parity_trace::enabled("embedding.tokens") {
+        crate::parity_trace::token_ids("embedding.tokens", token_ids).map_err(|e| e.to_string())?;
+    }
     let mut hidden = vec![0.0f32; n_tokens * n_embd];
 
     // ---- embeddings: token (+ segment row 0 for jina) (+ abs pos for bert)
@@ -437,6 +441,7 @@ pub fn run_embedding_tokens(
         }
     }
 
+    trace("bert.embedding", None, &[n_tokens, n_embd], &hidden)?;
     // ---- embedding LayerNorm (`bert.cpp:92`, `LLM_NORM` with bias)
     let mut normed = vec![0.0f32; n_embd];
     for row in hidden.chunks_exact_mut(n_embd) {
@@ -449,6 +454,7 @@ pub fn run_embedding_tokens(
         );
         row.copy_from_slice(&normed);
     }
+    trace("bert.embedding_norm", None, &[n_tokens, n_embd], &hidden)?;
 
     let mut qkv_buf = vec![0.0f32; n_tokens * (n_embd_q + 2 * n_embd_gqa)];
     // Fused QKV width: Q + K + V concatenated along the output dim.
@@ -474,19 +480,10 @@ pub fn run_embedding_tokens(
     // `n_tokens * n_head * n_layer` times — 4608 allocations for a 32-token
     // bge-m3 prompt — for a buffer that depends on none of the three.
     let mut scores = vec![0.0f32; n_tokens];
-    // Snapshot of `hidden` at the top of each layer (`bert.cpp:151`'s `inpL`).
-    // Same allocation-once discipline: `hidden.clone()` per layer was
-    // `n_layer` allocations plus copies that are still required either way.
-    let mut residual = vec![0.0f32; n_tokens * n_embd];
+    let mut value_column = vec![0.0f32; n_tokens];
 
     for layer in 0..n_layer {
         let lw = &weights.layers[layer];
-        // `bert.cpp:141` — the layer input is re-added after attention and
-        // again after the FFN (residual re-add, not a pre-norm sandwich). The
-        // snapshot itself is still needed every layer; only its allocation
-        // moved out of the loop.
-        residual.copy_from_slice(&hidden);
-
         // 1. Q / K / V with biases. Fused `attn_qkv` for nomic-bert, three
         //    separate projections for the others. `bert.cpp:120-133` ropes Q
         //    and K only for NOMIC_BERT (and its MoE sibling / jina-bert-v3);
@@ -578,6 +575,21 @@ pub fn run_embedding_tokens(
             }
         }
 
+        #[cfg(feature = "parity-trace")]
+        for (name, offset, heads, width) in [
+            ("bert.q", 0, n_head, head_k),
+            ("bert.k", n_embd_q, n_head_kv, head_k),
+            ("bert.v", n_embd_q + n_embd_gqa, n_head_kv, head_v),
+        ] {
+            if crate::parity_trace::enabled(name) {
+                let values: Vec<f32> = qkv_buf
+                    .chunks_exact(qkv_width)
+                    .flat_map(|row| row[offset..offset + heads * width].iter().copied())
+                    .collect();
+                trace(name, Some(layer), &[n_tokens, heads, width], &values)?;
+            }
+        }
+
         // 2. bidirectional attention with the ALiBi / zero bias. The ggml
         //    mask is `-|p0-p1|` (or 0 without ALiBi) and never masks a key
         //    inside the same sequence, so no key is hidden.
@@ -590,11 +602,11 @@ pub fn run_embedding_tokens(
                 for s in 0..n_tokens {
                     let q_row = &qkv_buf[t * qkv_width..t * qkv_width + n_embd_q];
                     let k_row = &qkv_buf[s * qkv_width + n_embd_q..s * qkv_width + qkv_width];
-                    let dot: f32 = q_row[q_off..q_off + head_k]
-                        .iter()
-                        .zip(&k_row[kv_h * head_v..kv_h * head_v + head_k])
-                        .map(|(a, b)| a * b)
-                        .sum();
+                    let dot = dot_f32(
+                        &q_row[q_off..q_off + head_k],
+                        &k_row[kv_h * head_v..kv_h * head_v + head_k],
+                        head_k,
+                    );
                     let bias = if cfg.variant.uses_alibi() {
                         alibi_bias(slopes[h], t, s)
                     } else {
@@ -604,12 +616,11 @@ pub fn run_embedding_tokens(
                 }
                 softmax_inplace(&mut scores);
                 for d in 0..head_v {
-                    let mut acc = 0.0f32;
-                    for s in 0..n_tokens {
+                    for (s, value) in value_column.iter_mut().enumerate() {
                         let v_off = n_embd_q + n_embd_gqa + kv_h * head_v + d;
-                        acc += qkv_buf[s * qkv_width + v_off] * scores[s];
+                        *value = qkv_buf[s * qkv_width + v_off];
                     }
-                    attn_row[out_base + d] = acc;
+                    attn_row[out_base + d] = dot_f32(&value_column, &scores, n_tokens);
                 }
             }
         }
@@ -628,15 +639,17 @@ pub fn run_embedding_tokens(
             );
             lw.wo_bias.add_to(proj);
         }
+        trace(
+            "bert.attention",
+            Some(layer),
+            &[n_tokens, n_embd],
+            &attn_proj,
+        )?;
         for t in 0..n_tokens {
             let x = &mut hidden[t * n_embd..(t + 1) * n_embd];
-            // `bert.cpp:151` — `cur = ggml_add(cur, inpL)` where `cur` is the
-            // attention *output projection* and `inpL` the layer input. The
-            // projected value has to be part of the sum; adding only the
-            // residual makes every layer an identity map through `inpL`, which
-            // silently drops the attention from the stack.
+            // The layer input is still in `x`; add the attention projection once.
             for i in 0..n_embd {
-                x[i] += attn_proj[t * n_embd + i] + residual[t * n_embd + i];
+                x[i] = attn_proj[t * n_embd + i] + x[i];
             }
             // `bert.cpp:154` — attention output LayerNorm. `x` is reborrowed
             // as `&[f32]` for the read; the write goes to `normed`.
@@ -650,6 +663,7 @@ pub fn run_embedding_tokens(
             x.copy_from_slice(&normed);
         }
 
+        trace("bert.ffn_input", Some(layer), &[n_tokens, n_embd], &hidden)?;
         // 4. FFN: GELU/GEGLU/SwiGLU dense, or 8x top-2 MoE for `nomic-bert-moe` MoE
         //    layers. The MoE branch mirrors `build_moe_ffn`
         //    (`llama-graph.cpp:2002`) reduced to scalar batches — router
@@ -890,23 +904,25 @@ pub fn run_embedding_tokens(
                 x.copy_from_slice(&normed);
             }
         }
+        trace(
+            "bert.layer_output",
+            Some(layer),
+            &[n_tokens, n_embd],
+            &hidden,
+        )?;
     }
 
     // ---- pooling, then L2 (`common.cpp:1893`, `embd_normalize = 2`)
     let mut pooled = vec![0.0f32; n_embd];
     match cfg.pooling_type {
         1 => {
-            // Mean over every token, specials included.
-            // `llm_graph_input_mean::set_input` (`llama-graph.cpp:250-278`)
-            // gives each token weight 1/n_tokens.
-            for row in hidden.chunks_exact(n_embd) {
-                for (slot, value) in pooled.iter_mut().zip(row) {
-                    *slot += *value;
-                }
-            }
+            // ggml multiplies each token by 1/n_tokens before its F64 dot reduction.
             let inv_tokens = 1.0f32 / n_tokens as f32;
-            for value in pooled.iter_mut() {
-                *value *= inv_tokens;
+            for (dim, value) in pooled.iter_mut().enumerate() {
+                *value = hidden
+                    .chunks_exact(n_embd)
+                    .map(|row| f64::from(row[dim] * inv_tokens))
+                    .sum::<f64>() as f32;
             }
         }
         2 => {
@@ -930,8 +946,19 @@ pub fn run_embedding_tokens(
         }
         other => return Err(format!("unsupported pooling_type {other}")),
     }
+    trace("embedding.pooled", None, &[n_embd], &pooled)?;
     l2_normalize(&mut pooled)?;
+    trace("embedding.final", None, &[n_embd], &pooled)?;
     Ok(pooled)
+}
+
+fn trace(name: &str, layer: Option<usize>, shape: &[usize], values: &[f32]) -> Result<(), String> {
+    #[cfg(feature = "parity-trace")]
+    if crate::parity_trace::enabled(name) {
+        crate::parity_trace::checkpoint(name, layer, shape, values).map_err(|e| e.to_string())?;
+    }
+    let _ = (name, layer, shape, values);
+    Ok(())
 }
 
 pub fn print_embedding(pooled: &[f32], output: EmbeddingOutput) {
