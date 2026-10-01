@@ -1010,3 +1010,46 @@ fn per_row_and_direct_kernel_agree_for_one_row() {
     println!("matmul vs direct kernel: max|diff|={} at {}", worst.0, worst.1);
     assert_eq!(worst.0.to_bits(), 0.0f32.to_bits(), "per-row matmul and direct kernel disagree");
 }
+
+/// The cached RoPE table must produce exactly what the uncached per-call
+/// computation produced, for every position a generation can reach. The cache
+/// only skips recomputation, so this is a pure equality check against the
+/// original code path.
+#[test]
+fn cached_rope_matches_uncached_computation() {
+    fn draw(state: &mut u32, divisor: f32) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        half::bf16::from_f32((((*state >> 8) & 0xffff) as i32 - 32768) as f32 / divisor).to_f32()
+    }
+    let head_dim = 128usize;
+    let base = 1_000_000.0f32;
+    let mut state = 606u32;
+    let values: Vec<f32> = (0..head_dim).map(|_| draw(&mut state, 512.0)).collect();
+    for position in [0usize, 1, 2, 7, 63, 64, 511, 512, 1000] {
+        let mut cached = values.clone();
+        super::ar::rope(&mut cached, position, head_dim, base);
+
+        // Exactly what the original implementation did on every call.
+        let (mut cos, mut sin) = crate::ops::rope::rope_sin_cos_sleef_table_with_threads(
+            &[position],
+            head_dim,
+            base,
+            1,
+        );
+        for value in cos.iter_mut().chain(&mut sin) {
+            *value = half::bf16::from_f32(*value).to_f32();
+        }
+        let mut uncached = values.clone();
+        crate::ops::rope::rope_neox_inplace_with_table(&mut uncached, head_dim, &cos, &sin);
+
+        for (index, (a, b)) in cached.iter().zip(&uncached).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "position {position} dim {index}: cached {a} vs uncached {b}"
+            );
+        }
+    }
+}

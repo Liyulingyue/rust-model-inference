@@ -1497,13 +1497,78 @@ pub(super) fn rms_norm_heads(values: &mut [f32], weight: &[f32], head_dim: usize
     }
 }
 
-pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f32) {
-    let (mut cos, mut sin) =
-        crate::ops::rope::rope_sin_cos_sleef_table_with_threads(&[position], head_dim, base, 1);
-    for value in cos.iter_mut().chain(&mut sin) {
-        *value = half::bf16::from_f32(*value).to_f32();
+/// Cached sin/cos tables for a single (head_dim, base) pair, extended lazily.
+///
+/// `rope` is called twice per layer per token and each call used to rebuild the
+/// whole table from scratch: `head_dim / 2` `powf` calls plus `head_dim` scalar
+/// SLEEF sin/cos evaluations and two heap allocations. Positions only ever grow
+/// during a generation, so keeping the tables and appending is exactly equivalent
+/// -- every cached entry is the value the original call would have produced,
+/// since the values are still computed by the same function.
+struct RopeTable {
+    head_dim: usize,
+    base: f32,
+    cos: Vec<f32>,
+    sin: Vec<f32>,
+}
+
+impl RopeTable {
+    fn new(head_dim: usize, base: f32) -> Self {
+        Self {
+            head_dim,
+            base,
+            cos: Vec::new(),
+            sin: Vec::new(),
+        }
     }
-    crate::ops::rope::rope_neox_inplace_with_table(values, head_dim, &cos, &sin);
+
+    /// Ensure rows `0..=position` are present and return their range.
+    fn range(&mut self, position: usize, head_dim: usize, base: f32) -> (usize, usize) {
+        if self.head_dim != head_dim || self.base != base {
+            *self = Self::new(head_dim, base);
+        }
+        let stride = self.head_dim;
+        let have = self.cos.len() / stride.max(1);
+        if position < have {
+            return (position * stride, (position + 1) * stride);
+        }
+        // Grow to the requested position in one batch so a long generation does
+        // not re-extend on every token.
+        let want = position + 1;
+        let (mut cos, mut sin) = crate::ops::rope::rope_sin_cos_sleef_table_with_threads(
+            &(have..want).collect::<Vec<usize>>(),
+            self.head_dim,
+            self.base,
+            1,
+        );
+        // The YuE2 contract rounds the table through bf16 before the rotation.
+        for value in cos.iter_mut().chain(&mut sin) {
+            *value = half::bf16::from_f32(*value).to_f32();
+        }
+        self.cos.append(&mut cos);
+        self.sin.append(&mut sin);
+        (position * stride, (position + 1) * stride)
+    }
+}
+
+pub(super) fn rope(values: &mut [f32], position: usize, head_dim: usize, base: f32) {
+    use std::sync::{Mutex, OnceLock};
+    static TABLE: OnceLock<Mutex<RopeTable>> = OnceLock::new();
+    let cell = TABLE.get_or_init(|| Mutex::new(RopeTable::new(head_dim, base)));
+    // Hold the lock for the whole call: the rotation reads the table slices
+    // while this guard owns them, so a concurrent `rope` on another thread
+    // cannot reallocate the vectors out from under the reader.
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // `range` is a no-op for a matching (head_dim, base); a different
+    // architecture in the same process rebuilds instead of silently returning
+    // a table for the wrong width or base.
+    let (start, end) = guard.range(position, head_dim, base);
+    crate::ops::rope::rope_neox_inplace_with_table(
+        values,
+        head_dim,
+        &guard.cos[start..end],
+        &guard.sin[start..end],
+    );
 }
 pub(super) fn dot(left: &[f32], right: &[f32]) -> f32 {
     crate::ops::dot_f32(left, right, left.len())
