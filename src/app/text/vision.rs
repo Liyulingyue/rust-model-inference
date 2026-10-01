@@ -28,8 +28,13 @@ pub(crate) fn encode_qwen35_image_dynamic(
     n_threads_arg: usize,
 ) -> Result<(VisionGrid, Vec<f32>), String> {
     let start = Instant::now();
-    let mut encoder = VisionEncoder::from_source(mmproj_source)
-        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder::from_source(
+        mmproj_source,
+        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+            n_threads_arg.max(1),
+        )),
+    )
+    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
     encoder.precompute();
     eprintln!(
         "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
@@ -163,7 +168,15 @@ pub(crate) fn build_qwen3_media_positions(
     let mut grid_index = 0usize;
     while token < token_ids.len() {
         if token_ids[token] != placeholder_id {
-            positions.push([next, next, next, 0]);
+            // text token — upstream llama.cpp routes text chunks through
+            // the legacy 1D path (compat layer only sets `pos[0]`), so
+            // the H/W/E axes stay at 0 (identity under M-RoPE). Match
+            // that here: applying spurious H/W rotations by `next`
+            // (= base + max(grid_h, grid_w)) accumulates with image
+            // size and destabilises the LLM's last-position logits, so
+            // greedy argmax starts picking `<|im_end|>` at >= 256x256
+            // images. See docs/usage/qwen3.md §3 for the slice history.
+            positions.push([next, 0, 0, 0]);
             next = next.checked_add(1).ok_or("Qwen media position overflow")?;
             token += 1;
             continue;
@@ -336,8 +349,13 @@ pub(crate) fn encode_qwen3vl_image_dynamic(
         return Err("mmproj is not a Qwen3-VL (merger) projector".into());
     }
 
-    let mut encoder = VisionEncoder3vl::from_source(mmproj_source)
-        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder3vl::from_source(
+        mmproj_source,
+        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+            n_threads_arg.max(1),
+        )),
+    )
+    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
     encoder.precompute();
     let original_w =
         usize::try_from(image.width()).map_err(|_| "image width does not fit usize")?;

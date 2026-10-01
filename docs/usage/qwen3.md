@@ -65,6 +65,37 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+`Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
+在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
+LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
+n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
+
+**现状（2026-10-01 修通后）**：
+
+- 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
+  都能产出准确的图像描述（"This image is a simple, abstract
+  composition of two overlapping circular shapes..."）。
+- **修复**：multimodal 流中 text token 的 M-RoPE 位置从
+  `[next, next, next, 0]` 改成 `[next, 0, 0, 0]` —— 即只把 T 轴当作
+  真正的 1D 位置，H/W/E 轴保持 0 (M-RoPE identity)。
+  改前 256×256 起 LLM 在最后位置预测 `<|im_end|>` 文本为空；改后 ≥256 image
+  文本生成正常。
+- 根因：upstream llama.cpp (`tools/mtmd/mtmd-helper-common.h` 的
+  `set_position_normal`) 走的是 1D legacy path，compat layer 只填
+  `token.pos[0]`，H/W/E 留 0；而我们的 `build_qwen3_media_positions`
+  原本把所有 4 个轴都填 `next`，H/W 多出来的 rotation 会在大 image grid
+  (`next = base + max(grid_h, grid_w) ≥ 12` 时) 累积，导致 LLM 在
+  最后位置 logits 偏向 `<|im_end|>` / ``。
+- **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
+  静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
+  这个偏置不明显，输出正常。
+- 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
+
+限制：
+
+- 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
+- 音频必须是 16 kHz PCM16 WAV。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
