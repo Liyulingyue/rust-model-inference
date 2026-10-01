@@ -1029,13 +1029,13 @@ unsafe fn value_reduce_block2_neon(
     while dim + 4 <= head_width {
         let mut acc = vdupq_n_f32(0.0);
         for token in 0..n_tokens {
-            let (values, base) = if token < n_first {
-                (values_first, base_first)
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
             } else {
-                (values_second, base_second)
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
             };
-            let local = if token < n_first { token } else { token - n_first };
-            let start = base + local * row_stride + head_offset + dim;
             let weight = vdupq_n_f32(scores[token]);
             let v = vld1q_f32(values.as_ptr().add(start));
             acc = vaddq_f32(acc, vmulq_f32(weight, v));
@@ -1047,13 +1047,13 @@ unsafe fn value_reduce_block2_neon(
     while dim < head_width {
         let mut sum = 0.0f32;
         for token in 0..n_tokens {
-            let (values, base) = if token < n_first {
-                (values_first, base_first)
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
             } else {
-                (values_second, base_second)
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
             };
-            let local = if token < n_first { token } else { token - n_first };
-            let start = base + local * row_stride + head_offset + dim;
             sum += scores[token] * *values.get_unchecked(start);
         }
         *output.get_unchecked_mut(dim) += sum;
@@ -1078,13 +1078,14 @@ fn value_reduce_block2_scalar(
     for dim in 0..head_width {
         let mut sum = 0.0f32;
         for token in 0..n_tokens {
-            let (values, base) = if token < n_first {
-                (values_first, base_first)
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
             } else {
-                (values_second, base_second)
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
             };
-            let local = if token < n_first { token } else { token - n_first };
-            sum += scores[token] * values[base + local * row_stride + head_offset + dim];
+            sum += scores[token] * values[start];
         }
         output[dim] += sum;
     }
@@ -1452,12 +1453,36 @@ fn hybrid_attention(
                     scores_row[prefix_len + position] = dot(q_row, key) * scale;
                 }
 
-                // Streaming softmax keeps the online max/sum rescale, which is
-                // what the torch reference does, so the arithmetic order is
-                // unchanged; only the inner reduction is vectorized.
                 let out = unsafe {
                     std::slice::from_raw_parts_mut(output_ptr.add(row * q_width + head * head_dim), head_dim)
                 };
+                if scores_len <= 512 {
+                    // The short path is not just a blocked path with one block:
+                    // `softmax` rounds every exponential to bf16 while
+                    // `flash_exp_sum` keeps full f32, so the two disagree and
+                    // the reference picks `softmax` here. Keep the branch.
+                    let inverse_sum = softmax(&mut scores_row[..scores_len]);
+                    value_reduce_block2(
+                        prefix_v,
+                        0,
+                        nar_v,
+                        0,
+                        prefix_len,
+                        &scores_row[..scores_len],
+                        out,
+                        kv_width,
+                        kv_offset,
+                        scores_len,
+                        head_dim,
+                    );
+                    for value in out.iter_mut() {
+                        *value = bf16(*value * inverse_sum);
+                    }
+                    continue;
+                }
+                // Streaming softmax keeps the online max/sum rescale, which is
+                // what the torch reference does, so the arithmetic order is
+                // unchanged; only the inner reduction is vectorized.
                 out.fill(0.0);
                 let mut running_max = f32::NEG_INFINITY;
                 let mut running_sum = 0.0f32;
@@ -1480,9 +1505,9 @@ fn hybrid_attention(
                     let n_nar = (end - start) - n_prefix;
                     value_reduce_block2(
                         prefix_v,
-                        start * kv_width,
+                        start,
                         nar_v,
-                        0,
+                        start.saturating_sub(prefix_len),
                         n_prefix,
                         block,
                         out,

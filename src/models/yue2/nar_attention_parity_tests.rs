@@ -246,3 +246,124 @@ fn optimized_attention_matches_legacy_bitwise() {
         );
     }
 }
+
+/// Production-scale parity. The small fixtures pass, so if this one fails the
+/// divergence depends on the real prefix/latent split.
+#[test]
+fn optimized_attention_matches_legacy_at_production_scale() {
+    let config = config();
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let pool = crate::core::thread_pool::ComputePool::new(8);
+
+    // What a real 24 s render does: 600 latent frames against a 1758-token AR
+    // prefix, i.e. total_len 2358 so several 512-wide KV blocks straddle the
+    // prefix/latent boundary.
+    for (prefix_rows, nar_rows) in [(1758usize, 600usize), (1308, 256), (600, 40), (500, 12)] {
+        let mut state = 24680u32;
+        let q = queries(nar_rows, &config);
+        let nar_k: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect();
+        let nar_v: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
+        let prefix = (
+            (0..prefix_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect::<Vec<f32>>(),
+            (0..prefix_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect::<Vec<f32>>(),
+        );
+        let mut optimized = vec![0.0f32; nar_rows * q_width];
+        super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
+        let mut legacy = vec![0.0f32; nar_rows * q_width];
+        super::hybrid_attention_legacy(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut legacy);
+        let mut worst = (0.0f32, 0usize);
+        for (index, (a, b)) in optimized.iter().zip(&legacy).enumerate() {
+            let diff = (a - b).abs();
+            if diff > worst.0 {
+                worst = (diff, index);
+            }
+        }
+        assert_eq!(
+            worst.0.to_bits(),
+            0.0f32.to_bits(),
+            "prefix={prefix_rows} nar={nar_rows} total={} (blocks of 512): \\
+             max|diff|={} at element {}",
+            prefix_rows + nar_rows,
+            worst.0,
+            worst.1,
+        );
+    }
+}
+
+/// Narrow down which prefix/latent split starts diverging, and whether the
+/// split point relative to the 512-wide KV block boundary is what matters.
+#[test]
+fn production_scale_divergence_is_a_boundary_effect() {
+    let config = config();
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let pool = crate::core::thread_pool::ComputePool::new(8);
+    let nar_rows = 8usize;
+    // Walk the prefix length across the 512 block boundaries.
+    for prefix_rows in [
+        8usize, 100, 500, 503, 504, 505, 506, 507, 508, 509, 510, 511, 512, 513, 514, 515,
+        520, 600, 1024, 1536,
+    ] {
+        let mut state = 24680u32;
+        let q = queries(nar_rows, &config);
+        let nar_k: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect();
+        let nar_v: Vec<f32> = (0..nar_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
+        let prefix = (
+            (0..prefix_rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect::<Vec<f32>>(),
+            (0..prefix_rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect::<Vec<f32>>(),
+        );
+        let mut optimized = vec![0.0f32; nar_rows * q_width];
+        super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
+        let mut legacy = vec![0.0f32; nar_rows * q_width];
+        super::hybrid_attention_legacy(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut legacy);
+        let worst = optimized
+            .iter()
+            .zip(&legacy)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let remainder = (prefix_rows + nar_rows) % 512;
+        println!(
+            "prefix={prefix_rows:5} total={:5} total%512={remainder:4} max|diff|={worst:e}",
+            prefix_rows + nar_rows
+        );
+    }
+}
+
+/// `causal_prefix_attention` bit-exactness against the legacy kernel. The
+/// prefix KV it produces is what every NAR velocity attends to, so a
+/// discrepancy here propagates into the latents even when `hybrid_attention`
+/// itself is exact. Only thread-stability was covered before.
+#[test]
+fn optimized_causal_attention_matches_legacy_bitwise() {
+    let config = config();
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let pool = crate::core::thread_pool::ComputePool::new(8);
+    let mut state = 777u32;
+    // Cross both the row<512 fast path and the blocked path, and land on the
+    // same 512-wide block boundaries a 1758-token AR prefix would.
+    for rows in [8usize, 100, 511, 512, 513, 700, 1024, 1758] {
+        let q: Vec<f32> = (0..rows * q_width).map(|_| draw(&mut state, 8192.0)).collect();
+        let k: Vec<f32> = (0..rows * kv_width).map(|_| draw(&mut state, 8192.0)).collect();
+        let v: Vec<f32> = (0..rows * kv_width).map(|_| draw(&mut state, 16384.0)).collect();
+        let mut optimized = vec![0.0f32; rows * q_width];
+        super::causal_prefix_attention(&config, &pool, &q, &k, &v, &mut optimized);
+        let mut legacy = vec![0.0f32; rows * q_width];
+        super::causal_prefix_attention_legacy(&config, &pool, &q, &k, &v, &mut legacy);
+        let mut worst = (0.0f32, 0usize);
+        for (index, (a, b)) in optimized.iter().zip(&legacy).enumerate() {
+            let d = (a - b).abs();
+            if d > worst.0 {
+                worst = (d, index);
+            }
+        }
+        assert_eq!(
+            worst.0.to_bits(),
+            0.0f32.to_bits(),
+            "causal rows={rows}: max|diff|={} at element {}",
+            worst.0,
+            worst.1
+        );
+    }
+}

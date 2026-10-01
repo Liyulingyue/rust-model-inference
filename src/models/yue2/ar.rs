@@ -42,17 +42,40 @@ const MATRIX_TYPES: [GGMLType; 5] = [
 /// One instance is owned by the NAR session, so the Q8_0 activation buffer is
 /// allocated once per generation instead of once per projection per step.
 pub(super) struct RowScratch {
-    q8: Vec<u8>,
-    scales: Vec<f32>,
+    /// One Q8_0 activation buffer per pool thread. Sharing a single buffer
+    /// across threads is a data race: a thread quantizes its row and then
+    /// consumes the payload, and another thread can overwrite it in between.
+    slots: Vec<(Vec<u8>, Vec<f32>)>,
+    threads: usize,
 }
 
 impl RowScratch {
     pub(super) fn new() -> Self {
         Self {
-            q8: Vec::new(),
-            scales: Vec::new(),
+            slots: Vec::new(),
+            threads: 0,
         }
     }
+
+    /// Ensure at least `threads` slots, each large enough for the widest input
+    /// seen so far. The NAR reuses one scratch across matrices of differing
+    /// `n_in` (2048 / 1024 / 6144), so the buffers must grow, not just fill in.
+    fn reserve_threads(&mut self, threads: usize, q8_len: usize, scale_len: usize) {
+        self.threads = threads;
+        if self.slots.len() < threads {
+            self.slots
+                .resize_with(threads, || (vec![0u8; q8_len], vec![0.0f32; scale_len]));
+        }
+        for (q8, scales) in &mut self.slots {
+            if q8.len() < q8_len {
+                q8.resize(q8_len, 0);
+            }
+            if scales.len() < scale_len {
+                scales.resize(scale_len, 0.0);
+            }
+        }
+    }
+
 }
 
 impl YuE2Weight {
@@ -96,6 +119,32 @@ impl YuE2Weight {
             n_in,
             n_out,
         })
+    }
+
+    /// Test-only accessor for the underlying kernel, so parity tests can call
+    /// the same kernel entry the batched path uses.
+    #[cfg(test)]
+    pub(super) fn kernel(&self) -> &crate::ops::kernel::Weight<'static> {
+        &self.fast
+    }
+
+    /// Test-only constructor for a quantized weight, so parity tests can
+    /// exercise the block-quantized `matmul_rows` path rather than the BF16 one.
+    #[cfg(test)]
+    pub(super) fn from_quantized_bytes(
+        bytes: &'static [u8],
+        ggml_type: crate::core::tensor::GGMLType,
+        n_in: usize,
+        n_out: usize,
+    ) -> Self {
+        Self {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes, ggml_type, n_in, n_out,
+            )),
+            bf16: None,
+            n_in,
+            n_out,
+        }
     }
 
     #[cfg(test)]
@@ -213,31 +262,36 @@ impl YuE2Weight {
             return Ok(());
         }
 
-        // One Q8_0 staging buffer for the whole batch, plus the per-thread slice
-        // ranges so a thread never writes into another thread's activation.
+        // Per-thread Q8_0 staging. This MUST be one buffer per pool thread: a
+        // thread quantizes its activation and then immediately consumes it, so a
+        // shared buffer lets a second thread overwrite the payload in between and
+        // silently produces a different result (observed as ~12% error).
         let q8_stride = self.n_in;
         let scale_stride = self.n_in.div_ceil(32);
-        if scratch.q8.len() < q8_stride {
-            scratch.q8.resize(q8_stride, 0);
-            scratch.scales.resize(scale_stride, 0.0);
-        }
+        scratch.reserve_threads(pool.n_threads().max(1), q8_stride, scale_stride);
         let weight = &self.fast;
         let n_in = self.n_in;
         let n_out = self.n_out;
         let input_ptr = input.as_ptr();
         let output_ptr = output.as_mut_ptr();
-        let q8_ptr = scratch.q8.as_mut_ptr();
-        let scale_ptr = scratch.scales.as_mut_ptr();
         let bias_ptr = bias.map(|bias| bias.as_ptr());
+        let slots_ptr = scratch.slots.as_mut_ptr();
+        let slot_count = scratch.slots.len();
         pool.compute(|ith, nth| {
             let (start, end) = crate::ops::kernel::bf16::BF16Kernel::row_range(n_rows, ith, nth);
+            if start == end {
+                return;
+            }
+            // SAFETY: slot `ith` belongs to exactly this pool thread, and
+            // `start..end` is disjoint from every other thread's rows.
+            let (q8, scales) = unsafe {
+                let (q8, scales) = &mut *slots_ptr.add(ith.min(slot_count - 1));
+                (q8.as_mut_slice(), scales.as_mut_slice())
+            };
             for row in start..end {
                 let activation = unsafe {
                     std::slice::from_raw_parts(input_ptr.add(row * n_in), n_in)
                 };
-                let q8 = unsafe { std::slice::from_raw_parts_mut(q8_ptr, q8_stride) };
-                let scales =
-                    unsafe { std::slice::from_raw_parts_mut(scale_ptr, scale_stride) };
                 crate::ops::quantize_q8_0_into(activation, n_in, q8, scales);
                 let out = unsafe {
                     std::slice::from_raw_parts_mut(output_ptr.add(row * n_out), n_out)
