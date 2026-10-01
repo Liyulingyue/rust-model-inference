@@ -368,8 +368,15 @@ impl Qwen25OmniAudioModel {
         )?;
         apply_gelu_erf(&mut hidden)?;
 
+        let max_position = self.positions.len() / self.config.hidden;
         for token in 0..layout.post_conv_tokens {
-            let position = token % self.config.window;
+            if token >= max_position {
+                return Err(format!(
+                    "Qwen2.5-Omni audio position {} out of range (max {})",
+                    token, max_position
+                ));
+            }
+            let position = token;
             let position_row =
                 &self.positions[position * self.config.hidden..(position + 1) * self.config.hidden];
             let hidden_row =
@@ -397,7 +404,7 @@ impl Qwen25OmniAudioModel {
         let mut update = reserved_f32("Qwen2.5-Omni update", values)?;
         let mut ffn_up = reserved_f32("Qwen2.5-Omni FFN up", ffn_values)?;
         let mut ffn_down = reserved_f32("Qwen2.5-Omni FFN down", values)?;
-        let mut scores = reserved_f32("Qwen2.5-Omni scores", self.config.window)?;
+        let mut scores = reserved_f32("Qwen2.5-Omni scores", layout.post_conv_tokens)?;
         let head_dim = self.config.hidden / self.config.heads;
         for layer in &self.layers {
             layer_norm_rows(

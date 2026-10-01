@@ -28,8 +28,13 @@ pub(crate) fn encode_qwen35_image_dynamic(
     n_threads_arg: usize,
 ) -> Result<(VisionGrid, Vec<f32>), String> {
     let start = Instant::now();
-    let mut encoder = VisionEncoder::from_source(mmproj_source)
-        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder::from_source(
+        mmproj_source,
+        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+            n_threads_arg.max(1),
+        )),
+    )
+    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
     encoder.precompute();
     eprintln!(
         "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
@@ -336,8 +341,13 @@ pub(crate) fn encode_qwen3vl_image_dynamic(
         return Err("mmproj is not a Qwen3-VL (merger) projector".into());
     }
 
-    let mut encoder = VisionEncoder3vl::from_source(mmproj_source)
-        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+    let mut encoder = VisionEncoder3vl::from_source(
+        mmproj_source,
+        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+            n_threads_arg.max(1),
+        )),
+    )
+    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
     encoder.precompute();
     let original_w =
         usize::try_from(image.width()).map_err(|_| "image width does not fit usize")?;
