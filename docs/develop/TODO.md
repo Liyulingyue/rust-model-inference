@@ -833,17 +833,20 @@ pub mod capability {
 
 **2026-10-01 per-chunk oracle 实跑结果**（commit `fe4b99c` 之前 / 之后）：
 - **mel extraction**：✅ 与 llama.cpp bitwise-aligned（max abs diff 0.378 主要来自帧 2999 末尾 40 个 reflect-vs-zero 反射差异，符合预期）
-- **位置嵌入**：❌→✅ commit `5c0d1c0`（msi-new8 之前一版）发现 `token % self.config.window` bug，固定到 `token`（1500 个唯一 pos）后修好
-- **conv1d 输出**：❌ 当前 cos = 0.18 与 oracle，差值幅度~3（pre-GELU）。bias/weight/mel/layout 全部一致，怀疑是 `conv1d_same_f16` 内部 `dot_f16_f16_bytes` 或 patch 构建逻辑有精度级 bug，深入需要逐元素对照
-- **下游**：因为 conv1d 已经分歧，整条编码路径余下 N 层 transformer 输出根本没法 bitwise 对齐
-
-调试现场保留在 `/tmp/audio-fix-test/`（`our-trace-conv1.jsonl.*`）和 `/tmp/rmi-jina-audio-conv1d-oracle.f32`，
-下次继续走 conv1d patch 构造 / `dot_f16_f16_bytes_avx2` 路径定位。
+- **位置嵌入**：❌→✅ commit `1201166` 修了 `token % self.config.window` bug，固定到 `token`（1500 个唯一 pos）。见 commit message
+- **conv1d 输出**：✅ **Rust 端正确**——numpy 参考实现和 Rust `conv2_only` 在 ULP 级吻合（max abs 3.4e-3，AVX2 vs scalar 重排差），意味着 Rust 的 `conv1d_same_f16` patch 构造 + `dot_f16_f16_bytes` 实现都没问题
+- **oracle dump 不可信**：之前以为是 Rust conv1d 有大 bug（cos=0.18 with oracle），但 2026-10-01 bisect 时发现 llama.cpp 的 `inp_raw` dump 两次值不一样（v0[0]=4.92, v1[0]=1.35），且 dump 出的值和我们 mel 也对不上——说明 ggml 的 input tensor 在 `ggml_set_input` 之后 buffer 被 allocator 复用了，`ggml_backend_tensor_get` 读到的是被覆盖的脏数据。同理 `after_conv1d` dump 也不可信
+- **结论**：当前 oracle 对比无法作为 ground truth。Rust 端的 correctness 由 numpy 参考独立验证了。TODO-016 暂时挂起，等 oracle dump 机制修好后重新跑
 
 **当前不做**：
-- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构），且端到端语义验证已经覆盖了跨块拼接的功能正确性
+- 触发条件没到：jina v5 audio encoder 改动少（一次 30s 切块重构 + 一次位置嵌入修复），且端到端语义验证已经覆盖了跨块拼接的功能正确性
 - 仓库的 cargo test 已经能在没有 llama.cpp 副本的 CI 上跑出 934/19/67 baseline，oracle 失败不会阻塞
-- 触发再做：第二条等用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+- **触发再做**：
+  1. llama.cpp dump 机制修了之后（用 `ggml_backend_tensor_get_and_copy` 或者 `ggml_set_input` 后立即读），重新跑 per-chunk 对齐
+  2. 用户加新的 jina-omni 量化、或者上游 llama.cpp fork 有新 audio 相关改动需要重新对齐
+
+调试现场保留在 `/tmp/audio-fix-test/`（`our-trace-conv1.jsonl.*`、numpy 参考脚本 `conv2_only=0.054`/`-0.008` 验算过程）和 `/tmp/rmi-jina-audio-*-oracle*.f32`。
+下次继续走：先修 oracle dump（直接读 `t->data` 改用 `ggml_backend_tensor_copy` 或者改在 `set_input_f32` 之后立刻 dump），再用可信的 oracle 验证 Rust 端对齐。
 
 **实施步骤**（任一触发条件满足时）：
 1. `cd $LLAMA_DIR && git checkout b96806d` 起固定 commit
