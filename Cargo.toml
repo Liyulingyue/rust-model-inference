@@ -104,3 +104,8 @@ required-features = ["vulkan"]
 name = "vk_ops_check"
 path = "examples/vk_ops_check.rs"
 required-features = ["vulkan"]
+
+[[example]]
+name = "dit_vk_bench"
+path = "examples/dit_vk_bench.rs"
+required-features = ["vulkan"]
