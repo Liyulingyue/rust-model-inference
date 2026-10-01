@@ -345,17 +345,22 @@ pub fn run_inference(
         // `tokenizer.chat_template` to carry the model identity. Fall
         // back to that: Zephyr's template is the only llama-arch template
         // that uses `<|user|>` / `<|assistant|>` as the user-turn and
-        // generation-prompt markers.
+        // generation-prompt markers. The `arch == "llama"` gate keeps
+        // the chat-template fallback from firing on GLM-4 (`arch="glm4"`,
+        // also uses `<|user|>` / `<|assistant|>` markers per its own
+        // template); the GLM-4 branches in `llama_turn_text` /
+        // `build_prompt_tokens` handle that arch.
         let is_zephyr = source
             .metadata("general.name")
             .and_then(|v| v.to_string_val())
             .map(|s| s.to_ascii_lowercase().contains("zephyr"))
             .unwrap_or(false)
-            || source
-                .metadata("tokenizer.chat_template")
-                .and_then(|v| v.to_string_val())
-                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
-                .unwrap_or(false);
+            || (arch == "llama"
+                && source
+                    .metadata("tokenizer.chat_template")
+                    .and_then(|v| v.to_string_val())
+                    .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                    .unwrap_or(false));
 
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
@@ -411,9 +416,23 @@ pub fn run_inference(
         // expects no BOS since add_bos_token=false), so add_special=false
         // and we manually prepend BOS. For Nanbeige (base model), let the
         // tokenizer's add_bos setting handle BOS via add_special=true.
+        //
+        // GLM-4 uses GPT-2 BPE (`tokenizer.ggml.model="gpt2"`); its BOS
+        // is `<|endoftext|>` (id 151329). The chat template emits
+        // `[gMASK]<sop>` (a separate BOS-equivalent), but the model is
+        // trained with `<|endoftext|>` PRECEDING `[gMASK]<sop>`, so we
+        // need `add_special=true` to make the tokenizer prepend BOS
+        // GLM-4 uses GPT-2 BPE with `tokenizer.ggml.add_bos_token=false`
+        // (the metadata field is missing from unsloth's GGUF conversion).
+        // Its BOS is `<|endoftext|>` (id 151329), which must precede
+        // the chat template's `[gMASK]<sop>` BOS-equivalent. Setting
+        // `add_special=true` alone doesn't help (the BPETokenizer only
+        // prepends when `add_bos` is also true), so we leave
+        // `add_special=false` for GLM-4 and prepend BOS manually below
+        // (just like `k2-horizon` / `granite` / `exaone` do).
         let (add_special, parse_special) = match arch {
             "nanbeige" => (true, true),
-            "k2-horizon" | "granite" | "exaone" => (false, true),
+            "k2-horizon" | "granite" | "exaone" | "glm4" => (false, true),
             _ if is_mistral || is_zephyr => (true, true),
             _ => (false, true),
         };
@@ -427,7 +446,8 @@ pub fn run_inference(
         // The chat template starts with `{{- bos_token }}`, but MiniCPM5
         // and Granite both have `tokenizer.ggml.add_bos_token=false`, so
         // encode() does not emit BOS automatically. Prepend BOS manually
-        // to match llama.cpp.
+        // to match llama.cpp. (`add_special=true` arms above handle BOS
+        // automatically via the tokenizer and skip this prepend.)
         if !add_special {
             if let Some(bos) = tokenizer.bos_id() {
                 body.insert(0, bos);
@@ -526,6 +546,22 @@ fn llama_turn_text(
         }
         return format!("<|user|>{content}<|end|>");
     }
+    if arch == "glm4" {
+        // GLM-4 (THUDM) uses `<|user|>\n{content}` for the user turn
+        // and `<|assistant|>\n` for the generation prompt. The model's
+        // chat template emits `[gMASK]<sop>\n` exactly once at the very
+        // start of the prompt; the caller (`build_prompt_tokens_from_turns`)
+        // is responsible for prepending it before the first user turn
+        // because this helper is per-turn and carries no position state.
+        // GLM-4 tokenizer is GPT-2 BPE; `[gMASK]` (id 151331), `<sop>`
+        // (id 151333), `<|user|>` (id 151336), `<|assistant|>` (id 151337)
+        // are recognised as single special tokens via `parse_special=true`.
+        // (Ref: THUDM/glm-4-9b-chat tokenizer_config.json chat_template.)
+        if role == "assistant" {
+            return "<|assistant|>\n".to_string();
+        }
+        return format!("<|user|>\n{content}");
+    }
     if is_mistral {
         // Mistral-Instruct uses `[INST] {user} [/INST]` for the user turn
         // and an empty assistant turn (generation begins right after
@@ -572,6 +608,11 @@ fn llama_supports_multiturn(
     if is_mistral || is_zephyr {
         return true;
     }
+    // GLM-4 repeats `<|user|>\n{content}` / `<|assistant|>\n{content}\n`
+    // blocks for each turn, so multi-turn is expressible here.
+    if arch == "glm4" {
+        return true;
+    }
     // nanbeige (ChatML template) and granite (start_of_role) do.
     // Plain llama / exaone fall back to the `user\n...assistant\n` shape,
     // which llama.cpp renders as repeated `{role}\n{content}\n` blocks, so
@@ -611,11 +652,12 @@ pub fn build_prompt_tokens_from_turns(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("zephyr"))
         .unwrap_or(false)
-        || source
-            .metadata("tokenizer.chat_template")
-            .and_then(|v| v.to_string_val())
-            .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
-            .unwrap_or(false);
+        || (arch == "llama"
+            && source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                .unwrap_or(false));
     if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5, is_mistral, is_zephyr) {
         return Err(format!(
             "multi-turn chat is unsupported for architecture {arch:?}; only a single user turn is rendered"
@@ -626,6 +668,15 @@ pub fn build_prompt_tokens_from_turns(
         .and_then(|v| v.to_string_val())
         .is_some_and(|t| t.contains(" + IM_START + "));
     let mut prompt_text = String::new();
+    // GLM-4's chat template emits the `[gMASK]<sop>` BOS-like sentinel
+    // exactly once at the start of the prompt. `llama_turn_text` is
+    // per-turn and has no position state, so prepend here. The single-turn
+    // `build_prompt_tokens` for `arch == "glm4"` emits `[gMASK]<sop>`
+    // (no trailing newline) — match that byte-for-byte so HTTP multi-turn
+    // produces the same first few tokens as the CLI.
+    if arch == "glm4" {
+        prompt_text.push_str("[gMASK]<sop>");
+    }
     for (role, content) in turns {
         prompt_text.push_str(&llama_turn_text(
             &arch,
@@ -663,6 +714,7 @@ pub fn build_prompt_tokens_from_turns(
         }
     }
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    // Multi-turn BOS handling mirrors the single-turn path.
     let add_special = arch == "nanbeige";
     let mut body = tokenizer.encode(
         &prompt_text,
@@ -2672,11 +2724,12 @@ pub fn build_prompt_tokens(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("zephyr"))
         .unwrap_or(false)
-        || source
-            .metadata("tokenizer.chat_template")
-            .and_then(|v| v.to_string_val())
-            .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
-            .unwrap_or(false);
+        || (arch == "llama"
+            && source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                .unwrap_or(false));
 
     let prompt_text = if arch == "k2-horizon" {
         format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
