@@ -55,6 +55,7 @@ enum Backend {
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
+    Gliner2Boundary(Gliner2BoundaryBackend),
 }
 
 /// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
@@ -65,6 +66,19 @@ enum Backend {
 struct Gliner2Backend {
     source: Box<dyn TensorSource>,
     tokenizer: crate::models::gliner::ModelTokenizer,
+    n_threads: usize,
+}
+
+/// GLiNER2.5 BoundaryExtractor backend: the multi-task head (document pool,
+/// pair scorer, classifier, abstention) in one DeBERTa-v3 GGUF, named by
+/// `--model` plus `--gliner2-boundary`.
+///
+/// The mapping is owned here and the model is rebuilt per request from a
+/// borrow of it, the same way the Decide backend does: `BoundaryModel` is
+/// zero-copy views over the mapping plus a settings parse, so there is nothing
+/// to cache, and no `'static` leak is needed.
+struct Gliner2BoundaryBackend {
+    source: Box<dyn TensorSource>,
     n_threads: usize,
 }
 
@@ -905,6 +919,11 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     if options.gliner2_decide {
         return Ok(Arc::new(Backend::Gliner2(build_gliner2(options)?)));
     }
+    if options.gliner2_boundary {
+        return Ok(Arc::new(Backend::Gliner2Boundary(build_gliner2_boundary(
+            options,
+        )?)));
+    }
     Ok(Arc::new(Backend::Text(build_text(options)?)))
 }
 
@@ -937,6 +956,13 @@ fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
         return Some(format!(
             "--gliner2-decide selects the GLiNER2 backend, but {reranker}; the probe wins \
              and the flag would be dropped. GLiNER2 needs a DeBERTa GGUF as --model"
+        ));
+    }
+    if options.gliner2_boundary {
+        return Some(format!(
+            "--gliner2-boundary selects the GLiNER2 boundary backend, but {reranker}; the \
+             probe wins and the flag would be dropped. It needs a boundary-variant \
+             DeBERTa GGUF as --model"
         ));
     }
     if let Some(mmproj) = &options.mmproj {
@@ -1068,6 +1094,45 @@ fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
     Ok(Gliner2Backend {
         source,
         tokenizer,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
+    })
+}
+
+fn build_gliner2_boundary(options: &CliOptions) -> Result<Gliner2BoundaryBackend, String> {
+    let source: Box<dyn TensorSource> = crate::format::ggufrs::open_model_source(
+        &options.model,
+        crate::format::ggufrs::ComponentRole::Llm,
+    )
+    .map_err(|error| {
+        format!(
+            "open GLiNER2 boundary model ({}): {error}",
+            options.model.display()
+        )
+    })?;
+    if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
+        return Err(format!(
+            "{} is not a gliner2 boundary variant (gliner2.variant = \"boundary\"); \
+             --gliner2-decide is the classification variant",
+            options.model.display()
+        ));
+    }
+    // Validate the whole contract once at startup rather than per request, the
+    // same way `build_gliner2` does.
+    crate::models::gliner_boundary::BoundaryModel::from_source(source.as_ref()).map_err(
+        |error| {
+            format!(
+                "load GLiNER2 boundary model from {}: {error}",
+                options.model.display()
+            )
+        },
+    )?;
+    Ok(Gliner2BoundaryBackend {
+        source,
         n_threads: crate::app::resolve_thread_count(
             options.threads,
             std::thread::available_parallelism()
@@ -1418,6 +1483,7 @@ pub fn run_server() {
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
+        Backend::Gliner2Boundary(_) => "gliner2-boundary",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -1457,6 +1523,13 @@ pub fn run_server() {
         Backend::Clm(_) | Backend::Gliner2(_) => {
             router.route("/v1/jev/score", post(api::jev_score))
         }
+        // The boundary variant returns spans and classification groups, which
+        // `JevResult` cannot hold, so it gets its own request/response shape
+        // rather than being bent into the JEV one. Deliberately *not* aliased
+        // onto `/v1/jev/score`: a JEV-shaped body there would fail on a missing
+        // `schema` field, which reads as a malformed request rather than as
+        // "this server does not do that".
+        Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
     };
     let app = router.layer(CorsLayer::permissive()).with_state(state);
 

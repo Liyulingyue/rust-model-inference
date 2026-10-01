@@ -34,7 +34,8 @@ pub mod spans;
 
 pub use content_pooler::SpanContentPooler;
 pub use extract::{
-    decode_spans, encode_boundary_prompt, extract_spans, run_extraction, ExtractedSpan,
+    boundary_overlap_policy, decode_spans, encode_boundary_prompt, extract_spans, run_extraction,
+    ExtractedSpan,
 };
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;

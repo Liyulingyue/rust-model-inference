@@ -209,7 +209,14 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 - **修法**：oracle 现在同时 dump `spans`（中间）和 `resolved_spans`（最终），并加 threshold=0.02 的 case 强制产生重叠（默认 threshold 下模型太自信，**同一个 field 不会有重叠 span**，resolution 阶段等于没被测到）。现在 29 个候选 → `flat` 收敛到 3，`allow` 保留 14
 - **fixture 里专门留了一个贪心必错的 case**：三条交叉 span，中间那条分最高（0.5）但会挡住两边；贪心拿 0.5，最优是 0.55 + 0.45 = 1.0。除了这个 case 之外的所有 case 贪心都能过
 
-### 🟢 5.2.4b-2 relations + records + HTTP 路由（待开工）
+### ✅ 5.2.4b-1b HTTP 路由 `/v1/jev/boundary`
+- **后端**：`Gliner2Boundary`，`--gliner2-boundary`。flag 选 head，`is_boundary_gguf()`（`gliner2.variant`）在启动时确认变体，**不匹配就报错**
+- **不缓存模型**：mapping 留在后端，每请求现建 `BoundaryModel`（零拷贝 + 一次 settings 解析），和 Decide 每请求重建 tokenizer 一致，**不需要 `'static` 泄漏**
+- **自己的 request/response 形状**：`JevResult` 装不下 word offset 和 resolution 后的顺序，所以 body 直接吃 reference 的 schema 形状。**刻意不 alias `/v1/jev/score`**——JEV body 在那里会报"缺 schema 字段"，读起来像请求写错而不是路由不存在，404 才诚实
+- **测试**：`tests/gliner2_5_base_v1_boundary_http.rs`，真起 server + curl，3 个测试。覆盖路由分发、raw schema、响应形状、mixed 抽取+分类、threshold override、`/v1/jev/score` 必须 404、四条 400 错误路径
+- **threshold override 的测试用 0.02**：默认 threshold 下同 field 无重叠，threshold 被忽略也看不出来
+
+### 🟢 5.2.4b-2 relations + records + json_structures（待开工）
 - **范围**：
   1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
   2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
@@ -229,7 +236,8 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 | 5.2.4a | 真实入口 + `--gliner2-boundary` | ✅ | 本次 |
 | 5.2.4b-1 | 分类头 + null/count head | ✅ | 本次 |
 | 5.2.4b-1a | overlap_policy 解码 | ✅ | 本次 |
-| 5.2.4b-2 | relations + records + json_structures + HTTP | 🟢 待开工 | — |
+| 5.2.4b-1b | HTTP 路由 `/v1/jev/boundary` | ✅ | 本次 |
+| 5.2.4b-2 | relations + records + json_structures | 🟢 待开工 | — |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
@@ -240,11 +248,10 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
 
 **仍然没有的**：
 - relations（`[R]`）/ records（`record_decoder`）/ `json_structures`（`[C]`）
-- HTTP 路由
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
 
-13 个 boundary 测试文件 / 34 个测试全绿。
+14 个 boundary 测试文件 / 37 个测试全绿。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base

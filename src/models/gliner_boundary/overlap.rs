@@ -42,6 +42,18 @@ pub enum OverlapPolicy {
     Longest,
 }
 
+impl OverlapPolicy {
+    /// The canonical name, for echoing back what a checkpoint resolved to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Nested => "nested",
+            Self::Disallow => "disallow",
+            Self::Longest => "longest",
+        }
+    }
+}
+
 /// Normalize a policy name, or fall back to `default` when it is `None`.
 ///
 /// `None` is resolved *only* through `default` so a caller can preserve an
