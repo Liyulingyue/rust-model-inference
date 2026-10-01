@@ -75,10 +75,17 @@ models/.venv/bin/python tools/converter/z_image/convert_z_image.py \
 | `--components` | `all`（默认）/ `dit` / `vae` / `text` |
 | `--overwrite` | 覆盖已有输出 |
 
-> **DiT 的 dtype 不随 `--outtype` 变化**。`validate_dit` 硬编码要求
-> 30 个主层为 Q8_0、两个 refiner 栈为 F16 —— 主层走量化 matmul，refiner
-> 每步只跑两次所以留在 F16。因此 `--outtype f16` 不会让推理更快：
-> 实测 139.4 s/步 对 140.5 s/步。
+| 档位 | DiT 体积 | 每步耗时（8 线程） | 与上游权重差异 |
+|---|---|---|---|
+| `q8_0` | 6.73 GB | 140.5 s | 3.75 / 255 |
+| `f16` | 11.47 GB | 138.8 s | **3.44 / 255** |
+| `f32` | 22.93 GB | — | — |
+
+`q8_0` 模式下两个 refiner 栈保持 F16（每步只跑两次，量化收益不抵误差），
+30 个主层按 `--outtype` 走。
+
+> **F16 不更快。** 权重流量翻倍（10.6 GB vs 5.64 GB）正好抵消了省掉输入量化
+> 的收益，两者落在噪声范围内。它的价值是精度更接近原始权重。
 
 VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上）。
 
