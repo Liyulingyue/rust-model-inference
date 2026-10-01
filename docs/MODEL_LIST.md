@@ -11,7 +11,7 @@
 | Falcon-H1                  | 1.5B / 3B | 文本                 | llama.cpp @ `171e8846b`                | https://modelscope.cn/models/unsloth/Falcon-H1-1.5B-Instruct-GGUF / https://modelscope.cn/models/unsloth/Falcon-H1-3B-Instruct-GGUF | √ |
 | EXAONE-3.5                 | 2.4B       | 文本                 | llama trunk + `[|user|]/[|endofturn|]` 模板    | https://modelscope.cn/models/LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct-GGUF | √ |
 | Gemma-4                   | E2B / E4B / 12B          | 文本、图像、音频      | llama.cpp @ `3173a56` | https://www.modelscope.cn/models/unsloth/gemma-4-E2B-it-GGUF | √ |
-| EmbeddingGemma-300M              | 300M          | 文本 Embedding（编码器） | 新模块 `src/models/gemma_embedding/`（非因果 + 4-norm sandwich + QK-norm + geglu + 对称 SWA） | https://modelscope.cn/models/ggml-org/embeddinggemma-300m-GGUF | √ |
+| EmbeddingGemma           | 300M          | 文本 Embedding（编码器） | 新模块 `src/models/gemma_embedding/`（非因果 + 4-norm sandwich + QK-norm + geglu + 对称 SWA） | https://modelscope.cn/models/ggml-org/embeddinggemma-300m-GGUF | √ |
 | jina-embeddings-v2-base-en       | 137M          | 文本 Embedding（编码器） | 新模块 `src/models/bert_family/`（post-norm LayerNorm + QKV bias + ALiBi + 双向） | https://modelscope.cn/models/ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF | √ |
 | nomic-embed-text-v1.5          | 137M          | 文本 Embedding（编码器） | 新模块 `src/models/bert_family/`（复用 BERT 家族 graph，fused QKV + RoPE + SwiGLU） | https://modelscope.cn/models/nomic-ai/nomic-embed-text-v1.5-GGUF | √ |
 | bge-small-en-v1.5                | 33M           | 文本 Embedding（编码器） | 复用 `src/models/bert_family/` 的 `bert` 变体（零新代码） | https://modelscope.cn/models/ggml-org/bge-small-en-v1.5-Q8_0-GGUF | √ |
