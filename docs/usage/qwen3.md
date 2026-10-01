@@ -65,6 +65,14 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+`Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
+在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
+LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
+n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
+**现状**：视觉编码 + LLM forward 在 4 核 CPU 上端到端跑通，但 LLM 立刻生成 `<|im_end|>`（token 151644），
+说明视觉 embedding 注入 / M-RoPE positions 还有 bug（不是这次能修的）。
+文本-only 路径在 4 核上约 4 tok/s。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。

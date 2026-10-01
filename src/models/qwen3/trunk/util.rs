@@ -253,7 +253,7 @@ pub fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
     use crate::models::qwen3::trunk::config::{Qwen3Config, Qwen3Rope};
-    use crate::models::qwen3::trunk::tests::qwen3vl_metadata_source;
+    use crate::models::qwen3::trunk::tests::{qwen3vl_4b_metadata_source, qwen3vl_metadata_source};
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
@@ -267,6 +267,37 @@ mod tests {
             }
         );
         assert_eq!(config.n_deepstack_layers, 3);
+    }
+
+    /// `Qwen3-VL-4B-Instruct` (Qwen3-4B LLM backbone) had no allowlist
+    /// entry before 2026-10-01 and was rejected at config load with
+    /// "Unsupported main-model configuration" because `n_embd=2560`,
+    /// `n_layer=36`, `n_head=32`, `n_ff=9728` did not match either the
+    /// 1024-dim 28-layer or the 2048-dim 28-layer existing entries.
+    /// Real weight: `Qwen/Qwen3-VL-4B-Instruct-GGUF` Q4_K_M
+    /// (`Qwen3VL-4B-Instruct-Q4_K_M.gguf`).
+    #[test]
+    fn qwen3vl_4b_loads_through_qwen3_allowed_dimensions_whitelist() {
+        let config = Qwen3Config::from_source(&qwen3vl_4b_metadata_source())
+            .expect("Qwen3-VL-4B must pass the Qwen3AllowedDimensions whitelist");
+        assert_eq!(config.n_embd, 2560);
+        assert_eq!(config.n_layer, 36);
+        assert_eq!(config.n_head, 32);
+        assert_eq!(config.n_head_kv, 8);
+        assert_eq!(config.n_ff, 9728);
+        assert_eq!(config.n_ctx, 262_144);
+        assert!(
+            (config.freq_base - 5_000_000.0).abs() < 1.0,
+            "freq_base={}",
+            config.freq_base
+        );
+        assert_eq!(
+            config.rope,
+            Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            }
+        );
     }
 
     #[test]
