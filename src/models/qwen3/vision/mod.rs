@@ -1,6 +1,5 @@
 pub mod clip_config;
 
-use std::sync::Arc;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
@@ -8,6 +7,7 @@ use crate::ops::{
     vec_add_into,
 };
 use clip_config::ClipVisionConfig;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisionGrid {
@@ -214,16 +214,14 @@ impl Q8Weight {
             let pool = pool.clone();
             let out_ptr = output.as_mut_ptr();
             pool.compute(move |ith, nth| {
-                let (start, end) =
-                    crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+                let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
                 for t in start..end {
                     let q8_off = t * n_in;
                     let scale_off = t * blocks;
                     // SAFETY: row_range partitions [0, n_tokens) disjointly
                     // across workers, so `t` is unique per worker.
-                    let out_chunk = unsafe {
-                        std::slice::from_raw_parts_mut(out_ptr.add(t * n_out), n_out)
-                    };
+                    let out_chunk =
+                        unsafe { std::slice::from_raw_parts_mut(out_ptr.add(t * n_out), n_out) };
                     crate::ops::matmul_q8_0_quantized_parallel(
                         weight,
                         &q8_buf[q8_off..q8_off + n_in],
@@ -303,11 +301,11 @@ fn matmul_f32_weight(
     let weight = weight.as_ptr();
     let input = input.as_ptr();
     pool.clone().compute(move |ith, nth| {
-        let (start, end) =
-            crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(n_tokens, ith, nth);
         for token in start..end {
             // SAFETY: row_range partitions [0, n_tokens) disjointly.
-            let out_row = unsafe { std::slice::from_raw_parts_mut(out_ptr.add(token * n_out), n_out) };
+            let out_row =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr.add(token * n_out), n_out) };
             let input_row = unsafe { std::slice::from_raw_parts(input.add(token * n_in), n_in) };
             for (out, value) in out_row.iter_mut().enumerate() {
                 let w = unsafe { std::slice::from_raw_parts(weight.add(out * n_in), n_in) };
@@ -1408,7 +1406,7 @@ impl<'a> VisionEncoder<'a> {
                 let src_off = t * merged_embd;
                 let dst_off = t * merged_embd;
                 pc.mm_0_weight.matmul_single(
-                &self.pool,
+                    &self.pool,
                     &concat_buf[src_off..src_off + merged_embd],
                     &mut mm0_out[dst_off..dst_off + merged_embd],
                     &mut scratch.q8_buf,
@@ -1451,7 +1449,7 @@ impl<'a> VisionEncoder<'a> {
                 let src_off = t * merged_embd;
                 let dst_off = t * proj_dim;
                 pc.mm_2_weight.matmul_single(
-                &self.pool,
+                    &self.pool,
                     &mm0_out[src_off..src_off + merged_embd],
                     &mut out[dst_off..dst_off + proj_dim],
                     &mut scratch.q8_buf,
@@ -1527,7 +1525,7 @@ impl<'a> VisionEncoder<'a> {
             );
         }
         weights.fc1_weight.matmul_batch(
-                &self.pool,
+            &self.pool,
             &scratch.project_concat_buf[..concat_len],
             &mut scratch.project_mm0_out[..concat_len],
             n_projected,
@@ -1543,7 +1541,7 @@ impl<'a> VisionEncoder<'a> {
         let output =
             &mut scratch.deepstack[output_start..output_start + n_projected * projection_dim];
         weights.fc2_weight.matmul_batch(
-                &self.pool,
+            &self.pool,
             &scratch.project_mm0_out[..concat_len],
             output,
             n_projected,

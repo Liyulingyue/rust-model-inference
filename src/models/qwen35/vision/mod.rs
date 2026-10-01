@@ -1526,100 +1526,100 @@ impl<'a> VisionEncoder<'a> {
             let h_start = (ith * per_worker).min(n_head);
             let h_end = (h_start + per_worker).min(n_head);
             for h in h_start..h_end {
-                        let q_base = h * n_tokens * d_head;
-                        let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-                        let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
-                        let score_off = h * n_tokens * n_tokens;
-                        unsafe {
-                            let score_slice = sw.slice(score_off, n_tokens * n_tokens);
-                            let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
-                            #[cfg(target_arch = "aarch64")]
-                            let mut value_column = vec![0.0f32; n_tokens];
-                            for t in 0..n_tokens {
-                                let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
-                                #[cfg(target_arch = "x86_64")]
-                                if use_avx2 {
-                                    unsafe {
-                                        attention_qk_avx2(
-                                            q_ptr,
-                                            attn_buf.as_ptr().add(k_base),
-                                            &mut score_slice[t * n_tokens..t * n_tokens + n_tokens],
-                                            n_tokens,
-                                            d_head,
-                                            scale,
-                                        );
-                                    }
-                                } else {
-                                    for s in 0..n_tokens {
-                                        let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                                        let mut sum = 0.0f32;
-                                        for i in 0..d_head {
-                                            sum += *q_ptr.add(i) * *k_ptr.add(i);
-                                        }
-                                        score_slice[t * n_tokens + s] = sum * scale;
-                                    }
+                let q_base = h * n_tokens * d_head;
+                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+                let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
+                let score_off = h * n_tokens * n_tokens;
+                unsafe {
+                    let score_slice = sw.slice(score_off, n_tokens * n_tokens);
+                    let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
+                    #[cfg(target_arch = "aarch64")]
+                    let mut value_column = vec![0.0f32; n_tokens];
+                    for t in 0..n_tokens {
+                        let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
+                        #[cfg(target_arch = "x86_64")]
+                        if use_avx2 {
+                            unsafe {
+                                attention_qk_avx2(
+                                    q_ptr,
+                                    attn_buf.as_ptr().add(k_base),
+                                    &mut score_slice[t * n_tokens..t * n_tokens + n_tokens],
+                                    n_tokens,
+                                    d_head,
+                                    scale,
+                                );
+                            }
+                        } else {
+                            for s in 0..n_tokens {
+                                let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
+                                let mut sum = 0.0f32;
+                                for i in 0..d_head {
+                                    sum += *q_ptr.add(i) * *k_ptr.add(i);
                                 }
-                                #[cfg(not(target_arch = "x86_64"))]
-                                {
-                                    let q_slice = std::slice::from_raw_parts(q_ptr, d_head);
-                                    for s in 0..n_tokens {
-                                        let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                                        let k_slice = std::slice::from_raw_parts(k_ptr, d_head);
-                                        let dot = dot_f32(q_slice, k_slice, d_head);
-                                        score_slice[t * n_tokens + s] = dot * scale;
-                                    }
-                                }
-                                softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
+                                score_slice[t * n_tokens + s] = sum * scale;
+                            }
+                        }
+                        #[cfg(not(target_arch = "x86_64"))]
+                        {
+                            let q_slice = std::slice::from_raw_parts(q_ptr, d_head);
+                            for s in 0..n_tokens {
+                                let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
+                                let k_slice = std::slice::from_raw_parts(k_ptr, d_head);
+                                let dot = dot_f32(q_slice, k_slice, d_head);
+                                score_slice[t * n_tokens + s] = dot * scale;
+                            }
+                        }
+                        softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
 
-                                let out_base = t * d_head;
-                                for d in 0..d_head {
-                                    out_slice[out_base + d] = 0.0;
-                                }
-                                #[cfg(target_arch = "x86_64")]
-                                if use_avx2 {
-                                    for s in 0..n_tokens {
-                                        let sc = score_slice[t * n_tokens + s];
-                                        unsafe {
-                                            attn_scaled_add_avx2(
-                                                &mut out_slice[out_base..out_base + d_head],
-                                                attn_buf.as_ptr().add(v_base + s * d_head),
-                                                sc,
-                                                d_head,
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    for s in 0..n_tokens {
-                                        let sc = score_slice[t * n_tokens + s];
-                                        let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
-                                        for d in 0..d_head {
-                                            out_slice[out_base + d] += sc * *v_ptr.add(d);
-                                        }
-                                    }
-                                }
-                                #[cfg(target_arch = "aarch64")]
-                                for d in 0..d_head {
-                                    out_slice[out_base + d] = attention_value_dot(
-                                        &attn_buf[v_base..v_base + n_tokens * d_head],
-                                        &score_slice[t * n_tokens..t * n_tokens + n_tokens],
-                                        n_tokens,
-                                        d_head,
-                                        d,
-                                        &mut value_column,
-                                    );
-                                }
-                                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-                                for s in 0..n_tokens {
-                                    let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
-                                    let value = std::slice::from_raw_parts(v_ptr, d_head);
-                                    vec_mad_f32(
+                        let out_base = t * d_head;
+                        for d in 0..d_head {
+                            out_slice[out_base + d] = 0.0;
+                        }
+                        #[cfg(target_arch = "x86_64")]
+                        if use_avx2 {
+                            for s in 0..n_tokens {
+                                let sc = score_slice[t * n_tokens + s];
+                                unsafe {
+                                    attn_scaled_add_avx2(
                                         &mut out_slice[out_base..out_base + d_head],
-                                        value,
-                                        score_slice[t * n_tokens + s],
+                                        attn_buf.as_ptr().add(v_base + s * d_head),
+                                        sc,
+                                        d_head,
                                     );
                                 }
                             }
+                        } else {
+                            for s in 0..n_tokens {
+                                let sc = score_slice[t * n_tokens + s];
+                                let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
+                                for d in 0..d_head {
+                                    out_slice[out_base + d] += sc * *v_ptr.add(d);
+                                }
+                            }
                         }
+                        #[cfg(target_arch = "aarch64")]
+                        for d in 0..d_head {
+                            out_slice[out_base + d] = attention_value_dot(
+                                &attn_buf[v_base..v_base + n_tokens * d_head],
+                                &score_slice[t * n_tokens..t * n_tokens + n_tokens],
+                                n_tokens,
+                                d_head,
+                                d,
+                                &mut value_column,
+                            );
+                        }
+                        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                        for s in 0..n_tokens {
+                            let v_ptr = attn_buf.as_ptr().add(v_base + s * d_head);
+                            let value = std::slice::from_raw_parts(v_ptr, d_head);
+                            vec_mad_f32(
+                                &mut out_slice[out_base..out_base + d_head],
+                                value,
+                                score_slice[t * n_tokens + s],
+                            );
+                        }
+                    }
+                }
             }
         });
         t_attn = t_attn_start.elapsed().as_secs_f64();
@@ -3109,7 +3109,11 @@ mod tests {
             source.data.insert(name.into(), vec![0; elements * 2]);
         }
 
-        let encoder = VisionEncoder::from_source(&source, std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(2))).unwrap();
+        let encoder = VisionEncoder::from_source(
+            &source,
+            std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(2)),
+        )
+        .unwrap();
 
         assert_eq!(encoder.config.projection_dim, 1024);
         let precomputed = encoder.precomputed.as_ref().unwrap();
