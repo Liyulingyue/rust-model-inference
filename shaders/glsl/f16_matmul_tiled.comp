@@ -1,0 +1,134 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Register-tiled F16 grouped matmul, the float-weight counterpart of
+// q8_matmul_tiled_dp4a.
+//
+// The refiner stacks are F16 in the GGUF, and bind_weight only accepts Q8_0, so
+// all four refiner blocks ran their FFN through the per-row CPU path -- 3.7 s of
+// a 14.2 s step, more than the 30-layer main stack costs on the device. The
+// tiling is the same idea as the Q8_0 kernel: a lane owns an output column for
+// the whole k walk, so the staged activation is read once per token rather than
+// once per (token, column).
+//
+// The activation is staged as f32 and rounded to f16 in registers, matching what
+// F16_MATMUL does, so this is a drop-in for that kernel's arithmetic rather than
+// a different rounding.
+
+#include "f16_rounding.glsl"
+
+layout(local_size_x = 64) in;
+
+// 32 accumulators per lane is where the Q8_0 kernel's curve turned, past the
+// register file. The chunk is smaller here because the staged activation is f32
+// rather than one byte per element: 32 * 8 * 256 * 4 = 256 KiB would not fit.
+const uint TOKENS = 32u;
+const uint CHUNK_ELEMENTS = 256u;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint unused_scales_word;
+    uint n_in;
+    uint elements_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows;
+} pc;
+
+shared float input_stage[TOKENS * CHUNK_ELEMENTS];
+
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+
+uint weight_f16(uint slot, uint index) {
+    uint word = weight_word(slot, index >> 1u);
+    return (index & 1u) == 0u ? word & 0xffffu : word >> 16u;
+}
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 0x1fu);
+    uint mantissa = bits & 0x3ffu;
+    float value;
+    if (exponent == 0) {
+        value = (float(mantissa) / 1024.0) * exp2(-14.0);
+    } else if (exponent == 31) {
+        return 0.0;
+    } else {
+        value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
+    }
+    return sign == 0u ? value : -value;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token_tile = gl_WorkGroupID.z / pc.group_count;
+    uint token_base = token_tile * TOKENS;
+    if (token_base >= pc.token_rows) return;
+
+    // One lane, one output column, for the whole k walk: the workgroup covers
+    // 64 consecutive columns, so the tile is 64 wide rather than 1.
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = column_base + lane;
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    // A partial last tile would put some lanes past the end of the weight
+    // buffer. They cannot return, because the loop below has a barrier and
+    // Vulkan requires those in uniform control flow, so clamp their read to a
+    // column that exists and let the store drop the result.
+    uint read_column = min(column, output_rows - 1u);
+
+    float accumulator[TOKENS];
+    for (uint t = 0u; t < TOKENS; t++) {
+        accumulator[t] = 0.0;
+    }
+    uint live = 0u;
+    for (uint t = 0u; t < TOKENS; t++) {
+        if (token_base + t < pc.token_rows) live = t + 1u;
+    }
+    if (live == 0u) return;
+
+    for (uint chunk = 0u; chunk < pc.n_in; chunk += CHUNK_ELEMENTS) {
+        uint elements = min(CHUNK_ELEMENTS, pc.n_in - chunk);
+        // Stage this chunk's activations for every live token.
+        for (uint t = 0u; t < live; t++) {
+            uint base = (token_base + t) * pc.input_stride + chunk;
+            uint dst = t * CHUNK_ELEMENTS;
+            for (uint index = lane; index < elements; index += 64u) {
+                input_stage[dst + index] = round_f16_rte(
+                    uintBitsToFloat(arena.data[pc.input_word + base + index])
+                );
+            }
+        }
+        barrier();
+
+        uint row_base = read_column * pc.elements_per_row + chunk;
+        for (uint index = 0u; index < elements; index++) {
+            // One weight load, TOKENS dots.
+            float weight_value = f16_decode(weight_f16(slot, row_base + index));
+            for (uint t = 0u; t < live; t++) {
+                accumulator[t] = fma(input_stage[t * CHUNK_ELEMENTS + index], weight_value, accumulator[t]);
+            }
+        }
+        barrier();
+    }
+
+    // `output` is [token][head][width] for the attention-shaped callers and
+    // [token][width] here, so a fixed column's runs are `output_stride` apart.
+    if (column < output_rows) {
+        for (uint t = 0u; t < live; t++) {
+            arena.data[output_word + (token_base + t) * output_stride + column] =
+                floatBitsToUint(accumulator[t]);
+        }
+    }
+}

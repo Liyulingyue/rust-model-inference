@@ -17,6 +17,8 @@ const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
 const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
+const F16_MATMUL_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
@@ -67,6 +69,7 @@ const Q5_K_MATMUL: usize = 21;
 const F32_MATMUL: usize = 22;
 const ADALN_MODULATE: usize = 23;
 const Q8_MATMUL_GROUPED_TILED: usize = 24;
+const F16_MATMUL_TILED: usize = 25;
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
 /// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
 /// no extra bookkeeping here.
@@ -94,7 +97,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 25] = [
+const OPERATOR_SHADERS: [&[u8]; 26] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -120,6 +123,7 @@ const OPERATOR_SHADERS: [&[u8]; 25] = [
     F32_MATMUL_SHADER,
     ADALN_MODULATE_SHADER,
     Q8_MATMUL_GROUPED_TILED_SHADER,
+    F16_MATMUL_TILED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -850,6 +854,11 @@ impl<'a> Qwen3Ops<'a> {
             .map(|(index, shader)| {
                 if index == Q8_MATMUL_GROUPED && force_dp4a {
                     Q8_MATMUL_GROUPED_DP4A_SHADER
+                } else if index == F16_MATMUL_TILED && !force_dp4a {
+                    // The F16 tiled kernel is not tied to integer dot product,
+                    // but it is only used from the tiled path, which is gated on
+                    // that support, so keep the slot consistent with it.
+                    F16_MATMUL_SHADER
                 } else if index == Q8_MATMUL_GROUPED_TILED && !force_dp4a {
                     // The tiled kernel needs `dotPacked4x8EXT`, so on a device
                     // without it the slot falls back to the plain grouped shader
@@ -1319,12 +1328,45 @@ impl<'a> Qwen3Ops<'a> {
             ));
         }
         let format = bindings.weight_format(outputs.len())?;
-        let (activation, scales, quantize) = match format {
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
+        // F16 weights take the float tiled kernel: no quantize dispatch, and the
+        // activation is read from the arena as f32 and rounded in registers.
+        // This is what lets the F16 refiner stacks leave the CPU.
+        if matches!(
+            format,
+            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
+        ) {
+            if format != GpuWeightFormat::F16 {
                 return Err(VulkanError::UnsupportedShape(
-                    "tiled Q8_0 matmul is only defined for quantized weights".into(),
+                    "tiled float matmul is only implemented for F16 weights".into(),
                 ));
             }
+            let (push, _) = matmul_rows_push(
+                self.arena.size as usize,
+                &self.context.limits,
+                bindings,
+                activation,
+                q8_scales,
+                None,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            )?;
+            let columns = outputs
+                .first()
+                .map(|(_, n_out, _)| *n_out)
+                .ok_or(VulkanError::UnsupportedShape("tiled matmul has no output".into()))?;
+            const FLOAT_TOKENS: usize = 32;
+            let tiles = token_rows.div_ceil(FLOAT_TOKENS);
+            let dispatch = row_dispatch(
+                columns.div_ceil(64),
+                tiles * outputs.len(),
+                &self.context.limits,
+            )?;
+            self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
+            return Ok(());
+        }
+        let (activation, scales, quantize) = match format {
             GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
                 let push = quantize_rows_push(
                     self.arena.size as usize,

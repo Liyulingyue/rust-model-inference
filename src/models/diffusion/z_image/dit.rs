@@ -1588,7 +1588,7 @@ const GPU_PHASE_LABELS: [&str; 9] = [
     "attention (host)",
     "out proj (gpu)",
     "ffn: main stack (gpu)",
-    "ffn: refiner (cpu)",
+    "ffn: refiner",
     "  w1 readback (of ffn)",
     "  host silu (of ffn)",
 ];
@@ -2068,11 +2068,22 @@ fn take_gpu_session(
     scratch.gpu.remove(&rows)
 }
 
-/// Upload and bind this block's Q8_0 projections, once per render.
+/// Whether to bind the F16 refiner stacks to the GPU. See `bind_block_weights`.
+#[cfg(feature = "vulkan")]
+fn f16_refiner_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_F16_REF")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Upload and bind this block's projections, once per render.
 ///
-/// The two refiner stacks are F16 in the GGUF and the batched kernel binds
-/// Q8_0, so they bind nothing and every projection falls through to the
-/// per-row CPU path below. The main stack is Q8_0 and binds all five.
+/// The main stack is Q8_0 and binds all five. The two refiner stacks are F16 in
+/// the GGUF and bind nothing unless `RUST_GPU_F16_REF` is set, so by default
+/// every refiner projection falls through to the per-row CPU path below.
 #[cfg(feature = "vulkan")]
 fn bind_block_weights(
     session: &mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession,
@@ -2097,13 +2108,29 @@ fn bind_block_weights(
         let Some(info) = source.tensor_info(name) else {
             continue;
         };
-        if info.ggml_type != GGMLType::Q8_0 {
-            continue;
-        }
+        // Q8_0 for the main stack, F16 for the refiner stacks: the GPU has a
+        // tiled kernel for each, and re-quantizing the refiner to Q8_0 would
+        // move it to the device at the cost of its precision.
+        let format = match info.ggml_type {
+            GGMLType::Q8_0 => crate::vulkan::ops::GpuWeightFormat::Q8_0,
+            // Off by default. The F16 tiled kernel is 7x faster than the CPU
+            // row path on the refiner's shapes (3.74 s -> 0.52 s of a step) and
+            // agrees with it to 2.17/255, but with the refiner on the device the
+            // main stack's FFN slot measured 6.68 s against 3.81 s before, and
+            // 8.00 s with the refiner back on the CPU -- so the step total did
+            // not move and the regression is not explained. The slot is not
+            // stable enough across instrumentation changes to attribute it, so
+            // this stays opt-in until it is.
+            GGMLType::F16 if f16_refiner_enabled() => crate::vulkan::ops::GpuWeightFormat::F16,
+            _ => continue,
+        };
         let Some(bytes) = source.tensor_slice(name) else {
             continue;
         };
-        if session.bind_weight(layer, projection, bytes).is_ok() {
+        if session
+            .bind_weight_as(layer, projection, bytes, format)
+            .is_ok()
+        {
             bound.insert(projection);
         }
     }
@@ -2462,7 +2489,7 @@ fn run_block_gpu(
     // The FFN splits by backend: the main stack's five projections bind Q8_0
     // and run on the device, while the refiner blocks are F16 in the GGUF and
     // fall through to the per-row CPU path.
-    if gate_on_gpu {
+    if layer < MAIN_LAYERS {
         gpu_profile_add(5, ffn_start);
     } else {
         gpu_profile_add(6, ffn_start);

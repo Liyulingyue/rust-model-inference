@@ -261,13 +261,26 @@ impl DitGpuSession {
         projection: Projection,
         bytes: &[u8],
     ) -> Result<(), VulkanError> {
+        self.bind_weight_as(layer, projection, bytes, GpuWeightFormat::Q8_0)
+    }
+
+    /// Bind a weight matrix in a named format. The main stack is Q8_0; the
+    /// refiner stacks are F16 in the GGUF, and each has a tiled kernel, so both
+    /// can stay on the device instead of falling through to the CPU row path.
+    pub(crate) fn bind_weight_as(
+        &mut self,
+        layer: usize,
+        projection: Projection,
+        bytes: &[u8],
+        format: GpuWeightFormat,
+    ) -> Result<(), VulkanError> {
         if self.weights.contains_key(&(layer, projection)) {
             return Ok(());
         }
         let buffer = unsafe { self.context.upload_static(bytes) }?;
         let bindings = self
             .ops
-            .bind_weight_buffers(std::slice::from_ref(&buffer), &[GpuWeightFormat::Q8_0])?;
+            .bind_weight_buffers(std::slice::from_ref(&buffer), &[format])?;
         self.weights
             .insert((layer, projection), BoundWeight { buffer, bindings });
         Ok(())
