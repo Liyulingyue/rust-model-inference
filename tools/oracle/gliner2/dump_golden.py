@@ -161,7 +161,9 @@ def main():
         "--encoder-config",
         type=Path,
         default=REPO_ROOT / "target/gliner2-deberta-config",
-        help="directory holding the base deberta-v3-large config.json",
+        help="directory holding the base deberta-v3 config.json matching the "
+             "checkpoint's `model_name` (large for Decide/large-v1, base for "
+             "gliner2-base-v1)",
     )
     arguments.add_argument(
         "--model-dir",
@@ -197,8 +199,15 @@ def main():
     encoder.eval()
 
     classifier = torch.nn.Sequential(
-        torch.nn.Linear(1024, 2048), torch.nn.ReLU(), torch.nn.Linear(2048, 1)
+        torch.nn.Linear(config.hidden_size, config.hidden_size * 2),
+        torch.nn.ReLU(),
+        torch.nn.Linear(config.hidden_size * 2, 1),
     )
+    # `hidden * 2` is `create_mlp(hidden, [hidden * 2], 1)`, matching the
+    # converter's `classifier.intermediate_size`. Deriving it from the encoder
+    # config rather than writing 1024/2048 is what lets this oracle score a
+    # base-sized checkpoint: `load_state_dict` is strict, so a wrong width here
+    # fails loudly instead of producing plausible garbage.
     classifier.load_state_dict(
         {
             "0.weight": state["classifier.0.weight"],

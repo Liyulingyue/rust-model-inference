@@ -47,13 +47,35 @@ fastino 的 GLiNER 家族在 ModelScope 共 11 个公开 repo。已通过 `model
   - `tests/fixtures/gliner2-large-v1/classify-golden.json`：dump_golden.py 用 `transformers==4.48.1` + 同 microsoft/deberta-v3-large config 生成（与 Decide oracle 完全同一条 oracle 链）
 - **commit**：`f6619df` (smoke) + 后续 oracle commit
 
-### 2. `fastino/gliner2-base-v1` — DeBERTa-v3-base
-- 同上但 encoder 维度更小（768 hidden / 12 layers / 12 heads）
-- flag / 路由 / 位置同上
-- **额外工作**：`tools/converter/gliner/convert_gliner.py` 当前硬编码 DeBERTa-v3-large（1024 / 24 / 16），需要读 config 动态化
-- 推理层：`src/models/gliner/weights.rs` 同理需要动态化
+### ✅ 2. `fastino/gliner2-base-v1` — DeBERTa-v3-base（已完成，**零 Rust 改动**）
+- **架构族**：SpanExtractor pre-2.5，与 `gliner2-large-v1` 同族；768 hidden / 12 layers / 12 heads / 3072 FF
+- **flag / 路由 / 位置**：✅ 全部沿用 `--gliner2-decide` + `/v1/jev/score` + `src/models/gliner/`
+- **推翻的假设**：本 TODO 原先写"推理层 `weights.rs` 同理需要动态化"——**错的**。Rust 侧
+  `n_embd` / `n_layer` / `n_head` / `n_ff` / `head_dim` / `eps` / bucket 全部从 GGUF metadata
+  读，`src/` 一行没改。只有转换器把尺寸写死了
+- **转换器改动**（`convert_gliner.py`）：
+  - `ENCODER` 整块全局硬编码 → `ENCODER_SIZES`（按 `model_name`）+ `ENCODER_COMMON`，
+    `resolve_encoder()` 遇到未知 `model_name` 直接报错而不回退到 large（回退会静默产出
+    能过形状契约但解码成噪声的 GGUF）
+  - `validate_config` 现在额外校验 `model_type == "extractor"`（同族的标志），并返回解析后的 dims
+  - `general.name` 原来对**每个**模型都写死 `"gliner2.5-decide"`（对 large-v1 也是错的）→ 改为 `model_dir.name`
+  - `tokenizer_class` 只接受 `DebertaV2Tokenizer`，但 base-v1 发的是 `DebertaV2TokenizerFast`
+    （同一份 SPM vocab，类名只是包装差异）→ 精确接受这两个名字，不放宽到任意 `Deberta*`
+- **尺寸表怎么来的**：从权重张量形状反推 + 用 `microsoft/deberta-v3-base` 的 config 取
+  `num_attention_heads`（**唯一不出现在任何张量形状里的字段**，只有 oracle 能抓）。转换器原有的
+  形状契约会重新校验另外三个，填错立刻抛错
+- **`counting_layer` 差异无需处理**：base-v1 是 `count_lstm_v2`（`count_embed` 为 2 层
+  transformer），large-v1 是 `count_lstm`（`count_embed.projector`）。两者都不进 GGUF——转换器
+  本来就 drop `span_rep.*` / `count_embed.*` / `count_pred.*` 并且拒绝 drop 任何其它东西
+- **oracle**（`dump_golden.py` 也去硬编码）：分类头 `Linear(hidden*2)` 现在从 encoder config 推导，
+  `load_state_dict` 严格模式，宽度错了在生成时就炸。**max logit delta 3.433e-5**（1e-4 容差）
+- **测试**：`tests/gliner2_base_v1.rs`（6 smoke）+ `tests/gliner2_base_v1_parity.rs`（2 byte-exact）
+- **跨变体回归**：base-v1 与 Decide 的 `input_ids` / `marker_positions` **逐字节相同**（encoder 尺寸
+  不参与 tokenization），已作为测试钉住
+- **验证 large-v1 零回归**：用新转换器重建 large-v1，394 个 tensor 的 **1.74 GB 张量数据逐字节
+  相同**；metadata 仅 3 处差异，都是上面有意改的（`general.name` / `source_architecture`
+  补 `model_type` / `source_config` key 顺序）
 - **价值**：base 尺寸跑得快很多（吞吐 ~3×），生产部署友好
-- **前置**：先 #1 完成验证流程，再做 #2 的尺寸动态化
 
 ### 3. `fastino/gliner2-multi-v1` — 多语 base
 - 同 #2 但训练数据换了，权重不同，tokenizer 可能是 mDeBERTa-v3（多语 SPM）
@@ -556,7 +578,7 @@ structures/records（`[C]`）；外加 abstention（`null_projection`）与 coun
 |---|---|---|---|---|---|
 | ~~A~~ | ~~架构 trait 化~~ | 全部 | ~~~1天~~ | ~~后续所有变体的前置~~ | **取消**：抽象应在真有重复时再做，避免过早抽象 |
 | ✅ B | `gliner2-large-v1` Decide 验证 | span pre-2.5 | 小（~200行） | 中（兼容性证据） | 完成 |
-| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | **下一条** |
+| C | `gliner2-base-v1` + multi-v1 | span pre-2.5 | 中（~500行 + 尺寸动态化） | **高**（生产可用） | base ✅ / multi-v1 下一条 |
 | D | BoundaryExtractor 任一基线 | boundary | 大（~3000行） | 中（多任务） | 中 |
 | E | Ettin encoder + BPE tokenizer | span 1B | **巨大**（~2000行） | 中（1B 升级） | 低 |
 | F | 专项 guardrail（待定） | 待定 | 中 | 低 | 低 |
