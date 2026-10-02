@@ -510,6 +510,7 @@ fn main() {
                 // annotates it with a `mode`; without this the record head never
                 // runs.
                 record_metadata: schema.get("record_metadata"),
+                field_metadata: schema.get("field_metadata"),
                 output_json: options.jev_output_json,
             },
         ));

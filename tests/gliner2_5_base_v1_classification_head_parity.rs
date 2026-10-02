@@ -25,7 +25,7 @@ use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner::prompt::{BoundaryTaskKind, Label, Task};
 use rust_model_inference::models::gliner_boundary::extract::{
-    encode_mixed_boundary_prompt, run_mixed_extraction, ClassificationResult,
+    encode_mixed_boundary_prompt, run_mixed_extraction, ClassificationResult, SchemaOptions,
 };
 use rust_model_inference::models::gliner_boundary::BoundaryModel;
 
@@ -204,7 +204,7 @@ fn logits_probabilities_and_choices_match() {
             &kinds,
             0,
             None,
-            None,
+            SchemaOptions::default(),
         )
         .expect("run mixed extraction");
 

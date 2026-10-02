@@ -38,7 +38,7 @@ use super::overlap::{
     normalize_overlap_policy, resolve_overlaps, OverlapPolicy, ScoredSpan as OverlapSpan,
 };
 use super::record_head::{
-    decode_group, FieldCandidates, RecordCandidates, RecordDecodeSettings, RecordGroup, RecordHead,
+    decode_group, RecordCandidates, RecordDecodeSettings, RecordGroup, RecordHead,
 };
 use super::record_spec::{compile_record_specs, LayoutQuery, RecordSpec};
 use super::relations::{
@@ -46,6 +46,7 @@ use super::relations::{
     RelationStates, RelationTypeSpec,
 };
 use super::spans::{score_document_candidates, DocumentCandidateBatch};
+use super::structure::{decode_legacy_structures, LegacyStructureGroup, StructureField};
 
 /// The reference's default score threshold, used when the caller does not pass
 /// one (`_group_scored_candidates`'s `threshold: float = 0.5`).
@@ -148,12 +149,27 @@ pub struct Extraction {
     /// Decoded records, one entry per compiled record group in schema order.
     /// Empty unless a `[C]` group carried a `mode` in `record_metadata`.
     pub records: Vec<ExtractedRecord>,
+    /// Decoded *legacy* `json_structures` instances — one per group that did
+    /// **not** carry a `record_metadata` mode. Mutually exclusive with
+    /// `records` for any given group: the annotation is what picks the path.
+    pub structures: Vec<ExtractedStructure>,
     /// `null_projection` / `count_head` per extractive query.
     pub query_heads: QueryHeads,
     /// The normalized, lowercased word list the spans index into.
     pub words: Vec<String>,
     /// Field name per extractive query.
     pub query_names: Vec<String>,
+}
+
+/// The schema keys that select a decode path, as the reference reads them.
+///
+/// Grouped because they are two `Option<&Value>` that must not be transposed:
+/// `record_metadata` decides record-vs-legacy, `field_metadata` decides
+/// scalar-vs-list, and swapping them produces a different decode with no error.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SchemaOptions<'a> {
+    pub record_metadata: Option<&'a serde_json::Value>,
+    pub field_metadata: Option<&'a serde_json::Value>,
 }
 
 /// Run the whole pipeline.
@@ -171,11 +187,16 @@ pub fn run_mixed_extraction(
     // where `_decode_relations` receives the same `threshold` as the span path.
     // `None` is the reference's 0.5 default.
     relation_threshold: Option<f32>,
-    // The schema's top-level `record_metadata`. `None` means the caller did not
-    // supply one, which is the same as `{}`: no group compiles, so every
-    // `json_structures` group keeps the legacy structure path.
-    record_metadata: Option<&serde_json::Value>,
+    // `record_metadata` picks record-vs-legacy per `json_structures` group, and
+    // `field_metadata` (`{"<group>.<field>": {"dtype": "str"}}`) picks
+    // scalar-vs-list. Grouped so the two cannot be transposed: swapping them
+    // changes the decode with no error.
+    schema: SchemaOptions<'_>,
 ) -> Result<Extraction, String> {
+    let SchemaOptions {
+        record_metadata,
+        field_metadata,
+    } = schema;
     if tasks.is_empty() {
         return Err("extraction needs at least one schema task".into());
     }
@@ -220,6 +241,7 @@ pub fn run_mixed_extraction(
         classifications: Vec::new(),
         relations: Vec::new(),
         records: Vec::new(),
+        structures: Vec::new(),
         query_heads: QueryHeads {
             null_logits: Vec::new(),
             count_log_rates: Vec::new(),
@@ -294,12 +316,30 @@ pub fn run_mixed_extraction(
         }
     }
 
+    // Legacy structures: the `[C]` groups that did *not* take the record path.
+    // Emitted alongside the spans rather than instead of them — the reference's
+    // engine returns both the per-field spans and the structure instances.
+    if !encoded.query_positions.is_empty() {
+        extractions.structures = score_structures(
+            model,
+            tasks,
+            kinds,
+            &extractions.candidates,
+            &extractions.words,
+            &encoded.query_names,
+            SchemaOptions {
+                record_metadata,
+                field_metadata,
+            },
+            relation_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD),
+        )?;
+    }
+
     // Records: a `[C]` group carrying a `mode` in `record_metadata` compiles to a
     // record spec; one without keeps the legacy structure path and produces
     // nothing here. Records read the same pool candidates the span path does, plus
     // the `candidate_encoder` states, so this runs alongside the relation stage.
     if !encoded.query_positions.is_empty() {
-        let text_states = gather_states(&hidden, &encoded.text_word_first_positions, hidden_size);
         let query_states = gather_states(&hidden, &encoded.query_positions, hidden_size);
         extractions.records = score_records(
             model,
@@ -363,6 +403,140 @@ pub fn run_mixed_extraction(
     }
 
     Ok(extractions)
+}
+
+/// Decode the `json_structures` groups that are **not** records.
+///
+/// A group takes the record path only when `record_metadata` gives it a `mode`
+/// (`compile_record_specs` keys off that), so the legacy path is exactly the
+/// complement. Both run over the same pool candidates; the difference is that
+/// the record head forms instances and the legacy path does not.
+///
+/// `is_scalar` comes from the schema's optional `field_metadata`, read the
+/// same way the reference reads `field_metadata["<parent>.<field>"]["dtype"]`
+/// with a default of `"list"`. A schema that says nothing about dtypes therefore
+/// yields all-list fields, which is the reference's default rather than a guess.
+fn score_structures(
+    model: &BoundaryModel<'_>,
+    tasks: &[Task],
+    kinds: &[BoundaryTaskKind],
+    candidates: &DocumentCandidateBatch,
+    words: &[String],
+    query_names: &[String],
+    schema: SchemaOptions<'_>,
+    threshold: f32,
+) -> Result<Vec<ExtractedStructure>, String> {
+    let SchemaOptions {
+        record_metadata,
+        field_metadata,
+    } = schema;
+    if !tasks
+        .iter()
+        .zip(kinds)
+        .any(|(_, kind)| *kind == BoundaryTaskKind::JsonStructure)
+    {
+        return Ok(Vec::new());
+    }
+    let metadata = record_metadata
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let annotated: std::collections::BTreeSet<String> = metadata
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter(|(_, config)| {
+                    config
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|mode| matches!(mode, "natural" | "latent" | "anchorless"))
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let policy = boundary_overlap_policy(model)?;
+
+    // Field order follows the schema's declaration, and `query_ids` maps each
+    // declared field back to the query the prompt actually routed it to. Those two
+    // orders differ whenever a non-extractive group is interleaved, which is why
+    // the mapping is explicit rather than positional.
+    let mut query_cursor = 0usize;
+    let mut scored: Vec<Vec<(f32, usize, usize)>> = Vec::with_capacity(query_names.len());
+    let mut is_scalar: Vec<bool> = vec![false; query_names.len()];
+    let temperature = if model.settings.pair_temperature > 0.0 {
+        model.settings.pair_temperature
+    } else {
+        1.0
+    };
+    for _ in 0..query_names.len() {
+        let mut hits: Vec<(f32, usize, usize)> = Vec::new();
+        for slot in 0..candidates.pool_size {
+            let flat = query_cursor * candidates.pool_size + slot;
+            if !candidates.valid_mask.get(flat).copied().unwrap_or(false) {
+                continue;
+            }
+            let score = 1.0 / (1.0 + (-candidates.pair_logits[flat] / temperature).exp());
+            if score < threshold {
+                continue;
+            }
+            let start = candidates.indices[flat * 2];
+            let end = candidates.indices[flat * 2 + 1];
+            hits.push((score, start, end));
+        }
+        // `_group_scored_candidates` sorts by `(-score, start, end)`. The legacy
+        // decoder then takes `spans[0]` for a scalar field, so this order *is* the
+        // value choice and must not be re-sorted afterwards.
+        hits.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        scored.push(hits);
+        query_cursor += 1;
+    }
+
+    // Resolve every field's dtype first: `LegacyStructureGroup` borrows
+    // `is_scalar` immutably, so it cannot be filled while a group is alive.
+    let dtypes = field_metadata
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut legacy: Vec<(usize, String, Vec<String>)> = Vec::new();
+    let mut cursor = 0usize;
+    for (task, kind) in tasks.iter().zip(kinds) {
+        if *kind == BoundaryTaskKind::Classification {
+            continue;
+        }
+        let field_count = task.labels.len();
+        if *kind == BoundaryTaskKind::JsonStructure && !annotated.contains(&task.name) {
+            for (index, label) in task.labels.iter().enumerate() {
+                is_scalar[cursor + index] = dtypes
+                    .get(&format!("{}.{}", task.name, label.name))
+                    .and_then(|entry| entry.get("dtype"))
+                    .and_then(|value| value.as_str())
+                    == Some("str");
+            }
+            legacy.push((
+                cursor,
+                task.name.clone(),
+                task.labels.iter().map(|l| l.name.clone()).collect(),
+            ));
+        }
+        cursor += field_count;
+    }
+    let groups: Vec<LegacyStructureGroup<'_>> = legacy
+        .iter()
+        .map(|(start, name, fields)| LegacyStructureGroup {
+            name,
+            field_names: fields.iter().map(String::as_str).collect(),
+            query_ids: (*start..start + fields.len()).collect(),
+            scored: &scored,
+            is_scalar: &is_scalar,
+            words,
+        })
+        .collect();
+    Ok(decode_legacy_structures(&groups, policy)
+        .into_iter()
+        .map(|instance| ExtractedStructure {
+            task: instance.task,
+            fields: instance.fields,
+        })
+        .collect())
 }
 
 /// Compile and decode every record group in the schema.
@@ -584,7 +758,15 @@ pub fn run_extraction(
         };
         tasks.len()
     ];
-    let result = run_mixed_extraction(model, text, tasks, &kinds, n_threads_arg, None, None)?;
+    let result = run_mixed_extraction(
+        model,
+        text,
+        tasks,
+        &kinds,
+        n_threads_arg,
+        None,
+        SchemaOptions::default(),
+    )?;
     Ok((result.candidates, result.words))
 }
 
@@ -767,6 +949,19 @@ pub struct ExtractedRecord {
     pub anchor_span: Option<(usize, usize)>,
     /// `sigmoid(object logit / record_temperature)`.
     pub score: f32,
+}
+
+/// One legacy `json_structures` instance, flattened onto the extraction result.
+///
+/// The reference's engine keys these by structure name and nests one instance per
+/// group; a flat list keeps the group name on each entry, which is the same
+/// information without the string keys.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedStructure {
+    /// The `json_structures` group name.
+    pub task: String,
+    /// `(field name, value)` in the schema's declared field order.
+    pub fields: Vec<(String, StructureField)>,
 }
 
 /// One classification group's decoded result.

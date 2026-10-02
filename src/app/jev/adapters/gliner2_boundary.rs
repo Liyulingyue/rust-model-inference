@@ -16,8 +16,9 @@ use crate::core::tensor::TensorSource;
 use crate::models::gliner::prompt::{BoundaryTaskKind, Label, Task};
 use crate::models::gliner_boundary::extract::{
     apply_abstention, boundary_overlap_policy, decode_spans, run_mixed_extraction,
-    ClassificationResult, ExtractedSpan, Extraction,
+    ClassificationResult, ExtractedSpan, Extraction, SchemaOptions,
 };
+use crate::models::gliner_boundary::structure::{StructureField, StructureSpan};
 use crate::models::gliner_boundary::BoundaryModel;
 
 /// One extracted span, as emitted by `--jev-output-json`.
@@ -74,13 +75,40 @@ struct RecordJson {
     fields: RecordFieldsJson,
 }
 
+/// One field value of a legacy structure instance, as emitted by
+/// `--jev-output json`. A scalar is the one span it bound; a list is all of them.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum StructureFieldJson {
+    Scalar(Option<SpanJson>),
+    List(Vec<SpanJson>),
+}
+
+/// One legacy `json_structures` instance, as emitted by `--jev-output json`.
+#[derive(Debug, serde::Serialize)]
+struct StructureJson {
+    task: String,
+    fields: Vec<(String, StructureFieldJson)>,
+}
+
 /// The whole JSON payload for `--jev-output json`.
 #[derive(Debug, serde::Serialize)]
 struct BoundaryJson {
     spans: Vec<SpanJson>,
     relations: Vec<RelationJson>,
     records: Vec<RecordJson>,
+    structures: Vec<StructureJson>,
     classifications: Vec<ClassJson>,
+}
+
+fn structure_span_json(span: &StructureSpan) -> SpanJson {
+    SpanJson {
+        field: String::new(),
+        score: span.score,
+        start: span.start,
+        end: span.end,
+        text: span.text.clone(),
+    }
 }
 
 /// Parse the reference's extractive schema shape.
@@ -428,6 +456,17 @@ fn parse_json_structure_groups(
 /// caller, because a query whose `null_projection` clears the threshold is
 /// emptied wholesale by the reference and a partial application would leak
 /// spans it dropped.
+/// The schema keys that pick a decode path.
+///
+/// Grouped because they travel together and are easy to transpose: swapping them
+/// makes a record schema look like a legacy one (or the reverse) with no error,
+/// just a different answer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoundarySchemaOptions<'a> {
+    pub record_metadata: Option<&'a serde_json::Value>,
+    pub field_metadata: Option<&'a serde_json::Value>,
+}
+
 pub fn extract(
     model: &BoundaryModel<'_>,
     text: &str,
@@ -435,8 +474,12 @@ pub fn extract(
     kinds: &[BoundaryTaskKind],
     n_threads_arg: usize,
     threshold: Option<f32>,
-    record_metadata: Option<&serde_json::Value>,
+    schema_options: BoundarySchemaOptions<'_>,
 ) -> Result<Extraction, String> {
+    let BoundarySchemaOptions {
+        record_metadata,
+        field_metadata,
+    } = schema_options;
     let mut result = run_mixed_extraction(
         model,
         text,
@@ -444,7 +487,10 @@ pub fn extract(
         kinds,
         n_threads_arg,
         threshold,
-        record_metadata,
+        SchemaOptions {
+            record_metadata,
+            field_metadata,
+        },
     )?;
     if !result.query_names.is_empty() {
         result.spans = decode_spans(
@@ -489,8 +535,11 @@ pub struct BoundaryDecodeOptions<'a> {
     /// Span and relation score threshold; `None` is the checkpoint default.
     pub threshold: Option<f32>,
     /// The schema's top-level `record_metadata`. `None` means every
-    /// `json_structures` group keeps the legacy structure path.
+    /// `json_structures` group takes the legacy structure path.
     pub record_metadata: Option<&'a serde_json::Value>,
+    /// The schema's `field_metadata`: `{group: {field: "str"}}`. A `"str"`
+    /// field is a scalar in the legacy structure path; anything else is a list.
+    pub field_metadata: Option<&'a serde_json::Value>,
     pub output_json: bool,
 }
 
@@ -507,6 +556,7 @@ pub fn run_gliner2_boundary(
     let BoundaryDecodeOptions {
         threshold,
         record_metadata,
+        field_metadata,
         output_json,
     } = decode;
     if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
@@ -533,7 +583,10 @@ pub fn run_gliner2_boundary(
         kinds,
         n_threads_arg,
         threshold,
-        record_metadata,
+        BoundarySchemaOptions {
+            record_metadata,
+            field_metadata,
+        },
     )?;
     let spans = &result.spans;
     let elapsed = started.elapsed().as_millis();
@@ -590,6 +643,30 @@ pub fn run_gliner2_boundary(
                     }
                 })
                 .collect(),
+            structures: result
+                .structures
+                .iter()
+                .map(|structure| StructureJson {
+                    task: structure.task.clone(),
+                    fields: structure
+                        .fields
+                        .iter()
+                        .map(|(name, value)| {
+                            (
+                                name.clone(),
+                                match value {
+                                    StructureField::Scalar(span) => StructureFieldJson::Scalar(
+                                        span.as_ref().map(structure_span_json),
+                                    ),
+                                    StructureField::List(spans) => StructureFieldJson::List(
+                                        spans.iter().map(structure_span_json).collect(),
+                                    ),
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
             classifications: result
                 .classifications
                 .iter()
@@ -644,6 +721,30 @@ pub fn run_gliner2_boundary(
             );
         }
     }
+    if !result.structures.is_empty() {
+        for structure in &result.structures {
+            println!("{}:", structure.task);
+            for (name, value) in &structure.fields {
+                match value {
+                    StructureField::Scalar(Some(span)) => {
+                        println!("  {name}: {}  p={:.4}", span.text, span.score)
+                    }
+                    StructureField::Scalar(None) => println!("  {name}: (none)"),
+                    StructureField::List(spans) if spans.is_empty() => {
+                        println!("  {name}: (none)")
+                    }
+                    StructureField::List(spans) => {
+                        let text = spans
+                            .iter()
+                            .map(|span| span.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        println!("  {name}: {text}");
+                    }
+                }
+            }
+        }
+    }
     if !result.records.is_empty() {
         let mut current = String::new();
         for record in &result.records {
@@ -664,10 +765,12 @@ pub fn run_gliner2_boundary(
     }
     print_classifications(&result.classifications);
     println!(
-        "({elapsed} ms, {} span(s), {} relation(s), {} record(s), {} classification(s))",
+        "({elapsed} ms, {} span(s), {} relation(s), {} record(s), {} structure(s), \
+         {} classification(s))",
         spans.len(),
         result.relations.len(),
         result.records.len(),
+        result.structures.len(),
         result.classifications.len()
     );
     Ok(())

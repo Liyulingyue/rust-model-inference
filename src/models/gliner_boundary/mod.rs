@@ -36,12 +36,13 @@ pub mod record_spec;
 pub mod relations;
 pub mod settings;
 pub mod spans;
+pub mod structure;
 
 pub use candidate_encoder::CandidateEncoder;
 pub use content_pooler::SpanContentPooler;
 pub use extract::{
     boundary_overlap_policy, decode_spans, encode_boundary_prompt, extract_spans, run_extraction,
-    run_mixed_extraction, ExtractedSpan, Extraction,
+    run_mixed_extraction, ExtractedSpan, ExtractedStructure, Extraction, SchemaOptions,
 };
 pub use forward::{BoundaryEncoder, BoundaryEncoding};
 pub use loader::BoundaryModel;
@@ -65,6 +66,10 @@ pub use relations::{
 };
 pub use settings::BoundarySettings;
 pub use spans::{score_document_candidates, score_spans, DocumentCandidateBatch, ScoredSpan};
+pub use structure::{
+    decode_legacy_structures, LegacyStructureGroup, StructureField, StructureInstance,
+    StructureSpan,
+};
 
 use crate::core::tensor::TensorSource;
 

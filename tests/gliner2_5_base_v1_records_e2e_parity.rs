@@ -23,7 +23,9 @@
 use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner::prompt::BoundaryTaskKind;
-use rust_model_inference::models::gliner_boundary::{run_mixed_extraction, BoundaryModel};
+use rust_model_inference::models::gliner_boundary::{
+    run_mixed_extraction, BoundaryModel, SchemaOptions,
+};
 
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/records-e2e-golden.json";
 const TOLERANCE: f32 = 2.0e-4;
@@ -78,8 +80,19 @@ fn run_case(
     let (tasks, kinds) = rust_model_inference::app::parse_boundary_schema(schema).expect("schema");
     assert!(kinds.iter().any(|k| *k == BoundaryTaskKind::JsonStructure));
     let meta = schema.get("record_metadata");
-    let extraction = run_mixed_extraction(model, text, &tasks, &kinds, 0, Some(threshold), meta)
-        .expect("mixed extraction");
+    let extraction = run_mixed_extraction(
+        model,
+        text,
+        &tasks,
+        &kinds,
+        0,
+        Some(threshold),
+        SchemaOptions {
+            record_metadata: meta,
+            field_metadata: schema.get("field_metadata"),
+        },
+    )
+    .expect("mixed extraction");
     extraction
         .records
         .iter()

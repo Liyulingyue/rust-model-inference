@@ -1225,8 +1225,12 @@ pub(super) async fn jev_boundary(
         boundary.n_threads,
         req.threshold,
         // A `json_structures` group only becomes a record when the schema
-        // annotates it with a `mode`.
-        req.schema.get("record_metadata"),
+        // annotates it with a `mode`; otherwise it takes the legacy structure
+        // path, which reports one instance per group.
+        crate::app::BoundarySchemaOptions {
+            record_metadata: req.schema.get("record_metadata"),
+            field_metadata: req.schema.get("field_metadata"),
+        },
     ) {
         Ok(result) => result,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),

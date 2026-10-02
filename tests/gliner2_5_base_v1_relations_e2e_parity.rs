@@ -24,7 +24,7 @@ use rust_model_inference::core::loader::GGUFLoader;
 use rust_model_inference::core::tensor::TensorSource;
 use rust_model_inference::models::gliner::prompt::BoundaryTaskKind;
 use rust_model_inference::models::gliner_boundary::{
-    run_mixed_extraction, BoundaryModel, Extraction,
+    run_mixed_extraction, BoundaryModel, Extraction, SchemaOptions,
 };
 
 const FIXTURE: &str = "tests/fixtures/gliner2.5-base-v1/relations-e2e-golden.json";
@@ -80,7 +80,16 @@ fn run_case(
         kinds.iter().any(|k| *k == BoundaryTaskKind::Relation),
         "the fixture cases all declare relation groups"
     );
-    run_mixed_extraction(model, text, &tasks, &kinds, 0, Some(threshold), None).expect("extract")
+    run_mixed_extraction(
+        model,
+        text,
+        &tasks,
+        &kinds,
+        0,
+        Some(threshold),
+        SchemaOptions::default(),
+    )
+    .expect("extract")
 }
 
 #[test]

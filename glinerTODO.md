@@ -427,13 +427,29 @@ list-of-dict。同时 oracle 用 `error_policy="raise"` 而非 `"fallback"`—�
 会把 malformed schema 静默替换成 dummy `[E] entity`，症状变成「没有 record」而不是
 schema 错误本身。
 
-### 🟢 5.2.4b-4 `[C]` legacy 路径（无 `record_metadata`）审一遍（待开工）
-- **范围**：
-  1. relations（`relation_scorer`，`[R]` marker + directional head/tail states）
-  2. records（`record_decoder`，需要 `candidate_states`——已经返回了）
-  3. HTTP 路由 `/v1/jev/boundary`
-  4. `json_structures`（`[C]` marker + 嵌套结构解码）
-- **前置**：5.2.4b-1 ✅
+### ✅ 5.2.4b-4 `[C]` legacy structure 路径（无 `record_metadata`）
+- **新** `src/models/gliner_boundary/structure.rs`：`decode_legacy_structures` /
+  `StructureSpan` / `StructureField`(Scalar|List) / `StructureInstance` /
+  `LegacyStructureGroup`
+- **新** `dump_structures_end_to_end.py`（7 case）+ `structures-e2e-golden.json` +
+  `gliner2_5_base_v1_structures_e2e_parity.rs`（3 测试）
+- **接进** `extract.rs`（`Extraction.structures` / `score_structures`）、
+  `gliner2_boundary.rs`（`BoundarySchemaOptions` / CLI + JSON 输出）
+- **reference 的四条 legacy 语义**（全部 oracle 覆盖）：
+  1. 每个 group **恰好一个** instance——boundary 没有 count-slot 轴，所以没有「取第几行」
+     的问题；这是它与 records 最大的结构差异
+  2. `field_metadata["<group>.<field>"]["dtype"] == "str"` → scalar，**取 `spans[0]` 并丢弃
+     其余**；缺失默认 `"list"`，全留
+  3. 字段全空 → **整个 instance 丢弃**（不是输出空对象）
+  4. scalar 遇 null 列是 `continue` 不是 `break`（`required_one` 字段因此不会静默变空）
+- **两个承重排序**（`structure.rs` 模块注释里写了原因）：先按 score 降序取 scalar 的
+  `spans[0]`，再按字段顺序输出 list。顺序反了 scalar 会拿到 list 的第一项
+- **手动验证**：`Marie Curie worked in Paris with Pierre Curie in London.` →
+  `name: marie curie`、`city: london | paris`、`colleague: pierre curie`
+  （scalar 单值、list 多值）
+- **已知未覆盖**：带 `choices` 的 `field_metadata` 会走 reference 的
+  `_decode_choice_field` / `_record_local_choice_mentions` literal-enum 分支，当前只覆盖
+  无 `choices` 的路径（oracle docstring 已写明此限制）
 
 ### 📊 5.2 阶段总结
 | Phase | 范围 | 状态 | commit |
@@ -443,7 +459,7 @@ schema 错误本身。
 | 5.2.1b | BoundaryQueryHead + oracle | ✅ | `f3d6643` |
 | 5.2.2a | score_explicit_pairs + PairScorer（全 feature） | ✅ | `6eafe4e` + `1d98e37` + 本次 |
 | 5.2.2b | DocumentCandidatePool + SharedPoolScorer（主线） | ✅ | 本次 |
-| 5.2.3 | relations + records + count + abstention | 🟡 待开工 | — |
+| 5.2.3 | relations + records + count + abstention | ✅ | `af503dc` ~ `ea0e1dd` |
 | 5.2.4a | 真实入口 + `--gliner2-boundary` | ✅ | 本次 |
 | 5.2.4b-1 | 分类头 + null/count head | ✅ | 本次 |
 | 5.2.4b-1a | overlap_policy 解码 | ✅ | 本次 |
@@ -454,22 +470,29 @@ schema 错误本身。
 | 5.2.4b-1f | LSA（匈牙利）solver | ✅ | `b446a98` |
 | 5.2.4b-1g | `record_metadata` + `RecordSpec` 编译 | ✅ | `ebf0c39` |
 | 5.2.4b-1h | `[C]` json_structures schema + prompt 路由 | ✅ | 本次 |
-| 5.2.4b-2/3 | json_structures（`[C]`）+ record head | 🟡 已勘察 | — |
+| 5.2.4b-1i | `RecordHead.forward_group` + `decode_group` | ✅ | `07d808d` |
+| 5.2.4b-1j | records 接进 extract/CLI/HTTP | ✅ | `226902a` |
+| 5.2.4b-1k | records 端到端 oracle | ✅ | `ea0e1dd` |
+| 5.2.4b-2/3 | json_structures（`[C]`）+ record head | ✅ | `7df4ed0` ~ `ea0e1dd` |
+| 5.2.4b-4 | `[C]` legacy structure 路径 | ✅ | 本次 |
 
 已完成：boundary encoder（含 attention window）、per-query marginals、显式 span 的 compat prior、完整 `SparseBoundaryPairScorer`、以及**主线** `DocumentCandidatePool` + `SharedPoolScorer`，10 个 boundary 测试文件 / 25 个测试全绿，delta 在 1e-6 ~ 1.5e-5。
 `score_document_candidates()` 已经能从 `text_states` 走到 `[B,Q,C]` 的最终 logits。
 
 **5.2.4a 已完成：模型可以真的跑了。** `--gliner2-boundary` 从 CLI 端到端出 span，输出与 reference 逐位一致（`input_ids` 相等、pair-logit delta 2.813e-5、span 完全相同）。
 
-**现在支持的**：extractive spans（`[E]`）+ classification（`[L]`）+ abstention（`null_projection`）+ count log-rate（`count_head`），两组可以同时出现在一个 schema 里。
+**现在支持的**：四类 query group 全部打通，可同时出现在一个 schema 里——
+extractive spans（`[E]`）、classification（`[L]`）、relations（`[R]`）、
+structures/records（`[C]`）；外加 abstention（`null_projection`）与 count log-rate（`count_head`）。
+`[C]` 的两条分支都在：带 `record_metadata.mode` → record（LSA 分配），不带 → legacy structure。
 
 **仍然没有的**：
-- records（`record_decoder`，18 个 tensor，**需要匈牙利算法**）/ `json_structures`（`[C]`）
 - `relation_metadata.<type>.threshold` per-type override（现在统一用 caller 的 threshold）
 - per-field threshold override（`_query_thresholds` 读 `entity_metadata.<field>.threshold`）和 per-sample `_overlap_policy` override
 - `adaptive_threshold`（base-v1 是 false，但 `count_head` 已经算出来了）
+- `field_metadata` 的 `choices` literal-enum 分支（`_decode_choice_field` / `_record_local_choice_mentions`）
 
-21 个 boundary 测试文件 / 68 个测试全绿（**0 ignored**）。
+22 个 boundary 测试文件 / 68 个测试全绿（**0 ignored**）。
 
 ### 6. `fastino/gliner2.5-multi-v1` — mDeBERTa-v3-base + BoundaryExtractor
 - 同 #5，但 encoder 换成多语 mDeBERTa-v3-base
