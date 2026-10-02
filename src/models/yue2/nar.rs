@@ -1,8 +1,8 @@
 use crate::ops::quant::BlockQ8K;
 
 use super::ar::{
-    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax, YuE2AttentionWeights,
-    YuE2MlpWeights, YuE2Weight,
+    add_in_place, dot, rms_norm, rms_norm_heads, rope, silu, softmax, value_reduce_block,
+    value_reduce_block2, RowScratch, YuE2AttentionWeights, YuE2MlpWeights, YuE2Weight,
 };
 use super::protocol::{CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END, VOCAB_SIZE};
 use super::YuE2Model;
@@ -204,9 +204,14 @@ impl<'model> YuE2NarSession<'model> {
             &position,
         );
 
+        // Build the whole [latent | time | position] activation batch, then run
+        // one `vae2llm` projection over it. The per-row form paid a full
+        // spin-barrier round trip for each of the 258 rows.
         let mut x = vec![0.0; nar_len * hidden];
-        let mut latent_row = vec![0.0; config.latent_channels];
+        let mut activation = vec![0.0; nar_len * config.latent_channels];
         for row in 0..nar_len {
+            let latent_row =
+                &mut activation[row * config.latent_channels..(row + 1) * config.latent_channels];
             latent_row.fill(0.0);
             if (1..=frames).contains(&row) {
                 let start = (row - 1) * config.latent_channels;
@@ -217,16 +222,20 @@ impl<'model> YuE2NarSession<'model> {
                     *output = bf16(input);
                 }
             }
-            let output = &mut x[row * hidden..(row + 1) * hidden];
-            self.model.aux.vae2llm.matmul_bias(
-                &latent_row,
-                &self.model.aux.vae2llm_bias,
-                output,
+        }
+        self.model
+            .aux
+            .vae2llm
+            .matmul_rows(
+                &activation,
+                &mut x,
                 &self.model.pool,
-                &mut scratch.q8,
-                &mut scratch.scales,
-                &mut scratch.q8k,
-            );
+                &mut scratch.rows,
+                Some(&self.model.aux.vae2llm_bias),
+            )
+            .expect("vae2llm input width is the latent channel count");
+        for row in 0..nar_len {
+            let output = &mut x[row * hidden..(row + 1) * hidden];
             for ((value, &time), &position) in output
                 .iter_mut()
                 .zip(&time)
@@ -296,6 +305,7 @@ impl<'model> YuE2NarSession<'model> {
             );
             hybrid_attention(
                 config,
+                &self.model.pool,
                 &q,
                 &self.prefix_kv[layer_index],
                 &k,
@@ -318,6 +328,7 @@ impl<'model> YuE2NarSession<'model> {
                 self.model,
                 &mut scratch,
             );
+
             trace(
                 "yue2.nar.attn_output",
                 Some(layer_index),
@@ -356,6 +367,7 @@ impl<'model> YuE2NarSession<'model> {
                 &mut down,
                 &mut scratch,
             );
+
             trace(
                 "yue2.nar.ffn_gate",
                 Some(layer_index),
@@ -433,7 +445,16 @@ impl<'model> YuE2NarSession<'model> {
             .collect::<Vec<_>>();
         let dt = 1.0 / steps as f32;
         let channels = self.model.config().latent_channels;
+        let solve_started = std::time::Instant::now();
         for (step, (time, midpoint)) in times.into_iter().enumerate() {
+            // Each step is two full NAR forward passes over the chunk, so
+            // report progress; a 32-step solve is otherwise silent for minutes.
+            eprintln!(
+                "[yue2:nar] step {}/{} t={time:.3} +{:.1}s",
+                step + 1,
+                steps,
+                solve_started.elapsed().as_secs_f64(),
+            );
             let first = self.velocity(&state, raw_time(time))?;
             trace(
                 "yue2.nar.velocity_first",
@@ -477,6 +498,8 @@ struct LinearScratch {
     q8: Vec<u8>,
     scales: Vec<f32>,
     q8k: Vec<BlockQ8K>,
+    /// Batched-path activation staging, reused across every projection.
+    rows: RowScratch,
 }
 
 fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
@@ -520,7 +543,7 @@ fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
             &mut scratch,
         );
         cache.push((k.clone(), v.clone()));
-        causal_prefix_attention(config, &q, &k, &v, &mut attention);
+        causal_prefix_attention(config, &model.pool, &q, &k, &v, &mut attention);
         linear_rows(
             &layer.ar_attention.output,
             &attention,
@@ -553,78 +576,119 @@ fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     cache
 }
 
+/// Causal self-attention over the AR prefix used to seed the NAR KV cache.
+///
+/// This is the same shape as [`hybrid_attention`] but masked to `position <=
+/// row`. The value reduction goes through the shared `attention_value_reduce`,
+/// which accumulates each output element in ascending position order exactly
+/// like the previous hand-written loop, so results stay bit-identical; the win
+/// is the NEON inner loop plus row-level parallelism, which matters because the
+/// prefix runs to >1k tokens and this used to dominate generation time.
 fn causal_prefix_attention(
     config: &super::YuE2Config,
+    pool: &crate::core::thread_pool::ComputePool,
     q: &[f32],
     k: &[f32],
     v: &[f32],
     output: &mut [f32],
 ) {
+    if legacy_attention() {
+        return causal_prefix_attention_legacy(config, pool, q, k, v, output);
+    }
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
+    let head_dim = config.head_dim;
     let rows = k.len() / kv_width;
     let group_size = config.q_heads / config.kv_heads;
-    let scale = (config.head_dim as f32).sqrt().recip();
-    let mut scores = vec![0.0; rows];
-    for row in 0..rows {
-        for head in 0..config.q_heads {
-            let kv_head = head / group_size;
-            let q_start = row * q_width + head * config.head_dim;
-            let kv_offset = kv_head * config.head_dim;
-            for (position, score) in scores.iter_mut().enumerate() {
-                let key = &k[position * kv_width + kv_offset
-                    ..position * kv_width + kv_offset + config.head_dim];
-                *score = if position <= row {
-                    dot(&q[q_start..q_start + config.head_dim], key) * scale
-                } else {
-                    f32::NEG_INFINITY
+    let scale = (head_dim as f32).sqrt().recip();
+    let per_thread_scores: Vec<std::cell::UnsafeCell<Vec<f32>>> = (0..pool.n_threads().max(1))
+        .map(|_| std::cell::UnsafeCell::new(vec![0.0f32; rows.max(1)]))
+        .collect();
+    let q_ptr = q.as_ptr();
+    let k_ptr = k.as_ptr();
+    let v_ptr = v.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    pool.compute(|ith, nth| {
+        let (row_start, row_end) = {
+            let n = nth.max(1);
+            (rows * ith / n, rows * (ith + 1) / n)
+        };
+        if row_start == row_end {
+            return;
+        }
+        // SAFETY: slot `ith` is touched only by pool thread `ith`.
+        let mut scores =
+            unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
+        for row in row_start..row_end {
+            for head in 0..config.q_heads {
+                let kv_offset = (head / group_size) * head_dim;
+                let q_row = unsafe {
+                    std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim)
                 };
-            }
-            if row < 512 {
-                let inverse_sum = flash_softmax(&mut scores);
-                for dimension in 0..config.head_dim {
-                    let mut sum = 0.0f32;
-                    for position in 0..rows {
-                        sum += scores[position] * v[position * kv_width + kv_offset + dimension];
-                    }
-                    output[q_start + dimension] = bf16(sum * inverse_sum);
+                for position in 0..rows {
+                    let key = unsafe {
+                        std::slice::from_raw_parts(
+                            k_ptr.add(position * kv_width + kv_offset),
+                            head_dim,
+                        )
+                    };
+                    scores[position] = if position <= row {
+                        dot(q_row, key) * scale
+                    } else {
+                        f32::NEG_INFINITY
+                    };
                 }
-                continue;
-            }
-
-            let result = &mut output[q_start..q_start + config.head_dim];
-            result.fill(0.0);
-            let mut running_max = f32::NEG_INFINITY;
-            let mut running_sum = 0.0f32;
-            for start in (0..=row).step_by(512) {
-                let end = (start + 512).min(rows);
-                let block = &mut scores[start..end];
-                let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let next_max = running_max.max(block_max);
-                let block_sum = flash_exp_sum(block, next_max);
-                let rescale = (running_max - next_max).exp();
-                running_sum = rescale.mul_add(running_sum, block_sum);
-                if start > 0 {
+                let result = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(row * q_width + head * head_dim),
+                        head_dim,
+                    )
+                };
+                if row < 512 {
+                    let inverse_sum = flash_softmax(scores);
+                    result.fill(0.0);
+                    value_reduce_block(v, scores, result, 0, kv_width, kv_offset, rows, head_dim);
                     for value in result.iter_mut() {
-                        *value *= rescale;
+                        *value = bf16(*value * inverse_sum);
                     }
+                    continue;
                 }
-                for (dimension, value) in result.iter_mut().enumerate() {
-                    let mut sum = 0.0f32;
-                    for offset in 0..block.len() {
-                        sum +=
-                            block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+
+                result.fill(0.0);
+                let mut running_max = f32::NEG_INFINITY;
+                let mut running_sum = 0.0f32;
+                for start in (0..=row).step_by(512) {
+                    let end = (start + 512).min(rows);
+                    let block = &mut scores[start..end];
+                    let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let next_max = running_max.max(block_max);
+                    let block_sum = flash_exp_sum(block, next_max);
+                    let rescale = (running_max - next_max).exp();
+                    running_sum = rescale.mul_add(running_sum, block_sum);
+                    if start > 0 {
+                        for value in result.iter_mut() {
+                            *value *= rescale;
+                        }
                     }
-                    *value += sum;
+                    value_reduce_block(
+                        v,
+                        block,
+                        result,
+                        start * kv_width,
+                        kv_width,
+                        kv_offset,
+                        block.len(),
+                        head_dim,
+                    );
+                    running_max = next_max;
                 }
-                running_max = next_max;
-            }
-            let inverse_sum = running_sum.recip();
-            for value in result.iter_mut() {
-                *value = bf16(*value * inverse_sum);
+                let inverse_sum = running_sum.recip();
+                for value in result.iter_mut() {
+                    *value = bf16(*value * inverse_sum);
+                }
             }
         }
-    }
+    });
 }
 
 fn flash_softmax(values: &mut [f32]) -> f32 {
@@ -708,6 +772,10 @@ fn flash_exp_u20(value: f32) -> f32 {
 }
 
 #[cfg(test)]
+#[path = "nar_attention_parity_tests.rs"]
+mod attention_parity_tests;
+
+#[cfg(test)]
 mod flash_tests {
     use super::{flash_exp_sum, flash_softmax, hybrid_attention};
 
@@ -779,7 +847,10 @@ mod flash_tests {
             let v = read(&format!("yue2.nar.v.{occurrence}"));
             let expected = read(&format!("yue2.nar.attn.{occurrence}"));
             let mut output = vec![0.0; q.len()];
-            hybrid_attention(&config, &q, &prefix, &k, &v, &mut output);
+            // Single-threaded so the oracle comparison is deterministic; the
+            // kernel partitions rows, not arithmetic within a row.
+            let pool = crate::core::thread_pool::ComputePool::new(1);
+            hybrid_attention(&config, &pool, &q, &prefix, &k, &v, &mut output);
             for (index, (actual, expected)) in output.iter().zip(&expected).enumerate() {
                 assert_eq!(
                     actual.to_bits(),
@@ -804,6 +875,7 @@ impl LinearScratch {
                 };
                 max_input.div_ceil(256)
             ],
+            rows: RowScratch::new(),
         }
     }
 }
@@ -831,34 +903,25 @@ fn project_qkv_rows(
     let config = model.config();
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
-    for (row, input) in input.chunks_exact(config.hidden).enumerate() {
+    // Batch the three projections. The per-row form issued three `pool.compute`
+    // regions per row, i.e. 258 * 3 barriers per layer per NAR velocity, and the
+    // pool is a pure spin-barrier design where each region costs a full
+    // all-thread SeqCst handshake.
+    weights
+        .q
+        .matmul_rows(input, q, &model.pool, &mut scratch.rows, None)
+        .expect("q projection shape is fixed by the NAR layout");
+    weights
+        .k
+        .matmul_rows(input, k, &model.pool, &mut scratch.rows, None)
+        .expect("k projection shape is fixed by the NAR layout");
+    weights
+        .v
+        .matmul_rows(input, v, &model.pool, &mut scratch.rows, None)
+        .expect("v projection shape is fixed by the NAR layout");
+    for row in 0..input.len() / config.hidden {
         let q_row = &mut q[row * q_width..(row + 1) * q_width];
         let k_row = &mut k[row * kv_width..(row + 1) * kv_width];
-        let v_row = &mut v[row * kv_width..(row + 1) * kv_width];
-        weights.q.matmul(
-            input,
-            q_row,
-            &model.pool,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            &mut scratch.q8k,
-        );
-        weights.k.matmul(
-            input,
-            k_row,
-            &model.pool,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            &mut scratch.q8k,
-        );
-        weights.v.matmul(
-            input,
-            v_row,
-            &model.pool,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            &mut scratch.q8k,
-        );
         rms_norm_heads(q_row, &weights.q_norm, config.head_dim, config.rms_eps);
         rms_norm_heads(k_row, &weights.k_norm, config.head_dim, config.rms_eps);
         rope(
@@ -876,8 +939,48 @@ fn project_qkv_rows(
     }
 }
 
-fn hybrid_attention(
+/// Bit-exact vectorized value reduction, matching the original scalar form.
+///
+/// The NAR needs both speed and *bit-identical* results: it feeds an
+/// autoregressive-free but bf16-rounded stack where a 1-ULP change flips a bf16
+/// rounding decision and the perturbation compounds across 28 layers and every
+/// NAR step. Two properties of the original hand-written loop therefore have to
+/// be preserved exactly:
+///
+///   1. each KV block accumulates into a *fresh* zeroed accumulator which is
+///      then added to the output once, so the additions associate as
+///      `out + ((0 + s0*v0) + s1*v1) + ...` rather than
+///      `((out + s0*v0) + s1*v1) + ...`; and
+///   2. the product is rounded before the accumulate, i.e. multiply and add are
+///      separate operations, not an FMA.
+///
+/// `crate::ops::attention_value::attention_value_reduce` satisfies neither: it
+/// contracts with `vfmaq_f32` and folds each block straight into the caller's
+/// output. This variant is vectorized over the head dimension (which is
+/// independent per lane) while keeping the token loop strictly sequential.
+/// Escape hatch for A/B-ing the NAR attention rewrite.
+///
+/// The rewrite in [`hybrid_attention`] and [`causal_prefix_attention`] moved the
+/// value reduction onto `attention_value_reduce`, which contracts with FMA where
+/// the previous hand-written loops rounded product and sum separately, and added
+/// row-level pool parallelism. Parallelism is provably neutral (row partitioning
+/// cannot reorder arithmetic within a row, and
+/// `nar_attention_parity_tests` pins that across thread counts), but the FMA
+/// change is a real rounding-mode difference that compounds over NAR steps.
+///
+/// Set `RMI_YUE2_LEGACY_ATTN=1` to restore the original scalar form so the two
+/// can be compared on identical inputs. Remove once the rewrite is settled.
+fn legacy_attention() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| std::env::var_os("RMI_YUE2_LEGACY_ATTN").is_some())
+}
+
+/// Original pre-rewrite value reduction: `sum += s * v`, two roundings, and no
+/// pool parallelism. Kept verbatim so `RMI_YUE2_LEGACY_ATTN=1` reproduces the
+/// exact arithmetic the optimized path replaced.
+fn hybrid_attention_legacy(
     config: &super::YuE2Config,
+    _pool: &crate::core::thread_pool::ComputePool,
     q: &[f32],
     prefix: &(Vec<f32>, Vec<f32>),
     nar_k: &[f32],
@@ -894,9 +997,15 @@ fn hybrid_attention(
     let mut scores = vec![0.0; total_len];
     for row in 0..nar_len {
         for head in 0..config.q_heads {
-            let kv_head = head / group_size;
+            let kv_offset = (head / group_size) * config.head_dim;
             let q_start = row * q_width + head * config.head_dim;
-            let kv_offset = kv_head * config.head_dim;
+            let value_at = |position: usize, dimension: usize| {
+                if position < prefix_len {
+                    prefix.1[position * kv_width + kv_offset + dimension]
+                } else {
+                    nar_v[(position - prefix_len) * kv_width + kv_offset + dimension]
+                }
+            };
             for (position, score) in scores.iter_mut().enumerate() {
                 let key = if position < prefix_len {
                     &prefix.0[position * kv_width + kv_offset
@@ -908,13 +1017,6 @@ fn hybrid_attention(
                 };
                 *score = dot(&q[q_start..q_start + config.head_dim], key) * scale;
             }
-            let value_at = |position: usize, dimension: usize| {
-                if position < prefix_len {
-                    prefix.1[position * kv_width + kv_offset + dimension]
-                } else {
-                    nar_v[(position - prefix_len) * kv_width + kv_offset + dimension]
-                }
-            };
             let result = &mut output[q_start..q_start + config.head_dim];
             if total_len <= 512 {
                 let inverse_sum = softmax(&mut scores);
@@ -927,7 +1029,6 @@ fn hybrid_attention(
                 }
                 continue;
             }
-
             result.fill(0.0);
             let mut running_max = f32::NEG_INFINITY;
             let mut running_sum = 0.0f32;
@@ -961,6 +1062,241 @@ fn hybrid_attention(
     }
 }
 
+/// Original pre-rewrite causal kernel, single threaded, two-rounding reduction.
+fn causal_prefix_attention_legacy(
+    config: &super::YuE2Config,
+    _pool: &crate::core::thread_pool::ComputePool,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    output: &mut [f32],
+) {
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let rows = k.len() / kv_width;
+    let group_size = config.q_heads / config.kv_heads;
+    let scale = (config.head_dim as f32).sqrt().recip();
+    let mut scores = vec![0.0; rows];
+    for row in 0..rows {
+        for head in 0..config.q_heads {
+            let kv_offset = (head / group_size) * config.head_dim;
+            let q_start = row * q_width + head * config.head_dim;
+            for (position, score) in scores.iter_mut().enumerate() {
+                let key = &k[position * kv_width + kv_offset
+                    ..position * kv_width + kv_offset + config.head_dim];
+                *score = if position <= row {
+                    dot(&q[q_start..q_start + config.head_dim], key) * scale
+                } else {
+                    f32::NEG_INFINITY
+                };
+            }
+            if row < 512 {
+                let inverse_sum = flash_softmax(&mut scores);
+                for dimension in 0..config.head_dim {
+                    let mut sum = 0.0f32;
+                    for position in 0..rows {
+                        sum += scores[position] * v[position * kv_width + kv_offset + dimension];
+                    }
+                    output[q_start + dimension] = bf16(sum * inverse_sum);
+                }
+                continue;
+            }
+            let result = &mut output[q_start..q_start + config.head_dim];
+            result.fill(0.0);
+            let mut running_max = f32::NEG_INFINITY;
+            let mut running_sum = 0.0f32;
+            for start in (0..=row).step_by(512) {
+                let end = (start + 512).min(rows);
+                let block = &mut scores[start..end];
+                let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let next_max = running_max.max(block_max);
+                let block_sum = flash_exp_sum(block, next_max);
+                let rescale = (running_max - next_max).exp();
+                running_sum = rescale.mul_add(running_sum, block_sum);
+                if start > 0 {
+                    for value in result.iter_mut() {
+                        *value *= rescale;
+                    }
+                }
+                for (dimension, value) in result.iter_mut().enumerate() {
+                    let mut sum = 0.0f32;
+                    for offset in 0..block.len() {
+                        sum +=
+                            block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                    }
+                    *value += sum;
+                }
+                running_max = next_max;
+            }
+            let inverse_sum = running_sum.recip();
+            for value in result.iter_mut() {
+                *value = bf16(*value * inverse_sum);
+            }
+        }
+    }
+}
+
+/// Prefix+latent attention for one NAR layer.
+///
+/// `prefix` holds the AR semantic prefix keys/values and `nar_k`/`nar_v` the
+/// latent rows, both already RoPE'd. The two are separate allocations, so the
+/// value reduction is issued twice against a contiguous run each rather than
+/// being interleaved with a per-element bounds branch (the previous shape,
+/// which cost a branch and a scalar multiply-add per element and dominated the
+/// NAR solve at ~3.4 GOPS).
+///
+/// The QK half uses the shared NEON `dot_f32`; the AV half uses the shared
+/// `attention_value_reduce`. Work is partitioned over rows through the compute
+/// pool because a NAR step evaluates every latent position in one shot.
+fn hybrid_attention(
+    config: &super::YuE2Config,
+    pool: &crate::core::thread_pool::ComputePool,
+    q: &[f32],
+    prefix: &(Vec<f32>, Vec<f32>),
+    nar_k: &[f32],
+    nar_v: &[f32],
+    output: &mut [f32],
+) {
+    if legacy_attention() {
+        return hybrid_attention_legacy(config, pool, q, prefix, nar_k, nar_v, output);
+    }
+    let q_width = config.q_heads * config.head_dim;
+    let kv_width = config.kv_heads * config.head_dim;
+    let head_dim = config.head_dim;
+    let prefix_len = prefix.0.len() / kv_width;
+    let nar_len = nar_k.len() / kv_width;
+    let total_len = prefix_len + nar_len;
+    let group_size = config.q_heads / config.kv_heads;
+    let scale = (head_dim as f32).sqrt().recip();
+    let prefix_k = prefix.0.as_slice();
+    let prefix_v = prefix.1.as_slice();
+
+    // Partition over latent rows: the prefix columns are shared read-only
+    // state, so every worker can walk them without coordination.
+    let scores_len = total_len;
+    let q_ptr = q.as_ptr();
+    let nar_k_ptr = nar_k.as_ptr();
+    let output_ptr = output.as_mut_ptr();
+    let scores_len = scores_len.max(1);
+    // One score row per pool thread: the attention is a pure function of
+    // (q, k, v), so threads never share it.
+    let per_thread_scores: Vec<std::cell::UnsafeCell<Vec<f32>>> = (0..pool.n_threads().max(1))
+        .map(|_| std::cell::UnsafeCell::new(vec![0.0f32; scores_len]))
+        .collect();
+    pool.compute(|ith, nth| {
+        let (row_start, row_end) = {
+            let n = nth.max(1);
+            (nar_len * ith / n, nar_len * (ith + 1) / n)
+        };
+        if row_start == row_end {
+            return;
+        }
+        // SAFETY: slot `ith` belongs to exactly this pool thread.
+        let mut scores_row =
+            unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
+        for row in row_start..row_end {
+            for head in 0..config.q_heads {
+                let kv_offset = (head / group_size) * head_dim;
+                let q_row = unsafe {
+                    std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim)
+                };
+                for position in 0..prefix_len {
+                    let key = unsafe {
+                        std::slice::from_raw_parts(
+                            prefix_k.as_ptr().add(position * kv_width + kv_offset),
+                            head_dim,
+                        )
+                    };
+                    scores_row[position] = dot(q_row, key) * scale;
+                }
+                for position in 0..nar_len {
+                    let key = unsafe {
+                        std::slice::from_raw_parts(
+                            nar_k_ptr.add(position * kv_width + kv_offset),
+                            head_dim,
+                        )
+                    };
+                    scores_row[prefix_len + position] = dot(q_row, key) * scale;
+                }
+
+                let out = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        output_ptr.add(row * q_width + head * head_dim),
+                        head_dim,
+                    )
+                };
+                if scores_len <= 512 {
+                    // The short path is not just a blocked path with one block:
+                    // `softmax` rounds every exponential to bf16 while
+                    // `flash_exp_sum` keeps full f32, so the two disagree and
+                    // the reference picks `softmax` here. Keep the branch.
+                    let inverse_sum = softmax(&mut scores_row[..scores_len]);
+                    value_reduce_block2(
+                        prefix_v,
+                        0,
+                        nar_v,
+                        0,
+                        prefix_len,
+                        &scores_row[..scores_len],
+                        out,
+                        kv_width,
+                        kv_offset,
+                        scores_len,
+                        head_dim,
+                    );
+                    for value in out.iter_mut() {
+                        *value = bf16(*value * inverse_sum);
+                    }
+                    continue;
+                }
+                // Streaming softmax keeps the online max/sum rescale, which is
+                // what the torch reference does, so the arithmetic order is
+                // unchanged; only the inner reduction is vectorized.
+                out.fill(0.0);
+                let mut running_max = f32::NEG_INFINITY;
+                let mut running_sum = 0.0f32;
+                for start in (0..scores_len).step_by(512) {
+                    let end = (start + 512).min(scores_len);
+                    let block = &mut scores_row[start..end];
+                    let block_max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let next_max = running_max.max(block_max);
+                    let block_sum = flash_exp_sum(block, next_max);
+                    let rescale = (running_max - next_max).exp();
+                    running_sum = rescale.mul_add(running_sum, block_sum);
+                    if start > 0 {
+                        for value in out.iter_mut() {
+                            *value *= rescale;
+                        }
+                    }
+                    // One accumulator across the prefix/latent boundary: a KV
+                    // block that straddles it must not be reduced as two sums.
+                    let n_prefix = end.min(prefix_len).saturating_sub(start);
+                    let n_nar = (end - start) - n_prefix;
+                    value_reduce_block2(
+                        prefix_v,
+                        start,
+                        nar_v,
+                        start.saturating_sub(prefix_len),
+                        n_prefix,
+                        block,
+                        out,
+                        kv_width,
+                        kv_offset,
+                        end - start,
+                        head_dim,
+                    );
+                    debug_assert_eq!(n_prefix + n_nar, end - start);
+                    running_max = next_max;
+                }
+                let inverse_sum = running_sum.recip();
+                for value in out.iter_mut() {
+                    *value = bf16(*value * inverse_sum);
+                }
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn linear_rows(
     weight: &YuE2Weight,
@@ -971,16 +1307,11 @@ fn linear_rows(
     model: &YuE2Model,
     scratch: &mut LinearScratch,
 ) {
-    for (input, output) in input.chunks_exact(n_in).zip(output.chunks_exact_mut(n_out)) {
-        weight.matmul(
-            input,
-            output,
-            &model.pool,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            &mut scratch.q8k,
-        );
-    }
+    debug_assert_eq!(input.len() % n_in, 0);
+    debug_assert_eq!(output.len(), input.len() / n_in * n_out);
+    weight
+        .matmul_rows(input, output, &model.pool, &mut scratch.rows, None)
+        .expect("linear_rows shape is checked by the caller");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -994,17 +1325,11 @@ fn linear_bias_rows(
     model: &YuE2Model,
     scratch: &mut LinearScratch,
 ) {
-    for (input, output) in input.chunks_exact(n_in).zip(output.chunks_exact_mut(n_out)) {
-        weight.matmul_bias(
-            input,
-            bias,
-            output,
-            &model.pool,
-            &mut scratch.q8,
-            &mut scratch.scales,
-            &mut scratch.q8k,
-        );
-    }
+    debug_assert_eq!(input.len() % n_in, 0);
+    debug_assert_eq!(output.len(), input.len() / n_in * n_out);
+    weight
+        .matmul_rows(input, output, &model.pool, &mut scratch.rows, Some(bias))
+        .expect("linear_bias_rows shape is checked by the caller");
 }
 
 #[allow(clippy::too_many_arguments)]
