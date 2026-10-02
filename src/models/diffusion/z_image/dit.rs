@@ -1577,19 +1577,20 @@ thread_local! {
 /// block and reads all zeroes on this path -- which is what made the CPU
 /// attention share of a step unknowable from the profile output.
 thread_local! {
-    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 8]> =
-        const { std::cell::RefCell::new([0.0; 8]) };
+    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 10]> =
+        const { std::cell::RefCell::new([0.0; 10]) };
 }
 
-const GPU_PHASE_LABELS: [&str; 8] = [
+const GPU_PHASE_LABELS: [&str; 9] = [
     "modulation (host)",
     "norm+adaln+qkv (gpu)",
     "rope (host)",
     "attention (host)",
     "out proj (gpu)",
-    "ffn (gpu)",
-    "  w1 readback",
-    "  host silu",
+    "ffn: main stack (gpu)",
+    "ffn: refiner (cpu)",
+    "  w1 readback (of ffn)",
+    "  host silu (of ffn)",
 ];
 
 #[cfg(feature = "vulkan")]
@@ -1601,19 +1602,26 @@ fn gpu_profile_add(slot: usize, started: std::time::Instant) {
 
 #[cfg(feature = "vulkan")]
 fn gpu_profile_reset() {
-    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 8]);
+    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 10]);
 }
 
 #[cfg(feature = "vulkan")]
 fn gpu_profile_report(steps: usize) {
     let t = GPU_PROFILE_TIMERS.with(|cell| *cell.borrow());
-    let total: f64 = t.iter().sum();
+    // Slots 7 and 8 are subsets of slot 5, so the total stops at the first
+    // non-overlapping 7; counting them again would report a step that never
+    // happened.
+    const DISJOINT: usize = 7;
+    let total: f64 = t[..DISJOINT].iter().sum();
     if total <= 0.0 {
         return;
     }
     let pct = |x: f64| x / total * 100.0;
     eprintln!("\n[gpu-block-profile over {steps} denoise steps] total={total:.1}ms");
     for (label, value) in GPU_PHASE_LABELS.iter().zip(t.iter()) {
+        if *value == 0.0 && label.starts_with("  ") {
+            continue;
+        }
         eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(*value));
     }
 }
@@ -2306,6 +2314,7 @@ fn run_block_gpu(
         scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
     }
 
+    let ffn_start = std::time::Instant::now();
     if gate_on_gpu {
         // w1's output is the silu'd side, so it goes to the `gate` region and
         // the product is formed on the host before w2 sees it.
@@ -2321,8 +2330,7 @@ fn run_block_gpu(
             .map_err(|e| format!("Z-Image DiT w1 dispatch failed: {e}"))?;
         let t_ffn = std::time::Instant::now();
         let mut gate = session.readback(ffn_len).to_vec();
-        gpu_profile_add(6, t_ffn);
-        let t_ffn = std::time::Instant::now();
+        gpu_profile_add(7, t_ffn);
         let t_ffn = std::time::Instant::now();
         if up_on_gpu {
             session
@@ -2340,7 +2348,7 @@ fn run_block_gpu(
                 let gate_value = gate[index];
                 gate[index] = (gate_value / (1.0 + (-gate_value).exp())) * up[index];
             }
-            gpu_profile_add(7, t_silu);
+            gpu_profile_add(8, t_silu);
         } else {
             for row in 0..rows {
                 let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
@@ -2451,7 +2459,14 @@ fn run_block_gpu(
         }
     }
 
-    gpu_profile_add(5, t_phase);
+    // The FFN splits by backend: the main stack's five projections bind Q8_0
+    // and run on the device, while the refiner blocks are F16 in the GGUF and
+    // fall through to the per-row CPU path.
+    if gate_on_gpu {
+        gpu_profile_add(5, ffn_start);
+    } else {
+        gpu_profile_add(6, ffn_start);
+    }
 
     Ok(())
 }
@@ -2862,7 +2877,7 @@ fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
             if name != self.info.name {
                 return None;
             }
-            self.slice_calls.fetch_add(1, Ordering::Relaxed);
+            self.slice_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(&self.bytes)
         }
     }
@@ -2915,7 +2930,7 @@ fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
         force_f32_linear_into(&source, "w", &[5.0, 6.0], &mut output, 2, 2, &mut scratch).unwrap();
 
         assert_eq!(output, [17.0, 39.0]);
-        assert_eq!(source.slice_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(source.slice_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
         assert_eq!(scratch.force_f32_row.as_ptr(), row_ptr);
         assert_eq!(scratch.force_f32_row.len(), 2);
     }
@@ -3211,8 +3226,8 @@ fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
 
     #[test]
     fn final_image_helpers_reject_invalid_lengths() {
-        assert!(real_image_row(&[0.0; 9], 2, 2, 3, 0, 2).is_err());
-        assert!(real_image_row(&[0.0; 10], 2, 4, 3, 0, 2).is_err());
+        assert!(real_image_row(&[0.0; 8], 2, 2, 3, 0, 2).is_err());
+        assert!(real_image_row(&[0.0; 8], 2, 4, 3, 0, 2).is_err());
 
         let mut short_patches = [0.0; 7];
         let mut velocity = [0.0; 8];
