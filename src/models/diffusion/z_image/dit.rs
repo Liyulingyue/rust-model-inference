@@ -538,6 +538,7 @@ pub(crate) fn attention_into(
     head_width: usize,
     scores: &mut [f32],
     output: &mut [f32],
+    pool: &ComputePool,
 ) -> Result<(), String> {
     let hidden = checked_product(heads, head_width, "attention hidden")?;
     let qkv_width = checked_product(hidden, 3, "attention QKV")?;
@@ -549,33 +550,127 @@ pub(crate) fn attention_into(
     }
     let scale = 1.0 / (head_width as f32).sqrt();
     let value_base = hidden * 2;
-    for query in 0..tokens {
-        for head in 0..heads {
-            let query_start = query * qkv_width + head * head_width;
-            let query_values = &qkv[query_start..query_start + head_width];
-            for key in 0..tokens {
-                let key_start = key * qkv_width + hidden + head * head_width;
-                scores[key] = dot_f32(
-                    query_values,
-                    &qkv[key_start..key_start + head_width],
+    let pairs = checked_product(tokens, heads, "attention pairs")?;
+
+    // A (query, head) pair is independent of every other one: it reads only
+    // `qkv` and writes one contiguous `head_width` run of `output`. That makes
+    // the split below bit-identical to the serial version, not merely close.
+    //
+    // The score row is the one thing that cannot be shared: the serial code
+    // reused `scores` for every pair, so two threads on different pairs would
+    // stomp on each other. Each thread gets its own row.
+    let threads = pool.n_threads().max(1);
+    if threads == 1 {
+        for query in 0..tokens {
+            for head in 0..heads {
+                attention_pair(
+                    qkv,
+                    tokens,
+                    heads,
                     head_width,
-                ) * scale;
+                    hidden,
+                    qkv_width,
+                    value_base,
+                    scale,
+                    &mut scores[..tokens],
+                    query,
+                    head,
+                    &mut output[query * hidden + head * head_width
+                        ..query * hidden + (head + 1) * head_width],
+                );
             }
-            softmax_inplace(&mut scores[..tokens]);
-            let output_start = query * hidden + head * head_width;
-            attention_value_reduce(
-                qkv,
-                &scores[..tokens],
-                &mut output[output_start..output_start + head_width],
-                value_base + head * head_width,
-                qkv_width,
-                0,
-                tokens,
-                head_width,
-            );
         }
+        return Ok(());
     }
+    ATTENTION_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let needed = threads * tokens;
+        if scratch.len() < needed {
+            scratch.resize(needed, 0.0);
+        }
+        let scratch_ptr = scratch.as_mut_ptr();
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(|thread, threads| {
+            for pair in (thread..pairs).step_by(threads) {
+                let query = pair / heads;
+                let head = pair % heads;
+                // SAFETY: `thread` is this worker's only index and each row is
+                // exactly `tokens` long, so the rows are disjoint. The writes
+                // to `output` are likewise one disjoint run per pair.
+                let (row, out) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(scratch_ptr.add(thread * tokens), tokens),
+                        std::slice::from_raw_parts_mut(
+                            output_ptr.add(query * hidden + head * head_width),
+                            head_width,
+                        ),
+                    )
+                };
+                attention_pair(
+                    qkv,
+                    tokens,
+                    heads,
+                    head_width,
+                    hidden,
+                    qkv_width,
+                    value_base,
+                    scale,
+                    row,
+                    query,
+                    head,
+                    out,
+                );
+            }
+        });
+    });
     Ok(())
+}
+
+thread_local! {
+    static ATTENTION_SCRATCH: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One (query, head) pair: the scores over every key, then the value reduction.
+/// The arithmetic is the serial path's, unchanged, so splitting the loop across
+/// threads cannot move a result.
+#[allow(clippy::too_many_arguments)]
+fn attention_pair(
+    qkv: &[f32],
+    tokens: usize,
+    heads: usize,
+    head_width: usize,
+    hidden: usize,
+    qkv_width: usize,
+    value_base: usize,
+    scale: f32,
+    scores: &mut [f32],
+    query: usize,
+    head: usize,
+    output: &mut [f32],
+) {
+    let _ = heads;
+    let query_start = query * qkv_width + head * head_width;
+    let query_values = &qkv[query_start..query_start + head_width];
+    for key in 0..tokens {
+        let key_start = key * qkv_width + hidden + head * head_width;
+        scores[key] = dot_f32(
+            query_values,
+            &qkv[key_start..key_start + head_width],
+            head_width,
+        ) * scale;
+    }
+    softmax_inplace(&mut scores[..tokens]);
+    attention_value_reduce(
+        qkv,
+        &scores[..tokens],
+        output,
+        value_base + head * head_width,
+        qkv_width,
+        0,
+        tokens,
+        head_width,
+    );
 }
 
 fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
@@ -1074,6 +1169,8 @@ impl ZImageDit {
         PROFILE_TIMERS.with(|cell| {
             *cell.borrow_mut() = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         });
+        #[cfg(feature = "vulkan")]
+        gpu_profile_reset();
         for pair in sigmas.windows(2) {
             let sigma = pair[0];
             let sigma_next = pair[1];
@@ -1088,6 +1185,8 @@ impl ZImageDit {
             euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next)?;
             require_finite(&latent, "Euler latent")?;
         }
+        #[cfg(feature = "vulkan")]
+        gpu_profile_report(sigmas.len() - 1);
         // 输出累计的 profile
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
@@ -1313,6 +1412,7 @@ fn run_block(
         ROPE_HEAD_WIDTH,
         scores,
         &mut attention[..hidden_len],
+        pool,
     )?;
     t_attention = t.elapsed();
 
@@ -1435,6 +1535,49 @@ fn run_block(
 thread_local! {
     static PROFILE_TIMERS: std::cell::RefCell<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> =
         std::cell::RefCell::new((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+}
+
+/// The GPU block's own breakdown, because `PROFILE_TIMERS` is fed by the CPU
+/// block and reads all zeroes on this path -- which is what made the CPU
+/// attention share of a step unknowable from the profile output.
+thread_local! {
+    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 6]> =
+        const { std::cell::RefCell::new([0.0; 6]) };
+}
+
+const GPU_PHASE_LABELS: [&str; 6] = [
+    "modulation (host)",
+    "norm+adaln+qkv (gpu)",
+    "rope (host)",
+    "attention (host)",
+    "out proj (gpu)",
+    "ffn (gpu)",
+];
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_add(slot: usize, started: std::time::Instant) {
+    GPU_PROFILE_TIMERS.with(|cell| {
+        cell.borrow_mut()[slot] += started.elapsed().as_secs_f64() * 1e3;
+    });
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_reset() {
+    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 6]);
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_report(steps: usize) {
+    let t = GPU_PROFILE_TIMERS.with(|cell| *cell.borrow());
+    let total: f64 = t.iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    let pct = |x: f64| x / total * 100.0;
+    eprintln!("\n[gpu-block-profile over {steps} denoise steps] total={total:.1}ms");
+    for (label, value) in GPU_PHASE_LABELS.iter().zip(t.iter()) {
+        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(*value));
+    }
 }
 
 pub(crate) struct TorchMt19937 {
@@ -1962,6 +2105,7 @@ fn run_block_gpu(
     let ffn_len = rows * FFN_WIDTH;
     let bound = bind_block_weights(session, source, block, layer);
 
+    let t_phase = std::time::Instant::now();
     // --- AdaLN, identical to the CPU path ------------------------------------
     let modulations = if let Some(weights) = &block.modulation {
         let time = time.ok_or("Missing Z-Image AdaLN input")?;
@@ -1985,6 +2129,9 @@ fn run_block_gpu(
         }
         None
     };
+
+    gpu_profile_add(0, t_phase);
+    let t_phase = std::time::Instant::now();
 
     // --- QKV: normalise, modulate and project in one command buffer ----------
     let layout = *session.layout();
@@ -2027,6 +2174,9 @@ fn run_block_gpu(
         }
     }
 
+    gpu_profile_add(1, t_phase);
+    let t_phase = std::time::Instant::now();
+
     // --- RoPE on Q and K, per row and per head, same as the CPU path ----------
     for row in 0..rows {
         let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
@@ -2043,6 +2193,9 @@ fn run_block_gpu(
         }
     }
 
+    gpu_profile_add(2, t_phase);
+    let t_phase = std::time::Instant::now();
+
     // --- attention (CPU, 43.8% of a step) ------------------------------------
     attention_into(
         &qkv[..qkv_len],
@@ -2051,7 +2204,11 @@ fn run_block_gpu(
         ROPE_HEAD_WIDTH,
         scores,
         &mut attention[..hidden_len],
+        pool,
     )?;
+
+    gpu_profile_add(3, t_phase);
+    let t_phase = std::time::Instant::now();
 
     // --- output projection, then norm and residual per row -------------------
     if bound.contains(&Projection::Out) {
@@ -2097,17 +2254,19 @@ fn run_block_gpu(
         }
     }
 
+    gpu_profile_add(4, t_phase);
+    let t_phase = std::time::Instant::now();
+
     // --- FFN ------------------------------------------------------------------
+    let gate_on_gpu = bound.contains(&Projection::W1);
+    let up_on_gpu = bound.contains(&Projection::W3);
+    let down_on_gpu = bound.contains(&Projection::W2);
     for row in 0..rows {
         let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
         let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
         rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
         scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
     }
-
-    let gate_on_gpu = bound.contains(&Projection::W1);
-    let up_on_gpu = bound.contains(&Projection::W3);
-    let down_on_gpu = bound.contains(&Projection::W2);
 
     if gate_on_gpu {
         // w1's output is the silu'd side, so it goes to the `gate` region and
@@ -2247,6 +2406,8 @@ fn run_block_gpu(
             )?;
         }
     }
+
+    gpu_profile_add(5, t_phase);
 
     Ok(())
 }
@@ -3148,7 +3309,8 @@ fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
         ];
         let mut scores = [0.0; 2];
         let mut output = [0.0; 4];
-        attention_into(&qkv, 2, 1, 2, &mut scores, &mut output).unwrap();
+        let pool = ComputePool::new(1);
+        attention_into(&qkv, 2, 1, 2, &mut scores, &mut output, &pool).unwrap();
         assert_eq!(output, [4.0, 6.0, 4.0, 6.0]);
     }
 
@@ -3200,7 +3362,8 @@ fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
         let mut scores = [0.0f32; 32];
         let mut output = [0.0f32; 32];
 
-        attention_into(&qkv, 32, 1, 1, &mut scores, &mut output).unwrap();
+        let pool = ComputePool::new(1);
+        attention_into(&qkv, 32, 1, 1, &mut scores, &mut output, &pool).unwrap();
 
         assert_eq!(output[5].to_bits(), 0x3ffa_6cf2);
     }
@@ -3490,5 +3653,48 @@ fn tiled_bench_synthetic(rows: usize, n_in: usize, n_out: usize) -> (Vec<f32>, V
 
 
 
+
+
+/// Splitting attention across threads must not move a bit.
+///
+/// A (query, head) pair reads only `qkv` and writes one contiguous run of
+/// `output`, so the parallel path is the serial path with the loop order
+/// changed -- but the score row had to become per-thread to make that true,
+/// and that is exactly the kind of change that can silently corrupt a row if
+/// two threads are ever handed the same scratch. This compares the two
+/// directly at the real shape, single-threaded versus the whole pool.
+#[test]
+fn parallel_attention_matches_the_serial_loop_bitwise() {
+    let tokens = 256usize;
+    let heads = 4usize;
+    let head_width = 16usize;
+    let hidden = heads * head_width;
+    let qkv: Vec<f32> = (0..tokens * hidden * 3)
+        .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
+        .collect();
+    let mut serial = vec![0f32; tokens * hidden];
+    let mut parallel = vec![0f32; tokens * hidden];
+    let mut scores = vec![0f32; tokens];
+
+    let one = ComputePool::new(1);
+    let many = ComputePool::new(8);
+    attention_into(&qkv, tokens, heads, head_width, &mut scores, &mut serial, &one).unwrap();
+    attention_into(&qkv, tokens, heads, head_width, &mut scores, &mut parallel, &many).unwrap();
+
+    let mut first_bad = None;
+    for (index, (a, b)) in serial.iter().zip(parallel.iter()).enumerate() {
+        if a.to_bits() != b.to_bits() && first_bad.is_none() {
+            first_bad = Some((index, *a, *b));
+        }
+    }
+    eprintln!(
+        "parallel vs serial: {} outputs, first difference {first_bad:?}",
+        serial.len()
+    );
+    assert!(
+        first_bad.is_none(),
+        "parallel attention differs from serial at {first_bad:?}"
+    );
+}
 
 }
