@@ -2074,13 +2074,26 @@ fn take_gpu_session(
 /// the render agrees with the CPU slightly better, 2.17/255 against 2.26,
 /// because the kernel's f16 rounding matches what the CPU row path does.
 ///
-/// **Off by default.** On its own it is a clear single-step win -- the refiner
-/// FFN drops from 5.72 s to 3.32 s and parity improves -- but an 8-step render
-/// with it on runs 344 s of denoise against 157 s with it off, so something
-/// about the F16 refiner degrades across steps. The per-phase profile only
-/// accounts for 14.3 s of a 43 s step, so it is not measuring where the rest
-/// goes either, and I am not shipping a change that makes the common case
-/// slower. `RUST_GPU_F16_REF=1` opts in to reproduce the single-step win.
+/// **Off by default.** The single step is a clear win -- the refiner FFN drops
+/// from 5.72 s to 3.32 s and parity improves to 2.17/255 -- but an 8-step render
+/// is 394 s of main layers against 125 s with the refiner on the CPU, and the
+/// shape of it is the interesting part:
+///
+///   step            1      2      3    ...     8
+///   refiner on   15.3   53.9   54.1        54.4  s
+///   refiner off  16.2   15.6   15.6        15.6  s
+///
+/// The first step is fine and every step after it is 38.4 s worse, to within a
+/// tenth of a second each time. A kernel that were simply slow would be slow on
+/// the first step too, so this is not the matmul: it is a one-time state that
+/// starts costing something per block after the first pass. Ruled out so far:
+/// the descriptor pool (246 of 256 sets against a per-session pool, and the
+/// stacks have separate sessions because their row counts differ), weight
+/// re-upload (`has_weight` caches per (layer, projection), and the refiner and
+/// main stack occupy disjoint layer indices), and the profile itself, which
+/// reconciles to within 10 s over eight steps with the refiner off.
+///
+/// `RUST_GPU_F16_REF=1` opts in.
 #[cfg(feature = "vulkan")]
 fn f16_refiner_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
