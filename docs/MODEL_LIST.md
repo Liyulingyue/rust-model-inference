@@ -45,9 +45,7 @@
 | Qwen3-ASR | 0.6B | ASR | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B | https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF | √ |
 | Qwen3-Omni-MoE |  | 多模态 |  | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | 待补 | 待核验。|
-| Qwen3-VL                      | 4B           | 多模态（图像）        | llama.cpp `qwen3vl.cpp`（通过 `rope_mrope_interleaved` + `[24,20,20,0]` section） | -                                                          | https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF | △ (端到端 verified：allowlist + `build_qwen3_media_positions [next,0,0,0]` fix; 128/256/384/512 PNG works; 1024 not tested (4 核 + 7.5 GiB RAM 限制); text-only 4 tok/s; multimodal 1.5 tok/s after vision encoding; greedy 首 token 偶尔是 `<|im_start|>` (被 streaming decoder 静默跳过); temp=0.7 hides it). [使用文档](usage/qwen3.md#3-视觉语言qwen3-vl--qwen35--qwen38) |
-
-> 注：本仓库当前**仅核验** Qwen3-VL-4B-Instruct；其他 Qwen3-VL 尺寸（2B、8B、32B、30B-A3B、235B-A22B 等）在 4 核 + 7.5 GiB RAM 环境下均未端到端验证。其中 2B（`-Instruct` 与 `-Thinking` 两个 GGUF 均下载并尝试过）在 ChatML、字面文字 chat、`--thinking`、高温度采样等多种 chat template / sampling 路径下都首 token 预测 `<|im_end|>`（EOS，0 输出 token）或退化为重复 token（`\n\n\n...` / `####...` / `sponsorsponsor...` 等），推测与 GGUF 转换时的 chat template 训练分布 + 2B 较小容量对 vision encoder embedding 的容错较差有关。
+| Qwen3-VL                      | 4B           | 多模态（图像）        | llama.cpp | -                                                          | https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF | √ |
 | Qwen3.5 | 0.8B / 2B | 文本 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen3.5-4B | 待补 | 待核验。|
 | Qwen3.8 | 27B | 多模态 | llama.cpp @ `b96806d` | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
 | Edge0-35B-A3B-preview | 35B / 3B active | 文本 | Edge0 @ `fb4cd2c` | https://www.modelscope.cn/models/edge0/Edge0-35B-A3B-preview | `tools/converter/edge0`（本仓库产出） | 标量 CPU 四步 greedy 与官方文本一致；固定文本样本的 16 次 forward、全部 40 层及 logits F32 逐位核验；不含视觉权重，未接入 prerouter；[范围与命令](../tools/oracle/edge0/README.md) |
