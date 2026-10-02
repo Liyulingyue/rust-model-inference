@@ -345,6 +345,7 @@ impl<'a> Weight<'a> {
             self.ggml_type,
             crate::core::tensor::GGMLType::Q4_0
                 | crate::core::tensor::GGMLType::Q4_1
+                | crate::core::tensor::GGMLType::Q5_0
                 | crate::core::tensor::GGMLType::Q8_0
                 | crate::core::tensor::GGMLType::Q1_0
         )

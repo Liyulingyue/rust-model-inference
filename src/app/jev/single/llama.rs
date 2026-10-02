@@ -107,6 +107,14 @@ impl JevScorer for LlamaJevScorer {
             // with no system role. `payload` already folds system +
             // question into the user message.
             format!("<|user|>{payload}<|end|><|assistant|>")
+        } else if self.arch == "glm4" {
+            // GLM-4: `[gMASK]<sop>` prefix, then `<|user|>\n{payload}<|assistant|>\n`.
+            // Mirrors the CLI's `llama_turn_text` and `run_inference_tokens`.
+            // `[gMASK]` is the BOS-like sentinel (id 151329); `<sop>` is 151332.
+            // Both are special tokens, recognised as single ids because
+            // `parse_special=true`. We deliberately emit the bare user block
+            // (no system role) because GLM-4's chat template only has user/assistant.
+            format!("[gMASK]<sop><|user|>\n{payload}<|assistant|>\n")
         } else {
             format!("system\n{system}\nuser\n{payload}\nassistant\n")
         };
