@@ -769,7 +769,11 @@ impl<'a> LlamaSession<'a> {
                     up_proj,
                     n_ff,
                 );
-                down_input = gate_proj;
+                // `silu_mul_rows(gate, up)` writes the post-silu
+                // tensor into `up`; copy it back into `gate_buf`
+                // so `down_input` points at the fused activation.
+                gate_buf.copy_from_slice(up_proj);
+                down_input = gate_buf;
             }
             // down via PreparedRows.
             let needs_q8_down = lw.w_down.needs_q8_0_activation();
@@ -940,6 +944,7 @@ impl<'a> LlamaSession<'a> {
         let score_stride = scratch.score_stride;
         let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
         let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+        let ffn_fused_ptr = scratch.ffn_fused.as_mut_ptr();
         let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
         let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
         let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -1270,7 +1275,7 @@ let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
                  if arch == "glm4" {
                      let ffn_fused = unsafe {
                          std::slice::from_raw_parts_mut(
-                             up_buf_ptr as *mut f32,
+                             ffn_fused_ptr,
                              2 * n_ff,
                          )
                      };
@@ -1373,6 +1378,20 @@ let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
                 );
             });
 
+            // GLM-4 also RMSNorm-s the FFN output before residual add
+            // (mirrors the chunked path at `forward_chunk_batched_real`).
+            // Without this, the single-token decode path skips the post-norm
+            // and produces non-PLL-of-PLN outputs (e.g. HTTP returning
+            // token-id salad on questions that CLI answers correctly).
+            // Note: `rms_norm_grouped(input, weight, output, groups, eps)`
+            // writes the normalized result into `output`, so we apply it
+            // in-place into `down_buf` via a `normed_post` scratch.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                let down_buf_mut = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+                let normed_post = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+                normed_post.copy_from_slice(down_buf_mut);
+                rms_norm_grouped(normed_post, ffn_post_norm, down_buf_mut, norm_groups, eps);
+            }
             let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
             if residual_scale != 0.0 {
                 vec_mad_f32(x, down_buf, residual_scale);

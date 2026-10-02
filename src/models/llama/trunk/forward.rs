@@ -690,17 +690,31 @@ pub fn build_prompt_tokens_from_turns(
         ));
     }
     // The single-turn callers end with an assistant prompt; reproduce that
-    // when the caller did not already append one.
+    // whenever the conversation does not already end with one.
+    //
+    // This used to be gated on `turns.len() == 1`, so a multi-turn prompt
+    // stopped at the last user turn and never emitted its generation
+    // prompt. GLM-4 was the visible casualty: its user turn is the bare
+    // block `<|user|>\n{content}`, so the prompt ended mid-user-message,
+    // GLM-4 sampled an immediate stop token, and the reply came back empty.
+    //
+    // The extra multi-turn case is limited to the archs that render a BARE
+    // user turn (glm4 / mistral / zephyr) and therefore genuinely need the
+    // generation prompt appended separately. Every other template already
+    // folds the assistant marker into the user turn - the fallback even
+    // hardcodes it (`user\n{content}\nassistant\n<think>\n`) - so appending
+    // there would double it: Llama-3.2 rendered
+    // `...What is my name?\nassistant\n<think>\nuser\n\nassistant\n<think>\n`.
     //
     // EXCLUDED: k2-horizon. Its `llama_turn_text` already returns the full
     // single-turn template INCLUDING the assistant prefix, so appending
     // another assistant turn duplicated the user content in the prompt and
     // the model echoed it back (caught by the CLI/HTTP sentinel).
-    if turns.len() == 1 && turns[0].0 != "assistant" && arch != "k2-horizon" {
-        // Mirrors the previous single-turn behaviour: every non-ChatML
-        // arch appends `assistant\n...` here. ChatML archs already end their
-        // turn with " + IM_END + ", which is also where generation starts.
-        if arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+    if arch != "k2-horizon" && arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+        let conversation_open = turns.last().map(|(role, _)| *role) != Some("assistant");
+        let single_turn = turns.len() == 1 && turns[0].0 != "assistant";
+        let bare_user_turn = arch == "glm4" || is_mistral || is_zephyr;
+        if conversation_open && (single_turn || bare_user_turn) {
             prompt_text.push_str(&llama_turn_text(
                 &arch,
                 is_minicpm5,
