@@ -537,6 +537,30 @@ impl<'a> LlamaSession<'a> {
             ];
             prepared_rows.matmul_group(normed, projections, pool)?;
 
+            // GLM-4 ships separate `attn_q/k/v.bias` tensors that must be
+            // added in-place before RoPE; plain llama doesn't. The legacy
+            // CLI path (`forward.rs`) does this dispatch; the session path
+            // forgot it, which broke HTTP generation on GLM-4 (model
+            // produced gibberish like "illard familiarity HodangkanGhost").
+            // For batched prefill (`rows > 1`) the bias is shared across
+            // every row in the chunk — broadcast with `vec_add_into` per
+            // row.
+            if let Some(bq) = lw.bq.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bq, &mut q_out[r * n_embd_q..(r + 1) * n_embd_q]);
+                }
+            }
+            if let Some(bk) = lw.bk.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bk, &mut k_out[r * n_embd_gqa..(r + 1) * n_embd_gqa]);
+                }
+            }
+            if let Some(bv) = lw.bv.as_deref() {
+                for r in 0..rows {
+                    vec_add_into(bv, &mut v_out[r * n_embd_gqa..(r + 1) * n_embd_gqa]);
+                }
+            }
+
             // ---- Per-row RoPE ----
             // `apply_rope` writes into a single `[n_embd_head_k *
             // n_heads]` slice in place; for the batched case we
@@ -681,28 +705,83 @@ impl<'a> LlamaSession<'a> {
                 );
             }
             let normed = &mut scratch.normed[..rows * n_embd];
-            let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
-            let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+            // GLM-4 (`glm4` arch) ships a single fused
+            // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the first
+            // half is gate, the second is up. Plain llama uses two
+            // distinct matmuls on separate `w_gate` / `w_up` tensors.
+            // The legacy CLI path (`forward.rs`) dispatches on `arch`
+            // here; the session path was running two matmuls on the
+            // same fused tensor, doubling the work and giving garbage
+            // (this is what produced "illard familiarity HodangkanGhost"
+            // from the HTTP server). We mirror the CLI dispatch:
+            // single matmul on `w_gate` (which weights.rs substitutes
+            // from `ffn_up.weight` for archs without `ffn_gate`),
+            // writing into `scratch.ffn_fused` (sized `[rows × 2*n_ff]`),
+            // then `silu_mul_rows` in place, then copy the post-silu
+            // half into `gate_buf` so `w_down`'s prepared_rows reads
+            // the activation from its expected source.
             let gate_buf = &mut scratch.gate_buf[..rows * n_ff];
-            let up_buf = &mut scratch.up_buf[..rows * n_ff];
-            prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
-            let gate_proj = &mut gate_buf[..];
-            let up_proj = &mut up_buf[..];
-            prepared_rows.matmul_group(
-                normed,
-                [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
-                pool,
-            )?;
-            // silu_mul per-row (independent; cheap on n_ff).
-            crate::models::llama::trunk::forward::silu_mul_rows(
-                pool, n_threads, gate_proj, up_proj, n_ff,
-            );
+            let down_input: &mut [f32];
+            if arch == "glm4" {
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let ffn_fused = &mut scratch.ffn_fused[..rows * 2 * n_ff];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(normed, [(&lw.w_gate, ffn_fused)], pool)?;
+                // `silu_mul_rows` writes `silu(gate) * up` into the
+                // up half (i.e. the second `n_ff` chunk of `ffn_fused`).
+                // The CLI path uses `silu_mul_approx_inplace` which
+                // overwrites the second argument; `silu_mul_rows`
+                // overwrites the second arg in a pool-parallel loop.
+                let (gate_part, up_part) = ffn_fused.split_at_mut(rows * n_ff);
+                crate::models::llama::trunk::forward::silu_mul_rows(
+                    pool, n_threads, gate_part, up_part, n_ff,
+                );
+                // `w_down` reads from `gate_buf`; copy the post-silu
+                // activation (now living in `up_part` after
+                // silu_mul_inplace) into `gate_buf`.
+                gate_buf.copy_from_slice(up_part);
+                down_input = gate_buf;
+            } else {
+                let needs_q8_ffn = lw.w_gate.needs_q8_0_activation();
+                let needs_q8k_ffn = lw.w_gate.uses_q8_k();
+                let up_buf = &mut scratch.up_buf[..rows * n_ff];
+                let gate_proj = &mut gate_buf[..];
+                let up_proj = &mut up_buf[..];
+                prepared_rows.prepare(normed, rows, n_embd, needs_q8_ffn, needs_q8k_ffn)?;
+                prepared_rows.matmul_group(
+                    normed,
+                    [(&lw.w_gate, up_proj), (&lw.w_up, gate_proj)],
+                    pool,
+                )?;
+                crate::models::llama::trunk::forward::silu_mul_rows(
+                    pool, n_threads, gate_proj, up_proj, n_ff,
+                );
+                // `silu_mul_rows(gate, up)` writes the post-silu
+                // tensor into `up`; copy it back into `gate_buf`
+                // so `down_input` points at the fused activation.
+                gate_buf.copy_from_slice(up_proj);
+                down_input = gate_buf;
+            }
             // down via PreparedRows.
             let needs_q8_down = lw.w_down.needs_q8_0_activation();
             let needs_q8k_down = lw.w_down.uses_q8_k();
             let down_buf = &mut scratch.down_buf[..rows * n_embd];
-            prepared_rows.prepare(gate_proj, rows, n_ff, needs_q8_down, needs_q8k_down)?;
-            prepared_rows.matmul_group(gate_proj, [(&lw.w_down, &mut down_buf[..])], pool)?;
+            prepared_rows.prepare(down_input, rows, n_ff, needs_q8_down, needs_q8k_down)?;
+            prepared_rows.matmul_group(down_input, [(&lw.w_down, &mut down_buf[..])], pool)?;
+            // GLM-4 also RMSNorm-s the FFN output before residual add.
+            // Mirror forward.rs's gate. For batched (`rows > 1`) the
+            // norm is applied row-by-row on down_buf; the result
+            // replaces the residual-add input.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                let normed_pre = &mut scratch.normed[..n_embd];
+                for r in 0..rows {
+                    let off = r * n_embd;
+                    let down_row = &mut down_buf[off..off + n_embd];
+                    normed_pre.copy_from_slice(down_row);
+                    rms_norm_grouped(normed_pre, ffn_post_norm, down_row, norm_groups, eps);
+                }
+            }
             for r in 0..rows {
                 let x_row = &mut scratch.x[r * n_embd..(r + 1) * n_embd];
                 let down_row = &down_buf[r * n_embd..(r + 1) * n_embd];
@@ -853,6 +932,7 @@ impl<'a> LlamaSession<'a> {
         let score_stride = scratch.score_stride;
         let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
         let up_buf_ptr = scratch.up_buf.as_mut_ptr();
+        let ffn_fused_ptr = scratch.ffn_fused.as_mut_ptr();
         let q8_buf_ptr = scratch.q8_buf.as_mut_ptr() as *mut u8;
         let scale_buf_ptr = scratch.scale_buf.as_mut_ptr();
         let q8k_buf_ptr = scratch.q8k_buf.as_mut_ptr();
@@ -933,6 +1013,23 @@ impl<'a> LlamaSession<'a> {
                     nth,
                 );
             });
+
+            // GLM-4 ships separate `attn_q/k/v.bias` tensors that must be
+            // added in-place before RoPE; plain llama doesn't. The legacy
+            // CLI path (`forward.rs`) does this dispatch; the session path
+            // forgot it, which broke HTTP generation on GLM-4 (model
+            // produced gibberish like "illard familiarity HodangkanGhost").
+            // `forward_one_token` is per-token (`rows = 1`), so a single
+            // `vec_add_into` per bias suffices.
+            if let Some(bq) = lw.bq.as_deref() {
+                vec_add_into(bq, q);
+            }
+            if let Some(bk) = lw.bk.as_deref() {
+                vec_add_into(bk, k_new);
+            }
+            if let Some(bv) = lw.bv.as_deref() {
+                vec_add_into(bv, v_new);
+            }
 
             // RoPE — note: arch passed by reference for the duration
             // of the closure so the apply_rope helper can pick the
@@ -1117,7 +1214,14 @@ impl<'a> LlamaSession<'a> {
             });
 
             let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
-            let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
+            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+            // GLM-4 applies an RMSNorm on the attention output *before*
+            // the residual add. Plain llama skips it. Mirror forward.rs.
+            if let Some(attn_post_norm) = lw.attn_post_norm.as_deref() {
+                let normed_pre = &mut scratch.normed[..n_embd];
+                normed_pre.copy_from_slice(attn_proj);
+                rms_norm_grouped(normed_pre, attn_post_norm, attn_proj, norm_groups, eps);
+            }
             if residual_scale != 0.0 {
                 vec_mad_f32(x, attn_proj, residual_scale);
             } else {
@@ -1144,37 +1248,84 @@ impl<'a> LlamaSession<'a> {
                 let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr_ffn, n_embd / 256) };
                 let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
                 let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-                lw.w_gate.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    up_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-                lw.w_up.kernel.forward_prepared(
-                    input,
-                    q8,
-                    sc,
-                    Some(q8k),
-                    gate_buf,
-                    n_embd,
-                    n_ff,
-                    ith,
-                    nth,
-                );
-                if gpu_matmul_active() {
-                    if ith == 0 {
-                        silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                // GLM-4 (`glm4` arch) ships a single fused
+                // `ffn_up.weight` of shape `[n_embd, 2*n_ff]`; the
+                // first half is gate, the second is up. Plain llama
+                // uses two distinct matmuls on separate `w_gate` /
+                // `w_up` tensors. weights.rs substitutes `w_gate`
+                // to point at the fused tensor when GLM-4 has no
+                // separate `ffn_gate.weight`, so the unfused path
+                // (two matmuls on w_gate / w_up) reads the same
+                // tensor twice and produces garbage. Dispatch on
+                // `arch` here for the same reason `forward.rs`
+                // does. (`up_buf_ptr` is `*mut f32`; we cast for
+                // the 2*n_ff-sized destination.)
+                if arch == "glm4" {
+                    let ffn_fused =
+                        unsafe { std::slice::from_raw_parts_mut(ffn_fused_ptr, 2 * n_ff) };
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        ffn_fused,
+                        n_embd,
+                        2 * n_ff,
+                        ith,
+                        nth,
+                    );
+                    let (gate_part, up_part) = ffn_fused.split_at_mut(n_ff);
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(gate_part, up_part);
+                            gate_buf.copy_from_slice(&up_part[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &gate_part[r_start..r_end],
+                            &mut up_part[r_start..r_end],
+                        );
+                        gate_buf[r_start..r_end].copy_from_slice(&up_part[r_start..r_end]);
                     }
                 } else {
-                    let per_thread = (n_ff + nth - 1) / nth;
-                    let r_start = ith * per_thread;
-                    let r_end = (r_start + per_thread).min(n_ff);
-                    silu_mul_approx_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
+                    lw.w_gate.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        up_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    lw.w_up.kernel.forward_prepared(
+                        input,
+                        q8,
+                        sc,
+                        Some(q8k),
+                        gate_buf,
+                        n_embd,
+                        n_ff,
+                        ith,
+                        nth,
+                    );
+                    if gpu_matmul_active() {
+                        if ith == 0 {
+                            silu_mul_approx_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+                        }
+                    } else {
+                        let per_thread = (n_ff + nth - 1) / nth;
+                        let r_start = ith * per_thread;
+                        let r_end = (r_start + per_thread).min(n_ff);
+                        silu_mul_approx_inplace(
+                            &up_buf[r_start..r_end],
+                            &mut gate_buf[r_start..r_end],
+                        );
+                    }
                 }
             });
 
@@ -1210,6 +1361,20 @@ impl<'a> LlamaSession<'a> {
                 );
             });
 
+            // GLM-4 also RMSNorm-s the FFN output before residual add
+            // (mirrors the chunked path at `forward_chunk_batched_real`).
+            // Without this, the single-token decode path skips the post-norm
+            // and produces non-PLL-of-PLN outputs (e.g. HTTP returning
+            // token-id salad on questions that CLI answers correctly).
+            // Note: `rms_norm_grouped(input, weight, output, groups, eps)`
+            // writes the normalized result into `output`, so we apply it
+            // in-place into `down_buf` via a `normed_post` scratch.
+            if let Some(ffn_post_norm) = lw.ffn_post_norm.as_deref() {
+                let down_buf_mut = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+                let normed_post = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
+                normed_post.copy_from_slice(down_buf_mut);
+                rms_norm_grouped(normed_post, ffn_post_norm, down_buf_mut, norm_groups, eps);
+            }
             let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
             if residual_scale != 0.0 {
                 vec_mad_f32(x, down_buf, residual_scale);

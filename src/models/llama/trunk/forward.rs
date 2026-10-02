@@ -338,11 +338,29 @@ pub fn run_inference(
             .and_then(|v| v.to_string_val())
             .map(|s| s.to_ascii_lowercase().contains("mistral"))
             .unwrap_or(false);
+        // Zephyr detection: `general.name` containing "zephyr" covers
+        // TheBloke's conversions (`huggingfaceh4_zephyr-7b-alpha`), but
+        // other publishers (mradermacher, MaziyarPanahi) rewrite
+        // `general.name` to "`.`" / `"hub"` and rely on the embedded
+        // `tokenizer.chat_template` to carry the model identity. Fall
+        // back to that: Zephyr's template is the only llama-arch template
+        // that uses `<|user|>` / `<|assistant|>` as the user-turn and
+        // generation-prompt markers. The `arch == "llama"` gate keeps
+        // the chat-template fallback from firing on GLM-4 (`arch="glm4"`,
+        // also uses `<|user|>` / `<|assistant|>` markers per its own
+        // template); the GLM-4 branches in `llama_turn_text` /
+        // `build_prompt_tokens` handle that arch.
         let is_zephyr = source
             .metadata("general.name")
             .and_then(|v| v.to_string_val())
             .map(|s| s.to_ascii_lowercase().contains("zephyr"))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || (arch == "llama"
+                && source
+                    .metadata("tokenizer.chat_template")
+                    .and_then(|v| v.to_string_val())
+                    .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                    .unwrap_or(false));
 
         let prompt_text = if arch == "k2-horizon" {
             format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
@@ -398,9 +416,23 @@ pub fn run_inference(
         // expects no BOS since add_bos_token=false), so add_special=false
         // and we manually prepend BOS. For Nanbeige (base model), let the
         // tokenizer's add_bos setting handle BOS via add_special=true.
+        //
+        // GLM-4 uses GPT-2 BPE (`tokenizer.ggml.model="gpt2"`); its BOS
+        // is `<|endoftext|>` (id 151329). The chat template emits
+        // `[gMASK]<sop>` (a separate BOS-equivalent), but the model is
+        // trained with `<|endoftext|>` PRECEDING `[gMASK]<sop>`, so we
+        // need `add_special=true` to make the tokenizer prepend BOS
+        // GLM-4 uses GPT-2 BPE with `tokenizer.ggml.add_bos_token=false`
+        // (the metadata field is missing from unsloth's GGUF conversion).
+        // Its BOS is `<|endoftext|>` (id 151329), which must precede
+        // the chat template's `[gMASK]<sop>` BOS-equivalent. Setting
+        // `add_special=true` alone doesn't help (the BPETokenizer only
+        // prepends when `add_bos` is also true), so we leave
+        // `add_special=false` for GLM-4 and prepend BOS manually below
+        // (just like `k2-horizon` / `granite` / `exaone` do).
         let (add_special, parse_special) = match arch {
             "nanbeige" => (true, true),
-            "k2-horizon" | "granite" | "exaone" => (false, true),
+            "k2-horizon" | "granite" | "exaone" | "glm4" => (false, true),
             _ if is_mistral || is_zephyr => (true, true),
             _ => (false, true),
         };
@@ -414,7 +446,8 @@ pub fn run_inference(
         // The chat template starts with `{{- bos_token }}`, but MiniCPM5
         // and Granite both have `tokenizer.ggml.add_bos_token=false`, so
         // encode() does not emit BOS automatically. Prepend BOS manually
-        // to match llama.cpp.
+        // to match llama.cpp. (`add_special=true` arms above handle BOS
+        // automatically via the tokenizer and skip this prepend.)
         if !add_special {
             if let Some(bos) = tokenizer.bos_id() {
                 body.insert(0, bos);
@@ -453,6 +486,8 @@ const THINK_END_MARK: &str = concat!("<", "|/think", "|", ">");
 fn llama_turn_text(
     arch: &str,
     is_minicpm5: bool,
+    is_mistral: bool,
+    is_zephyr: bool,
     has_chatml_template: bool,
     role: &str,
     content: &str,
@@ -511,15 +546,71 @@ fn llama_turn_text(
         }
         return format!("<|user|>{content}<|end|>");
     }
+    if arch == "glm4" {
+        // GLM-4 (THUDM) uses `<|user|>\n{content}` for the user turn
+        // and `<|assistant|>\n` for the generation prompt. The model's
+        // chat template emits `[gMASK]<sop>\n` exactly once at the very
+        // start of the prompt; the caller (`build_prompt_tokens_from_turns`)
+        // is responsible for prepending it before the first user turn
+        // because this helper is per-turn and carries no position state.
+        // GLM-4 tokenizer is GPT-2 BPE; `[gMASK]` (id 151331), `<sop>`
+        // (id 151333), `<|user|>` (id 151336), `<|assistant|>` (id 151337)
+        // are recognised as single special tokens via `parse_special=true`.
+        // (Ref: THUDM/glm-4-9b-chat tokenizer_config.json chat_template.)
+        if role == "assistant" {
+            return "<|assistant|>\n".to_string();
+        }
+        return format!("<|user|>\n{content}");
+    }
+    if is_mistral {
+        // Mistral-Instruct uses `[INST] {user} [/INST]` for the user turn
+        // and an empty assistant turn (generation begins right after
+        // `[/INST]`). The closing wrapper `[/INST]` is part of the user
+        // turn, not a separator, so the model is asked to produce the
+        // first assistant token directly. Tokenizer BOS (id=1) is emitted
+        // via `add_special=true` so we don't prepend it manually.
+        // (Ref: llama.cpp `llama_chat_apply_template_internal` Mistral
+        // branch; mistralai/Mistral-7B-Instruct-v0.3 tokenizer config.)
+        if role == "assistant" {
+            return String::new();
+        }
+        return format!("[INST] {content} [/INST]");
+    }
+    if is_zephyr {
+        // Zephyr-7B uses `<|user|>\n{content}</s>\n<|assistant|>\n` for
+        // the user turn and `<|assistant|>\n` for the assistant
+        // generation prompt, mirroring HuggingFaceH4's tokenizer
+        // `chat_template`. The trailing `\n` matters: Zephyr expects the
+        // assistant marker on its own line.
+        if role == "assistant" {
+            return "<|assistant|>\n".to_string();
+        }
+        return format!("<|user|>\n{content}</s>\n<|assistant|>\n");
+    }
     format!("user\n{content}\nassistant\n{THINK_MARK}\n")
 }
 
 /// True when `arch`'s template can express more than one turn.
-fn llama_supports_multiturn(arch: &str, is_minicpm5: bool) -> bool {
+fn llama_supports_multiturn(
+    arch: &str,
+    is_minicpm5: bool,
+    is_mistral: bool,
+    is_zephyr: bool,
+) -> bool {
     if arch == "k2-horizon" {
         return false;
     }
     if is_minicpm5 {
+        return true;
+    }
+    // Mistral/Zephyr repeat `[INST]…[/INST]`/`<|user|>…<|assistant|>`
+    // blocks for each turn, so multi-turn is expressible here.
+    if is_mistral || is_zephyr {
+        return true;
+    }
+    // GLM-4 repeats `<|user|>\n{content}` / `<|assistant|>\n{content}\n`
+    // blocks for each turn, so multi-turn is expressible here.
+    if arch == "glm4" {
         return true;
     }
     // nanbeige (ChatML template) and granite (start_of_role) do.
@@ -551,7 +642,23 @@ pub fn build_prompt_tokens_from_turns(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("minicpm"))
         .unwrap_or(false);
-    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5) {
+    let is_mistral = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("mistral"))
+        .unwrap_or(false);
+    let is_zephyr = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+        .unwrap_or(false)
+        || (arch == "llama"
+            && source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                .unwrap_or(false));
+    if turns.len() != 1 && !llama_supports_multiturn(&arch, is_minicpm5, is_mistral, is_zephyr) {
         return Err(format!(
             "multi-turn chat is unsupported for architecture {arch:?}; only a single user turn is rendered"
         ));
@@ -561,10 +668,21 @@ pub fn build_prompt_tokens_from_turns(
         .and_then(|v| v.to_string_val())
         .is_some_and(|t| t.contains(" + IM_START + "));
     let mut prompt_text = String::new();
+    // GLM-4's chat template emits the `[gMASK]<sop>` BOS-like sentinel
+    // exactly once at the start of the prompt. `llama_turn_text` is
+    // per-turn and has no position state, so prepend here. The single-turn
+    // `build_prompt_tokens` for `arch == "glm4"` emits `[gMASK]<sop>`
+    // (no trailing newline) — match that byte-for-byte so HTTP multi-turn
+    // produces the same first few tokens as the CLI.
+    if arch == "glm4" {
+        prompt_text.push_str("[gMASK]<sop>");
+    }
     for (role, content) in turns {
         prompt_text.push_str(&llama_turn_text(
             &arch,
             is_minicpm5,
+            is_mistral,
+            is_zephyr,
             has_chatml_template,
             role,
             content,
@@ -572,20 +690,36 @@ pub fn build_prompt_tokens_from_turns(
         ));
     }
     // The single-turn callers end with an assistant prompt; reproduce that
-    // when the caller did not already append one.
+    // whenever the conversation does not already end with one.
+    //
+    // This used to be gated on `turns.len() == 1`, so a multi-turn prompt
+    // stopped at the last user turn and never emitted its generation
+    // prompt. GLM-4 was the visible casualty: its user turn is the bare
+    // block `<|user|>\n{content}`, so the prompt ended mid-user-message,
+    // GLM-4 sampled an immediate stop token, and the reply came back empty.
+    //
+    // The extra multi-turn case is limited to the archs that render a BARE
+    // user turn (glm4 / mistral / zephyr) and therefore genuinely need the
+    // generation prompt appended separately. Every other template already
+    // folds the assistant marker into the user turn - the fallback even
+    // hardcodes it (`user\n{content}\nassistant\n<think>\n`) - so appending
+    // there would double it: Llama-3.2 rendered
+    // `...What is my name?\nassistant\n<think>\nuser\n\nassistant\n<think>\n`.
     //
     // EXCLUDED: k2-horizon. Its `llama_turn_text` already returns the full
     // single-turn template INCLUDING the assistant prefix, so appending
     // another assistant turn duplicated the user content in the prompt and
     // the model echoed it back (caught by the CLI/HTTP sentinel).
-    if turns.len() == 1 && turns[0].0 != "assistant" && arch != "k2-horizon" {
-        // Mirrors the previous single-turn behaviour: every non-ChatML
-        // arch appends `assistant\n...` here. ChatML archs already end their
-        // turn with " + IM_END + ", which is also where generation starts.
-        if arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+    if arch != "k2-horizon" && arch != "nanbeige" && !(is_minicpm5 && !thinking) {
+        let conversation_open = turns.last().map(|(role, _)| *role) != Some("assistant");
+        let single_turn = turns.len() == 1 && turns[0].0 != "assistant";
+        let bare_user_turn = arch == "glm4" || is_mistral || is_zephyr;
+        if conversation_open && (single_turn || bare_user_turn) {
             prompt_text.push_str(&llama_turn_text(
                 &arch,
                 is_minicpm5,
+                is_mistral,
+                is_zephyr,
                 has_chatml_template,
                 "assistant",
                 "",
@@ -594,6 +728,7 @@ pub fn build_prompt_tokens_from_turns(
         }
     }
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
+    // Multi-turn BOS handling mirrors the single-turn path.
     let add_special = arch == "nanbeige";
     let mut body = tokenizer.encode(
         &prompt_text,
@@ -2357,16 +2492,28 @@ pub(crate) fn silu_mul_rows(
         let r_end = (r_start + per_thread).min(n_ff);
         for row in 0..rows {
             unsafe {
-                let g = std::slice::from_raw_parts_mut(
-                    gate_ptr.add(row * n_ff + r_start),
+                let g =
+                    std::slice::from_raw_parts(gate_ptr.add(row * n_ff + r_start), r_end - r_start);
+                let u = std::slice::from_raw_parts_mut(
+                    up_ptr.add(row * n_ff + r_start) as *mut f32,
                     r_end - r_start,
                 );
-                let u =
-                    std::slice::from_raw_parts(up_ptr.add(row * n_ff + r_start), r_end - r_start);
+                // Exact SiLU via libm `exp` — matches llama.cpp. The
+                // approximate-exp variant is only used on the decode
                 // Exact SiLU via libm `exp` — matches llama.cpp. The
                 // approximate-exp variant is only used on the decode
                 // path where it was already the pre-existing convention.
-                silu_mul_inplace(u, g);
+                //
+                // Args: `silu_mul_inplace(gate, up)` writes
+                // `up[i] *= silu(gate[i])`. The first arg is the
+                // multiplier source (read-only), the second is the
+                // destination (mut, overwritten with silu(gate)*up).
+                // Earlier revisions of this helper swapped the args,
+                // producing the wrong tensor — `silu(UP) * GATE`
+                // rather than `silu(GATE) * UP`. Swapped back: pass
+                // `g` (gate buffer, read-only here) and `u` (up
+                // buffer, the destination).
+                silu_mul_inplace(g, u);
             }
         }
     });
@@ -2593,6 +2740,22 @@ pub fn build_prompt_tokens(
         .and_then(|v| v.to_string_val())
         .map(|s| s.to_ascii_lowercase().contains("minicpm"))
         .unwrap_or(false);
+    let is_mistral = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("mistral"))
+        .unwrap_or(false);
+    let is_zephyr = source
+        .metadata("general.name")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_ascii_lowercase().contains("zephyr"))
+        .unwrap_or(false)
+        || (arch == "llama"
+            && source
+                .metadata("tokenizer.chat_template")
+                .and_then(|v| v.to_string_val())
+                .map(|t| t.contains("<|user|>") && t.contains("<|assistant|>"))
+                .unwrap_or(false));
 
     let prompt_text = if arch == "k2-horizon" {
         format_k2_horizon_chat_prompt_with_thinking(prompt, thinking)
@@ -2625,14 +2788,28 @@ pub fn build_prompt_tokens(
         // 151332. Both are special tokens, recognised as single ids
         // because `parse_special=true`.
         format!("[gMASK]<sop><|user|>\n{prompt}<|assistant|>\n")
+    } else if is_mistral {
+        // Mistral-Instruct single-turn template: `[INST] {prompt} [/INST]`.
+        // Tokenizer BOS is emitted via `add_special=true`; the literal
+        // `[INST]`/`[/INST]` are recognised as single SentencePiece
+        // special tokens (id 3 / 4) when `parse_special=true`.
+        format!("[INST] {prompt} [/INST]")
+    } else if is_zephyr {
+        // Zephyr-7B single-turn template:
+        // `<|user|>\n{prompt}</s>\n<|assistant|>\n`. Trailing `\n` matters.
+        format!("<|user|>\n{prompt}</s>\n<|assistant|>\n")
     } else {
         format!("user\n{prompt}\nassistant\n<think>\n")
     };
     eprintln!("[RUST_PROMPT_TEXT] {prompt_text}");
-    // Granite/MiniCPM5/Phi-3/Phi-4 all ship `add_bos_token=false`, so
-    // `encode()` does not emit BOS via `add_special=true`. Match the CLI
-    // path (run_inference_tokens below) by always prepending BOS manually.
-    let add_special = arch == "nanbeige";
+    // Mistral/Zephyr ship `add_bos_token=true`, so let the tokenizer emit
+    // BOS via `add_special=true` and recognise the literal control tokens
+    // via `parse_special=true`. Granite/MiniCPM5/Phi-3/Phi-4/GLM-4/Llama
+    // all ship `add_bos_token=false`, so encode() does not emit BOS via
+    // `add_special=true`; for those we set `add_special=false` and
+    // prepend BOS manually below. Nanbeige (base) uses the tokenizer's
+    // own add_bos setting.
+    let add_special = arch == "nanbeige" || is_mistral || is_zephyr;
     let mut body = tokenizer.encode(
         &prompt_text,
         EncodeOptions {
