@@ -2799,6 +2799,7 @@ impl WPMTokenizer {
     }
 
     /// Reuse the installed BERT normalizer and pre-tokenizer (NFD, CJK and punctuation).
+    /// This is the production path — it matches `llama.cpp` b96806d9 exactly.
     fn preprocess(&self, text: &str) -> Vec<String> {
         use tokenizers::{
             NormalizedString, Normalizer, OffsetReferential, OffsetType, PreTokenizedString,
@@ -2822,6 +2823,71 @@ impl WPMTokenizer {
             .into_iter()
             .map(|(word, _, _)| word.to_owned())
             .collect()
+    }
+
+    /// Pre-`tokenizers`-crate BERT pre-tokenizer (HF-free escape hatch reference).
+    ///
+    /// **NOT production-ready**: this implementation has known gaps vs the HF path
+    /// above and vs `llama.cpp` b96806d9. It is kept here as a reference for
+    /// future maintainers, **not** as a drop-in replacement.
+    ///
+    /// ## What this does correctly
+    /// - Lowercase (when `self.lowercase == true`).
+    /// - Strip combining marks after NFD-like reduction (when `self.strip_accents`).
+    /// - Split on Unicode whitespace.
+    /// - Drop NUL / U+FFFD / control code points.
+    ///
+    /// ## What this gets wrong (vs `preprocess` / `llama.cpp`)
+    /// - **No punctuation splitting**: `"France?"` becomes one word, not two.
+    ///   The HF `BertPreTokenizer` splits on punctuation; this version does not.
+    /// - **No CJK per-character splitting**: `"世界"` stays as one word, not two.
+    ///   The HF `BertNormalizer` wraps CJK in spaces via `handle_chinese_chars`,
+    ///   then the pre-tokenizer splits per character.
+    /// - **NFD is implicit**: it relies on `is_combining_mark` to drop accents
+    ///   without an explicit `unicode-normalization` NFD pass first. For most
+    ///   ASCII-with-diacritics input this matches, but precomposed sequences
+    ///   that decompose to multiple non-combining codepoints are not folded.
+    ///
+    /// ## When to reach for this
+    /// Only if the `tokenizers` crate dependency must be removed entirely for
+    /// licensing / supply-chain / compile-time reasons. In that case, the right
+    /// fix is to **rewrite** this function (or its replacement) with proper
+    /// punctuation + CJK splitting, then swap `preprocess` to call it. Do not
+    /// simply uncomment the call — the output diverges from `llama.cpp`.
+    ///
+    /// `#[allow(dead_code)]` is intentional: the production encoder never calls
+    /// this. The function and its helper `is_combining_mark` exist purely so
+    /// the historical algorithm stays reviewable.
+    #[allow(dead_code)]
+    fn preprocess_legacy(&self, text: &str) -> Vec<String> {
+        let mut words: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for value in text.chars() {
+            let mapped = if self.lowercase {
+                value.to_lowercase().to_string()
+            } else {
+                value.to_string()
+            };
+            for mapped_value in mapped.chars() {
+                if self.strip_accents && is_combining_mark(mapped_value) {
+                    continue;
+                }
+                if mapped_value.is_whitespace() {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
+                if mapped_value == '\0' || mapped_value == '\u{FFFD}' || mapped_value.is_control() {
+                    continue;
+                }
+                current.push(mapped_value);
+            }
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+        words
     }
 
     /// Greedy longest-match one word, prefixed with the phantom space.
@@ -2872,6 +2938,18 @@ impl WPMTokenizer {
             }
         }
     }
+}
+
+/// Helper for [`WPMTokenizer::preprocess_legacy`]: does the codepoint classify
+/// as a Unicode combining mark? Used only by the HF-free escape-hatch path;
+/// the production [`WPMTokenizer::preprocess`] delegates to
+/// `tokenizers::BertNormalizer`, which performs its own NFD + combining-mark
+/// stripping internally. Kept here so `preprocess_legacy` can stay bit-for-bit
+/// equivalent to the algorithm it replaced.
+#[allow(dead_code)]
+fn is_combining_mark(value: char) -> bool {
+    use unicode_categories::UnicodeCategories;
+    value.is_mark_nonspacing() || value.is_mark_enclosing()
 }
 
 #[cfg(test)]
