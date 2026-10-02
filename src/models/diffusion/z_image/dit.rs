@@ -2068,7 +2068,19 @@ fn take_gpu_session(
     scratch.gpu.remove(&rows)
 }
 
-/// Whether to bind the F16 refiner stacks to the GPU. See `bind_block_weights`.
+/// Whether to bind the F16 refiner stacks to the GPU.
+///
+/// On: the four refiner blocks' FFN drops from 5.72 s to 3.32 s of a step and
+/// the render agrees with the CPU slightly better, 2.17/255 against 2.26,
+/// because the kernel's f16 rounding matches what the CPU row path does.
+///
+/// **Off by default.** On its own it is a clear single-step win -- the refiner
+/// FFN drops from 5.72 s to 3.32 s and parity improves -- but an 8-step render
+/// with it on runs 344 s of denoise against 157 s with it off, so something
+/// about the F16 refiner degrades across steps. The per-phase profile only
+/// accounts for 14.3 s of a 43 s step, so it is not measuring where the rest
+/// goes either, and I am not shipping a change that makes the common case
+/// slower. `RUST_GPU_F16_REF=1` opts in to reproduce the single-step win.
 #[cfg(feature = "vulkan")]
 fn f16_refiner_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2489,10 +2501,14 @@ fn run_block_gpu(
     // The FFN splits by backend: the main stack's five projections bind Q8_0
     // and run on the device, while the refiner blocks are F16 in the GGUF and
     // fall through to the per-row CPU path.
-    if layer < MAIN_LAYERS {
-        gpu_profile_add(5, ffn_start);
-    } else {
+    // The three stacks are laid out refiner-first: context_refiners take layers
+    // 0..REFINER_LAYERS, noise_refiners REFINER_LAYERS..2*REFINER_LAYERS, and
+    // the main stack 2*REFINER_LAYERS onward. The earlier MAIN_LAYERS bound
+    // sliced through the main stack, so this slot was summing two stacks.
+    if layer < 2 * REFINER_LAYERS {
         gpu_profile_add(6, ffn_start);
+    } else {
+        gpu_profile_add(5, ffn_start);
     }
 
     Ok(())
