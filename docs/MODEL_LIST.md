@@ -44,7 +44,7 @@
 | Qwen3-Embedding | 0.6B | Embedding |  | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B | https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF | √ |
 | Qwen3-ASR | 0.6B | ASR | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen3-ASR-0.6B | https://www.modelscope.cn/models/ggml-org/Qwen3-ASR-0.6B-GGUF | √ |
 | Qwen3-Omni-MoE |  | 多模态 |  | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
-| Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | 待补 | 待核验。|
+| Qwen3-TTS | 12Hz-1.7B-Base | TTS | llama.cpp @ `201e50c` | https://www.modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice | https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF | √ |
 | Qwen3-VL                      | 4B           | 文本、图像        | llama.cpp | -                                                          | https://www.modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF | √ |
 | Qwen3.5 | 0.8B / 2B / 4B | 文本、图像 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/Qwen/Qwen3.5-4B | https://www.modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF | √ |
 | Qwen3.8 | 27B | 多模态 | llama.cpp @ `b96806d` | 待补 | 待补 | 待核验。两列权重来源均未定位。 |
